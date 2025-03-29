@@ -1,5 +1,6 @@
 ﻿//! Represents an error
 
+use std::convert::Infallible;
 use std::fmt;
 use std::error::Error as StdError;
 use std::io::Error as IoError;
@@ -10,6 +11,7 @@ type BoxError = Box<
     + Sync
 >;
 
+/// Represents MCP server error
 #[derive(Debug)]
 pub struct Error {
     inner: BoxError
@@ -36,6 +38,12 @@ impl From<serde_json::Error> for Error {
 impl From<IoError> for Error {
     fn from(err: IoError) -> Error {
         Self { inner: err.into() }
+    }
+}
+
+impl From<Infallible> for Error {
+    fn from(infallible: Infallible) -> Error {
+        match infallible {}
     }
 }
 

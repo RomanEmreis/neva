@@ -1,6 +1,7 @@
 ﻿//! Represents a response that MCP server provides
 
 use serde::Serialize;
+use serde_json::{json, Value};
 pub use into_response::IntoResponse;
 use crate::types::{
     RequestId,
@@ -22,7 +23,7 @@ pub struct Response {
     
     /// The result of the method invocation.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<serde_json::Value>,
+    pub result: Option<Value>,
     
     /// Error information.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -31,11 +32,21 @@ pub struct Response {
 
 impl Response {
     /// Creates a successful response
-    pub fn success(id: RequestId, result: Option<serde_json::Value>) -> Self {
+    pub fn success(id: RequestId, result: Value) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.to_string(),
             id,
-            result,
+            result: Some(result),
+            error: None,
+        }
+    }
+
+    /// Creates a dummy successful response
+    pub fn pong(id: RequestId) -> Self {
+        Self {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id,
+            result: Some(json!({})),
             error: None,
         }
     }
@@ -60,7 +71,7 @@ mod tests {
     fn it_deserializes_successful_response_with_int_id_to_json() {
         let resp = Response::success(
             RequestId::Number(42),
-            Some(serde_json::json!({ "key": "test" })));
+            serde_json::json!({ "key": "test" }));
         
         let json = serde_json::to_string(&resp).unwrap();
         

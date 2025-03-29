@@ -8,7 +8,8 @@ use neva::{App, types::Json};
 
 #[tokio::main]
 async fn main() {
-    let mut app = App::new();
+    let mut app = App::new()
+        .with_options(|opt| opt.with_stdio());
 
     app.map_tool("say_hello", || async {
         "Hello, world!"
@@ -23,7 +24,7 @@ async fn main() {
     });
 
     app.map_tool("v2/say_json", |arg: serde_json::Value| async move {
-        format!("The result: {}!", arg)
+        arg
     });
     
     app.run().await;

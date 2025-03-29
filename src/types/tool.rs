@@ -1,12 +1,14 @@
 ﻿//! Represents an MCP tool
 
+mod from_request;
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use super::helpers::TypeCategory;
-use crate::types::{Request, Response, IntoResponse};
+use crate::types::{RequestId, Response, IntoResponse};
 
 /// Represents a tool that the server is capable of calling. Part of the [`ListToolsResponse`].
 /// 
@@ -30,6 +32,9 @@ pub struct Tool {
     handler: DynHandler
 }
 
+/// Used by the client to invoke a tool provided by the server.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
 #[derive(Debug, Clone, Deserialize)]
 pub struct CallToolRequestParams {
     /// Tool name.
@@ -38,10 +43,10 @@ pub struct CallToolRequestParams {
     /// Optional arguments to pass to the tool.
     #[serde(rename = "arguments")]
     pub args: Option<HashMap<String, serde_json::Value>>,
-}
-
-pub struct CallToolResponse {
     
+    /// A Call tool request id
+    #[serde(skip)]
+    pub(crate) req_id: RequestId
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -76,6 +81,17 @@ impl InputSchema {
     }
 }
 
+impl SchemaProperty {
+    /// Creates a new [`SchemaProperty`] for a `T`
+    #[inline]
+    pub(crate) fn new<T: TypeCategory>() -> Self {
+        Self { 
+            r#type: T::category().into(),
+            descr: None
+        }
+    }
+}
+
 /// Represents a specific registered handler
 pub(crate) type DynHandler = Arc<
     dyn Handler
@@ -85,7 +101,7 @@ pub(crate) type DynHandler = Arc<
 
 /// Represents a Request -> Response handler
 pub(crate) trait Handler {
-    fn call(&self, req: Request) -> BoxFuture<Response>;
+    fn call(&self, params: CallToolRequestParams) -> BoxFuture<Response>;
 }
 
 /// Describes a generic MCP Tool handler
@@ -105,7 +121,7 @@ pub(crate) struct ToolFunc<F, R, Args>
 where
     F: ToolHandler<Args, Output = R>,
     R: IntoResponse,
-    Args: TryFrom<Request>
+    Args: TryFrom<CallToolRequestParams>
 {
     func: F,
     _marker: std::marker::PhantomData<Args>,
@@ -115,7 +131,7 @@ impl<F, R ,Args> ToolFunc<F, R, Args>
 where
     F: ToolHandler<Args, Output = R>,
     R: IntoResponse,
-    Args: TryFrom<Request>
+    Args: TryFrom<CallToolRequestParams>
 {
     /// Creates a new [`ToolFunc`] wrapped into [`Arc`]
     pub(crate) fn new(func: F) -> Arc<Self> {
@@ -128,14 +144,14 @@ impl<F, R ,Args> Handler for ToolFunc<F, R, Args>
 where
     F: ToolHandler<Args, Output = R>,
     R: IntoResponse,
-    Args: TryFrom<Request> + Send + Sync,
+    Args: TryFrom<CallToolRequestParams> + Send + Sync,
     Args::Error: ToString + Send + Sync
 {
     #[inline]
-    fn call(&self, req: Request) -> BoxFuture<Response> {
+    fn call(&self, params: CallToolRequestParams) -> BoxFuture<Response> {
         Box::pin(async move {
-            let id = req.id.clone().unwrap_or_default();
-            match Args::try_from(req) { 
+            let id = params.req_id.clone();
+            match Args::try_from(params) { 
                 Err(err) => Response::error(id, &err.to_string()),
                 Ok(args) => self.func
                     .call(args)
@@ -151,7 +167,7 @@ impl Tool {
     pub fn new<F, Args, R>(name: &str, handler: F) -> Self 
     where
         F: ToolHandler<Args, Output = R>,
-        Args: TryFrom<Request> + Send + Sync + 'static,
+        Args: TryFrom<CallToolRequestParams> + Send + Sync + 'static,
         R: IntoResponse + Send + 'static,
         Args::Error: ToString + Send + Sync
     {
@@ -165,14 +181,16 @@ impl Tool {
         }
     }
     
+    /// Sets a description for a tool
     pub fn with_description(mut self, description: &str) -> Self {
         self.descr = Some(description.into());
         self
     }
     
+    /// Invoke a tool
     #[inline]
-    pub async fn call(&self, req: Request) -> Response {
-        self.handler.call(req).await
+    pub(crate) async fn call(&self, params: CallToolRequestParams) -> Response {
+        self.handler.call(params).await
     }
 }
 
@@ -192,13 +210,14 @@ macro_rules! impl_generic_tool_handler ({ $($param:ident)* } => {
         }
         
         #[inline]
-        #[allow(unused_mut, unused_imports)]
+        #[allow(unused_mut)]
         fn args() -> Option<HashMap<String, SchemaProperty>> {
-            use std::any::type_name;
-                        
             let mut args = HashMap::new();
             $(
-            args.insert(type_name::<$param>().to_string(), SchemaProperty { r#type: $param::category().to_string(), descr: None });
+            args.insert(
+                std::any::type_name::<$param>().to_string(),
+                SchemaProperty::new::<$param>()
+            );
             )*
             if args.len() == 0 { 
                 None
@@ -218,5 +237,24 @@ impl_generic_tool_handler! { T1 T2 T3 T4 T5 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     
+    #[tokio::test]
+    async fn it_creates_and_calls_tool() {
+        let tool = Tool::new("sum", |a: i32, b: i32| async move { a + b });
+        
+        let params = CallToolRequestParams {
+            name: "sum".into(),
+            req_id: RequestId::default(),
+            args: Some(HashMap::from([
+                ("a".into(), serde_json::to_value(5).unwrap()),
+                ("b".into(), serde_json::to_value(2).unwrap()),
+            ])),
+        };
+        
+        let resp = tool.call(params).await;
+        let json = serde_json::to_string(&resp).unwrap();
+
+        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":7}}"#);
+    }
 }

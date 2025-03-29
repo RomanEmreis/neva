@@ -1,26 +1,36 @@
 ﻿use crate::{
-    //error::Error,
+    error::Error,
     types::{Request, Response}
 };
 use tokio::{
-    sync::broadcast::Receiver,
-    io::{AsyncBufReadExt, Stdout, BufReader}
+    io::{AsyncBufReadExt, BufReader, Stdout},
+    sync::mpsc::{Receiver, Sender},
 };
 use tokio::io::AsyncWriteExt;
-use tokio::sync::broadcast;
+use tokio::sync::mpsc;
+use crate::transport::Transport;
 
+/// Represents stdio transport
 pub struct StdIo {
     stdout: Stdout,
-    rx: Receiver<Result<Request, String>>
+    tx: Sender<Result<Request, Error>>,
+    rx: Receiver<Result<Request, Error>>
 }
 
 impl StdIo {
-    pub(crate) fn start() -> Self {
-        let (tx, rx) = broadcast::channel(100);
-        let stdin = tokio::io::stdin();
+    /// Creates a new stdio transport
+    pub(crate) fn new() -> Self {
+        let (tx, rx) = mpsc::channel(100);
         let stdout = tokio::io::stdout();
-        let mut reader = BufReader::new(stdin);
+        Self { stdout, tx, rx }
+    }
+}
 
+impl Transport for StdIo {
+    fn start(&self) {
+        let stdin = tokio::io::stdin();
+        let mut reader = BufReader::new(stdin);
+        let tx = self.tx.clone();
         tokio::spawn(async move {
             let mut line = String::new();
             loop {
@@ -30,34 +40,34 @@ impl StdIo {
                     Ok(_) => {
                         let req = match serde_json::from_str::<Request>(&line) {
                             Ok(req) => Ok(req),
-                            Err(err) => Err(err.to_string()),
+                            Err(err) => Err(err.into()),
                         };
-                        tx.send(req).unwrap();
+                        tx.send(req).await.unwrap();
                     }
                     Err(err) => {
-                        let err = Err(err.to_string());
-                        tx.send(err).unwrap();
+                        let err = Err(err.into());
+                        tx.send(err).await.unwrap();
                         break;
                     }
                 };
             }
         });
-        
-        Self { stdout, rx }
     }
     
-    pub(crate) async fn recv(&mut self) -> Result<Request, String> {
+    async fn recv(&mut self) -> Result<Request, Error> {
         match self.rx.recv().await {
-            Ok(res) => Ok(res?),
-            Err(err) => Err(err.to_string())
+            Some(res) => Ok(res?),
+            None => Err(Error::new("unexpected end of stream"))
         }
     }
     
-    pub(crate) async fn send(&mut self, resp: Response) {
-        let mut json_bytes = serde_json::to_vec(&resp).unwrap();
+    async fn send(&mut self, resp: Response) -> Result<(), Error> {
+        let mut json_bytes = serde_json::to_vec(&resp)?;
         json_bytes.push(b'\n');
-        self.stdout.write_all(json_bytes.as_slice()).await.unwrap();
-        self.stdout.flush().await.unwrap();
+        self.stdout.write_all(json_bytes.as_slice()).await?;
+        self.stdout.flush().await?;
+        
+        Ok(())
     }
 }
 
