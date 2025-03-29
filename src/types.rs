@@ -1,8 +1,9 @@
 ﻿use serde::{Deserialize, Serialize};
-pub use request::Request;
-pub use response::Response;
+pub use request::{RequestId, Request};
+pub use response::{IntoResponse, Response};
 pub use capabilities::{ClientCapabilities, ServerCapabilities};
-pub use tool::{CallToolRequestParams, Tool};
+pub use tool::{CallToolRequestParams, Tool, ToolHandler};
+pub use helpers::Json;
 use crate::PROTOCOL_VERSION;
 use crate::types::capabilities::ToolsCapability;
 
@@ -10,6 +11,7 @@ pub mod request;
 pub mod response;
 pub mod capabilities;
 pub mod tool;
+pub(crate) mod helpers;
 
 pub(super) const JSONRPC_VERSION: &str = "2.0";
 

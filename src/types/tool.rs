@@ -5,7 +5,8 @@ use std::future::Future;
 use std::sync::Arc;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use crate::types::{Request, Response};
+use super::helpers::TypeCategory;
+use crate::types::{Request, Response, IntoResponse};
 
 /// Represents a tool that the server is capable of calling. Part of the [`ListToolsResponse`].
 /// 
@@ -16,14 +17,14 @@ pub struct Tool {
     pub name: String,
     
     /// A human-readable description of the tool.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    #[serde(rename = "description", skip_serializing_if = "Option::is_none")]
+    pub descr: Option<String>,
     
     /// A JSON Schema object defining the expected parameters for the tool.
     /// 
     /// > Note: Needs to a valid JSON schema object that additionally is of type object.
     #[serde(rename = "inputSchema")]
-    pub input_schema: serde_json::Value,
+    pub input_schema: InputSchema,
     
     #[serde(skip)]
     handler: DynHandler
@@ -41,6 +42,38 @@ pub struct CallToolRequestParams {
 
 pub struct CallToolResponse {
     
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InputSchema {
+    /// Schema object type
+    /// 
+    /// > Note: always "object"
+    #[serde(rename = "type")]
+    pub r#type: String,
+    
+    /// A list of properties for command
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub properties: Option<HashMap<String, SchemaProperty>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SchemaProperty {
+    /// Property type
+    #[serde(rename = "type")]
+    pub r#type: String,
+
+    /// A Human-readable description of a property
+    #[serde(rename = "description", skip_serializing_if = "Option::is_none")]
+    pub descr: Option<String>,
+}
+
+impl InputSchema {
+    /// Creates a new [`InputSchema`] object
+    #[inline]
+    pub(crate) fn new(props: Option<HashMap<String, SchemaProperty>>) -> Self {
+        Self { r#type: "object".into(), properties: props }
+    }
 }
 
 /// Represents a specific registered handler
@@ -61,12 +94,17 @@ pub trait ToolHandler<Args>: Clone + Send + Sync + 'static {
     type Future: Future<Output = Self::Output> + Send;
 
     fn call(&self, args: Args) -> Self::Future;
+    
+    #[inline]
+    fn args() -> Option<HashMap<String, SchemaProperty>> {
+        None
+    }
 }
 
 pub(crate) struct ToolFunc<F, R, Args>
 where
     F: ToolHandler<Args, Output = R>,
-    R: Into<Response>,
+    R: IntoResponse,
     Args: TryFrom<Request>
 {
     func: F,
@@ -76,7 +114,7 @@ where
 impl<F, R ,Args> ToolFunc<F, R, Args>
 where
     F: ToolHandler<Args, Output = R>,
-    R: Into<Response>,
+    R: IntoResponse,
     Args: TryFrom<Request>
 {
     /// Creates a new [`ToolFunc`] wrapped into [`Arc`]
@@ -89,19 +127,20 @@ where
 impl<F, R ,Args> Handler for ToolFunc<F, R, Args>
 where
     F: ToolHandler<Args, Output = R>,
-    R: Into<Response>,
+    R: IntoResponse,
     Args: TryFrom<Request> + Send + Sync,
     Args::Error: ToString + Send + Sync
 {
     #[inline]
     fn call(&self, req: Request) -> BoxFuture<Response> {
         Box::pin(async move {
+            let id = req.id.clone().unwrap_or_default();
             match Args::try_from(req) { 
-                Err(err) => Response::error(10, err.to_string()),
+                Err(err) => Response::error(id, &err.to_string()),
                 Ok(args) => self.func
                     .call(args)
                     .await
-                    .into()
+                    .into_response(id)
             }
         })
     }
@@ -113,21 +152,21 @@ impl Tool {
     where
         F: ToolHandler<Args, Output = R>,
         Args: TryFrom<Request> + Send + Sync + 'static,
-        R: Into<Response> + Send + 'static,
+        R: IntoResponse + Send + 'static,
         Args::Error: ToString + Send + Sync
     {
         let handler = ToolFunc::new(handler);
-        let input_schema = serde_json::json!({ "type": "object", "properties": { "name": { "type": "string", "description": "some descr" } } }); 
+        let input_schema = InputSchema::new(F::args());
         Self {
             name: name.into(),
-            description: None,
+            descr: None,
             input_schema, 
             handler,
         }
     }
     
     pub fn with_description(mut self, description: &str) -> Self {
-        self.description = Some(description.into());
+        self.descr = Some(description.into());
         self
     }
     
@@ -138,7 +177,7 @@ impl Tool {
 }
 
 macro_rules! impl_generic_tool_handler ({ $($param:ident)* } => {
-    impl<Func, Fut: Send, $($param,)*> ToolHandler<($($param,)*)> for Func
+    impl<Func, Fut: Send, $($param: TypeCategory,)*> ToolHandler<($($param,)*)> for Func
     where
         Func: Fn($($param),*) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future + 'static,
@@ -150,6 +189,22 @@ macro_rules! impl_generic_tool_handler ({ $($param:ident)* } => {
         #[allow(non_snake_case)]
         fn call(&self, ($($param,)*): ($($param,)*)) -> Self::Future {
             (self)($($param,)*)
+        }
+        
+        #[inline]
+        #[allow(unused_mut, unused_imports)]
+        fn args() -> Option<HashMap<String, SchemaProperty>> {
+            use std::any::type_name;
+                        
+            let mut args = HashMap::new();
+            $(
+            args.insert(type_name::<$param>().to_string(), SchemaProperty { r#type: $param::category().to_string(), descr: None });
+            )*
+            if args.len() == 0 { 
+                None
+            } else {
+                Some(args)
+            }
         }
     }
 });

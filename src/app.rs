@@ -1,7 +1,11 @@
 ﻿use crate::options::McpOptions;
 use crate::transport::StdIo;
-use crate::types::{CallToolRequestParams, InitializeRequestParams, InitializeResult, Request, Response, Tool};
-use crate::types::tool::ToolHandler;
+use crate::types::{
+    CallToolRequestParams, 
+    InitializeResult, 
+    Request, Response, IntoResponse, 
+    Tool, ToolHandler
+};
 
 pub mod options;
 
@@ -26,7 +30,7 @@ impl App {
     where
         F: ToolHandler<Args, Output = R>,
         Args: TryFrom<Request> + Send + Sync + 'static,
-        R: Into<Response> + Send + 'static,
+        R: IntoResponse + Send + 'static,
         Args::Error: ToString + Send + Sync
     {
         self.options.add_tool(Tool::new(name, handler));
@@ -35,28 +39,26 @@ impl App {
     
     async fn handle_request(&self, req: Request) -> Response {
         match req.method.as_str() { 
-            "initialize" => self.handle_initialize(
-                req.params
-                    .and_then(|params| serde_json::from_value(params).ok())),
-            "tools/list" => self.handle_tools_list(),
+            "initialize" => self.handle_initialize(req),
+            "tools/list" => self.handle_tools_list(req),
             "tools/call" => self.handle_tool_call(req).await,
-            _ => Response::error(4, "unknown request".into())
+            _ => Response::error(req.id.unwrap_or_default(), "unknown request")
         }
     }
     
-    fn handle_initialize(&self, _params: Option<InitializeRequestParams>) -> Response {
+    fn handle_initialize(&self, req: Request) -> Response {
         let json = serde_json::json!(InitializeResult::new());
-        Response::success(0, Some(json))
+        Response::success(req.id.unwrap_or_default(), Some(json))
     }
     
-    fn handle_tools_list(&self) -> Response {
+    fn handle_tools_list(&self, req: Request) -> Response {
         let tools = self.options
             .tools
             .iter().map(|(_, tool)| tool.clone())
             .collect::<Vec<_>>();
         
         let tools = serde_json::json!({ "tools": tools });
-        Response::success(1, Some(tools))
+        Response::success(req.id.unwrap_or_default(), Some(tools))
     }
     
     async fn handle_tool_call(&self, req: Request) -> Response {
@@ -66,7 +68,7 @@ impl App {
             Some(tool) => {
                 tool.call(req).await
             },
-            None => Response::error(3, "tool not found".into())
+            None => Response::error(req.id.unwrap_or_default(), "tool not found")
         }
     }
 }

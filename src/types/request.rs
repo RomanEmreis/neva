@@ -1,14 +1,40 @@
 ﻿//! Represents a request from MCP client
 
-use serde::{Deserialize, de::DeserializeOwned};
+use std::fmt;
+use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use crate::types::CallToolRequestParams;
+
+/// A unique identifier for a request
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RequestId {
+    String(String),
+    Number(i64),
+}
+
+impl Default for RequestId {
+    #[inline]
+    fn default() -> RequestId {
+        Self::String("(no id)".into())
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Request {
     pub jsonrpc: String,
     pub method: String,
     pub params: Option<serde_json::Value>,
-    pub id: Option<i32>,
+    pub id: Option<RequestId>,
+}
+
+impl fmt::Display for RequestId {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RequestId::String(str) => write!(f, "{}", str),
+            RequestId::Number(num) => write!(f, "{}", num),
+        }
+    }
 }
 
 impl TryFrom<Request> for () {

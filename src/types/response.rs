@@ -1,20 +1,37 @@
 ﻿//! Represents a response that MCP server provides
 
 use serde::Serialize;
-use crate::types::JSONRPC_VERSION;
+pub use into_response::IntoResponse;
+use crate::types::{
+    RequestId,
+    JSONRPC_VERSION
+};
 
+pub mod into_response;
+
+/// A response message in the JSON-RPC protocol.
 #[derive(Debug, Clone, Serialize)]
 pub struct Response {
+    /// JSON-RPC protocol version. 
+    /// 
+    /// > Note: always 2.0.
     pub jsonrpc: String,
-    pub id: i32,
+    
+    /// Request identifier matching the original request.
+    pub id: RequestId,
+    
+    /// The result of the method invocation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
+    
+    /// Error information.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
 impl Response {
-    pub fn success(id: i32, result: Option<serde_json::Value>) -> Self {
+    /// Creates a successful response
+    pub fn success(id: RequestId, result: Option<serde_json::Value>) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.to_string(),
             id,
@@ -23,26 +40,41 @@ impl Response {
         }
     }
 
-    pub fn error(id: i32, error: String) -> Self {
+    /// Creates an error response
+    pub fn error(id: RequestId, error: &str) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.to_string(),
             id,
             result: None,
-            error: Some(error),
+            error: Some(error.into()),
         }
     }
 }
 
-impl From<String> for Response {
-    fn from(str: String) -> Self {
-        let result = serde_json::json!({ "result": str });
-        Response::success(2, Some(result))
-    }
-}
+#[cfg(test)]
+mod tests {
+    use crate::types::RequestId;
+    use super::Response;
 
-impl From<&'static str> for Response {
-    fn from(str: &str) -> Self {
-        let result = serde_json::json!({ "result": str });
-        Response::success(2, Some(result))
+    #[test]
+    fn it_deserializes_successful_response_with_int_id_to_json() {
+        let resp = Response::success(
+            RequestId::Number(42),
+            Some(serde_json::json!({ "key": "test" })));
+        
+        let json = serde_json::to_string(&resp).unwrap();
+        
+        assert_eq!(json, r#"{"jsonrpc":"2.0","id":42,"result":{"key":"test"}}"#);
+    }
+
+    #[test]
+    fn it_deserializes_error_response_with_string_id_to_json() {
+        let resp = Response::error(
+            RequestId::String("id".into()),
+            "some error message");
+
+        let json = serde_json::to_string(&resp).unwrap();
+
+        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"id","error":"some error message"}"#);
     }
 }
