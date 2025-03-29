@@ -9,7 +9,10 @@ use neva::{App, types::Json};
 #[tokio::main]
 async fn main() {
     let mut app = App::new()
-        .with_options(|opt| opt.with_stdio());
+        .with_options(|opt| opt
+            .with_stdio()
+            .with_server_name("sample mcp server")
+            .with_server_ver("0.1.0.0"));
 
     app.map_tool("say_hello", || async {
         "Hello, world!"
@@ -20,7 +23,8 @@ async fn main() {
     });
 
     app.map_tool("say_json", |arg: Json<Payload>| async move {
-        format!("{}, {}!", arg.say, arg.name)
+        let result = Result { message: format!("{}, {}!", arg.say, arg.name) };
+        Json::from(result)
     });
 
     app.map_tool("v2/say_json", |arg: serde_json::Value| async move {
@@ -34,4 +38,9 @@ async fn main() {
 struct Payload {
     say: String,
     name: String,
+}
+
+#[derive(serde::Serialize)]
+struct Result {
+    message: String,
 }

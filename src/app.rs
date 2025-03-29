@@ -64,7 +64,7 @@ impl App {
     }
     
     fn handle_initialize(&self, req: Request) -> Response {
-        let json = json!(InitializeResult::new());
+        let json = json!(InitializeResult::new(&self.options));
         Response::success(req.id.unwrap_or_default(), json)
     }
     

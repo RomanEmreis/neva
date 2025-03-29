@@ -4,7 +4,8 @@ pub use response::{IntoResponse, Response};
 pub use capabilities::{ClientCapabilities, ServerCapabilities};
 pub use tool::{CallToolRequestParams, Tool, ToolHandler};
 pub use helpers::Json;
-use crate::PROTOCOL_VERSION;
+use crate::{PROTOCOL_VERSION, SERVER_NAME};
+use crate::options::McpOptions;
 use crate::types::capabilities::ToolsCapability;
 
 pub mod request;
@@ -65,8 +66,17 @@ pub struct Implementation {
     pub version: String,
 }
 
+impl Default for Implementation {
+    fn default() -> Self {
+        Self {
+            name: SERVER_NAME.into(),
+            version: env!("CARGO_PKG_VERSION").into()
+        }
+    }
+}
+
 impl InitializeResult {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(options: &McpOptions) -> Self {
         Self {
             protocol_ver: PROTOCOL_VERSION.into(),
             capabilities: ServerCapabilities {
@@ -76,10 +86,7 @@ impl InitializeResult {
                 prompts: None,
                 resources: None
             },
-            server_info: Implementation { 
-                name: "neva".into(),
-                version: env!("CARGO_PKG_VERSION").into()
-            },
+            server_info: options.implementation.clone(),
             instructions: None
         }
     }
