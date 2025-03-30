@@ -56,14 +56,17 @@ impl App {
     
     async fn handle_request(&self, req: Request) -> Response {
         match req.method.as_str() { 
+            "ping" => Response::empty(req.into_id()),
             "initialize" => self.handle_initialize(req),
+            "completion/complete" => self.handle_completion(req),
+            "notifications/initialized" => Response::empty(req.into_id()),
+            "notifications/cancelled" => Response::empty(req.into_id()),
             "tools/list" => self.handle_tools_list(req),
             "tools/call" => self.handle_tool_call(req).await,
-            "ping" => Response::empty(req.into_id()),
-            "notifications/initialized" => Response::empty(req.into_id()),
             "resources/list" => self.handle_resources_list(req),
-            "prompts/list" => Response::error(req.into_id(), "not implemented"),
-            "completion/complete" => self.handle_completion(req),
+            "resources/read" => Response::error(req.into_id(), "not implemented"),
+            "prompts/list" => self.handle_prompts_list(req),
+            "prompts/get" => Response::error(req.into_id(), "not implemented"),
             _ => Response::error(req.into_id(), "unknown request")
         }
     }
@@ -88,6 +91,12 @@ impl App {
     fn handle_resources_list(&self, req: Request) -> Response {
         self.options
             .resources()
+            .into_response(req.into_id())
+    }
+
+    fn handle_prompts_list(&self, req: Request) -> Response {
+        self.options
+            .prompts()
             .into_response(req.into_id())
     }
     

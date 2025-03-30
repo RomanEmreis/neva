@@ -15,12 +15,22 @@ pub use resource::{
     ReadResourceResult, 
     ReadResourceRequestParams
 };
+pub use prompt::{
+    ListPromptsResult,
+    Prompt,
+    GetPromptRequestParams,
+    GetPromptResult,
+    PromptArgument,
+    PromptMessage,
+    Role
+};
 
 pub mod request;
 pub mod response;
 pub mod capabilities;
 pub mod tool;
 pub mod resource;
+pub mod prompt;
 pub mod completion;
 pub(crate) mod helpers;
 

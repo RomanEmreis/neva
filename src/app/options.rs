@@ -5,7 +5,8 @@ use crate::transport::{StdIo, TransportProto};
 use crate::types::{
     Implementation, 
     Tool, ListToolsResult,
-    Resource, ListResourcesResult
+    Resource, ListResourcesResult,
+    Prompt, ListPromptsResult
 };
 
 /// Represents MCP server configuration options
@@ -15,7 +16,7 @@ pub struct McpOptions {
     proto: Option<TransportProto>,
     tools: HashMap<String, Tool>,
     resources: HashMap<String, Resource>,
-    //prompts: HashMap<String, Prompt>,
+    prompts: HashMap<String, Prompt>,
 }
 
 impl McpOptions {
@@ -46,6 +47,12 @@ impl McpOptions {
     /// Adds a resource
     pub(crate) fn add_resource(&mut self, resource: Resource) -> &mut Self {
         self.resources.insert(resource.uri.clone(), resource);
+        self
+    }
+
+    /// Adds a prompt
+    pub(crate) fn add_prompt(&mut self, prompt: Prompt) -> &mut Self {
+        self.prompts.insert(prompt.name.clone(), prompt);
         self
     }
     
@@ -80,6 +87,21 @@ impl McpOptions {
     #[inline]
     pub(crate) fn resources(&self) -> ListResourcesResult {
         self.resources
+            .iter().map(|(_, tool)| tool)
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    /// Returns a tool by its name
+    #[inline]
+    pub(crate) fn get_prompt(&self, name: &str) -> Option<&Prompt> {
+        self.prompts.get(name)
+    }
+
+    /// Returns a list of available prompts
+    #[inline]
+    pub(crate) fn prompts(&self) -> ListPromptsResult {
+        self.prompts
             .iter().map(|(_, tool)| tool)
             .collect::<Vec<_>>()
             .into()
