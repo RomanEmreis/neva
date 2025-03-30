@@ -1,16 +1,12 @@
 ﻿use serde_json::from_value;
+use crate::error::Error;
 use crate::options::McpOptions;
 use crate::transport::Transport;
-use crate::types::{
-    CallToolRequestParams, 
-    InitializeResult, 
-    IntoResponse, Request, Response, 
-    CompleteResult,
-    Tool, ToolHandler
-};
+use crate::types::{CallToolRequestParams, InitializeResult, IntoResponse, Request, Response, CompleteResult, Tool, ToolHandler, CallToolResponse};
 
 pub mod options;
 
+#[derive(Default)]
 pub struct App {
     options: McpOptions
 }
@@ -46,9 +42,8 @@ impl App {
     pub fn map_tool<F, Args, R>(&mut self, name: &str, handler: F) -> &mut Self
     where
         F: ToolHandler<Args, Output = R>,
-        Args: TryFrom<CallToolRequestParams> + Send + Sync + 'static,
-        R: IntoResponse + Send + 'static,
-        Args::Error: ToString + Send + Sync
+        Args: TryFrom<CallToolRequestParams, Error = Error> + Send + Sync + 'static,
+        R: Into<CallToolResponse> + Send + 'static,
     {
         self.options.add_tool(Tool::new(name, handler));
         self

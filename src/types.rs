@@ -7,7 +7,14 @@ pub use request::{RequestId, Request};
 pub use response::{IntoResponse, Response};
 pub use completion::{Completion, CompleteResult};
 pub use capabilities::{ClientCapabilities, ServerCapabilities, ToolsCapability};
-pub use tool::{CallToolRequestParams, Tool, ToolHandler, ListToolsResult};
+pub use content::Content;
+pub use tool::{
+    CallToolRequestParams,
+    CallToolResponse,
+    Tool, 
+    ToolHandler, 
+    ListToolsResult
+};
 pub use resource::{
     ListResourcesResult, 
     Resource, 
@@ -32,6 +39,7 @@ pub mod tool;
 pub mod resource;
 pub mod prompt;
 pub mod completion;
+pub mod content;
 pub(crate) mod helpers;
 
 pub(super) const JSONRPC_VERSION: &str = "2.0";

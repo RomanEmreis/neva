@@ -3,7 +3,7 @@ use super::CallToolRequestParams;
 use serde::{de::DeserializeOwned};
 
 impl TryFrom<CallToolRequestParams> for () {
-    type Error = String;
+    type Error = Error;
 
     #[inline]
     fn try_from(_: CallToolRequestParams) -> Result<Self, Self::Error> {

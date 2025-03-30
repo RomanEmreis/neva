@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
-use crate::types::{IntoResponse, RequestId, Response};
+use crate::types::{IntoResponse, RequestId, Response, Content};
 
 /// A prompt or prompt template that the server offers.
 /// 
@@ -79,11 +79,6 @@ pub struct PromptMessage {
     pub role: Role,
 }
 
-#[derive(Deserialize)]
-pub struct Content {
-    
-}
-
 /// Represents the type of role in the conversation.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
@@ -101,7 +96,7 @@ pub enum Role {
 #[derive(Default, Serialize)]
 pub struct ListPromptsResult<'a> {
     /// A list of prompts or prompt templates that the server offers.
-    prompts: Vec<&'a Prompt>,
+    pub prompts: Vec<&'a Prompt>,
 }
 
 impl IntoResponse for ListPromptsResult<'_> {
@@ -123,5 +118,14 @@ impl ListPromptsResult<'_> {
     #[inline]
     pub fn new() -> Self {
         Default::default()
+    }
+}
+
+impl Prompt {
+    /// Creates a new [`Prompt`]
+    #[inline]
+    pub fn new(name: &str) -> Self {
+        // TODO: impl
+        Self { name: name.into(), descr: None, args: None }
     }
 }

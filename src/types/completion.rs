@@ -75,6 +75,29 @@ mod tests {
     
     #[test]
     fn it_creates_default_completion() {
+        let completion = Completion::default();
         
+        assert_eq!(completion.values.len(), 0);
+        assert_eq!(completion.total, Some(0));
+        assert_eq!(completion.has_more, Some(false));
+    }
+
+    #[test]
+    fn it_creates_new_completion() {
+        let completion = Completion::new();
+
+        assert_eq!(completion.values.len(), 0);
+        assert_eq!(completion.total, None);
+        assert_eq!(completion.has_more, None);
+    }
+    
+    #[test]
+    fn it_converts_complete_result_into_response() {
+        let result = CompleteResult::default();
+        
+        let resp = result.into_response(RequestId::default());
+        let json = serde_json::to_string(&resp).unwrap();
+
+        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"(no id)","result":{"completion":{"has_more":false,"total":0,"values":[]}}}"#);
     }
 }

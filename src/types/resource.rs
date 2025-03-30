@@ -45,7 +45,7 @@ pub struct ReadResourceResult {
 /// Represents the content of a resource.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ResourceContents {
     /// The URI of the resource.
     pub uri: String,
@@ -91,5 +91,19 @@ impl ListResourcesResult<'_> {
     #[inline]
     pub fn new() -> Self {
         Default::default()
+    }
+}
+
+impl Resource {
+    /// Creates a new [`Resource`]
+    #[inline]
+    pub fn new(uri: &str, name: &str) -> Self {
+        // TODO: impl
+        Self { 
+            uri: uri.into(), 
+            name: name.into(), 
+            descr: None, 
+            mime: None
+        }
     }
 }

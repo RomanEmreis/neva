@@ -1,7 +1,12 @@
 ﻿//! Tools for converting any type into MCP server response
 
 use serde::Serialize;
-use crate::types::{RequestId, Response, Json};
+use crate::error::Error;
+use crate::types::{
+    RequestId, 
+    Response,
+    Json
+};
 
 /// A trait for converting any return type into MCP response
 pub trait IntoResponse {
@@ -14,6 +19,13 @@ impl IntoResponse for &'static str {
     fn into_response(self, req_id: RequestId) -> Response {
         let result = serde_json::json!({ "result": self });
         Response::success(req_id, result)
+    }
+}
+
+impl IntoResponse for Error {
+    #[inline]
+    fn into_response(self, req_id: RequestId) -> Response {
+        Response::error(req_id, &self.to_string())
     }
 }
 

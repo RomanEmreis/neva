@@ -5,14 +5,15 @@
 //! ```
 
 use neva::{App, types::Json};
+use neva::error::Error;
 
 #[tokio::main]
 async fn main() {
     let mut app = App::new()
         .with_options(|opt| opt
             .with_stdio()
-            .with_server_name("sample mcp server")
-            .with_server_ver("0.1.0.0"));
+            .with_name("sample mcp server")
+            .with_version("0.1.0.0"));
 
     app.map_tool("say_hello", || async {
         "Hello, world!"
@@ -29,6 +30,14 @@ async fn main() {
 
     app.map_tool("v2/say_json", |arg: serde_json::Value| async move {
         arg
+    });
+    
+    app.map_tool("test_error", |throw: bool| async move {
+        if throw {
+            Err(Error::new("some error"))
+        } else {
+            Ok("no error")
+        }
     });
     
     app.run().await;

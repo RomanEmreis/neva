@@ -1,14 +1,18 @@
 ﻿//! Represents an MCP tool
 
 mod from_request;
+pub mod call_tool_response;
 
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
+use crate::error::Error;
 use super::helpers::TypeCategory;
 use crate::types::{RequestId, Response, IntoResponse};
+
+pub use call_tool_response::CallToolResponse;
 
 /// Represents a tool that the server is capable of calling. Part of the [`ListToolsResponse`].
 /// 
@@ -151,8 +155,8 @@ pub trait ToolHandler<Args>: Clone + Send + Sync + 'static {
 pub(crate) struct ToolFunc<F, R, Args>
 where
     F: ToolHandler<Args, Output = R>,
-    R: IntoResponse,
-    Args: TryFrom<CallToolRequestParams>
+    R: Into<CallToolResponse>,
+    Args: TryFrom<CallToolRequestParams, Error = Error>
 {
     func: F,
     _marker: std::marker::PhantomData<Args>,
@@ -161,8 +165,8 @@ where
 impl<F, R ,Args> ToolFunc<F, R, Args>
 where
     F: ToolHandler<Args, Output = R>,
-    R: IntoResponse,
-    Args: TryFrom<CallToolRequestParams>
+    R: Into<CallToolResponse>,
+    Args: TryFrom<CallToolRequestParams, Error = Error>
 {
     /// Creates a new [`ToolFunc`] wrapped into [`Arc`]
     pub(crate) fn new(func: F) -> Arc<Self> {
@@ -174,19 +178,19 @@ where
 impl<F, R ,Args> Handler for ToolFunc<F, R, Args>
 where
     F: ToolHandler<Args, Output = R>,
-    R: IntoResponse,
-    Args: TryFrom<CallToolRequestParams> + Send + Sync,
-    Args::Error: ToString + Send + Sync
+    R: Into<CallToolResponse>,
+    Args: TryFrom<CallToolRequestParams, Error = Error> + Send + Sync,
 {
     #[inline]
     fn call(&self, params: CallToolRequestParams) -> BoxFuture<Response> {
         Box::pin(async move {
             let id = params.req_id.clone();
             match Args::try_from(params) { 
-                Err(err) => Response::error(id, &err.to_string()),
+                Err(err) => err.into_response(id),
                 Ok(args) => self.func
                     .call(args)
                     .await
+                    .into()
                     .into_response(id)
             }
         })
@@ -198,9 +202,8 @@ impl Tool {
     pub fn new<F, Args, R>(name: &str, handler: F) -> Self 
     where
         F: ToolHandler<Args, Output = R>,
-        Args: TryFrom<CallToolRequestParams> + Send + Sync + 'static,
-        R: IntoResponse + Send + 'static,
-        Args::Error: ToString + Send + Sync
+        Args: TryFrom<CallToolRequestParams, Error = Error> + Send + Sync + 'static,
+        R: Into<CallToolResponse> + Send + 'static,
     {
         let handler = ToolFunc::new(handler);
         let input_schema = InputSchema::new(F::args());
