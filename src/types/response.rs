@@ -42,7 +42,7 @@ impl Response {
     }
 
     /// Creates a dummy successful response
-    pub fn pong(id: RequestId) -> Self {
+    pub fn empty(id: RequestId) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.to_string(),
             id,

@@ -2,7 +2,11 @@
 
 use std::collections::HashMap;
 use crate::transport::{StdIo, TransportProto};
-use crate::types::{Implementation, Tool};
+use crate::types::{
+    Implementation, 
+    Tool, ListToolsResult,
+    Resource, ListResourcesResult
+};
 
 /// Represents MCP server configuration options
 #[derive(Default)]
@@ -10,8 +14,8 @@ pub struct McpOptions {
     pub(crate) implementation: Implementation,
     proto: Option<TransportProto>,
     tools: HashMap<String, Tool>,
-    //prompts: HashMap<&'static str, Prompt>,
-    //resources: HashMap<&'static str, Resource>,
+    resources: HashMap<String, Resource>,
+    //prompts: HashMap<String, Prompt>,
 }
 
 impl McpOptions {
@@ -38,6 +42,12 @@ impl McpOptions {
         self.tools.insert(tool.name.clone(), tool);
         self
     }
+
+    /// Adds a resource
+    pub(crate) fn add_resource(&mut self, resource: Resource) -> &mut Self {
+        self.resources.insert(resource.uri.clone(), resource);
+        self
+    }
     
     /// Returns current transport protocol
     pub(crate) fn transport(&mut self) -> TransportProto {
@@ -53,11 +63,26 @@ impl McpOptions {
     
     /// Returns a list of available tools
     #[inline]
-    pub(crate) fn tools(&self) -> Vec<&Tool> {
-        self
-            .tools
+    pub(crate) fn tools(&self) -> ListToolsResult {
+        self.tools
             .iter().map(|(_, tool)| tool)
             .collect::<Vec<_>>()
+            .into()
+    }
+
+    /// Reads a resource by it URI
+    #[inline]
+    pub(crate) fn read_resource(&self, uri: &str) -> Option<&Resource> {
+        self.resources.get(uri)
+    }
+
+    /// Returns a list of available resources
+    #[inline]
+    pub(crate) fn resources(&self) -> ListResourcesResult {
+        self.resources
+            .iter().map(|(_, tool)| tool)
+            .collect::<Vec<_>>()
+            .into()
     }
 }
 

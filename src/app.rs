@@ -1,10 +1,11 @@
-﻿use serde_json::{from_value, json};
+﻿use serde_json::from_value;
 use crate::options::McpOptions;
 use crate::transport::Transport;
 use crate::types::{
-    CallToolRequestParams,
-    InitializeResult,
-    IntoResponse, Request, Response,
+    CallToolRequestParams, 
+    InitializeResult, 
+    IntoResponse, Request, Response, 
+    CompleteResult,
     Tool, ToolHandler
 };
 
@@ -58,23 +59,40 @@ impl App {
             "initialize" => self.handle_initialize(req),
             "tools/list" => self.handle_tools_list(req),
             "tools/call" => self.handle_tool_call(req).await,
-            "ping" => Response::pong(req.id.unwrap_or_default()),
-            _ => Response::error(req.id.unwrap_or_default(), "unknown request")
+            "ping" => Response::empty(req.into_id()),
+            "notifications/initialized" => Response::empty(req.into_id()),
+            "resources/list" => self.handle_resources_list(req),
+            "prompts/list" => Response::error(req.into_id(), "not implemented"),
+            "completion/complete" => self.handle_completion(req),
+            _ => Response::error(req.into_id(), "unknown request")
         }
     }
     
     fn handle_initialize(&self, req: Request) -> Response {
-        let json = json!(InitializeResult::new(&self.options));
-        Response::success(req.id.unwrap_or_default(), json)
+        let result = InitializeResult::new(&self.options);
+        result.into_response(req.id.unwrap_or_default())
+    }
+
+    fn handle_completion(&self, req: Request) -> Response {
+        // TODO: return default as it non-optional capability so far
+        let result = CompleteResult::default();
+        result.into_response(req.into_id())
     }
     
     fn handle_tools_list(&self, req: Request) -> Response {
-        let tools = json!({ "tools": self.options.tools() });
-        Response::success(req.id.unwrap_or_default(), tools)
+        self.options
+            .tools()
+            .into_response(req.into_id())
+    }
+
+    fn handle_resources_list(&self, req: Request) -> Response {
+        self.options
+            .resources()
+            .into_response(req.into_id())
     }
     
     async fn handle_tool_call(&self, req: Request) -> Response {
-        let req_id = req.id.unwrap_or_default();
+        let req_id = req.id();
 
         let params = match req.params {
             None => return Response::error(req_id, "missing params"),

@@ -1,17 +1,27 @@
 ﻿use serde::{Deserialize, Serialize};
-pub use request::{RequestId, Request};
-pub use response::{IntoResponse, Response};
-pub use capabilities::{ClientCapabilities, ServerCapabilities};
-pub use tool::{CallToolRequestParams, Tool, ToolHandler};
-pub use helpers::Json;
 use crate::{PROTOCOL_VERSION, SERVER_NAME};
 use crate::options::McpOptions;
-use crate::types::capabilities::ToolsCapability;
+
+pub use helpers::Json;
+pub use request::{RequestId, Request};
+pub use response::{IntoResponse, Response};
+pub use completion::{Completion, CompleteResult};
+pub use capabilities::{ClientCapabilities, ServerCapabilities, ToolsCapability};
+pub use tool::{CallToolRequestParams, Tool, ToolHandler, ListToolsResult};
+pub use resource::{
+    ListResourcesResult, 
+    Resource, 
+    ResourceContents, 
+    ReadResourceResult, 
+    ReadResourceRequestParams
+};
 
 pub mod request;
 pub mod response;
 pub mod capabilities;
 pub mod tool;
+pub mod resource;
+pub mod completion;
 pub(crate) mod helpers;
 
 pub(super) const JSONRPC_VERSION: &str = "2.0";
@@ -72,6 +82,13 @@ impl Default for Implementation {
             name: SERVER_NAME.into(),
             version: env!("CARGO_PKG_VERSION").into()
         }
+    }
+}
+
+impl IntoResponse for InitializeResult {
+    #[inline]
+    fn into_response(self, req_id: RequestId) -> Response {
+        Response::success(req_id, serde_json::to_value(self).unwrap())
     }
 }
 

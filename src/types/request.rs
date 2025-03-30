@@ -46,6 +46,25 @@ impl fmt::Display for RequestId {
     }
 }
 
+impl Request {
+    /// Consumes the request and returns request's id if it's specified, otherwise returns default value
+    /// 
+    /// Default: `(no id)`
+    pub fn into_id(self) -> RequestId {
+        self.id
+            .unwrap_or_default()
+    }
+
+    /// Returns request's id if it's specified, otherwise returns default value
+    ///
+    /// Default: `(no id)`
+    pub fn id(&self) -> RequestId {
+        self.id
+            .clone()
+            .unwrap_or_default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
 

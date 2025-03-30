@@ -13,7 +13,7 @@ use crate::types::{RequestId, Response, IntoResponse};
 /// Represents a tool that the server is capable of calling. Part of the [`ListToolsResponse`].
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Clone, Serialize)]
+#[derive(Serialize)]
 pub struct Tool {
     /// The name of the tool.
     pub name: String,
@@ -30,6 +30,15 @@ pub struct Tool {
     
     #[serde(skip)]
     handler: DynHandler
+}
+
+/// A response to a request to list the tools available on the server.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+#[derive(Default, Serialize)]
+pub struct ListToolsResult<'a> {
+    /// The server's response to a tools/list request from the client.
+    pub tools: Vec<&'a Tool>
 }
 
 /// Used by the client to invoke a tool provided by the server.
@@ -71,6 +80,28 @@ pub struct SchemaProperty {
     /// A Human-readable description of a property
     #[serde(rename = "description", skip_serializing_if = "Option::is_none")]
     pub descr: Option<String>,
+}
+
+impl IntoResponse for ListToolsResult<'_> {
+    #[inline]
+    fn into_response(self, req_id: RequestId) -> Response {
+        Response::success(req_id, serde_json::to_value(self).unwrap())
+    }
+}
+
+impl<'a> From<Vec<&'a Tool>> for ListToolsResult<'a> {
+    #[inline]
+    fn from(tools: Vec<&'a Tool>) -> Self {
+        Self { tools }
+    }
+}
+
+impl ListToolsResult<'_> {
+    /// Create a new [`ListToolsResult`]
+    #[inline]
+    pub fn new() -> Self {
+        Default::default()
+    }
 }
 
 impl InputSchema {
