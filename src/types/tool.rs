@@ -1,23 +1,27 @@
 ﻿//! Represents an MCP tool
 
-mod from_request;
-pub mod call_tool_response;
-
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use crate::error::Error;
 use super::helpers::TypeCategory;
-use crate::types::{RequestId, Response, IntoResponse};
+use crate::{
+    app::handler::{Handler, HandlerParams, GenericHandler, RequestHandler},
+    types::{RequestId, Response, IntoResponse}
+};
 
 pub use call_tool_response::CallToolResponse;
+
+mod from_request;
+pub mod call_tool_response;
 
 /// Represents a tool that the server is capable of calling. Part of the [`ListToolsResponse`].
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Tool {
     /// The name of the tool.
     pub name: String,
@@ -32,17 +36,28 @@ pub struct Tool {
     #[serde(rename = "inputSchema")]
     pub input_schema: InputSchema,
     
+    /// A tool call handler
     #[serde(skip)]
-    handler: DynHandler
+    handler: RequestHandler<CallToolResponse>
+}
+
+/// Sent from the client to request a list of tools the server has.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+#[derive(Deserialize)]
+pub struct ListToolsRequestParams {
+    /// An opaque token representing the current pagination position.
+    /// If provided, the server should return results starting after this cursor.
+    pub cursor: Option<String>,
 }
 
 /// A response to a request to list the tools available on the server.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
 #[derive(Default, Serialize)]
-pub struct ListToolsResult<'a> {
+pub struct ListToolsResult {
     /// The server's response to a tools/list request from the client.
-    pub tools: Vec<&'a Tool>
+    pub tools: Vec<Tool>
 }
 
 /// Used by the client to invoke a tool provided by the server.
@@ -55,11 +70,7 @@ pub struct CallToolRequestParams {
     
     /// Optional arguments to pass to the tool.
     #[serde(rename = "arguments")]
-    pub args: Option<HashMap<String, serde_json::Value>>,
-    
-    /// A Call tool request id
-    #[serde(skip)]
-    pub(crate) req_id: RequestId
+    pub args: Option<HashMap<String, Value>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -86,21 +97,21 @@ pub struct SchemaProperty {
     pub descr: Option<String>,
 }
 
-impl IntoResponse for ListToolsResult<'_> {
+impl IntoResponse for ListToolsResult {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
         Response::success(req_id, serde_json::to_value(self).unwrap())
     }
 }
 
-impl<'a> From<Vec<&'a Tool>> for ListToolsResult<'a> {
+impl From<Vec<Tool>> for ListToolsResult {
     #[inline]
-    fn from(tools: Vec<&'a Tool>) -> Self {
+    fn from(tools: Vec<Tool>) -> Self {
         Self { tools }
     }
 }
 
-impl ListToolsResult<'_> {
+impl ListToolsResult {
     /// Create a new [`ListToolsResult`]
     #[inline]
     pub fn new() -> Self {
@@ -127,25 +138,8 @@ impl SchemaProperty {
     }
 }
 
-/// Represents a specific registered handler
-pub(crate) type DynHandler = Arc<
-    dyn Handler
-    + Send
-    + Sync
->;
-
-/// Represents a Request -> Response handler
-pub(crate) trait Handler {
-    fn call(&self, params: CallToolRequestParams) -> BoxFuture<Response>;
-}
-
 /// Describes a generic MCP Tool handler
-pub trait ToolHandler<Args>: Clone + Send + Sync + 'static {
-    type Output;
-    type Future: Future<Output = Self::Output> + Send;
-
-    fn call(&self, args: Args) -> Self::Future;
-    
+pub trait ToolHandler<Args>: GenericHandler<Args> {
     #[inline]
     fn args() -> Option<HashMap<String, SchemaProperty>> {
         None
@@ -175,24 +169,23 @@ where
     }
 }
 
-impl<F, R ,Args> Handler for ToolFunc<F, R, Args>
+impl<F, R ,Args> Handler<CallToolResponse> for ToolFunc<F, R, Args>
 where
     F: ToolHandler<Args, Output = R>,
     R: Into<CallToolResponse>,
     Args: TryFrom<CallToolRequestParams, Error = Error> + Send + Sync,
 {
     #[inline]
-    fn call(&self, params: CallToolRequestParams) -> BoxFuture<Response> {
+    fn call(&self, params: HandlerParams) -> BoxFuture<Result<CallToolResponse, Error>> {
+        let HandlerParams::Tool(params) = params else { 
+            unreachable!()
+        };
         Box::pin(async move {
-            let id = params.req_id.clone();
-            match Args::try_from(params) { 
-                Err(err) => err.into_response(id),
-                Ok(args) => self.func
-                    .call(args)
-                    .await
-                    .into()
-                    .into_response(id)
-            }
+            let args = Args::try_from(params)?;
+            Ok(self.func
+                .call(args)
+                .await
+                .into())
         })
     }
 }
@@ -223,7 +216,7 @@ impl Tool {
     
     /// Invoke a tool
     #[inline]
-    pub(crate) async fn call(&self, params: CallToolRequestParams) -> Response {
+    pub(crate) async fn call(&self, params: HandlerParams) -> Result<CallToolResponse, Error> {
         self.handler.call(params).await
     }
 }
@@ -234,15 +227,6 @@ macro_rules! impl_generic_tool_handler ({ $($param:ident)* } => {
         Func: Fn($($param),*) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future + 'static,
     {
-        type Output = Fut::Output;
-        type Future = Fut;
-
-        #[inline]
-        #[allow(non_snake_case)]
-        fn call(&self, ($($param,)*): ($($param,)*)) -> Self::Future {
-            (self)($($param,)*)
-        }
-        
         #[inline]
         #[allow(unused_mut)]
         fn args() -> Option<HashMap<String, SchemaProperty>> {
@@ -279,14 +263,13 @@ mod tests {
         
         let params = CallToolRequestParams {
             name: "sum".into(),
-            req_id: RequestId::default(),
             args: Some(HashMap::from([
                 ("a".into(), serde_json::to_value(5).unwrap()),
                 ("b".into(), serde_json::to_value(2).unwrap()),
             ])),
         };
         
-        let resp = tool.call(params).await;
+        let resp = tool.call(params.into()).await.unwrap();
         let json = serde_json::to_string(&resp).unwrap();
 
         assert_eq!(json, r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":7}}"#);

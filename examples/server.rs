@@ -4,8 +4,9 @@
 //! npx @modelcontextprotocol/inspector cargo run --example server
 //! ```
 
-use neva::{App, types::Json};
+use neva::{App, types::{Json, ListResourcesRequestParams, ResourceContents}};
 use neva::error::Error;
+use neva::types::Resource;
 
 #[tokio::main]
 async fn main() {
@@ -38,6 +39,20 @@ async fn main() {
         } else {
             Ok("no error")
         }
+    });
+    
+    app.map_resources(|_params| async move {
+        [
+            Resource::new("res://test1", "test 1"),
+            Resource::new("res://test2", "test 2")
+        ]
+    });
+    
+    app.map_resource("res://{name}", "get_res", |name: String| async move {
+        ResourceContents::text(
+            &format!("res://{name}"), 
+            "text/plain", 
+            &format!("Some details about resource: {name}"))
     });
     
     app.run().await;

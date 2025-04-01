@@ -1,15 +1,26 @@
 ﻿//! Represents an MCP resource
 
 use serde::{Deserialize, Serialize};
-use crate::types::{IntoResponse, RequestId, Response};
+use crate::types::{RequestId, Response, IntoResponse};
+
+pub use uri::Uri;
+pub use read_resource_result::{ReadResourceResult, ResourceContents};
+pub use template::{ResourceTemplate, ListResourceTemplatesResult, ListResourceTemplatesRequestParams};
+pub(crate) use route::Route;
+
+mod from_request;
+pub mod read_resource_result;
+pub mod uri;
+pub mod template;
+pub(crate) mod route;
 
 /// Represents a known resource that the server is capable of reading.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Resource {
     /// The URI of this resource.
-    pub uri: String,
+    pub uri: Uri,
     
     /// A human-readable name for this resource.
     pub name: String,
@@ -20,7 +31,17 @@ pub struct Resource {
 
     /// The MIME type of this resource, if known.
     #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
-    pub mime: Option<String>,
+    pub mime: Option<String>
+}
+
+/// Sent from the client to request a list of resources the server has.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+#[derive(Deserialize)]
+pub struct ListResourcesRequestParams {
+    /// An opaque token representing the current pagination position.
+    /// If provided, the server should return results starting after this cursor.
+    pub cursor: Option<String>,
 }
 
 /// Sent from the client to the server, to read a specific resource URI.
@@ -30,64 +51,63 @@ pub struct Resource {
 pub struct ReadResourceRequestParams {
     /// The URI of the resource to read. The URI can use any protocol; 
     /// it is up to the server how to interpret it.
-    pub uri: String,
-}
-
-/// The server's response to a resources/read request from the client.
-/// 
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Serialize)]
-pub struct ReadResourceResult {
-    /// A list of ResourceContents that this resource contains.
-    pub contents: Vec<ResourceContents>
-}
-
-/// Represents the content of a resource.
-/// 
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Serialize, Deserialize)]
-pub struct ResourceContents {
-    /// The URI of the resource.
-    pub uri: String,
-
-    /// The type of content.
-    #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
-    pub mime: Option<String>,
-
-    /// The text content of the resource.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-
-    /// The base64-encoded binary content of the resource.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub blob: Option<String>
+    pub uri: Uri,
 }
 
 /// The server's response to a resources/list request from the client.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
 #[derive(Default, Serialize)]
-pub struct ListResourcesResult<'a> {
+pub struct ListResourcesResult {
     /// A list of resources that the server offers.
-    pub resources: Vec<&'a Resource>
+    pub resources: Vec<Resource>
 }
 
-impl IntoResponse for ListResourcesResult<'_> {
+/// Sent from the client to request resources/updated notifications 
+/// from the server whenever a particular resource changes.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+#[derive(Deserialize)]
+pub struct SubscribeRequestParams {
+    /// The URI of the resource to subscribe to. 
+    /// The URI can use any protocol; it is up to the server how to interpret it.
+    pub uri: String,
+}
+
+/// Sent from the client to request not receiving updated notifications 
+/// from the server whenever a primitive resource changes.
+///
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+#[derive(Deserialize)]
+pub struct UnsubscribeRequestParams {
+    /// The URI of the resource to unsubscribe from. 
+    /// The URI can use any protocol; it is up to the server how to interpret it. 
+    pub uri: String,
+}
+
+impl IntoResponse for ListResourcesResult {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
         Response::success(req_id, serde_json::to_value(self).unwrap())
     }
 }
 
-impl<'a> From<Vec<&'a Resource>> for ListResourcesResult<'a> {
+impl<const N: usize> From<[Resource; N]> for ListResourcesResult {
     #[inline]
-    fn from(resources: Vec<&'a Resource>) -> Self {
+    fn from(resources: [Resource; N]) -> Self {
+        Self { resources: resources.to_vec() }
+    }
+}
+
+impl From<Vec<Resource>> for ListResourcesResult {
+    #[inline]
+    fn from(resources: Vec<Resource>) -> Self {
         Self { resources }
     }
 }
 
-impl ListResourcesResult<'_> {
-    /// Create a new [`ListResourcesResult`]
+impl ListResourcesResult {
+    /// Creates a new [`ListResourcesResult`]
     #[inline]
     pub fn new() -> Self {
         Default::default()
@@ -97,13 +117,29 @@ impl ListResourcesResult<'_> {
 impl Resource {
     /// Creates a new [`Resource`]
     #[inline]
-    pub fn new(uri: &str, name: &str) -> Self {
-        // TODO: impl
+    pub fn new(uri: &'static str, name: &str) -> Self {
         Self { 
             uri: uri.into(), 
             name: name.into(), 
             descr: None, 
-            mime: None
+            mime: None,
         }
     }
+
+    /// Sets a description for a resource
+    pub fn with_description(mut self, description: &str) -> Self {
+        self.descr = Some(description.into());
+        self
+    }
+
+    /// Sets a MIME type for a resource
+    pub fn with_mime(mut self, mime: &str) -> Self {
+        self.mime = Some(mime.into());
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    
 }

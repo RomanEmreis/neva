@@ -1,6 +1,7 @@
 ﻿//! A set of helpers for types
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{
     fmt::{self, Display, Formatter},
     ops::{Deref, DerefMut},
@@ -11,6 +12,7 @@ mod sealed {
     pub trait TypeCategorySealed {}
 }
 
+/// A traits that helps to determine a category of an object type
 pub(crate) trait TypeCategory: sealed::TypeCategorySealed {
     fn category() -> &'static str;
 }
@@ -114,8 +116,8 @@ impl<T> TypeCategory for Json<T> {
     }
 }
 
-impl sealed::TypeCategorySealed for serde_json::Value {}
-impl TypeCategory for serde_json::Value {
+impl sealed::TypeCategorySealed for Value {}
+impl TypeCategory for Value {
     fn category() -> &'static str {
         "object"
     }

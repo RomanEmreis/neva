@@ -14,6 +14,14 @@ pub trait IntoResponse {
     fn into_response(self, req_id: RequestId) -> Response;
 }
 
+impl IntoResponse for Response {
+    #[inline]
+    fn into_response(mut self, req_id: RequestId) -> Response {
+        self.id = req_id;
+        self
+    }
+}
+
 impl IntoResponse for &'static str {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
@@ -40,6 +48,27 @@ impl IntoResponse for serde_json::Value {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
         Response::success(req_id, self)
+    }
+}
+
+impl IntoResponse for () {
+    #[inline]
+    fn into_response(self, req_id: RequestId) -> Response {
+        Response::empty(req_id)
+    }
+}
+
+impl<T, E> IntoResponse for Result<T, E>
+where 
+    T: IntoResponse,
+    E: IntoResponse
+{
+    #[inline]
+    fn into_response(self, req_id: RequestId) -> Response {
+        match self { 
+            Ok(value) => value.into_response(req_id),
+            Err(err) => err.into_response(req_id),
+        }
     }
 }
 

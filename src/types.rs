@@ -5,10 +5,17 @@ use crate::options::McpOptions;
 pub use helpers::Json;
 pub use request::{RequestId, Request};
 pub use response::{IntoResponse, Response};
-pub use completion::{Completion, CompleteResult};
-pub use capabilities::{ClientCapabilities, ServerCapabilities, ToolsCapability};
+pub use reference::Reference;
+pub use completion::{Completion, CompleteRequestParams, Argument, CompleteResult};
 pub use content::Content;
+pub use capabilities::{
+    ClientCapabilities, 
+    ServerCapabilities, 
+    ToolsCapability, 
+    ResourcesCapability
+};
 pub use tool::{
+    ListToolsRequestParams,
     CallToolRequestParams,
     CallToolResponse,
     Tool, 
@@ -16,20 +23,26 @@ pub use tool::{
     ListToolsResult
 };
 pub use resource::{
-    ListResourcesResult, 
-    Resource, 
+    ListResourcesRequestParams,
+    ListResourceTemplatesRequestParams,
+    ListResourcesResult,
+    ListResourceTemplatesResult,
+    Resource,
+    ResourceTemplate,
     ResourceContents, 
     ReadResourceResult, 
-    ReadResourceRequestParams
+    ReadResourceRequestParams,
+    SubscribeRequestParams,
+    UnsubscribeRequestParams,
 };
 pub use prompt::{
+    ListPromptsRequestParams,
     ListPromptsResult,
     Prompt,
     GetPromptRequestParams,
     GetPromptResult,
     PromptArgument,
-    PromptMessage,
-    Role
+    PromptMessage
 };
 
 pub mod request;
@@ -40,6 +53,7 @@ pub mod resource;
 pub mod prompt;
 pub mod completion;
 pub mod content;
+pub mod reference;
 pub(crate) mod helpers;
 
 pub(super) const JSONRPC_VERSION: &str = "2.0";
@@ -94,6 +108,29 @@ pub struct Implementation {
     pub version: String,
 }
 
+/// Represents the type of role in the conversation.
+///
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub enum Role {
+    /// Corresponds to the user in the conversation.
+    User,
+    /// Corresponds to the AI in the conversation.
+    Assistant
+}
+
+/// Represents annotations that can be attached to content.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Annotations {
+    /// Describes who the intended customer of this object or data is.
+    audience: Vec<Role>,
+    
+    /// Describes how important this data is for operating the server (0 to 1).
+    priority: f32
+}
+
 impl Default for Implementation {
     fn default() -> Self {
         Self {
@@ -118,8 +155,11 @@ impl InitializeResult {
                 tools: Some(ToolsCapability {
                     list_changed: true
                 }),
+                resources: Some(ResourcesCapability {
+                    list_changed: true,
+                    subscribe: false
+                }),
                 prompts: None,
-                resources: None
             },
             server_info: options.implementation.clone(),
             instructions: None

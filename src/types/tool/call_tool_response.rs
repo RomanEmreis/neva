@@ -53,6 +53,19 @@ where
     }
 }
 
+impl<T> From<Option<T>> for CallToolResponse
+where
+    T: Into<CallToolResponse>,
+{
+    #[inline]
+    fn from(value: Option<T>) -> Self {
+        match value {
+            Some(value) => value.into(),
+            None => Self::empty(),
+        }
+    }
+}
+
 impl From<&'static str> for CallToolResponse {
     #[inline]
     fn from(str: &str) -> Self {
@@ -73,6 +86,13 @@ impl<T: Serialize> From<Json<T>> for CallToolResponse {
         serde_json::to_value(&value)
             .map_err(Error::from)
             .into()
+    }
+}
+
+impl From<Vec<&'static str>> for CallToolResponse {
+    #[inline]
+    fn from(values: Vec<&'static str>) -> Self {
+        Self::texts(values)
     }
 }
 
@@ -132,9 +152,123 @@ impl CallToolResponse {
             is_error: true,
         }
     }
+
+    /// Creates an empty response
+    #[inline]
+    pub fn empty() -> Self {
+        Self {
+            content: vec![],
+            is_error: false,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     
+    #[test]
+    fn it_converts_from_str() {
+        let resp: CallToolResponse = "test".into();
+        
+        let json = serde_json::to_string(&resp).unwrap();
+        
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"test"}],"is_error":false}"#);
+    }
+
+    #[test]
+    fn it_converts_from_string() {
+        let resp: CallToolResponse = String::from("test").into();
+
+        let json = serde_json::to_string(&resp).unwrap();
+
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"test"}],"is_error":false}"#);
+    }
+
+    #[test]
+    fn it_converts_from_error() {
+        let resp: CallToolResponse = Error::new("test").into();
+
+        let json = serde_json::to_string(&resp).unwrap();
+
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"test"}],"is_error":true}"#);
+    }
+
+    #[test]
+    fn it_converts_from_err_result() {
+        let resp: CallToolResponse = Err::<String, _>(Error::new("test")).into();
+
+        let json = serde_json::to_string(&resp).unwrap();
+
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"test"}],"is_error":true}"#);
+    }
+
+    #[test]
+    fn it_converts_from_ok_result() {
+        let resp: CallToolResponse = Ok::<_, Error>("test").into();
+
+        let json = serde_json::to_string(&resp).unwrap();
+
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"test"}],"is_error":false}"#);
+    }
+
+    #[test]
+    fn it_converts_from_some_option_result() {
+        let resp: CallToolResponse = Some("test").into();
+
+        let json = serde_json::to_string(&resp).unwrap();
+
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"test"}],"is_error":false}"#);
+    }
+
+    #[test]
+    fn it_converts_from_none_option_result() {
+        let resp: CallToolResponse = None::<String>.into();
+
+        let json = serde_json::to_string(&resp).unwrap();
+
+        assert_eq!(json, r#"{"content":[],"is_error":false}"#);
+    }
+
+    #[test]
+    fn it_converts_from_vec() {
+        let resp: CallToolResponse = vec!["test 1", "test 2"].into();
+
+        let json = serde_json::to_string(&resp).unwrap();
+
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"test 1"},{"type":"text","text":"test 2"}],"is_error":false}"#);
+    }
+
+    #[test]
+    fn it_converts_from_self() {
+        let resp: CallToolResponse = CallToolResponse::empty().into();
+
+        let json = serde_json::to_string(&resp).unwrap();
+
+        assert_eq!(json, r#"{"content":[],"is_error":false}"#);
+    }
+
+    #[test]
+    fn it_converts_from_untyped_json() {
+        let resp: CallToolResponse = serde_json::json!({ "msg": "test" }).into();
+
+        let json = serde_json::to_string(&resp).unwrap();
+
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"{\"msg\":\"test\"}"}],"is_error":false}"#);
+    }
+
+    #[test]
+    fn it_converts_from_typed_json() {
+        let json = Test { msg: "test".into() };
+        let resp: CallToolResponse = Json::from(json).into();
+
+        let json = serde_json::to_string(&resp).unwrap();
+
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"{\"msg\":\"test\"}"}],"is_error":false}"#);
+    }
+    
+    #[derive(Serialize)]
+    struct Test {
+        msg: String
+    }
 }

@@ -43,5 +43,17 @@ impl Content {
             resource: None
         }
     }
+
+    /// Creates an empty [`Content`]
+    #[inline]
+    pub fn empty() -> Self {
+        Self {
+            text: None,
+            r#type: "text".into(),
+            mime: None,
+            data: None,
+            resource: None
+        }
+    }
 }
 

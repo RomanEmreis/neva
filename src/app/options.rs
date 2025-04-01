@@ -1,13 +1,18 @@
 ﻿//! MCP server options
 
-use std::collections::HashMap;
+use std::{
+    borrow::Cow,
+    collections::HashMap
+};
 use crate::transport::{StdIo, TransportProto};
+use crate::app::handler::{RequestHandler};
 use crate::types::{
     Implementation, 
     Tool, ListToolsResult,
-    Resource, ListResourcesResult,
+    Resource, ReadResourceResult, ResourceTemplate, ListResourcesResult, ListResourceTemplatesResult, resource::Route,
     Prompt, ListPromptsResult
 };
+use crate::types::resource::Uri;
 
 /// Represents MCP server configuration options
 #[derive(Default)]
@@ -21,8 +26,14 @@ pub struct McpOptions {
     /// A map of tools, where the _key_ is a tool _name_
     tools: HashMap<String, Tool>,
 
-    /// A map of resources, where the _key_ is a resource _URI_
+    /// A map of resources, where the _key_ is a resource name
     resources: HashMap<String, Resource>,
+
+    /// A flat map of resource templates, where the _key_ is a resource template name
+    resources_templates: HashMap<String, ResourceTemplate>,
+    
+    /// A resource template routing data structure
+    resource_routes: Route,
 
     /// A map of prompts, where the _key_ is a prompt _name_
     prompts: HashMap<String, Prompt>,
@@ -55,7 +66,23 @@ impl McpOptions {
 
     /// Adds a resource
     pub(crate) fn add_resource(&mut self, resource: Resource) -> &mut Self {
-        self.resources.insert(resource.uri.clone(), resource);
+        self.resources.insert(resource.name.clone(), resource);
+        self
+    }
+
+    /// Adds a resource template
+    pub(crate) fn add_resource_template(
+        &mut self, 
+        template: ResourceTemplate, 
+        handler: RequestHandler<ReadResourceResult>
+    ) -> &mut Self {
+        let uri_parts: Vec<Cow<'static, str>> = template.uri_template
+            .parts()
+            .unwrap()
+            .collect();
+        
+        self.resource_routes.insert(uri_parts.as_slice(), handler);
+        self.resources_templates.insert(template.name.clone(), template.clone());
         self
     }
 
@@ -82,14 +109,26 @@ impl McpOptions {
     pub(crate) fn tools(&self) -> ListToolsResult {
         self.tools
             .values()
+            .cloned()
             .collect::<Vec<_>>()
             .into()
     }
 
     /// Reads a resource by it URI
     #[inline]
-    pub(crate) fn read_resource(&self, uri: &str) -> Option<&Resource> {
-        self.resources.get(uri)
+    pub(crate) fn read_resource(&self, uri: &Uri) -> Option<&RequestHandler<ReadResourceResult>> {
+        let uri_parts: Vec<Cow<'static, str>> = uri
+            .parts()
+            .unwrap()
+            .collect();
+        
+        match self.resource_routes.find(uri_parts.as_slice()) {
+            None => None,
+            Some(route) => match route.route { 
+                Route::Handler(handler) => Some(handler),
+                _ => None
+            },
+        }
     }
 
     /// Returns a list of available resources
@@ -97,6 +136,17 @@ impl McpOptions {
     pub(crate) fn resources(&self) -> ListResourcesResult {
         self.resources
             .values()
+            .cloned()
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    /// Returns a list of available resource templates
+    #[inline]
+    pub(crate) fn resource_templates(&self) -> ListResourceTemplatesResult {
+        self.resources_templates
+            .values()
+            .cloned()
             .collect::<Vec<_>>()
             .into()
     }
@@ -112,6 +162,7 @@ impl McpOptions {
     pub(crate) fn prompts(&self) -> ListPromptsResult {
         self.prompts
             .values()
+            .cloned()
             .collect::<Vec<_>>()
             .into()
     }
@@ -119,7 +170,11 @@ impl McpOptions {
 
 #[cfg(test)]
 mod tests {
+    use crate::app::handler::HandlerParams;
     use crate::SERVER_NAME;
+    use crate::types::resource::template::ResourceFunc;
+    use crate::types::resource::Uri;
+    use crate::types::{ReadResourceRequestParams, ResourceContents};
     use super::*;
     
     #[test]
@@ -190,23 +245,50 @@ mod tests {
     }
 
     #[test]
-    fn it_adds_and_reads_resource() {
-        let mut options = McpOptions::default();
-
-        options.add_resource(Resource::new("/res", "resource"));
-
-        let res = options.read_resource("/res").unwrap();
-        assert_eq!(res.name, "resource");
-    }
-
-    #[test]
     fn it_returns_resources() {
         let mut options = McpOptions::default();
 
-        options.add_resource(Resource::new("/res", "resource"));
+        options.add_resource(Resource::new("res://res", "res"));
 
         let resources = options.resources();
         assert_eq!(resources.resources.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn it_adds_and_reads_resource_template() {
+        let mut options = McpOptions::default();
+
+        let handler = |uri: Uri| async move {
+            ResourceContents::text(&uri, "text/plain", "some text")
+        };
+        
+        options.add_resource_template(
+            ResourceTemplate::new("res://res", "test"),
+            ResourceFunc::new(handler));
+
+        let req = ReadResourceRequestParams {
+            uri: "/res".into()
+        };
+        
+        let res = options.read_resource(&req.uri).unwrap();
+        let res = res.call(req.into()).await.unwrap();
+        assert_eq!(res.contents.len(), 1);
+    }
+
+    #[test]
+    fn it_returns_resource_templates() {
+        let mut options = McpOptions::default();
+
+        let handler = |uri: Uri| async move {
+            ResourceContents::text(&uri, "text/plain", "some text")
+        };
+
+        options.add_resource_template(
+            ResourceTemplate::new("res://res", "test"),
+            ResourceFunc::new(handler));
+
+        let resources = options.resource_templates();
+        assert_eq!(resources.templates.len(), 1);
     }
 
     #[test]

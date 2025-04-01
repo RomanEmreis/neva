@@ -1,7 +1,7 @@
 ﻿//! Completion request types
 
-use super::{IntoResponse, RequestId, Response};
-use serde::Serialize;
+use super::{IntoResponse, RequestId, Response, Reference};
+use serde::{Deserialize, Serialize};
 
 /// Represents a completion object in the server's response
 /// 
@@ -20,6 +20,32 @@ pub struct Completion {
     /// in the current response, even if the exact total is unknown.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_more: Option<bool>,
+}
+
+/// A request from the client to the server, to ask for completion options.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+#[derive(Deserialize)]
+pub struct CompleteRequestParams {
+    /// The reference's information
+    #[serde(rename = "ref")]
+    pub r#ref: Reference,
+    
+    /// The argument's information
+    #[serde(rename = "argument")]
+    pub arg: Argument,
+}
+
+/// Used for completion requests to provide additional context for the completion options.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+#[derive(Deserialize)]
+pub struct Argument {
+    /// The name of the argument.
+    pub name: String,
+    
+    /// The value of the argument to use for completion matching.
+    pub value: String,
 }
 
 /// The server's response to a completion/complete request

@@ -1,29 +1,82 @@
-﻿use serde_json::from_value;
+﻿use std::collections::HashMap;
+use std::future::Future;
+use std::sync::Arc;
 use crate::error::Error;
 use crate::options::McpOptions;
 use crate::transport::Transport;
-use crate::types::{CallToolRequestParams, InitializeResult, IntoResponse, Request, Response, CompleteResult, Tool, ToolHandler, CallToolResponse};
+use crate::app::handler::{
+    FromRequest, 
+    GenericHandler, 
+    HandlerParams, 
+    RequestFunc, 
+    RequestHandler
+};
+use crate::types::{
+    InitializeResult, InitializeRequestParams, 
+    IntoResponse, Response, 
+    CompleteResult, CompleteRequestParams, 
+    ListToolsRequestParams, CallToolRequestParams, ListToolsResult, CallToolResponse, Tool, ToolHandler, 
+    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate,
+    ListResourcesRequestParams, ListResourcesResult,
+    ReadResourceRequestParams, ReadResourceResult,
+    SubscribeRequestParams, UnsubscribeRequestParams,
+    ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult
+};
+use crate::types::resource::template::ResourceFunc;
 
 pub mod options;
+pub(crate) mod handler;
 
+/// Represents an MCP server application
 #[derive(Default)]
 pub struct App {
-    options: McpOptions
+    options: McpOptions,
+    handlers: HashMap<String, RequestHandler<Response>>,
 }
 
 impl App {
     pub fn new() -> App {
-        Self { options: McpOptions::default() }
+        let mut app = Self { 
+            options: McpOptions::default(),
+            handlers: HashMap::new()
+        };
+
+        app.map_handler("initialize", Self::init);
+        app.map_handler("completion/complete", Self::completion);
+        
+        app.map_handler("tools/list", Self::tools);
+        app.map_handler("tools/call", Self::tool);
+        
+        app.map_handler("resources/list", Self::resources);
+        app.map_handler("resources/templates/list", Self::resource_templates);
+        app.map_handler("resources/read", Self::resource);
+        app.map_handler("resources/subscribe", Self::resource_subscribe);
+        app.map_handler("resources/unsubscribe", Self::resource_unsubscribe);
+        
+        app.map_handler("prompts/list", Self::prompts);
+        app.map_handler("prompts/get", Self::prompt);
+        
+        app.map_handler("notifications/initialized", Self::notifications_init);
+        app.map_handler("notifications/cancelled", Self::notifications_cancel);
+        
+        app.map_handler("ping", Self::ping);
+        
+        app
     }
     
     pub async fn run(mut self) {
         let mut transport = self.options.transport();
+        let options = Arc::new(self.options);
 
         transport.start();
         
         while let Ok(req) = transport.recv().await {
-            let resp = self.handle_request(req).await;
-            match transport.send(resp).await { 
+            let req_id = req.id();
+            let resp = match self.handlers.get(&req.method) {
+                Some(handler) => handler.call(HandlerParams::Request(options.clone(), req)).await,
+                None => Err(Error::new("unknown request"))
+            };
+            match transport.send(resp.into_response(req_id)).await { 
                 Ok(_) => (),
                 Err(e) => eprintln!("Error sending response: {:?}", e),
             }
@@ -39,6 +92,17 @@ impl App {
         self
     }
     
+    pub fn map_handler<F, Args, R>(&mut self, name: &str, handler: F) -> &mut Self
+    where 
+        F: GenericHandler<(Arc<McpOptions>, Args), Output = R>,
+        Args: FromRequest + Send + Sync + 'static,
+        R: IntoResponse + Send + 'static,
+    {
+        let handler = RequestFunc::new(handler);
+        self.handlers.insert(name.into(), handler);
+        self
+    }
+    
     pub fn map_tool<F, Args, R>(&mut self, name: &str, handler: F) -> &mut Self
     where
         F: ToolHandler<Args, Output = R>,
@@ -48,71 +112,129 @@ impl App {
         self.options.add_tool(Tool::new(name, handler));
         self
     }
-    
-    async fn handle_request(&self, req: Request) -> Response {
-        match req.method.as_str() { 
-            "ping" => Response::empty(req.into_id()),
-            "initialize" => self.handle_initialize(req),
-            "completion/complete" => self.handle_completion(req),
-            "notifications/initialized" => Response::empty(req.into_id()),
-            "notifications/cancelled" => Response::empty(req.into_id()),
-            "tools/list" => self.handle_tools_list(req),
-            "tools/call" => self.handle_tool_call(req).await,
-            "resources/list" => self.handle_resources_list(req),
-            "resources/read" => Response::error(req.into_id(), "not implemented"),
-            "prompts/list" => self.handle_prompts_list(req),
-            "prompts/get" => Response::error(req.into_id(), "not implemented"),
-            _ => Response::error(req.into_id(), "unknown request")
-        }
+
+    pub fn map_resource<F, Args, R>(&mut self, uri: &'static str, name: &str, handler: F) -> &mut Self
+    where
+        F: GenericHandler<Args, Output = R>,
+        Args: TryFrom<ReadResourceRequestParams, Error = Error> + Send + Sync + 'static,
+        R: Into<ReadResourceResult> + Send + 'static,
+    {
+        let handler = ResourceFunc::new(handler);
+        let template = ResourceTemplate::new(uri, name);
+        
+        self.options.add_resource_template(template, handler);
+        self
     }
     
-    fn handle_initialize(&self, req: Request) -> Response {
-        let result = InitializeResult::new(&self.options);
-        result.into_response(req.id.unwrap_or_default())
-    }
-
-    fn handle_completion(&self, req: Request) -> Response {
-        // TODO: return default as it non-optional capability so far
-        let result = CompleteResult::default();
-        result.into_response(req.into_id())
-    }
-    
-    fn handle_tools_list(&self, req: Request) -> Response {
-        self.options
-            .tools()
-            .into_response(req.into_id())
-    }
-
-    fn handle_resources_list(&self, req: Request) -> Response {
-        self.options
-            .resources()
-            .into_response(req.into_id())
-    }
-
-    fn handle_prompts_list(&self, req: Request) -> Response {
-        self.options
-            .prompts()
-            .into_response(req.into_id())
-    }
-    
-    async fn handle_tool_call(&self, req: Request) -> Response {
-        let req_id = req.id();
-
-        let params = match req.params {
-            None => return Response::error(req_id, "missing params"),
-            Some(p) => match from_value::<CallToolRequestParams>(p) {
-                Ok(mut params) => {
-                    params.req_id = req_id;
-                    params
+    pub fn map_resources<F, R>(&mut self, handler: F) -> &mut Self
+    where
+        F: Fn(ListResourcesRequestParams) -> R + Clone + Send + Sync + 'static,
+        R: Future + Send,
+        R::Output: Into<ListResourcesResult>
+    {
+        self.map_handler(
+            "resources/list", 
+            move |_, params| {
+                let handler = handler.clone();
+                async move {
+                    handler(params)
+                        .await
+                        .into()
                 }
-                Err(err) => return Response::error(req_id, &err.to_string()),
-            },
-        };
+            }
+        );
+        self
+    }
 
-        match self.options.get_tool(&params.name) {
-            Some(tool) => tool.call(params).await,
-            None => Response::error(params.req_id, "tool not found"),
+    async fn init(
+        options: Arc<McpOptions>, 
+        _params: InitializeRequestParams
+    ) -> InitializeResult {
+        InitializeResult::new(&options)
+    }
+
+    async fn completion(
+        _: Arc<McpOptions>, 
+        _params: CompleteRequestParams
+    ) -> CompleteResult {
+        // TODO: return default as it non-optional capability so far
+        CompleteResult::default()
+    }
+    
+    async fn tools(
+        options: Arc<McpOptions>, 
+        _params: ListToolsRequestParams
+    ) -> ListToolsResult {
+        options.tools()
+    }
+
+    async fn resources(
+        options: Arc<McpOptions>,
+        _params: ListResourcesRequestParams
+    ) -> ListResourcesResult {
+        options.resources()
+    }
+
+    async fn resource_templates(
+        options: Arc<McpOptions>, 
+        _params: ListResourceTemplatesRequestParams
+    ) -> ListResourceTemplatesResult {
+        options.resource_templates()
+    }
+    
+    async fn prompts(
+        options: Arc<McpOptions>, 
+        _params: ListPromptsRequestParams
+    ) -> ListPromptsResult {
+        options.prompts()
+    }
+    
+    async fn tool(
+        options: Arc<McpOptions>, 
+        params: CallToolRequestParams
+    ) -> Result<CallToolResponse, Error> {
+        match options.get_tool(&params.name) {
+            Some(tool) => tool.call(params.into()).await,
+            None => Err(Error::new("tool not found")),
         }
+    }
+    
+    async fn resource(
+        options: Arc<McpOptions>, 
+        params: ReadResourceRequestParams) -> Result<ReadResourceResult, Error> {
+        // TODO: impl resource routing
+        match options.read_resource(&params.uri) {
+            Some(handler) => handler.call(params.into()).await,
+            None => Err(Error::new("resource not found")),
+        }
+    }
+    
+    async fn prompt(
+        _options: Arc<McpOptions>, 
+        _params: GetPromptRequestParams
+    ) -> GetPromptResult {
+        // TODO: impl
+        GetPromptResult::default()
+    }
+
+    async fn ping(_: Arc<McpOptions>, _: serde_json::Value) {}
+    
+    async fn notifications_init(_: Arc<McpOptions>, _: serde_json::Value) {}
+    
+    async fn notifications_cancel(_: Arc<McpOptions>, _: serde_json::Value) {}
+    
+    async fn resource_subscribe(
+        _options: Arc<McpOptions>, 
+        _params: SubscribeRequestParams
+    ) -> Error {
+        Error::new("resource_subscribe not implemented")
+    }
+
+    async fn resource_unsubscribe(
+        _options: Arc<McpOptions>, 
+        _params: UnsubscribeRequestParams
+    ) -> Error {
+        Error::new("resource_subscribe not implemented")
     }
 }
 
