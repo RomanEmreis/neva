@@ -1,18 +1,18 @@
 ﻿//! MCP server options
 
+use crate::transport::{StdIo, TransportProto};
+use crate::app::handler::{RequestHandler};
 use std::{
     borrow::Cow,
     collections::HashMap
 };
-use crate::transport::{StdIo, TransportProto};
-use crate::app::handler::{RequestHandler};
 use crate::types::{
     Implementation, 
     Tool, ListToolsResult,
-    Resource, ReadResourceResult, ResourceTemplate, ListResourcesResult, ListResourceTemplatesResult, resource::Route,
+    Resource, Uri, ReadResourceResult, ResourceTemplate, ListResourcesResult, 
+    ListResourceTemplatesResult, resource::Route,
     Prompt, ListPromptsResult
 };
-use crate::types::resource::Uri;
 
 /// Represents MCP server configuration options
 #[derive(Default)]
@@ -76,10 +76,9 @@ impl McpOptions {
         template: ResourceTemplate, 
         handler: RequestHandler<ReadResourceResult>
     ) -> &mut Self {
-        let uri_parts: Vec<Cow<'static, str>> = template.uri_template
-            .parts()
-            .unwrap()
-            .collect();
+        let uri_parts: Vec<Cow<'static, str>> = template
+            .uri_template
+            .as_vec();
         
         self.resource_routes.insert(uri_parts.as_slice(), handler);
         self.resources_templates.insert(template.name.clone(), template.clone());
@@ -116,19 +115,10 @@ impl McpOptions {
 
     /// Reads a resource by it URI
     #[inline]
-    pub(crate) fn read_resource(&self, uri: &Uri) -> Option<&RequestHandler<ReadResourceResult>> {
-        let uri_parts: Vec<Cow<'static, str>> = uri
-            .parts()
-            .unwrap()
-            .collect();
-        
-        match self.resource_routes.find(uri_parts.as_slice()) {
-            None => None,
-            Some(route) => match route.route { 
-                Route::Handler(handler) => Some(handler),
-                _ => None
-            },
-        }
+    pub(crate) fn read_resource(&self, uri: &Uri) -> Option<&Route> {
+        let uri_parts = uri.as_vec();
+        self.resource_routes
+            .find(uri_parts.as_slice())
     }
 
     /// Returns a list of available resources
@@ -173,7 +163,7 @@ mod tests {
     use crate::SERVER_NAME;
     use crate::types::resource::template::ResourceFunc;
     use crate::types::resource::Uri;
-    use crate::types::{ReadResourceRequestParams, ResourceContents};
+    use crate::types::{ReadResourceRequestParams, ResourceContents, Role};
     use super::*;
     
     #[test]
@@ -270,7 +260,10 @@ mod tests {
         };
         
         let res = options.read_resource(&req.uri).unwrap();
-        let res = res.call(req.into()).await.unwrap();
+        let res = match res { 
+            Route::Handler(handler) => handler.call(req.into()).await.unwrap(),
+            _ => unreachable!()
+        };
         assert_eq!(res.contents.len(), 1);
     }
 
@@ -294,7 +287,9 @@ mod tests {
     fn it_adds_and_gets_prompt() {
         let mut options = McpOptions::default();
 
-        options.add_prompt(Prompt::new("test"));
+        options.add_prompt(Prompt::new("test", || async { 
+            [("test", Role::User)]
+        }));
 
         let prompt = options.get_prompt("test").unwrap();
         assert_eq!(prompt.name, "test");
@@ -304,7 +299,9 @@ mod tests {
     fn it_returns_prompts() {
         let mut options = McpOptions::default();
 
-        options.add_prompt(Prompt::new("test"));
+        options.add_prompt(Prompt::new("test", || async {
+            [("test", Role::User)]
+        }));
 
         let prompts = options.prompts();
         assert_eq!(prompts.prompts.len(), 1);

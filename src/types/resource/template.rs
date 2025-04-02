@@ -4,9 +4,20 @@ use std::sync::Arc;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use crate::error::Error;
-use crate::app::handler::{FromHandlerParams, GenericHandler, Handler, HandlerParams};
-use crate::types::{resource::Uri, Annotations, IntoResponse, ReadResourceRequestParams, ReadResourceResult, Request, RequestId, Response};
-use crate::types::request::FromRequest;
+use crate::app::handler::{
+    FromHandlerParams, 
+    GenericHandler, 
+    Handler, 
+    HandlerParams
+};
+use crate::types::{
+    resource::Uri, 
+    Annotations, 
+    IntoResponse, 
+    ReadResourceRequestParams, ReadResourceResult, 
+    Request, RequestId, FromRequest,
+    Response
+};
 
 /// Represents a known resource template that the server is capable of reading.
 /// 

@@ -1,21 +1,14 @@
-﻿//!
+﻿//! A route handling tools
 
-use std::borrow::Cow;
-use std::collections::HashMap;
 use super::ReadResourceResult;
 use crate::app::handler::RequestHandler;
+use std::{borrow::Cow, collections::HashMap};
 
 const END_OF_ROUTE: &str = "";
 const OPEN_BRACKET: char = '{';
 const CLOSE_BRACKET: char = '}';
 
-//pub(crate) type PathArguments = Box<[(Cow<'static, str>, Cow<'static, str>)]>;
-
-pub(crate) struct RouteParams<'route> {
-    pub(crate) route: &'route Route,
-    //pub(crate) params: PathArguments
-}
-
+/// A data structure for easy insert and search handler by route template
 pub(crate) enum Route {
     Static(HashMap<Cow<'static, str>, Route>),
     Dynamic(HashMap<Cow<'static, str>, Route>),
@@ -30,6 +23,7 @@ impl Default for Route {
 }
 
 impl Route {
+    /// Inserts a route handler
     pub(crate) fn insert(
         &mut self,
         path_segments: &[Cow<'static, str>],
@@ -73,9 +67,9 @@ impl Route {
         }
     }
 
-    pub(crate) fn find(&self, path_segments: &[Cow<'static, str>]) -> Option<RouteParams> {
+    /// Searches for a route handler
+    pub(crate) fn find(&self, path_segments: &[Cow<'static, str>]) -> Option<&Route> {
         let mut current = Some(self);
-        //let mut params = Vec::new();
         for (index, segment) in path_segments.iter().enumerate() {
             let is_last = index == path_segments.len() - 1;
 
@@ -89,17 +83,7 @@ impl Route {
                     let resolved_route = direct_match.or_else(|| {
                         map.iter()
                             .filter(|(key, _)| Self::is_dynamic_segment(key))
-                            .map(|(_key, route)| {
-                                //if let Some(param_name) = key
-                                //    .strip_prefix(OPEN_BRACKET)
-                                //    .and_then(|k| k.strip_suffix(CLOSE_BRACKET)) {
-                                //    params.push((
-                                //        Cow::Owned(param_name.to_owned()), 
-                                //        segment.clone()
-                                //    ));
-                                //}
-                                route
-                            })
+                            .map(|(_, route)| route)
                             .next()
                     });
 
@@ -123,16 +107,42 @@ impl Route {
                 _ => None,
             };
         }
-
-        current.map(|route| RouteParams { 
-            //params: params.into_boxed_slice(),
-            route
-        })
+        current
     }
 
     #[inline]
     fn is_dynamic_segment(segment: &str) -> bool {
-        segment.starts_with(OPEN_BRACKET) &&
-            segment.ends_with(CLOSE_BRACKET)
+        segment.starts_with(OPEN_BRACKET) && 
+        segment.ends_with(CLOSE_BRACKET)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::types::resource::template::ResourceFunc;
+    use crate::types::{ResourceContents, Uri};
+    use super::*;
+    
+    #[test]
+    fn it_inserts_and_finds() {
+        let uri1: Uri = "res://path/to/{resource}".into();
+        let handler1 = ResourceFunc::new(|uri: Uri| async move {
+            ResourceContents::text(&uri, "text/plain", "some text 1")
+        });
+
+        let uri2: Uri = "res://another/path/to/{resource}".into();
+        let handler2 = ResourceFunc::new(|uri: Uri| async move {
+            ResourceContents::text(&uri, "text/plain", "some text 2")
+        });
+        
+        let mut route = Route::default();
+        route.insert(uri1.as_vec().as_slice(), handler1);
+        route.insert(uri2.as_vec().as_slice(), handler2);
+        
+        let h1 = route.find(uri1.as_vec().as_slice()).unwrap();
+        let h2 = route.find(uri2.as_vec().as_slice()).unwrap();
+        
+        matches!(h1, Route::Handler(_));
+        matches!(h2, Route::Handler(_));
     }
 }

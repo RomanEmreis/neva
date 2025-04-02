@@ -6,6 +6,7 @@
 
 use neva::{App, types::{Json, Resource, ResourceContents}};
 use neva::error::Error;
+use neva::types::{content, Role, Uri};
 
 #[tokio::main]
 async fn main() {
@@ -48,10 +49,17 @@ async fn main() {
     });
     
     app.map_resource("res://{name}", "get_res", |name: String| async move {
-        ResourceContents::text(
-            &format!("res://{name}"), 
-            "text/plain", 
-            &format!("Some details about resource: {name}"))
+        let content = (
+            format!("res://{name}"),
+            format!("Some details about resource: {name}")
+        );
+        [content]
+    });
+    
+    app.map_prompt("analyze-code", |lang: String| async move {
+        [
+            (format!("Language: {lang}"), Role::User)
+        ]
     });
     
     app.run().await;

@@ -1,7 +1,7 @@
 ﻿//! Completion request types
 
-use super::{IntoResponse, RequestId, Response, Reference, Request};
 use serde::{Deserialize, Serialize};
+use super::{IntoResponse, RequestId, Response, Reference, Request};
 use crate::app::handler::{FromHandlerParams, HandlerParams};
 use crate::error::Error;
 use crate::types::request::FromRequest;

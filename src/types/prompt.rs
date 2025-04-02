@@ -1,14 +1,18 @@
 ﻿//! Represents an MCP prompt
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::future::Future;
+use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use crate::types::{IntoResponse, Request, RequestId, Response};
-
-pub use get_prompt_result::{GetPromptResult, PromptMessage};
-use crate::app::handler::{FromHandlerParams, HandlerParams};
+use crate::app::handler::{FromHandlerParams, HandlerParams, GenericHandler, Handler, RequestHandler};
 use crate::error::Error;
 use crate::types::request::FromRequest;
 
+pub use get_prompt_result::{GetPromptResult, PromptMessage};
+
+mod from_request;
 pub mod get_prompt_result;
 
 /// A prompt or prompt template that the server offers.
@@ -26,6 +30,10 @@ pub struct Prompt {
     /// A list of arguments to use for templating the prompt.
     #[serde(rename = "arguments", skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<PromptArgument>>,
+
+    /// A get prompt handler
+    #[serde(skip)]
+    handler: RequestHandler<GetPromptResult>
 }
 
 /// Describes an argument that a prompt can accept.
@@ -115,11 +123,120 @@ impl FromHandlerParams for GetPromptRequestParams {
     }
 }
 
+/// Describes a generic get prompt handler
+pub trait PromptHandler<Args>: GenericHandler<Args> {
+    #[inline]
+    fn args() -> Option<Vec<PromptArgument>> {
+        None
+    }
+}
+
+pub(crate) struct PromptFunc<F, R, Args>
+where
+    F: PromptHandler<Args, Output = R>,
+    R: Into<GetPromptResult>,
+    Args: TryFrom<GetPromptRequestParams, Error = Error>,
+{
+    func: F,
+    _marker: std::marker::PhantomData<Args>,
+}
+
+impl<F, R, Args> PromptFunc<F, R, Args>
+where
+    F: PromptHandler<Args, Output = R>,
+    R: Into<GetPromptResult>,
+    Args: TryFrom<GetPromptRequestParams, Error = Error>
+{
+    /// Creates a new [`PromptFunc`] wrapped into [`Arc`]
+    pub(crate) fn new(func: F) -> Arc<Self> {
+        let func = Self { func, _marker: std::marker::PhantomData };
+        Arc::new(func)
+    }
+}
+
+impl<F, R, Args> Handler<GetPromptResult> for PromptFunc<F, R, Args>
+where
+    F: PromptHandler<Args, Output = R>,
+    R: Into<GetPromptResult>,
+    Args: TryFrom<GetPromptRequestParams, Error = Error> + Send + Sync
+{
+    #[inline]
+    fn call(&self, params: HandlerParams) -> BoxFuture<Result<GetPromptResult, Error>> {
+        let HandlerParams::Prompt(params) = params else {
+            unreachable!()
+        };
+        Box::pin(async move {
+            let args = Args::try_from(params)?;
+            Ok(self.func
+                .call(args)
+                .await
+                .into())
+        })
+    }
+}
+
 impl Prompt {
     /// Creates a new [`Prompt`]
     #[inline]
-    pub fn new(name: &str) -> Self {
-        // TODO: impl
-        Self { name: name.into(), descr: None, args: None }
+    pub fn new<F, R, Args>(name: &str, handler: F) -> Self
+    where
+        F: PromptHandler<Args, Output = R>,
+        R: Into<GetPromptResult> + Send + 'static,
+        Args: TryFrom<GetPromptRequestParams, Error = Error>  + Send + Sync + 'static,
+    {
+        let handler = PromptFunc::new(handler);
+        let args = F::args();
+        Self { 
+            name: name.into(), 
+            descr: None, 
+            args,
+            handler
+        }
+    }
+
+    /// Get prompt result
+    #[inline]
+    pub(crate) async fn call(&self, params: HandlerParams) -> Result<GetPromptResult, Error> {
+        self.handler.call(params).await
     }
 }
+
+impl PromptArgument {
+    pub fn new<T>() -> Self {
+        let is_required = true;
+        Self {
+            name: std::any::type_name::<T>().into(),
+            descr: None,
+            required: Some(is_required),
+        }
+    }
+}
+
+macro_rules! impl_generic_prompt_handler ({ $($param:ident)* } => {
+    impl<Func, Fut: Send, $($param,)*> PromptHandler<($($param,)*)> for Func
+    where
+        Func: Fn($($param),*) -> Fut + Send + Sync + Clone + 'static,
+        Fut: Future + 'static,
+    {
+        #[inline]
+        #[allow(unused_mut)]
+        fn args() -> Option<Vec<PromptArgument>> {
+            let mut args = Vec::new();
+            $(
+            args.push(PromptArgument::new::<$param>());
+            )*
+            if args.len() == 0 { 
+                None
+            } else {
+                Some(args)
+            }
+        }
+    }
+});
+
+impl_generic_prompt_handler! {}
+impl_generic_prompt_handler! { T1 }
+impl_generic_prompt_handler! { T1 T2 }
+impl_generic_prompt_handler! { T1 T2 T3 }
+impl_generic_prompt_handler! { T1 T2 T3 T4 }
+impl_generic_prompt_handler! { T1 T2 T3 T4 T5 }

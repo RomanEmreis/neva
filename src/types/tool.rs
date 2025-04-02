@@ -213,8 +213,8 @@ impl Tool {
     pub fn new<F, Args, R>(name: &str, handler: F) -> Self 
     where
         F: ToolHandler<Args, Output = R>,
-        Args: TryFrom<CallToolRequestParams, Error = Error> + Send + Sync + 'static,
         R: Into<CallToolResponse> + Send + 'static,
+        Args: TryFrom<CallToolRequestParams, Error = Error> + Send + Sync + 'static,
     {
         let handler = ToolFunc::new(handler);
         let input_schema = InputSchema::new(F::args());

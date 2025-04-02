@@ -31,6 +31,33 @@ pub struct Content {
     pub resource: Option<ResourceContents>
 }
 
+impl From<&str> for Content {
+    #[inline]
+    fn from(value: &str) -> Self {
+        Self::text(value)
+    }
+}
+
+impl From<String> for Content {
+    #[inline]
+    fn from(value: String) -> Self {
+        Self {
+            text: Some(value),
+            r#type: "text".into(),
+            mime: Some("text/plain".into()),
+            data: None,
+            resource: None
+        }
+    }
+}
+
+impl From<serde_json::Value> for Content {
+    #[inline]
+    fn from(value: serde_json::Value) -> Self {
+        Self::json(value)
+    }
+}
+
 impl Content {
     /// Creates a text [`Content`]
     #[inline]
@@ -38,7 +65,19 @@ impl Content {
         Self {
             text: Some(text.into()),
             r#type: "text".into(),
-            mime: None,
+            mime: Some("text/plain".into()),
+            data: None,
+            resource: None
+        }
+    }
+
+    /// Creates a JSON [`Content`]
+    #[inline]
+    pub fn json(json: serde_json::Value) -> Self {
+        Self {
+            text: Some(json.to_string()),
+            r#type: "text".into(),
+            mime: Some("application/json".into()),
             data: None,
             resource: None
         }

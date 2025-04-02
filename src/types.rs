@@ -43,10 +43,12 @@ pub use prompt::{
     GetPromptRequestParams,
     GetPromptResult,
     PromptArgument,
-    PromptMessage
+    PromptMessage,
+    PromptHandler,
 };
 use crate::app::handler::{FromHandlerParams, HandlerParams};
 use crate::error::Error;
+use crate::types::capabilities::PromptsCapability;
 use crate::types::request::FromRequest;
 
 pub mod request;
@@ -116,6 +118,7 @@ pub struct Implementation {
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
 #[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Role {
     /// Corresponds to the user in the conversation.
     User,
@@ -171,7 +174,9 @@ impl InitializeResult {
                     list_changed: true,
                     subscribe: false
                 }),
-                prompts: None,
+                prompts: Some(PromptsCapability {
+                    list_changed: true,
+                }),
             },
             server_info: options.implementation.clone(),
             instructions: None

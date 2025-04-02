@@ -36,3 +36,73 @@ impl IntoResponse for GetPromptResult {
         Response::success(req_id, serde_json::to_value(self).unwrap())
     }
 }
+
+impl From<(&str, Role)> for PromptMessage {
+    #[inline]
+    fn from((msg, role): (&str, Role)) -> Self {
+        Self::text(msg, role)
+    }
+}
+
+impl From<(String, Role)> for PromptMessage {
+    #[inline]
+    fn from((msg, role): (String, Role)) -> Self {
+        Self {
+            content: msg.into(),
+            role,
+        }
+    }
+}
+
+impl From<PromptMessage> for GetPromptResult {
+    #[inline]
+    fn from(msg: PromptMessage) -> Self {
+        Self { descr: None, messages: vec![msg] }
+    }
+}
+
+impl<T, P> From<T> for GetPromptResult
+where
+    T: IntoIterator<Item = P>,
+    P: Into<PromptMessage>
+{
+    #[inline]
+    fn from(iter: T) -> Self {
+        Self {
+            descr: None,
+            messages: iter
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}
+
+impl PromptMessage {
+    /// Creates a new [`PromptMessage`]
+    #[inline]
+    pub fn new(content: Content, role: Role) -> Self {
+        Self { content, role }
+    }
+    
+    #[inline]
+    pub fn text(content: &str, role: Role) -> Self {
+        Self {
+            content: content.into(),
+            role,
+        }
+    }
+}
+
+impl GetPromptResult {
+    /// Creates a new [`GetPromptResult`]
+    #[inline]
+    pub fn new(descr: Option<String>, messages: impl Iterator<Item = PromptMessage>) -> Self {
+        Self { descr, messages: messages.collect() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    
+}

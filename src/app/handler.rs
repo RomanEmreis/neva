@@ -5,7 +5,13 @@ use std::sync::Arc;
 use futures_util::future::BoxFuture;
 use crate::error::Error;
 use crate::options::McpOptions;
-use crate::types::{CallToolRequestParams, ReadResourceRequestParams, GetPromptRequestParams, IntoResponse, Request, Response, RequestId};
+use crate::types::{
+    CallToolRequestParams, 
+    ReadResourceRequestParams,
+    GetPromptRequestParams, 
+    IntoResponse, Response,
+    Request, RequestId
+};
 
 /// Represents a specific registered handler
 pub(crate) type RequestHandler<T> = Arc<

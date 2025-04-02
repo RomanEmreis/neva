@@ -56,4 +56,12 @@ impl Uri {
             .map(|s| Cow::Owned(s.to_owned()));
         Ok(parts)
     }
+
+    #[inline]
+    pub fn as_vec<'a>(&self) -> Vec<Cow<'a, str>> {
+        match self.parts() {
+            Ok(parts) => parts.collect(),
+            Err(_) => Vec::new()
+        }
+    }
 }

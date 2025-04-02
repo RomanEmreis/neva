@@ -47,7 +47,43 @@ impl From<(&str, &str)> for ResourceContents {
         Self {
             uri: uri.into(),
             text: Some(text.into()),
-            mime: None,
+            mime: Some("text/plain".into()),
+            blob: None
+        }
+    }
+}
+
+impl From<(&str, &str, &str)> for ResourceContents {
+    #[inline]
+    fn from((uri, mime, text): (&str, &str, &str)) -> Self {
+        Self {
+            uri: uri.into(),
+            text: Some(text.into()),
+            mime: Some(mime.into()),
+            blob: None
+        }
+    }
+}
+
+impl From<(String, String)> for ResourceContents {
+    #[inline]
+    fn from((uri, text): (String, String)) -> Self {
+        Self {
+            uri,
+            text: Some(text),
+            mime: Some("text/plain".into()),
+            blob: None
+        }
+    }
+}
+
+impl From<(String, String, String)> for ResourceContents {
+    #[inline]
+    fn from((uri, mime, text): (String, String, String)) -> Self {
+        Self {
+            uri,
+            text: Some(text),
+            mime: Some(mime),
             blob: None
         }
     }
@@ -60,14 +96,18 @@ impl From<ResourceContents> for ReadResourceResult {
     }
 }
 
-impl<T> From<T> for ReadResourceResult
+impl<T, R> From<T> for ReadResourceResult
 where 
-    T: IntoIterator<Item = ResourceContents> 
+    T: IntoIterator<Item = R>,
+    R: Into<ResourceContents>
 {
     #[inline]
     fn from(iter: T) -> Self {
         Self {
-            contents: iter.into_iter().collect(),
+            contents: iter
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         }
     }
 }
@@ -132,12 +172,60 @@ mod tests {
     }
 
     #[test]
+    fn it_creates_result_from_array_of_str_tuples1() {
+        let result = ReadResourceResult::from([
+            ("/res1", "test 1"),
+            ("/res1", "test 1")
+        ]);
+
+        let json = serde_json::to_string(&result).unwrap();
+
+        assert_eq!(json, r#"{"contents":[{"uri":"/res1","mimeType":"text/plain","text":"test 1"},{"uri":"/res1","mimeType":"text/plain","text":"test 1"}]}"#);
+    }
+
+    #[test]
+    fn it_creates_result_from_array_of_str_tuples2() {
+        let result = ReadResourceResult::from([
+            ("/res1", "json", "test 1"),
+            ("/res1", "json", "test 1")
+        ]);
+
+        let json = serde_json::to_string(&result).unwrap();
+
+        assert_eq!(json, r#"{"contents":[{"uri":"/res1","mimeType":"json","text":"test 1"},{"uri":"/res1","mimeType":"json","text":"test 1"}]}"#);
+    }
+
+    #[test]
+    fn it_creates_result_from_array_of_string_tuples1() {
+        let result = ReadResourceResult::from([
+            (String::from("/res1"), String::from("test 1")),
+            (String::from("/res1"), String::from("test 1"))
+        ]);
+
+        let json = serde_json::to_string(&result).unwrap();
+
+        assert_eq!(json, r#"{"contents":[{"uri":"/res1","mimeType":"text/plain","text":"test 1"},{"uri":"/res1","mimeType":"text/plain","text":"test 1"}]}"#);
+    }
+
+    #[test]
+    fn it_creates_result_from_array_of_string_tuples2() {
+        let result = ReadResourceResult::from([
+            (String::from("/res1"), String::from("json"), String::from("test 1")),
+            (String::from("/res1"), String::from("json"), String::from("test 1"))
+        ]);
+
+        let json = serde_json::to_string(&result).unwrap();
+
+        assert_eq!(json, r#"{"contents":[{"uri":"/res1","mimeType":"json","text":"test 1"},{"uri":"/res1","mimeType":"json","text":"test 1"}]}"#);
+    }
+
+    #[test]
     fn it_creates_result_from_tuple_of_contents() {
         let content: ResourceContents = ("/res", "test").into();
         let result: ReadResourceResult = content.into();
 
         let json = serde_json::to_string(&result).unwrap();
 
-        assert_eq!(json, r#"{"contents":[{"uri":"/res","text":"test"}]}"#);
+        assert_eq!(json, r#"{"contents":[{"uri":"/res","mimeType":"text/plain","text":"test"}]}"#);
     }
 }

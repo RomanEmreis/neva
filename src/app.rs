@@ -11,18 +11,7 @@ use crate::app::handler::{
     RequestFunc,
     RequestHandler
 };
-use crate::types::{
-    InitializeResult, InitializeRequestParams, 
-    IntoResponse, Response, 
-    CompleteResult, CompleteRequestParams, 
-    ListToolsRequestParams, CallToolRequestParams, ListToolsResult, CallToolResponse, Tool, ToolHandler, 
-    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate,
-    ListResourcesRequestParams, ListResourcesResult,
-    ReadResourceRequestParams, ReadResourceResult,
-    SubscribeRequestParams, UnsubscribeRequestParams,
-    ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult
-};
-use crate::types::resource::template::ResourceFunc;
+use crate::types::{InitializeResult, InitializeRequestParams, IntoResponse, Response, CompleteResult, CompleteRequestParams, ListToolsRequestParams, CallToolRequestParams, ListToolsResult, CallToolResponse, Tool, ToolHandler, ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate, ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, SubscribeRequestParams, UnsubscribeRequestParams, resource::{Route, template::ResourceFunc}, ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt};
 
 pub mod options;
 pub(crate) mod handler;
@@ -35,6 +24,7 @@ pub struct App {
 }
 
 impl App {
+    /// Initializes a new app
     pub fn new() -> App {
         let mut app = Self { 
             options: McpOptions::default(),
@@ -64,6 +54,21 @@ impl App {
         app
     }
     
+    /// Run the MCP server
+    /// 
+    /// # Example
+    /// ```no_run
+    /// use neva::App;
+    /// 
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let mut app = App::new();
+    /// 
+    /// // configure tools, resources, prompts
+    /// 
+    /// app.run().await;
+    /// # }
+    /// ```
     pub async fn run(mut self) {
         let mut transport = self.options.transport();
         let options = Arc::new(self.options);
@@ -91,33 +96,86 @@ impl App {
         self.options = config(self.options);
         self
     }
-    
-    pub fn map_handler<F, Args, R>(&mut self, name: &str, handler: F) -> &mut Self
+
+    /// Maps an MCP client request to a specific function
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::App;
+    /// 
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let mut app = App::new();
+    ///
+    /// app.map_handler("ping", || async { 
+    ///     "pong"
+    /// });
+    ///
+    /// # app.run().await;
+    /// # }
+    /// ```
+    pub fn map_handler<F, R, Args>(&mut self, name: &str, handler: F) -> &mut Self
     where 
         F: GenericHandler<Args, Output = R>,
-        Args: FromHandlerParams + Send + Sync + 'static,
         R: IntoResponse + Send + 'static,
+        Args: FromHandlerParams + Send + Sync + 'static,
     {
         let handler = RequestFunc::new(handler);
         self.handlers.insert(name.into(), handler);
         self
     }
-    
-    pub fn map_tool<F, Args, R>(&mut self, name: &str, handler: F) -> &mut Self
+
+    /// Maps an MCP tool call request to a specific function
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::App;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let mut app = App::new();
+    ///
+    /// app.map_tool("hello", |name: String| async move { 
+    ///     format!("Hello, {name}")
+    /// });
+    ///
+    /// # app.run().await;
+    /// # }
+    /// ```
+    pub fn map_tool<F, R, Args>(&mut self, name: &str, handler: F) -> &mut Self
     where
         F: ToolHandler<Args, Output = R>,
-        Args: TryFrom<CallToolRequestParams, Error = Error> + Send + Sync + 'static,
         R: Into<CallToolResponse> + Send + 'static,
+        Args: TryFrom<CallToolRequestParams, Error = Error> + Send + Sync + 'static,
     {
         self.options.add_tool(Tool::new(name, handler));
         self
     }
 
-    pub fn map_resource<F, Args, R>(&mut self, uri: &'static str, name: &str, handler: F) -> &mut Self
+    /// Maps an MCP resource read request to a specific function
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::{App, types::ResourceContents};
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// use neva::types::content;
+    /// let mut app = App::new();
+    ///
+    /// app.map_resource("res://{name}", "read_resource", |name: String| async move {
+    ///     let content = (format!("res://{name}"), format!("Resource: {name} content"));
+    ///     [content]
+    /// });
+    ///
+    /// # app.run().await;
+    /// # }
+    /// ```
+    pub fn map_resource<F, R, Args>(&mut self, uri: &'static str, name: &str, handler: F) -> &mut Self
     where
         F: GenericHandler<Args, Output = R>,
-        Args: TryFrom<ReadResourceRequestParams, Error = Error> + Send + Sync + 'static,
         R: Into<ReadResourceResult> + Send + 'static,
+        Args: TryFrom<ReadResourceRequestParams, Error = Error> + Send + Sync + 'static,
     {
         let handler = ResourceFunc::new(handler);
         let template = ResourceTemplate::new(uri, name);
@@ -125,7 +183,28 @@ impl App {
         self.options.add_resource_template(template, handler);
         self
     }
-    
+
+    /// Maps an MCP resource read request to a specific function
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::{App, types::{Resource, ListResourcesRequestParams}};
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// use neva::types::content;
+    /// let mut app = App::new();
+    ///
+    /// app.map_resources(|_params: ListResourcesRequestParams| async move {
+    ///     [
+    ///         Resource::new("res://res1", "res1"),
+    ///         Resource::new("res://res2", "res2")
+    ///     ]
+    /// });
+    ///
+    /// # app.run().await;
+    /// # }
+    /// ```
     pub fn map_resources<F, R>(&mut self, handler: F) -> &mut Self
     where
         F: Fn(ListResourcesRequestParams) -> R + Clone + Send + Sync + 'static,
@@ -146,6 +225,37 @@ impl App {
         self
     }
 
+    /// Maps an MCP get prompt request to a specific function
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::{App, types::Role};
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// use neva::types::content;
+    /// let mut app = App::new();
+    ///
+    /// app.map_prompt("analyze-code", |lang: String| async move {
+    ///     [
+    ///         (format!("Language: {lang}"), Role::User)
+    ///     ]
+    /// });
+    ///
+    /// # app.run().await;
+    /// # }
+    /// ```
+    pub fn map_prompt<F, R, Args>(&mut self, name: &str, handler: F) -> &mut Self
+    where 
+        F: PromptHandler<Args, Output = R>,
+        R: Into<GetPromptResult> + Send + 'static,
+        Args: TryFrom<GetPromptRequestParams, Error = Error> + Send + Sync + 'static,
+    {
+        self.options.add_prompt(Prompt::new(name, handler));
+        self
+    }
+
+    /// Connection initialization handler
     async fn init(
         options: Arc<McpOptions>, 
         _params: InitializeRequestParams
@@ -153,6 +263,7 @@ impl App {
         InitializeResult::new(&options)
     }
 
+    /// Completion request handler
     async fn completion(
         _: Arc<McpOptions>, 
         _params: CompleteRequestParams
@@ -161,6 +272,7 @@ impl App {
         CompleteResult::default()
     }
     
+    /// Tools request handler
     async fn tools(
         options: Arc<McpOptions>, 
         _params: ListToolsRequestParams
@@ -168,6 +280,7 @@ impl App {
         options.tools()
     }
 
+    /// Resources request handler
     async fn resources(
         options: Arc<McpOptions>,
         _params: ListResourcesRequestParams
@@ -175,6 +288,7 @@ impl App {
         options.resources()
     }
 
+    /// Resource templates request handler
     async fn resource_templates(
         options: Arc<McpOptions>, 
         _params: ListResourceTemplatesRequestParams
@@ -182,6 +296,7 @@ impl App {
         options.resource_templates()
     }
     
+    /// Prompts request handler
     async fn prompts(
         options: Arc<McpOptions>, 
         _params: ListPromptsRequestParams
@@ -189,6 +304,7 @@ impl App {
         options.prompts()
     }
     
+    /// A tool call request handler
     async fn tool(
         options: Arc<McpOptions>, 
         params: CallToolRequestParams
@@ -198,30 +314,40 @@ impl App {
             None => Err(Error::new("tool not found")),
         }
     }
-    
+
+    /// A read resource request handler
     async fn resource(
         options: Arc<McpOptions>, 
         params: ReadResourceRequestParams) -> Result<ReadResourceResult, Error> {
         match options.read_resource(&params.uri) {
-            Some(handler) => handler.call(params.into()).await,
-            None => Err(Error::new("resource not found")),
+            Some(Route::Handler(handler)) => handler
+                .call(params.into())
+                .await,
+            _ => Err(Error::new("resource not found")),
         }
     }
     
+    /// A get prompt request handler
     async fn prompt(
-        _options: Arc<McpOptions>, 
-        _params: GetPromptRequestParams
-    ) -> GetPromptResult {
-        // TODO: impl
-        GetPromptResult::default()
+        options: Arc<McpOptions>, 
+        params: GetPromptRequestParams
+    ) -> Result<GetPromptResult, Error> {
+        match options.get_prompt(&params.name) {
+            Some(prompt) => prompt.call(params.into()).await,
+            None => Err(Error::new("prompt not found")),
+        }
     }
 
-    async fn ping(_: Arc<McpOptions>) {}
+    /// Ping request handler
+    async fn ping() {}
     
-    async fn notifications_init(_: Arc<McpOptions>) {}
+    /// A notifications initialization request handler
+    async fn notifications_init() {}
     
-    async fn notifications_cancel(_: Arc<McpOptions>) {}
+    /// A notification cancel request handler
+    async fn notifications_cancel() {}
     
+    /// A subscription to a resource change request handler
     async fn resource_subscribe(
         _options: Arc<McpOptions>, 
         _params: SubscribeRequestParams
@@ -229,6 +355,7 @@ impl App {
         Error::new("resource_subscribe not implemented")
     }
 
+    /// An unsubscription to from resource change request handler
     async fn resource_unsubscribe(
         _options: Arc<McpOptions>, 
         _params: UnsubscribeRequestParams
