@@ -4,9 +4,8 @@
 //! npx @modelcontextprotocol/inspector cargo run --example server
 //! ```
 
-use neva::{App, types::{Json, ListResourcesRequestParams, ResourceContents}};
+use neva::{App, types::{Json, Resource, ResourceContents}};
 use neva::error::Error;
-use neva::types::Resource;
 
 #[tokio::main]
 async fn main() {

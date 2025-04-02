@@ -14,6 +14,8 @@ use crate::{
 };
 
 pub use call_tool_response::CallToolResponse;
+use crate::app::handler::FromHandlerParams;
+use crate::types::{Request, request::FromRequest};
 
 mod from_request;
 pub mod call_tool_response;
@@ -135,6 +137,22 @@ impl SchemaProperty {
             r#type: T::category().into(),
             descr: None
         }
+    }
+}
+
+impl FromHandlerParams for CallToolRequestParams {
+    #[inline]
+    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
+        let req = Request::from_params(params)?;
+        Self::from_request(req)
+    }
+}
+
+impl FromHandlerParams for ListToolsRequestParams {
+    #[inline]
+    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
+        let req = Request::from_params(params)?;
+        Self::from_request(req)
     }
 }
 

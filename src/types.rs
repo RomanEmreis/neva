@@ -23,6 +23,7 @@ pub use tool::{
     ListToolsResult
 };
 pub use resource::{
+    Uri,
     ListResourcesRequestParams,
     ListResourceTemplatesRequestParams,
     ListResourcesResult,
@@ -44,6 +45,9 @@ pub use prompt::{
     PromptArgument,
     PromptMessage
 };
+use crate::app::handler::{FromHandlerParams, HandlerParams};
+use crate::error::Error;
+use crate::types::request::FromRequest;
 
 pub mod request;
 pub mod response;
@@ -144,6 +148,14 @@ impl IntoResponse for InitializeResult {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
         Response::success(req_id, serde_json::to_value(self).unwrap())
+    }
+}
+
+impl FromHandlerParams for InitializeRequestParams {
+    #[inline]
+    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
+        let req = Request::from_params(params)?;
+        Self::from_request(req)
     }
 }
 

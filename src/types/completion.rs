@@ -1,7 +1,10 @@
 ﻿//! Completion request types
 
-use super::{IntoResponse, RequestId, Response, Reference};
+use super::{IntoResponse, RequestId, Response, Reference, Request};
 use serde::{Deserialize, Serialize};
+use crate::app::handler::{FromHandlerParams, HandlerParams};
+use crate::error::Error;
+use crate::types::request::FromRequest;
 
 /// Represents a completion object in the server's response
 /// 
@@ -65,6 +68,14 @@ impl Default for Completion {
             total: Some(0),
             has_more: Some(false),
         }
+    }
+}
+
+impl FromHandlerParams for CompleteRequestParams {
+    #[inline]
+    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
+        let req = Request::from_params(params)?;
+        Self::from_request(req)
     }
 }
 

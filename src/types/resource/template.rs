@@ -4,16 +4,9 @@ use std::sync::Arc;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use crate::error::Error;
-use crate::app::handler::{GenericHandler, Handler, HandlerParams};
-use crate::types::{
-    resource::Uri,
-    Annotations, 
-    IntoResponse, 
-    ReadResourceRequestParams, 
-    ReadResourceResult, 
-    RequestId, 
-    Response
-};
+use crate::app::handler::{FromHandlerParams, GenericHandler, Handler, HandlerParams};
+use crate::types::{resource::Uri, Annotations, IntoResponse, ReadResourceRequestParams, ReadResourceResult, Request, RequestId, Response};
+use crate::types::request::FromRequest;
 
 /// Represents a known resource template that the server is capable of reading.
 /// 
@@ -69,6 +62,14 @@ impl From<Vec<ResourceTemplate>> for ListResourceTemplatesResult {
     #[inline]
     fn from(templates: Vec<ResourceTemplate>) -> Self {
         Self { templates }
+    }
+}
+
+impl FromHandlerParams for ListResourceTemplatesRequestParams {
+    #[inline]
+    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
+        let req = Request::from_params(params)?;
+        Self::from_request(req)
     }
 }
 

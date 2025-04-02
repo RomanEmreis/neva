@@ -9,11 +9,11 @@ const END_OF_ROUTE: &str = "";
 const OPEN_BRACKET: char = '{';
 const CLOSE_BRACKET: char = '}';
 
-pub(crate) type PathArguments = Box<[(Cow<'static, str>, Cow<'static, str>)]>;
+//pub(crate) type PathArguments = Box<[(Cow<'static, str>, Cow<'static, str>)]>;
 
 pub(crate) struct RouteParams<'route> {
     pub(crate) route: &'route Route,
-    pub(crate) params: PathArguments
+    //pub(crate) params: PathArguments
 }
 
 pub(crate) enum Route {
@@ -75,7 +75,7 @@ impl Route {
 
     pub(crate) fn find(&self, path_segments: &[Cow<'static, str>]) -> Option<RouteParams> {
         let mut current = Some(self);
-        let mut params = Vec::new();
+        //let mut params = Vec::new();
         for (index, segment) in path_segments.iter().enumerate() {
             let is_last = index == path_segments.len() - 1;
 
@@ -89,15 +89,15 @@ impl Route {
                     let resolved_route = direct_match.or_else(|| {
                         map.iter()
                             .filter(|(key, _)| Self::is_dynamic_segment(key))
-                            .map(|(key, route)| {
-                                if let Some(param_name) = key
-                                    .strip_prefix(OPEN_BRACKET)
-                                    .and_then(|k| k.strip_suffix(CLOSE_BRACKET)) {
-                                    params.push((
-                                        Cow::Owned(param_name.to_owned()), 
-                                        segment.clone()
-                                    ));
-                                }
+                            .map(|(_key, route)| {
+                                //if let Some(param_name) = key
+                                //    .strip_prefix(OPEN_BRACKET)
+                                //    .and_then(|k| k.strip_suffix(CLOSE_BRACKET)) {
+                                //    params.push((
+                                //        Cow::Owned(param_name.to_owned()), 
+                                //        segment.clone()
+                                //    ));
+                                //}
                                 route
                             })
                             .next()
@@ -125,7 +125,7 @@ impl Route {
         }
 
         current.map(|route| RouteParams { 
-            params: params.into_boxed_slice(),
+            //params: params.into_boxed_slice(),
             route
         })
     }

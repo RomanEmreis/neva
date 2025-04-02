@@ -2,9 +2,12 @@
 
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
-use crate::types::{IntoResponse, RequestId, Response};
+use crate::types::{IntoResponse, Request, RequestId, Response};
 
 pub use get_prompt_result::{GetPromptResult, PromptMessage};
+use crate::app::handler::{FromHandlerParams, HandlerParams};
+use crate::error::Error;
+use crate::types::request::FromRequest;
 
 pub mod get_prompt_result;
 
@@ -93,6 +96,22 @@ impl ListPromptsResult {
     #[inline]
     pub fn new() -> Self {
         Default::default()
+    }
+}
+
+impl FromHandlerParams for ListPromptsRequestParams {
+    #[inline]
+    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
+        let req = Request::from_params(params)?;
+        Self::from_request(req)
+    }
+}
+
+impl FromHandlerParams for GetPromptRequestParams {
+    #[inline]
+    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
+        let req = Request::from_params(params)?;
+        Self::from_request(req)
     }
 }
 

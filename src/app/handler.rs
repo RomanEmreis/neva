@@ -3,18 +3,9 @@
 use std::future::Future;
 use std::sync::Arc;
 use futures_util::future::BoxFuture;
-use serde::de::DeserializeOwned;
-use serde_json::json;
 use crate::error::Error;
 use crate::options::McpOptions;
-use crate::types::{
-    CallToolRequestParams, 
-    ReadResourceRequestParams, 
-    GetPromptRequestParams, 
-    IntoResponse, 
-    Request, 
-    Response
-};
+use crate::types::{CallToolRequestParams, ReadResourceRequestParams, GetPromptRequestParams, IntoResponse, Request, Response, RequestId};
 
 /// Represents a specific registered handler
 pub(crate) type RequestHandler<T> = Arc<
@@ -23,7 +14,7 @@ pub(crate) type RequestHandler<T> = Arc<
     + Sync
 >;
 
-pub(crate) enum HandlerParams {
+pub enum HandlerParams {
     Request(Arc<McpOptions>, Request),
     Tool(CallToolRequestParams),
     Resource(ReadResourceRequestParams),
@@ -56,8 +47,8 @@ pub(crate) trait Handler<T: IntoResponse> {
     fn call(&self, params: HandlerParams) -> BoxFuture<Result<T, Error>>;
 }
 
-pub trait FromRequest: Sized {
-    fn from_request(request: Request) -> Result<Self, Error>;
+pub trait FromHandlerParams: Sized {
+    fn from_params(params: &HandlerParams) -> Result<Self, Error>;
 }
 
 pub trait GenericHandler<Args>: Clone + Send + Sync + 'static  {
@@ -69,9 +60,9 @@ pub trait GenericHandler<Args>: Clone + Send + Sync + 'static  {
 
 pub(crate) struct RequestFunc<F, R, Args>
 where 
-    F: GenericHandler<(Arc<McpOptions>, Args), Output = R>,
+    F: GenericHandler<Args, Output = R>,
     R: IntoResponse,
-    Args: FromRequest,
+    Args: FromHandlerParams,
 {
     func: F,
     _marker: std::marker::PhantomData<Args>,    
@@ -79,9 +70,9 @@ where
 
 impl<F, R, Args> RequestFunc<F, R, Args>
 where
-    F: GenericHandler<(Arc<McpOptions>, Args), Output = R>,
+    F: GenericHandler<Args, Output = R>,
     R: IntoResponse,
-    Args: FromRequest
+    Args: FromHandlerParams
 {
     pub(crate) fn new(func: F) -> Arc<Self> {
         let func = Self { func, _marker: std::marker::PhantomData };
@@ -91,35 +82,75 @@ where
 
 impl<F, R, Args> Handler<Response> for RequestFunc<F, R, Args>
 where
-    F: GenericHandler<(Arc<McpOptions>, Args), Output = R>,
+    F: GenericHandler<Args, Output = R>,
     R: IntoResponse,
-    Args: FromRequest + Send + Sync
+    Args: FromHandlerParams + Send + Sync
 {
     #[inline]
     fn call(&self, params: HandlerParams) -> BoxFuture<Result<Response, Error>> {
-        let HandlerParams::Request(options, req) = params else {
-            unreachable!()
-        };
         Box::pin(async move {
-            let id = req.id();
-            let args = Args::from_request(req)?;
+            let id = RequestId::from_params(&params)?;
+            let args = Args::from_params(&params)?;
             Ok(self.func
-                .call((options, args))
+                .call(args)
                 .await
                 .into_response(id))
         })
     }
 }
 
-impl<T: DeserializeOwned> FromRequest for T {
-    #[inline]
-    fn from_request(req: Request) -> Result<Self, Error> {
-        let params = req.params
-            .unwrap_or_else(|| json!({}));
-        let args = T::deserialize(params)?;
-        Ok(args)
+impl FromHandlerParams for () {
+    fn from_params(_: &HandlerParams) -> Result<Self, Error> {
+        Ok(())
     }
 }
+
+impl FromHandlerParams for RequestId {
+    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
+        let req = Request::from_params(params)?;
+        Ok(req.id())
+    }
+}
+
+impl FromHandlerParams for Arc<McpOptions> {
+    #[inline]
+    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
+        match params {
+            HandlerParams::Request(options, _) => Ok(options.clone()),
+            _ => Err(Error::new("invalid handler parameters"))
+        }
+    }
+}
+
+impl FromHandlerParams for Request {
+    #[inline]
+    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
+        match params {
+            HandlerParams::Request(_, req) => Ok(req.clone()),
+            _ => Err(Error::new("invalid handler parameters"))
+        }
+    }
+}
+
+macro_rules! impl_from_handler_params {
+    ($($T: ident),*) => {
+        impl<$($T: FromHandlerParams),+> FromHandlerParams for ($($T,)+) {
+            #[inline]
+            fn from_params(params: &HandlerParams) -> Result<Self, Error> {
+                let args = ($(
+                    $T::from_params(params)?,
+                )*);
+                Ok(args)
+            }
+        }
+    };
+}
+
+impl_from_handler_params! { T1 }
+impl_from_handler_params! { T1, T2 }
+impl_from_handler_params! { T1, T2, T3 }
+impl_from_handler_params! { T1, T2, T3, T4 }
+impl_from_handler_params! { T1, T2, T3, T4, T5 }
 
 macro_rules! impl_generic_handler ({ $($param:ident)* } => {
     impl<Func, Fut: Send, $($param,)*> GenericHandler<($($param,)*)> for Func
@@ -144,3 +175,8 @@ impl_generic_handler! { T1 T2 }
 impl_generic_handler! { T1 T2 T3 }
 impl_generic_handler! { T1 T2 T3 T4 }
 impl_generic_handler! { T1 T2 T3 T4 T5 }
+
+#[cfg(test)]
+mod tests {
+    
+}

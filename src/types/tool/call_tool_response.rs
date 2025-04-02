@@ -240,8 +240,9 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::useless_conversion)]
     fn it_converts_from_self() {
-        let resp: CallToolResponse = CallToolResponse::empty().into();
+        let resp: CallToolResponse = CallToolResponse::empty();
 
         let json = serde_json::to_string(&resp).unwrap();
 

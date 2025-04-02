@@ -7,7 +7,7 @@ impl TryFrom<ReadResourceRequestParams> for (Uri,) {
 
     #[inline]
     fn try_from(params: ReadResourceRequestParams) -> Result<Self, Self::Error> {
-        Ok((params.uri.into(),))
+        Ok((params.uri,))
     }
 }
 

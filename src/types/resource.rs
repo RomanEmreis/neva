@@ -1,12 +1,15 @@
 ﻿//! Represents an MCP resource
 
 use serde::{Deserialize, Serialize};
-use crate::types::{RequestId, Response, IntoResponse};
+use crate::types::{RequestId, Response, IntoResponse, Request};
 
 pub use uri::Uri;
 pub use read_resource_result::{ReadResourceResult, ResourceContents};
 pub use template::{ResourceTemplate, ListResourceTemplatesResult, ListResourceTemplatesRequestParams};
 pub(crate) use route::Route;
+use crate::app::handler::{FromHandlerParams, HandlerParams};
+use crate::error::Error;
+use crate::types::request::FromRequest;
 
 mod from_request;
 pub mod read_resource_result;
@@ -103,6 +106,38 @@ impl From<Vec<Resource>> for ListResourcesResult {
     #[inline]
     fn from(resources: Vec<Resource>) -> Self {
         Self { resources }
+    }
+}
+
+impl FromHandlerParams for ListResourcesRequestParams {
+    #[inline]
+    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
+        let req = Request::from_params(params)?;
+        Self::from_request(req)
+    }
+}
+
+impl FromHandlerParams for ReadResourceRequestParams {
+    #[inline]
+    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
+        let req = Request::from_params(params)?;
+        Self::from_request(req)
+    }
+}
+
+impl FromHandlerParams for SubscribeRequestParams {
+    #[inline]
+    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
+        let req = Request::from_params(params)?;
+        Self::from_request(req)
+    }
+}
+
+impl FromHandlerParams for UnsubscribeRequestParams {
+    #[inline]
+    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
+        let req = Request::from_params(params)?;
+        Self::from_request(req)
     }
 }
 

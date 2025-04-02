@@ -5,10 +5,10 @@ use crate::error::Error;
 use crate::options::McpOptions;
 use crate::transport::Transport;
 use crate::app::handler::{
-    FromRequest, 
-    GenericHandler, 
-    HandlerParams, 
-    RequestFunc, 
+    FromHandlerParams,
+    GenericHandler,
+    HandlerParams,
+    RequestFunc,
     RequestHandler
 };
 use crate::types::{
@@ -94,8 +94,8 @@ impl App {
     
     pub fn map_handler<F, Args, R>(&mut self, name: &str, handler: F) -> &mut Self
     where 
-        F: GenericHandler<(Arc<McpOptions>, Args), Output = R>,
-        Args: FromRequest + Send + Sync + 'static,
+        F: GenericHandler<Args, Output = R>,
+        Args: FromHandlerParams + Send + Sync + 'static,
         R: IntoResponse + Send + 'static,
     {
         let handler = RequestFunc::new(handler);
@@ -134,7 +134,7 @@ impl App {
     {
         self.map_handler(
             "resources/list", 
-            move |_, params| {
+            move |params| {
                 let handler = handler.clone();
                 async move {
                     handler(params)
@@ -202,7 +202,6 @@ impl App {
     async fn resource(
         options: Arc<McpOptions>, 
         params: ReadResourceRequestParams) -> Result<ReadResourceResult, Error> {
-        // TODO: impl resource routing
         match options.read_resource(&params.uri) {
             Some(handler) => handler.call(params.into()).await,
             None => Err(Error::new("resource not found")),
@@ -217,11 +216,11 @@ impl App {
         GetPromptResult::default()
     }
 
-    async fn ping(_: Arc<McpOptions>, _: serde_json::Value) {}
+    async fn ping(_: Arc<McpOptions>) {}
     
-    async fn notifications_init(_: Arc<McpOptions>, _: serde_json::Value) {}
+    async fn notifications_init(_: Arc<McpOptions>) {}
     
-    async fn notifications_cancel(_: Arc<McpOptions>, _: serde_json::Value) {}
+    async fn notifications_cancel(_: Arc<McpOptions>) {}
     
     async fn resource_subscribe(
         _options: Arc<McpOptions>, 

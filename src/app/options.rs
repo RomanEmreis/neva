@@ -170,7 +170,6 @@ impl McpOptions {
 
 #[cfg(test)]
 mod tests {
-    use crate::app::handler::HandlerParams;
     use crate::SERVER_NAME;
     use crate::types::resource::template::ResourceFunc;
     use crate::types::resource::Uri;
@@ -267,7 +266,7 @@ mod tests {
             ResourceFunc::new(handler));
 
         let req = ReadResourceRequestParams {
-            uri: "/res".into()
+            uri: "res://res".into()
         };
         
         let res = options.read_resource(&req.uri).unwrap();

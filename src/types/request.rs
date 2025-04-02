@@ -3,6 +3,10 @@
 use std::fmt;
 use serde::{Serialize, Deserialize};
 
+pub use from_request::FromRequest;
+
+pub mod from_request;
+
 /// A unique identifier for a request
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
