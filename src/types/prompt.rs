@@ -123,6 +123,46 @@ impl FromHandlerParams for GetPromptRequestParams {
     }
 }
 
+impl From<&str> for PromptArgument {
+    #[inline]
+    fn from(name: &str) -> Self {
+        Self {
+            name: name.into(), 
+            descr: None,
+            required: Some(true)
+        }
+    }
+}
+
+impl From<String> for PromptArgument {
+    #[inline]
+    fn from(name: String) -> Self {
+        Self {
+            name,
+            descr: None,
+            required: Some(true),
+        }
+    }
+}
+
+impl From<(&str, &str)> for PromptArgument {
+    #[inline]
+    fn from((name, description): (&str, &str)) -> Self {
+        Self::required(name, description)
+    }
+}
+
+impl From<(&str, &str, bool)> for PromptArgument {
+    #[inline]
+    fn from((name, description, required): (&str, &str, bool)) -> Self {
+        Self {
+            name: name.into(),
+            descr: Some(description.into()),
+            required: Some(required),
+        }
+    }
+}
+
 /// Describes a generic get prompt handler
 pub trait PromptHandler<Args>: GenericHandler<Args> {
     #[inline]
@@ -193,6 +233,24 @@ impl Prompt {
             handler
         }
     }
+    
+    /// Sets a [`Prompt`] description
+    pub fn with_description(&mut self, descr: &str) -> &mut Self {
+        self.descr = Some(descr.into());
+        self
+    }
+    
+    pub fn with_args<T, A>(&mut self, args: T) -> &mut Self
+    where
+        T: IntoIterator<Item = A>,
+        A: Into<PromptArgument>,
+    {
+        self.args = Some(args
+            .into_iter()
+            .map(Into::into)
+            .collect());
+        self
+    }
 
     /// Get prompt result
     #[inline]
@@ -202,12 +260,30 @@ impl Prompt {
 }
 
 impl PromptArgument {
-    pub fn new<T>() -> Self {
-        let is_required = true;
+    /// Creates a new [`PromptArgument`] 
+    pub(crate) fn new<T>() -> Self {
         Self {
             name: std::any::type_name::<T>().into(),
             descr: None,
-            required: Some(is_required),
+            required: Some(true),
+        }
+    }
+    
+    /// Creates a new required [`PromptArgument`]
+    pub fn required(name: &str, descr: &str) -> Self {
+        Self {
+            name: name.into(),
+            descr: Some(descr.into()),
+            required: Some(true),
+        }
+    }
+
+    /// Creates a new required [`PromptArgument`]
+    pub fn optional(name: &str, descr: &str) -> Self {
+        Self {
+            name: name.into(),
+            descr: Some(descr.into()),
+            required: Some(false),
         }
     }
 }

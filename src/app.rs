@@ -11,7 +11,17 @@ use crate::app::handler::{
     RequestFunc,
     RequestHandler
 };
-use crate::types::{InitializeResult, InitializeRequestParams, IntoResponse, Response, CompleteResult, CompleteRequestParams, ListToolsRequestParams, CallToolRequestParams, ListToolsResult, CallToolResponse, Tool, ToolHandler, ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate, ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, SubscribeRequestParams, UnsubscribeRequestParams, resource::{Route, template::ResourceFunc}, ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt};
+use crate::types::{
+    InitializeResult, InitializeRequestParams,
+    IntoResponse, Response, 
+    CompleteResult, CompleteRequestParams, 
+    ListToolsRequestParams, CallToolRequestParams, ListToolsResult, CallToolResponse, Tool, ToolHandler,
+    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate, 
+    ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, 
+    SubscribeRequestParams, UnsubscribeRequestParams, Resource, resource::{Route, template::ResourceFunc}, 
+    ListPromptsRequestParams, ListPromptsResult, 
+    GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt
+};
 
 pub mod options;
 pub(crate) mod handler;
@@ -125,7 +135,8 @@ impl App {
         self
     }
 
-    /// Maps an MCP tool call request to a specific function
+    /// Maps an MCP tool call request to a specific function and returns a mutable reference to the
+    /// [`Tool`] for further configuration
     ///
     /// # Example
     /// ```no_run
@@ -142,14 +153,19 @@ impl App {
     /// # app.run().await;
     /// # }
     /// ```
-    pub fn map_tool<F, R, Args>(&mut self, name: &str, handler: F) -> &mut Self
+    pub fn map_tool<F, R, Args>(&mut self, name: &str, handler: F) -> &mut Tool
     where
         F: ToolHandler<Args, Output = R>,
         R: Into<CallToolResponse> + Send + 'static,
         Args: TryFrom<CallToolRequestParams, Error = Error> + Send + Sync + 'static,
     {
-        self.options.add_tool(Tool::new(name, handler));
-        self
+        self.options.add_tool(Tool::new(name, handler))
+    }
+    
+    /// Adds a known resource
+    pub fn add_resource(&mut self, uri: &'static str, name: &str) -> &mut Resource {
+        let resource = Resource::new(uri, name);
+        self.options.add_resource(resource)
     }
 
     /// Maps an MCP resource read request to a specific function
@@ -171,7 +187,7 @@ impl App {
     /// # app.run().await;
     /// # }
     /// ```
-    pub fn map_resource<F, R, Args>(&mut self, uri: &'static str, name: &str, handler: F) -> &mut Self
+    pub fn map_resource<F, R, Args>(&mut self, uri: &'static str, name: &str, handler: F) -> &mut ResourceTemplate
     where
         F: GenericHandler<Args, Output = R>,
         R: Into<ReadResourceResult> + Send + 'static,
@@ -180,8 +196,7 @@ impl App {
         let handler = ResourceFunc::new(handler);
         let template = ResourceTemplate::new(uri, name);
         
-        self.options.add_resource_template(template, handler);
-        self
+        self.options.add_resource_template(template, handler)
     }
 
     /// Maps an MCP resource read request to a specific function
@@ -211,17 +226,11 @@ impl App {
         R: Future + Send,
         R::Output: Into<ListResourcesResult>
     {
-        self.map_handler(
-            "resources/list", 
-            move |params| {
-                let handler = handler.clone();
-                async move {
-                    handler(params)
-                        .await
-                        .into()
-                }
-            }
-        );
+        let handler = move |params| {
+            let handler = handler.clone();
+            async move { handler(params).await.into() }
+        };
+        self.map_handler("resources/list", handler);
         self
     }
 
@@ -245,14 +254,13 @@ impl App {
     /// # app.run().await;
     /// # }
     /// ```
-    pub fn map_prompt<F, R, Args>(&mut self, name: &str, handler: F) -> &mut Self
+    pub fn map_prompt<F, R, Args>(&mut self, name: &str, handler: F) -> &mut Prompt
     where 
         F: PromptHandler<Args, Output = R>,
         R: Into<GetPromptResult> + Send + 'static,
         Args: TryFrom<GetPromptRequestParams, Error = Error> + Send + Sync + 'static,
     {
-        self.options.add_prompt(Prompt::new(name, handler));
-        self
+        self.options.add_prompt(Prompt::new(name, handler))
     }
 
     /// Connection initialization handler
@@ -318,7 +326,8 @@ impl App {
     /// A read resource request handler
     async fn resource(
         options: Arc<McpOptions>, 
-        params: ReadResourceRequestParams) -> Result<ReadResourceResult, Error> {
+        params: ReadResourceRequestParams
+    ) -> Result<ReadResourceResult, Error> {
         match options.read_resource(&params.uri) {
             Some(Route::Handler(handler)) => handler
                 .call(params.into())

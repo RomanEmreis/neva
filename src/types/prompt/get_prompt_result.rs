@@ -37,19 +37,19 @@ impl IntoResponse for GetPromptResult {
     }
 }
 
-impl From<(&str, Role)> for PromptMessage {
+impl<T: Into<Role>> From<(&str, T)> for PromptMessage {
     #[inline]
-    fn from((msg, role): (&str, Role)) -> Self {
-        Self::text(msg, role)
+    fn from((msg, role): (&str, T)) -> Self {
+        Self::text(msg, role.into())
     }
 }
 
-impl From<(String, Role)> for PromptMessage {
+impl<T: Into<Role>> From<(String, T)> for PromptMessage {
     #[inline]
-    fn from((msg, role): (String, Role)) -> Self {
+    fn from((msg, role): (String, T)) -> Self {
         Self {
             content: msg.into(),
-            role,
+            role: role.into(),
         }
     }
 }

@@ -1,8 +1,9 @@
-﻿use serde::{Deserialize, Serialize};
+﻿use std::fmt::Display;
+use serde::{Deserialize, Serialize};
 use crate::{PROTOCOL_VERSION, SERVER_NAME};
 use crate::options::McpOptions;
 
-pub use helpers::Json;
+pub use helpers::{Json, PropertyType};
 pub use request::{RequestId, Request};
 pub use response::{IntoResponse, Response};
 pub use reference::Reference;
@@ -129,13 +130,45 @@ pub enum Role {
 /// Represents annotations that can be attached to content.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 pub struct Annotations {
     /// Describes who the intended customer of this object or data is.
     audience: Vec<Role>,
     
     /// Describes how important this data is for operating the server (0 to 1).
     priority: f32
+}
+
+impl Display for Role {
+    #[inline]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self { 
+            Role::User => write!(f, "user"),
+            Role::Assistant => write!(f, "assistant"),
+        }
+    }
+}
+
+impl From<&str> for Role {
+    #[inline]
+    fn from(role: &str) -> Self {
+        match role { 
+            "user" => Self::User,
+            "assistant" => Self::Assistant,
+            _ => Self::User
+        }
+    }
+}
+
+impl From<String> for Role {
+    #[inline]
+    fn from(role: String) -> Self {
+        match role.as_str() {
+            "user" => Self::User,
+            "assistant" => Self::Assistant,
+            _ => Self::User
+        }
+    }
 }
 
 impl Default for Implementation {
@@ -159,6 +192,20 @@ impl FromHandlerParams for InitializeRequestParams {
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
         let req = Request::from_params(params)?;
         Self::from_request(req)
+    }
+}
+
+impl Annotations {
+    /// Adds audience
+    pub fn add_audience<T: Into<Role>>(mut self, role: T) -> Self {
+        self.audience.push(role.into());
+        self
+    }
+    
+    /// Sets priority
+    pub fn set_priority(mut self, priority: f32) -> Self {
+        self.priority = priority;
+        self
     }
 }
 

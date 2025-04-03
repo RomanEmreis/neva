@@ -10,12 +10,12 @@ use crate::error::Error;
 use super::helpers::TypeCategory;
 use crate::{
     app::handler::{Handler, HandlerParams, GenericHandler, RequestHandler},
-    types::{RequestId, Response, IntoResponse}
+    types::{PropertyType, Request, request::FromRequest, RequestId, Response, IntoResponse}
 };
 
-pub use call_tool_response::CallToolResponse;
 use crate::app::handler::FromHandlerParams;
-use crate::types::{Request, request::FromRequest};
+
+pub use call_tool_response::CallToolResponse;
 
 mod from_request;
 pub mod call_tool_response;
@@ -81,7 +81,7 @@ pub struct InputSchema {
     /// 
     /// > Note: always "object"
     #[serde(rename = "type")]
-    pub r#type: String,
+    pub r#type: PropertyType,
     
     /// A list of properties for command
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -92,7 +92,7 @@ pub struct InputSchema {
 pub struct SchemaProperty {
     /// Property type
     #[serde(rename = "type")]
-    pub r#type: String,
+    pub r#type: PropertyType,
 
     /// A Human-readable description of a property
     #[serde(rename = "description", skip_serializing_if = "Option::is_none")]
@@ -121,11 +121,38 @@ impl ListToolsResult {
     }
 }
 
+impl Default for InputSchema {
+    #[inline]
+    fn default() -> Self {
+        Self { 
+            r#type: PropertyType::Object, 
+            properties: Some(HashMap::new())
+        }
+    }
+}
+
 impl InputSchema {
     /// Creates a new [`InputSchema`] object
     #[inline]
     pub(crate) fn new(props: Option<HashMap<String, SchemaProperty>>) -> Self {
-        Self { r#type: "object".into(), properties: props }
+        Self { r#type: PropertyType::Object, properties: props }
+    }
+    
+    /// Adds a new property into schema. 
+    /// If a property with this name already exists it overwrites it
+    pub fn add_property<T: Into<PropertyType>>(
+        mut self, name: 
+        &str, 
+        descr: &str, 
+        property_type: T
+    ) -> Self {
+        self.properties
+            .get_or_insert_with(HashMap::new)
+            .insert(name.into(), SchemaProperty { 
+                r#type: property_type.into(), 
+                descr: Some(descr.into())
+            });
+        self
     }
 }
 
@@ -134,7 +161,7 @@ impl SchemaProperty {
     #[inline]
     pub(crate) fn new<T: TypeCategory>() -> Self {
         Self { 
-            r#type: T::category().into(),
+            r#type: T::category(),
             descr: None
         }
     }
@@ -227,8 +254,19 @@ impl Tool {
     }
     
     /// Sets a description for a tool
-    pub fn with_description(mut self, description: &str) -> Self {
+    pub fn with_description(&mut self, description: &str) -> &mut Self {
         self.descr = Some(description.into());
+        self
+    }
+    
+    /// Sets an [`InputSchema`] for the tool. 
+    /// 
+    /// > **Note:** Automatically generated schema will be overwritten
+    pub fn with_schema<F>(&mut self, config: F) -> &mut Self
+    where 
+        F: FnOnce(InputSchema) -> InputSchema
+    {
+        self.input_schema = config(Default::default());
         self
     }
     
@@ -250,10 +288,13 @@ macro_rules! impl_generic_tool_handler ({ $($param:ident)* } => {
         fn args() -> Option<HashMap<String, SchemaProperty>> {
             let mut args = HashMap::new();
             $(
-            args.insert(
-                std::any::type_name::<$param>().to_string(),
-                SchemaProperty::new::<$param>()
-            );
+            {
+                let prop = SchemaProperty::new::<$param>(); 
+                args.insert(
+                    prop.r#type.to_string(),
+                    prop
+                )
+            };
             )*
             if args.len() == 0 { 
                 None
@@ -290,6 +331,6 @@ mod tests {
         let resp = tool.call(params.into()).await.unwrap();
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":7}}"#);
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"7","mimeType":"text/plain"}],"is_error":false}"#);
     }
 }

@@ -149,5 +149,29 @@ impl ResourceTemplate {
             annotations: None
         }
     }
+
+    /// Sets a description for a resource template
+    pub fn with_description(&mut self, description: &str) -> &mut Self {
+        self.descr = Some(description.into());
+        self
+    }
+
+    /// Sets a MIME type for all matching resources
+    pub fn with_mime(&mut self, mime: &str) -> &mut Self {
+        self.mime = Some(mime.into());
+        self
+    }
+    
+    pub fn with_annotations<F>(&mut self, config: F) -> &mut Self
+    where
+        F: FnOnce(Annotations) -> Annotations 
+    {
+        self.annotations = Some(config(Default::default()));
+        self
+    }
 }
 
+#[cfg(test)]
+mod tests {
+    
+}

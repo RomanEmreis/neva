@@ -59,15 +59,17 @@ impl McpOptions {
     }
     
     /// Adds a tool
-    pub(crate) fn add_tool(&mut self, tool: Tool) -> &mut Self {
-        self.tools.insert(tool.name.clone(), tool);
-        self
+    pub(crate) fn add_tool(&mut self, tool: Tool) -> &mut Tool {
+        self.tools
+            .entry(tool.name.clone())
+            .or_insert(tool)
     }
 
     /// Adds a resource
-    pub(crate) fn add_resource(&mut self, resource: Resource) -> &mut Self {
-        self.resources.insert(resource.name.clone(), resource);
-        self
+    pub(crate) fn add_resource(&mut self, resource: Resource) -> &mut Resource {
+        self.resources
+            .entry(resource.name.clone())
+            .or_insert(resource)
     }
 
     /// Adds a resource template
@@ -75,20 +77,22 @@ impl McpOptions {
         &mut self, 
         template: ResourceTemplate, 
         handler: RequestHandler<ReadResourceResult>
-    ) -> &mut Self {
+    ) -> &mut ResourceTemplate {
         let uri_parts: Vec<Cow<'static, str>> = template
             .uri_template
             .as_vec();
         
         self.resource_routes.insert(uri_parts.as_slice(), handler);
-        self.resources_templates.insert(template.name.clone(), template.clone());
-        self
+        self.resources_templates
+            .entry(template.name.clone())
+            .or_insert(template.clone())
     }
 
     /// Adds a prompt
-    pub(crate) fn add_prompt(&mut self, prompt: Prompt) -> &mut Self {
-        self.prompts.insert(prompt.name.clone(), prompt);
-        self
+    pub(crate) fn add_prompt(&mut self, prompt: Prompt) -> &mut Prompt {
+        self.prompts
+            .entry(prompt.name.clone())
+            .or_insert(prompt)
     }
     
     /// Returns current transport protocol
