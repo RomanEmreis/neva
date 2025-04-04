@@ -39,7 +39,7 @@ pub struct Prompt {
 /// Describes an argument that a prompt can accept.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PromptArgument {
     /// The name of the argument.
     pub name: String,
@@ -131,6 +131,14 @@ impl From<&str> for PromptArgument {
             descr: None,
             required: Some(true)
         }
+    }
+}
+
+impl From<serde_json::Value> for PromptArgument {
+    #[inline]
+    fn from(json: serde_json::Value) -> Self {
+        serde_json::from_value(json)
+            .expect("A correct PromptArgument value must be provided")
     }
 }
 
@@ -240,6 +248,7 @@ impl Prompt {
         self
     }
     
+    /// Sets arguments for the [`Prompt`]
     pub fn with_args<T, A>(&mut self, args: T) -> &mut Self
     where
         T: IntoIterator<Item = A>,

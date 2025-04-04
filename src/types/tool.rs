@@ -75,12 +75,12 @@ pub struct CallToolRequestParams {
     pub args: Option<HashMap<String, Value>>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct InputSchema {
     /// Schema object type
     /// 
     /// > Note: always "object"
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default)]
     pub r#type: PropertyType,
     
     /// A list of properties for command
@@ -88,10 +88,10 @@ pub struct InputSchema {
     pub properties: Option<HashMap<String, SchemaProperty>>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SchemaProperty {
     /// Property type
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default)]
     pub r#type: PropertyType,
 
     /// A Human-readable description of a property
@@ -332,5 +332,22 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
 
         assert_eq!(json, r#"{"content":[{"type":"text","text":"7","mimeType":"text/plain"}],"is_error":false}"#);
+    }
+    
+    #[test]
+    fn it_deserializes_input_schema() {
+        let json = r#"{ 
+            "properties": {
+                "name": { 
+                    "type": "string",
+                    "description": "A name to whom say hello"
+                }
+            }
+        }"#;
+        
+        let schema: InputSchema = serde_json::from_str(json).unwrap();
+        
+        assert_eq!(schema.r#type, PropertyType::Object);
+        assert!(schema.properties.is_some());
     }
 }

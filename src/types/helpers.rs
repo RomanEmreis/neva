@@ -18,6 +18,13 @@ pub enum PropertyType {
     Object,
 }
 
+impl Default for PropertyType {
+    #[inline]
+    fn default() -> Self {
+        Self::Object
+    }
+}
+
 impl From<&str> for PropertyType {
     #[inline]
     fn from(s: &str) -> Self {

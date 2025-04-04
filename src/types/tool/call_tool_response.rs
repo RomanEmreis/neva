@@ -173,7 +173,7 @@ mod tests {
         
         let json = serde_json::to_string(&resp).unwrap();
         
-        assert_eq!(json, r#"{"content":[{"type":"text","text":"test"}],"is_error":false}"#);
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"test","mimeType":"text/plain"}],"is_error":false}"#);
     }
 
     #[test]
@@ -182,7 +182,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"content":[{"type":"text","text":"test"}],"is_error":false}"#);
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"test","mimeType":"text/plain"}],"is_error":false}"#);
     }
 
     #[test]
@@ -191,7 +191,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"content":[{"type":"text","text":"test"}],"is_error":true}"#);
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"test","mimeType":"text/plain"}],"is_error":true}"#);
     }
 
     #[test]
@@ -200,7 +200,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"content":[{"type":"text","text":"test"}],"is_error":true}"#);
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"test","mimeType":"text/plain"}],"is_error":true}"#);
     }
 
     #[test]
@@ -209,7 +209,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"content":[{"type":"text","text":"test"}],"is_error":false}"#);
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"test","mimeType":"text/plain"}],"is_error":false}"#);
     }
 
     #[test]
@@ -218,7 +218,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"content":[{"type":"text","text":"test"}],"is_error":false}"#);
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"test","mimeType":"text/plain"}],"is_error":false}"#);
     }
 
     #[test]
@@ -236,7 +236,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"content":[{"type":"text","text":"test 1"},{"type":"text","text":"test 2"}],"is_error":false}"#);
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"test 1","mimeType":"text/plain"},{"type":"text","text":"test 2","mimeType":"text/plain"}],"is_error":false}"#);
     }
 
     #[test]
@@ -255,7 +255,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"content":[{"type":"text","text":"{\"msg\":\"test\"}"}],"is_error":false}"#);
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"{\"msg\":\"test\"}","mimeType":"text/plain"}],"is_error":false}"#);
     }
 
     #[test]
@@ -265,7 +265,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"content":[{"type":"text","text":"{\"msg\":\"test\"}"}],"is_error":false}"#);
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"{\"msg\":\"test\"}","mimeType":"text/plain"}],"is_error":false}"#);
     }
     
     #[derive(Serialize)]
