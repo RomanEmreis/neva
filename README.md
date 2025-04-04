@@ -1,8 +1,6 @@
 # Neva
 Easy configurable MCP server SDK for Rust
 
----
-
 ## Dependencies
 ```toml
 [dependencies]
@@ -21,6 +19,22 @@ async fn hello(name: String) -> String {
     format!("Hello, {name}!")
 }
 
+#[resource(uri = "res://{name}", descr = "Some details about resource")]
+async fn get_res(name: String) -> [(String, String); 1] {
+    let content = (
+        format!("res://{name}"),
+        format!("Some details about resource: {name}")
+    );
+    [content]
+}
+
+#[prompt(descr = "Analyze code for potential improvements")]
+async fn analyze_code(lang: String) -> [(String, String); 1] {
+    [
+        (format!("Language: {lang}"), "user".into())
+    ]
+}
+
 #[tokio::main]
 async fn main() {
     let mut app = App::new()
@@ -30,6 +44,8 @@ async fn main() {
             .with_version("1.0.0"));
 
     map_hello(&mut app);
+    map_get_res(&mut app);
+    map_analyze_code(&mut app);
 
     app.run().await;
 }
