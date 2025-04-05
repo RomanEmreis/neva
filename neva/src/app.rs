@@ -369,7 +369,7 @@ impl App {
         _options: Arc<McpOptions>, 
         _params: UnsubscribeRequestParams
     ) -> Error {
-        Error::new(ErrorCode::InvalidRequest, "resource_subscribe not implemented")
+        Error::new(ErrorCode::InvalidRequest, "resource_unsubscribe not implemented")
     }
 }
 
