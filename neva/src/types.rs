@@ -1,6 +1,6 @@
 ﻿use std::fmt::Display;
 use serde::{Deserialize, Serialize};
-use crate::{PROTOCOL_VERSION, SERVER_NAME};
+use crate::{PROTOCOL_VERSIONS, SERVER_NAME};
 use crate::options::McpOptions;
 
 pub use helpers::{Json, PropertyType};
@@ -212,7 +212,7 @@ impl Annotations {
 impl InitializeResult {
     pub(crate) fn new(options: &McpOptions) -> Self {
         Self {
-            protocol_ver: PROTOCOL_VERSION.into(),
+            protocol_ver: String::from(*PROTOCOL_VERSIONS.first().unwrap()),
             capabilities: ServerCapabilities {
                 tools: Some(ToolsCapability {
                     list_changed: true
