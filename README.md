@@ -11,8 +11,7 @@ tokio = { version = "1", features = ["full"] }
 ## Code
 
 ```rust
-use neva::App;
-use neva_macros::{tool, resource, prompt};
+use neva::{App, tool, resource, prompt};
 
 #[tool(descr = "A say hello tool")]
 async fn hello(name: String) -> String {

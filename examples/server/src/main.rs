@@ -1,11 +1,14 @@
-﻿//! Run with:
-//! 
+//! Run with:
+//!
 //! ```no_rust
-//! npx @modelcontextprotocol/inspector cargo run --example server
+//! npx @modelcontextprotocol/inspector cargo run -p example-server
 //! ```
 
-use neva::{App, types::{Json, Resource, ListResourcesRequestParams, ListResourcesResult}};
-use neva_macros::{tool, resource, prompt};
+use neva::{
+    App, 
+    tool, resource, prompt, 
+    types::{Json, Resource, ListResourcesRequestParams, ListResourcesResult}
+};
 
 #[derive(serde::Deserialize)]
 struct Payload {
@@ -42,8 +45,8 @@ async fn say_json(arg: Json<Payload>) -> Json<Result> {
 }
 
 #[resource(
-    uri = "res://{name}", 
-    descr = "Some details about resource", 
+    uri = "res://{name}",
+    descr = "Some details about resource",
     mime = "text/plain",
     annotations = r#"{
         "audience": ["user"],
@@ -92,16 +95,16 @@ async fn main() {
             .with_stdio()
             .with_name("sample mcp server")
             .with_version("0.1.0.0"));
-    
+
     map_say_hello(&mut app);
     map_say_hello_to(&mut app);
     map_say_json(&mut app);
-    
+
     map_get_res(&mut app);
-    
+
     map_analyze_code(&mut app);
-    
+
     app.map_resources(list_resources);
-    
+
     app.run().await;
 }

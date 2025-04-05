@@ -1,28 +1,10 @@
-[package]
-name = "neva"
-version = "0.0.1"
-edition = "2021"
+[workspace]
+members = ["neva", "neva_macros", "examples/*"]
+default-members = ["neva", "neva_macros"]
+resolver = "2"
+
+[workspace.package]
 rust-version = "1.80.0"
-authors = ["Roman Emreis <roman.emreis@outlook.com>"]
-license = "MIT"
-repository = "https://github.com/RomanEmreis/neva"
-description = "MCP SDK for Rust"
-documentation = "https://docs.rs/neva"
-readme = "README.md"
-categories = ["web-programming::http-server"]
-keywords = ["neva", "mcp", "server", "ai", "framework"]
 
-[dependencies]
-base64 = "0.22.1"
-futures-util = { version = "0.3.31", default-features = false, features = ["alloc"] }
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.140"
-tokio = { version = "1.44.1", features = ["sync", "io-std", "io-util", "rt"] }
-neva_macros = { path = "neva_macros" }
-
-[dev-dependencies]
-tokio = { version = "1.44.1", features = ["rt", "rt-multi-thread", "macros"] }
-
-[[example]]
-name = "server"
-path = "examples/server.rs"
+[workspace.lints.rust]
+unsafe_code = "forbid"
