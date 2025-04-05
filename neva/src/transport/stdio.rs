@@ -1,5 +1,5 @@
 ﻿use crate::{
-    error::Error,
+    error::{Error, ErrorCode},
     types::{Request, Response}
 };
 use tokio::{
@@ -57,7 +57,7 @@ impl Transport for StdIo {
     async fn recv(&mut self) -> Result<Request, Error> {
         match self.rx.recv().await {
             Some(res) => Ok(res?),
-            None => Err(Error::new("unexpected end of stream"))
+            None => Err(Error::new(ErrorCode::InvalidRequest, "unexpected end of stream"))
         }
     }
     

@@ -1,13 +1,16 @@
 ﻿//! Represents a response that MCP server provides
 
+use crate::error::Error;
 use serde::Serialize;
 use serde_json::{json, Value};
+pub use error_details::ErrorDetails;
 pub use into_response::IntoResponse;
 use crate::types::{
     RequestId,
     JSONRPC_VERSION
 };
 
+pub mod error_details;
 pub mod into_response;
 
 /// A response message in the JSON-RPC protocol.
@@ -27,7 +30,7 @@ pub struct Response {
     
     /// Error information.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub error: Option<ErrorDetails>,
 }
 
 impl Response {
@@ -52,7 +55,7 @@ impl Response {
     }
 
     /// Creates an error response
-    pub fn error(id: RequestId, error: &str) -> Self {
+    pub fn error(id: RequestId, error: Error) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.to_string(),
             id,
@@ -64,7 +67,7 @@ impl Response {
 
 #[cfg(test)]
 mod tests {
-    use crate::types::RequestId;
+    use crate::{error::Error, types::RequestId};
     use super::Response;
 
     #[test]
@@ -82,10 +85,10 @@ mod tests {
     fn it_deserializes_error_response_with_string_id_to_json() {
         let resp = Response::error(
             RequestId::String("id".into()),
-            "some error message");
+            Error::new(-32603, "some error message"));
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"id","error":"some error message"}"#);
+        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"id","error":{"code":-32603,"message":"some error message","data":null}}"#);
     }
 }

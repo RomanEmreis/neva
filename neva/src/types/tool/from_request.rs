@@ -1,6 +1,6 @@
-﻿use crate::error::Error;
+﻿use crate::error::{Error, ErrorCode};
 use super::CallToolRequestParams;
-use serde::{de::DeserializeOwned};
+use serde::de::DeserializeOwned;
 
 impl TryFrom<CallToolRequestParams> for () {
     type Error = Error;
@@ -18,7 +18,7 @@ macro_rules! impl_from_call_tool_params {
             
             #[inline]
             fn try_from(params: CallToolRequestParams) -> Result<Self, Self::Error> {
-                let args = params.args.ok_or(Error::new("arguments missing"))?;
+                let args = params.args.ok_or(Error::new(ErrorCode::InvalidParams, "arguments missing"))?;
                 let mut iter = args.iter();
                 let tuple = (
                     $(

@@ -165,6 +165,8 @@ impl CallToolResponse {
 
 #[cfg(test)]
 mod tests {
+    use crate::error::ErrorCode;
+
     use super::*;
     
     #[test]
@@ -187,7 +189,7 @@ mod tests {
 
     #[test]
     fn it_converts_from_error() {
-        let resp: CallToolResponse = Error::new("test").into();
+        let resp: CallToolResponse = Error::new(ErrorCode::InternalError, "test").into();
 
         let json = serde_json::to_string(&resp).unwrap();
 
@@ -196,7 +198,7 @@ mod tests {
 
     #[test]
     fn it_converts_from_err_result() {
-        let resp: CallToolResponse = Err::<String, _>(Error::new("test")).into();
+        let resp: CallToolResponse = Err::<String, _>(Error::new(ErrorCode::InternalError, "test")).into();
 
         let json = serde_json::to_string(&resp).unwrap();
 

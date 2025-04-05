@@ -1,7 +1,7 @@
 ﻿use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
-use crate::error::Error;
+use crate::error::{Error, ErrorCode};
 use crate::options::McpOptions;
 use crate::transport::Transport;
 use crate::app::handler::{
@@ -89,7 +89,7 @@ impl App {
             let req_id = req.id();
             let resp = match self.handlers.get(&req.method) {
                 Some(handler) => handler.call(HandlerParams::Request(options.clone(), req)).await,
-                None => Err(Error::new("unknown request"))
+                None => Err(Error::new(ErrorCode::MethodNotFound, "unknown request"))
             };
             match transport.send(resp.into_response(req_id)).await { 
                 Ok(_) => (),
@@ -319,7 +319,7 @@ impl App {
     ) -> Result<CallToolResponse, Error> {
         match options.get_tool(&params.name) {
             Some(tool) => tool.call(params.into()).await,
-            None => Err(Error::new("tool not found")),
+            None => Err(Error::new(ErrorCode::InvalidParams, "tool not found")),
         }
     }
 
@@ -332,7 +332,7 @@ impl App {
             Some(Route::Handler(handler)) => handler
                 .call(params.into())
                 .await,
-            _ => Err(Error::new("resource not found")),
+            _ => Err(Error::new(ErrorCode::ResourceNotFound, "resource not found")),
         }
     }
     
@@ -343,7 +343,7 @@ impl App {
     ) -> Result<GetPromptResult, Error> {
         match options.get_prompt(&params.name) {
             Some(prompt) => prompt.call(params.into()).await,
-            None => Err(Error::new("prompt not found")),
+            None => Err(Error::new(ErrorCode::InvalidParams, "prompt not found")),
         }
     }
 
@@ -361,7 +361,7 @@ impl App {
         _options: Arc<McpOptions>, 
         _params: SubscribeRequestParams
     ) -> Error {
-        Error::new("resource_subscribe not implemented")
+        Error::new(ErrorCode::InvalidRequest, "resource_subscribe not implemented")
     }
 
     /// An unsubscription to from resource change request handler
@@ -369,7 +369,7 @@ impl App {
         _options: Arc<McpOptions>, 
         _params: UnsubscribeRequestParams
     ) -> Error {
-        Error::new("resource_subscribe not implemented")
+        Error::new(ErrorCode::InvalidRequest, "resource_unsubscribe not implemented")
     }
 }
 

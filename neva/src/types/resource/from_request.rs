@@ -1,5 +1,5 @@
 ﻿use std::str::FromStr;
-use crate::error::Error;
+use crate::error::{Error, ErrorCode};
 use super::{Uri, ReadResourceRequestParams};
 
 impl TryFrom<ReadResourceRequestParams> for (Uri,) {
@@ -41,9 +41,9 @@ macro_rules! impl_from_read_resource_params {
                 let tuple = (
                     $(
                     iter.next()
-                        .ok_or(Error::new("Invalid URI param provided"))?
+                        .ok_or(Error::new(ErrorCode::InvalidParams, "Invalid URI param provided"))?
                         .parse::<$T>()
-                        .map_err(|_| Error::new("Unable to parse URI params"))?,
+                        .map_err(|_| Error::new(ErrorCode::InvalidParams, "Unable to parse URI params"))?,
                     )*    
                 );
                 Ok(tuple)

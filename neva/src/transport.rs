@@ -1,5 +1,5 @@
 ﻿use std::future::Future;
-use crate::error::Error;
+use crate::error::{Error, ErrorCode};
 use crate::types::{Request, Response};
 
 pub(crate) use stdio::StdIo;
@@ -47,7 +47,10 @@ impl Transport for TransportProto {
     async fn recv(&mut self) -> Result<Request, Error> {
         match self {
             TransportProto::Stdio(stdio) => stdio.recv().await,
-            TransportProto::None => Err(Error::new("Transport protocol must be specified")),
+            TransportProto::None => Err(Error::new(
+                ErrorCode::InternalError, 
+                "Transport protocol must be specified"
+            )),
         }
     }
 
@@ -55,7 +58,10 @@ impl Transport for TransportProto {
     async fn send(&mut self, resp: Response) -> Result<(), Error> {
         match self {
             TransportProto::Stdio(stdio) => stdio.send(resp).await,
-            TransportProto::None => Err(Error::new("Transport protocol must be specified")),
+            TransportProto::None => Err(Error::new(
+                ErrorCode::InternalError, 
+                "Transport protocol must be specified"
+            )),
         }
     }
 }

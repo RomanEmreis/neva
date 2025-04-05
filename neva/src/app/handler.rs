@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::sync::Arc;
 use futures_util::future::BoxFuture;
-use crate::error::Error;
+use crate::error::{Error, ErrorCode};
 use crate::options::McpOptions;
 use crate::types::{
     CallToolRequestParams, 
@@ -123,7 +123,7 @@ impl FromHandlerParams for Arc<McpOptions> {
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
         match params {
             HandlerParams::Request(options, _) => Ok(options.clone()),
-            _ => Err(Error::new("invalid handler parameters"))
+            _ => Err(Error::new(ErrorCode::InternalError, "invalid handler parameters"))
         }
     }
 }
@@ -133,7 +133,7 @@ impl FromHandlerParams for Request {
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
         match params {
             HandlerParams::Request(_, req) => Ok(req.clone()),
-            _ => Err(Error::new("invalid handler parameters"))
+            _ => Err(Error::new(ErrorCode::InternalError, "invalid handler parameters"))
         }
     }
 }

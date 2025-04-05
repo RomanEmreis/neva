@@ -33,7 +33,7 @@ impl IntoResponse for &'static str {
 impl IntoResponse for Error {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
-        Response::error(req_id, &self.to_string())
+        Response::error(req_id, self)
     }
 }
 
