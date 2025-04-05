@@ -65,13 +65,22 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
                 if let Pat::Ident(pat_ident) = &*pat_type.pat {
                     let arg_name = pat_ident.ident.to_string();
                     let arg_type = match &*pat_type.ty {
+                        Type::Array(_) => "array",
+                        Type::Slice(_) => "slice",
                         Type::Path(type_path) => {
-                            let type_ident = type_path.path.segments.last().unwrap().ident.to_string();
+                            let type_ident = type_path.path.segments
+                                .last()
+                                .unwrap()
+                                .ident
+                                .to_string();
                             match type_ident.as_str() {
                                 "String" => "string",
-                                "i16" | "i32" | "i64" | "u32" | "u64" | "usize" => "number",
+                                "str" => "string",
+                                "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => "number",
+                                "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => "number",
                                 "f32" | "f64" => "number",
                                 "bool" => "boolean",
+                                "Vec" => "array",
                                 _ => "object", // Default case for unknown types
                             }
                         }
