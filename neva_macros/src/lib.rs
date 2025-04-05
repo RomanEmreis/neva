@@ -1,4 +1,4 @@
-///! A proc macro implementation for configuring tool
+//! A proc macro implementation for configuring tool
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -22,7 +22,7 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Parse the attribute input as key-value pairs
     let parser = Punctuated::<MetaNameValue, Token![,]>::parse_terminated;
     let parsed_attrs = parser
-        .parse(attr.into())
+        .parse(attr)
         .expect("Failed to parse attributes");
 
     for meta in parsed_attrs {
@@ -135,7 +135,7 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Parse the attribute input as key-value pairs
     let parser = Punctuated::<MetaNameValue, Token![,]>::parse_terminated;
     let parsed_attrs = parser
-        .parse(attr.into())
+        .parse(attr)
         .expect("Failed to parse attributes");
 
     for meta in parsed_attrs {
@@ -215,7 +215,7 @@ pub fn prompt(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Parse the attribute input as key-value pairs
     let parser = Punctuated::<MetaNameValue, Token![,]>::parse_terminated;
     let parsed_attrs = parser
-        .parse(attr.into())
+        .parse(attr)
         .expect("Failed to parse attributes");
 
     for meta in parsed_attrs {
