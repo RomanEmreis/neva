@@ -5,6 +5,10 @@ use std::fmt;
 use std::error::Error as StdError;
 use std::io::Error as IoError;
 
+pub use error_code::ErrorCode;
+
+pub mod error_code;
+
 type BoxError = Box<
     dyn StdError
     + Send
@@ -14,7 +18,8 @@ type BoxError = Box<
 /// Represents MCP server error
 #[derive(Debug)]
 pub struct Error {
-    inner: BoxError
+    pub(crate) code: ErrorCode,
+    inner: BoxError,
 }
 
 impl fmt::Display for Error {
@@ -31,13 +36,19 @@ impl StdError for Error {
 
 impl From<serde_json::Error> for Error {
     fn from(err: serde_json::Error) -> Error {
-        Self { inner: err.into() }
+        Self { 
+            inner: err.into(),
+            code: ErrorCode::ParseError
+         }
     }
 }
 
 impl From<IoError> for Error {
     fn from(err: IoError) -> Error {
-        Self { inner: err.into() }
+        Self { 
+            inner: err.into(),
+            code: ErrorCode::InternalError
+        }
     }
 }
 
@@ -48,8 +59,13 @@ impl From<Infallible> for Error {
 }
 
 impl Error {
-    pub fn new(err: impl Into<BoxError>) -> Error {
-        Self { inner: err.into() }
+    pub fn new(code: impl TryInto<ErrorCode>, err: impl Into<BoxError>) -> Error {
+        Self { 
+            inner: err.into(),
+            code: code
+                .try_into()
+                .unwrap_or_default()
+        }
     }
 }
 

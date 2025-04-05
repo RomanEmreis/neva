@@ -1,7 +1,7 @@
 ﻿//! URI helpers and utilities
 
 use serde::{Serialize, Deserialize};
-use crate::error::Error;
+use crate::error::{Error, ErrorCode};
 use std::{
     borrow::Cow,
     ops::{Deref, DerefMut}
@@ -51,7 +51,7 @@ impl Uri {
     pub fn parts<'a>(&self) -> Result<impl Iterator<Item = Cow<'a, str>> + use<'a, '_>, Error> {
         let parts = self.rsplit("//")
             .next()
-            .ok_or(Error::new("Invalid URI provided"))?
+            .ok_or(Error::new(ErrorCode::InvalidParams, "Invalid URI provided"))?
             .split("/")
             .map(|s| Cow::Owned(s.to_owned()));
         Ok(parts)

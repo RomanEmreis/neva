@@ -1,6 +1,6 @@
-﻿use crate::error::Error;
+﻿use crate::error::{Error, ErrorCode};
 use super::GetPromptRequestParams;
-use serde::{de::DeserializeOwned};
+use serde::de::DeserializeOwned;
 
 impl TryFrom<GetPromptRequestParams> for () {
     type Error = Error;
@@ -18,7 +18,7 @@ macro_rules! impl_from_get_prompt_params {
             
             #[inline]
             fn try_from(params: GetPromptRequestParams) -> Result<Self, Self::Error> {
-                let args = params.args.ok_or(Error::new("arguments missing"))?;
+                let args = params.args.ok_or(Error::new(ErrorCode::InvalidParams, "arguments missing"))?;
                 let mut iter = args.iter();
                 let tuple = (
                     $(
