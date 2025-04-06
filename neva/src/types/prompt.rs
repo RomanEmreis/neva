@@ -182,7 +182,8 @@ pub trait PromptHandler<Args>: GenericHandler<Args> {
 pub(crate) struct PromptFunc<F, R, Args>
 where
     F: PromptHandler<Args, Output = R>,
-    R: Into<GetPromptResult>,
+    R: TryInto<GetPromptResult>,
+    R::Error: Into<Error>,
     Args: TryFrom<GetPromptRequestParams, Error = Error>,
 {
     func: F,
@@ -192,7 +193,8 @@ where
 impl<F, R, Args> PromptFunc<F, R, Args>
 where
     F: PromptHandler<Args, Output = R>,
-    R: Into<GetPromptResult>,
+    R: TryInto<GetPromptResult>,
+    R::Error: Into<Error>,
     Args: TryFrom<GetPromptRequestParams, Error = Error>
 {
     /// Creates a new [`PromptFunc`] wrapped into [`Arc`]
@@ -205,7 +207,8 @@ where
 impl<F, R, Args> Handler<GetPromptResult> for PromptFunc<F, R, Args>
 where
     F: PromptHandler<Args, Output = R>,
-    R: Into<GetPromptResult>,
+    R: TryInto<GetPromptResult>,
+    R::Error: Into<Error>,
     Args: TryFrom<GetPromptRequestParams, Error = Error> + Send + Sync
 {
     #[inline]
@@ -215,10 +218,11 @@ where
         };
         Box::pin(async move {
             let args = Args::try_from(params)?;
-            Ok(self.func
+            self.func
                 .call(args)
                 .await
-                .into())
+                .try_into()
+                .map_err(Into::into)
         })
     }
 }
@@ -229,7 +233,8 @@ impl Prompt {
     pub fn new<F, R, Args>(name: &str, handler: F) -> Self
     where
         F: PromptHandler<Args, Output = R>,
-        R: Into<GetPromptResult> + Send + 'static,
+        R: TryInto<GetPromptResult> + Send + 'static,
+        R::Error: Into<Error>,
         Args: TryFrom<GetPromptRequestParams, Error = Error>  + Send + Sync + 'static,
     {
         let handler = PromptFunc::new(handler);

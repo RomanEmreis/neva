@@ -6,11 +6,10 @@
 
 use neva::{
     App, 
+    error::{Error, ErrorCode},
     tool, resource, prompt, 
     types::{Json, Resource, ListResourcesRequestParams, ListResourcesResult}
 };
-use neva::error::{Error, ErrorCode};
-use neva::types::{ResourceContents};
 
 #[derive(serde::Deserialize)]
 struct Payload {
@@ -55,16 +54,16 @@ async fn say_json(arg: Json<Payload>) -> Json<Results> {
         "priority": 1.0
     }"#
 )]
-async fn get_res(name: String) -> [(String, String); 1] {
+async fn get_res(name: String) -> (String, String) {
     let content = (
         format!("res://{name}"),
         format!("Some details about resource: {name}")
     );
-    [content]
+    content
 }
 
 #[resource(uri = "res://err/{uri}")]
-async fn err_resource(_uri: neva::types::Uri) -> Result<ResourceContents, Error> {
+async fn err_resource(_uri: neva::types::Uri) -> Result<(String, String), Error> {
     Err(Error::from(ErrorCode::ResourceNotFound))
 }
 
@@ -78,10 +77,13 @@ async fn err_resource(_uri: neva::types::Uri) -> Result<ResourceContents, Error>
         }    
     ]"#
 )]
-async fn analyze_code(lang: String) -> [(String, String); 1] {
-    [
-        (format!("Language: {lang}"), "user".into())
-    ]
+async fn analyze_code(lang: String) -> (String, String) {
+    (format!("Language: {lang}"), "user".into())
+}
+
+#[prompt(descr = "A prompt that return error")]
+async fn prompt_err() -> Result<(String, String), Error> {
+    Err(Error::from(ErrorCode::InvalidRequest))
 }
 
 async fn list_resources(_params: ListResourcesRequestParams) -> impl Into<ListResourcesResult> {
@@ -114,6 +116,7 @@ async fn main() {
     map_err_resource(&mut app);
 
     map_analyze_code(&mut app);
+    map_prompt_err(&mut app);
 
     app.map_resources(list_resources);
 

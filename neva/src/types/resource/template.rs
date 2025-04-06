@@ -164,6 +164,7 @@ impl ResourceTemplate {
         self
     }
     
+    /// Sets annotations for the resource template
     pub fn with_annotations<F>(&mut self, config: F) -> &mut Self
     where
         F: FnOnce(Annotations) -> Annotations 

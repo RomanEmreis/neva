@@ -1,7 +1,7 @@
 ﻿//! MCP server options
 
 use crate::transport::{StdIo, TransportProto};
-use crate::app::handler::{RequestHandler};
+use crate::app::handler::RequestHandler;
 use std::{
     borrow::Cow,
     collections::HashMap
@@ -226,7 +226,7 @@ mod tests {
     use crate::SERVER_NAME;
     use crate::types::resource::template::ResourceFunc;
     use crate::types::resource::Uri;
-    use crate::types::{ReadResourceRequestParams, ResourceContents, Role};
+    use crate::types::{GetPromptRequestParams, PromptMessage, ReadResourceRequestParams, ResourceContents, Role};
     use super::*;
     
     #[test]
@@ -348,10 +348,10 @@ mod tests {
 
         let res = options.read_resource(&req.uri).unwrap();
         let res = match res {
-            Route::Handler(handler) => handler.call(req.into()).await.unwrap(),
+            Route::Handler(handler) => handler.call(req.into()).await,
             _ => unreachable!()
         };
-        assert_eq!(res.contents.len(), 1);
+        assert!(res.is_err());
     }
 
     #[test]
@@ -370,8 +370,8 @@ mod tests {
         assert_eq!(resources.templates.len(), 1);
     }
 
-    #[test]
-    fn it_adds_and_gets_prompt() {
+    #[tokio::test]
+    async fn it_adds_and_gets_prompt() {
         let mut options = McpOptions::default();
 
         options.add_prompt(Prompt::new("test", || async { 
@@ -380,6 +380,38 @@ mod tests {
 
         let prompt = options.get_prompt("test").unwrap();
         assert_eq!(prompt.name, "test");
+
+        let req = GetPromptRequestParams {
+            name: "test".into(),
+            args: None
+        };
+
+        let result = prompt.call(req.into()).await.unwrap();
+
+        let msg = result.messages.first().unwrap();
+
+        assert_eq!(msg.role, Role::User)
+    }
+
+    #[tokio::test]
+    async fn it_adds_and_gets_prompt_with_error() {
+        let mut options = McpOptions::default();
+
+        options.add_prompt(Prompt::new("test", || async { 
+            Err::<PromptMessage, _>(Error::from(ErrorCode::InternalError))
+        }));
+
+        let prompt = options.get_prompt("test").unwrap();
+        assert_eq!(prompt.name, "test");
+
+        let req = GetPromptRequestParams {
+            name: "test".into(),
+            args: None
+        };
+
+        let result = prompt.call(req.into()).await;
+
+        assert!(result.is_err())
     }
 
     #[test]

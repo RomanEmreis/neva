@@ -172,7 +172,7 @@ impl App {
     ///
     /// # Example
     /// ```no_run
-    /// use neva::{App, types::ResourceContents};
+    /// use neva::App;
     ///
     /// # #[tokio::main]
     /// # async fn main() {
@@ -180,8 +180,7 @@ impl App {
     /// let mut app = App::new();
     ///
     /// app.map_resource("res://{name}", "read_resource", |name: String| async move {
-    ///     let content = (format!("res://{name}"), format!("Resource: {name} content"));
-    ///     [content]
+    ///     (format!("res://{name}"), format!("Resource: {name} content"))
     /// });
     ///
     /// # app.run().await;
@@ -247,9 +246,7 @@ impl App {
     /// let mut app = App::new();
     ///
     /// app.map_prompt("analyze-code", |lang: String| async move {
-    ///     [
-    ///         (format!("Language: {lang}"), Role::User)
-    ///     ]
+    ///     (format!("Language: {lang}"), Role::User)
     /// });
     ///
     /// # app.run().await;
@@ -258,7 +255,8 @@ impl App {
     pub fn map_prompt<F, R, Args>(&mut self, name: &str, handler: F) -> &mut Prompt
     where 
         F: PromptHandler<Args, Output = R>,
-        R: Into<GetPromptResult> + Send + 'static,
+        R: TryInto<GetPromptResult> + Send + 'static,
+        R::Error: Into<Error>,
         Args: TryFrom<GetPromptRequestParams, Error = Error> + Send + Sync + 'static,
     {
         self.options.add_prompt(Prompt::new(name, handler))

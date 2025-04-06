@@ -11,6 +11,7 @@ use syn::{
     Token
 };
 
+/// Maps the function to a tool
 #[proc_macro_attribute]
 pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     let function = parse_macro_input!(item as ItemFn);
@@ -122,6 +123,7 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     expanded.into()
 }
 
+/// Maps the function to a resource template
 #[proc_macro_attribute]
 pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
     let function = parse_macro_input!(item as ItemFn);
@@ -204,6 +206,7 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
     expanded.into()
 }
 
+/// Maps the function to a prompt
 #[proc_macro_attribute]
 pub fn prompt(attr: TokenStream, item: TokenStream) -> TokenStream {
     let function = parse_macro_input!(item as ItemFn);

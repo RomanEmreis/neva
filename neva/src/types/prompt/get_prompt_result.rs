@@ -1,7 +1,7 @@
 ﻿//! Types and utils for prompt request results
 
 use serde::Serialize;
-use crate::types::{Content, IntoResponse, RequestId, Response, Role};
+use crate::{error::Error, types::{Content, IntoResponse, RequestId, Response, Role}};
 
 /// The server's response to a prompts/get request from the client.
 ///
@@ -54,20 +54,54 @@ impl<T: Into<Role>> From<(String, T)> for PromptMessage {
     }
 }
 
-impl From<PromptMessage> for GetPromptResult {
+impl<T> From<T> for GetPromptResult
+where 
+    T: Into<PromptMessage>
+{
     #[inline]
-    fn from(msg: PromptMessage) -> Self {
-        Self { descr: None, messages: vec![msg] }
+    fn from(msg: T) -> Self {
+        Self { descr: None, messages: vec![msg.into()] }
     }
 }
 
-impl<T, P> From<T> for GetPromptResult
+impl<T, E> TryFrom<Result<T, E>> for GetPromptResult
+where 
+    T: Into<GetPromptResult>,
+    E: Into<Error>
+{
+    type Error = E;
+
+    #[inline]
+    fn try_from(value: Result<T, E>) -> Result<Self, Self::Error> {
+        match value {
+            Ok(ok) => Ok(ok.into()),
+            Err(err) => Err(err)
+        }
+    }
+}
+
+impl<T> From<Vec<T>> for GetPromptResult
 where
-    T: IntoIterator<Item = P>,
-    P: Into<PromptMessage>
+    T: Into<PromptMessage>
 {
     #[inline]
-    fn from(iter: T) -> Self {
+    fn from(iter: Vec<T>) -> Self {
+        Self {
+            descr: None,
+            messages: iter
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}
+
+impl<const N: usize, T> From<[T; N]> for GetPromptResult
+where
+    T: Into<PromptMessage>
+{
+    #[inline]
+    fn from(iter: [T; N]) -> Self {
         Self {
             descr: None,
             messages: iter
