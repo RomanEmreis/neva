@@ -45,6 +45,11 @@ async fn say_json(arg: Json<Payload>) -> Json<Results> {
     result.into()
 }
 
+#[tool(descr = "A tool with error")]
+async fn tool_error() -> Result<String, Error> {
+    Err(Error::from(ErrorCode::InternalError))
+}
+
 #[resource(
     uri = "res://{name}",
     descr = "Some details about resource",
@@ -111,6 +116,7 @@ async fn main() {
     map_say_hello(&mut app);
     map_say_hello_to(&mut app);
     map_say_json(&mut app);
+    map_tool_error(&mut app);
 
     map_get_res(&mut app);
     map_err_resource(&mut app);
