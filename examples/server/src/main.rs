@@ -100,8 +100,11 @@ async fn main() {
     let mut app = App::new()
         .with_options(|opt| opt
             .with_stdio()
-            .with_name("sample mcp server")
-            .with_version("0.1.0.0"));
+            .with_mcp_version("2024-11-05")
+            .with_name("Sample MCP Server")
+            .with_version("0.1.0.0")
+            .with_tools(|tools| tools
+                .with_list_changed()));
 
     map_say_hello(&mut app);
     map_say_hello_to(&mut app);

@@ -1,6 +1,6 @@
 ﻿use std::fmt::Display;
 use serde::{Deserialize, Serialize};
-use crate::{PROTOCOL_VERSIONS, SERVER_NAME};
+use crate::SERVER_NAME;
 use crate::options::McpOptions;
 
 pub use helpers::{Json, PropertyType};
@@ -13,7 +13,8 @@ pub use capabilities::{
     ClientCapabilities, 
     ServerCapabilities, 
     ToolsCapability, 
-    ResourcesCapability
+    ResourcesCapability,
+    PromptsCapability
 };
 pub use tool::{
     ListToolsRequestParams,
@@ -49,7 +50,6 @@ pub use prompt::{
 };
 use crate::app::handler::{FromHandlerParams, HandlerParams};
 use crate::error::Error;
-use crate::types::capabilities::PromptsCapability;
 use crate::types::request::FromRequest;
 
 pub mod request;
@@ -212,18 +212,11 @@ impl Annotations {
 impl InitializeResult {
     pub(crate) fn new(options: &McpOptions) -> Self {
         Self {
-            protocol_ver: String::from(*PROTOCOL_VERSIONS.first().unwrap()),
+            protocol_ver: options.protocol_ver().into(),
             capabilities: ServerCapabilities {
-                tools: Some(ToolsCapability {
-                    list_changed: true
-                }),
-                resources: Some(ResourcesCapability {
-                    list_changed: true,
-                    subscribe: false
-                }),
-                prompts: Some(PromptsCapability {
-                    list_changed: true,
-                }),
+                tools: Some(options.tools_capability.clone()),
+                resources: Some(options.resources_capability.clone()),
+                prompts: Some(options.prompts_capability.clone()),
             },
             server_info: options.implementation.clone(),
             instructions: None
