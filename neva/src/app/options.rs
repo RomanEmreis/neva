@@ -1,17 +1,19 @@
 ﻿//! MCP server options
 
 use crate::transport::{StdIo, TransportProto};
-use crate::app::handler::{RequestHandler};
+use crate::app::handler::RequestHandler;
 use std::{
     borrow::Cow,
     collections::HashMap
 };
+use crate::PROTOCOL_VERSIONS;
 use crate::types::{
     Implementation, 
-    Tool, ListToolsResult,
-    Resource, Uri, ReadResourceResult, ResourceTemplate, ListResourcesResult, 
+    Tool, ListToolsResult, 
+    Resource, Uri, ReadResourceResult, ResourceTemplate, ListResourcesResult,
     ListResourceTemplatesResult, resource::Route,
-    Prompt, ListPromptsResult
+    Prompt, ListPromptsResult,
+    ResourcesCapability, ToolsCapability, PromptsCapability
 };
 
 /// Represents MCP server configuration options
@@ -19,6 +21,18 @@ use crate::types::{
 pub struct McpOptions {
     /// Information of current server's implementation
     pub(crate) implementation: Implementation,
+
+    /// Tools capability options
+    pub(crate) tools_capability: ToolsCapability,
+
+    /// Resource capability options
+    pub(crate) resources_capability: ResourcesCapability,
+
+    /// Prompts capability options
+    pub(crate) prompts_capability: PromptsCapability,
+
+    /// An MCP version that server supports
+    protocol_ver: Option<&'static str>,
     
     /// Current transport protocol that server uses
     proto: Option<TransportProto>,
@@ -57,6 +71,41 @@ impl McpOptions {
         self.implementation.version = ver.into();
         self
     }
+
+    /// Specifies Model Context Protocol version
+    /// 
+    /// Default: last available protocol version
+    pub fn with_mcp_version(mut self, ver: &'static str) -> Self {
+        self.protocol_ver = Some(ver);
+        self
+    }
+
+    /// Configures tools capability
+    pub fn with_tools<F>(mut self, config: F) -> Self 
+    where 
+        F: FnOnce(ToolsCapability) -> ToolsCapability
+    {
+        self.tools_capability = config(self.tools_capability);
+        self
+    }
+
+    /// Configures resources capability
+    pub fn with_resources<F>(mut self, config: F) -> Self
+    where
+        F: FnOnce(ResourcesCapability) -> ResourcesCapability
+    {
+        self.resources_capability = config(self.resources_capability);
+        self
+    }
+
+    /// Configures prompts capability
+    pub fn with_prompts<F>(mut self, config: F) -> Self
+    where
+        F: FnOnce(PromptsCapability) -> PromptsCapability
+    {
+        self.prompts_capability = config(self.prompts_capability);
+        self
+    }
     
     /// Adds a tool
     pub(crate) fn add_tool(&mut self, tool: Tool) -> &mut Tool {
@@ -93,6 +142,15 @@ impl McpOptions {
         self.prompts
             .entry(prompt.name.clone())
             .or_insert(prompt)
+    }
+    
+    /// Returns a Model Context Protocol version that server supports
+    #[inline]
+    pub(crate) fn protocol_ver(&self) -> &'static str {
+        match self.protocol_ver { 
+            Some(ver) => ver,
+            None => PROTOCOL_VERSIONS.last().unwrap()
+        }
     }
     
     /// Returns current transport protocol
@@ -164,10 +222,11 @@ impl McpOptions {
 
 #[cfg(test)]
 mod tests {
+    use crate::error::{Error, ErrorCode};
     use crate::SERVER_NAME;
     use crate::types::resource::template::ResourceFunc;
     use crate::types::resource::Uri;
-    use crate::types::{ReadResourceRequestParams, ResourceContents, Role};
+    use crate::types::{GetPromptRequestParams, PromptMessage, ReadResourceRequestParams, ResourceContents, Role};
     use super::*;
     
     #[test]
@@ -271,6 +330,30 @@ mod tests {
         assert_eq!(res.contents.len(), 1);
     }
 
+    #[tokio::test]
+    async fn it_adds_and_reads_resource_template_with_err() {
+        let mut options = McpOptions::default();
+
+        let handler = |_: Uri| async move {
+            Err::<ResourceContents, _>(Error::from(ErrorCode::ResourceNotFound))
+        };
+
+        options.add_resource_template(
+            ResourceTemplate::new("res://res", "test"),
+            ResourceFunc::new(handler));
+
+        let req = ReadResourceRequestParams {
+            uri: "res://res".into()
+        };
+
+        let res = options.read_resource(&req.uri).unwrap();
+        let res = match res {
+            Route::Handler(handler) => handler.call(req.into()).await,
+            _ => unreachable!()
+        };
+        assert!(res.is_err());
+    }
+
     #[test]
     fn it_returns_resource_templates() {
         let mut options = McpOptions::default();
@@ -287,8 +370,8 @@ mod tests {
         assert_eq!(resources.templates.len(), 1);
     }
 
-    #[test]
-    fn it_adds_and_gets_prompt() {
+    #[tokio::test]
+    async fn it_adds_and_gets_prompt() {
         let mut options = McpOptions::default();
 
         options.add_prompt(Prompt::new("test", || async { 
@@ -297,6 +380,38 @@ mod tests {
 
         let prompt = options.get_prompt("test").unwrap();
         assert_eq!(prompt.name, "test");
+
+        let req = GetPromptRequestParams {
+            name: "test".into(),
+            args: None
+        };
+
+        let result = prompt.call(req.into()).await.unwrap();
+
+        let msg = result.messages.first().unwrap();
+
+        assert_eq!(msg.role, Role::User)
+    }
+
+    #[tokio::test]
+    async fn it_adds_and_gets_prompt_with_error() {
+        let mut options = McpOptions::default();
+
+        options.add_prompt(Prompt::new("test", || async { 
+            Err::<PromptMessage, _>(Error::from(ErrorCode::InternalError))
+        }));
+
+        let prompt = options.get_prompt("test").unwrap();
+        assert_eq!(prompt.name, "test");
+
+        let req = GetPromptRequestParams {
+            name: "test".into(),
+            args: None
+        };
+
+        let result = prompt.call(req.into()).await;
+
+        assert!(result.is_err())
     }
 
     #[test]

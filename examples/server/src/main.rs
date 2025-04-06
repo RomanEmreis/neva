@@ -6,6 +6,7 @@
 
 use neva::{
     App, 
+    error::{Error, ErrorCode},
     tool, resource, prompt, 
     types::{Json, Resource, ListResourcesRequestParams, ListResourcesResult}
 };
@@ -17,7 +18,7 @@ struct Payload {
 }
 
 #[derive(serde::Serialize)]
-struct Result {
+struct Results {
     message: String,
 }
 
@@ -39,9 +40,14 @@ async fn say_hello_to(name: String) -> String {
 }
 
 #[tool(descr = "Say from JSON")]
-async fn say_json(arg: Json<Payload>) -> Json<Result> {
-    let result = Result { message: format!("{}, {}!", arg.say, arg.name) };
+async fn say_json(arg: Json<Payload>) -> Json<Results> {
+    let result = Results { message: format!("{}, {}!", arg.say, arg.name) };
     result.into()
+}
+
+#[tool(descr = "A tool with error")]
+async fn tool_error() -> Result<String, Error> {
+    Err(Error::from(ErrorCode::InternalError))
 }
 
 #[resource(
@@ -53,12 +59,17 @@ async fn say_json(arg: Json<Payload>) -> Json<Result> {
         "priority": 1.0
     }"#
 )]
-async fn get_res(name: String) -> [(String, String); 1] {
+async fn get_res(name: String) -> (String, String) {
     let content = (
         format!("res://{name}"),
         format!("Some details about resource: {name}")
     );
-    [content]
+    content
+}
+
+#[resource(uri = "res://err/{uri}")]
+async fn err_resource(_uri: neva::types::Uri) -> Result<(String, String), Error> {
+    Err(Error::from(ErrorCode::ResourceNotFound))
 }
 
 #[prompt(
@@ -71,10 +82,13 @@ async fn get_res(name: String) -> [(String, String); 1] {
         }    
     ]"#
 )]
-async fn analyze_code(lang: String) -> [(String, String); 1] {
-    [
-        (format!("Language: {lang}"), "user".into())
-    ]
+async fn analyze_code(lang: String) -> (String, String) {
+    (format!("Language: {lang}"), "user".into())
+}
+
+#[prompt(descr = "A prompt that return error")]
+async fn prompt_err() -> Result<(String, String), Error> {
+    Err(Error::from(ErrorCode::InvalidRequest))
 }
 
 async fn list_resources(_params: ListResourcesRequestParams) -> impl Into<ListResourcesResult> {
@@ -93,16 +107,22 @@ async fn main() {
     let mut app = App::new()
         .with_options(|opt| opt
             .with_stdio()
-            .with_name("sample mcp server")
-            .with_version("0.1.0.0"));
+            .with_mcp_version("2024-11-05")
+            .with_name("Sample MCP Server")
+            .with_version("0.1.0.0")
+            .with_tools(|tools| tools
+                .with_list_changed()));
 
     map_say_hello(&mut app);
     map_say_hello_to(&mut app);
     map_say_json(&mut app);
+    map_tool_error(&mut app);
 
     map_get_res(&mut app);
+    map_err_resource(&mut app);
 
     map_analyze_code(&mut app);
+    map_prompt_err(&mut app);
 
     app.map_resources(list_resources);
 

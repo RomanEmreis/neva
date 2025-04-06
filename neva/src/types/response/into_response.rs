@@ -1,7 +1,7 @@
 ﻿//! Tools for converting any type into MCP server response
 
 use serde::Serialize;
-use crate::error::Error;
+use crate::error::{Error, ErrorCode};
 use crate::types::{
     RequestId, 
     Response,
@@ -34,6 +34,13 @@ impl IntoResponse for Error {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
         Response::error(req_id, self)
+    }
+}
+
+impl IntoResponse for ErrorCode {
+    #[inline]
+    fn into_response(self, req_id: RequestId) -> Response {
+        Response::error(req_id, self.into())
     }
 }
 

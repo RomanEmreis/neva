@@ -32,7 +32,7 @@ pub struct ServerCapabilities {
 /// Represents the tools capability configuration.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Debug, Clone, Serialize)]
+#[derive(Default, Debug, Clone, Serialize)]
 pub struct ToolsCapability {
     /// Gets or sets whether this server supports notifications for changes to the tool list.
     #[serde(rename = "listChanged")]
@@ -42,7 +42,7 @@ pub struct ToolsCapability {
 /// Represents the prompts capability configuration.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Debug, Clone, Serialize)]
+#[derive(Default, Debug, Clone, Serialize)]
 pub struct PromptsCapability {
     /// Whether this server supports notifications for changes to the prompt list.
     #[serde(rename = "listChanged")]
@@ -52,7 +52,7 @@ pub struct PromptsCapability {
 /// Represents the resources capability configuration.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Debug, Clone, Serialize)]
+#[derive(Default, Debug, Clone, Serialize)]
 pub struct ResourcesCapability {
     /// Whether this server supports notifications for changes to the resource list.
     #[serde(rename = "listChanged")]
@@ -60,4 +60,42 @@ pub struct ResourcesCapability {
 
     /// Whether this server supports subscribing to resource updates.
     pub subscribe: bool
+}
+
+impl ToolsCapability {
+    /// Specifies whether this server supports notifications for changes to the tools list.
+    ///
+    /// Default: _false_
+    pub fn with_list_changed(mut self) -> Self {
+        self.list_changed = true;
+        self
+    }
+}
+
+impl ResourcesCapability {
+    /// Specifies whether this server supports notifications for changes to the resource list.
+    ///
+    /// Default: _false_
+    pub fn with_list_changed(mut self) -> Self {
+        self.list_changed = true;
+        self
+    }
+
+    /// Specifies whether this server supports subscribing to resource updates.
+    /// 
+    /// Default: _false_
+    pub fn with_subscribe(mut self) -> Self {
+        self.subscribe = true;
+        self
+    }
+}
+
+impl PromptsCapability {
+    /// Specifies whether this server supports notifications for changes to the prompts list.
+    ///
+    /// Default: _false_
+    pub fn with_list_changed(mut self) -> Self {
+        self.list_changed = true;
+        self
+    }
 }

@@ -172,7 +172,7 @@ impl App {
     ///
     /// # Example
     /// ```no_run
-    /// use neva::{App, types::ResourceContents};
+    /// use neva::App;
     ///
     /// # #[tokio::main]
     /// # async fn main() {
@@ -180,8 +180,7 @@ impl App {
     /// let mut app = App::new();
     ///
     /// app.map_resource("res://{name}", "read_resource", |name: String| async move {
-    ///     let content = (format!("res://{name}"), format!("Resource: {name} content"));
-    ///     [content]
+    ///     (format!("res://{name}"), format!("Resource: {name} content"))
     /// });
     ///
     /// # app.run().await;
@@ -190,7 +189,8 @@ impl App {
     pub fn map_resource<F, R, Args>(&mut self, uri: &'static str, name: &str, handler: F) -> &mut ResourceTemplate
     where
         F: GenericHandler<Args, Output = R>,
-        R: Into<ReadResourceResult> + Send + 'static,
+        R: TryInto<ReadResourceResult> + Send + 'static,
+        R::Error: Into<Error>,
         Args: TryFrom<ReadResourceRequestParams, Error = Error> + Send + Sync + 'static,
     {
         let handler = ResourceFunc::new(handler);
@@ -246,9 +246,7 @@ impl App {
     /// let mut app = App::new();
     ///
     /// app.map_prompt("analyze-code", |lang: String| async move {
-    ///     [
-    ///         (format!("Language: {lang}"), Role::User)
-    ///     ]
+    ///     (format!("Language: {lang}"), Role::User)
     /// });
     ///
     /// # app.run().await;
@@ -257,7 +255,8 @@ impl App {
     pub fn map_prompt<F, R, Args>(&mut self, name: &str, handler: F) -> &mut Prompt
     where 
         F: PromptHandler<Args, Output = R>,
-        R: Into<GetPromptResult> + Send + 'static,
+        R: TryInto<GetPromptResult> + Send + 'static,
+        R::Error: Into<Error>,
         Args: TryFrom<GetPromptRequestParams, Error = Error> + Send + Sync + 'static,
     {
         self.options.add_prompt(Prompt::new(name, handler))
@@ -319,7 +318,7 @@ impl App {
     ) -> Result<CallToolResponse, Error> {
         match options.get_tool(&params.name) {
             Some(tool) => tool.call(params.into()).await,
-            None => Err(Error::new(ErrorCode::InvalidParams, "tool not found")),
+            None => Err(Error::new(ErrorCode::InvalidParams, "Tool not found")),
         }
     }
 
@@ -332,7 +331,7 @@ impl App {
             Some(Route::Handler(handler)) => handler
                 .call(params.into())
                 .await,
-            _ => Err(Error::new(ErrorCode::ResourceNotFound, "resource not found")),
+            _ => Err(Error::from(ErrorCode::ResourceNotFound)),
         }
     }
     
@@ -343,7 +342,7 @@ impl App {
     ) -> Result<GetPromptResult, Error> {
         match options.get_prompt(&params.name) {
             Some(prompt) => prompt.call(params.into()).await,
-            None => Err(Error::new(ErrorCode::InvalidParams, "prompt not found")),
+            None => Err(Error::new(ErrorCode::InvalidParams, "Prompt not found")),
         }
     }
 

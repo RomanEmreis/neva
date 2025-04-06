@@ -2,7 +2,7 @@
 
 use base64::{engine::general_purpose, Engine};
 use serde::{Deserialize, Serialize};
-use crate::types::{IntoResponse, RequestId, Response};
+use crate::{error::Error, types::{IntoResponse, RequestId, Response}};
 
 /// The server's response to a resources/read request from the client.
 ///
@@ -89,22 +89,54 @@ impl From<(String, String, String)> for ResourceContents {
     }
 }
 
-impl From<ResourceContents> for ReadResourceResult {
-    #[inline]
-    fn from(content: ResourceContents) -> Self {
-        Self { contents: vec![content] }
+impl<T> From<T> for ReadResourceResult
+where 
+    T: Into<ResourceContents>
+{
+    fn from(content: T) -> Self {
+        Self { contents: vec![content.into()] }
     }
 }
 
-impl<T, R> From<T> for ReadResourceResult
+impl<T, E> TryFrom<Result<T, E>> for ReadResourceResult
 where 
-    T: IntoIterator<Item = R>,
-    R: Into<ResourceContents>
+    T: Into<ReadResourceResult>,
+    E: Into<Error>
+{
+    type Error = E;
+
+    #[inline]
+    fn try_from(value: Result<T, E>) -> Result<Self, Self::Error> {
+        match value {
+            Ok(ok) => Ok(ok.into()),
+            Err(err) => Err(err)
+        }
+    }
+}
+
+impl<T> From<Vec<T>> for ReadResourceResult
+where 
+    T: Into<ResourceContents>
 {
     #[inline]
-    fn from(iter: T) -> Self {
+    fn from(vec: Vec<T>) -> Self {
         Self {
-            contents: iter
+            contents: vec
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}
+
+impl<const N: usize, T> From<[T; N]> for ReadResourceResult
+where 
+    T: Into<ResourceContents>
+{
+    #[inline]
+    fn from(vec: [T; N]) -> Self {
+        Self {
+            contents: vec
                 .into_iter()
                 .map(Into::into)
                 .collect(),
