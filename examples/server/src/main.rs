@@ -9,6 +9,8 @@ use neva::{
     tool, resource, prompt, 
     types::{Json, Resource, ListResourcesRequestParams, ListResourcesResult}
 };
+use neva::error::{Error, ErrorCode};
+use neva::types::{ResourceContents};
 
 #[derive(serde::Deserialize)]
 struct Payload {
@@ -17,7 +19,7 @@ struct Payload {
 }
 
 #[derive(serde::Serialize)]
-struct Result {
+struct Results {
     message: String,
 }
 
@@ -39,8 +41,8 @@ async fn say_hello_to(name: String) -> String {
 }
 
 #[tool(descr = "Say from JSON")]
-async fn say_json(arg: Json<Payload>) -> Json<Result> {
-    let result = Result { message: format!("{}, {}!", arg.say, arg.name) };
+async fn say_json(arg: Json<Payload>) -> Json<Results> {
+    let result = Results { message: format!("{}, {}!", arg.say, arg.name) };
     result.into()
 }
 
@@ -59,6 +61,11 @@ async fn get_res(name: String) -> [(String, String); 1] {
         format!("Some details about resource: {name}")
     );
     [content]
+}
+
+#[resource(uri = "res://err/{uri}")]
+async fn err_resource(_uri: neva::types::Uri) -> Result<ResourceContents, Error> {
+    Err(Error::from(ErrorCode::ResourceNotFound))
 }
 
 #[prompt(
@@ -101,6 +108,7 @@ async fn main() {
     map_say_json(&mut app);
 
     map_get_res(&mut app);
+    map_err_resource(&mut app);
 
     map_analyze_code(&mut app);
 

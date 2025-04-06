@@ -96,7 +96,7 @@ impl ListResourceTemplatesResult {
 pub(crate) struct ResourceFunc<F, R, Args>
 where
     F: GenericHandler<Args, Output = R>,
-    R: Into<ReadResourceResult>,
+    R: TryInto<ReadResourceResult>,
     Args: TryFrom<ReadResourceRequestParams, Error = Error>
 {
     func: F,
@@ -106,7 +106,7 @@ where
 impl<F, R ,Args> ResourceFunc<F, R, Args>
 where
     F: GenericHandler<Args, Output = R>,
-    R: Into<ReadResourceResult>,
+    R: TryInto<ReadResourceResult>,
     Args: TryFrom<ReadResourceRequestParams, Error = Error>
 {
     /// Creates a new [`ResourceFunc`] wrapped into [`Arc`]
@@ -119,7 +119,8 @@ where
 impl<F, R ,Args> Handler<ReadResourceResult> for ResourceFunc<F, R, Args>
 where
     F: GenericHandler<Args, Output = R>,
-    R: Into<ReadResourceResult>,
+    R: TryInto<ReadResourceResult>,
+    R::Error: Into<Error>,
     Args: TryFrom<ReadResourceRequestParams, Error = Error> + Send + Sync,
 {
     #[inline]
@@ -129,10 +130,11 @@ where
         };
         Box::pin(async move {
             let args = Args::try_from(params)?;
-            Ok(self.func
+            self.func
                 .call(args)
                 .await
-                .into())
+                .try_into()
+                .map_err(Into::into)
         })
     }
 }

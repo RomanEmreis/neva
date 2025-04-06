@@ -190,7 +190,8 @@ impl App {
     pub fn map_resource<F, R, Args>(&mut self, uri: &'static str, name: &str, handler: F) -> &mut ResourceTemplate
     where
         F: GenericHandler<Args, Output = R>,
-        R: Into<ReadResourceResult> + Send + 'static,
+        R: TryInto<ReadResourceResult> + Send + 'static,
+        R::Error: Into<Error>,
         Args: TryFrom<ReadResourceRequestParams, Error = Error> + Send + Sync + 'static,
     {
         let handler = ResourceFunc::new(handler);
@@ -319,7 +320,7 @@ impl App {
     ) -> Result<CallToolResponse, Error> {
         match options.get_tool(&params.name) {
             Some(tool) => tool.call(params.into()).await,
-            None => Err(Error::new(ErrorCode::InvalidParams, "tool not found")),
+            None => Err(Error::new(ErrorCode::InvalidParams, "Tool not found")),
         }
     }
 
@@ -332,7 +333,7 @@ impl App {
             Some(Route::Handler(handler)) => handler
                 .call(params.into())
                 .await,
-            _ => Err(Error::new(ErrorCode::ResourceNotFound, "resource not found")),
+            _ => Err(Error::from(ErrorCode::ResourceNotFound)),
         }
     }
     
@@ -343,7 +344,7 @@ impl App {
     ) -> Result<GetPromptResult, Error> {
         match options.get_prompt(&params.name) {
             Some(prompt) => prompt.call(params.into()).await,
-            None => Err(Error::new(ErrorCode::InvalidParams, "prompt not found")),
+            None => Err(Error::new(ErrorCode::InvalidParams, "Prompt not found")),
         }
     }
 

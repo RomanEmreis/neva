@@ -1,6 +1,8 @@
 //! Represents error code tools
 
+use std::fmt::Display;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use crate::error::Error;
 
 /// Standard JSON-RPC error codes as defined in the MCP specification.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -72,6 +74,25 @@ impl<'de> Deserialize<'de> for ErrorCode {
         ErrorCode::try_from(value).map_err(|_| {
             serde::de::Error::custom(format!("Invalid error code: {}", value))
         })
+    }
+}
+
+impl Display for ErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self { 
+            ErrorCode::ParseError => write!(f, "Parse error"),
+            ErrorCode::InvalidRequest => write!(f, "Invalid request"),
+            ErrorCode::MethodNotFound => write!(f, "Method not found"),
+            ErrorCode::InvalidParams  => write!(f, "Invalid parameters"),
+            ErrorCode::InternalError => write!(f, "Internal error"),
+            ErrorCode::ResourceNotFound => write!(f, "Resource not found"),
+        }
+    }
+}
+
+impl From<ErrorCode> for Error {
+    fn from(code: ErrorCode) -> Self {
+        Error::new(code, code.to_string())
     }
 }
 
