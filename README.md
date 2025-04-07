@@ -19,19 +19,16 @@ async fn hello(name: String) -> String {
 }
 
 #[resource(uri = "res://{name}", descr = "Some details about resource")]
-async fn get_res(name: String) -> [(String, String); 1] {
-    let content = (
+async fn get_res(name: String) -> (String, String) {
+    (
         format!("res://{name}"),
         format!("Some details about resource: {name}")
-    );
-    [content]
+    )
 }
 
 #[prompt(descr = "Analyze code for potential improvements")]
-async fn analyze_code(lang: String) -> [(String, String); 1] {
-    [
-        (format!("Language: {lang}"), "user".into())
-    ]
+async fn analyze_code(lang: String) -> (String, String) {
+    (format!("Language: {lang}"), "user".into())
 }
 
 #[tokio::main]
