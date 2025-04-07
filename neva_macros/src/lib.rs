@@ -52,10 +52,8 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     // If no schema is provided, generate it automatically from function arguments
     let schema_code = if let Some(schema_json) = schema {
         quote! {
-            .with_schema(|schema| {
-                let mut schema_data: neva::types::tool::InputSchema = serde_json::from_str(#schema_json).unwrap();
-                schema_data.r#type = neva::types::PropertyType::Object;
-                schema_data
+            .with_schema(|_| {
+                neva::types::tool::InputSchema::from_json_str(#schema_json)
             })
         }
     } else {
@@ -182,8 +180,7 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
     let annotations_code = annotations.map(|annotations_json| {
         quote! { 
             .with_annotations(|_| {
-                let annotations = serde_json::from_str(#annotations_json).unwrap();
-                annotations
+                neva::types::Annotations::from_json_str(#annotations_json)
             }) 
         }
     });
@@ -246,9 +243,7 @@ pub fn prompt(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // If no schema is provided, generate it automatically from function arguments
     let args_code = if let Some(args_json) = args {
-        quote! {
-            .with_args(serde_json::from_str::<Vec<serde_json::Value>>(#args_json).unwrap())
-        }
+        quote! { .with_args(neva::types::prompt::PromptArguments::from_json_str(#args_json)) }
     } else {
         let mut arg_entries = Vec::new();
         for arg in &function.sig.inputs {
@@ -262,9 +257,7 @@ pub fn prompt(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
         if !arg_entries.is_empty() {
-            quote! {
-                .with_args([#(#arg_entries,)*])
-            }
+            quote! { .with_args([#(#arg_entries,)*]) }
         } else {
             quote! {}
         }

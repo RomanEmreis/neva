@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::future::Future;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use crate::types::{IntoResponse, Request, RequestId, Response};
 use crate::app::handler::{FromHandlerParams, HandlerParams, GenericHandler, Handler, RequestHandler};
 use crate::error::Error;
@@ -270,6 +271,16 @@ impl Prompt {
     #[inline]
     pub(crate) async fn call(&self, params: HandlerParams) -> Result<GetPromptResult, Error> {
         self.handler.call(params).await
+    }
+}
+
+pub struct PromptArguments;
+impl PromptArguments {
+    /// Deserializes a [`Vec`] of [`PromptArgument`] from JSON string
+    #[inline]
+    pub fn from_json_str(json: &str) -> Vec<Value> {
+        serde_json::from_str(json)
+            .expect("PromptArgument: Incorrect JSON string provided")
     }
 }
 
