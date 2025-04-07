@@ -196,6 +196,13 @@ impl FromHandlerParams for InitializeRequestParams {
 }
 
 impl Annotations {
+    /// Deserializes a new [`Annotations`] from JSON string
+    #[inline]
+    pub fn from_json_str(json: &str) -> Self {
+        serde_json::from_str(json)
+            .expect("Annotations: Incorrect JSON string provided")
+    }
+    
     /// Adds audience
     pub fn add_audience<T: Into<Role>>(mut self, role: T) -> Self {
         self.audience.push(role.into());

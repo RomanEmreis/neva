@@ -138,6 +138,13 @@ impl InputSchema {
         Self { r#type: PropertyType::Object, properties: props }
     }
     
+    /// Deserializes a new [`InputSchema`] from JSON string
+    #[inline]
+    pub fn from_json_str(json: &str) -> Self {
+        serde_json::from_str(json)
+            .expect("InputSchema: Incorrect JSON string provided")
+    }
+    
     /// Adds a new property into schema. 
     /// If a property with this name already exists it overwrites it
     pub fn add_property<T: Into<PropertyType>>(
