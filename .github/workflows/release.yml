@@ -13,10 +13,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Release
-        run: cargo build --release
-      - uses: katyo/publish-crates@v2
-        with:
-          token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          ignore-unpublished-changes: true
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Login to crates.io
+        run: cargo login ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Publish macros
+        run: cargo publish --manifest-path neva_macros/Cargo.toml
+      - name: Wait for index update
+        run: sleep 30
+      - name: Publish neva
+        run: cargo publish --manifest-path neva/Cargo.toml
