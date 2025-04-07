@@ -18,7 +18,15 @@ futures-util = { version = "0.3.31", default-features = false, features = ["allo
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 tokio = { version = "1.44.2", features = ["sync", "io-std", "io-util", "rt"] }
-neva_macros = { path = "../neva_macros", version = "0.0.1" }
+neva_macros = { path = "../neva_macros", version = "0.0.1", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.44.2", features = ["rt", "rt-multi-thread", "macros"] }
+
+[features]
+default = []
+full = ["macros"]
+macros = ["dep:neva_macros"]
+
+[package.metadata.docs.rs]
+all-features = true
