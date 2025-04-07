@@ -4,7 +4,7 @@ Easy configurable MCP server SDK for Rust
 ## Dependencies
 ```toml
 [dependencies]
-neva = "0.0.1"
+neva = { version = "0.0.1", features = ["full"] }
 tokio = { version = "1", features = ["full"] }
 ```
 

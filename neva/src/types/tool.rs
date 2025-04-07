@@ -20,7 +20,7 @@ pub use call_tool_response::CallToolResponse;
 mod from_request;
 pub mod call_tool_response;
 
-/// Represents a tool that the server is capable of calling. Part of the [`ListToolsResponse`].
+/// Represents a tool that the server is capable of calling. Part of the [`ListToolsResult`].
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
 #[derive(Clone, Serialize)]
