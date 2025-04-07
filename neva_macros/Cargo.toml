@@ -3,6 +3,14 @@ name = "neva_macros"
 version = "0.0.1"
 edition = "2021"
 rust-version = "1.80.0"
+authors = ["Roman Emreis <roman.emreis@outlook.com>"]
+license = "MIT"
+repository = "https://github.com/RomanEmreis/neva"
+description = "Macros for Neva"
+documentation = "https://docs.rs/neva"
+readme = "../README.md"
+categories = ["web-programming::http-server"]
+keywords = ["neva", "mcp", "server", "ai", "framework"]
 
 [lib]
 proc-macro = true
