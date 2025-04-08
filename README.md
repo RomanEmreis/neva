@@ -1,10 +1,13 @@
 # Neva
 Easy configurable MCP server SDK for Rust
 
+> [!NOTE]  
+> This project is currently in preview. Breaking changes can be introduced without prior notice.
+
 ## Dependencies
 ```toml
 [dependencies]
-neva = { version = "0.0.1", features = ["full"] }
+neva = { version = "0.0.2", features = ["full"] }
 tokio = { version = "1", features = ["full"] }
 ```
 

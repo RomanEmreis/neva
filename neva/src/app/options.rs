@@ -1,5 +1,6 @@
 ﻿//! MCP server options
 
+use std::sync::{Arc, RwLock};
 use crate::transport::{StdIo, TransportProto};
 use crate::app::handler::RequestHandler;
 use std::{
@@ -13,8 +14,12 @@ use crate::types::{
     Resource, Uri, ReadResourceResult, ResourceTemplate, ListResourcesResult,
     ListResourceTemplatesResult, resource::Route,
     Prompt, ListPromptsResult,
-    ResourcesCapability, ToolsCapability, PromptsCapability
+    ResourcesCapability, ToolsCapability, PromptsCapability,
+    notification::LoggingLevel
 };
+
+/// Represents MCP server options that are available in runtime
+pub type RuntimeMcpOptions = Arc<RwLock<McpOptions>>;
 
 /// Represents MCP server configuration options
 #[derive(Default)]
@@ -30,6 +35,9 @@ pub struct McpOptions {
 
     /// Prompts capability options
     pub(crate) prompts_capability: PromptsCapability,
+    
+    /// The last logging level set by the client
+    pub(crate) log_level: Option<LoggingLevel>,
 
     /// An MCP version that server supports
     protocol_ver: Option<&'static str>,
@@ -105,6 +113,11 @@ impl McpOptions {
     {
         self.prompts_capability = config(self.prompts_capability);
         self
+    }
+    
+    /// Sets the [`LoggingLevel`]
+    pub fn set_log_level(&mut self, level: LoggingLevel) {
+        self.log_level = Some(level);
     }
     
     /// Adds a tool

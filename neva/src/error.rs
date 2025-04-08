@@ -59,6 +59,8 @@ impl From<Infallible> for Error {
 }
 
 impl Error {
+    /// Creates a new [`Error`]
+    #[inline]
     pub fn new(code: impl TryInto<ErrorCode>, err: impl Into<BoxError>) -> Error {
         Self { 
             inner: err.into(),

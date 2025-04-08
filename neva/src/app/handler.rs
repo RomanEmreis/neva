@@ -4,7 +4,7 @@ use std::future::Future;
 use std::sync::Arc;
 use futures_util::future::BoxFuture;
 use crate::error::{Error, ErrorCode};
-use crate::options::McpOptions;
+use crate::options::RuntimeMcpOptions;
 use crate::types::{
     CallToolRequestParams, 
     ReadResourceRequestParams,
@@ -21,7 +21,7 @@ pub(crate) type RequestHandler<T> = Arc<
 >;
 
 pub enum HandlerParams {
-    Request(Arc<McpOptions>, Request),
+    Request(RuntimeMcpOptions, Request),
     Tool(CallToolRequestParams),
     Resource(ReadResourceRequestParams),
     Prompt(GetPromptRequestParams)
@@ -118,7 +118,7 @@ impl FromHandlerParams for RequestId {
     }
 }
 
-impl FromHandlerParams for Arc<McpOptions> {
+impl FromHandlerParams for RuntimeMcpOptions {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
         match params {
