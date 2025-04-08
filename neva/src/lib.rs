@@ -1,3 +1,32 @@
+//! # Neva
+//! Easy configurable MCP server SDK for Rust
+//! 
+//! ## Dependencies
+//! ```toml
+//! [dependencies]
+//! neva = { version = "0.0.2", features = ["full"] }
+//! tokio = { version = "1", features = ["full"] }
+//! ```
+//! 
+//! ## Example
+//! 
+//! ```no_run
+//! use neva::App;
+//! 
+//! #[tokio::main]
+//! async fn main() {
+//!     let mut app = App::new()
+//!         .with_options(|opt| opt
+//!             .with_stdio());
+//! 
+//!     app.map_tool("hello", |name: String| async move { 
+//!         format!("Hello, {name}!")
+//!     });
+//! 
+//!     app.run().await;
+//! }
+//! ```
+
 pub use app::{App, options};
 
 pub mod app;

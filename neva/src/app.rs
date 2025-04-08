@@ -1,8 +1,10 @@
-﻿use std::collections::HashMap;
+﻿//! Represents an MCP application
+
+use std::collections::HashMap;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use crate::error::{Error, ErrorCode};
-use crate::options::McpOptions;
+use crate::options::{McpOptions, RuntimeMcpOptions};
 use crate::transport::Transport;
 use crate::app::handler::{
     FromHandlerParams,
@@ -20,7 +22,8 @@ use crate::types::{
     ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, 
     SubscribeRequestParams, UnsubscribeRequestParams, Resource, resource::{Route, template::ResourceFunc}, 
     ListPromptsRequestParams, ListPromptsResult, 
-    GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt
+    GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt,
+    notification::{SetLevelRequestParams}
 };
 
 pub mod options;
@@ -61,6 +64,8 @@ impl App {
         
         app.map_handler("ping", Self::ping);
         
+        app.map_handler("logging/setLevel", Self::set_log_level);
+        
         app
     }
     
@@ -81,7 +86,7 @@ impl App {
     /// ```
     pub async fn run(mut self) {
         let mut transport = self.options.transport();
-        let options = Arc::new(self.options);
+        let options = Arc::new(RwLock::new(self.options));
 
         transport.start();
         
@@ -176,7 +181,6 @@ impl App {
     ///
     /// # #[tokio::main]
     /// # async fn main() {
-    /// use neva::types::content;
     /// let mut app = App::new();
     ///
     /// app.map_resource("res://{name}", "read_resource", |name: String| async move {
@@ -199,6 +203,33 @@ impl App {
         self.options.add_resource_template(template, handler)
     }
 
+    /// Maps an MCP get prompt request to a specific function
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::{App, types::Role};
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let mut app = App::new();
+    ///
+    /// app.map_prompt("analyze-code", |lang: String| async move {
+    ///     (format!("Language: {lang}"), Role::User)
+    /// });
+    ///
+    /// # app.run().await;
+    /// # }
+    /// ```
+    pub fn map_prompt<F, R, Args>(&mut self, name: &str, handler: F) -> &mut Prompt
+    where
+        F: PromptHandler<Args, Output = R>,
+        R: TryInto<GetPromptResult> + Send + 'static,
+        R::Error: Into<Error>,
+        Args: TryFrom<GetPromptRequestParams, Error = Error> + Send + Sync + 'static,
+    {
+        self.options.add_prompt(Prompt::new(name, handler))
+    }
+
     /// Maps an MCP resource read request to a specific function
     ///
     /// # Example
@@ -207,7 +238,6 @@ impl App {
     ///
     /// # #[tokio::main]
     /// # async fn main() {
-    /// use neva::types::content;
     /// let mut app = App::new();
     ///
     /// app.map_resources(|_params: ListResourcesRequestParams| async move {
@@ -234,116 +264,150 @@ impl App {
         self
     }
 
-    /// Maps an MCP get prompt request to a specific function
+    /// Maps a completion request
     ///
     /// # Example
     /// ```no_run
-    /// use neva::{App, types::Role};
+    /// use neva::{App, types::{CompleteRequestParams, CompleteResult}};
     ///
     /// # #[tokio::main]
     /// # async fn main() {
-    /// use neva::types::content;
     /// let mut app = App::new();
     ///
-    /// app.map_prompt("analyze-code", |lang: String| async move {
-    ///     (format!("Language: {lang}"), Role::User)
+    /// app.map_completion(|_params: CompleteRequestParams| async move {
+    ///     ["Item 1", "Item 2", "Item 3"]
     /// });
     ///
     /// # app.run().await;
     /// # }
     /// ```
-    pub fn map_prompt<F, R, Args>(&mut self, name: &str, handler: F) -> &mut Prompt
-    where 
-        F: PromptHandler<Args, Output = R>,
-        R: TryInto<GetPromptResult> + Send + 'static,
-        R::Error: Into<Error>,
-        Args: TryFrom<GetPromptRequestParams, Error = Error> + Send + Sync + 'static,
+    pub fn map_completion<F, R>(&mut self, handler: F) -> &mut Self
+    where
+        F: Fn(CompleteRequestParams) -> R + Clone + Send + Sync + 'static,
+        R: Future + Send,
+        R::Output: Into<CompleteResult>
     {
-        self.options.add_prompt(Prompt::new(name, handler))
+        let handler = move |params| {
+            let handler = handler.clone();
+            async move { handler(params).await.into() }
+        };
+        self.map_handler("completion/complete", handler);
+        self
     }
 
     /// Connection initialization handler
     async fn init(
-        options: Arc<McpOptions>, 
+        options: RuntimeMcpOptions, 
         _params: InitializeRequestParams
-    ) -> InitializeResult {
-        InitializeResult::new(&options)
+    ) -> Result<InitializeResult, Error> {
+        let options = options.read()
+            .map_err(|_| Error::from(ErrorCode::InternalError))?;
+        
+        Ok(InitializeResult::new(&options))
     }
 
     /// Completion request handler
-    async fn completion(
-        _: Arc<McpOptions>, 
-        _params: CompleteRequestParams
-    ) -> CompleteResult {
-        // TODO: return default as it non-optional capability so far
+    async fn completion() -> CompleteResult {
+        // return default as it non-optional capability so far
         CompleteResult::default()
     }
     
     /// Tools request handler
     async fn tools(
-        options: Arc<McpOptions>, 
+        options: RuntimeMcpOptions, 
         _params: ListToolsRequestParams
-    ) -> ListToolsResult {
-        options.tools()
+    ) -> Result<ListToolsResult, Error> {
+        options
+            .read()
+            .map(|opt| opt.tools())
+            .map_err(|_| Error::from(ErrorCode::InternalError))
     }
 
     /// Resources request handler
     async fn resources(
-        options: Arc<McpOptions>,
+        options: RuntimeMcpOptions,
         _params: ListResourcesRequestParams
-    ) -> ListResourcesResult {
-        options.resources()
+    ) -> Result<ListResourcesResult, Error> {
+        options
+            .read()
+            .map(|opt| opt.resources())
+            .map_err(|_| Error::from(ErrorCode::InternalError))
     }
 
     /// Resource templates request handler
     async fn resource_templates(
-        options: Arc<McpOptions>, 
+        options: RuntimeMcpOptions, 
         _params: ListResourceTemplatesRequestParams
-    ) -> ListResourceTemplatesResult {
-        options.resource_templates()
+    ) -> Result<ListResourceTemplatesResult, Error> {
+        options
+            .read()
+            .map(|opt| opt.resource_templates())
+            .map_err(|_| Error::from(ErrorCode::InternalError))
     }
     
     /// Prompts request handler
     async fn prompts(
-        options: Arc<McpOptions>, 
+        options: RuntimeMcpOptions, 
         _params: ListPromptsRequestParams
-    ) -> ListPromptsResult {
-        options.prompts()
+    ) -> Result<ListPromptsResult, Error> {
+        options
+            .read()
+            .map(|opt| opt.prompts())
+            .map_err(|_| Error::from(ErrorCode::InternalError))
     }
     
     /// A tool call request handler
     async fn tool(
-        options: Arc<McpOptions>, 
+        options: RuntimeMcpOptions, 
         params: CallToolRequestParams
     ) -> Result<CallToolResponse, Error> {
-        match options.get_tool(&params.name) {
-            Some(tool) => tool.call(params.into()).await,
-            None => Err(Error::new(ErrorCode::InvalidParams, "Tool not found")),
-        }
+        let tool = {
+            let options = options.read()
+                .map_err(|_| Error::from(ErrorCode::InternalError))?;
+            
+            match options.get_tool(&params.name) { 
+                Some(tool) => tool.clone(),
+                None => return Err(Error::new(ErrorCode::InvalidParams, "Tool not found"))
+            }
+        };
+        
+        tool.call(params.into()).await
     }
 
     /// A read resource request handler
     async fn resource(
-        options: Arc<McpOptions>, 
+        options: RuntimeMcpOptions, 
         params: ReadResourceRequestParams
     ) -> Result<ReadResourceResult, Error> {
-        match options.read_resource(&params.uri) {
-            Some(Route::Handler(handler)) => handler
-                .call(params.into())
-                .await,
-            _ => Err(Error::from(ErrorCode::ResourceNotFound)),
-        }
+        let handler = {
+            let options = options.read()
+                .map_err(|_| Error::from(ErrorCode::InternalError))?;
+
+            match options.read_resource(&params.uri) {
+                Some(Route::Handler(handler)) => handler.clone(),
+                _ => return Err(Error::from(ErrorCode::ResourceNotFound)),
+            }
+        };
+
+        handler.call(params.into()).await
     }
     
     /// A get prompt request handler
     async fn prompt(
-        options: Arc<McpOptions>, 
+        options: RuntimeMcpOptions, 
         params: GetPromptRequestParams
     ) -> Result<GetPromptResult, Error> {
-        match options.get_prompt(&params.name) {
-            Some(prompt) => prompt.call(params.into()).await,
-            None => Err(Error::new(ErrorCode::InvalidParams, "Prompt not found")),
-        }
+        let prompt = {
+            let options = options.read()
+                .map_err(|_| Error::from(ErrorCode::InternalError))?;
+
+            match options.get_prompt(&params.name) {
+                Some(prompt) => prompt.clone(),
+                None => return Err(Error::new(ErrorCode::InvalidParams, "Prompt not found"))
+            }
+        };
+
+        prompt.call(params.into()).await
     }
 
     /// Ping request handler
@@ -357,7 +421,7 @@ impl App {
     
     /// A subscription to a resource change request handler
     async fn resource_subscribe(
-        _options: Arc<McpOptions>, 
+        _options: RuntimeMcpOptions, 
         _params: SubscribeRequestParams
     ) -> Error {
         Error::new(ErrorCode::InvalidRequest, "resource_subscribe not implemented")
@@ -365,10 +429,22 @@ impl App {
 
     /// An unsubscription to from resource change request handler
     async fn resource_unsubscribe(
-        _options: Arc<McpOptions>, 
+        _options: RuntimeMcpOptions, 
         _params: UnsubscribeRequestParams
     ) -> Error {
         Error::new(ErrorCode::InvalidRequest, "resource_unsubscribe not implemented")
+    }
+    
+    /// Sets the logging level
+    async fn set_log_level(
+        options: RuntimeMcpOptions,
+        params: SetLevelRequestParams
+    ) -> Result<(), Error> {
+        let mut options = options.write()
+            .map_err(|_| Error::from(ErrorCode::InternalError))?;
+
+        options.set_log_level(params.level);
+        Ok(())
     }
 }
 

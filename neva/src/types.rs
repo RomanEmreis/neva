@@ -14,7 +14,9 @@ pub use capabilities::{
     ServerCapabilities, 
     ToolsCapability, 
     ResourcesCapability,
-    PromptsCapability
+    PromptsCapability,
+    LoggingCapability,
+    CompletionsCapability
 };
 pub use tool::{
     ListToolsRequestParams,
@@ -61,13 +63,14 @@ pub mod prompt;
 pub mod completion;
 pub mod content;
 pub mod reference;
+pub mod notification;
 pub(crate) mod helpers;
 
 pub(super) const JSONRPC_VERSION: &str = "2.0";
 
 /// Parameters for an initialization request sent to the server.
 /// 
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Clone, Deserialize)]
 pub struct InitializeRequestParams {
     /// The version of the Model Context Protocol that the client is to use.
@@ -84,7 +87,7 @@ pub struct InitializeRequestParams {
 
 /// Result of the initialization request sent to the server.
 /// 
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Clone, Serialize)]
 pub struct InitializeResult {
     /// The version of the Model Context Protocol that the server is to use.
@@ -105,7 +108,7 @@ pub struct InitializeResult {
 
 /// Describes the name and version of an MCP implementation.
 /// 
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Implementation {
     /// Name of the implementation.
@@ -117,7 +120,7 @@ pub struct Implementation {
 
 /// Represents the type of role in the conversation.
 ///
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -129,7 +132,7 @@ pub enum Role {
 
 /// Represents annotations that can be attached to content.
 /// 
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub struct Annotations {
     /// Describes who the intended customer of this object or data is.
@@ -224,6 +227,8 @@ impl InitializeResult {
                 tools: Some(options.tools_capability.clone()),
                 resources: Some(options.resources_capability.clone()),
                 prompts: Some(options.prompts_capability.clone()),
+                logging: Some(LoggingCapability::default()),
+                completions: Some(CompletionsCapability::default()),
             },
             server_info: options.implementation.clone(),
             instructions: None
