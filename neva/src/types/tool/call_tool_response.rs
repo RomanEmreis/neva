@@ -66,6 +66,13 @@ where
     }
 }
 
+impl From<()> for CallToolResponse {
+    #[inline]
+    fn from(_: ()) -> Self {
+        Self::empty()
+    }
+}
+
 impl From<&'static str> for CallToolResponse {
     #[inline]
     fn from(str: &str) -> Self {

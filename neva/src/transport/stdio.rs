@@ -27,6 +27,10 @@ impl StdIo {
 }
 
 impl Transport for StdIo {
+    fn meta(&self) -> &'static str {
+        "stdio"
+    }
+    
     fn start(&self) {
         let stdin = tokio::io::stdin();
         let mut reader = BufReader::new(stdin);

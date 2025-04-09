@@ -1,6 +1,6 @@
 ﻿//! MCP server options
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use crate::transport::{StdIo, TransportProto};
 use crate::app::handler::RequestHandler;
 use std::{
@@ -15,11 +15,25 @@ use crate::types::{
     ListResourceTemplatesResult, resource::Route,
     Prompt, ListPromptsResult,
     ResourcesCapability, ToolsCapability, PromptsCapability,
-    notification::LoggingLevel
 };
 
+#[cfg(feature = "tracing")]
+use crate::error::Error;
+#[cfg(feature = "tracing")]
+use crate::types::notification::LoggingLevel;
+
+#[cfg(feature = "tracing")]
+use tracing_subscriber::{
+    filter::LevelFilter, 
+    reload::Handle, 
+    Registry
+};
+
+#[cfg(feature = "tracing")]
+use crate::error::ErrorCode;
+
 /// Represents MCP server options that are available in runtime
-pub type RuntimeMcpOptions = Arc<RwLock<McpOptions>>;
+pub type RuntimeMcpOptions = Arc<McpOptions>;
 
 /// Represents MCP server configuration options
 #[derive(Default)]
@@ -37,7 +51,8 @@ pub struct McpOptions {
     pub(crate) prompts_capability: PromptsCapability,
     
     /// The last logging level set by the client
-    pub(crate) log_level: Option<LoggingLevel>,
+    #[cfg(feature = "tracing")]
+    pub(crate) log_level: Option<Handle<LevelFilter, Registry>>,
 
     /// An MCP version that server supports
     protocol_ver: Option<&'static str>,
@@ -115,9 +130,33 @@ impl McpOptions {
         self
     }
     
+    /// Configures [`LogLevelHandle`] that allow to change the [`LoggingLevel`] in runtime
+    #[cfg(feature = "tracing")]
+    pub fn with_logging(mut self, log_handle: Handle<LevelFilter, Registry>) -> Self {
+        self.log_level = Some(log_handle);
+        self
+    }
+    
     /// Sets the [`LoggingLevel`]
-    pub fn set_log_level(&mut self, level: LoggingLevel) {
-        self.log_level = Some(level);
+    #[cfg(feature = "tracing")]
+    pub fn set_log_level(&self, level: LoggingLevel) -> Result<(), Error> {
+        if let Some(handle) = &self.log_level {
+            handle
+                .modify(|current| *current = level.into())
+                .map_err(|e| Error::new(ErrorCode::InternalError, e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Returns current log level
+    #[cfg(feature = "tracing")]
+    pub(crate) fn log_level(&self) -> Option<LoggingLevel> {
+        match &self.log_level { 
+            None => None,
+            Some(handle) => handle
+                .clone_current()
+                .map(|x| x.into()),
+        }
     }
     
     /// Adds a tool
