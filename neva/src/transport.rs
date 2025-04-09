@@ -8,6 +8,10 @@ pub(crate) mod stdio;
 
 /// Describes a transport protocol for communicating between server and client
 pub(crate) trait Transport {
+    /// Transport protocol metadata (e.g. name, socket)
+    #[allow(dead_code)]
+    fn meta(&self) -> &'static str;
+    
     /// Starts the server with the current transport protocol
     fn start(&self);
 
@@ -35,6 +39,13 @@ impl Default for TransportProto {
 }
 
 impl Transport for TransportProto {
+    fn meta(&self) -> &'static str {
+        match self {
+            TransportProto::Stdio(stdio) => stdio.meta(),
+            TransportProto::None => "nothing",
+        }
+    }
+    
     #[inline]
     fn start(&self) {
         match self {

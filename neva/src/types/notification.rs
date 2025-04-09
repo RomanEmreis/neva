@@ -3,9 +3,18 @@
 use serde::{Serialize, Deserialize};
 use crate::types::JSONRPC_VERSION;
 
-pub use log_message::{LogMessage, LoggingLevel, SetLevelRequestParams};
+pub use log_message::{
+    LogMessage, 
+    LoggingLevel, 
+    SetLevelRequestParams
+};
+
+#[cfg(feature = "tracing")]
+pub use formatter::NotificationFormatter;
 
 pub mod log_message;
+#[cfg(feature = "tracing")]
+pub mod formatter;
 
 /// A notification which does not expect a response.
 #[derive(Debug, Clone, Serialize, Deserialize)]

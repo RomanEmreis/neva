@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use crate::error::{Error, ErrorCode};
 use crate::options::{McpOptions, RuntimeMcpOptions};
 use crate::transport::Transport;
@@ -22,9 +22,11 @@ use crate::types::{
     ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, 
     SubscribeRequestParams, UnsubscribeRequestParams, Resource, resource::{Route, template::ResourceFunc}, 
     ListPromptsRequestParams, ListPromptsResult, 
-    GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt,
-    notification::{SetLevelRequestParams}
+    GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt
 };
+
+#[cfg(feature = "tracing")]
+use crate::types::notification::SetLevelRequestParams;
 
 pub mod options;
 pub(crate) mod handler;
@@ -63,7 +65,8 @@ impl App {
         app.map_handler("notifications/cancelled", Self::notifications_cancel);
         
         app.map_handler("ping", Self::ping);
-        
+
+        #[cfg(feature = "tracing")]
         app.map_handler("logging/setLevel", Self::set_log_level);
         
         app
@@ -86,19 +89,32 @@ impl App {
     /// ```
     pub async fn run(mut self) {
         let mut transport = self.options.transport();
-        let options = Arc::new(RwLock::new(self.options));
+        let options = Arc::new(self.options);
 
         transport.start();
         
+        #[cfg(feature = "tracing")]
+        tracing::info!(logger = "neva", "Listening: {}", transport.meta());
+        
         while let Ok(req) = transport.recv().await {
             let req_id = req.id();
+
+            #[cfg(feature = "tracing")]
+            tracing::trace!(logger = "neva", "Received: {:?}", req);
+            
             let resp = match self.handlers.get(&req.method) {
                 Some(handler) => handler.call(HandlerParams::Request(options.clone(), req)).await,
                 None => Err(Error::new(ErrorCode::MethodNotFound, "unknown request"))
             };
             match transport.send(resp.into_response(req_id)).await { 
                 Ok(_) => (),
-                Err(e) => eprintln!("Error sending response: {:?}", e),
+                Err(_e) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::error!(
+                        logger = "neva", 
+                        error = format!("Error sending response: {:?}", _e)
+                    );
+                },
             }
         }
     }
@@ -300,9 +316,6 @@ impl App {
         options: RuntimeMcpOptions, 
         _params: InitializeRequestParams
     ) -> Result<InitializeResult, Error> {
-        let options = options.read()
-            .map_err(|_| Error::from(ErrorCode::InternalError))?;
-        
         Ok(InitializeResult::new(&options))
     }
 
@@ -316,44 +329,32 @@ impl App {
     async fn tools(
         options: RuntimeMcpOptions, 
         _params: ListToolsRequestParams
-    ) -> Result<ListToolsResult, Error> {
-        options
-            .read()
-            .map(|opt| opt.tools())
-            .map_err(|_| Error::from(ErrorCode::InternalError))
+    ) -> ListToolsResult {
+        options.tools()
     }
 
     /// Resources request handler
     async fn resources(
         options: RuntimeMcpOptions,
         _params: ListResourcesRequestParams
-    ) -> Result<ListResourcesResult, Error> {
-        options
-            .read()
-            .map(|opt| opt.resources())
-            .map_err(|_| Error::from(ErrorCode::InternalError))
+    ) -> ListResourcesResult {
+        options.resources()
     }
 
     /// Resource templates request handler
     async fn resource_templates(
         options: RuntimeMcpOptions, 
         _params: ListResourceTemplatesRequestParams
-    ) -> Result<ListResourceTemplatesResult, Error> {
-        options
-            .read()
-            .map(|opt| opt.resource_templates())
-            .map_err(|_| Error::from(ErrorCode::InternalError))
+    ) -> ListResourceTemplatesResult {
+        options.resource_templates()
     }
     
     /// Prompts request handler
     async fn prompts(
         options: RuntimeMcpOptions, 
         _params: ListPromptsRequestParams
-    ) -> Result<ListPromptsResult, Error> {
-        options
-            .read()
-            .map(|opt| opt.prompts())
-            .map_err(|_| Error::from(ErrorCode::InternalError))
+    ) -> ListPromptsResult {
+        options.prompts()
     }
     
     /// A tool call request handler
@@ -361,17 +362,10 @@ impl App {
         options: RuntimeMcpOptions, 
         params: CallToolRequestParams
     ) -> Result<CallToolResponse, Error> {
-        let tool = {
-            let options = options.read()
-                .map_err(|_| Error::from(ErrorCode::InternalError))?;
-            
-            match options.get_tool(&params.name) { 
-                Some(tool) => tool.clone(),
-                None => return Err(Error::new(ErrorCode::InvalidParams, "Tool not found"))
-            }
-        };
-        
-        tool.call(params.into()).await
+        match options.get_tool(&params.name) {
+            Some(tool) => tool.call(params.into()).await,
+            None => Err(Error::new(ErrorCode::InvalidParams, "Tool not found"))
+        }
     }
 
     /// A read resource request handler
@@ -379,17 +373,10 @@ impl App {
         options: RuntimeMcpOptions, 
         params: ReadResourceRequestParams
     ) -> Result<ReadResourceResult, Error> {
-        let handler = {
-            let options = options.read()
-                .map_err(|_| Error::from(ErrorCode::InternalError))?;
-
-            match options.read_resource(&params.uri) {
-                Some(Route::Handler(handler)) => handler.clone(),
-                _ => return Err(Error::from(ErrorCode::ResourceNotFound)),
-            }
-        };
-
-        handler.call(params.into()).await
+        match options.read_resource(&params.uri) {
+            Some(Route::Handler(handler)) => handler.call(params.into()).await,
+            _ => Err(Error::from(ErrorCode::ResourceNotFound)),
+        }
     }
     
     /// A get prompt request handler
@@ -397,17 +384,10 @@ impl App {
         options: RuntimeMcpOptions, 
         params: GetPromptRequestParams
     ) -> Result<GetPromptResult, Error> {
-        let prompt = {
-            let options = options.read()
-                .map_err(|_| Error::from(ErrorCode::InternalError))?;
-
-            match options.get_prompt(&params.name) {
-                Some(prompt) => prompt.clone(),
-                None => return Err(Error::new(ErrorCode::InvalidParams, "Prompt not found"))
-            }
-        };
-
-        prompt.call(params.into()).await
+        match options.get_prompt(&params.name) {
+            Some(prompt) => prompt.call(params.into()).await,
+            None => Err(Error::new(ErrorCode::InvalidParams, "Prompt not found"))
+        }
     }
 
     /// Ping request handler
@@ -436,15 +416,18 @@ impl App {
     }
     
     /// Sets the logging level
+    #[cfg(feature = "tracing")]
     async fn set_log_level(
         options: RuntimeMcpOptions,
         params: SetLevelRequestParams
     ) -> Result<(), Error> {
-        let mut options = options.write()
-            .map_err(|_| Error::from(ErrorCode::InternalError))?;
-
-        options.set_log_level(params.level);
-        Ok(())
+        let current_level = options.log_level();
+        tracing::debug!(
+            logger = "neva", 
+            "Logging level has been changed from {:?} to {:?}", current_level, params.level
+        );
+        
+        options.set_log_level(params.level)
     }
 }
 
