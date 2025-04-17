@@ -4,6 +4,7 @@ use serde::{Serialize, Deserialize};
 use crate::error::Error;
 use crate::app::handler::{FromHandlerParams, HandlerParams};
 use crate::types::{Request, FromRequest, response::ErrorDetails};
+use crate::types::notification::Notification;
 
 /// The severity of a log message.
 /// These map to syslog message severities, as specified in 
@@ -71,6 +72,16 @@ impl From<Error> for LogMessage {
             logger: None,
             data: Some(serde_json::to_value(&details).unwrap()),
         }
+    }
+}
+
+impl From<LogMessage> for Notification {
+    #[inline]
+    fn from(log: LogMessage) -> Self {
+        Self::new(
+            "notifications/message", 
+            serde_json::to_value(log).ok()
+        )
     }
 }
 

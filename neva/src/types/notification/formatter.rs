@@ -18,6 +18,7 @@ use crate::types::notification::{
     LoggingLevel, 
     Notification
 };
+use crate::types::ProgressToken;
 
 /// A formatter that formats tracing events into MCP notification logs
 pub struct NotificationFormatter;
@@ -109,29 +110,50 @@ where
 
         let meta = event.metadata();
         let level = meta.level();
-
+        
         let mut visitor = Visitor {
             map: BTreeMap::new(),
         };
 
         event.record(&mut visitor);
+        
+        let notification = match meta.target() { 
+            "progress" => {
+                let token = visitor.map
+                    .get("token")
+                    .map(|v| serde_json::from_value::<ProgressToken>(v.clone()).unwrap());
+                
+                let total = visitor.map
+                    .get("total")
+                    .map(|v| v.to_string().replace("\"", "").parse().unwrap());
 
-        let logger = visitor.map
-            .get("logger")
-            .map(|v| v.to_string().replace("\"", ""));
+                let value = visitor.map
+                    .get("value")
+                    .map(|v| v.to_string().replace("\"", "").parse().unwrap());
 
-        // Remove `logger` from data map
-        let mut data_map = visitor.map.clone();
-        data_map.remove("logger");
+                token.unwrap()
+                    .notify(value.unwrap(), total)
+                    .into()
+            },
+            _ => {
+                let logger = visitor.map
+                    .get("logger")
+                    .map(|v| v.to_string().replace("\"", ""));
 
-        let log = LogMessage {
-            level: level.into(),
-            data: serde_json::to_value(data_map).ok(),
-            logger,
+                // Remove `logger` from data map
+                let mut data_map = visitor.map.clone();
+                data_map.remove("logger");
+
+                let log = LogMessage {
+                    level: level.into(),
+                    data: serde_json::to_value(data_map).ok(),
+                    logger,
+                };
+
+                Notification::from(log)
+            }
         };
         
-        let notification = Notification::log(log);
-
         let json = serde_json::to_string(&notification).unwrap();
         writeln!(writer, "{}", json)
     }

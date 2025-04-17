@@ -1,6 +1,8 @@
 ﻿//! MCP server options
 
 use std::sync::Arc;
+use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use crate::transport::{StdIo, TransportProto};
 use crate::app::handler::RequestHandler;
 use std::{
@@ -9,6 +11,7 @@ use std::{
 };
 use crate::PROTOCOL_VERSIONS;
 use crate::types::{
+    RequestId,
     Implementation, 
     Tool, ListToolsResult, 
     Resource, Uri, ReadResourceResult, ResourceTemplate, ListResourcesResult,
@@ -74,6 +77,9 @@ pub struct McpOptions {
 
     /// A map of prompts, where the _key_ is a prompt _name_
     prompts: HashMap<String, Prompt>,
+    
+    /// Currently running requests
+    requests: RwLock<HashMap<RequestId, CancellationToken>>
 }
 
 impl McpOptions {
@@ -157,6 +163,30 @@ impl McpOptions {
                 .clone_current()
                 .map(|x| x.into()),
         }
+    }
+    
+    /// Tracks the request with `req_id` and returns the [`CancellationToken`] for this request
+    pub(crate) async fn track_request(&self, req_id: RequestId) -> CancellationToken {
+        let token = CancellationToken::new();
+
+        let mut requests = self.requests.write().await;
+        requests.insert(req_id, token.clone());
+        
+        token
+    }
+    
+    /// Cancels the request with `req_id` if it is present
+    pub(crate) async fn cancel_request(&self, req_id: RequestId) {
+        if let Some(token) = self.requests.write().await.remove(&req_id) {
+            token.cancel();
+        }
+    }
+
+    /// Completes the request with `req_id` if it is present
+    pub(crate) async fn complete_request(&self, req_id: RequestId) {
+        self.requests.write()
+            .await
+            .remove(&req_id);
     }
     
     /// Adds a tool
@@ -371,7 +401,8 @@ mod tests {
             ResourceFunc::new(handler));
 
         let req = ReadResourceRequestParams {
-            uri: "res://res".into()
+            uri: "res://res".into(),
+            meta: None
         };
         
         let res = options.read_resource(&req.uri).unwrap();
@@ -395,7 +426,8 @@ mod tests {
             ResourceFunc::new(handler));
 
         let req = ReadResourceRequestParams {
-            uri: "res://res".into()
+            uri: "res://res".into(),
+            meta: None
         };
 
         let res = options.read_resource(&req.uri).unwrap();
@@ -435,7 +467,8 @@ mod tests {
 
         let req = GetPromptRequestParams {
             name: "test".into(),
-            args: None
+            args: None,
+            meta: None,
         };
 
         let result = prompt.call(req.into()).await.unwrap();
@@ -458,7 +491,8 @@ mod tests {
 
         let req = GetPromptRequestParams {
             name: "test".into(),
-            args: None
+            args: None,
+            meta: None,
         };
 
         let result = prompt.call(req.into()).await;

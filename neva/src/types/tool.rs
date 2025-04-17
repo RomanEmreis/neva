@@ -9,11 +9,23 @@ use serde_json::Value;
 use crate::error::Error;
 use super::helpers::TypeCategory;
 use crate::{
-    app::handler::{Handler, HandlerParams, GenericHandler, RequestHandler},
-    types::{PropertyType, Request, request::FromRequest, RequestId, Response, IntoResponse}
+    app::handler::{
+        FromHandlerParams, 
+        Handler, 
+        HandlerParams, 
+        GenericHandler, 
+        RequestHandler
+    },
+    types::{
+        PropertyType, 
+        Request, 
+        request::{FromRequest, RequestParamsMeta}, 
+        RequestId, 
+        Response, 
+        IntoResponse
+    }
 };
 
-use crate::app::handler::FromHandlerParams;
 
 pub use call_tool_response::CallToolResponse;
 
@@ -22,7 +34,7 @@ pub mod call_tool_response;
 
 /// Represents a tool that the server is capable of calling. Part of the [`ListToolsResult`].
 /// 
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Clone, Serialize)]
 pub struct Tool {
     /// The name of the tool.
@@ -45,7 +57,7 @@ pub struct Tool {
 
 /// Sent from the client to request a list of tools the server has.
 /// 
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Deserialize)]
 pub struct ListToolsRequestParams {
     /// An opaque token representing the current pagination position.
@@ -55,7 +67,7 @@ pub struct ListToolsRequestParams {
 
 /// A response to a request to list the tools available on the server.
 /// 
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Default, Serialize)]
 pub struct ListToolsResult {
     /// The server's response to a tools/list request from the client.
@@ -64,7 +76,7 @@ pub struct ListToolsResult {
 
 /// Used by the client to invoke a tool provided by the server.
 /// 
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Clone, Deserialize)]
 pub struct CallToolRequestParams {
     /// Tool name.
@@ -73,6 +85,13 @@ pub struct CallToolRequestParams {
     /// Optional arguments to pass to the tool.
     #[serde(rename = "arguments")]
     pub args: Option<HashMap<String, Value>>,
+
+    /// Metadata related to the request that provides additional protocol-level information.
+    /// 
+    /// > **Note:** This can include progress tracking tokens and other protocol-specific properties
+    /// > that are not part of the primary request parameters.
+    #[serde(rename = "_meta")]
+    pub meta: Option<RequestParamsMeta>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -296,11 +315,13 @@ macro_rules! impl_generic_tool_handler ({ $($param:ident)* } => {
             let mut args = HashMap::new();
             $(
             {
-                let prop = SchemaProperty::new::<$param>(); 
-                args.insert(
-                    prop.r#type.to_string(),
-                    prop
-                )
+                let prop = SchemaProperty::new::<$param>();
+                if prop.r#type != PropertyType::None {
+                    args.insert(
+                        prop.r#type.to_string(),
+                        prop
+                    );
+                }
             };
             )*
             if args.len() == 0 { 
@@ -329,6 +350,7 @@ mod tests {
         
         let params = CallToolRequestParams {
             name: "sum".into(),
+            meta: None,
             args: Some(HashMap::from([
                 ("a".into(), serde_json::to_value(5).unwrap()),
                 ("b".into(), serde_json::to_value(2).unwrap()),

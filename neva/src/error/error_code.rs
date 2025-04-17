@@ -23,7 +23,10 @@ pub enum ErrorCode {
     InternalError = -32603,
 
     /// The resource does not exist / is not available.
-    ResourceNotFound = -32002
+    ResourceNotFound = -32002,
+    
+    /// [Internal code] The request has been cancelled
+    RequestCancelled = -99999
 }
 
 impl Default for ErrorCode {
@@ -48,6 +51,8 @@ impl TryFrom<i32> for ErrorCode {
             -32601 => Ok(ErrorCode::MethodNotFound),
             -32602 => Ok(ErrorCode::InvalidParams),
             -32603 => Ok(ErrorCode::InternalError),
+            -32002 => Ok(ErrorCode::ResourceNotFound),
+            -99999 => Ok(ErrorCode::RequestCancelled),
             _ => Err(()),
         }
     }
@@ -86,6 +91,7 @@ impl Display for ErrorCode {
             ErrorCode::InvalidParams  => write!(f, "Invalid parameters"),
             ErrorCode::InternalError => write!(f, "Internal error"),
             ErrorCode::ResourceNotFound => write!(f, "Resource not found"),
+            ErrorCode::RequestCancelled => write!(f, "Request cancelled"),
         }
     }
 }
@@ -108,6 +114,8 @@ mod tests {
             (-32601, ErrorCode::MethodNotFound),
             (-32602, ErrorCode::InvalidParams),
             (-32603, ErrorCode::InternalError),
+            (-32002, ErrorCode::ResourceNotFound),
+            (-99999, ErrorCode::RequestCancelled),
         ];
 
         for (code, val) in codes {
@@ -127,6 +135,8 @@ mod tests {
             ("-32601", ErrorCode::MethodNotFound),
             ("-32602", ErrorCode::InvalidParams),
             ("-32603", ErrorCode::InternalError),
+            ("-32002", ErrorCode::ResourceNotFound),
+            ("-99999", ErrorCode::RequestCancelled),
         ];
 
         for (code, val) in codes {

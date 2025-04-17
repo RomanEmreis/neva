@@ -8,33 +8,72 @@ use tokio::{
 };
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
-use crate::transport::Transport;
+use crate::transport::{
+    Transport, 
+    Sender as TransportSender, 
+    Receiver as TransportReceiver
+};
 
 /// Represents stdio transport
 pub struct StdIo {
-    stdout: Stdout,
-    tx: Sender<Result<Request, Error>>,
-    rx: Receiver<Result<Request, Error>>
+    listener: Sender<Result<Request, Error>>,
+    sender: StdIoSender,
+    receiver: StdIoReceiver,
 }
+
+/// Represents stdio sender
+pub struct StdIoSender(Stdout);
+
+/// Represents stdio receiver
+pub struct StdIoReceiver(Receiver<Result<Request, Error>>);
 
 impl StdIo {
     /// Creates a new stdio transport
     pub(crate) fn new() -> Self {
         let (tx, rx) = mpsc::channel(100);
-        let stdout = tokio::io::stdout();
-        Self { stdout, tx, rx }
+        Self { 
+            listener: tx, 
+            receiver: StdIoReceiver(rx),
+            sender: StdIoSender(tokio::io::stdout()), 
+        }
+    }
+}
+
+impl Clone for StdIoSender {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self(tokio::io::stdout())
+    }
+}
+
+impl TransportSender for StdIoSender {
+    async fn send(&mut self, resp: Response) -> Result<(), Error> {
+        let mut json_bytes = serde_json::to_vec(&resp)?;
+        json_bytes.push(b'\n');
+        self.0.write_all(json_bytes.as_slice()).await?;
+        self.0.flush().await?;
+        
+        Ok(())
+    }
+}
+
+impl TransportReceiver for StdIoReceiver {
+    async fn recv(&mut self) -> Result<Request, Error> {
+        match self.0.recv().await {
+            Some(res) => Ok(res?),
+            None => Err(Error::new(ErrorCode::InvalidRequest, "unexpected end of stream"))
+        }
     }
 }
 
 impl Transport for StdIo {
-    fn meta(&self) -> &'static str {
-        "stdio"
-    }
+    type Sender = StdIoSender;
+    type Receiver = StdIoReceiver;
     
     fn start(&self) {
         let stdin = tokio::io::stdin();
         let mut reader = BufReader::new(stdin);
-        let tx = self.tx.clone();
+        let tx = self.listener.clone();
         tokio::spawn(async move {
             let mut line = String::new();
             loop {
@@ -56,22 +95,13 @@ impl Transport for StdIo {
                 };
             }
         });
+
+        #[cfg(feature = "tracing")]
+        tracing::info!(logger = "neva", "Listening: stdio");
     }
-    
-    async fn recv(&mut self) -> Result<Request, Error> {
-        match self.rx.recv().await {
-            Some(res) => Ok(res?),
-            None => Err(Error::new(ErrorCode::InvalidRequest, "unexpected end of stream"))
-        }
-    }
-    
-    async fn send(&mut self, resp: Response) -> Result<(), Error> {
-        let mut json_bytes = serde_json::to_vec(&resp)?;
-        json_bytes.push(b'\n');
-        self.stdout.write_all(json_bytes.as_slice()).await?;
-        self.stdout.flush().await?;
-        
-        Ok(())
+
+    fn split(self) -> (Self::Sender, Self::Receiver) {
+        (self.sender, self.receiver)
     }
 }
 

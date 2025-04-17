@@ -5,7 +5,7 @@ use std::future::Future;
 use std::sync::Arc;
 use crate::error::{Error, ErrorCode};
 use crate::options::{McpOptions, RuntimeMcpOptions};
-use crate::transport::Transport;
+use crate::transport::{Receiver, Sender, Transport};
 use crate::app::handler::{
     FromHandlerParams,
     GenericHandler,
@@ -22,7 +22,8 @@ use crate::types::{
     ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, 
     SubscribeRequestParams, UnsubscribeRequestParams, Resource, resource::{Route, template::ResourceFunc}, 
     ListPromptsRequestParams, ListPromptsResult, 
-    GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt
+    GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt,
+    notification::CancelledNotificationParams
 };
 
 #[cfg(feature = "tracing")]
@@ -88,34 +89,53 @@ impl App {
     /// # }
     /// ```
     pub async fn run(mut self) {
-        let mut transport = self.options.transport();
+        let transport = self.options.transport();
         let options = Arc::new(self.options);
-
+        let handlers = Arc::new(self.handlers);
+        
         transport.start();
         
-        #[cfg(feature = "tracing")]
-        tracing::info!(logger = "neva", "Listening: {}", transport.meta());
+        let (sender, mut receiver) = transport.split();
         
-        while let Ok(req) = transport.recv().await {
+        while let Ok(req) = receiver.recv().await {
             let req_id = req.id();
+            let handlers = handlers.clone();
+            let options = options.clone();
+            let token = options.track_request(req_id.clone()).await;
+            let mut sender = sender.clone();
+            tokio::task::spawn(async move {
+                #[cfg(feature = "tracing")]
+                tracing::trace!(logger = "neva", "Received: {:?}", req);
 
-            #[cfg(feature = "tracing")]
-            tracing::trace!(logger = "neva", "Received: {:?}", req);
-            
-            let resp = match self.handlers.get(&req.method) {
-                Some(handler) => handler.call(HandlerParams::Request(options.clone(), req)).await,
-                None => Err(Error::new(ErrorCode::MethodNotFound, "unknown request"))
-            };
-            match transport.send(resp.into_response(req_id)).await { 
-                Ok(_) => (),
-                Err(_e) => {
-                    #[cfg(feature = "tracing")]
-                    tracing::error!(
-                        logger = "neva", 
-                        error = format!("Error sending response: {:?}", _e)
-                    );
-                },
-            }
+                let resp = match handlers.get(&req.method) {
+                    None => Err(Error::new(ErrorCode::MethodNotFound, "unknown request")),
+                        Some(handler) => tokio::select! {
+                        resp = handler.call(HandlerParams::Request(options.clone(), req)) => {
+                            options.complete_request(req_id.clone()).await;
+                            resp
+                        }
+                        _ = token.cancelled() => {
+                            #[cfg(feature = "tracing")]
+                            tracing::debug!(
+                                logger = "neva", 
+                                "The request with ID: {} has been cancelled", req_id);
+                            
+                            Err(Error::new(ErrorCode::RequestCancelled, "request cancelled"))
+                        }
+                    },
+                };
+
+                match sender.send(resp.into_response(req_id)).await {
+                        Ok(_) => (),
+                        Err(_e) => {
+                            #[cfg(feature = "tracing")]
+                            tracing::error!(
+                            logger = "neva", 
+                            error = format!("Error sending response: {:?}", _e)
+                        );
+                    },
+                } 
+            });
         }
     }
     
@@ -397,7 +417,12 @@ impl App {
     async fn notifications_init() {}
     
     /// A notification cancel request handler
-    async fn notifications_cancel() {}
+    async fn notifications_cancel(
+        options: RuntimeMcpOptions,
+        params: CancelledNotificationParams
+    ) {
+        options.cancel_request(params.request_id).await;
+    }
     
     /// A subscription to a resource change request handler
     async fn resource_subscribe(
