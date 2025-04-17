@@ -1,4 +1,5 @@
-﻿use crate::error::{Error, ErrorCode};
+﻿use crate::types::{Meta, ProgressToken, request::RequestParamsMeta};
+use crate::error::{Error, ErrorCode};
 use super::GetPromptRequestParams;
 use serde::de::DeserializeOwned;
 
@@ -8,6 +9,29 @@ impl TryFrom<GetPromptRequestParams> for () {
     #[inline]
     fn try_from(_: GetPromptRequestParams) -> Result<Self, Self::Error> {
         Ok(())
+    }
+}
+
+impl TryFrom<GetPromptRequestParams> for (Meta<RequestParamsMeta>,) {
+    type Error = Error;
+
+    #[inline]
+    fn try_from(params: GetPromptRequestParams) -> Result<Self, Self::Error> {
+        params.meta
+            .ok_or(Error::new(ErrorCode::InvalidParams, "Missing metadata"))
+            .map(|meta| (Meta(meta),))
+    }
+}
+
+impl TryFrom<GetPromptRequestParams> for (Meta<ProgressToken>,) {
+    type Error = Error;
+
+    #[inline]
+    fn try_from(params: GetPromptRequestParams) -> Result<Self, Self::Error> {
+        params.meta
+            .and_then(|meta| meta.progress_token)
+            .ok_or(Error::new(ErrorCode::InvalidParams, "Missing progress token"))
+            .map(|token| (Meta(token),))
     }
 }
 

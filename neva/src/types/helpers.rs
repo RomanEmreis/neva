@@ -6,11 +6,17 @@ use std::{
     fmt::{self, Display, Formatter},
     ops::{Deref, DerefMut},
 };
+use crate::types::{
+    CallToolRequestParams,
+    ReadResourceRequestParams,
+    GetPromptRequestParams
+};
 
 /// Represents a SchemaProperty type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PropertyType {
+    None,
     Array,
     String,
     Number,
@@ -62,6 +68,7 @@ impl Display for PropertyType {
             PropertyType::Number => write!(f, "number"),
             PropertyType::Bool => write!(f, "boolean"),
             PropertyType::Object => write!(f, "object"),
+            PropertyType::None => write!(f, "unknown"),
         }
     }
 }
@@ -126,11 +133,31 @@ impl_type_category!(Vec<T>, T, PropertyType::Array);
 impl_type_category!([T], T, PropertyType::Array);
 impl_type_category!(&[T], T, PropertyType::Array);
 
+impl_type_category!(CallToolRequestParams, PropertyType::None);
+impl_type_category!(ReadResourceRequestParams, PropertyType::None);
+impl_type_category!(GetPromptRequestParams, PropertyType::None);
+impl_type_category!(Meta<T>, T, PropertyType::None);
+
+impl_type_category!(Value, PropertyType::Object);
+impl_type_category!(Json<T>, T, PropertyType::Object);
+
 /// Wraps JSON-typed data
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub struct Json<T>(T);
+pub struct Json<T>(pub T);
+
+/// Wraps  metadata
+#[derive(Debug, Default)]
+pub struct Meta<T>(pub T);
 
 impl<T> Json<T> {
+    /// Unwraps the inner `T`
+    #[inline]
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+impl<T> Meta<T> {
     /// Unwraps the inner `T`
     #[inline]
     pub fn into_inner(self) -> T {
@@ -161,6 +188,22 @@ impl<T> DerefMut for Json<T> {
     }
 }
 
+impl<T> Deref for Meta<T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T> DerefMut for Meta<T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.0
+    }
+}
+
 impl<T: Display> Display for Json<T> {
     #[inline]
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -168,17 +211,10 @@ impl<T: Display> Display for Json<T> {
     }
 }
 
-impl<T> sealed::TypeCategorySealed for Json<T> {}
-impl<T> TypeCategory for Json<T> {
-    fn category() -> PropertyType {
-        PropertyType::Object
-    }
-}
-
-impl sealed::TypeCategorySealed for Value {}
-impl TypeCategory for Value {
-    fn category() -> PropertyType {
-        PropertyType::Object
+impl<T: Display> Display for Meta<T> {
+    #[inline]
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        Display::fmt(&self.0, f)
     }
 }
 

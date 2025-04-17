@@ -6,10 +6,11 @@ use std::future::Future;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use crate::types::{IntoResponse, Request, RequestId, Response};
+use super::helpers::TypeCategory;
+use crate::types::{IntoResponse, PropertyType, Request, RequestId, Response};
 use crate::app::handler::{FromHandlerParams, HandlerParams, GenericHandler, Handler, RequestHandler};
 use crate::error::Error;
-use crate::types::request::FromRequest;
+use crate::types::request::{FromRequest, RequestParamsMeta};
 
 pub use get_prompt_result::{GetPromptResult, PromptMessage};
 
@@ -74,7 +75,14 @@ pub struct GetPromptRequestParams {
     
     /// Arguments to use for templating the prompt.
     #[serde(rename = "arguments", skip_serializing_if = "Option::is_none")]
-    pub args: Option<HashMap<String, serde_json::Value>>,
+    pub args: Option<HashMap<String, Value>>,
+
+    /// Metadata related to the request that provides additional protocol-level information.
+    ///
+    /// > **Note:** This can include progress tracking tokens and other protocol-specific properties
+    /// > that are not part of the primary request parameters.
+    #[serde(rename = "_meta")]
+    pub meta: Option<RequestParamsMeta>,
 }
 
 /// The server's response to a prompts/list request from the client.
@@ -314,7 +322,7 @@ impl PromptArgument {
 }
 
 macro_rules! impl_generic_prompt_handler ({ $($param:ident)* } => {
-    impl<Func, Fut: Send, $($param,)*> PromptHandler<($($param,)*)> for Func
+    impl<Func, Fut: Send, $($param: TypeCategory,)*> PromptHandler<($($param,)*)> for Func
     where
         Func: Fn($($param),*) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future + 'static,
@@ -324,7 +332,11 @@ macro_rules! impl_generic_prompt_handler ({ $($param:ident)* } => {
         fn args() -> Option<Vec<PromptArgument>> {
             let mut args = Vec::new();
             $(
-            args.push(PromptArgument::new::<$param>());
+            {
+                if $param::category() != PropertyType::None { 
+                    args.push(PromptArgument::new::<$param>());
+                } 
+            }
             )*
             if args.len() == 0 { 
                 None

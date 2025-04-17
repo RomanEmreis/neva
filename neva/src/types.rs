@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::SERVER_NAME;
 use crate::options::McpOptions;
 
-pub use helpers::{Json, PropertyType};
+pub use helpers::{Json, Meta, PropertyType};
 pub use request::{RequestId, Request};
 pub use response::{IntoResponse, Response};
 pub use reference::Reference;
@@ -52,6 +52,7 @@ pub use prompt::{
 };
 use crate::app::handler::{FromHandlerParams, HandlerParams};
 use crate::error::Error;
+use crate::types::notification::ProgressNotification;
 use crate::types::request::FromRequest;
 
 pub mod request;
@@ -140,6 +141,35 @@ pub struct Annotations {
     
     /// Describes how important this data is for operating the server (0 to 1).
     priority: f32
+}
+
+/// Represents a progress token, which can be either a string or an integer.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ProgressToken {
+    String(String),
+    Number(i32),
+}
+
+impl Display for ProgressToken {
+    #[inline]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self { 
+            ProgressToken::String(s) => write!(f, "{}", s),
+            ProgressToken::Number(n) => write!(f, "{}", n),
+        }
+    }
+}
+
+impl ProgressToken {
+    /// Creates a [`ProgressNotification`]
+    pub fn notify(&self, progress: f64, total: Option<f64>) -> ProgressNotification {
+        ProgressNotification {
+            progress_token: self.clone(),
+            progress,
+            total
+        }
+    }
 }
 
 impl Display for Role {

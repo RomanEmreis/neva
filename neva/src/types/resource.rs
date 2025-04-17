@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::types::{RequestId, Response, IntoResponse, Request};
 use crate::app::handler::{FromHandlerParams, HandlerParams};
 use crate::error::Error;
-use crate::types::request::FromRequest;
+use crate::types::request::{FromRequest, RequestParamsMeta};
 
 pub use uri::Uri;
 pub use read_resource_result::{ReadResourceResult, ResourceContents};
@@ -55,6 +55,13 @@ pub struct ReadResourceRequestParams {
     /// The URI of the resource to read. The URI can use any protocol; 
     /// it is up to the server how to interpret it.
     pub uri: Uri,
+
+    /// Metadata related to the request that provides additional protocol-level information.
+    ///
+    /// > **Note:** This can include progress tracking tokens and other protocol-specific properties
+    /// > that are not part of the primary request parameters.
+    #[serde(rename = "_meta")]
+    pub meta: Option<RequestParamsMeta>,
 }
 
 /// The server's response to a resources/list request from the client.

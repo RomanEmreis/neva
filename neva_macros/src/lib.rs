@@ -3,13 +3,7 @@
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::parse::Parser;
-use syn::{
-    parse_macro_input, 
-    ItemFn, FnArg, Pat, Type, Lit, Expr, 
-    punctuated::Punctuated, 
-    MetaNameValue,
-    Token
-};
+use syn::{parse_macro_input, ItemFn, FnArg, Pat, Type, Lit, Expr, punctuated::Punctuated, Token, Meta};
 
 /// Maps the function to a tool
 #[proc_macro_attribute]
@@ -19,28 +13,46 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Parse the attribute for metadata
     let mut description = None;
     let mut schema = None;
+    let mut no_schema = false;
 
     // Parse the attribute input as key-value pairs
-    let parser = Punctuated::<MetaNameValue, Token![,]>::parse_terminated;
+    let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
     let parsed_attrs = parser
         .parse(attr)
         .expect("Failed to parse attributes");
 
     for meta in parsed_attrs {
-        if let Some(ident) = meta.path.get_ident() {
-            match ident.to_string().as_str() {
-                "descr" => {
-                    if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = meta.value {
-                        description = Some(lit_str.value());
+        match &meta {
+            Meta::Path(path) => {
+                if path.is_ident("no_schema") {
+                    no_schema = true;
+                }
+            },
+            Meta::NameValue(nv) => {
+                if let Some(ident) = nv.path.get_ident() {
+                    match ident.to_string().as_str() {
+                        "descr" => {
+                            if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = &nv.value {
+                                description = Some(lit_str.value());
+                            }
+                        }
+                        "schema" => {
+                            if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = &nv.value {
+                                schema = Some(lit_str.value());
+                            }
+                        }
+                        "no_schema" => {
+                            if let Expr::Lit(syn::ExprLit { lit: Lit::Bool(lit), .. }) = &nv.value {
+                                if lit.value {
+                                    no_schema = true;
+                                } 
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                "schema" => {
-                    if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = meta.value {
-                        schema = Some(lit_str.value());
-                    }
-                }
-                _ => {}
-            }
+            },
+            Meta::List(_) => {}
         }
     }
 
@@ -56,7 +68,7 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
                 neva::types::tool::InputSchema::from_json_str(#schema_json)
             })
         }
-    } else {
+    } else if !no_schema {
         let mut schema_entries = Vec::new();
 
         for arg in &function.sig.inputs {
@@ -102,6 +114,8 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
         } else { 
             quote! {}
         }   
+    } else {
+        quote! {}
     };
     
     let module_name = syn::Ident::new(&format!("map_{}", func_name), func_name.span());
@@ -131,38 +145,44 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut description = None;
     let mut mime = None;
     let mut annotations = None;
-
+    
     // Parse the attribute input as key-value pairs
-    let parser = Punctuated::<MetaNameValue, Token![,]>::parse_terminated;
+    let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
     let parsed_attrs = parser
         .parse(attr)
         .expect("Failed to parse attributes");
 
     for meta in parsed_attrs {
-        if let Some(ident) = meta.path.get_ident() {
-            match ident.to_string().as_str() {
-                "uri" => {
-                    if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = meta.value {
-                        uri = Some(lit_str.value());
+        match &meta {
+            Meta::Path(_) => {},
+            Meta::List(_) => {},
+            Meta::NameValue(nv) => {
+                if let Some(ident) = nv.path.get_ident() {
+                    match ident.to_string().as_str() {
+                        "uri" => {
+                            if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = &nv.value {
+                                uri = Some(lit_str.value());
+                            }
+                        }
+                        "descr" => {
+                            if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = &nv.value {
+                                description = Some(lit_str.value());
+                            }
+                        }
+                        "mime" => {
+                            if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = &nv.value {
+                                mime = Some(lit_str.value());
+                            }
+                        }
+                        "annotations" => {
+                            if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = &nv.value {
+                                annotations = Some(lit_str.value());
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                "descr" => {
-                    if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = meta.value {
-                        description = Some(lit_str.value());
-                    }
-                }
-                "mime" => {
-                    if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = meta.value {
-                        mime = Some(lit_str.value());
-                    }
-                }
-                "annotations" => {
-                    if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = meta.value {
-                        annotations = Some(lit_str.value());
-                    }
-                }
-                _ => {}
-            }
+            },
         }
     }
     
@@ -211,28 +231,46 @@ pub fn prompt(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Parse the attribute for metadata
     let mut description = None;
     let mut args = None;
+    let mut no_args = false;
 
     // Parse the attribute input as key-value pairs
-    let parser = Punctuated::<MetaNameValue, Token![,]>::parse_terminated;
+    let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
     let parsed_attrs = parser
         .parse(attr)
         .expect("Failed to parse attributes");
 
     for meta in parsed_attrs {
-        if let Some(ident) = meta.path.get_ident() {
-            match ident.to_string().as_str() {
-                "descr" => {
-                    if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = meta.value {
-                        description = Some(lit_str.value());
+        match &meta {
+            Meta::Path(path) => {
+                if path.is_ident("no_args") {
+                    no_args = true;
+                }
+            },
+            Meta::NameValue(nv) => {
+                if let Some(ident) = nv.path.get_ident() {
+                    match ident.to_string().as_str() {
+                        "descr" => {
+                            if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = &nv.value {
+                                description = Some(lit_str.value());
+                            }
+                        }
+                        "args" => {
+                            if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = &nv.value {
+                                args = Some(lit_str.value());
+                            }
+                        }
+                        "no_args" => {
+                            if let Expr::Lit(syn::ExprLit { lit: Lit::Bool(lit), .. }) = &nv.value {
+                                if lit.value {
+                                    no_args = true;
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                "args" => {
-                    if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = meta.value {
-                        args = Some(lit_str.value());
-                    }
-                }
-                _ => {}
-            }
+            },
+            Meta::List(_) => {}
         }
     }
 
@@ -244,7 +282,7 @@ pub fn prompt(attr: TokenStream, item: TokenStream) -> TokenStream {
     // If no schema is provided, generate it automatically from function arguments
     let args_code = if let Some(args_json) = args {
         quote! { .with_args(neva::types::prompt::PromptArguments::from_json_str(#args_json)) }
-    } else {
+    } else if !no_args {
         let mut arg_entries = Vec::new();
         for arg in &function.sig.inputs {
             if let FnArg::Typed(pat_type) = arg {
@@ -261,6 +299,8 @@ pub fn prompt(attr: TokenStream, item: TokenStream) -> TokenStream {
         } else {
             quote! {}
         }
+    } else {
+        quote! {}
     };
 
     let module_name = syn::Ident::new(&format!("map_{}", func_name), func_name.span());

@@ -1,5 +1,6 @@
 ﻿use std::str::FromStr;
 use crate::error::{Error, ErrorCode};
+use crate::types::{ProgressToken, request::RequestParamsMeta, Meta};
 use super::{Uri, ReadResourceRequestParams};
 
 impl TryFrom<ReadResourceRequestParams> for (Uri,) {
@@ -17,6 +18,29 @@ impl TryFrom<ReadResourceRequestParams> for (ReadResourceRequestParams,) {
     #[inline]
     fn try_from(params: ReadResourceRequestParams) -> Result<Self, Self::Error> {
         Ok((params,))
+    }
+}
+
+impl TryFrom<ReadResourceRequestParams> for (Meta<RequestParamsMeta>,) {
+    type Error = Error;
+
+    #[inline]
+    fn try_from(params: ReadResourceRequestParams) -> Result<Self, Self::Error> {
+        params.meta
+            .ok_or(Error::new(ErrorCode::InvalidParams, "Missing metadata"))
+            .map(|meta| (Meta(meta),))
+    }
+}
+
+impl TryFrom<ReadResourceRequestParams> for (Meta<ProgressToken>,) {
+    type Error = Error;
+
+    #[inline]
+    fn try_from(params: ReadResourceRequestParams) -> Result<Self, Self::Error> {
+        params.meta
+            .and_then(|meta| meta.progress_token)
+            .ok_or(Error::new(ErrorCode::InvalidParams, "Missing progress token"))
+            .map(|token| (Meta(token),))
     }
 }
 
