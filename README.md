@@ -9,7 +9,7 @@ Easy configurable MCP server SDK for Rust
 
 > 💡 **Note**: This project is currently in preview. Breaking changes can be introduced without prior notice.
 
-[API Docs](https://docs.rs/volga/latest/neva/) | [Examples](https://github.com/RomanEmreis/neva/tree/main/examples)
+[API Docs](https://docs.rs/neva/latest/neva/) | [Examples](https://github.com/RomanEmreis/neva/tree/main/examples)
 
 ## Dependencies
 ```toml
