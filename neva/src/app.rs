@@ -89,7 +89,7 @@ impl App {
     /// # }
     /// ```
     pub async fn run(mut self) {
-        let transport = self.options.transport();
+        let mut transport = self.options.transport();
         let options = Arc::new(self.options);
         let handlers = Arc::new(self.handlers);
         
@@ -99,19 +99,21 @@ impl App {
         
         while let Ok(req) = receiver.recv().await {
             let req_id = req.id();
+            
             let handlers = handlers.clone();
             let options = options.clone();
-            let token = options.track_request(req_id.clone()).await;
+            
+            let token = options.track_request(&req_id).await;
+            
             let mut sender = sender.clone();
             tokio::task::spawn(async move {
                 #[cfg(feature = "tracing")]
                 tracing::trace!(logger = "neva", "Received: {:?}", req);
-
-                let resp = match handlers.get(&req.method) {
-                    None => Err(Error::new(ErrorCode::MethodNotFound, "unknown request")),
-                        Some(handler) => tokio::select! {
+                
+                let resp = if let Some(handler) = handlers.get(&req.method) {
+                    tokio::select! {
                         resp = handler.call(HandlerParams::Request(options.clone(), req)) => {
-                            options.complete_request(req_id.clone()).await;
+                            options.complete_request(&req_id).await;
                             resp
                         }
                         _ = token.cancelled() => {
@@ -119,22 +121,19 @@ impl App {
                             tracing::debug!(
                                 logger = "neva", 
                                 "The request with ID: {} has been cancelled", req_id);
-                            
-                            Err(Error::new(ErrorCode::RequestCancelled, "request cancelled"))
+                            Err(Error::from(ErrorCode::RequestCancelled))
                         }
-                    },
+                    }
+                } else {
+                    Err(Error::from(ErrorCode::MethodNotFound))
                 };
 
-                match sender.send(resp.into_response(req_id)).await {
-                        Ok(_) => (),
-                        Err(_e) => {
-                            #[cfg(feature = "tracing")]
-                            tracing::error!(
-                            logger = "neva", 
-                            error = format!("Error sending response: {:?}", _e)
-                        );
-                    },
-                } 
+                if let Err(_err) = sender.send(resp.into_response(req_id)).await {
+                    #[cfg(feature = "tracing")]
+                    tracing::error!(
+                        logger = "neva", 
+                        error = format!("Error sending response: {:?}", _err));
+                }
             });
         }
     }
@@ -421,7 +420,7 @@ impl App {
         options: RuntimeMcpOptions,
         params: CancelledNotificationParams
     ) {
-        options.cancel_request(params.request_id).await;
+        options.cancel_request(&params.request_id).await;
     }
     
     /// A subscription to a resource change request handler

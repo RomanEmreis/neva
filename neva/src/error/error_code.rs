@@ -7,7 +7,7 @@ use crate::error::Error;
 /// Standard JSON-RPC error codes as defined in the MCP specification.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ErrorCode {
-    /// Invalid JSON was received by the server.
+    /// The server received invalid JSON.
     ParseError = -32700,
 
     /// The JSON sent is not a valid Request object.

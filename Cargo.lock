@@ -63,7 +63,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
-name = "example-cancellation"
+name = "example-logging"
 version = "0.1.0"
 dependencies = [
  "neva",
@@ -73,7 +73,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "example-logging"
+name = "example-progress"
 version = "0.1.0"
 dependencies = [
  "neva",
@@ -189,7 +189,7 @@ dependencies = [
 
 [[package]]
 name = "neva"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "base64",
  "futures-util",
@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "neva_macros"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -279,9 +279,9 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
 name = "proc-macro2"
-version = "1.0.94"
+version = "1.0.95"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a31971752e70b8b2686d7e46ec17fb38dad4051d94024c88df49b667caea9c84"
+checksum = "02b3e5e68a3a1a02aad3ec490a98007cbc13c37cbe84a3cd7b8e406d76e7f778"
 dependencies = [
  "unicode-ident",
 ]

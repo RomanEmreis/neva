@@ -1,6 +1,6 @@
 [package]
 name = "neva"
-version = "0.0.3"
+version = "0.0.4"
 edition = "2021"
 rust-version = "1.80.0"
 authors = ["Roman Emreis <roman.emreis@outlook.com>"]
@@ -21,7 +21,7 @@ tokio = { version = "1.44.2", features = ["sync", "io-std", "io-util", "rt", "ma
 tokio-util = "0.7.14"
 tracing = { version = "0.1.41", optional = true }
 tracing-subscriber = { version = "0.3.19", features = ["fmt", "json"], optional = true }
-neva_macros = { path = "../neva_macros", version = "0.0.3", optional = true }
+neva_macros = { path = "../neva_macros", version = "0.0.4", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.44.2", features = ["rt", "rt-multi-thread", "macros"] }

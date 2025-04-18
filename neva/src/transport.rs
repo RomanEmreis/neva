@@ -8,13 +8,13 @@ pub(crate) mod stdio;
 
 /// Describes a sender that can send messages to a client 
 pub(crate) trait Sender {
-    /// Sends messages to client
+    /// Sends messages to a client
     fn send(&mut self, resp: Response) -> impl Future<Output = Result<(), Error>>;
 }
 
-/// Describes a receiver that can receive messages from client
+/// Describes a receiver that can receive messages from a client
 pub(crate) trait Receiver {
-    /// Receives a messages from client
+    /// Receives a messages from a client
     fn recv(&mut self) -> impl Future<Output = Result<Request, Error>>;
 }
 
@@ -24,7 +24,7 @@ pub(crate) trait Transport {
     type Receiver: Receiver;
     
     /// Starts the server with the current transport protocol
-    fn start(&self);
+    fn start(&mut self);
     
     /// Splits transport into [`Sender`] and [`Receiver`] that can be used in a different threads
     fn split(self) -> (Self::Sender, Self::Receiver);
@@ -88,7 +88,7 @@ impl Transport for TransportProto {
     type Receiver = TransportProtoReceiver;
     
     #[inline]
-    fn start(&self) {
+    fn start(&mut self) {
         match self {
             TransportProto::Stdio(stdio) => stdio.start(),
             TransportProto::None => (),
