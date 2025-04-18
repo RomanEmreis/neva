@@ -1,7 +1,7 @@
 //! Run with:
 //!
 //! ```no_rust
-//! npx @modelcontextprotocol/inspector cargo run -p example-cancellation
+//! npx @modelcontextprotocol/inspector cargo run -p example-progress
 //! ```
 
 use neva::{App, types::{Meta, ProgressToken}, tool};
@@ -11,7 +11,7 @@ use tracing_subscriber::prelude::*;
 #[tool(no_schema)]
 async fn long_running_task(token: Meta<ProgressToken>) {
     let mut progress = 0;
-    // Simulating long-running task
+    // Simulating a long-running task
     loop {
         if progress == 100 {
             break;

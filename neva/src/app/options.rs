@@ -166,27 +166,27 @@ impl McpOptions {
     }
     
     /// Tracks the request with `req_id` and returns the [`CancellationToken`] for this request
-    pub(crate) async fn track_request(&self, req_id: RequestId) -> CancellationToken {
+    pub(crate) async fn track_request(&self, req_id: &RequestId) -> CancellationToken {
         let token = CancellationToken::new();
 
         let mut requests = self.requests.write().await;
-        requests.insert(req_id, token.clone());
+        requests.insert(req_id.clone(), token.clone());
         
         token
     }
     
     /// Cancels the request with `req_id` if it is present
-    pub(crate) async fn cancel_request(&self, req_id: RequestId) {
-        if let Some(token) = self.requests.write().await.remove(&req_id) {
+    pub(crate) async fn cancel_request(&self, req_id: &RequestId) {
+        if let Some(token) = self.requests.write().await.remove(req_id) {
             token.cancel();
         }
     }
 
     /// Completes the request with `req_id` if it is present
-    pub(crate) async fn complete_request(&self, req_id: RequestId) {
+    pub(crate) async fn complete_request(&self, req_id: &RequestId) {
         self.requests.write()
             .await
-            .remove(&req_id);
+            .remove(req_id);
     }
     
     /// Adds a tool
