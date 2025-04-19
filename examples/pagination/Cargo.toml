@@ -1,0 +1,9 @@
+[package]
+name = "example-pagination"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+neva = { path = "../../neva", features = ["full"] }
+tokio = { version = "1.44.1", features = ["full"] }

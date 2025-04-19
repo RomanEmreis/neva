@@ -22,7 +22,8 @@ use crate::{
         request::{FromRequest, RequestParamsMeta}, 
         RequestId, 
         Response, 
-        IntoResponse
+        IntoResponse,
+        Cursor, Page
     }
 };
 
@@ -62,7 +63,8 @@ pub struct Tool {
 pub struct ListToolsRequestParams {
     /// An opaque token representing the current pagination position.
     /// If provided, the server should return results starting after this cursor.
-    pub cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<Cursor>,
 }
 
 /// A response to a request to list the tools available on the server.
@@ -71,7 +73,16 @@ pub struct ListToolsRequestParams {
 #[derive(Default, Serialize)]
 pub struct ListToolsResult {
     /// The server's response to a tools/list request from the client.
-    pub tools: Vec<Tool>
+    pub tools: Vec<Tool>,
+    
+    /// An opaque token representing the pagination position after the last returned result.
+    ///
+    /// When a paginated result has more data available, the `next_cursor`
+    /// field will contain `Some` token that can be used in subsequent requests
+    /// to fetch the next page. When there are no more results to return, the `next_cursor` field
+    /// will be `None`.
+    #[serde(rename = "nextCursor", skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<Cursor>,
 }
 
 /// Used by the client to invoke a tool provided by the server.
@@ -128,7 +139,20 @@ impl IntoResponse for ListToolsResult {
 impl From<Vec<Tool>> for ListToolsResult {
     #[inline]
     fn from(tools: Vec<Tool>) -> Self {
-        Self { tools }
+        Self {
+            next_cursor: None,
+            tools
+        }
+    }
+}
+
+impl From<Page<'_, Tool>> for ListToolsResult {
+    #[inline]
+    fn from(page: Page<Tool>) -> Self {
+        Self {
+            next_cursor: page.next_cursor,
+            tools: page.items.to_vec()
+        }
     }
 }
 

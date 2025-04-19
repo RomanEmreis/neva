@@ -73,6 +73,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-pagination"
+version = "0.1.0"
+dependencies = [
+ "neva",
+ "tokio",
+]
+
+[[package]]
 name = "example-progress"
 version = "0.1.0"
 dependencies = [
