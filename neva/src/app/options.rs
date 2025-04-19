@@ -13,10 +13,10 @@ use crate::PROTOCOL_VERSIONS;
 use crate::types::{
     RequestId,
     Implementation, 
-    Tool, ListToolsResult, 
-    Resource, Uri, ReadResourceResult, ResourceTemplate, ListResourcesResult,
-    ListResourceTemplatesResult, resource::Route,
-    Prompt, ListPromptsResult,
+    Tool, 
+    Resource, Uri, ReadResourceResult, ResourceTemplate,
+    resource::Route,
+    Prompt,
     ResourcesCapability, ToolsCapability, PromptsCapability,
 };
 
@@ -249,12 +249,11 @@ impl McpOptions {
     
     /// Returns a list of available tools
     #[inline]
-    pub(crate) fn tools(&self) -> ListToolsResult {
+    pub(crate) fn tools(&self) -> Vec<Tool> {
         self.tools
             .values()
             .cloned()
-            .collect::<Vec<_>>()
-            .into()
+            .collect()
     }
 
     /// Reads a resource by it URI
@@ -267,22 +266,20 @@ impl McpOptions {
 
     /// Returns a list of available resources
     #[inline]
-    pub(crate) fn resources(&self) -> ListResourcesResult {
+    pub(crate) fn resources(&self) -> Vec<Resource> {
         self.resources
             .values()
             .cloned()
-            .collect::<Vec<_>>()
-            .into()
+            .collect()
     }
 
     /// Returns a list of available resource templates
     #[inline]
-    pub(crate) fn resource_templates(&self) -> ListResourceTemplatesResult {
+    pub(crate) fn resource_templates(&self) -> Vec<ResourceTemplate> {
         self.resources_templates
             .values()
             .cloned()
-            .collect::<Vec<_>>()
-            .into()
+            .collect()
     }
 
     /// Returns a tool by its name
@@ -293,12 +290,11 @@ impl McpOptions {
 
     /// Returns a list of available prompts
     #[inline]
-    pub(crate) fn prompts(&self) -> ListPromptsResult {
+    pub(crate) fn prompts(&self) -> Vec<Prompt> {
         self.prompts
             .values()
             .cloned()
-            .collect::<Vec<_>>()
-            .into()
+            .collect()
     }
 }
 
@@ -375,7 +371,7 @@ mod tests {
         options.add_tool(Tool::new("tool", || async { "test" }));
 
         let tools = options.tools();
-        assert_eq!(tools.tools.len(), 1);
+        assert_eq!(tools.len(), 1);
     }
 
     #[test]
@@ -385,7 +381,7 @@ mod tests {
         options.add_resource(Resource::new("res://res", "res"));
 
         let resources = options.resources();
-        assert_eq!(resources.resources.len(), 1);
+        assert_eq!(resources.len(), 1);
     }
 
     #[tokio::test]
@@ -451,7 +447,7 @@ mod tests {
             ResourceFunc::new(handler));
 
         let resources = options.resource_templates();
-        assert_eq!(resources.templates.len(), 1);
+        assert_eq!(resources.len(), 1);
     }
 
     #[tokio::test]
@@ -509,6 +505,6 @@ mod tests {
         }));
 
         let prompts = options.prompts();
-        assert_eq!(prompts.prompts.len(), 1);
+        assert_eq!(prompts.len(), 1);
     }
 }

@@ -11,12 +11,10 @@ use crate::app::handler::{
     HandlerParams
 };
 use crate::types::{
-    resource::Uri, 
-    Annotations, 
-    IntoResponse, 
+    resource::Uri, Annotations, IntoResponse, 
     ReadResourceRequestParams, ReadResourceResult, 
-    Request, RequestId, FromRequest,
-    Response
+    Request, RequestId, FromRequest, Response, 
+    Cursor, Page
 };
 
 /// Represents a known resource template that the server is capable of reading.
@@ -49,7 +47,8 @@ pub struct ResourceTemplate {
 pub struct ListResourceTemplatesRequestParams {
     /// An opaque token representing the current pagination position.
     /// If provided, the server should return results starting after this cursor.
-    pub cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<Cursor>,
 }
 
 /// The server's response to a resources/templates/list request from the client.
@@ -60,6 +59,15 @@ pub struct ListResourceTemplatesResult {
     /// A list of resource templates that the server offers.
     #[serde(rename = "resourceTemplates")]
     pub templates: Vec<ResourceTemplate>,
+
+    /// An opaque token representing the pagination position after the last returned result.
+    ///
+    /// When a paginated result has more data available, the `next_cursor`
+    /// field will contain `Some` token that can be used in subsequent requests
+    /// to fetch the next page. When there are no more results to return, the `next_cursor` field
+    /// will be `None`.
+    #[serde(rename = "nextCursor", skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<Cursor>,
 }
 
 impl IntoResponse for ListResourceTemplatesResult {
@@ -72,7 +80,20 @@ impl IntoResponse for ListResourceTemplatesResult {
 impl From<Vec<ResourceTemplate>> for ListResourceTemplatesResult {
     #[inline]
     fn from(templates: Vec<ResourceTemplate>) -> Self {
-        Self { templates }
+        Self { 
+            next_cursor: None,
+            templates
+        }
+    }
+}
+
+impl From<Page<'_, ResourceTemplate>> for ListResourceTemplatesResult {
+    #[inline]
+    fn from(page: Page<ResourceTemplate>) -> Self {
+        Self {
+            next_cursor: page.next_cursor,
+            templates: page.items.to_vec()
+        }
     }
 }
 

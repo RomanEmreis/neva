@@ -9,6 +9,7 @@ pub use response::{IntoResponse, Response};
 pub use reference::Reference;
 pub use completion::{Completion, CompleteRequestParams, Argument, CompleteResult};
 pub use content::Content;
+pub use cursor::{Cursor, Page, Pagination};
 pub use capabilities::{
     ClientCapabilities, 
     ServerCapabilities, 
@@ -65,6 +66,7 @@ pub mod completion;
 pub mod content;
 pub mod reference;
 pub mod notification;
+pub mod cursor;
 pub(crate) mod helpers;
 
 pub(super) const JSONRPC_VERSION: &str = "2.0";

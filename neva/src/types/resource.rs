@@ -1,7 +1,7 @@
 ﻿//! Represents an MCP resource
 
 use serde::{Deserialize, Serialize};
-use crate::types::{RequestId, Response, IntoResponse, Request};
+use crate::types::{RequestId, Response, IntoResponse, Request, Cursor, Page};
 use crate::app::handler::{FromHandlerParams, HandlerParams};
 use crate::error::Error;
 use crate::types::request::{FromRequest, RequestParamsMeta};
@@ -44,7 +44,8 @@ pub struct Resource {
 pub struct ListResourcesRequestParams {
     /// An opaque token representing the current pagination position.
     /// If provided, the server should return results starting after this cursor.
-    pub cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<Cursor>,
 }
 
 /// Sent from the client to the server, to read a specific resource URI.
@@ -70,7 +71,16 @@ pub struct ReadResourceRequestParams {
 #[derive(Default, Serialize)]
 pub struct ListResourcesResult {
     /// A list of resources that the server offers.
-    pub resources: Vec<Resource>
+    pub resources: Vec<Resource>,
+
+    /// An opaque token representing the pagination position after the last returned result.
+    ///
+    /// When a paginated result has more data available, the `next_cursor`
+    /// field will contain `Some` token that can be used in subsequent requests
+    /// to fetch the next page. When there are no more results to return, the `next_cursor` field
+    /// will be `None`.
+    #[serde(rename = "nextCursor", skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<Cursor>,
 }
 
 /// Sent from the client to request resources/updated notifications 
@@ -105,14 +115,30 @@ impl IntoResponse for ListResourcesResult {
 impl<const N: usize> From<[Resource; N]> for ListResourcesResult {
     #[inline]
     fn from(resources: [Resource; N]) -> Self {
-        Self { resources: resources.to_vec() }
+        Self {
+            next_cursor: None,
+            resources: resources.to_vec()
+        }
     }
 }
 
 impl From<Vec<Resource>> for ListResourcesResult {
     #[inline]
     fn from(resources: Vec<Resource>) -> Self {
-        Self { resources }
+        Self {
+            next_cursor: None,
+            resources
+        }
+    }
+}
+
+impl From<Page<'_, Resource>> for ListResourcesResult {
+    #[inline]
+    fn from(page: Page<Resource>) -> Self {
+        Self {
+            next_cursor: page.next_cursor,
+            resources: page.items.to_vec()
+        }
     }
 }
 
@@ -153,6 +179,30 @@ impl ListResourcesResult {
     #[inline]
     pub fn new() -> Self {
         Default::default()
+    }
+}
+
+impl From<Uri> for Resource {
+    #[inline]
+    fn from(uri: Uri) -> Self {
+        Self {
+            name: uri.to_string(),
+            descr: None,
+            mime: None,
+            uri
+        }
+    }
+}
+
+impl From<String> for Resource {
+    #[inline]
+    fn from(uri: String) -> Self {
+        Self {
+            name: uri.clone(),
+            uri: uri.into(),
+            descr: None,
+            mime: None,
+        }
     }
 }
 

@@ -27,7 +27,7 @@ pub struct Completion {
 
 /// A request from the client to the server, to ask for completion options.
 /// 
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Deserialize)]
 pub struct CompleteRequestParams {
     /// The reference's information
@@ -41,7 +41,7 @@ pub struct CompleteRequestParams {
 
 /// Used for completion requests to provide additional context for the completion options.
 /// 
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Deserialize)]
 pub struct Argument {
     /// The name of the argument.
@@ -53,7 +53,7 @@ pub struct Argument {
 
 /// The server's response to a completion/complete request
 /// 
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Default, Serialize)]
 pub struct CompleteResult {
     /// The completion object containing the completion values.
@@ -82,18 +82,19 @@ impl FromHandlerParams for CompleteRequestParams {
 impl Completion {
     /// Creates a new empty [`Completion`] object
     #[inline]
-    pub fn new<T, V>(values: T, total: usize, has_more: bool) -> Self
+    pub fn new<T, V>(values: T, total: usize) -> Self
     where 
         T: IntoIterator<Item = V>,
         V: Into<String>,
     {
+        let values: Vec<String> = values
+            .into_iter()
+            .map(Into::into)
+            .collect();
         Self {
             total: Some(total),
-            has_more: Some(has_more),
-            values: values
-                .into_iter()
-                .map(Into::into)
-                .collect(),
+            has_more: Some(total > values.len()),
+            values,
         }
     }
 }
@@ -243,7 +244,7 @@ mod tests {
 
     #[test]
     fn it_creates_new_completion() {
-        let completion = Completion::new(["1", "2", "3"], 5, true);
+        let completion = Completion::new(["1", "2", "3"], 5);
 
         assert_eq!(completion.values.len(), 3);
         assert_eq!(completion.total, Some(5));

@@ -25,12 +25,14 @@ use crate::types::{
     GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt,
     notification::CancelledNotificationParams
 };
-
+use crate::types::cursor::Pagination;
 #[cfg(feature = "tracing")]
 use crate::types::notification::SetLevelRequestParams;
 
 pub mod options;
 pub(crate) mod handler;
+
+const DEFAULT_PAGE_SIZE: usize = 10;
 
 /// Represents an MCP server application
 #[derive(Default)]
@@ -347,33 +349,41 @@ impl App {
     /// Tools request handler
     async fn tools(
         options: RuntimeMcpOptions, 
-        _params: ListToolsRequestParams
+        params: ListToolsRequestParams
     ) -> ListToolsResult {
         options.tools()
+            .paginate(params.cursor, DEFAULT_PAGE_SIZE)
+            .into()
     }
 
     /// Resources request handler
     async fn resources(
         options: RuntimeMcpOptions,
-        _params: ListResourcesRequestParams
+        params: ListResourcesRequestParams
     ) -> ListResourcesResult {
         options.resources()
+            .paginate(params.cursor, DEFAULT_PAGE_SIZE)
+            .into()
     }
 
     /// Resource templates request handler
     async fn resource_templates(
         options: RuntimeMcpOptions, 
-        _params: ListResourceTemplatesRequestParams
+        params: ListResourceTemplatesRequestParams
     ) -> ListResourceTemplatesResult {
         options.resource_templates()
+            .paginate(params.cursor, DEFAULT_PAGE_SIZE)
+            .into()
     }
     
     /// Prompts request handler
     async fn prompts(
         options: RuntimeMcpOptions, 
-        _params: ListPromptsRequestParams
+        params: ListPromptsRequestParams
     ) -> ListPromptsResult {
         options.prompts()
+            .paginate(params.cursor, DEFAULT_PAGE_SIZE)
+            .into()
     }
     
     /// A tool call request handler
@@ -412,7 +422,7 @@ impl App {
     /// Ping request handler
     async fn ping() {}
     
-    /// A notifications initialization request handler
+    /// A notification initialization request handler
     async fn notifications_init() {}
     
     /// A notification cancel request handler

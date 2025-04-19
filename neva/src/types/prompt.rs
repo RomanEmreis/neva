@@ -7,7 +7,7 @@ use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use super::helpers::TypeCategory;
-use crate::types::{IntoResponse, PropertyType, Request, RequestId, Response};
+use crate::types::{Cursor, IntoResponse, Page, PropertyType, Request, RequestId, Response};
 use crate::app::handler::{FromHandlerParams, HandlerParams, GenericHandler, Handler, RequestHandler};
 use crate::error::Error;
 use crate::types::request::{FromRequest, RequestParamsMeta};
@@ -62,7 +62,8 @@ pub struct PromptArgument {
 pub struct ListPromptsRequestParams {
     /// An opaque token representing the current pagination position.
     /// If provided, the server should return results starting after this cursor.
-    pub cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<Cursor>,
 }
 
 /// Used by the client to get a prompt provided by the server.
@@ -92,6 +93,15 @@ pub struct GetPromptRequestParams {
 pub struct ListPromptsResult {
     /// A list of prompts or prompt templates that the server offers.
     pub prompts: Vec<Prompt>,
+
+    /// An opaque token representing the pagination position after the last returned result.
+    ///
+    /// When a paginated result has more data available, the `next_cursor`
+    /// field will contain `Some` token that can be used in subsequent requests
+    /// to fetch the next page. When there are no more results to return, the `next_cursor` field
+    /// will be `None`.
+    #[serde(rename = "nextCursor", skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<Cursor>,
 }
 
 impl IntoResponse for ListPromptsResult {
@@ -104,7 +114,20 @@ impl IntoResponse for ListPromptsResult {
 impl From<Vec<Prompt>> for ListPromptsResult {
     #[inline]
     fn from(prompts: Vec<Prompt>) -> Self {
-        Self { prompts }
+        Self {
+            next_cursor: None,
+            prompts
+        }
+    }
+}
+
+impl From<Page<'_, Prompt>> for ListPromptsResult {
+    #[inline]
+    fn from(page: Page<Prompt>) -> Self {
+        Self {
+            next_cursor: page.next_cursor,
+            prompts: page.items.to_vec()
+        }
     }
 }
 
@@ -143,9 +166,9 @@ impl From<&str> for PromptArgument {
     }
 }
 
-impl From<serde_json::Value> for PromptArgument {
+impl From<Value> for PromptArgument {
     #[inline]
-    fn from(json: serde_json::Value) -> Self {
+    fn from(json: Value) -> Self {
         serde_json::from_value(json)
             .expect("A correct PromptArgument value must be provided")
     }
