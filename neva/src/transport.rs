@@ -1,21 +1,23 @@
 ﻿use std::future::Future;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 use crate::error::{Error, ErrorCode};
-use crate::types::{Request, Response};
 
 pub(crate) use stdio::StdIo;
 
 pub(crate) mod stdio;
 
 /// Describes a sender that can send messages to a client 
-pub(crate) trait Sender {
+pub(crate) trait Sender{
     /// Sends messages to a client
-    fn send(&mut self, resp: Response) -> impl Future<Output = Result<(), Error>>;
+    fn send<R: Serialize>(&mut self, resp: R) -> impl Future<Output = Result<(), Error>>;
 }
 
 /// Describes a receiver that can receive messages from a client
 pub(crate) trait Receiver {
     /// Receives a messages from a client
-    fn recv(&mut self) -> impl Future<Output = Result<Request, Error>>;
+    fn recv<R: DeserializeOwned>(&mut self) -> impl Future<Output = Result<R, Error>>;
 }
 
 /// Describes a transport protocol for communicating between server and client
@@ -24,7 +26,7 @@ pub(crate) trait Transport {
     type Receiver: Receiver;
     
     /// Starts the server with the current transport protocol
-    fn start(&mut self);
+    fn start(&mut self) -> CancellationToken;
     
     /// Splits transport into [`Sender`] and [`Receiver`] that can be used in a different threads
     fn split(self) -> (Self::Sender, Self::Receiver);
@@ -59,7 +61,7 @@ impl Default for TransportProto {
 
 impl Sender for TransportProtoSender {
     #[inline]
-    async fn send(&mut self, resp: Response) -> Result<(), Error> {
+    async fn send<R: Serialize>(&mut self, resp: R) -> Result<(), Error> {
         match self {
             TransportProtoSender::Stdio(stdio) => stdio.send(resp).await,
             TransportProtoSender::None => Err(Error::new(
@@ -72,7 +74,7 @@ impl Sender for TransportProtoSender {
 
 impl Receiver for TransportProtoReceiver {
     #[inline]
-    async fn recv(&mut self) -> Result<Request, Error> {
+    async fn recv<R: DeserializeOwned>(&mut self) -> Result<R, Error> {
         match self {
             TransportProtoReceiver::Stdio(stdio) => stdio.recv().await,
             TransportProtoReceiver::None => Err(Error::new(
@@ -88,11 +90,11 @@ impl Transport for TransportProto {
     type Receiver = TransportProtoReceiver;
     
     #[inline]
-    fn start(&mut self) {
+    fn start(&mut self) -> CancellationToken {
         match self {
             TransportProto::Stdio(stdio) => stdio.start(),
-            TransportProto::None => (),
-        };
+            TransportProto::None => CancellationToken::new(),
+        }
     }
     
     fn split(self) -> (Self::Sender, Self::Receiver) {
@@ -102,6 +104,32 @@ impl Transport for TransportProto {
                 (TransportProtoSender::Stdio(tx), TransportProtoReceiver::Stdio(rx))
             },
             TransportProto::None => (TransportProtoSender::None, TransportProtoReceiver::None),
+        }
+    }
+}
+
+impl Sender for TransportProto {
+    #[inline]
+    async fn send<R: Serialize>(&mut self, resp: R) -> Result<(), Error> {
+        match self {
+            TransportProto::Stdio(stdio) => stdio.send(resp).await,
+            TransportProto::None => Err(Error::new(
+                ErrorCode::InternalError,
+                "Transport protocol must be specified"
+            )),
+        }
+    }
+}
+
+impl Receiver for TransportProto {
+    #[inline]
+    async fn recv<R: DeserializeOwned>(&mut self) -> Result<R, Error> {
+        match self {
+            TransportProto::Stdio(stdio) => stdio.recv().await,
+            TransportProto::None => Err(Error::new(
+                ErrorCode::InternalError,
+                "Transport protocol must be specified"
+            )),
         }
     }
 }

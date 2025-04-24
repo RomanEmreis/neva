@@ -13,18 +13,7 @@ use crate::app::handler::{
     RequestFunc,
     RequestHandler
 };
-use crate::types::{
-    InitializeResult, InitializeRequestParams,
-    IntoResponse, Response, 
-    CompleteResult, CompleteRequestParams, 
-    ListToolsRequestParams, CallToolRequestParams, ListToolsResult, CallToolResponse, Tool, ToolHandler,
-    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate, 
-    ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, 
-    SubscribeRequestParams, UnsubscribeRequestParams, Resource, resource::{Route, template::ResourceFunc}, 
-    ListPromptsRequestParams, ListPromptsResult, 
-    GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt,
-    notification::CancelledNotificationParams
-};
+use crate::types::{InitializeResult, InitializeRequestParams, IntoResponse, Response, CompleteResult, CompleteRequestParams, ListToolsRequestParams, CallToolRequestParams, ListToolsResult, CallToolResponse, Tool, ToolHandler, ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate, ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, SubscribeRequestParams, UnsubscribeRequestParams, Resource, resource::{Route, template::ResourceFunc}, ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt, notification::CancelledNotificationParams, Request};
 use crate::types::cursor::Pagination;
 #[cfg(feature = "tracing")]
 use crate::types::notification::SetLevelRequestParams;
@@ -43,7 +32,7 @@ pub struct App {
 
 impl App {
     /// Initializes a new app
-    pub fn new() -> App {
+    pub fn new() -> Self {
         let mut app = Self { 
             options: McpOptions::default(),
             handlers: HashMap::new()
@@ -95,11 +84,11 @@ impl App {
         let options = Arc::new(self.options);
         let handlers = Arc::new(self.handlers);
         
-        transport.start();
+        let _ = transport.start();
         
         let (sender, mut receiver) = transport.split();
         
-        while let Ok(req) = receiver.recv().await {
+        while let Ok(req) = receiver.recv::<Request>().await {
             let req_id = req.id();
             
             let handlers = handlers.clone();

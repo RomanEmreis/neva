@@ -1,13 +1,13 @@
 ﻿//! Types and utils for references
 
 use std::fmt::Display;
-use serde::Deserialize;
+use serde::{Serialize, Deserialize};
 
 /// Represents a reference to a resource or prompt.
 /// Umbrella type for both ResourceReference and PromptReference from the spec schema.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Reference {
     /// The type of content. Can be ref/resource or ref/prompt.
     #[serde(rename = "type")]

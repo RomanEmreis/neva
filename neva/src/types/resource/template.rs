@@ -19,8 +19,8 @@ use crate::types::{
 
 /// Represents a known resource template that the server is capable of reading.
 /// 
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Clone, Serialize)]
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ResourceTemplate {
     #[serde(rename = "uriTemplate")]
     pub uri_template: Uri,
@@ -42,8 +42,8 @@ pub struct ResourceTemplate {
 
 /// Sent from the client to request a list of resource templates the server has.
 ///
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Deserialize)]
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Default, Serialize, Deserialize)]
 pub struct ListResourceTemplatesRequestParams {
     /// An opaque token representing the current pagination position.
     /// If provided, the server should return results starting after this cursor.
@@ -53,8 +53,8 @@ pub struct ListResourceTemplatesRequestParams {
 
 /// The server's response to a resources/templates/list request from the client.
 /// 
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Default, Serialize)]
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Default, Serialize, Deserialize)]
 pub struct ListResourceTemplatesResult {
     /// A list of resource templates that the server offers.
     #[serde(rename = "resourceTemplates")]

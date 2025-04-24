@@ -9,7 +9,7 @@ use serde_json::Value;
 use super::helpers::TypeCategory;
 use crate::types::{Cursor, IntoResponse, Page, PropertyType, Request, RequestId, Response};
 use crate::app::handler::{FromHandlerParams, HandlerParams, GenericHandler, Handler, RequestHandler};
-use crate::error::Error;
+use crate::error::{Error, ErrorCode};
 use crate::types::request::{FromRequest, RequestParamsMeta};
 
 pub use get_prompt_result::{GetPromptResult, PromptMessage};
@@ -19,8 +19,8 @@ pub mod get_prompt_result;
 
 /// A prompt or prompt template that the server offers.
 /// 
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Clone, Serialize)]
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Prompt {
     /// The name of the prompt or prompt template.
     pub name: String,
@@ -35,12 +35,12 @@ pub struct Prompt {
 
     /// A get prompt handler
     #[serde(skip)]
-    handler: RequestHandler<GetPromptResult>
+    handler: Option<RequestHandler<GetPromptResult>>
 }
 
 /// Describes an argument that a prompt can accept.
 /// 
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PromptArgument {
     /// The name of the argument.
@@ -58,7 +58,7 @@ pub struct PromptArgument {
 /// Sent from the client to request a list of prompts and prompt templates the server has.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ListPromptsRequestParams {
     /// An opaque token representing the current pagination position.
     /// If provided, the server should return results starting after this cursor.
@@ -69,7 +69,7 @@ pub struct ListPromptsRequestParams {
 /// Used by the client to get a prompt provided by the server.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct GetPromptRequestParams {
     /// The name of the prompt or prompt template.
     pub name: String,
@@ -89,7 +89,7 @@ pub struct GetPromptRequestParams {
 /// The server's response to a prompts/list request from the client.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Default, Serialize)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct ListPromptsResult {
     /// A list of prompts or prompt templates that the server offers.
     pub prompts: Vec<Prompt>,
@@ -275,7 +275,7 @@ impl Prompt {
             name: name.into(), 
             descr: None, 
             args,
-            handler
+            handler: Some(handler)
         }
     }
     
@@ -301,7 +301,10 @@ impl Prompt {
     /// Get prompt result
     #[inline]
     pub(crate) async fn call(&self, params: HandlerParams) -> Result<GetPromptResult, Error> {
-        self.handler.call(params).await
+        match self.handler {
+            Some(ref handler) => handler.call(params).await,
+            None => Err(Error::new(ErrorCode::InternalError, "Prompt handler not specified"))
+        }
     }
 }
 

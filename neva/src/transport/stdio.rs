@@ -1,36 +1,51 @@
-﻿use futures_util::TryFutureExt;
-use crate::{
-    error::{Error, ErrorCode},
-    types::{Request, Response}
-};
+﻿//! stdio transport implementation
+
+use futures_util::TryFutureExt;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+use tokio_util::sync::CancellationToken;
+use crate::error::{Error, ErrorCode};
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
-    sync::mpsc::{Receiver, Sender},
+    io::{
+        AsyncWrite, AsyncWriteExt,
+        AsyncRead, AsyncBufReadExt,
+        Stdin, Stdout,
+        BufReader, BufWriter
+    },
+    sync::mpsc::{self, Receiver, Sender},
 };
-use tokio::io::AsyncWriteExt;
-use tokio::sync::mpsc;
 use crate::transport::{
     Transport, 
     Sender as TransportSender, 
     Receiver as TransportReceiver
 };
 
+#[cfg(feature = "client")]
+use tokio::process::{Command, ChildStdin, ChildStdout};
+#[cfg(feature = "client")]
+use self::options::StdIoOptions;
+
+#[cfg(feature = "client")]
+pub(crate) mod options;
+
 /// Represents stdio transport
-pub struct StdIo {
+pub(crate) struct StdIo {
     sender: StdIoSender,
     receiver: StdIoReceiver,
+    #[cfg(feature = "client")]
+    options: Option<StdIoOptions>,
 }
 
 /// Represents stdio sender
-pub struct StdIoSender {
-    tx: Sender<Response>,
-    rx: Option<Receiver<Response>>,
+pub(crate) struct StdIoSender {
+    tx: Sender<serde_json::Value>,
+    rx: Option<Receiver<serde_json::Value>>,
 }
 
 /// Represents stdio receiver
-pub struct StdIoReceiver {
-    tx: Sender<Result<Request, Error>>,
-    rx: Receiver<Result<Request, Error>>
+pub(crate) struct StdIoReceiver {
+    tx: Sender<Result<serde_json::Value, Error>>,
+    rx: Receiver<Result<serde_json::Value, Error>>
 }
 
 impl Clone for StdIoSender {
@@ -51,7 +66,11 @@ impl StdIoSender {
     }
     
     /// Starts a new thread that writes to stdout asynchronously
-    pub(crate) fn start(&mut self) {
+    pub(crate) fn start<T: AsyncWrite + Unpin + Send + 'static>(
+        &mut self, 
+        mut writer: BufWriter<T>, 
+        token: CancellationToken
+    ) {
         let Some(mut receiver) = self.rx.take() else {
             #[cfg(feature = "tracing")]
             tracing::error!(logger = "neva", "The stdout writer already in use");
@@ -59,22 +78,36 @@ impl StdIoSender {
         };
         
         tokio::spawn(async move {
-            let mut stdout = tokio::io::stdout();
-            while let Some(resp) = receiver.recv().await {
-                match serde_json::to_vec(&resp) {
-                    Ok(mut json_bytes) => {
-                        json_bytes.push(b'\n');
-                        if let Err(_err) = stdout.write_all(&json_bytes).await {
-                            #[cfg(feature = "tracing")]
-                            tracing::error!(logger = "neva", "stdout write error: {:?}", _err);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => break,
+                    resp = receiver.recv() => {
+                        match resp {
+                            Some(resp) => {
+                                match serde_json::to_vec(&resp) {
+                                    Ok(mut json_bytes) => {
+                                        json_bytes.push(b'\n');
+                                        if let Err(_err) = writer.write_all(&json_bytes).await {
+                                            #[cfg(feature = "tracing")]
+                                            tracing::error!(
+                                                logger = "neva", 
+                                                "stdout write error: {:?}", _err);
+                                        }
+                                        let _ = writer.flush().await;
+                                    },
+                                    Err(_err) => {
+                                        #[cfg(feature = "tracing")]
+                                        tracing::error!(
+                                            logger = "neva", 
+                                            "Serialization error: {:?}", _err);
+                                    }
+                                }
+                            },
+                            None => break,
                         }
-                        let _ = stdout.flush().await;
-                    },
-                    Err(_err) => {
-                        #[cfg(feature = "tracing")]
-                        tracing::error!(logger = "neva", "Serialization error: {:?}", _err);
                     }
-                };
+                }
             }
         });
     }
@@ -88,34 +121,42 @@ impl StdIoReceiver {
     }
     
     /// Starts a new thread that reads from stdin asynchronously
-    pub(crate) fn start(&self) {
+    pub(crate) fn start<T: AsyncRead + Unpin + Send + 'static>(
+        &self, 
+        mut reader: BufReader<T>, 
+        token: CancellationToken
+    ) {
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let stdin = tokio::io::stdin();
-            let mut reader = BufReader::new(stdin);
             let mut line = String::new();
             loop {
                 line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => break, // EOF
-                    Ok(_) => {
-                        let req = match serde_json::from_str::<Request>(&line) {
-                            Ok(req) => Ok(req),
-                            Err(err) => Err(err.into()),
-                        };
-                        if let Err(_e) = tx.send(req).await {
-                            #[cfg(feature = "tracing")]
-                            tracing::error!(logger = "neva", "Failed to send request: {:?}", _e);
-                            break;
-                        }
-                    }
-                    Err(err) => {
-                        let err = Err(err.into());
-                        if let Err(_e) = tx.send(err).await {
-                            #[cfg(feature = "tracing")]
-                            tracing::error!(logger = "neva", "Failed to send error request: {:?}", _e);
-                        }
-                        break;
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => break,
+                    read_line = reader.read_line(&mut line) => {
+                        match read_line {
+                            Ok(0) => break, // EOF
+                            Ok(_) => {
+                                let req = match serde_json::from_str(&line) {
+                                    Ok(req) => Ok(req),
+                                    Err(err) => Err(err.into()),
+                                };
+                                if let Err(_e) = tx.send(req).await {
+                                    #[cfg(feature = "tracing")]
+                                    tracing::error!(logger = "neva", "Failed to send request: {:?}", _e);
+                                    break;
+                                }
+                            }
+                            Err(err) => {
+                                let err = Err(err.into());
+                                if let Err(_e) = tx.send(err).await {
+                                    #[cfg(feature = "tracing")]
+                                    tracing::error!(logger = "neva", "Failed to send error request: {:?}", _e);
+                                }
+                                break;
+                            }
+                        };      
                     }
                 };
             }
@@ -124,28 +165,104 @@ impl StdIoReceiver {
 }
 
 impl StdIo {
-    /// Creates a new stdio transport
+    /// Creates a new stdio transport for server
     pub(crate) fn new() -> Self {
         Self { 
             receiver: StdIoReceiver::new(),
-            sender: StdIoSender::new(), 
+            sender: StdIoSender::new(),
+            #[cfg(feature = "client")]
+            options: None,
         }
+    }
+
+    pub(crate) fn init_transport() -> (BufReader<Stdin>, BufWriter<Stdout>) {
+        (BufReader::new(tokio::io::stdin()), BufWriter::new(tokio::io::stdout()))
+    }
+
+    /// Creates a new stdio transport for the MCP client
+    #[cfg(feature = "client")]
+    pub(crate) fn client(options: StdIoOptions) -> Self {
+        Self {
+            receiver: StdIoReceiver::new(),
+            sender: StdIoSender::new(),
+            options: Some(options),
+        }
+    }
+
+    #[cfg(feature = "client")]
+    fn handshake(
+        options: StdIoOptions, 
+        token: CancellationToken
+    ) -> (BufReader<ChildStdout>, BufWriter<ChildStdin>) {
+        #[cfg(not(target_os = "windows"))]
+        let command = options.command;
+        #[cfg(not(target_os = "windows"))]
+        let args = options.args;
+        
+        #[cfg(target_os = "windows")]
+        let command = "cmd.exe";
+        #[cfg(target_os = "windows")]
+        let args = {
+            let mut win_args = vec!["/c", options.command];
+            win_args.extend_from_slice(&options.args);
+            win_args
+        };
+
+        let mut child = Command::new(command)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("Failed to handshake");
+
+        let child_id = child.id();
+        let stdin = child.stdin
+            .take()
+            .expect("Failed to handshake: Inaccessible stdin");
+        let stdout = child.stdout
+            .take()
+            .expect("Failed to handshake: Inaccessible stdout");
+
+        tokio::task::spawn(async move {
+           tokio::select! {
+               biased;
+               _ = child.wait() => {}
+               _ = token.cancelled() => {
+                   if let Err(_e) = child.kill().await {
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!(
+                           logger = "neva", 
+                           pid = child_id,
+                           "Failed to kill child process: {:?}", _e);
+                   } else {
+                       let _exit = child.wait().await;
+                       #[cfg(feature = "tracing")]
+                       tracing::trace!(
+                           logger = "neva",
+                           pid = child_id,
+                           "Child exited with status: {:?}", _exit);
+                   }
+               },
+           } 
+        });
+        
+        (BufReader::new(stdout), BufWriter::new(stdin))
     }
 }
 
 impl TransportSender for StdIoSender {
-    async fn send(&mut self, resp: Response) -> Result<(), Error> {
+    async fn send<R: Serialize>(&mut self, resp: R) -> Result<(), Error> {
         self.tx
-            .send(resp)
+            .send(serde_json::to_value(resp)?)
             .map_err(|err| Error::new(ErrorCode::InternalError, err))
             .await
     }
 }
 
 impl TransportReceiver for StdIoReceiver {
-    async fn recv(&mut self) -> Result<Request, Error> {
+    async fn recv<R: DeserializeOwned>(&mut self) -> Result<R, Error> {
         match self.rx.recv().await {
-            Some(res) => Ok(res?),
+            Some(res) => serde_json::from_value(res?).map_err(Into::into),
             None => Err(Error::new(ErrorCode::InvalidRequest, "Unexpected end of stream"))
         }
     }
@@ -155,16 +272,48 @@ impl Transport for StdIo {
     type Sender = StdIoSender;
     type Receiver = StdIoReceiver;
     
-    fn start(&mut self) {
-        self.receiver.start();
-        self.sender.start();
+    fn start(&mut self) -> CancellationToken {
+        let token = CancellationToken::new();
+        
+        #[cfg(feature = "client")]
+        if let Some(options) = self.options.take() {
+            let (reader, writer) = StdIo::handshake(options, token.clone());
+            self.receiver.start(reader, token.clone());
+            self.sender.start(writer, token.clone());
+        } else {
+            let (reader, writer) = StdIo::init_transport();
+            self.receiver.start(reader, token.clone());
+            self.sender.start(writer, token.clone());
+        }
+        #[cfg(not(feature = "client"))]
+        {
+            let (reader, writer) = StdIo::init_transport();
+
+            self.receiver.start(reader, token.clone());
+            self.sender.start(writer, token.clone());
+        }
 
         #[cfg(feature = "tracing")]
         tracing::info!(logger = "neva", "Listening: stdio");
+        token
     }
 
     fn split(self) -> (Self::Sender, Self::Receiver) {
         (self.sender, self.receiver)
+    }
+}
+
+impl TransportSender for StdIo {
+    #[inline]
+    async fn send<R: Serialize>(&mut self, resp: R) -> Result<(), Error> {
+        self.sender.send(resp).await
+    }
+}
+
+impl TransportReceiver for StdIo {
+    #[inline]
+    async fn recv<R: DeserializeOwned>(&mut self) -> Result<R, Error> {
+        self.receiver.recv().await
     }
 }
 

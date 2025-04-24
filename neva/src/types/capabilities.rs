@@ -6,15 +6,77 @@ use serde::{Deserialize, Serialize};
 /// Represents the capabilities that a client may support.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientCapabilities {
+    /// Gets or sets the client's roots capability, which are entry points for resource navigation.
+    ///
+    /// > **Note:** When `roots` is `Some`, the client indicates that it can respond to 
+    /// > server requests for listing root URIs. Root URIs serve as entry points for resource navigation in the protocol.
+    /// > 
+    /// > The server can use `RequestRoots` to request the list of
+    /// > available roots from the client, which will trigger the client's `RootsHandler`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub roots: Option<RootsCapability>,
+
+    /// Gets or sets the client's sampling capability, which indicates whether the client 
+    /// supports issuing requests to an LLM on behalf of the server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sampling: Option<SamplingCapability>,
+    
+    /// Gets or sets experimental, non-standard capabilities that the client supports.
+    ///
+    /// > **Note:** The `experimental` map allows clients to advertise support for features that are not yet 
+    /// > standardized in the Model Context Protocol specification. This extension mechanism enables 
+    /// > future protocol enhancements while maintaining backward compatibility.
+    /// > 
+    /// > Values in this map are implementation-specific and should be coordinated between client 
+    /// > and server implementations. Servers should not assume the presence of any experimental capability 
+    /// > without checking for it first.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub experimental: Option<HashMap<String, serde_json::Value>>,
 }
 
-/// Represents the capabilities that a server may support.
+/// Represents a client capability that enables root resource discovery in the Model Context Protocol.
+///
+/// > **Note:** When present in [`ClientCapabilities`], it indicates that the client supports listing
+/// > root URIs that serve as entry points for resource navigation.
+/// >
+/// > The roots capability establishes a mechanism for servers to discover and access the hierarchical 
+/// > structure of resources provided by a client. Root URIs represent top-level entry points from which
+/// > servers can navigate to access specific resources.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Clone, Serialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct RootsCapability {
+    /// Gets or sets whether the client supports notifications for changes to the roots list.
+    ///
+    /// > **Note:** When set to `true`, the client can notify servers when roots are added, 
+    /// > removed, or modified, allowing servers to refresh their roots cache accordingly.
+    /// > This enables servers to stay synchronized with client-side changes to available roots.
+    #[serde(default, rename = "listChanged")]
+    pub list_changed: bool
+}
+
+/// Represents the capability for a client to generate text or other content using an AI model.
+///
+/// > **Note:** This capability enables the MCP client to respond to sampling requests from an MCP server.
+/// >
+/// > When this capability is enabled, an MCP server can request the client to generate content
+/// > using an AI model. The client must set a `SamplingHandler` to process these requests.
+///
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct SamplingCapability {
+    // Currently empty in the spec, but may be extended in the future
+}
+
+/// Represents the capabilities that a server may support.
+///
+/// > **Note:** Server capabilities define the features and functionality available when clients connect.
+/// > These capabilities are advertised to clients during the initialize handshake.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerCapabilities {
     /// Present if the server offers any tools to call.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -35,35 +97,47 @@ pub struct ServerCapabilities {
     /// Present if the server supports argument autocompletion suggestions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completions: Option<CompletionsCapability>,
+
+    /// Gets or sets experimental, non-standard capabilities that the server supports.
+    ///
+    /// > **Note:** The `experimental` map allows servers to advertise support for features that are not yet 
+    /// > standardized in the Model Context Protocol specification. This extension mechanism enables 
+    /// > future protocol enhancements while maintaining backward compatibility.
+    /// > 
+    /// > Values in this dictionary are implementation-specific and should be coordinated between client 
+    /// > and server implementations. Clients should not assume the presence of any experimental capability 
+    /// > without checking for it first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub experimental: Option<HashMap<String, serde_json::Value>>,
 }
 
 /// Represents the tools capability configuration.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Default, Debug, Clone, Serialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ToolsCapability {
     /// Gets or sets whether this server supports notifications for changes to the tool list.
-    #[serde(rename = "listChanged")]
+    #[serde(default, rename = "listChanged")]
     pub list_changed: bool
 }
 
 /// Represents the prompts capability configuration.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Default, Debug, Clone, Serialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct PromptsCapability {
     /// Whether this server supports notifications for changes to the prompt list.
-    #[serde(rename = "listChanged")]
+    #[serde(default, rename = "listChanged")]
     pub list_changed: bool
 }
 
 /// Represents the resources capability configuration.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Default, Debug, Clone, Serialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ResourcesCapability {
     /// Whether this server supports notifications for changes to the resource list.
-    #[serde(rename = "listChanged")]
+    #[serde(default, rename = "listChanged")]
     pub list_changed: bool,
 
     /// Whether this server supports subscribing to resource updates.
@@ -73,7 +147,7 @@ pub struct ResourcesCapability {
 /// Represents the logging capability configuration.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Default, Debug, Clone, Serialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct LoggingCapability {
     // Currently empty in the spec, but may be extended in the future
 }
@@ -81,7 +155,7 @@ pub struct LoggingCapability {
 /// Represents the completions capability configuration.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Default, Debug, Clone, Serialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionsCapability {
     // Currently empty in the spec, but may be extended in the future
 }

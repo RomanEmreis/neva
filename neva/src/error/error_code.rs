@@ -26,7 +26,10 @@ pub enum ErrorCode {
     ResourceNotFound = -32002,
     
     /// [Internal code] The request has been cancelled
-    RequestCancelled = -99999
+    RequestCancelled = -99999,
+
+    /// [Internal code] The request has been timed out
+    Timeout = -99998,
 }
 
 impl Default for ErrorCode {
@@ -53,6 +56,7 @@ impl TryFrom<i32> for ErrorCode {
             -32603 => Ok(ErrorCode::InternalError),
             -32002 => Ok(ErrorCode::ResourceNotFound),
             -99999 => Ok(ErrorCode::RequestCancelled),
+            -99998 => Ok(ErrorCode::Timeout),
             _ => Err(()),
         }
     }
@@ -92,6 +96,7 @@ impl Display for ErrorCode {
             ErrorCode::InternalError => write!(f, "Internal error"),
             ErrorCode::ResourceNotFound => write!(f, "Resource not found"),
             ErrorCode::RequestCancelled => write!(f, "Request cancelled"),
+            ErrorCode::Timeout => write!(f, "Request timed out"),
         }
     }
 }
@@ -116,6 +121,7 @@ mod tests {
             (-32603, ErrorCode::InternalError),
             (-32002, ErrorCode::ResourceNotFound),
             (-99999, ErrorCode::RequestCancelled),
+            (-99998, ErrorCode::Timeout),
         ];
 
         for (code, val) in codes {
@@ -137,6 +143,7 @@ mod tests {
             ("-32603", ErrorCode::InternalError),
             ("-32002", ErrorCode::ResourceNotFound),
             ("-99999", ErrorCode::RequestCancelled),
+            ("-99998", ErrorCode::Timeout),
         ];
 
         for (code, val) in codes {

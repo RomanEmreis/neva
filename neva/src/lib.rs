@@ -1,10 +1,10 @@
 //! # Neva
-//! Easy configurable MCP server SDK for Rust
+//! Easy configurable MCP server and client SDK for Rust
 //! 
 //! ## Dependencies
 //! ```toml
 //! [dependencies]
-//! neva = { version = "0.0.4", features = ["full"] }
+//! neva = { version = "0.0.5", features = ["full"] }
 //! tokio = { version = "1", features = ["full"] }
 //! ```
 //! 
@@ -28,11 +28,15 @@
 //! ```
 
 pub use app::{App, options};
+#[cfg(feature = "client")]
+pub use client::Client;
 
 pub mod app;
 pub mod types;
 pub mod transport;
 pub mod error;
+#[cfg(feature = "client")]
+pub mod client;
 
 #[cfg(feature = "macros")]
 pub use neva_macros::*;

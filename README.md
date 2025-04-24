@@ -1,9 +1,9 @@
 # Neva
-Easy configurable MCP server SDK for Rust
+Easy configurable MCP server and client SDK for Rust
 
-[![latest](https://img.shields.io/badge/latest-0.0.4-d8eb34)](https://crates.io/crates/neva)
+[![latest](https://img.shields.io/badge/latest-0.0.5-d8eb34)](https://crates.io/crates/neva)
 [![latest](https://img.shields.io/badge/rustc-1.80+-964B00)](https://crates.io/crates/neva)
-[![License: MIT](https://img.shields.io/badge/License-MIT-624bd1.svg)](https://github.com/RomanEmreis/volga/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-624bd1.svg)](https://github.com/RomanEmreis/neva/blob/main/LICENSE)
 [![CI](https://github.com/RomanEmreis/neva/actions/workflows/rust.yml/badge.svg)](https://github.com/RomanEmreis/neva/actions/workflows/rust.yml)
 [![Release](https://github.com/RomanEmreis/neva/actions/workflows/release.yml/badge.svg)](https://github.com/RomanEmreis/neva/actions/workflows/release.yml)
 
@@ -14,11 +14,43 @@ Easy configurable MCP server SDK for Rust
 ## Dependencies
 ```toml
 [dependencies]
-neva = { version = "0.0.4", features = ["full"] }
+neva = { version = "0.0.5", features = ["full"] }
 tokio = { version = "1", features = ["full"] }
 ```
+## MCP Client
 
-## Code
+```rust
+use std::time::Duration;
+use neva::Client;
+use neva::error::Error;
+
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    let mut client = Client::new()
+        .with_options(|opt| opt
+            .with_stdio("npx", ["-y", "@modelcontextprotocol/server-everything"])
+            .with_timeout(Duration::from_secs(5)));
+    
+    client.connect().await?;
+
+    // List tools
+    let tools = client.list_tools(None).await?;
+    for tool in tools.tools {
+        println!("- {}", tool.name);
+    }
+
+    // Call a tool
+    let args = [
+        ("message", "Hello MCP!")
+    ];
+    let result = client.call_tool("echo", Some(args)).await?;
+    println!("{:?}", result.content);
+
+    client.disconnect().await
+}
+```
+
+## MCP Server
 
 ```rust
 use neva::{App, tool, resource, prompt};

@@ -5,9 +5,11 @@ use crate::error::Error;
 use crate::app::handler::{FromHandlerParams, HandlerParams};
 use crate::types::{Request, FromRequest, response::ErrorDetails};
 use crate::types::notification::Notification;
+#[cfg(feature = "tracing")]
+use tracing::Level;
 
 /// The severity of a log message.
-/// These map to syslog message severities, as specified in 
+/// This map to syslog message severities, as specified in 
 /// [RFC-5424](https://datatracker.ietf.org/doc/html/rfc5424#section-6.2.1):
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -41,7 +43,7 @@ pub enum LoggingLevel {
 /// If no logging/setLevel request has been sent from the client, the server MAY decide which messages to send automatically.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogMessage {
     /// The severity of this log message.
     pub level: LoggingLevel,
@@ -56,7 +58,7 @@ pub struct LogMessage {
 /// A request from the client to the server, to enable or adjust logging.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetLevelRequestParams {
     /// The level of logging that the client wants to receive from the server. 
     /// The server should send all logs at this level and higher (i.e., more severe) to the client as notifications/message.
@@ -102,5 +104,22 @@ impl LogMessage {
         data: Option<serde_json::Value>
     ) -> Self {
         Self { level, logger, data }
+    }
+    
+    /// Writes a log message
+    #[inline]
+    #[cfg(feature = "tracing")]
+    pub fn write(self) {
+        let data = serde_json::to_value(&self.data).unwrap_or_default();
+        match self.level {
+            LoggingLevel::Alert => tracing::event!(Level::ERROR, %data),
+            LoggingLevel::Critical => tracing::event!(Level::ERROR, %data),
+            LoggingLevel::Emergency => tracing::event!(Level::ERROR, %data),
+            LoggingLevel::Error => tracing::event!(Level::ERROR, %data),
+            LoggingLevel::Warning => tracing::event!(Level::WARN, %data),
+            LoggingLevel::Notice => tracing::event!(Level::WARN, %data),
+            LoggingLevel::Info => tracing::event!(Level::INFO, %data),
+            LoggingLevel::Debug => tracing::event!(Level::DEBUG, %data),
+        };
     }
 }

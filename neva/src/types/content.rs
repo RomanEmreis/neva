@@ -6,7 +6,7 @@ use crate::types::ResourceContents;
 /// Represents the content of response.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Content {
     /// The type of content. This determines the structure of the content object. 
     /// 

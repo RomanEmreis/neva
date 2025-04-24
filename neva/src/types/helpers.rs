@@ -20,6 +20,7 @@ pub enum PropertyType {
     Array,
     String,
     Number,
+    #[serde(alias = "boolean")]
     Bool,
     Object,
 }
@@ -39,6 +40,7 @@ impl From<&str> for PropertyType {
             "string" => PropertyType::String,
             "number" => PropertyType::Number,
             "bool" => PropertyType::Bool,
+            "boolean" => PropertyType::Bool,
             "object" => PropertyType::Object,
             _ => PropertyType::Object,
         }
@@ -53,6 +55,7 @@ impl From<String> for PropertyType {
             "string" => PropertyType::String,
             "number" => PropertyType::Number,
             "bool" => PropertyType::Bool,
+            "boolean" => PropertyType::Bool,
             "object" => PropertyType::Object,
             _ => PropertyType::Object,
         }
