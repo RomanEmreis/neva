@@ -19,8 +19,8 @@ pub(crate) mod route;
 
 /// Represents a known resource that the server is capable of reading.
 /// 
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Clone, Serialize)]
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Resource {
     /// The URI of this resource.
     pub uri: Uri,
@@ -39,8 +39,8 @@ pub struct Resource {
 
 /// Sent from the client to request a list of resources the server has.
 /// 
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Deserialize)]
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Default, Serialize, Deserialize)]
 pub struct ListResourcesRequestParams {
     /// An opaque token representing the current pagination position.
     /// If provided, the server should return results starting after this cursor.
@@ -50,8 +50,8 @@ pub struct ListResourcesRequestParams {
 
 /// Sent from the client to the server, to read a specific resource URI.
 /// 
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Deserialize)]
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Serialize, Deserialize)]
 pub struct ReadResourceRequestParams {
     /// The URI of the resource to read. The URI can use any protocol; 
     /// it is up to the server how to interpret it.
@@ -68,7 +68,7 @@ pub struct ReadResourceRequestParams {
 /// The server's response to a resources/list request from the client.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Default, Serialize)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct ListResourcesResult {
     /// A list of resources that the server offers.
     pub resources: Vec<Resource>,
@@ -87,7 +87,7 @@ pub struct ListResourcesResult {
 /// from the server whenever a particular resource changes.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct SubscribeRequestParams {
     /// The URI of the resource to subscribe to. 
     /// The URI can use any protocol; it is up to the server how to interpret it.
@@ -98,7 +98,7 @@ pub struct SubscribeRequestParams {
 /// from the server whenever a primitive resource changes.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct UnsubscribeRequestParams {
     /// The URI of the resource to unsubscribe from. 
     /// The URI can use any protocol; it is up to the server how to interpret it. 

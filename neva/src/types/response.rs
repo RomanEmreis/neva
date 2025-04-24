@@ -1,20 +1,18 @@
 ﻿//! Represents a response that MCP server provides
 
 use crate::error::Error;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 pub use error_details::ErrorDetails;
 pub use into_response::IntoResponse;
-use crate::types::{
-    RequestId,
-    JSONRPC_VERSION
-};
+use crate::types::{RequestId, JSONRPC_VERSION};
 
 pub mod error_details;
 pub mod into_response;
 
 /// A response message in the JSON-RPC protocol.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Response {
     /// JSON-RPC protocol version. 
     /// 
@@ -22,6 +20,7 @@ pub struct Response {
     pub jsonrpc: String,
     
     /// Request identifier matching the original request.
+    #[serde(default)]
     pub id: RequestId,
     
     /// The result of the method invocation.
@@ -61,6 +60,20 @@ impl Response {
             id,
             result: None,
             error: Some(error.into()),
+        }
+    }
+    
+    /// Unwraps the [`Response`] into either result of `T` or [`Error`]
+    pub fn into_result<T: DeserializeOwned>(self) -> Result<T, Error> {
+        match self.result {
+            Some(result) => serde_json::from_value::<T>(result)
+                .map_err(Into::into),
+            None => {
+                let error = self.error
+                    .unwrap_or_default()
+                    .into();
+                Err(error)
+            }
         }
     }
 }

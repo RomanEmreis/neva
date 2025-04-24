@@ -7,7 +7,7 @@ use crate::{error::Error, types::{IntoResponse, RequestId, Response}};
 /// The server's response to a resources/read request from the client.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ReadResourceResult {
     /// A list of ResourceContents that this resource contains.
     pub contents: Vec<ResourceContents>
@@ -16,7 +16,7 @@ pub struct ReadResourceResult {
 /// Represents the content of a resource.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ResourceContents {
     /// The URI of the resource.
     pub uri: String,

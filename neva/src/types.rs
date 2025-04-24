@@ -74,7 +74,7 @@ pub(super) const JSONRPC_VERSION: &str = "2.0";
 /// Parameters for an initialization request sent to the server.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitializeRequestParams {
     /// The version of the Model Context Protocol that the client is to use.
     #[serde(rename = "protocolVersion")]
@@ -91,7 +91,7 @@ pub struct InitializeRequestParams {
 /// Result of the initialization request sent to the server.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitializeResult {
     /// The version of the Model Context Protocol that the server is to use.
     #[serde(rename = "protocolVersion")]
@@ -150,7 +150,7 @@ pub struct Annotations {
 #[serde(untagged)]
 pub enum ProgressToken {
     String(String),
-    Number(i32),
+    Number(i64),
 }
 
 impl Display for ProgressToken {
@@ -244,7 +244,7 @@ impl Annotations {
         self
     }
     
-    /// Sets priority
+    /// Sets the priority
     pub fn set_priority(mut self, priority: f32) -> Self {
         self.priority = priority;
         self
@@ -261,6 +261,7 @@ impl InitializeResult {
                 prompts: Some(options.prompts_capability.clone()),
                 logging: Some(LoggingCapability::default()),
                 completions: Some(CompletionsCapability::default()),
+                experimental: None
             },
             server_info: options.implementation.clone(),
             instructions: None

@@ -95,6 +95,22 @@ impl From<LoggingLevel> for LevelFilter {
     }
 }
 
+impl From<LoggingLevel> for Level {
+    #[inline]
+    fn from(level: LoggingLevel) -> Self {
+        match level {
+            LoggingLevel::Alert => Level::ERROR,
+            LoggingLevel::Critical => Level::ERROR,
+            LoggingLevel::Emergency => Level::ERROR,
+            LoggingLevel::Error => Level::ERROR,
+            LoggingLevel::Warning => Level::WARN,
+            LoggingLevel::Notice => Level::WARN,
+            LoggingLevel::Info => Level::INFO,
+            LoggingLevel::Debug => Level::DEBUG,
+        }
+    }
+}
+
 impl<S, N> FormatEvent<S, N> for NotificationFormatter
 where
     S: Subscriber + for<'a> LookupSpan<'a>,

@@ -2,18 +2,28 @@
 
 use std::fmt;
 use serde::{Serialize, Deserialize};
-use super::ProgressToken;
+use super::{ProgressToken, JSONRPC_VERSION};
 
 pub use from_request::FromRequest;
 
 pub mod from_request;
 
 /// A unique identifier for a request
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RequestId {
     String(String),
     Number(i64),
+}
+
+impl Clone for RequestId {
+    #[inline]
+    fn clone(&self) -> Self {
+        match self { 
+            RequestId::Number(num) => RequestId::Number(*num),
+            RequestId::String(string) => RequestId::String(string.clone()),
+        }
+    }
 }
 
 impl Default for RequestId {
@@ -24,7 +34,7 @@ impl Default for RequestId {
 }
 
 /// A request in the JSON-RPC protocol.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
     /// JSON-RPC protocol version. 
     ///
@@ -35,9 +45,11 @@ pub struct Request {
     pub method: String,
     
     /// Optional parameters for the method.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub params: Option<serde_json::Value>,
     
     /// Request identifier. Must be a string or number and unique within the session.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<RequestId>,
 }
 
@@ -64,7 +76,27 @@ impl fmt::Display for RequestId {
     }
 }
 
+impl From<&RequestId> for ProgressToken {
+    #[inline]
+    fn from(id: &RequestId) -> ProgressToken {
+        match id { 
+            RequestId::Number(num) => ProgressToken::Number(*num),
+            RequestId::String(str) => ProgressToken::String(str.clone()),
+        }
+    }
+}
+
 impl Request {
+    /// Creates a new [`Request`]
+    pub fn new<T: Serialize>(id: Option<RequestId>, method: &str, params: Option<T>) -> Self {
+        Self {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: id.or_else(|| Some(RequestId::default())),
+            method: method.into(),
+            params: params.and_then(|p| serde_json::to_value(p).ok())
+        }
+    }
+    
     /// Consumes the request and returns request's id if it's specified, otherwise returns default value
     /// 
     /// Default: `(no id)`

@@ -63,6 +63,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
+name = "example-client"
+version = "0.1.0"
+dependencies = [
+ "neva",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "example-logging"
 version = "0.1.0"
 dependencies = [
@@ -197,7 +207,7 @@ dependencies = [
 
 [[package]]
 name = "neva"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "base64",
  "futures-util",
@@ -212,7 +222,7 @@ dependencies = [
 
 [[package]]
 name = "neva_macros"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -448,9 +458,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-util"
-version = "0.7.14"
+version = "0.7.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b9590b93e6fcc1739458317cccd391ad3955e2bde8913edf6f95f9e65a8f034"
+checksum = "66a539a9ad6d5d281510d5bd368c973d636c02dbf8a67300bfb6b950696ad7df"
 dependencies = [
  "bytes",
  "futures-core",

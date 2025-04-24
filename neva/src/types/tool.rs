@@ -6,7 +6,7 @@ use std::sync::Arc;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use crate::error::Error;
+use crate::error::{Error, ErrorCode};
 use super::helpers::TypeCategory;
 use crate::{
     app::handler::{
@@ -27,7 +27,6 @@ use crate::{
     }
 };
 
-
 pub use call_tool_response::CallToolResponse;
 
 mod from_request;
@@ -36,7 +35,7 @@ pub mod call_tool_response;
 /// Represents a tool that the server is capable of calling. Part of the [`ListToolsResult`].
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Tool {
     /// The name of the tool.
     pub name: String,
@@ -53,13 +52,13 @@ pub struct Tool {
     
     /// A tool call handler
     #[serde(skip)]
-    handler: RequestHandler<CallToolResponse>
+    handler: Option<RequestHandler<CallToolResponse>>
 }
 
 /// Sent from the client to request a list of tools the server has.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct ListToolsRequestParams {
     /// An opaque token representing the current pagination position.
     /// If provided, the server should return results starting after this cursor.
@@ -70,7 +69,7 @@ pub struct ListToolsRequestParams {
 /// A response to a request to list the tools available on the server.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Default, Serialize)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct ListToolsResult {
     /// The server's response to a tools/list request from the client.
     pub tools: Vec<Tool>,
@@ -88,7 +87,7 @@ pub struct ListToolsResult {
 /// Used by the client to invoke a tool provided by the server.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallToolRequestParams {
     /// Tool name.
     pub name: String,
@@ -299,7 +298,7 @@ impl Tool {
             name: name.into(),
             descr: None,
             input_schema, 
-            handler,
+            handler: Some(handler),
         }
     }
     
@@ -323,7 +322,10 @@ impl Tool {
     /// Invoke a tool
     #[inline]
     pub(crate) async fn call(&self, params: HandlerParams) -> Result<CallToolResponse, Error> {
-        self.handler.call(params).await
+        match self.handler { 
+            Some(ref handler) => handler.call(params).await,
+            None => Err(Error::new(ErrorCode::InternalError, "Tool handler not specified"))
+        }
     }
 }
 
@@ -384,7 +386,7 @@ mod tests {
         let resp = tool.call(params.into()).await.unwrap();
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"content":[{"type":"text","text":"7","mimeType":"text/plain"}],"is_error":false}"#);
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"7","mimeType":"text/plain"}],"isError":false}"#);
     }
     
     #[test]
