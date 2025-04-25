@@ -21,10 +21,13 @@ use crate::transport::{
 };
 
 #[cfg(feature = "client")]
-use tokio::process::{Command, ChildStdin, ChildStdout};
+use tokio::process::{ChildStdin, ChildStdout};
 #[cfg(feature = "client")]
 use self::options::StdIoOptions;
 
+#[cfg(target_os = "windows")]
+#[cfg(feature = "client")]
+mod windows;
 #[cfg(feature = "client")]
 pub(crate) mod options;
 
@@ -158,7 +161,7 @@ impl StdIoReceiver {
                             }
                         };      
                     }
-                };
+                }
             }
         });
     }
@@ -198,6 +201,14 @@ impl StdIo {
         let command = options.command;
         #[cfg(not(target_os = "windows"))]
         let args = options.args;
+
+        #[cfg(not(target_os = "windows"))]
+        let mut child = tokio::process::Command::new(command)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("Failed to handshake");
         
         #[cfg(target_os = "windows")]
         let command = "cmd.exe";
@@ -208,11 +219,8 @@ impl StdIo {
             win_args
         };
 
-        let mut child = Command::new(command)
-            .args(args)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
+        #[cfg(target_os = "windows")]
+        let (job, mut child) = windows::Job::new(command, args)
             .expect("Failed to handshake");
 
         let child_id = child.id();
@@ -224,26 +232,28 @@ impl StdIo {
             .expect("Failed to handshake: Inaccessible stdout");
 
         tokio::task::spawn(async move {
-           tokio::select! {
-               biased;
-               _ = child.wait() => {}
-               _ = token.cancelled() => {
-                   if let Err(_e) = child.kill().await {
+            #[cfg(target_os = "windows")]
+            let _job = job;
+            tokio::select! {
+                biased;
+                _ = child.wait() => {}
+                _ = token.cancelled() => {
+                    if let Err(_e) = child.kill().await {
                         #[cfg(feature = "tracing")]
                         tracing::warn!(
-                           logger = "neva", 
-                           pid = child_id,
-                           "Failed to kill child process: {:?}", _e);
-                   } else {
-                       let _exit = child.wait().await;
-                       #[cfg(feature = "tracing")]
-                       tracing::trace!(
-                           logger = "neva",
-                           pid = child_id,
-                           "Child exited with status: {:?}", _exit);
-                   }
-               },
-           } 
+                            logger = "neva", 
+                            pid = child_id,
+                            "Failed to kill child process: {:?}", _e);
+                    } else {
+                        let _exit = child.wait().await;
+                        #[cfg(feature = "tracing")]
+                        tracing::trace!(
+                            logger = "neva",
+                            pid = child_id,
+                            "Child exited with status: {:?}", _exit);
+                    }
+                },
+            } 
         });
         
         (BufReader::new(stdout), BufWriter::new(stdin))
@@ -319,5 +329,31 @@ impl TransportReceiver for StdIo {
 
 #[cfg(test)]
 mod tests {
-    
+    #[tokio::test]
+    #[cfg(all(feature = "client", target_os = "windows"))]
+    async fn it_tests_handshake() {
+        use tokio_util::sync::CancellationToken;
+        use crate::transport::StdIo;
+        use super::options::StdIoOptions;
+        
+        let token = CancellationToken::new();
+        let (_, _) = StdIo::handshake(
+            StdIoOptions::new("cmd.exe", ["/c", "ping", "127.0.0.1", "-t"]),
+            token.clone()
+        );
+
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        
+        token.cancel();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::process::Command::new("tasklist").output()
+        ).await.unwrap();
+
+        assert!(
+            !String::from_utf8_lossy(&result.unwrap().stdout).contains("ping.exe"),
+            "Ping should be terminated"
+        );
+    }    
 }
