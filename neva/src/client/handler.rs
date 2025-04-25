@@ -14,8 +14,11 @@ use crate::{
 };
 use crate::error::{Error, ErrorCode};
 use crate::transport::Transport;
-use crate::types::notification::{LogMessage, Notification};
+use crate::types::notification::Notification;
 use crate::types::Request;
+
+#[cfg(feature = "tracing")]
+use crate::types::notification::LogMessage;
 
 /// Pending requests data structure
 type PendingRequests = Arc<Mutex<HashMap<RequestId, RequestHandle>>>; 

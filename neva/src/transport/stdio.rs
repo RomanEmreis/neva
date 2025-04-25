@@ -25,9 +25,11 @@ use tokio::process::{ChildStdin, ChildStdout};
 #[cfg(feature = "client")]
 use self::options::StdIoOptions;
 
-#[cfg(target_os = "windows")]
-#[cfg(feature = "client")]
+#[cfg(all(feature = "client", target_os = "windows"))]
 mod windows;
+#[cfg(all(feature = "client", target_os = "linux"))]
+mod linux;
+
 #[cfg(feature = "client")]
 pub(crate) mod options;
 
@@ -197,17 +199,8 @@ impl StdIo {
         options: StdIoOptions, 
         token: CancellationToken
     ) -> (BufReader<ChildStdout>, BufWriter<ChildStdin>) {
-        #[cfg(not(target_os = "windows"))]
-        let command = options.command;
-        #[cfg(not(target_os = "windows"))]
-        let args = options.args;
-
-        #[cfg(not(target_os = "windows"))]
-        let mut child = tokio::process::Command::new(command)
-            .args(args)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
+        #[cfg(target_os = "linux")]
+        let (job, mut child) = linux::Job::new(options.command, options.args)
             .expect("Failed to handshake");
         
         #[cfg(target_os = "windows")]
@@ -223,7 +216,14 @@ impl StdIo {
         let (job, mut child) = windows::Job::new(command, args)
             .expect("Failed to handshake");
 
-        let child_id = child.id();
+        #[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
+        let mut child = tokio::process::Command::new(options.command)
+            .args(options.args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("Failed to handshake");
+        
         let stdin = child.stdin
             .take()
             .expect("Failed to handshake: Inaccessible stdin");
@@ -231,8 +231,10 @@ impl StdIo {
             .take()
             .expect("Failed to handshake: Inaccessible stdout");
 
+        #[cfg(feature = "tracing")]
+        let child_id = child.id();
+
         tokio::task::spawn(async move {
-            #[cfg(target_os = "windows")]
             let _job = job;
             tokio::select! {
                 biased;
@@ -355,5 +357,33 @@ mod tests {
             !String::from_utf8_lossy(&result.unwrap().stdout).contains("ping.exe"),
             "Ping should be terminated"
         );
+    }
+
+    #[tokio::test]
+    #[cfg(all(feature = "client", target_os = "linux"))]
+    async fn it_tests_handshake() {
+        //use tokio::io::AsyncBufReadExt;
+        use tokio_util::sync::CancellationToken;
+        use crate::transport::StdIo;
+        use super::options::StdIoOptions;
+
+        let token = CancellationToken::new();
+        let (_reader, _) = StdIo::handshake(
+            StdIoOptions::new("sh", ["-c", "sleep 300"]),
+            token.clone()
+        );
+
+        token.cancel();
+
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        
+        let output = tokio::process::Command::new("pgrep")
+            .arg("-f")
+            .arg("sleep 300")
+            .output()
+            .await
+            .unwrap();
+        
+        assert!(output.stdout.is_empty(), "Process still running");
     }    
 }
