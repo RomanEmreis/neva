@@ -17,6 +17,12 @@ pub use get_prompt_result::{GetPromptResult, PromptMessage};
 mod from_request;
 pub mod get_prompt_result;
 
+/// List of commands for Prompts
+pub mod commands {
+    pub const LIST: &str = "prompts/list";
+    pub const GET: &str = "prompts/get";
+}
+
 /// A prompt or prompt template that the server offers.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
@@ -82,7 +88,7 @@ pub struct GetPromptRequestParams {
     ///
     /// > **Note:** This can include progress tracking tokens and other protocol-specific properties
     /// > that are not part of the primary request parameters.
-    #[serde(rename = "_meta")]
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<RequestParamsMeta>,
 }
 

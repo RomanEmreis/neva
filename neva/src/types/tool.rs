@@ -32,6 +32,12 @@ pub use call_tool_response::CallToolResponse;
 mod from_request;
 pub mod call_tool_response;
 
+/// List of commands for Tools
+pub mod commands {
+    pub const LIST: &str = "tools/list";
+    pub const CALL: &str = "tools/call";
+}
+
 /// Represents a tool that the server is capable of calling. Part of the [`ListToolsResult`].
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
@@ -100,7 +106,7 @@ pub struct CallToolRequestParams {
     /// 
     /// > **Note:** This can include progress tracking tokens and other protocol-specific properties
     /// > that are not part of the primary request parameters.
-    #[serde(rename = "_meta")]
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<RequestParamsMeta>,
 }
 

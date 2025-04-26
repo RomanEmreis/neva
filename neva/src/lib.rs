@@ -46,3 +46,9 @@ pub(crate) const PROTOCOL_VERSIONS: [&str; 2] = [
     "2024-11-05", 
     "2025-03-26"
 ];
+
+/// List of commands
+pub mod commands {
+    pub const INIT: &str = "initialize";
+    pub const PING: &str = "ping";
+}

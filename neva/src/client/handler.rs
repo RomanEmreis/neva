@@ -1,24 +1,23 @@
 ﻿//! Request handling utilities
 
-use tokio::sync::{oneshot, Mutex};
+use crate::error::{Error, ErrorCode};
+use crate::transport::Transport;
+use crate::types::notification::Notification;
+use crate::types::Request;
 use tokio_util::sync::CancellationToken;
+use tokio::{
+    sync::{oneshot, Mutex},
+    time::timeout
+};
 use std::{
     collections::HashMap,
     time::Duration,
     sync::{Arc, atomic::{AtomicI64, Ordering}}
 };
-use tokio::time::timeout;
 use crate::{
     transport::{Receiver, Sender, TransportProto, TransportProtoReceiver, TransportProtoSender},
     types::{RequestId, Response}
 };
-use crate::error::{Error, ErrorCode};
-use crate::transport::Transport;
-use crate::types::notification::Notification;
-use crate::types::Request;
-
-#[cfg(feature = "tracing")]
-use crate::types::notification::LogMessage;
 
 /// Pending requests data structure
 type PendingRequests = Arc<Mutex<HashMap<RequestId, RequestHandle>>>; 
@@ -120,19 +119,23 @@ impl RequestHandler {
         tokio::task::spawn(async move {
             while let Ok(msg) = rx.recv::<serde_json::Value>().await {
                 if msg.get("id").is_some() {
-                    let resp = serde_json::from_value::<Response>(msg).unwrap();
-                    let sender = {
-                        let mut pending = pending.lock().await;
-                        pending.remove(&resp.id)
-                    };
-                    if let Some(sender) = sender {
-                        sender.send(resp);
+                    if msg.get("method").is_some() { 
+                        #[cfg(feature = "tracing")]
+                        tracing::debug!("Received notification method: {:?}", msg.get("method"));
+                    } else {
+                        let resp = serde_json::from_value::<Response>(msg).unwrap();
+                        let sender = {
+                            let mut pending = pending.lock().await;
+                            pending.remove(&resp.id)
+                        };
+                        if let Some(sender) = sender {
+                            sender.send(resp);
+                        }
                     }
                 } else {
                     #[cfg(feature = "tracing")]
                     {
                         let log = serde_json::from_value::<Notification>(msg).unwrap();
-                        let log = serde_json::from_value::<LogMessage>(log.params.unwrap()).unwrap();
                         log.write();
                     }
                 }

@@ -17,6 +17,15 @@ pub mod uri;
 pub mod template;
 pub(crate) mod route;
 
+/// List of commands for Resources
+pub mod commands {
+    pub const LIST: &str = "resources/list";
+    pub const TEMPLATES_LIST: &str = "resources/templates/list";
+    pub const READ: &str = "resources/read";
+    pub const SUBSCRIBE: &str = "resources/subscribe";
+    pub const UNSUBSCRIBE: &str = "resources/unsubscribe";
+}
+
 /// Represents a known resource that the server is capable of reading.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
@@ -61,7 +70,7 @@ pub struct ReadResourceRequestParams {
     ///
     /// > **Note:** This can include progress tracking tokens and other protocol-specific properties
     /// > that are not part of the primary request parameters.
-    #[serde(rename = "_meta")]
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<RequestParamsMeta>,
 }
 

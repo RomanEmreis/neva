@@ -21,6 +21,16 @@ pub mod log_message;
 #[cfg(feature = "tracing")]
 pub mod formatter;
 
+/// List of commands for Notifications
+pub mod commands {
+    pub const INITIALIZED: &str = "notifications/initialized";
+    pub const CANCELLED: &str = "notifications/cancelled";
+    pub const MESSAGE: &str = "notifications/message";
+    pub const PROGRESS: &str = "notifications/progress";
+    pub const STDERR: &str = "notifications/stderr";
+    pub const SET_LOG_LEVEL: &str = "logging/setLevel";
+}
+
 /// A notification which does not expect a response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Notification {
@@ -80,8 +90,43 @@ impl Notification {
         }
     }
     
+    /// Writes the [`Notification`]
+    #[inline]
+    pub fn write(self) {
+        let is_stderr = self.is_stderr();
+        let Some(params) = self.params else { return; };
+        if is_stderr {
+            Self::write_err_internal(params);
+        } else {
+            let log = serde_json::from_value::<LogMessage>(params).unwrap();
+            log.write();
+        }
+    }
+    
+    /// Returns `true` is the [`Notification`] received with method `notifications/stderr`
+    #[inline]
+    pub fn is_stderr(&self) -> bool {
+        self.method.as_str() == commands::STDERR
+    }
+    
+    /// Writes the [`Notification`] as [`LoggingLevel::Error`]
+    #[inline]
+    pub fn write_err(self) {
+        if let Some(params) = self.params {
+            Self::write_err_internal(params)
+        }
+    }
+    
     pub fn to_json(self) -> String {
         serde_json::to_string(&self).unwrap()
+    }
+    
+    #[inline]
+    fn write_err_internal(params: serde_json::Value) {
+        let err = params
+            .get("content")
+            .unwrap_or_else(|| &params);
+        tracing::error!("{}", err);
     }
 }
 

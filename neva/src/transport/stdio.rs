@@ -202,20 +202,9 @@ impl StdIo {
         #[cfg(target_os = "linux")]
         let (job, mut child) = linux::Job::new(options.command, options.args)
             .expect("Failed to handshake");
-        
         #[cfg(target_os = "windows")]
-        let command = "cmd.exe";
-        #[cfg(target_os = "windows")]
-        let args = {
-            let mut win_args = vec!["/c", options.command];
-            win_args.extend_from_slice(&options.args);
-            win_args
-        };
-
-        #[cfg(target_os = "windows")]
-        let (job, mut child) = windows::Job::new(command, args)
+        let (job, mut child) = windows::Job::new(options.command, options.args)
             .expect("Failed to handshake");
-
         #[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
         let mut child = tokio::process::Command::new(options.command)
             .args(options.args)
@@ -235,6 +224,7 @@ impl StdIo {
         let child_id = child.id();
 
         tokio::task::spawn(async move {
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             let _job = job;
             tokio::select! {
                 biased;

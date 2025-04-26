@@ -6,6 +6,11 @@ use crate::app::handler::{FromHandlerParams, HandlerParams};
 use crate::error::Error;
 use crate::types::request::FromRequest;
 
+/// List of commands for Completion
+pub mod commands {
+    pub const COMPLETE: &str = "completion/complete";
+}
+
 /// Represents a completion object in the server's response
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details

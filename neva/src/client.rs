@@ -7,16 +7,7 @@ use tokio_util::sync::CancellationToken;
 use handler::RequestHandler;
 use crate::error::{Error, ErrorCode};
 use crate::transport::Transport;
-use crate::types::{
-    ListToolsRequestParams, ListToolsResult, CallToolRequestParams, CallToolResponse,
-    ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult,
-    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, Uri,
-    ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult,
-    ClientCapabilities, InitializeRequestParams, InitializeResult, ProgressToken, 
-    Request, RequestId, Response, request::RequestParamsMeta,
-    cursor::Cursor,
-    notification::Notification,
-};
+use crate::types::{ListToolsRequestParams, ListToolsResult, CallToolRequestParams, CallToolResponse, ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, ListResourceTemplatesRequestParams, ListResourceTemplatesResult, Uri, ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult, ClientCapabilities, InitializeRequestParams, InitializeResult, ProgressToken, Request, RequestId, Response, request::RequestParamsMeta, cursor::Cursor, notification::Notification, Root};
 
 mod handler;
 pub mod options;
@@ -57,6 +48,33 @@ impl Client {
     {
         self.options = config(self.options);
         self
+    }
+    
+    /// Adds a new Root
+    /// 
+    /// # Example
+    /// ```no_run
+    /// use neva::client::Client;
+    /// # use neva::error::Error;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Error> {
+    /// let mut client = Client::new();
+    /// client.add_root("file:///home/user/projects/my_project", "My Project");
+    /// # client.disconnect().await
+    /// # }
+    /// ```    
+    pub fn add_root(&mut self, uri: &str, name: &str) -> &mut Self {
+        self.options.add_root(Root::new(uri, name));
+        self
+    }
+    
+    /// Sends the "notifications/roots/list_changed" notification to the server
+    pub async fn publish_roots_changed(&mut self) -> Result<(), Error> {
+        let changed = Notification::new(
+            crate::types::root::commands::LIST_CHANGED,
+            None);
+        self.send_notification(changed).await
     }
     
     /// Connects the MCP client to the MCP server
@@ -107,7 +125,9 @@ impl Client {
     /// }
     /// ```
     pub async fn disconnect(mut self) -> Result<(), Error> {
-        let cancelled = Notification::new("notifications/cancelled", None); 
+        let cancelled = Notification::new(
+            crate::types::notification::commands::CANCELLED, 
+            None); 
         self.send_notification(cancelled).await?;
 
         if let Some(token) = self.cancellation_token {
@@ -123,13 +143,13 @@ impl Client {
             protocol_ver: self.options.protocol_ver().to_string(),
             client_info: Some(self.options.implementation.clone()),
             capabilities: Some(ClientCapabilities {
+                roots: self.options.roots_capability.clone(),
+                sampling: self.options.sampling_capability.clone(),
                 experimental: None,
-                sampling: None,
-                roots: None
             })
         };
 
-        let req = Request::new(None, "initialize", Some(params));
+        let req = Request::new(None, crate::commands::INIT, Some(params));
         let resp = self.send_request(req).await?;
 
         let init_result = resp.into_result::<InitializeResult>()?;
@@ -138,7 +158,9 @@ impl Client {
             self.options.protocol_ver(),
             "Server protocol version mismatch.");
 
-        let initialized = Notification::new("notifications/initialized", None); 
+        let initialized = Notification::new(
+            crate::types::notification::commands::INITIALIZED, 
+            None); 
         self.send_notification(initialized).await
     }
     
@@ -168,7 +190,7 @@ impl Client {
         let id = self.generate_id()?;
         let request = Request::new(
             Some(id),
-            "tools/list",
+            crate::types::tool::commands::LIST,
             Some(ListToolsRequestParams { cursor }));
 
         self.send_request(request)
@@ -201,8 +223,8 @@ impl Client {
     pub async fn list_resources(&mut self, cursor: Option<Cursor>) -> Result<ListResourcesResult, Error> {
         let id = self.generate_id()?;
         let request = Request::new(
-            Some(id), 
-            "resources/list", 
+            Some(id),
+            crate::types::resource::commands::LIST, 
             Some(ListResourcesRequestParams { cursor }));
 
         self.send_request(request)
@@ -236,7 +258,7 @@ impl Client {
         let id = self.generate_id()?;
         let request = Request::new(
             Some(id),
-            "resources/templates/list",
+            crate::types::resource::commands::TEMPLATES_LIST,
             Some(ListResourceTemplatesRequestParams { cursor }));
 
         self.send_request(request)
@@ -270,7 +292,7 @@ impl Client {
         let id = self.generate_id()?;
         let request = Request::new(
             Some(id),
-            "prompts/list",
+            crate::types::prompt::commands::LIST,
             Some(ListPromptsRequestParams { cursor }));
 
         self.send_request(request)
@@ -306,7 +328,7 @@ impl Client {
         let id = self.generate_id()?;
         let request = Request::new(
             Some(id.clone()),
-            "tools/call",
+            crate::types::tool::commands::CALL,
             Some(CallToolRequestParams {
                 meta: Some(RequestParamsMeta { 
                     progress_token: Some(ProgressToken::from(&id))
@@ -342,8 +364,8 @@ impl Client {
     pub async fn read_resource(&mut self, uri: impl Into<Uri>) -> Result<ReadResourceResult, Error> {
         let id = self.generate_id()?;
         let request = Request::new(
-            Some(id.clone()), 
-            "resources/read",
+            Some(id.clone()),
+            crate::types::resource::commands::READ,
             Some(ReadResourceRequestParams {
                 uri: uri.into(),
                 meta: Some(RequestParamsMeta {
@@ -388,7 +410,7 @@ impl Client {
         let id = self.generate_id()?;
         let request = Request::new(
             Some(id.clone()),
-            "prompts/get",
+            crate::types::prompt::commands::GET,
             Some(GetPromptRequestParams {
                 meta: Some(RequestParamsMeta {
                     progress_token: Some(ProgressToken::from(&id))

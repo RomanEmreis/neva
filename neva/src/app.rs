@@ -38,28 +38,28 @@ impl App {
             handlers: HashMap::new()
         };
 
-        app.map_handler("initialize", Self::init);
-        app.map_handler("completion/complete", Self::completion);
+        app.map_handler(crate::commands::INIT, Self::init);
+        app.map_handler(crate::types::completion::commands::COMPLETE, Self::completion);
         
-        app.map_handler("tools/list", Self::tools);
-        app.map_handler("tools/call", Self::tool);
+        app.map_handler(crate::types::tool::commands::LIST, Self::tools);
+        app.map_handler(crate::types::tool::commands::CALL, Self::tool);
         
-        app.map_handler("resources/list", Self::resources);
-        app.map_handler("resources/templates/list", Self::resource_templates);
-        app.map_handler("resources/read", Self::resource);
-        app.map_handler("resources/subscribe", Self::resource_subscribe);
-        app.map_handler("resources/unsubscribe", Self::resource_unsubscribe);
+        app.map_handler(crate::types::resource::commands::LIST, Self::resources);
+        app.map_handler(crate::types::resource::commands::TEMPLATES_LIST, Self::resource_templates);
+        app.map_handler(crate::types::resource::commands::READ, Self::resource);
+        app.map_handler(crate::types::resource::commands::SUBSCRIBE, Self::resource_subscribe);
+        app.map_handler(crate::types::resource::commands::UNSUBSCRIBE, Self::resource_unsubscribe);
         
-        app.map_handler("prompts/list", Self::prompts);
-        app.map_handler("prompts/get", Self::prompt);
+        app.map_handler(crate::types::prompt::commands::LIST, Self::prompts);
+        app.map_handler(crate::types::prompt::commands::GET, Self::prompt);
         
-        app.map_handler("notifications/initialized", Self::notifications_init);
-        app.map_handler("notifications/cancelled", Self::notifications_cancel);
+        app.map_handler(crate::types::notification::commands::INITIALIZED, Self::notifications_init);
+        app.map_handler(crate::types::notification::commands::CANCELLED, Self::notifications_cancel);
         
-        app.map_handler("ping", Self::ping);
+        app.map_handler(crate::commands::PING, Self::ping);
 
         #[cfg(feature = "tracing")]
-        app.map_handler("logging/setLevel", Self::set_log_level);
+        app.map_handler(crate::types::notification::commands::SET_LOG_LEVEL, Self::set_log_level);
         
         app
     }

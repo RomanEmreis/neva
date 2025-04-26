@@ -2,6 +2,10 @@
 use serde::{Deserialize, Serialize};
 use crate::SERVER_NAME;
 use crate::options::McpOptions;
+use crate::app::handler::{FromHandlerParams, HandlerParams};
+use crate::error::Error;
+use crate::types::notification::ProgressNotification;
+use crate::types::request::FromRequest;
 
 pub use helpers::{Json, Meta, PropertyType};
 pub use request::{RequestId, Request};
@@ -51,10 +55,7 @@ pub use prompt::{
     PromptMessage,
     PromptHandler,
 };
-use crate::app::handler::{FromHandlerParams, HandlerParams};
-use crate::error::Error;
-use crate::types::notification::ProgressNotification;
-use crate::types::request::FromRequest;
+pub use root::Root;
 
 pub mod request;
 pub mod response;
@@ -67,6 +68,7 @@ pub mod content;
 pub mod reference;
 pub mod notification;
 pub mod cursor;
+pub mod root;
 pub(crate) mod helpers;
 
 pub(super) const JSONRPC_VERSION: &str = "2.0";

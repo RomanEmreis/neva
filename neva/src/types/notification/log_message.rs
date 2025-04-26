@@ -49,9 +49,11 @@ pub struct LogMessage {
     pub level: LoggingLevel,
     
     /// An optional name of the logger issuing this message.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub logger: Option<String>,
     
     /// The data to be logged, such as a string message or an object.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
 }
 
@@ -81,7 +83,7 @@ impl From<LogMessage> for Notification {
     #[inline]
     fn from(log: LogMessage) -> Self {
         Self::new(
-            "notifications/message", 
+            super::commands::MESSAGE, 
             serde_json::to_value(log).ok()
         )
     }
