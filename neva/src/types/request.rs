@@ -2,7 +2,7 @@
 
 use std::fmt;
 use serde::{Serialize, Deserialize};
-use super::{ProgressToken, JSONRPC_VERSION};
+use super::{ProgressToken, Message, JSONRPC_VERSION};
 
 pub use from_request::FromRequest;
 
@@ -73,6 +73,13 @@ impl fmt::Display for RequestId {
             RequestId::String(str) => write!(f, "{}", str),
             RequestId::Number(num) => write!(f, "{}", num),
         }
+    }
+}
+
+impl From<Request> for Message {
+    #[inline]
+    fn from(request: Request) -> Self {
+        Self::Request(request)
     }
 }
 

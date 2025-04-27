@@ -71,6 +71,15 @@ impl Client {
     
     /// Sends the "notifications/roots/list_changed" notification to the server
     pub async fn publish_roots_changed(&mut self) -> Result<(), Error> {
+        let Some(capabilities) = &self.options.roots_capability else { 
+            return Err(Error::new(ErrorCode::MethodNotFound, "Roots is not supported"));
+        };
+        if !capabilities.list_changed {
+            return Err(Error::new(
+                ErrorCode::MethodNotFound, 
+                "This client is not configured to send list change notifications"));
+        } 
+        
         let changed = Notification::new(
             crate::types::root::commands::LIST_CHANGED,
             None);

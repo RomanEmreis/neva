@@ -5,7 +5,7 @@ use std::future::Future;
 use std::sync::Arc;
 use crate::error::{Error, ErrorCode};
 use crate::options::{McpOptions, RuntimeMcpOptions};
-use crate::transport::{Receiver, Sender, Transport};
+use crate::transport::{Receiver, Sender, Transport, TransportProtoSender};
 use crate::app::handler::{
     FromHandlerParams,
     GenericHandler,
@@ -13,8 +13,20 @@ use crate::app::handler::{
     RequestFunc,
     RequestHandler
 };
-use crate::types::{InitializeResult, InitializeRequestParams, IntoResponse, Response, CompleteResult, CompleteRequestParams, ListToolsRequestParams, CallToolRequestParams, ListToolsResult, CallToolResponse, Tool, ToolHandler, ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate, ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, SubscribeRequestParams, UnsubscribeRequestParams, Resource, resource::{Route, template::ResourceFunc}, ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt, notification::CancelledNotificationParams, Request};
-use crate::types::cursor::Pagination;
+use crate::types::{
+    InitializeResult, InitializeRequestParams, 
+    IntoResponse, Response, Request, Message,
+    CompleteResult, CompleteRequestParams, 
+    ListToolsRequestParams, CallToolRequestParams, ListToolsResult, CallToolResponse, Tool, ToolHandler, 
+    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate, 
+    ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, 
+    SubscribeRequestParams, UnsubscribeRequestParams, Resource, 
+    resource::{Route, template::ResourceFunc}, 
+    ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult, 
+    PromptHandler, Prompt, 
+    notification::{Notification, CancelledNotificationParams},
+    cursor::Pagination
+};
 #[cfg(feature = "tracing")]
 use crate::types::notification::SetLevelRequestParams;
 
@@ -23,11 +35,13 @@ pub(crate) mod handler;
 
 const DEFAULT_PAGE_SIZE: usize = 10;
 
+type RequestHandlers = HashMap<String, RequestHandler<Response>>;
+
 /// Represents an MCP server application
 #[derive(Default)]
 pub struct App {
     options: McpOptions,
-    handlers: HashMap<String, RequestHandler<Response>>,
+    handlers: RequestHandlers,
 }
 
 impl App {
@@ -83,49 +97,15 @@ impl App {
         let mut transport = self.options.transport();
         let options = Arc::new(self.options);
         let handlers = Arc::new(self.handlers);
-        
         let _ = transport.start();
-        
         let (sender, mut receiver) = transport.split();
         
-        while let Ok(req) = receiver.recv::<Request>().await {
-            let req_id = req.id();
-            
-            let handlers = handlers.clone();
-            let options = options.clone();
-            
-            let token = options.track_request(&req_id).await;
-            
-            let mut sender = sender.clone();
-            tokio::task::spawn(async move {
-                #[cfg(feature = "tracing")]
-                tracing::trace!(logger = "neva", "Received: {:?}", req);
-                
-                let resp = if let Some(handler) = handlers.get(&req.method) {
-                    tokio::select! {
-                        resp = handler.call(HandlerParams::Request(options.clone(), req)) => {
-                            options.complete_request(&req_id).await;
-                            resp
-                        }
-                        _ = token.cancelled() => {
-                            #[cfg(feature = "tracing")]
-                            tracing::debug!(
-                                logger = "neva", 
-                                "The request with ID: {} has been cancelled", req_id);
-                            Err(Error::from(ErrorCode::RequestCancelled))
-                        }
-                    }
-                } else {
-                    Err(Error::from(ErrorCode::MethodNotFound))
-                };
-
-                if let Err(_err) = sender.send(resp.into_response(req_id)).await {
-                    #[cfg(feature = "tracing")]
-                    tracing::error!(
-                        logger = "neva", 
-                        error = format!("Error sending response: {:?}", _err));
-                }
-            });
+        while let Ok(msg) = receiver.recv().await {
+            match msg { 
+                Message::Request(req) => Self::handle_request(req, sender.clone(), options.clone(), handlers.clone()).await,
+                Message::Response(response) => Self::handle_response(response).await,
+                Message::Notification(notification) => Self::handle_notification(notification).await
+            }
         }
     }
     
@@ -451,6 +431,60 @@ impl App {
         );
         
         options.set_log_level(params.level)
+    }
+    
+    async fn handle_request(
+        req: Request,
+        mut sender: TransportProtoSender,
+        options: RuntimeMcpOptions,
+        handlers: Arc<RequestHandlers>
+    ) {
+        let req_id = req.id();
+
+        let handlers = handlers.clone();
+        let options = options.clone();
+
+        let token = options.track_request(&req_id).await;
+
+        tokio::spawn(async move {
+            #[cfg(feature = "tracing")]
+            tracing::trace!(logger = "neva", "Received: {:?}", req);
+
+            let resp = if let Some(handler) = handlers.get(&req.method) {
+                tokio::select! {
+                    resp = handler.call(HandlerParams::Request(options.clone(), req)) => {
+                        options.complete_request(&req_id).await;
+                        resp
+                    }
+                    _ = token.cancelled() => {
+                        #[cfg(feature = "tracing")]
+                        tracing::debug!(
+                            logger = "neva", 
+                            "The request with ID: {} has been cancelled", req_id);
+                        Err(Error::from(ErrorCode::RequestCancelled))
+                    }
+                }
+            } else {
+                Err(Error::from(ErrorCode::MethodNotFound))
+            };
+
+            if let Err(_err) = sender.send(resp.into_response(req_id).into()).await {
+                #[cfg(feature = "tracing")]
+                tracing::error!(
+                    logger = "neva", 
+                    error = format!("Error sending response: {:?}", _err));
+            }
+        });
+    }
+    
+    async fn handle_response(_resp: Response) {
+        #[cfg(feature = "tracing")]
+        tracing::debug!(logger = "neva", "Response received: {:?}", _resp);
+    }
+    
+    async fn handle_notification(_notification: Notification) {
+        #[cfg(feature = "tracing")]
+        tracing::debug!(logger = "neva", "Notification received: {:?}", _notification);
     }
 }
 

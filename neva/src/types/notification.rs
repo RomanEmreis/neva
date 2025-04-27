@@ -1,7 +1,7 @@
 ﻿//! Utilities for Notifications
 
 use serde::{Serialize, Deserialize};
-use crate::types::{FromRequest, Request, RequestId, JSONRPC_VERSION};
+use crate::types::{FromRequest, Request, RequestId, Message, JSONRPC_VERSION};
 use crate::app::handler::{FromHandlerParams, HandlerParams};
 use crate::error::Error;
 
@@ -71,6 +71,13 @@ pub struct CancelledNotificationParams {
     pub reason: Option<String>,
 }
 
+impl From<Notification> for Message {
+    #[inline]
+    fn from(notification: Notification) -> Self {
+        Self::Notification(notification)
+    }
+}
+
 impl FromHandlerParams for CancelledNotificationParams {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
@@ -92,6 +99,7 @@ impl Notification {
     
     /// Writes the [`Notification`]
     #[inline]
+    #[cfg(feature = "tracing")]
     pub fn write(self) {
         let is_stderr = self.is_stderr();
         let Some(params) = self.params else { return; };
@@ -111,6 +119,7 @@ impl Notification {
     
     /// Writes the [`Notification`] as [`LoggingLevel::Error`]
     #[inline]
+    #[cfg(feature = "tracing")]
     pub fn write_err(self) {
         if let Some(params) = self.params {
             Self::write_err_internal(params)
@@ -122,6 +131,7 @@ impl Notification {
     }
     
     #[inline]
+    #[cfg(feature = "tracing")]
     fn write_err_internal(params: serde_json::Value) {
         let err = params
             .get("content")

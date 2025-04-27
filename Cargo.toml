@@ -1,6 +1,7 @@
 [workspace]
 members = ["neva", "neva_macros", "examples/*"]
 default-members = ["neva", "neva_macros"]
+exclude = ["examples/roots"]
 resolver = "2"
 
 [workspace.package]

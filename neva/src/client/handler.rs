@@ -16,7 +16,7 @@ use std::{
 };
 use crate::{
     transport::{Receiver, Sender, TransportProto, TransportProtoReceiver, TransportProtoSender},
-    types::{RequestId, Response}
+    types::{RequestId, Response, Message}
 };
 
 /// Pending requests data structure
@@ -94,7 +94,7 @@ impl RequestHandler {
             pending.insert(id.clone(), RequestHandle::new(tx));
         }
 
-        self.sender.send(request).await?;
+        self.sender.send(request.into()).await?;
 
         match timeout(self.timeout, rx).await {
             Ok(Ok(resp)) => Ok(resp),
@@ -110,20 +110,20 @@ impl RequestHandler {
     /// Sends a notification to MCP server
     #[inline]
     pub(super) async fn send_notification(&mut self, notification: Notification) -> Result<(), Error> {
-        self.sender.send(notification).await
+        self.sender.send(notification.into()).await
     }
 
     #[inline]
     fn start(self, mut rx: TransportProtoReceiver) -> Self {
         let pending = self.pending.clone();
         tokio::task::spawn(async move {
-            while let Ok(msg) = rx.recv::<serde_json::Value>().await {
-                if msg.get("id").is_some() {
-                    if msg.get("method").is_some() { 
+            while let Ok(msg) = rx.recv().await {
+                match msg {
+                    Message::Request(req) => {
                         #[cfg(feature = "tracing")]
-                        tracing::debug!("Received notification method: {:?}", msg.get("method"));
-                    } else {
-                        let resp = serde_json::from_value::<Response>(msg).unwrap();
+                        tracing::debug!("Received notification method: {:?}", req.method);
+                    },
+                    Message::Response(resp) => {
                         let sender = {
                             let mut pending = pending.lock().await;
                             pending.remove(&resp.id)
@@ -131,12 +131,10 @@ impl RequestHandler {
                         if let Some(sender) = sender {
                             sender.send(resp);
                         }
-                    }
-                } else {
-                    #[cfg(feature = "tracing")]
-                    {
-                        let log = serde_json::from_value::<Notification>(msg).unwrap();
-                        log.write();
+                    },
+                    Message::Notification(notification) => {
+                        #[cfg(feature = "tracing")]
+                        notification.write();
                     }
                 }
             }

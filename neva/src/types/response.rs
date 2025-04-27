@@ -6,7 +6,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 pub use error_details::ErrorDetails;
 pub use into_response::IntoResponse;
-use crate::types::{RequestId, JSONRPC_VERSION};
+use crate::types::{RequestId, Message, JSONRPC_VERSION};
 
 pub mod error_details;
 pub mod into_response;
@@ -30,6 +30,13 @@ pub struct Response {
     /// Error information.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ErrorDetails>,
+}
+
+impl From<Response> for Message {
+    #[inline]
+    fn from(response: Response) -> Self {
+        Self::Response(response)
+    }
 }
 
 impl Response {

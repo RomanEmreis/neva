@@ -21,13 +21,8 @@ async fn main() -> Result<(), Error> {
             .with_roots(|roots| roots.with_list_changed())
             .with_timeout(Duration::from_secs(5))
             .with_mcp_version("2024-11-05"));
-
-    client.add_root("file:///home/user/projects/my_project", "My Project");
     
     client.connect().await?;
-
-    client.add_root("file:///home/user/projects/my_another_project", "My Another Project");
-    client.publish_roots_changed().await?;
     
     // List tools
     tracing::info!("--- LIST TOOLS ---");

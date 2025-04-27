@@ -45,17 +45,17 @@ pub struct McpOptions {
     pub(crate) implementation: Implementation,
 
     /// Tools capability options
-    pub(crate) tools_capability: ToolsCapability,
+    tools_capability: Option<ToolsCapability>,
 
     /// Resource capability options
-    pub(crate) resources_capability: ResourcesCapability,
+    resources_capability: Option<ResourcesCapability>,
 
     /// Prompts capability options
-    pub(crate) prompts_capability: PromptsCapability,
+    prompts_capability: Option<PromptsCapability>,
     
     /// The last logging level set by the client
     #[cfg(feature = "tracing")]
-    pub(crate) log_level: Option<Handle<LevelFilter, Registry>>,
+    log_level: Option<Handle<LevelFilter, Registry>>,
 
     /// An MCP version that server supports
     protocol_ver: Option<&'static str>,
@@ -114,7 +114,7 @@ impl McpOptions {
     where 
         F: FnOnce(ToolsCapability) -> ToolsCapability
     {
-        self.tools_capability = config(self.tools_capability);
+        self.tools_capability = Some(config(Default::default()));
         self
     }
 
@@ -123,7 +123,7 @@ impl McpOptions {
     where
         F: FnOnce(ResourcesCapability) -> ResourcesCapability
     {
-        self.resources_capability = config(self.resources_capability);
+        self.resources_capability = Some(config(Default::default()));
         self
     }
 
@@ -132,7 +132,7 @@ impl McpOptions {
     where
         F: FnOnce(PromptsCapability) -> PromptsCapability
     {
-        self.prompts_capability = config(self.prompts_capability);
+        self.prompts_capability = Some(config(Default::default()));
         self
     }
     
@@ -295,6 +295,35 @@ impl McpOptions {
             .values()
             .cloned()
             .collect()
+    }
+
+    /// Returns [`ToolsCapability`] if configured.
+    /// If not configured but at least one [`Tool`] exists, returns [`Default`].
+    /// Otherwise, returns `None`.
+    pub(crate) fn tools_capability(&self) -> Option<ToolsCapability> {
+        self.tools_capability
+            .clone()
+            .or_else(|| (!self.tools.is_empty()).then(Default::default))
+    }
+
+    /// Returns [`ResourcesCapability`] if configured.
+    /// If not configured but at least one [`Resource`] or [`ResourceTemplate`] exists, returns [`Default`].
+    /// Otherwise, returns `None`.
+    pub(crate) fn resources_capability(&self) -> Option<ResourcesCapability> {
+        self.resources_capability
+            .clone()
+            .or_else(
+                || (!self.resources.is_empty() 
+                || !self.resources_templates.is_empty()).then(Default::default))
+    }
+
+    /// Returns [`PromptsCapability`] if configured.
+    /// If not configured but at least one [`Prompt`] exists, returns [`Default`].
+    /// Otherwise, returns `None`.
+    pub(crate) fn prompts_capability(&self) -> Option<PromptsCapability> {
+        self.prompts_capability
+            .clone()
+            .or_else(|| (!self.prompts.is_empty()).then(Default::default))
     }
 }
 
@@ -506,5 +535,105 @@ mod tests {
 
         let prompts = options.prompts();
         assert_eq!(prompts.len(), 1);
+    }
+    
+    #[test]
+    fn it_returns_some_tool_capabilities_if_configured() {
+        let options = McpOptions::default()
+            .with_tools(|tools| tools.with_list_changed());
+        
+        let tools_capability = options.tools_capability().unwrap();
+        
+        assert!(tools_capability.list_changed);
+    }
+
+    #[test]
+    fn it_returns_some_tool_capabilities_if_there_are_tools() {
+        let mut options = McpOptions::default();
+        options.add_tool(Tool::new("tool", || async { "test" }));
+        
+        let tools_capability = options.tools_capability().unwrap();
+
+        assert!(!tools_capability.list_changed);
+    }
+
+    #[test]
+    fn it_returns_none_tool_capabilities() {
+        let options = McpOptions::default();
+
+        assert!(options.tools_capability().is_none());
+    }
+
+    #[test]
+    fn it_returns_some_resource_capabilities_if_configured() {
+        let options = McpOptions::default()
+            .with_resources(|res| res.with_list_changed());
+
+        let resources_capability = options.resources_capability().unwrap();
+
+        assert!(resources_capability.list_changed);
+    }
+
+    #[test]
+    fn it_returns_some_resources_capability_if_there_are_resources() {
+        let mut options = McpOptions::default();
+        options.add_resource(Resource::new("res", "test"));
+
+        let resources_capability = options.resources_capability().unwrap();
+
+        assert!(!resources_capability.list_changed);
+    }
+
+    #[test]
+    fn it_returns_some_resources_capability_if_there_are_resource_templates() {
+        let mut options = McpOptions::default();
+
+        let handler = |_: Uri| async move {
+            Err::<ResourceContents, _>(Error::from(ErrorCode::ResourceNotFound))
+        };
+        
+        options.add_resource_template(
+            ResourceTemplate::new("res", "test"), 
+            ResourceFunc::new(handler));
+
+        let resources_capability = options.resources_capability().unwrap();
+
+        assert!(!resources_capability.list_changed);
+    }
+
+    #[test]
+    fn it_returns_none_resources_capability() {
+        let options = McpOptions::default();
+
+        assert!(options.resources_capability().is_none());
+    }
+
+    #[test]
+    fn it_returns_some_prompts_capability_if_configured() {
+        let options = McpOptions::default()
+            .with_prompts(|prompts| prompts.with_list_changed());
+
+        let prompts_capability = options.prompts_capability().unwrap();
+
+        assert!(prompts_capability.list_changed);
+    }
+
+    #[test]
+    fn it_returns_some_prompts_capability_if_there_are_tools() {
+        let mut options = McpOptions::default();
+        options.add_prompt(Prompt::new("test", || async {
+            Err::<PromptMessage, _>(Error::from(ErrorCode::InternalError))
+        }));
+
+        let prompts_capability = options.prompts_capability().unwrap();
+
+        assert!(!prompts_capability.list_changed);
+    }
+
+    #[test]
+    fn it_returns_none_prompts_capability() {
+        let options = McpOptions::default();
+
+        assert!(options.prompts_capability().is_none());
     }
 }

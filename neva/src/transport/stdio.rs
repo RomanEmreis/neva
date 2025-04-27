@@ -1,10 +1,9 @@
 ﻿//! stdio transport implementation
 
 use futures_util::TryFutureExt;
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use crate::error::{Error, ErrorCode};
+use crate::types::Message;
 use tokio::{
     io::{
         AsyncWrite, AsyncWriteExt,
@@ -43,14 +42,14 @@ pub(crate) struct StdIo {
 
 /// Represents stdio sender
 pub(crate) struct StdIoSender {
-    tx: Sender<serde_json::Value>,
-    rx: Option<Receiver<serde_json::Value>>,
+    tx: Sender<Message>,
+    rx: Option<Receiver<Message>>,
 }
 
 /// Represents stdio receiver
 pub(crate) struct StdIoReceiver {
-    tx: Sender<Result<serde_json::Value, Error>>,
-    rx: Receiver<Result<serde_json::Value, Error>>
+    tx: Sender<Result<Message, Error>>,
+    rx: Receiver<Result<Message, Error>>
 }
 
 impl Clone for StdIoSender {
@@ -253,20 +252,20 @@ impl StdIo {
 }
 
 impl TransportSender for StdIoSender {
-    async fn send<R: Serialize>(&mut self, resp: R) -> Result<(), Error> {
+    async fn send(&mut self, msg: Message) -> Result<(), Error> {
         self.tx
-            .send(serde_json::to_value(resp)?)
+            .send(msg)
             .map_err(|err| Error::new(ErrorCode::InternalError, err))
             .await
     }
 }
 
 impl TransportReceiver for StdIoReceiver {
-    async fn recv<R: DeserializeOwned>(&mut self) -> Result<R, Error> {
-        match self.rx.recv().await {
-            Some(res) => serde_json::from_value(res?).map_err(Into::into),
-            None => Err(Error::new(ErrorCode::InvalidRequest, "Unexpected end of stream"))
-        }
+    async fn recv(&mut self) -> Result<Message, Error> {
+        self.rx
+            .recv()
+            .await
+            .unwrap_or_else(|| Err(Error::new(ErrorCode::InvalidRequest, "Unexpected end of stream")))
     }
 }
 
@@ -307,14 +306,14 @@ impl Transport for StdIo {
 
 impl TransportSender for StdIo {
     #[inline]
-    async fn send<R: Serialize>(&mut self, resp: R) -> Result<(), Error> {
+    async fn send(&mut self, resp: Message) -> Result<(), Error> {
         self.sender.send(resp).await
     }
 }
 
 impl TransportReceiver for StdIo {
     #[inline]
-    async fn recv<R: DeserializeOwned>(&mut self) -> Result<R, Error> {
+    async fn recv(&mut self) -> Result<Message, Error> {
         self.receiver.recv().await
     }
 }

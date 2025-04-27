@@ -1,8 +1,7 @@
 ﻿use std::future::Future;
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use crate::error::{Error, ErrorCode};
+use crate::types::Message;
 
 pub(crate) use stdio::StdIo;
 
@@ -11,13 +10,13 @@ pub(crate) mod stdio;
 /// Describes a sender that can send messages to a client 
 pub(crate) trait Sender{
     /// Sends messages to a client
-    fn send<R: Serialize>(&mut self, resp: R) -> impl Future<Output = Result<(), Error>>;
+    fn send(&mut self, resp: Message) -> impl Future<Output = Result<(), Error>>;
 }
 
 /// Describes a receiver that can receive messages from a client
 pub(crate) trait Receiver {
     /// Receives a messages from a client
-    fn recv<R: DeserializeOwned>(&mut self) -> impl Future<Output = Result<R, Error>>;
+    fn recv(&mut self) -> impl Future<Output = Result<Message, Error>>;
 }
 
 /// Describes a transport protocol for communicating between server and client
@@ -61,7 +60,7 @@ impl Default for TransportProto {
 
 impl Sender for TransportProtoSender {
     #[inline]
-    async fn send<R: Serialize>(&mut self, resp: R) -> Result<(), Error> {
+    async fn send(&mut self, resp: Message) -> Result<(), Error> {
         match self {
             TransportProtoSender::Stdio(stdio) => stdio.send(resp).await,
             TransportProtoSender::None => Err(Error::new(
@@ -74,7 +73,7 @@ impl Sender for TransportProtoSender {
 
 impl Receiver for TransportProtoReceiver {
     #[inline]
-    async fn recv<R: DeserializeOwned>(&mut self) -> Result<R, Error> {
+    async fn recv(&mut self) -> Result<Message, Error> {
         match self {
             TransportProtoReceiver::Stdio(stdio) => stdio.recv().await,
             TransportProtoReceiver::None => Err(Error::new(
@@ -110,7 +109,7 @@ impl Transport for TransportProto {
 
 impl Sender for TransportProto {
     #[inline]
-    async fn send<R: Serialize>(&mut self, resp: R) -> Result<(), Error> {
+    async fn send(&mut self, resp: Message) -> Result<(), Error> {
         match self {
             TransportProto::Stdio(stdio) => stdio.send(resp).await,
             TransportProto::None => Err(Error::new(
@@ -123,7 +122,7 @@ impl Sender for TransportProto {
 
 impl Receiver for TransportProto {
     #[inline]
-    async fn recv<R: DeserializeOwned>(&mut self) -> Result<R, Error> {
+    async fn recv(&mut self) -> Result<Message, Error> {
         match self {
             TransportProto::Stdio(stdio) => stdio.recv().await,
             TransportProto::None => Err(Error::new(
