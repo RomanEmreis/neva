@@ -46,7 +46,7 @@ pub struct ListRootsResult {
     /// The list of root URIs provided by the client.
     ///
     /// > **Note:** This collection contains all available root URIs and their associated metadata.
-    /// Each root serves as an entry point for resource navigation in the Model Context Protocol.
+    /// > Each root serves as an entry point for resource navigation in the Model Context Protocol.
     pub roots: Vec<Root>,
     
     /// An additional metadata for the result.

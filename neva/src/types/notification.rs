@@ -135,7 +135,7 @@ impl Notification {
     fn write_err_internal(params: serde_json::Value) {
         let err = params
             .get("content")
-            .unwrap_or_else(|| &params);
+            .unwrap_or(&params);
         tracing::error!("{}", err);
     }
 }
