@@ -27,7 +27,7 @@
 //! }
 //! ```
 
-pub use app::{App, options};
+pub use app::{App, context::Context, options};
 #[cfg(feature = "client")]
 pub use client::Client;
 
@@ -35,6 +35,7 @@ pub mod app;
 pub mod types;
 pub mod transport;
 pub mod error;
+pub mod shared;
 #[cfg(feature = "client")]
 pub mod client;
 

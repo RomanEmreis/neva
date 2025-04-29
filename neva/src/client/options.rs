@@ -7,19 +7,21 @@ use crate::transport::{StdIo, stdio::options::StdIoOptions, TransportProto};
 use crate::types::capabilities::{RootsCapability, SamplingCapability};
 use crate::types::{Root, Implementation, Uri};
 
+const DEFAULT_REQUEST_TIMEOUT: u64 = 10;
+
 /// Represents MCP client configuration options
 pub struct McpOptions {
     /// Information of current server's implementation
     pub(crate) implementation: Implementation,
     
-    /// Roots capability options
-    pub(crate) roots_capability: Option<RootsCapability>,
-    
-    /// Sampling capability options
-    pub(crate) sampling_capability: Option<SamplingCapability>,
-
     /// Request timeout
     pub(super) timeout: Duration,
+    
+    /// Roots capability options
+    pub(super) roots_capability: Option<RootsCapability>,
+    
+    /// Sampling capability options
+    pub(super) sampling_capability: Option<SamplingCapability>,
     
     /// An MCP version that server supports
     protocol_ver: Option<&'static str>,
@@ -35,7 +37,7 @@ impl Default for McpOptions {
     #[inline]
     fn default() -> Self {
         Self {
-            timeout: Duration::from_secs(10),
+            timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT),
             implementation: Default::default(),
             roots: Default::default(),
             roots_capability: None,
@@ -123,6 +125,22 @@ impl McpOptions {
             .entry(root.uri.clone())
             .or_insert(root)
     }
+
+    /// Adds multiple roots
+    pub fn add_roots<T, I>(&mut self, roots: I) -> &mut Self
+    where
+        T: Into<Root>,
+        I: IntoIterator<Item = T>
+    {
+        let roots = roots
+            .into_iter()
+            .map(|item| {
+                let root: Root = item.into();
+                (root.uri.clone(), root)
+            });
+        self.roots.extend(roots);
+        self    
+    }
     
     /// Returns a list of defined Roots
     pub fn roots(&self) -> Vec<Root> {
@@ -130,6 +148,24 @@ impl McpOptions {
             .values()
             .cloned()
             .collect()
+    }
+
+    /// Returns [`RootsCapability`] if configured.
+    /// If not configured but at least one [`Root`] exists, returns [`Default`].
+    /// Otherwise, returns `None`.
+    pub(crate) fn roots_capability(&self) -> Option<RootsCapability> {
+        self.roots_capability
+            .clone()
+            .or_else(|| (!self.roots.is_empty()).then(Default::default))
+    }
+
+    /// Returns [`SamplingCapability`] if configured.
+    /// If not configured but at least one Sampling exists, returns [`Default`].
+    /// Otherwise, returns `None`.
+    pub(crate) fn sampling_capability(&self) -> Option<SamplingCapability> {
+        self.sampling_capability
+            .clone()
+            //.or_else(|| (!self.sampling.is_empty()).then(Default::default))
     }
 }
 

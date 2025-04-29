@@ -24,6 +24,8 @@ use windows::{
     },
 };
 
+const CMD: &str = "cmd";
+
 /// Job Object wrapper for automatic handle closing
 pub(super) struct Job(HANDLE);
 unsafe impl Send for Job {}
@@ -31,12 +33,13 @@ unsafe impl Send for Job {}
 impl Job {
     /// Creates and returns a new child process ['Child'] and ['Job'] - job object wrapper
     pub(super) fn new(command: &str, args: Vec<&str>) -> Result<(Job, Child)> {
-        let command = "cmd.exe";
-        let args = {
-            let mut win_args = vec!["/c", options.command];
-            win_args.extend_from_slice(&options.args);
-            win_args
-        };
+        let (command, args) = if !command.contains(CMD) {
+            let mut win_args = vec!["/c", command];
+            win_args.extend_from_slice(&args);
+            (CMD, win_args)
+        } else {
+            (command, args)
+        }; 
         
         let (job_handle, child) = create_job_object_with_kill_on_close(command, args)?;
         let job = Self(job_handle);

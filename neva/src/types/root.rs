@@ -71,6 +71,14 @@ impl From<Vec<Root>> for ListRootsResult {
     }
 }
 
+impl From<(&str, &str)> for Root {
+    #[inline]
+    fn from(parts: (&str, &str)) -> Self {
+        let (uri, name) = parts;
+        Self::new(uri, name)
+    }
+}
+
 impl Root {
     /// Creates a new [`Root`]
     pub fn new(uri: &str, name: &str) -> Self {
@@ -78,5 +86,10 @@ impl Root {
             uri: Uri::from(uri.to_string()), 
             name: name.into()
         }
+    }
+    
+    /// Split [`Root`] into parts of URI and name
+    pub fn into_parts(self) -> (Uri, String) {
+        (self.uri, self.name)
     }
 }

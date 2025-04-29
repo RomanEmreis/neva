@@ -7,7 +7,17 @@ use tokio_util::sync::CancellationToken;
 use handler::RequestHandler;
 use crate::error::{Error, ErrorCode};
 use crate::transport::Transport;
-use crate::types::{ListToolsRequestParams, ListToolsResult, CallToolRequestParams, CallToolResponse, ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, ListResourceTemplatesRequestParams, ListResourceTemplatesResult, Uri, ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult, ClientCapabilities, InitializeRequestParams, InitializeResult, ProgressToken, Request, RequestId, Response, request::RequestParamsMeta, cursor::Cursor, notification::Notification, Root};
+use crate::types::{
+    ListToolsRequestParams, ListToolsResult, CallToolRequestParams, CallToolResponse, 
+    ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, 
+    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, Uri, 
+    ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult, 
+    ClientCapabilities, InitializeRequestParams, InitializeResult, 
+    Request, RequestId, Response, request::RequestParamsMeta, 
+    cursor::Cursor, 
+    notification::Notification, 
+    Root
+};
 
 mod handler;
 pub mod options;
@@ -66,24 +76,43 @@ impl Client {
     /// ```    
     pub fn add_root(&mut self, uri: &str, name: &str) -> &mut Self {
         self.options.add_root(Root::new(uri, name));
+        self.publish_roots_changed();
+        self
+    }
+
+    /// Adds multiple new Roots.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::client::Client;
+    /// # use neva::error::Error;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Error> {
+    /// let mut client = Client::new();
+    /// client.add_roots([
+    ///     ("file:///home/user/projects/my_project", "My Project"),
+    ///     ("file:///home/user/projects/another_project", "My Another Project")
+    /// ]);
+    /// # client.disconnect().await
+    /// # }
+    /// ```    
+    pub fn add_roots<T, I>(&mut self, roots: I) -> &mut Self
+    where 
+        T: Into<Root>,
+        I: IntoIterator<Item = T>,
+    {
+        self.options.add_roots(roots);
+        self.publish_roots_changed();
         self
     }
     
     /// Sends the "notifications/roots/list_changed" notification to the server
-    pub async fn publish_roots_changed(&mut self) -> Result<(), Error> {
-        let Some(capabilities) = &self.options.roots_capability else { 
-            return Err(Error::new(ErrorCode::MethodNotFound, "Roots is not supported"));
-        };
-        if !capabilities.list_changed {
-            return Err(Error::new(
-                ErrorCode::MethodNotFound, 
-                "This client is not configured to send list change notifications"));
-        } 
-        
-        let changed = Notification::new(
-            crate::types::root::commands::LIST_CHANGED,
-            None);
-        self.send_notification(changed).await
+    pub fn publish_roots_changed(&mut self) {
+        if let Some(handler) = self.handler.as_mut() {
+            let roots = self.options.roots();
+            handler.notify_roots_changed(roots);
+        }
     }
     
     /// Connects the MCP client to the MCP server
@@ -109,7 +138,7 @@ impl Client {
         let token = transport.start();
         
         self.cancellation_token = Some(token);
-        self.handler = Some(RequestHandler::new(transport, self.options.timeout));
+        self.handler = Some(RequestHandler::new(transport, &self.options));
         
         self.wait_for_shutdown_signal();
         self.init().await
@@ -152,8 +181,8 @@ impl Client {
             protocol_ver: self.options.protocol_ver().to_string(),
             client_info: Some(self.options.implementation.clone()),
             capabilities: Some(ClientCapabilities {
-                roots: self.options.roots_capability.clone(),
-                sampling: self.options.sampling_capability.clone(),
+                roots: self.options.roots_capability(),
+                sampling: self.options.sampling_capability(),
                 experimental: None,
             })
         };
@@ -339,10 +368,8 @@ impl Client {
             Some(id.clone()),
             crate::types::tool::commands::CALL,
             Some(CallToolRequestParams {
-                meta: Some(RequestParamsMeta { 
-                    progress_token: Some(ProgressToken::from(&id))
-                }),
                 name: name.into(),
+                meta: Some(RequestParamsMeta::new(&id)),
                 args: Self::create_args(args)
             }));
         
@@ -377,9 +404,7 @@ impl Client {
             crate::types::resource::commands::READ,
             Some(ReadResourceRequestParams {
                 uri: uri.into(),
-                meta: Some(RequestParamsMeta {
-                    progress_token: Some(ProgressToken::from(&id))
-                })
+                meta: Some(RequestParamsMeta::new(&id))
             })
         );
 
@@ -421,10 +446,8 @@ impl Client {
             Some(id.clone()),
             crate::types::prompt::commands::GET,
             Some(GetPromptRequestParams {
-                meta: Some(RequestParamsMeta {
-                    progress_token: Some(ProgressToken::from(&id))
-                }),
                 name: name.into(),
+                meta: Some(RequestParamsMeta::new(&id)),
                 args: Self::create_args(args)
             })
         );

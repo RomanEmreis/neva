@@ -1,8 +1,11 @@
 ﻿//! Represents a request from MCP client
 
 use std::fmt;
+use std::fmt::{Debug, Formatter};
 use serde::{Serialize, Deserialize};
 use super::{ProgressToken, Message, JSONRPC_VERSION};
+
+use crate::Context;
 
 pub use from_request::FromRequest;
 
@@ -38,7 +41,7 @@ impl Default for RequestId {
 pub struct Request {
     /// JSON-RPC protocol version. 
     ///
-    /// > Note: always 2.0.
+    /// > **Note:** always 2.0.
     pub jsonrpc: String,
     
     /// Name of the method to invoke.
@@ -57,18 +60,31 @@ pub struct Request {
 /// 
 /// > **Note:** This class contains properties that are used by the Model Context Protocol
 /// > for features like progress tracking and other protocol-specific capabilities.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Default, Clone, Deserialize, Serialize)]
 pub struct RequestParamsMeta {
-    /// Gets or sets an opaque token that will be attached to any subsequent progress notifications.
+    /// An opaque token that will be attached to any subsequent progress notifications.
     /// 
     /// > **Note:** The receiver is not obligated to provide these notifications.
     #[serde(rename = "progressToken", skip_serializing_if = "Option::is_none")]
-    pub progress_token: Option<ProgressToken>
+    pub progress_token: Option<ProgressToken>,
+    
+    /// MCP request context
+    #[serde(skip)]
+    pub(crate) context: Option<Context>
+}
+
+impl Debug for RequestParamsMeta {
+    #[inline]
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RequestParamsMeta")
+            .field("progress_token", &self.progress_token)
+            .finish()
+    }
 }
 
 impl fmt::Display for RequestId {
     #[inline]
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             RequestId::String(str) => write!(f, "{}", str),
             RequestId::Number(num) => write!(f, "{}", num),
@@ -89,6 +105,16 @@ impl From<&RequestId> for ProgressToken {
         match id { 
             RequestId::Number(num) => ProgressToken::Number(*num),
             RequestId::String(str) => ProgressToken::String(str.clone()),
+        }
+    }
+}
+
+impl RequestParamsMeta {
+    /// Creates a new [`RequestParamsMeta`] with [`ProgressToken`] for a specific [`RequestId`]
+    pub fn new(id: &RequestId) -> Self {
+        Self {
+            progress_token: Some(ProgressToken::from(id)),
+            context: None
         }
     }
 }

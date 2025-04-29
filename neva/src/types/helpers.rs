@@ -140,6 +140,7 @@ impl_type_category!(CallToolRequestParams, PropertyType::None);
 impl_type_category!(ReadResourceRequestParams, PropertyType::None);
 impl_type_category!(GetPromptRequestParams, PropertyType::None);
 impl_type_category!(Meta<T>, T, PropertyType::None);
+impl_type_category!(crate::Context, PropertyType::None);
 
 impl_type_category!(Value, PropertyType::Object);
 impl_type_category!(Json<T>, T, PropertyType::Object);

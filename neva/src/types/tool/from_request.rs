@@ -1,4 +1,5 @@
 ﻿use serde::de::DeserializeOwned;
+use crate::Context;
 use crate::error::{Error, ErrorCode};
 use crate::types::{Meta, ProgressToken, request::RequestParamsMeta};
 use super::CallToolRequestParams;
@@ -32,6 +33,18 @@ impl TryFrom<CallToolRequestParams> for (Meta<ProgressToken>,) {
             .and_then(|meta| meta.progress_token)
             .ok_or(Error::new(ErrorCode::InvalidParams, "Missing progress token"))
             .map(|token| (Meta(token),))
+    }
+}
+
+impl TryFrom<CallToolRequestParams> for (Context,) {
+    type Error = Error;
+
+    #[inline]
+    fn try_from(params: CallToolRequestParams) -> Result<Self, Self::Error> {
+        params.meta
+            .and_then(|meta| meta.context)
+            .ok_or(Error::new(ErrorCode::InvalidParams, "Missing MCP context"))
+            .map(|ctx| (ctx,))
     }
 }
 
@@ -109,7 +122,8 @@ mod tests {
         let params = CallToolRequestParams {
             name: "tool".into(),
             meta: Some(RequestParamsMeta {
-                progress_token: None
+                progress_token: None,
+                context: None
             }),
             args: None,
         };
@@ -124,7 +138,8 @@ mod tests {
         let params = CallToolRequestParams {
             name: "tool".into(),
             meta: Some(RequestParamsMeta {
-                progress_token: Some(ProgressToken::Number(5))
+                progress_token: Some(ProgressToken::Number(5)),
+                context: None
             }),
             args: None,
         };

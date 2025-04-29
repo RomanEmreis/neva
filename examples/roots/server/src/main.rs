@@ -1,8 +1,9 @@
-use neva::{App, tool};
+use neva::{App, Context, error::Error, tool};
 
 #[tool]
-async fn roots_request() -> &'static str {
-    "Roots requested!"
+async fn roots_request(mut ctx: Context) -> Result<String, Error> {
+    let roots = ctx.list_roots().await?;
+    Ok(format!("{:?}", roots.roots))
 }
 
 #[tokio::main]

@@ -1,31 +1,36 @@
 ﻿//! Request handling utilities
 
-use crate::error::{Error, ErrorCode};
-use crate::transport::Transport;
-use crate::types::notification::Notification;
-use crate::types::Request;
-use tokio_util::sync::CancellationToken;
+use std::sync::Arc;
 use tokio::{
-    sync::{oneshot, Mutex},
+    sync::RwLock, 
     time::timeout
 };
 use std::{
-    collections::HashMap,
     time::Duration,
-    sync::{Arc, atomic::{AtomicI64, Ordering}}
+    sync::atomic::{AtomicI64, Ordering}
 };
 use crate::{
-    transport::{Receiver, Sender, TransportProto, TransportProtoReceiver, TransportProtoSender},
-    types::{RequestId, Response, Message}
+    client::options::McpOptions,
+    error::{Error, ErrorCode},
+    shared::RequestQueue,
+    transport::{
+        Receiver, Sender, 
+        Transport, TransportProto, TransportProtoReceiver, TransportProtoSender
+    },
+    types::{
+        IntoResponse, Response, Message, 
+        RequestId, Request,
+        notification::Notification,
+        Root, root::ListRootsResult
+    }
 };
 
-/// Pending requests data structure
-type PendingRequests = Arc<Mutex<HashMap<RequestId, RequestHandle>>>; 
-
-/// Represents a request handle
-struct RequestHandle {
-    sender: oneshot::Sender<Response>,
-    _cancellation_token: CancellationToken
+struct Roots {
+    /// Cached list of [`Root`]
+    inner: Arc<RwLock<Vec<Root>>>,
+    
+    /// Notifier for Roots cache updates
+    sender: Option<tokio::sync::mpsc::Sender<Vec<Root>>>,
 }
 
 pub(super) struct RequestHandler {
@@ -36,42 +41,70 @@ pub(super) struct RequestHandler {
     timeout: Duration,
 
     /// Pending requests
-    pending: PendingRequests,
+    pending: RequestQueue,
 
     /// Current transport sender handle
     sender: TransportProtoSender,
+    
+    /// Cached list of [`Root`]
+    roots: Roots,
 }
 
-impl RequestHandle {
-    /// Creates a new [`RequestHandle`]
-    pub(super) fn new(sender: oneshot::Sender<Response>) -> Self {
-        Self { sender, _cancellation_token: CancellationToken::new() }
+impl Roots {
+    fn new(options: &McpOptions, notifications_sender: &TransportProtoSender) -> Self {
+        let mut roots = Self {
+            inner: Arc::new(RwLock::new(options.roots())),
+            sender: None
+        };
+
+        if options.roots_capability().is_some_and(|roots| roots.list_changed) {
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<Root>>(1);
+            roots.sender = Some(tx); 
+        
+            let roots = roots.inner.clone();
+            let mut sender = notifications_sender.clone();
+            tokio::spawn(async move {
+                while let Some(new_roots) = rx.recv().await {
+                    let mut current_roots = roots.write().await;
+                    *current_roots = new_roots;
+
+                    let changed = Notification::new(
+                        crate::types::root::commands::LIST_CHANGED,
+                        None);
+                    if let Err(_err) = sender.send(changed.into()).await {
+                        #[cfg(feature = "tracing")]
+                        tracing::error!("Error sending notification: {:?}", _err);
+                    }
+                }
+            });
+        }
+        
+        roots
     }
     
-    /// Sends a [`Response`] to MCP server
-    pub(super) fn send(self, resp: Response) {
-        match self.sender.send(resp) {
-            Ok(_) => (),
-            Err(_err) => {
-                #[cfg(feature = "tracing")]
-                tracing::error!(
-                    logger = "neva",
-                    "Request handler failed to send response: {:?}", _err);
-            }
-        };
-    }
+    fn update(&mut self, roots: Vec<Root>) {
+        match self.sender.as_mut() {
+            None => (),
+            Some(sender) => {
+                _ = sender
+                    .try_send(roots)
+                    .map_err(|err| Error::new(ErrorCode::InternalError, err))
+            },
+        }
+    } 
 }
 
 impl RequestHandler {
     /// Creates a new [`RequestHandler`]
-    pub(super) fn new(transport: TransportProto, timeout: Duration) -> Self {
+    pub(super) fn new(transport: TransportProto, options: &McpOptions) -> Self {
         let (tx, rx) = transport.split();
         
         let handler = Self {
+            roots: Roots::new(options, &tx),
             counter: AtomicI64::new(1),
-            pending: Arc::new(Mutex::new(HashMap::new())),
+            pending: RequestQueue::default(),
             sender: tx,
-            timeout,
+            timeout: options.timeout,
         };
         
         handler.start(rx)
@@ -87,21 +120,15 @@ impl RequestHandler {
     /// Sends a request to MCP server
     #[inline]
     pub(super) async fn send_request(&mut self, request: Request) -> Result<Response, Error> {
-        let (tx, rx) = oneshot::channel();
         let id = request.id();
-        {
-            let mut pending = self.pending.lock().await;
-            pending.insert(id.clone(), RequestHandle::new(tx));
-        }
-
+        let receiver = self.pending.push(&id).await;
         self.sender.send(request.into()).await?;
 
-        match timeout(self.timeout, rx).await {
+        match timeout(self.timeout, receiver).await {
             Ok(Ok(resp)) => Ok(resp),
             Ok(Err(_)) => Err(Error::new(ErrorCode::InternalError, "Response channel closed")),
             Err(_) => {
-                let mut pending = self.pending.lock().await;
-                pending.remove(&id);
+                _ = self.pending.pop(&id).await;
                 Err(Error::new(ErrorCode::Timeout, "Request timed out"))
             }
         }
@@ -112,24 +139,34 @@ impl RequestHandler {
     pub(super) async fn send_notification(&mut self, notification: Notification) -> Result<(), Error> {
         self.sender.send(notification.into()).await
     }
+    
+    /// Updates [`Root`] cache
+    pub(super) fn notify_roots_changed(&mut self, roots: Vec<Root>) {
+        self.roots.update(roots);
+    }
 
     #[inline]
     fn start(self, mut rx: TransportProtoReceiver) -> Self {
         let pending = self.pending.clone();
+        let mut sender = self.sender.clone();
+        let roots = self.roots.inner.clone();
         tokio::task::spawn(async move {
             while let Ok(msg) = rx.recv().await {
                 match msg {
+                    Message::Response(resp) => pending.complete(resp).await,
                     Message::Request(req) => {
-                        #[cfg(feature = "tracing")]
-                        tracing::debug!("Received notification method: {:?}", req.method);
-                    },
-                    Message::Response(resp) => {
-                        let sender = {
-                            let mut pending = pending.lock().await;
-                            pending.remove(&resp.id)
-                        };
-                        if let Some(sender) = sender {
-                            sender.send(resp);
+                        match req.method.as_str() { 
+                            crate::types::root::commands::LIST => {
+                                let roots = {
+                                    let roots = roots.read().await;
+                                    ListRootsResult::from(roots.to_vec())
+                                };
+                                sender.send(roots.into_response(req.id()).into()).await.unwrap();    
+                            },
+                            _ => {
+                                #[cfg(feature = "tracing")]
+                                tracing::debug!("Received notification method: {:?}", req.method);
+                            }
                         }
                     },
                     Message::Notification(notification) => {

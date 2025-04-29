@@ -1,6 +1,6 @@
 ﻿//! MCP server options
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use crate::transport::{StdIo, TransportProto};
@@ -39,10 +39,12 @@ use crate::error::ErrorCode;
 pub type RuntimeMcpOptions = Arc<McpOptions>;
 
 /// Represents MCP server configuration options
-#[derive(Default)]
 pub struct McpOptions {
     /// Information of current server's implementation
     pub(crate) implementation: Implementation,
+    
+    /// Timeout for the requests from server to a client
+    pub(crate) request_timeout: Duration,
 
     /// Tools capability options
     tools_capability: Option<ToolsCapability>,
@@ -80,6 +82,29 @@ pub struct McpOptions {
     
     /// Currently running requests
     requests: RwLock<HashMap<RequestId, CancellationToken>>
+}
+
+impl Default for McpOptions {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            implementation: Default::default(),
+            request_timeout: Duration::from_secs(10),
+            tools: Default::default(),
+            resources: Default::default(),
+            prompts: Default::default(),
+            resources_templates: Default::default(),
+            proto: Default::default(),
+            protocol_ver: Default::default(),
+            tools_capability: Default::default(),
+            resources_capability: Default::default(),
+            prompts_capability: Default::default(),
+            resource_routes: Default::default(),
+            requests: Default::default(),
+            #[cfg(feature = "tracing")]
+            log_level: Default::default(),
+        }
+    }
 }
 
 impl McpOptions {
@@ -133,6 +158,14 @@ impl McpOptions {
         F: FnOnce(PromptsCapability) -> PromptsCapability
     {
         self.prompts_capability = Some(config(Default::default()));
+        self
+    }
+
+    /// Specifies request timeout
+    ///
+    /// Default: 10 seconds
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
         self
     }
     

@@ -10,21 +10,22 @@ use crate::error::{Error, ErrorCode};
 use super::helpers::TypeCategory;
 use crate::{
     app::handler::{
-        FromHandlerParams, 
-        Handler, 
-        HandlerParams, 
-        GenericHandler, 
+        FromHandlerParams,
+        Handler,
+        HandlerParams,
+        GenericHandler,
         RequestHandler
-    },
+    }, 
     types::{
-        PropertyType, 
-        Request, 
-        request::{FromRequest, RequestParamsMeta}, 
-        RequestId, 
-        Response, 
+        PropertyType,
+        Request,
+        request::{FromRequest, RequestParamsMeta},
+        RequestId,
+        Response,
         IntoResponse,
         Cursor, Page
-    }
+    },
+    Context
 };
 
 pub use call_tool_response::CallToolResponse;
@@ -287,6 +288,14 @@ where
                 .await
                 .into())
         })
+    }
+}
+
+impl CallToolRequestParams {
+    /// Includes [`Context`] into request metadata. If metadata is `None` it creates a new.
+    pub(crate) fn with_context(mut self, ctx: Context) -> Self {
+        self.meta.get_or_insert_default().context = Some(ctx);
+        self
     }
 }
 

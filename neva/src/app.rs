@@ -2,10 +2,9 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::Arc;
+use self::{context::{Context, ServerRuntime}, options::{McpOptions, RuntimeMcpOptions}};
 use crate::error::{Error, ErrorCode};
-use crate::options::{McpOptions, RuntimeMcpOptions};
-use crate::transport::{Receiver, Sender, Transport, TransportProtoSender};
+use crate::transport::{Receiver, Sender, Transport};
 use crate::app::handler::{
     FromHandlerParams,
     GenericHandler,
@@ -31,6 +30,7 @@ use crate::types::{
 use crate::types::notification::SetLevelRequestParams;
 
 pub mod options;
+pub mod context;
 pub(crate) mod handler;
 
 const DEFAULT_PAGE_SIZE: usize = 10;
@@ -95,15 +95,15 @@ impl App {
     /// ```
     pub async fn run(mut self) {
         let mut transport = self.options.transport();
-        let options = Arc::new(self.options);
-        let handlers = Arc::new(self.handlers);
         let _ = transport.start();
+        
         let (sender, mut receiver) = transport.split();
+        let runtime = ServerRuntime::new(sender, self.options, self.handlers);
         
         while let Ok(msg) = receiver.recv().await {
             match msg { 
-                Message::Request(req) => Self::handle_request(req, sender.clone(), options.clone(), handlers.clone()).await,
-                Message::Response(response) => Self::handle_response(response).await,
+                Message::Request(req) => Self::handle_request(req, &runtime).await,
+                Message::Response(resp) => Self::handle_response(resp, &runtime).await,
                 Message::Notification(notification) => Self::handle_notification(notification).await
             }
         }
@@ -357,11 +357,12 @@ impl App {
     
     /// A tool call request handler
     async fn tool(
+        ctx: Context,
         options: RuntimeMcpOptions, 
         params: CallToolRequestParams
     ) -> Result<CallToolResponse, Error> {
         match options.get_tool(&params.name) {
-            Some(tool) => tool.call(params.into()).await,
+            Some(tool) => tool.call(params.with_context(ctx).into()).await,
             None => Err(Error::new(ErrorCode::InvalidParams, "Tool not found"))
         }
     }
@@ -433,16 +434,13 @@ impl App {
         options.set_log_level(params.level)
     }
     
-    async fn handle_request(
-        req: Request,
-        mut sender: TransportProtoSender,
-        options: RuntimeMcpOptions,
-        handlers: Arc<RequestHandlers>
-    ) {
+    async fn handle_request(req: Request, runtime: &ServerRuntime) {
         let req_id = req.id();
-
-        let handlers = handlers.clone();
-        let options = options.clone();
+        
+        let context = runtime.context();
+        let options = runtime.options();
+        let handlers = runtime.request_handlers();
+        let mut sender = runtime.sender();
 
         let token = options.track_request(&req_id).await;
 
@@ -452,7 +450,7 @@ impl App {
 
             let resp = if let Some(handler) = handlers.get(&req.method) {
                 tokio::select! {
-                    resp = handler.call(HandlerParams::Request(options.clone(), req)) => {
+                    resp = handler.call(HandlerParams::Request(context, options.clone(), req)) => {
                         options.complete_request(&req_id).await;
                         resp
                     }
@@ -477,14 +475,16 @@ impl App {
         });
     }
     
-    async fn handle_response(_resp: Response) {
-        #[cfg(feature = "tracing")]
-        tracing::debug!(logger = "neva", "Response received: {:?}", _resp);
+    async fn handle_response(resp: Response, runtime: &ServerRuntime) {
+        runtime
+            .pending_requests()
+            .complete(resp)
+            .await;
     }
     
     async fn handle_notification(_notification: Notification) {
         #[cfg(feature = "tracing")]
-        tracing::debug!(logger = "neva", "Notification received: {:?}", _notification);
+        _notification.write();
     }
 }
 
