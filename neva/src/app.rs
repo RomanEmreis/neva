@@ -369,22 +369,24 @@ impl App {
 
     /// A read resource request handler
     async fn resource(
+        ctx: Context,
         options: RuntimeMcpOptions, 
         params: ReadResourceRequestParams
     ) -> Result<ReadResourceResult, Error> {
         match options.read_resource(&params.uri) {
-            Some(Route::Handler(handler)) => handler.call(params.into()).await,
+            Some(Route::Handler(handler)) => handler.call(params.with_context(ctx).into()).await,
             _ => Err(Error::from(ErrorCode::ResourceNotFound)),
         }
     }
     
     /// A get prompt request handler
     async fn prompt(
+        ctx: Context,
         options: RuntimeMcpOptions, 
         params: GetPromptRequestParams
     ) -> Result<GetPromptResult, Error> {
         match options.get_prompt(&params.name) {
-            Some(prompt) => prompt.call(params.into()).await,
+            Some(prompt) => prompt.call(params.with_context(ctx).into()).await,
             None => Err(Error::new(ErrorCode::InvalidParams, "Prompt not found"))
         }
     }

@@ -1,4 +1,5 @@
-﻿use crate::types::{Meta, ProgressToken, request::RequestParamsMeta};
+﻿use crate::Context;
+use crate::types::{Meta, ProgressToken, request::RequestParamsMeta};
 use crate::error::{Error, ErrorCode};
 use super::GetPromptRequestParams;
 use serde::de::DeserializeOwned;
@@ -32,6 +33,18 @@ impl TryFrom<GetPromptRequestParams> for (Meta<ProgressToken>,) {
             .and_then(|meta| meta.progress_token)
             .ok_or(Error::new(ErrorCode::InvalidParams, "Missing progress token"))
             .map(|token| (Meta(token),))
+    }
+}
+
+impl TryFrom<GetPromptRequestParams> for (Context,) {
+    type Error = Error;
+
+    #[inline]
+    fn try_from(params: GetPromptRequestParams) -> Result<Self, Self::Error> {
+        params.meta
+            .and_then(|meta| meta.context)
+            .ok_or(Error::new(ErrorCode::InvalidParams, "Missing MCP request context"))
+            .map(|ctx| (ctx,))
     }
 }
 

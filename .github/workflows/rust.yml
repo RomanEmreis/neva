@@ -14,8 +14,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run Clippy
+      - name: Run all features
         run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Run server
+        run: cargo clippy --all-targets --features server -- -D warnings
+      - name: Run client
+        run: cargo clippy --all-targets --features client -- -D warnings
   
   build:
     environment: CICD
@@ -26,5 +30,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build
         run: cargo build --verbose
-      - name: Run tests
+      - name: Run all features tests
         run: cargo test --all-features --verbose
+      - name: Run server tests
+        run: cargo test --features server --verbose
+      - name: Run client tests
+        run: cargo test --features client --verbose

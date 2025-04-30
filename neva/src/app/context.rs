@@ -86,9 +86,8 @@ impl Context {
     /// 
     /// # Example
     /// ```no_run
-    /// use neva::{Context, error::Error, tool};
+    /// use neva::{Context, error::Error};
     /// 
-    /// #[tool(no_schema)]
     /// async fn handle_roots(mut ctx: Context) -> Result<(), Error> {
     ///     let roots = ctx.list_roots().await?;
     /// 

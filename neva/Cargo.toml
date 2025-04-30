@@ -34,9 +34,12 @@ tokio = { version = "1.44.2", features = ["rt", "rt-multi-thread", "macros"] }
 
 [features]
 default = []
-full = ["macros", "tracing", "client"]
+full = ["macros", "tracing", "server", "client"]
+server-full = ["server", "macros", "tracing"]
+client-full = ["client", "tracing"]
 macros = ["dep:neva_macros"]
 client = ["dep:windows", "dep:nix", "tokio/process", "tokio/signal"]
+server = []
 tracing = ["dep:tracing", "dep:tracing-subscriber"]
 
 [package.metadata.docs.rs]

@@ -146,6 +146,7 @@ impl RequestHandler {
     }
 
     #[inline]
+    #[allow(clippy::single_match)]
     fn start(self, mut rx: TransportProtoReceiver) -> Self {
         let pending = self.pending.clone();
         let mut sender = self.sender.clone();
@@ -169,9 +170,9 @@ impl RequestHandler {
                             }
                         }
                     },
-                    Message::Notification(notification) => {
+                    Message::Notification(_notification) => {
                         #[cfg(feature = "tracing")]
-                        notification.write();
+                        _notification.write();
                     }
                 }
             }

@@ -5,6 +5,7 @@ use std::fmt::{Debug, Formatter};
 use serde::{Serialize, Deserialize};
 use super::{ProgressToken, Message, JSONRPC_VERSION};
 
+#[cfg(feature = "server")]
 use crate::Context;
 
 pub use from_request::FromRequest;
@@ -70,6 +71,7 @@ pub struct RequestParamsMeta {
     
     /// MCP request context
     #[serde(skip)]
+    #[cfg(feature = "server")]
     pub(crate) context: Option<Context>
 }
 
@@ -114,6 +116,7 @@ impl RequestParamsMeta {
     pub fn new(id: &RequestId) -> Self {
         Self {
             progress_token: Some(ProgressToken::from(id)),
+            #[cfg(feature = "server")]
             context: None
         }
     }

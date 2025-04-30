@@ -1,4 +1,5 @@
 ﻿use std::str::FromStr;
+use crate::Context;
 use crate::error::{Error, ErrorCode};
 use crate::types::{ProgressToken, request::RequestParamsMeta, Meta};
 use super::{Uri, ReadResourceRequestParams};
@@ -41,6 +42,18 @@ impl TryFrom<ReadResourceRequestParams> for (Meta<ProgressToken>,) {
             .and_then(|meta| meta.progress_token)
             .ok_or(Error::new(ErrorCode::InvalidParams, "Missing progress token"))
             .map(|token| (Meta(token),))
+    }
+}
+
+impl TryFrom<ReadResourceRequestParams> for (Context,) {
+    type Error = Error;
+
+    #[inline]
+    fn try_from(params: ReadResourceRequestParams) -> Result<Self, Self::Error> {
+        params.meta
+            .and_then(|meta| meta.context)
+            .ok_or(Error::new(ErrorCode::InvalidParams, "Missing MCP request context"))
+            .map(|ctx| (ctx,))
     }
 }
 

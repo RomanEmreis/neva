@@ -1,15 +1,18 @@
 ﻿//! Utilities for Notifications
 
 use serde::{Serialize, Deserialize};
-use crate::types::{FromRequest, Request, RequestId, Message, JSONRPC_VERSION};
-use crate::app::handler::{FromHandlerParams, HandlerParams};
-use crate::error::Error;
+use crate::types::{RequestId, Message, JSONRPC_VERSION};
+#[cfg(feature = "server")]
+use crate::{error::Error, types::{FromRequest, Request}};
 
 pub use log_message::{
     LogMessage, 
     LoggingLevel, 
     SetLevelRequestParams
 };
+
+#[cfg(feature = "server")]
+use crate::app::handler::{FromHandlerParams, HandlerParams};
 
 pub use progress::ProgressNotification;
 
@@ -78,6 +81,7 @@ impl From<Notification> for Message {
     }
 }
 
+#[cfg(feature = "server")]
 impl FromHandlerParams for CancelledNotificationParams {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {

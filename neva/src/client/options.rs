@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 use crate::PROTOCOL_VERSIONS;
-use crate::transport::{StdIo, stdio::options::StdIoOptions, TransportProto};
+use crate::transport::{StdIoClient, stdio::options::StdIoOptions, TransportProto};
 use crate::types::capabilities::{RootsCapability, SamplingCapability};
 use crate::types::{Root, Implementation, Uri};
 
@@ -54,7 +54,7 @@ impl McpOptions {
     where
         T: IntoIterator<Item=&'static str>
     {
-        self.proto = Some(TransportProto::Stdio(StdIo::client(StdIoOptions::new(command, args))));
+        self.proto = Some(TransportProto::StdioClient(StdIoClient::new(StdIoOptions::new(command, args))));
         self
     }
 

@@ -32,13 +32,13 @@ unsafe impl Send for Job {}
 
 impl Job {
     /// Creates and returns a new child process ['Child'] and ['Job'] - job object wrapper
-    pub(super) fn new(command: &str, args: Vec<&str>) -> Result<(Job, Child)> {
+    pub(super) fn new(command: &str, args: &Vec<&str>) -> Result<(Job, Child)> {
         let (command, args) = if !command.contains(CMD) {
             let mut win_args = vec!["/c", command];
-            win_args.extend_from_slice(&args);
+            win_args.extend_from_slice(args);
             (CMD, win_args)
         } else {
-            (command, args)
+            (command, args.clone())
         }; 
         
         let (job_handle, child) = create_job_object_with_kill_on_close(command, args)?;

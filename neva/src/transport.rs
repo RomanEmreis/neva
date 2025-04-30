@@ -3,7 +3,11 @@ use tokio_util::sync::CancellationToken;
 use crate::error::{Error, ErrorCode};
 use crate::types::Message;
 
-pub(crate) use stdio::StdIo;
+#[cfg(feature = "server")]
+pub(crate) use stdio::StdIoServer;
+
+#[cfg(feature = "client")]
+pub(crate) use stdio::StdIoClient;
 
 pub(crate) mod stdio;
 
@@ -34,7 +38,10 @@ pub(crate) trait Transport {
 /// Holds all supported transport protocols
 pub(crate) enum TransportProto {
     None,
-    Stdio(StdIo),
+    #[cfg(feature = "client")]
+    StdioClient(StdIoClient),
+    #[cfg(feature = "server")]
+    StdIoServer(StdIoServer),
     //Ws(Websocket),
     //Sse(Sse),
     // add more options here...
@@ -91,44 +98,27 @@ impl Transport for TransportProto {
     #[inline]
     fn start(&mut self) -> CancellationToken {
         match self {
-            TransportProto::Stdio(stdio) => stdio.start(),
+            #[cfg(feature = "server")]
+            TransportProto::StdIoServer(stdio) => stdio.start(),
+            #[cfg(feature = "client")]
+            TransportProto::StdioClient(stdio) => stdio.start(),
             TransportProto::None => CancellationToken::new(),
         }
     }
     
     fn split(self) -> (Self::Sender, Self::Receiver) {
         match self {
-            TransportProto::Stdio(stdio) => {
+            #[cfg(feature = "server")]
+            TransportProto::StdIoServer(stdio) => {
+                let (tx, rx) = stdio.split();
+                (TransportProtoSender::Stdio(tx), TransportProtoReceiver::Stdio(rx))
+            },
+            #[cfg(feature = "client")]
+            TransportProto::StdioClient(stdio) => {
                 let (tx, rx) = stdio.split();
                 (TransportProtoSender::Stdio(tx), TransportProtoReceiver::Stdio(rx))
             },
             TransportProto::None => (TransportProtoSender::None, TransportProtoReceiver::None),
-        }
-    }
-}
-
-impl Sender for TransportProto {
-    #[inline]
-    async fn send(&mut self, resp: Message) -> Result<(), Error> {
-        match self {
-            TransportProto::Stdio(stdio) => stdio.send(resp).await,
-            TransportProto::None => Err(Error::new(
-                ErrorCode::InternalError,
-                "Transport protocol must be specified"
-            )),
-        }
-    }
-}
-
-impl Receiver for TransportProto {
-    #[inline]
-    async fn recv(&mut self) -> Result<Message, Error> {
-        match self {
-            TransportProto::Stdio(stdio) => stdio.recv().await,
-            TransportProto::None => Err(Error::new(
-                ErrorCode::InternalError,
-                "Transport protocol must be specified"
-            )),
         }
     }
 }

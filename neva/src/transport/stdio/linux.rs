@@ -25,14 +25,14 @@ impl Drop for Job {
     }
 }
 
-/// Создаёт процесс в новой группе с автоматическим завершением
+/// Creates a process in a new group with automatic termination
 #[inline]
-pub(super) fn create_process_group(command: &str, args: Vec<&str>) -> std::io::Result<(i32, Child)> {
+pub(super) fn create_process_group(command: &str, args: &Vec<&str>) -> std::io::Result<(i32, Child)> {
     let child = Command::new(command)
         .args(args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .process_group(0) // Создаём новую группу
+        .process_group(0)
         .spawn()?;
 
     let group_pid = child.id().expect("Failed to get process id");

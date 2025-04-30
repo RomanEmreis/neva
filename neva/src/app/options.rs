@@ -3,7 +3,7 @@
 use std::{sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use crate::transport::{StdIo, TransportProto};
+use crate::transport::{StdIoServer, TransportProto};
 use crate::app::handler::RequestHandler;
 use std::{
     borrow::Cow,
@@ -110,7 +110,7 @@ impl Default for McpOptions {
 impl McpOptions {
     /// Sets stdio as a transport protocol
     pub fn with_stdio(mut self) -> Self {
-        self.proto = Some(TransportProto::Stdio(StdIo::new()));
+        self.proto = Some(TransportProto::StdIoServer(StdIoServer::new()));
         self
     }
     
@@ -397,7 +397,7 @@ mod tests {
         
         let transport = options.transport();
 
-        assert!(matches!(transport, TransportProto::Stdio(_)));
+        assert!(matches!(transport, TransportProto::StdIoServer(_)));
     }
     
     #[test]

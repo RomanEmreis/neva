@@ -1,11 +1,20 @@
 ﻿use std::fmt::Display;
 use serde::{Deserialize, Serialize};
 use crate::SERVER_NAME;
-use crate::options::McpOptions;
-use crate::app::handler::{FromHandlerParams, HandlerParams};
+
+#[cfg(feature = "server")]
 use crate::error::Error;
+
 use crate::types::notification::{Notification, ProgressNotification};
+
+#[cfg(feature = "server")]
 use crate::types::request::FromRequest;
+
+#[cfg(feature = "server")]
+use crate::{
+    options::McpOptions,
+    app::handler::{FromHandlerParams, HandlerParams}
+};
 
 pub use helpers::{Json, Meta, PropertyType};
 pub use request::{RequestId, Request};
@@ -28,9 +37,12 @@ pub use tool::{
     CallToolRequestParams,
     CallToolResponse,
     Tool, 
-    ToolHandler, 
     ListToolsResult
 };
+
+#[cfg(feature = "server")]
+pub use tool::ToolHandler;
+
 pub use resource::{
     Uri,
     ListResourcesRequestParams,
@@ -53,8 +65,11 @@ pub use prompt::{
     GetPromptResult,
     PromptArgument,
     PromptMessage,
-    PromptHandler,
 };
+
+#[cfg(feature = "server")]
+pub use prompt::PromptHandler;
+
 pub use root::Root;
 
 pub mod request;
@@ -238,6 +253,7 @@ impl IntoResponse for InitializeResult {
     }
 }
 
+#[cfg(feature = "server")]
 impl FromHandlerParams for InitializeRequestParams {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
@@ -267,6 +283,7 @@ impl Annotations {
     }
 }
 
+#[cfg(feature = "server")]
 impl InitializeResult {
     pub(crate) fn new(options: &McpOptions) -> Self {
         Self {

@@ -1,9 +1,13 @@
 ﻿//! Utilities for Resource templates
 
-use std::sync::Arc;
-use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "server")]
+use std::sync::Arc;
+#[cfg(feature = "server")]
+use futures_util::future::BoxFuture;
+#[cfg(feature = "server")]
 use crate::error::Error;
+#[cfg(feature = "server")]
 use crate::app::handler::{
     FromHandlerParams, 
     GenericHandler, 
@@ -12,10 +16,12 @@ use crate::app::handler::{
 };
 use crate::types::{
     resource::Uri, Annotations, IntoResponse, 
-    ReadResourceRequestParams, ReadResourceResult, 
-    Request, RequestId, FromRequest, Response, 
+    RequestId, Response, 
     Cursor, Page
 };
+
+#[cfg(feature = "server")]
+use crate::types::{FromRequest, ReadResourceRequestParams, ReadResourceResult, Request};
 
 /// Represents a known resource template that the server is capable of reading.
 /// 
@@ -97,6 +103,7 @@ impl From<Page<'_, ResourceTemplate>> for ListResourceTemplatesResult {
     }
 }
 
+#[cfg(feature = "server")]
 impl FromHandlerParams for ListResourceTemplatesRequestParams {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
@@ -114,6 +121,7 @@ impl ListResourceTemplatesResult {
 }
 
 /// Represents a function that reads a resource
+#[cfg(feature = "server")]
 pub(crate) struct ResourceFunc<F, R, Args>
 where
     F: GenericHandler<Args, Output = R>,
@@ -124,6 +132,7 @@ where
     _marker: std::marker::PhantomData<Args>,
 }
 
+#[cfg(feature = "server")]
 impl<F, R ,Args> ResourceFunc<F, R, Args>
 where
     F: GenericHandler<Args, Output = R>,
@@ -137,6 +146,7 @@ where
     }
 }
 
+#[cfg(feature = "server")]
 impl<F, R ,Args> Handler<ReadResourceResult> for ResourceFunc<F, R, Args>
 where
     F: GenericHandler<Args, Output = R>,
@@ -160,6 +170,7 @@ where
     }
 }
 
+#[cfg(feature = "server")]
 impl ResourceTemplate {
     /// Creates a new [`ResourceTemplate`]
     #[inline]

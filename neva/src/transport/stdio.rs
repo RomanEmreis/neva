@@ -8,7 +8,6 @@ use tokio::{
     io::{
         AsyncWrite, AsyncWriteExt,
         AsyncRead, AsyncBufReadExt,
-        Stdin, Stdout,
         BufReader, BufWriter
     },
     sync::mpsc::{self, Receiver, Sender},
@@ -18,6 +17,9 @@ use crate::transport::{
     Sender as TransportSender, 
     Receiver as TransportReceiver
 };
+
+#[cfg(feature = "server")]
+use tokio::io::{Stdin, Stdout};
 
 #[cfg(feature = "client")]
 use tokio::process::{ChildStdin, ChildStdout};
@@ -32,12 +34,19 @@ mod linux;
 #[cfg(feature = "client")]
 pub(crate) mod options;
 
-/// Represents stdio transport
-pub(crate) struct StdIo {
+/// Represents stdio server transport
+#[cfg(feature = "server")]
+pub(crate) struct StdIoServer {
     sender: StdIoSender,
     receiver: StdIoReceiver,
-    #[cfg(feature = "client")]
-    options: Option<StdIoOptions>,
+}
+
+/// Represents stdio client transport
+#[cfg(feature = "client")]
+pub(crate) struct StdIoClient {
+    sender: StdIoSender,
+    receiver: StdIoReceiver,
+    options: StdIoOptions,
 }
 
 /// Represents stdio sender
@@ -168,41 +177,25 @@ impl StdIoReceiver {
     }
 }
 
-impl StdIo {
-    /// Creates a new stdio transport for server
-    pub(crate) fn new() -> Self {
-        Self { 
-            receiver: StdIoReceiver::new(),
-            sender: StdIoSender::new(),
-            #[cfg(feature = "client")]
-            options: None,
-        }
-    }
-
-    pub(crate) fn init_transport() -> (BufReader<Stdin>, BufWriter<Stdout>) {
-        (BufReader::new(tokio::io::stdin()), BufWriter::new(tokio::io::stdout()))
-    }
-
-    /// Creates a new stdio transport for the MCP client
-    #[cfg(feature = "client")]
-    pub(crate) fn client(options: StdIoOptions) -> Self {
+#[cfg(feature = "client")]
+impl StdIoClient {
+    /// Creates a new stdio transport for this client
+    pub(crate) fn new(options: StdIoOptions) -> Self {
         Self {
             receiver: StdIoReceiver::new(),
             sender: StdIoSender::new(),
-            options: Some(options),
+            options,
         }
     }
 
-    #[cfg(feature = "client")]
-    fn handshake(
-        options: StdIoOptions, 
-        token: CancellationToken
-    ) -> (BufReader<ChildStdout>, BufWriter<ChildStdin>) {
+    /// Handshakes stdio between client and server apps
+    fn handshake(&self, token: CancellationToken) -> (BufReader<ChildStdout>, BufWriter<ChildStdin>) {
+        let options =  &self.options;
         #[cfg(target_os = "linux")]
-        let (job, mut child) = linux::Job::new(options.command, options.args)
+        let (job, mut child) = linux::Job::new(options.command, &options.args)
             .expect("Failed to handshake");
         #[cfg(target_os = "windows")]
-        let (job, mut child) = windows::Job::new(options.command, options.args)
+        let (job, mut child) = windows::Job::new(options.command, &options.args)
             .expect("Failed to handshake");
         #[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
         let mut child = tokio::process::Command::new(options.command)
@@ -211,7 +204,7 @@ impl StdIo {
             .stdout(std::process::Stdio::piped())
             .spawn()
             .expect("Failed to handshake");
-        
+
         let stdin = child.stdin
             .take()
             .expect("Failed to handshake: Inaccessible stdin");
@@ -244,10 +237,26 @@ impl StdIo {
                             "Child exited with status: {:?}", _exit);
                     }
                 },
-            } 
+            }
         });
-        
+
         (BufReader::new(stdout), BufWriter::new(stdin))
+    }
+}
+
+#[cfg(feature = "server")]
+impl StdIoServer {
+    /// Creates a new stdio transport for server
+    pub(crate) fn new() -> Self {
+        Self {
+            receiver: StdIoReceiver::new(),
+            sender: StdIoSender::new()
+        }
+    }
+
+    /// Initializes and Returns references to `stdin` and `stdout`
+    pub(crate) fn init() -> (BufReader<Stdin>, BufWriter<Stdout>) {
+        (BufReader::new(tokio::io::stdin()), BufWriter::new(tokio::io::stdout()))
     }
 }
 
@@ -269,52 +278,49 @@ impl TransportReceiver for StdIoReceiver {
     }
 }
 
-impl Transport for StdIo {
+#[cfg(feature = "client")]
+impl Transport for StdIoClient {
     type Sender = StdIoSender;
     type Receiver = StdIoReceiver;
-    
+
     fn start(&mut self) -> CancellationToken {
         let token = CancellationToken::new();
+        let (reader, writer) = self.handshake(token.clone());
         
-        #[cfg(feature = "client")]
-        if let Some(options) = self.options.take() {
-            let (reader, writer) = StdIo::handshake(options, token.clone());
-            self.receiver.start(reader, token.clone());
-            self.sender.start(writer, token.clone());
-        } else {
-            let (reader, writer) = StdIo::init_transport();
-            self.receiver.start(reader, token.clone());
-            self.sender.start(writer, token.clone());
-        }
-        #[cfg(not(feature = "client"))]
-        {
-            let (reader, writer) = StdIo::init_transport();
+        self.receiver.start(reader, token.clone());
+        self.sender.start(writer, token.clone());
 
-            self.receiver.start(reader, token.clone());
-            self.sender.start(writer, token.clone());
-        }
+        #[cfg(feature = "tracing")]
+        tracing::info!(logger = "neva", "Connected: stdio");
+        token
+    }
+
+    #[inline]
+    fn split(self) -> (Self::Sender, Self::Receiver) {
+        (self.sender, self.receiver)
+    }
+}
+
+#[cfg(feature = "server")]
+impl Transport for StdIoServer {
+    type Sender = StdIoSender;
+    type Receiver = StdIoReceiver;
+
+    fn start(&mut self) -> CancellationToken {
+        let token = CancellationToken::new();
+        let (reader, writer) = StdIoServer::init();
+
+        self.receiver.start(reader, token.clone());
+        self.sender.start(writer, token.clone());
 
         #[cfg(feature = "tracing")]
         tracing::info!(logger = "neva", "Listening: stdio");
         token
     }
 
+    #[inline]
     fn split(self) -> (Self::Sender, Self::Receiver) {
         (self.sender, self.receiver)
-    }
-}
-
-impl TransportSender for StdIo {
-    #[inline]
-    async fn send(&mut self, resp: Message) -> Result<(), Error> {
-        self.sender.send(resp).await
-    }
-}
-
-impl TransportReceiver for StdIo {
-    #[inline]
-    async fn recv(&mut self) -> Result<Message, Error> {
-        self.receiver.recv().await
     }
 }
 
@@ -324,14 +330,12 @@ mod tests {
     #[cfg(all(feature = "client", target_os = "windows"))]
     async fn it_tests_handshake() {
         use tokio_util::sync::CancellationToken;
-        use crate::transport::StdIo;
+        use crate::transport::StdIoClient;
         use super::options::StdIoOptions;
         
+        let client = StdIoClient::new(StdIoOptions::new("cmd.exe", ["/c", "ping", "127.0.0.1", "-t"]));
         let token = CancellationToken::new();
-        let (_, _) = StdIo::handshake(
-            StdIoOptions::new("cmd.exe", ["/c", "ping", "127.0.0.1", "-t"]),
-            token.clone()
-        );
+        let (_, _) = client.handshake(token.clone());
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         
@@ -353,14 +357,12 @@ mod tests {
     async fn it_tests_handshake() {
         //use tokio::io::AsyncBufReadExt;
         use tokio_util::sync::CancellationToken;
-        use crate::transport::StdIo;
+        use crate::transport::StdIoClient;
         use super::options::StdIoOptions;
 
+        let client = StdIoClient::new(StdIoOptions::new("sh", ["-c", "sleep 300"]));
         let token = CancellationToken::new();
-        let (_reader, _) = StdIo::handshake(
-            StdIoOptions::new("sh", ["-c", "sleep 300"]),
-            token.clone()
-        );
+        let (_, _) = StdIo::handshake(token.clone());
 
         token.cancel();
 

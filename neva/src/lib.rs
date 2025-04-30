@@ -27,22 +27,27 @@
 //! }
 //! ```
 
+#[cfg(feature = "server")]
 pub use app::{App, context::Context, options};
 #[cfg(feature = "client")]
 pub use client::Client;
 
-pub mod app;
 pub mod types;
+#[cfg(any(feature = "server", feature = "client"))]
 pub mod transport;
 pub mod error;
+#[cfg(any(feature = "server", feature = "client"))]
 pub mod shared;
+#[cfg(feature = "server")]
+pub mod app;
 #[cfg(feature = "client")]
 pub mod client;
 
-#[cfg(feature = "macros")]
+#[cfg(all(feature = "macros", feature = "server"))]
 pub use neva_macros::*;
 
 pub(crate) const SERVER_NAME: &str = "neva";
+#[cfg(any(feature = "server", feature = "client"))]
 pub(crate) const PROTOCOL_VERSIONS: [&str; 2] = [
     "2024-11-05", 
     "2025-03-26"
