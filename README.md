@@ -11,14 +11,16 @@ Easy configurable MCP server and client SDK for Rust
 
 [API Docs](https://docs.rs/neva/latest/neva/) | [Examples](https://github.com/RomanEmreis/neva/tree/main/examples)
 
-## Dependencies
-```toml
-[dependencies]
-neva = { version = "0.0.6", features = ["full"] }
-tokio = { version = "1", features = ["full"] }
-```
 ## MCP Client
 
+### Dependencies
+```toml
+[dependencies]
+neva = { version = "0.0.6", features = ["client-full"] }
+tokio = { version = "1", features = ["full"] }
+```
+
+### Code
 ```rust
 use std::time::Duration;
 use neva::Client;
@@ -52,6 +54,14 @@ async fn main() -> Result<(), Error> {
 
 ## MCP Server
 
+### Dependencies
+```toml
+[dependencies]
+neva = { version = "0.0.6", features = ["server-full"] }
+tokio = { version = "1", features = ["full"] }
+```
+
+### Code
 ```rust
 use neva::{App, tool, resource, prompt};
 

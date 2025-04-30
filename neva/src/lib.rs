@@ -11,6 +11,7 @@
 //! ## Example
 //! 
 //! ```no_run
+//! # #[cfg(feature = "server")] {
 //! use neva::App;
 //! 
 //! #[tokio::main]
@@ -24,7 +25,28 @@
 //!     });
 //! 
 //!     app.run().await;
+//! } 
+//! # }
+//! # #[cfg(feature = "client")] {
+//! use std::time::Duration;
+//! use neva::{Client, error::Error};
+//! 
+//! #[tokio::main]
+//! async fn main() -> Result<(), Error> {
+//!     let mut client = Client::new()
+//!         .with_options(|opt| opt
+//!             .with_stdio("npx", ["-y", "@modelcontextprotocol/server-everything"]));
+//! 
+//!     client.connect().await?;
+//! 
+//!     // Call a tool
+//!     let args = [("message", "Hello MCP!")];
+//!     let result = client.call_tool("echo", Some(args)).await?;
+//!     println!("{:?}", result.content);
+//! 
+//!     client.disconnect().await
 //! }
+//! # }
 //! ```
 
 #[cfg(feature = "server")]

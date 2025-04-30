@@ -12,7 +12,7 @@ unsafe impl Send for Job {}
 
 impl Job {
     /// Creates and returns a new child process ['Child'] and ['Job'] - process group wrapper
-    pub(super) fn new(command: &str, args: Vec<&str>) -> std::io::Result<(Job, Child)> {
+    pub(super) fn new(command: &str, args: &Vec<&str>) -> std::io::Result<(Job, Child)> {
         let (job_handle, child) = create_process_group(command, args)?;
         let job = Self(job_handle);
         Ok((job, child))
@@ -50,7 +50,7 @@ mod tests {
     async fn it_tests_process_group_kill() {
         let (job, _) = create_process_group(
             "sh",
-            vec!["-c", "sleep 300 & sleep 300"]
+            &vec!["-c", "sleep 300 & sleep 300"]
         ).unwrap();
         
         let job = Job(job);

@@ -355,14 +355,13 @@ mod tests {
     #[tokio::test]
     #[cfg(all(feature = "client", target_os = "linux"))]
     async fn it_tests_handshake() {
-        //use tokio::io::AsyncBufReadExt;
         use tokio_util::sync::CancellationToken;
         use crate::transport::StdIoClient;
         use super::options::StdIoOptions;
 
         let client = StdIoClient::new(StdIoOptions::new("sh", ["-c", "sleep 300"]));
         let token = CancellationToken::new();
-        let (_, _) = StdIo::handshake(token.clone());
+        let (_, _) = client.handshake(token.clone());
 
         token.cancel();
 
