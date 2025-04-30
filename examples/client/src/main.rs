@@ -18,11 +18,12 @@ async fn main() -> Result<(), Error> {
     let mut client = Client::new()
         .with_options(|opt| opt
             .with_stdio("npx", ["-y", "@modelcontextprotocol/server-everything"])
+            .with_roots(|roots| roots.with_list_changed())
             .with_timeout(Duration::from_secs(5))
             .with_mcp_version("2024-11-05"));
- 
+    
     client.connect().await?;
-
+    
     // List tools
     tracing::info!("--- LIST TOOLS ---");
     let tools = client.list_tools(None).await?;

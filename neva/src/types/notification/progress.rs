@@ -18,7 +18,8 @@ pub struct ProgressNotification {
     /// even if the total is unknown.
     pub progress: f64,
     
-    /// Total number of items to process (or total progress required), if known.
+    /// Total number of items to a process (or total progress required), if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<f64>,
 }
 
@@ -26,7 +27,7 @@ impl From<ProgressNotification> for Notification {
     #[inline]
     fn from(progress: ProgressNotification) -> Self {
         Self::new(
-            "notifications/progress", 
+            super::commands::PROGRESS, 
             serde_json::to_value(progress).ok()
         )
     }

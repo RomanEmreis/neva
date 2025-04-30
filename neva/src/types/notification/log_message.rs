@@ -2,11 +2,14 @@
 
 use serde::{Serialize, Deserialize};
 use crate::error::Error;
-use crate::app::handler::{FromHandlerParams, HandlerParams};
-use crate::types::{Request, FromRequest, response::ErrorDetails};
+use crate::types::response::ErrorDetails;
 use crate::types::notification::Notification;
+#[cfg(feature = "server")]
+use crate::types::{Request, FromRequest};
 #[cfg(feature = "tracing")]
 use tracing::Level;
+#[cfg(feature = "server")]
+use crate::app::handler::{FromHandlerParams, HandlerParams};
 
 /// The severity of a log message.
 /// This map to syslog message severities, as specified in 
@@ -49,9 +52,11 @@ pub struct LogMessage {
     pub level: LoggingLevel,
     
     /// An optional name of the logger issuing this message.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub logger: Option<String>,
     
     /// The data to be logged, such as a string message or an object.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
 }
 
@@ -81,12 +86,13 @@ impl From<LogMessage> for Notification {
     #[inline]
     fn from(log: LogMessage) -> Self {
         Self::new(
-            "notifications/message", 
+            super::commands::MESSAGE, 
             serde_json::to_value(log).ok()
         )
     }
 }
 
+#[cfg(feature = "server")]
 impl FromHandlerParams for SetLevelRequestParams {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {

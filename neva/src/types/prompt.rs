@@ -1,21 +1,43 @@
 ﻿//! Represents an MCP prompt
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::future::Future;
-use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use crate::types::Cursor;
+use crate::types::request::RequestParamsMeta;
+#[cfg(feature = "server")]
+use std::sync::Arc;
+#[cfg(feature = "server")]
+use std::future::Future;
+#[cfg(feature = "server")]
+use futures_util::future::BoxFuture;
+#[cfg(feature = "server")]
 use super::helpers::TypeCategory;
-use crate::types::{Cursor, IntoResponse, Page, PropertyType, Request, RequestId, Response};
-use crate::app::handler::{FromHandlerParams, HandlerParams, GenericHandler, Handler, RequestHandler};
+#[cfg(feature = "server")]
 use crate::error::{Error, ErrorCode};
-use crate::types::request::{FromRequest, RequestParamsMeta};
+#[cfg(feature = "server")]
+use crate::types::FromRequest;
+
+#[cfg(feature = "server")]
+use crate::types::{IntoResponse, Page, PropertyType, Request, RequestId, Response};
+
+#[cfg(feature = "server")]
+use crate::app::{
+    context::Context,
+    handler::{FromHandlerParams, HandlerParams, GenericHandler, Handler, RequestHandler}
+};
 
 pub use get_prompt_result::{GetPromptResult, PromptMessage};
 
+#[cfg(feature = "server")]
 mod from_request;
 pub mod get_prompt_result;
+
+/// List of commands for Prompts
+pub mod commands {
+    pub const LIST: &str = "prompts/list";
+    pub const GET: &str = "prompts/get";
+}
 
 /// A prompt or prompt template that the server offers.
 /// 
@@ -35,6 +57,7 @@ pub struct Prompt {
 
     /// A get prompt handler
     #[serde(skip)]
+    #[cfg(feature = "server")]
     handler: Option<RequestHandler<GetPromptResult>>
 }
 
@@ -57,7 +80,7 @@ pub struct PromptArgument {
 
 /// Sent from the client to request a list of prompts and prompt templates the server has.
 ///
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Serialize, Deserialize)]
 pub struct ListPromptsRequestParams {
     /// An opaque token representing the current pagination position.
@@ -68,7 +91,7 @@ pub struct ListPromptsRequestParams {
 
 /// Used by the client to get a prompt provided by the server.
 /// 
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Serialize, Deserialize)]
 pub struct GetPromptRequestParams {
     /// The name of the prompt or prompt template.
@@ -82,7 +105,7 @@ pub struct GetPromptRequestParams {
     ///
     /// > **Note:** This can include progress tracking tokens and other protocol-specific properties
     /// > that are not part of the primary request parameters.
-    #[serde(rename = "_meta")]
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<RequestParamsMeta>,
 }
 
@@ -104,6 +127,7 @@ pub struct ListPromptsResult {
     pub next_cursor: Option<Cursor>,
 }
 
+#[cfg(feature = "server")]
 impl IntoResponse for ListPromptsResult {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
@@ -111,6 +135,7 @@ impl IntoResponse for ListPromptsResult {
     }
 }
 
+#[cfg(feature = "server")]
 impl From<Vec<Prompt>> for ListPromptsResult {
     #[inline]
     fn from(prompts: Vec<Prompt>) -> Self {
@@ -121,6 +146,7 @@ impl From<Vec<Prompt>> for ListPromptsResult {
     }
 }
 
+#[cfg(feature = "server")]
 impl From<Page<'_, Prompt>> for ListPromptsResult {
     #[inline]
     fn from(page: Page<Prompt>) -> Self {
@@ -131,6 +157,7 @@ impl From<Page<'_, Prompt>> for ListPromptsResult {
     }
 }
 
+#[cfg(feature = "server")]
 impl ListPromptsResult {
     /// Create a new [`ListPromptsResult`]
     #[inline]
@@ -139,6 +166,7 @@ impl ListPromptsResult {
     }
 }
 
+#[cfg(feature = "server")]
 impl FromHandlerParams for ListPromptsRequestParams {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
@@ -147,6 +175,7 @@ impl FromHandlerParams for ListPromptsRequestParams {
     }
 }
 
+#[cfg(feature = "server")]
 impl FromHandlerParams for GetPromptRequestParams {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
@@ -155,6 +184,7 @@ impl FromHandlerParams for GetPromptRequestParams {
     }
 }
 
+#[cfg(feature = "server")]
 impl From<&str> for PromptArgument {
     #[inline]
     fn from(name: &str) -> Self {
@@ -166,6 +196,7 @@ impl From<&str> for PromptArgument {
     }
 }
 
+#[cfg(feature = "server")]
 impl From<Value> for PromptArgument {
     #[inline]
     fn from(json: Value) -> Self {
@@ -174,6 +205,7 @@ impl From<Value> for PromptArgument {
     }
 }
 
+#[cfg(feature = "server")]
 impl From<String> for PromptArgument {
     #[inline]
     fn from(name: String) -> Self {
@@ -185,6 +217,7 @@ impl From<String> for PromptArgument {
     }
 }
 
+#[cfg(feature = "server")]
 impl From<(&str, &str)> for PromptArgument {
     #[inline]
     fn from((name, description): (&str, &str)) -> Self {
@@ -192,6 +225,7 @@ impl From<(&str, &str)> for PromptArgument {
     }
 }
 
+#[cfg(feature = "server")]
 impl From<(&str, &str, bool)> for PromptArgument {
     #[inline]
     fn from((name, description, required): (&str, &str, bool)) -> Self {
@@ -204,6 +238,7 @@ impl From<(&str, &str, bool)> for PromptArgument {
 }
 
 /// Describes a generic get prompt handler
+#[cfg(feature = "server")]
 pub trait PromptHandler<Args>: GenericHandler<Args> {
     #[inline]
     fn args() -> Option<Vec<PromptArgument>> {
@@ -211,6 +246,7 @@ pub trait PromptHandler<Args>: GenericHandler<Args> {
     }
 }
 
+#[cfg(feature = "server")]
 pub(crate) struct PromptFunc<F, R, Args>
 where
     F: PromptHandler<Args, Output = R>,
@@ -222,6 +258,7 @@ where
     _marker: std::marker::PhantomData<Args>,
 }
 
+#[cfg(feature = "server")]
 impl<F, R, Args> PromptFunc<F, R, Args>
 where
     F: PromptHandler<Args, Output = R>,
@@ -236,6 +273,7 @@ where
     }
 }
 
+#[cfg(feature = "server")]
 impl<F, R, Args> Handler<GetPromptResult> for PromptFunc<F, R, Args>
 where
     F: PromptHandler<Args, Output = R>,
@@ -259,6 +297,16 @@ where
     }
 }
 
+#[cfg(feature = "server")]
+impl GetPromptRequestParams {
+    /// Includes [`Context`] into request metadata. If metadata is `None` it creates a new.
+    pub(crate) fn with_context(mut self, ctx: Context) -> Self {
+        self.meta.get_or_insert_default().context = Some(ctx);
+        self
+    }
+}
+
+#[cfg(feature = "server")]
 impl Prompt {
     /// Creates a new [`Prompt`]
     #[inline]
@@ -308,7 +356,9 @@ impl Prompt {
     }
 }
 
+#[cfg(feature = "server")]
 pub struct PromptArguments;
+#[cfg(feature = "server")]
 impl PromptArguments {
     /// Deserializes a [`Vec`] of [`PromptArgument`] from JSON string
     #[inline]
@@ -318,6 +368,7 @@ impl PromptArguments {
     }
 }
 
+#[cfg(feature = "server")]
 impl PromptArgument {
     /// Creates a new [`PromptArgument`] 
     pub(crate) fn new<T>() -> Self {
@@ -348,6 +399,7 @@ impl PromptArgument {
 }
 
 macro_rules! impl_generic_prompt_handler ({ $($param:ident)* } => {
+    #[cfg(feature = "server")]
     impl<Func, Fut: Send, $($param: TypeCategory,)*> PromptHandler<($($param,)*)> for Func
     where
         Func: Fn($($param),*) -> Fut + Send + Sync + Clone + 'static,

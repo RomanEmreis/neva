@@ -12,7 +12,7 @@ unsafe impl Send for Job {}
 
 impl Job {
     /// Creates and returns a new child process ['Child'] and ['Job'] - process group wrapper
-    pub(super) fn new(command: &str, args: Vec<&str>) -> std::io::Result<(Job, Child)> {
+    pub(super) fn new(command: &str, args: &Vec<&str>) -> std::io::Result<(Job, Child)> {
         let (job_handle, child) = create_process_group(command, args)?;
         let job = Self(job_handle);
         Ok((job, child))
@@ -25,14 +25,14 @@ impl Drop for Job {
     }
 }
 
-/// Создаёт процесс в новой группе с автоматическим завершением
+/// Creates a process in a new group with automatic termination
 #[inline]
-pub(super) fn create_process_group(command: &str, args: Vec<&str>) -> std::io::Result<(i32, Child)> {
+pub(super) fn create_process_group(command: &str, args: &Vec<&str>) -> std::io::Result<(i32, Child)> {
     let child = Command::new(command)
         .args(args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .process_group(0) // Создаём новую группу
+        .process_group(0)
         .spawn()?;
 
     let group_pid = child.id().expect("Failed to get process id");
@@ -50,7 +50,7 @@ mod tests {
     async fn it_tests_process_group_kill() {
         let (job, _) = create_process_group(
             "sh",
-            vec!["-c", "sleep 300 & sleep 300"]
+            &vec!["-c", "sleep 300 & sleep 300"]
         ).unwrap();
         
         let job = Job(job);

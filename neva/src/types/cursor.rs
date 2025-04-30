@@ -4,6 +4,7 @@ use std::ops::{Deref, DerefMut};
 use serde::{Serialize, Serializer, Deserialize, Deserializer};
 use base64::{engine::general_purpose, Engine as _};
 
+/// An opaque token representing the pagination position after the last returned result.
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Cursor(pub usize);
 
@@ -54,11 +55,16 @@ impl DerefMut for Cursor {
     }
 }
 
+/// Represents a current page of items
 pub struct Page<'a, T> {
+    /// Page items
     pub items: &'a [T],
+
+    /// An opaque token representing the pagination position after the last returned result.
     pub next_cursor: Option<Cursor>,
 }
 
+/// A trait for types that need pagination support
 pub trait Pagination<T> {
     fn paginate(&self, cursor: Option<Cursor>, page_size: usize) -> Page<T>;
 }

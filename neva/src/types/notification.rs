@@ -1,15 +1,18 @@
 ﻿//! Utilities for Notifications
 
 use serde::{Serialize, Deserialize};
-use crate::types::{FromRequest, Request, RequestId, JSONRPC_VERSION};
-use crate::app::handler::{FromHandlerParams, HandlerParams};
-use crate::error::Error;
+use crate::types::{RequestId, Message, JSONRPC_VERSION};
+#[cfg(feature = "server")]
+use crate::{error::Error, types::{FromRequest, Request}};
 
 pub use log_message::{
     LogMessage, 
     LoggingLevel, 
     SetLevelRequestParams
 };
+
+#[cfg(feature = "server")]
+use crate::app::handler::{FromHandlerParams, HandlerParams};
 
 pub use progress::ProgressNotification;
 
@@ -20,6 +23,16 @@ pub mod progress;
 pub mod log_message;
 #[cfg(feature = "tracing")]
 pub mod formatter;
+
+/// List of commands for Notifications
+pub mod commands {
+    pub const INITIALIZED: &str = "notifications/initialized";
+    pub const CANCELLED: &str = "notifications/cancelled";
+    pub const MESSAGE: &str = "notifications/message";
+    pub const PROGRESS: &str = "notifications/progress";
+    pub const STDERR: &str = "notifications/stderr";
+    pub const SET_LOG_LEVEL: &str = "logging/setLevel";
+}
 
 /// A notification which does not expect a response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +74,14 @@ pub struct CancelledNotificationParams {
     pub reason: Option<String>,
 }
 
+impl From<Notification> for Message {
+    #[inline]
+    fn from(notification: Notification) -> Self {
+        Self::Notification(notification)
+    }
+}
+
+#[cfg(feature = "server")]
 impl FromHandlerParams for CancelledNotificationParams {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
@@ -80,8 +101,46 @@ impl Notification {
         }
     }
     
+    /// Writes the [`Notification`]
+    #[inline]
+    #[cfg(feature = "tracing")]
+    pub fn write(self) {
+        let is_stderr = self.is_stderr();
+        let Some(params) = self.params else { return; };
+        if is_stderr {
+            Self::write_err_internal(params);
+        } else {
+            let log = serde_json::from_value::<LogMessage>(params).unwrap();
+            log.write();
+        }
+    }
+    
+    /// Returns `true` is the [`Notification`] received with method `notifications/stderr`
+    #[inline]
+    pub fn is_stderr(&self) -> bool {
+        self.method.as_str() == commands::STDERR
+    }
+    
+    /// Writes the [`Notification`] as [`LoggingLevel::Error`]
+    #[inline]
+    #[cfg(feature = "tracing")]
+    pub fn write_err(self) {
+        if let Some(params) = self.params {
+            Self::write_err_internal(params)
+        }
+    }
+    
     pub fn to_json(self) -> String {
         serde_json::to_string(&self).unwrap()
+    }
+    
+    #[inline]
+    #[cfg(feature = "tracing")]
+    fn write_err_internal(params: serde_json::Value) {
+        let err = params
+            .get("content")
+            .unwrap_or(&params);
+        tracing::error!("{}", err);
     }
 }
 

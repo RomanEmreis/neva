@@ -1,8 +1,8 @@
 [package]
 name = "neva"
-version = "0.0.5"
+version = "0.0.6"
 edition = "2021"
-rust-version = "1.80.0"
+rust-version = "1.83.0"
 authors = ["Roman Emreis <roman.emreis@outlook.com>"]
 license = "MIT"
 repository = "https://github.com/RomanEmreis/neva"
@@ -17,11 +17,11 @@ base64 = "0.22.1"
 futures-util = { version = "0.3.31", default-features = false, features = ["alloc"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
-tokio = { version = "1.44.2", features = ["sync", "io-std", "io-util", "rt", "macros"] }
+tokio = { version = "1.44.2", features = ["sync", "io-std", "io-util", "rt", "time", "macros"] }
 tokio-util = "0.7.15"
 tracing = { version = "0.1.41", optional = true }
 tracing-subscriber = { version = "0.3.19", features = ["fmt", "json"], optional = true }
-neva_macros = { path = "../neva_macros", version = "0.0.5", optional = true }
+neva_macros = { path = "../neva_macros", version = "0.0.6", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61.1", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_System_Diagnostics", "Win32_System_Diagnostics_ToolHelp"], optional = true }
@@ -34,9 +34,12 @@ tokio = { version = "1.44.2", features = ["rt", "rt-multi-thread", "macros"] }
 
 [features]
 default = []
-full = ["macros", "tracing", "client"]
+full = ["macros", "tracing", "server", "client"]
+server-full = ["server", "macros", "tracing"]
+client-full = ["client", "tracing"]
 macros = ["dep:neva_macros"]
-client = ["dep:windows", "dep:nix", "tokio/process", "tokio/time", "tokio/signal"]
+client = ["dep:windows", "dep:nix", "tokio/process", "tokio/signal"]
+server = []
 tracing = ["dep:tracing", "dep:tracing-subscriber"]
 
 [package.metadata.docs.rs]

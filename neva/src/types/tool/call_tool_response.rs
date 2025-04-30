@@ -1,8 +1,12 @@
 ﻿//! Types and util for handling tool results
 
 use serde::{Serialize, Deserialize};
+use crate::types::{Content, IntoResponse, RequestId, Response};
+
+#[cfg(feature = "server")]
 use crate::error::Error;
-use crate::types::{Content, IntoResponse, Json, RequestId, Response};
+#[cfg(feature = "server")]
+use crate::types::Json;
 
 /// The server's response to a tool call.
 ///
@@ -33,6 +37,7 @@ impl IntoResponse for CallToolResponse {
     }
 }
 
+#[cfg(feature = "server")]
 impl From<Error> for CallToolResponse {
     #[inline]
     fn from(value: Error) -> Self {
@@ -40,6 +45,7 @@ impl From<Error> for CallToolResponse {
     }
 }
 
+#[cfg(feature = "server")]
 impl<T, E> From<Result<T, E>> for CallToolResponse
 where
     T: Into<CallToolResponse>,
@@ -54,6 +60,7 @@ where
     }
 }
 
+#[cfg(feature = "server")]
 impl<T> From<Option<T>> for CallToolResponse
 where
     T: Into<CallToolResponse>,
@@ -67,6 +74,7 @@ where
     }
 }
 
+#[cfg(feature = "server")]
 impl From<()> for CallToolResponse {
     #[inline]
     fn from(_: ()) -> Self {
@@ -74,6 +82,7 @@ impl From<()> for CallToolResponse {
     }
 }
 
+#[cfg(feature = "server")]
 impl From<&'static str> for CallToolResponse {
     #[inline]
     fn from(str: &str) -> Self {
@@ -81,6 +90,7 @@ impl From<&'static str> for CallToolResponse {
     }
 }
 
+#[cfg(feature = "server")]
 impl From<String> for CallToolResponse {
     #[inline]
     fn from(str: String) -> Self {
@@ -88,6 +98,7 @@ impl From<String> for CallToolResponse {
     }
 }
 
+#[cfg(feature = "server")]
 impl<T: Serialize> From<Json<T>> for CallToolResponse {
     #[inline]
     fn from(value: Json<T>) -> Self {
@@ -97,6 +108,7 @@ impl<T: Serialize> From<Json<T>> for CallToolResponse {
     }
 }
 
+#[cfg(feature = "server")]
 impl From<Vec<&'static str>> for CallToolResponse {
     #[inline]
     fn from(values: Vec<&'static str>) -> Self {
@@ -104,6 +116,7 @@ impl From<Vec<&'static str>> for CallToolResponse {
     }
 }
 
+#[cfg(feature = "server")]
 impl From<serde_json::Value> for CallToolResponse {
     #[inline]
     fn from(value: serde_json::Value) -> Self {
@@ -111,6 +124,7 @@ impl From<serde_json::Value> for CallToolResponse {
     }
 }
 
+#[cfg(feature = "server")]
 macro_rules! impl_from_for_call_tool_response {
     { $($type:ident),* $(,)? } => {
         $(impl From<$type> for CallToolResponse {
@@ -122,6 +136,7 @@ macro_rules! impl_from_for_call_tool_response {
     };
 }
 
+#[cfg(feature = "server")]
 impl_from_for_call_tool_response! {
     bool,
     i8, i16, i32, i64, i128, isize,
@@ -129,6 +144,7 @@ impl_from_for_call_tool_response! {
     f32, f64,
 }
 
+#[cfg(feature = "server")]
 impl CallToolResponse {
     /// Creates a single text response
     #[inline]
@@ -172,6 +188,7 @@ impl CallToolResponse {
 }
 
 #[cfg(test)]
+#[cfg(feature = "server")]
 mod tests {
     use crate::error::ErrorCode;
 

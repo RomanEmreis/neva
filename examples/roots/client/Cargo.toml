@@ -1,11 +1,11 @@
 [package]
-name = "example-client"
+name = "client"
 version = "0.1.0"
 edition = "2024"
 publish = false
 
 [dependencies]
-neva = { path = "../../neva", features = ["client-full"] }
+neva = { path = "../../../neva", features = ["client", "tracing"] }
 tokio = { version = "1.44.1", features = ["full"] }
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"

@@ -1,23 +1,26 @@
 ﻿use std::future::Future;
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use crate::error::{Error, ErrorCode};
+use crate::types::Message;
 
-pub(crate) use stdio::StdIo;
+#[cfg(feature = "server")]
+pub(crate) use stdio::StdIoServer;
+
+#[cfg(feature = "client")]
+pub(crate) use stdio::StdIoClient;
 
 pub(crate) mod stdio;
 
 /// Describes a sender that can send messages to a client 
 pub(crate) trait Sender{
     /// Sends messages to a client
-    fn send<R: Serialize>(&mut self, resp: R) -> impl Future<Output = Result<(), Error>>;
+    fn send(&mut self, resp: Message) -> impl Future<Output = Result<(), Error>>;
 }
 
 /// Describes a receiver that can receive messages from a client
 pub(crate) trait Receiver {
     /// Receives a messages from a client
-    fn recv<R: DeserializeOwned>(&mut self) -> impl Future<Output = Result<R, Error>>;
+    fn recv(&mut self) -> impl Future<Output = Result<Message, Error>>;
 }
 
 /// Describes a transport protocol for communicating between server and client
@@ -35,7 +38,10 @@ pub(crate) trait Transport {
 /// Holds all supported transport protocols
 pub(crate) enum TransportProto {
     None,
-    Stdio(StdIo),
+    #[cfg(feature = "client")]
+    StdioClient(StdIoClient),
+    #[cfg(feature = "server")]
+    StdIoServer(StdIoServer),
     //Ws(Websocket),
     //Sse(Sse),
     // add more options here...
@@ -61,7 +67,7 @@ impl Default for TransportProto {
 
 impl Sender for TransportProtoSender {
     #[inline]
-    async fn send<R: Serialize>(&mut self, resp: R) -> Result<(), Error> {
+    async fn send(&mut self, resp: Message) -> Result<(), Error> {
         match self {
             TransportProtoSender::Stdio(stdio) => stdio.send(resp).await,
             TransportProtoSender::None => Err(Error::new(
@@ -74,7 +80,7 @@ impl Sender for TransportProtoSender {
 
 impl Receiver for TransportProtoReceiver {
     #[inline]
-    async fn recv<R: DeserializeOwned>(&mut self) -> Result<R, Error> {
+    async fn recv(&mut self) -> Result<Message, Error> {
         match self {
             TransportProtoReceiver::Stdio(stdio) => stdio.recv().await,
             TransportProtoReceiver::None => Err(Error::new(
@@ -92,44 +98,27 @@ impl Transport for TransportProto {
     #[inline]
     fn start(&mut self) -> CancellationToken {
         match self {
-            TransportProto::Stdio(stdio) => stdio.start(),
+            #[cfg(feature = "server")]
+            TransportProto::StdIoServer(stdio) => stdio.start(),
+            #[cfg(feature = "client")]
+            TransportProto::StdioClient(stdio) => stdio.start(),
             TransportProto::None => CancellationToken::new(),
         }
     }
     
     fn split(self) -> (Self::Sender, Self::Receiver) {
         match self {
-            TransportProto::Stdio(stdio) => {
+            #[cfg(feature = "server")]
+            TransportProto::StdIoServer(stdio) => {
+                let (tx, rx) = stdio.split();
+                (TransportProtoSender::Stdio(tx), TransportProtoReceiver::Stdio(rx))
+            },
+            #[cfg(feature = "client")]
+            TransportProto::StdioClient(stdio) => {
                 let (tx, rx) = stdio.split();
                 (TransportProtoSender::Stdio(tx), TransportProtoReceiver::Stdio(rx))
             },
             TransportProto::None => (TransportProtoSender::None, TransportProtoReceiver::None),
-        }
-    }
-}
-
-impl Sender for TransportProto {
-    #[inline]
-    async fn send<R: Serialize>(&mut self, resp: R) -> Result<(), Error> {
-        match self {
-            TransportProto::Stdio(stdio) => stdio.send(resp).await,
-            TransportProto::None => Err(Error::new(
-                ErrorCode::InternalError,
-                "Transport protocol must be specified"
-            )),
-        }
-    }
-}
-
-impl Receiver for TransportProto {
-    #[inline]
-    async fn recv<R: DeserializeOwned>(&mut self) -> Result<R, Error> {
-        match self {
-            TransportProto::Stdio(stdio) => stdio.recv().await,
-            TransportProto::None => Err(Error::new(
-                ErrorCode::InternalError,
-                "Transport protocol must be specified"
-            )),
         }
     }
 }

@@ -1,7 +1,20 @@
 ﻿use std::fmt::Display;
 use serde::{Deserialize, Serialize};
 use crate::SERVER_NAME;
-use crate::options::McpOptions;
+
+#[cfg(feature = "server")]
+use crate::error::Error;
+
+use crate::types::notification::{Notification, ProgressNotification};
+
+#[cfg(feature = "server")]
+use crate::types::request::FromRequest;
+
+#[cfg(feature = "server")]
+use crate::{
+    options::McpOptions,
+    app::handler::{FromHandlerParams, HandlerParams}
+};
 
 pub use helpers::{Json, Meta, PropertyType};
 pub use request::{RequestId, Request};
@@ -24,9 +37,12 @@ pub use tool::{
     CallToolRequestParams,
     CallToolResponse,
     Tool, 
-    ToolHandler, 
     ListToolsResult
 };
+
+#[cfg(feature = "server")]
+pub use tool::ToolHandler;
+
 pub use resource::{
     Uri,
     ListResourcesRequestParams,
@@ -49,12 +65,12 @@ pub use prompt::{
     GetPromptResult,
     PromptArgument,
     PromptMessage,
-    PromptHandler,
 };
-use crate::app::handler::{FromHandlerParams, HandlerParams};
-use crate::error::Error;
-use crate::types::notification::ProgressNotification;
-use crate::types::request::FromRequest;
+
+#[cfg(feature = "server")]
+pub use prompt::PromptHandler;
+
+pub use root::Root;
 
 pub mod request;
 pub mod response;
@@ -67,9 +83,24 @@ pub mod content;
 pub mod reference;
 pub mod notification;
 pub mod cursor;
+pub mod root;
 pub(crate) mod helpers;
 
 pub(super) const JSONRPC_VERSION: &str = "2.0";
+
+/// Represents a JSON RPC message that could be either [`Request`] or [`Response`] or [`Notification`]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Message {
+    /// See [`Request`]
+    Request(Request),
+
+    /// See [`Response`]
+    Response(Response),
+
+    /// See [`Notification`]
+    Notification(Notification),
+}
 
 /// Parameters for an initialization request sent to the server.
 /// 
@@ -222,6 +253,7 @@ impl IntoResponse for InitializeResult {
     }
 }
 
+#[cfg(feature = "server")]
 impl FromHandlerParams for InitializeRequestParams {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
@@ -251,14 +283,15 @@ impl Annotations {
     }
 }
 
+#[cfg(feature = "server")]
 impl InitializeResult {
     pub(crate) fn new(options: &McpOptions) -> Self {
         Self {
             protocol_ver: options.protocol_ver().into(),
             capabilities: ServerCapabilities {
-                tools: Some(options.tools_capability.clone()),
-                resources: Some(options.resources_capability.clone()),
-                prompts: Some(options.prompts_capability.clone()),
+                tools: options.tools_capability(),
+                resources: options.resources_capability(),
+                prompts: options.prompts_capability(),
                 logging: Some(LoggingCapability::default()),
                 completions: Some(CompletionsCapability::default()),
                 experimental: None

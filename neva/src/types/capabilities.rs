@@ -197,3 +197,13 @@ impl PromptsCapability {
         self
     }
 }
+
+impl RootsCapability {
+    /// Specifies whether this client supports notifications for changes to the roots list.
+    ///
+    /// Default: _false_
+    pub fn with_list_changed(mut self) -> Self {
+        self.list_changed = true;
+        self
+    }
+}

@@ -1,12 +1,14 @@
 ﻿//! Types and utils for handling read resource results
 
-use base64::{engine::general_purpose, Engine};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "server")]
+use base64::{engine::general_purpose, Engine};
+#[cfg(feature = "server")]
 use crate::{error::Error, types::{IntoResponse, RequestId, Response}};
 
 /// The server's response to a resources/read request from the client.
 ///
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Serialize, Deserialize)]
 pub struct ReadResourceResult {
     /// A list of ResourceContents that this resource contains.
@@ -15,7 +17,7 @@ pub struct ReadResourceResult {
 
 /// Represents the content of a resource.
 ///
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ResourceContents {
     /// The URI of the resource.
@@ -34,6 +36,7 @@ pub struct ResourceContents {
     pub blob: Option<String>
 }
 
+#[cfg(feature = "server")]
 impl IntoResponse for ReadResourceResult {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
@@ -41,6 +44,7 @@ impl IntoResponse for ReadResourceResult {
     }
 }
 
+#[cfg(feature = "server")]
 impl From<(&str, &str)> for ResourceContents {
     #[inline]
     fn from((uri, text): (&str, &str)) -> Self {
@@ -53,6 +57,7 @@ impl From<(&str, &str)> for ResourceContents {
     }
 }
 
+#[cfg(feature = "server")]
 impl From<(&str, &str, &str)> for ResourceContents {
     #[inline]
     fn from((uri, mime, text): (&str, &str, &str)) -> Self {
@@ -65,6 +70,7 @@ impl From<(&str, &str, &str)> for ResourceContents {
     }
 }
 
+#[cfg(feature = "server")]
 impl From<(String, String)> for ResourceContents {
     #[inline]
     fn from((uri, text): (String, String)) -> Self {
@@ -77,6 +83,7 @@ impl From<(String, String)> for ResourceContents {
     }
 }
 
+#[cfg(feature = "server")]
 impl From<(String, String, String)> for ResourceContents {
     #[inline]
     fn from((uri, mime, text): (String, String, String)) -> Self {
@@ -89,6 +96,7 @@ impl From<(String, String, String)> for ResourceContents {
     }
 }
 
+#[cfg(feature = "server")]
 impl<T> From<T> for ReadResourceResult
 where 
     T: Into<ResourceContents>
@@ -98,6 +106,7 @@ where
     }
 }
 
+#[cfg(feature = "server")]
 impl<T, E> TryFrom<Result<T, E>> for ReadResourceResult
 where 
     T: Into<ReadResourceResult>,
@@ -114,6 +123,7 @@ where
     }
 }
 
+#[cfg(feature = "server")]
 impl<T> From<Vec<T>> for ReadResourceResult
 where 
     T: Into<ResourceContents>
@@ -129,6 +139,7 @@ where
     }
 }
 
+#[cfg(feature = "server")]
 impl<const N: usize, T> From<[T; N]> for ReadResourceResult
 where 
     T: Into<ResourceContents>
@@ -144,6 +155,7 @@ where
     }
 }
 
+#[cfg(feature = "server")]
 impl ReadResourceResult {
     /// Creates a text resource result
     #[inline]
@@ -162,6 +174,7 @@ impl ReadResourceResult {
     }
 }
 
+#[cfg(feature = "server")]
 impl ResourceContents {
     /// Creates a text resource content
     #[inline]
@@ -188,6 +201,7 @@ impl ResourceContents {
 }
 
 #[cfg(test)]
+#[cfg(feature = "server")]
 mod tests {
     use super::*;
     

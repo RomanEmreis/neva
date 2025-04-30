@@ -1,31 +1,47 @@
 ﻿//! MCP client options
 
+use std::collections::HashMap;
 use std::time::Duration;
 use crate::PROTOCOL_VERSIONS;
-use crate::transport::{StdIo, stdio::options::StdIoOptions, TransportProto};
-use crate::types::Implementation;
+use crate::transport::{StdIoClient, stdio::options::StdIoOptions, TransportProto};
+use crate::types::capabilities::{RootsCapability, SamplingCapability};
+use crate::types::{Root, Implementation, Uri};
+
+const DEFAULT_REQUEST_TIMEOUT: u64 = 10;
 
 /// Represents MCP client configuration options
 pub struct McpOptions {
     /// Information of current server's implementation
     pub(crate) implementation: Implementation,
-
+    
     /// Request timeout
     pub(super) timeout: Duration,
+    
+    /// Roots capability options
+    pub(super) roots_capability: Option<RootsCapability>,
+    
+    /// Sampling capability options
+    pub(super) sampling_capability: Option<SamplingCapability>,
     
     /// An MCP version that server supports
     protocol_ver: Option<&'static str>,
 
     /// Current transport protocol that server uses
     proto: Option<TransportProto>,
+    
+    /// Represents a list of roots that the client supports
+    roots: HashMap<Uri, Root>
 }
 
 impl Default for McpOptions {
     #[inline]
     fn default() -> Self {
         Self {
-            timeout: Duration::from_secs(10),
+            timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT),
             implementation: Default::default(),
+            roots: Default::default(),
+            roots_capability: None,
+            sampling_capability: None,
             proto: None,
             protocol_ver: None,
         }
@@ -38,7 +54,7 @@ impl McpOptions {
     where
         T: IntoIterator<Item=&'static str>
     {
-        self.proto = Some(TransportProto::Stdio(StdIo::client(StdIoOptions::new(command, args))));
+        self.proto = Some(TransportProto::StdioClient(StdIoClient::new(StdIoOptions::new(command, args))));
         self
     }
 
@@ -59,6 +75,24 @@ impl McpOptions {
     /// Default: last available protocol version
     pub fn with_mcp_version(mut self, ver: &'static str) -> Self {
         self.protocol_ver = Some(ver);
+        self
+    }
+    
+    /// Configures Roots capability
+    pub fn with_roots<T>(mut self, config: T) -> Self
+    where 
+        T: FnOnce(RootsCapability) -> RootsCapability
+    {
+        self.roots_capability = Some(config(Default::default()));
+        self
+    }
+
+    /// Configures Sampling capability
+    pub fn with_sampling<T>(mut self, config: T) -> Self
+    where
+        T: FnOnce(SamplingCapability) -> SamplingCapability
+    {
+        self.sampling_capability = Some(config(Default::default()));
         self
     }
 
@@ -85,7 +119,54 @@ impl McpOptions {
         transport.unwrap_or_default()
     }
     
+    /// Adds a root
+    pub fn add_root(&mut self, root: Root) -> &mut Root {
+        self.roots
+            .entry(root.uri.clone())
+            .or_insert(root)
+    }
+
+    /// Adds multiple roots
+    pub fn add_roots<T, I>(&mut self, roots: I) -> &mut Self
+    where
+        T: Into<Root>,
+        I: IntoIterator<Item = T>
+    {
+        let roots = roots
+            .into_iter()
+            .map(|item| {
+                let root: Root = item.into();
+                (root.uri.clone(), root)
+            });
+        self.roots.extend(roots);
+        self    
+    }
     
+    /// Returns a list of defined Roots
+    pub fn roots(&self) -> Vec<Root> {
+        self.roots
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    /// Returns [`RootsCapability`] if configured.
+    /// If not configured but at least one [`Root`] exists, returns [`Default`].
+    /// Otherwise, returns `None`.
+    pub(crate) fn roots_capability(&self) -> Option<RootsCapability> {
+        self.roots_capability
+            .clone()
+            .or_else(|| (!self.roots.is_empty()).then(Default::default))
+    }
+
+    /// Returns [`SamplingCapability`] if configured.
+    /// If not configured but at least one Sampling exists, returns [`Default`].
+    /// Otherwise, returns `None`.
+    pub(crate) fn sampling_capability(&self) -> Option<SamplingCapability> {
+        self.sampling_capability
+            .clone()
+            //.or_else(|| (!self.sampling.is_empty()).then(Default::default))
+    }
 }
 
 

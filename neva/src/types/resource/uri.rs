@@ -8,7 +8,7 @@ use std::{
 };
 
 /// Represents a resource URI
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct Uri(String);
 
 impl Deref for Uri {

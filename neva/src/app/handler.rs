@@ -5,6 +5,7 @@ use std::sync::Arc;
 use futures_util::future::BoxFuture;
 use crate::error::{Error, ErrorCode};
 use crate::options::RuntimeMcpOptions;
+use crate::Context;
 use crate::types::{
     CallToolRequestParams, 
     ReadResourceRequestParams,
@@ -21,7 +22,7 @@ pub(crate) type RequestHandler<T> = Arc<
 >;
 
 pub enum HandlerParams {
-    Request(RuntimeMcpOptions, Request),
+    Request(Context, RuntimeMcpOptions, Request),
     Tool(CallToolRequestParams),
     Resource(ReadResourceRequestParams),
     Prompt(GetPromptRequestParams)
@@ -118,11 +119,21 @@ impl FromHandlerParams for RequestId {
     }
 }
 
+impl FromHandlerParams for Context {
+    #[inline]
+    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
+        match params {
+            HandlerParams::Request(context, _, _) => Ok(context.clone()),
+            _ => Err(Error::new(ErrorCode::InternalError, "invalid handler parameters"))
+        }
+    }
+}
+
 impl FromHandlerParams for RuntimeMcpOptions {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
         match params {
-            HandlerParams::Request(options, _) => Ok(options.clone()),
+            HandlerParams::Request(_, options, _) => Ok(options.clone()),
             _ => Err(Error::new(ErrorCode::InternalError, "invalid handler parameters"))
         }
     }
@@ -132,7 +143,7 @@ impl FromHandlerParams for Request {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
         match params {
-            HandlerParams::Request(_, req) => Ok(req.clone()),
+            HandlerParams::Request(_, _, req) => Ok(req.clone()),
             _ => Err(Error::new(ErrorCode::InternalError, "invalid handler parameters"))
         }
     }

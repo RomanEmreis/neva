@@ -1,36 +1,50 @@
 ﻿//! Represents an MCP tool
 
 use std::collections::HashMap;
-use std::future::Future;
-use std::sync::Arc;
+#[cfg(feature = "server")]
+use std::{future::Future, sync::Arc};
+#[cfg(feature = "server")]
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(feature = "server")]
 use crate::error::{Error, ErrorCode};
+#[cfg(feature = "server")]
 use super::helpers::TypeCategory;
+use crate::types::{
+    PropertyType,
+    request::RequestParamsMeta,
+    Cursor
+};
+#[cfg(feature = "server")]
+use crate::types::{IntoResponse, Page, RequestId, Response};
+
+#[cfg(feature = "server")]
+use crate::types::{FromRequest, Request};
+
+#[cfg(feature = "server")]
 use crate::{
+    Context,
     app::handler::{
-        FromHandlerParams, 
-        Handler, 
-        HandlerParams, 
-        GenericHandler, 
-        RequestHandler
-    },
-    types::{
-        PropertyType, 
-        Request, 
-        request::{FromRequest, RequestParamsMeta}, 
-        RequestId, 
-        Response, 
-        IntoResponse,
-        Cursor, Page
+        FromHandlerParams,
+        Handler,
+        HandlerParams,
+        GenericHandler,
+        RequestHandler,
     }
 };
 
 pub use call_tool_response::CallToolResponse;
 
+#[cfg(feature = "server")]
 mod from_request;
 pub mod call_tool_response;
+
+/// List of commands for Tools
+pub mod commands {
+    pub const LIST: &str = "tools/list";
+    pub const CALL: &str = "tools/call";
+}
 
 /// Represents a tool that the server is capable of calling. Part of the [`ListToolsResult`].
 /// 
@@ -52,6 +66,7 @@ pub struct Tool {
     
     /// A tool call handler
     #[serde(skip)]
+    #[cfg(feature = "server")]
     handler: Option<RequestHandler<CallToolResponse>>
 }
 
@@ -100,7 +115,7 @@ pub struct CallToolRequestParams {
     /// 
     /// > **Note:** This can include progress tracking tokens and other protocol-specific properties
     /// > that are not part of the primary request parameters.
-    #[serde(rename = "_meta")]
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<RequestParamsMeta>,
 }
 
@@ -128,6 +143,7 @@ pub struct SchemaProperty {
     pub descr: Option<String>,
 }
 
+#[cfg(feature = "server")]
 impl IntoResponse for ListToolsResult {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
@@ -135,6 +151,7 @@ impl IntoResponse for ListToolsResult {
     }
 }
 
+#[cfg(feature = "server")]
 impl From<Vec<Tool>> for ListToolsResult {
     #[inline]
     fn from(tools: Vec<Tool>) -> Self {
@@ -145,6 +162,7 @@ impl From<Vec<Tool>> for ListToolsResult {
     }
 }
 
+#[cfg(feature = "server")]
 impl From<Page<'_, Tool>> for ListToolsResult {
     #[inline]
     fn from(page: Page<Tool>) -> Self {
@@ -155,6 +173,7 @@ impl From<Page<'_, Tool>> for ListToolsResult {
     }
 }
 
+#[cfg(feature = "server")]
 impl ListToolsResult {
     /// Create a new [`ListToolsResult`]
     #[inline]
@@ -173,6 +192,7 @@ impl Default for InputSchema {
     }
 }
 
+#[cfg(feature = "server")]
 impl InputSchema {
     /// Creates a new [`InputSchema`] object
     #[inline]
@@ -205,6 +225,7 @@ impl InputSchema {
     }
 }
 
+#[cfg(feature = "server")]
 impl SchemaProperty {
     /// Creates a new [`SchemaProperty`] for a `T`
     #[inline]
@@ -216,6 +237,7 @@ impl SchemaProperty {
     }
 }
 
+#[cfg(feature = "server")]
 impl FromHandlerParams for CallToolRequestParams {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
@@ -224,6 +246,7 @@ impl FromHandlerParams for CallToolRequestParams {
     }
 }
 
+#[cfg(feature = "server")]
 impl FromHandlerParams for ListToolsRequestParams {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
@@ -233,6 +256,7 @@ impl FromHandlerParams for ListToolsRequestParams {
 }
 
 /// Describes a generic MCP Tool handler
+#[cfg(feature = "server")]
 pub trait ToolHandler<Args>: GenericHandler<Args> {
     #[inline]
     fn args() -> Option<HashMap<String, SchemaProperty>> {
@@ -240,6 +264,7 @@ pub trait ToolHandler<Args>: GenericHandler<Args> {
     }
 }
 
+#[cfg(feature = "server")]
 pub(crate) struct ToolFunc<F, R, Args>
 where
     F: ToolHandler<Args, Output = R>,
@@ -250,6 +275,7 @@ where
     _marker: std::marker::PhantomData<Args>,
 }
 
+#[cfg(feature = "server")]
 impl<F, R ,Args> ToolFunc<F, R, Args>
 where
     F: ToolHandler<Args, Output = R>,
@@ -263,6 +289,7 @@ where
     }
 }
 
+#[cfg(feature = "server")]
 impl<F, R ,Args> Handler<CallToolResponse> for ToolFunc<F, R, Args>
 where
     F: ToolHandler<Args, Output = R>,
@@ -284,6 +311,16 @@ where
     }
 }
 
+#[cfg(feature = "server")]
+impl CallToolRequestParams {
+    /// Includes [`Context`] into request metadata. If metadata is `None` it creates a new.
+    pub(crate) fn with_context(mut self, ctx: Context) -> Self {
+        self.meta.get_or_insert_default().context = Some(ctx);
+        self
+    }
+}
+
+#[cfg(feature = "server")]
 impl Tool {
     /// Initializes a new [`Tool`]
     pub fn new<F, Args, R>(name: &str, handler: F) -> Self 
@@ -330,6 +367,7 @@ impl Tool {
 }
 
 macro_rules! impl_generic_tool_handler ({ $($param:ident)* } => {
+    #[cfg(feature = "server")]
     impl<Func, Fut: Send, $($param: TypeCategory,)*> ToolHandler<($($param,)*)> for Func
     where
         Func: Fn($($param),*) -> Fut + Send + Sync + Clone + 'static,
@@ -367,6 +405,7 @@ impl_generic_tool_handler! { T1 T2 T3 T4 }
 impl_generic_tool_handler! { T1 T2 T3 T4 T5 }
 
 #[cfg(test)]
+#[cfg(feature = "server")]
 mod tests {
     use super::*;
     

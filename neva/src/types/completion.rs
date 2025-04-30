@@ -1,10 +1,21 @@
 ﻿//! Completion request types
 
 use serde::{Deserialize, Serialize};
-use super::{IntoResponse, RequestId, Response, Reference, Request};
-use crate::app::handler::{FromHandlerParams, HandlerParams};
+use super::Reference;
+#[cfg(feature = "server")]
 use crate::error::Error;
+
+#[cfg(feature = "server")]
 use crate::types::request::FromRequest;
+#[cfg(feature = "server")]
+use crate::app::handler::{FromHandlerParams, HandlerParams};
+#[cfg(feature = "server")]
+use super::{IntoResponse, RequestId, Response, Request};
+
+/// List of commands for Completion
+pub mod commands {
+    pub const COMPLETE: &str = "completion/complete";
+}
 
 /// Represents a completion object in the server's response
 /// 
@@ -71,6 +82,7 @@ impl Default for Completion {
     }
 }
 
+#[cfg(feature = "server")]
 impl FromHandlerParams for CompleteRequestParams {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
@@ -79,6 +91,7 @@ impl FromHandlerParams for CompleteRequestParams {
     }
 }
 
+#[cfg(feature = "server")]
 impl Completion {
     /// Creates a new empty [`Completion`] object
     #[inline]
@@ -99,6 +112,7 @@ impl Completion {
     }
 }
 
+#[cfg(feature = "server")]
 impl CompleteResult {
     /// Create a new [`CompleteResult`] object
     #[inline]
@@ -107,6 +121,7 @@ impl CompleteResult {
     }
 }
 
+#[cfg(feature = "server")]
 impl IntoResponse for CompleteResult {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
@@ -114,6 +129,7 @@ impl IntoResponse for CompleteResult {
     }
 }
 
+#[cfg(feature = "server")]
 impl From<String> for Completion {
     #[inline]
     fn from(val: String) -> Self {
@@ -125,6 +141,7 @@ impl From<String> for Completion {
     }
 }
 
+#[cfg(feature = "server")]
 impl From<&str> for Completion {
     #[inline]
     fn from(val: &str) -> Self {
@@ -136,6 +153,7 @@ impl From<&str> for Completion {
     }
 }
 
+#[cfg(feature = "server")]
 impl<T, E> TryFrom<Result<T, E>> for CompleteResult
 where
     T: Into<CompleteResult>,
@@ -152,6 +170,7 @@ where
     }
 }
 
+#[cfg(feature = "server")]
 impl<T> From<T> for CompleteResult
 where
     T: Into<Completion>
@@ -162,6 +181,7 @@ where
     }
 }
 
+#[cfg(feature = "server")]
 impl<T> From<Option<T>> for CompleteResult 
 where
     T: Into<Completion>
@@ -175,6 +195,7 @@ where
     }
 }
 
+#[cfg(feature = "server")]
 impl From<Vec<String>> for Completion {
     #[inline]
     fn from(vec: Vec<String>) -> Self {
@@ -187,6 +208,7 @@ impl From<Vec<String>> for Completion {
     }
 }
 
+#[cfg(feature = "server")]
 impl From<Vec<&str>> for Completion {
     #[inline]
     fn from(vec: Vec<&str>) -> Self {
@@ -202,6 +224,7 @@ impl From<Vec<&str>> for Completion {
     }
 }
 
+#[cfg(feature = "server")]
 impl<const N: usize> From<[String; N]> for Completion {
     #[inline]
     fn from(arr: [String; N]) -> Self {
@@ -214,6 +237,7 @@ impl<const N: usize> From<[String; N]> for Completion {
     }
 }
 
+#[cfg(feature = "server")]
 impl<const N: usize> From<[&str; N]> for Completion {
     #[inline]
     fn from(arr: [&str; N]) -> Self {
@@ -230,6 +254,7 @@ impl<const N: usize> From<[&str; N]> for Completion {
 }
 
 #[cfg(test)]
+#[cfg(feature = "server")]
 mod tests {
     use super::*;
     

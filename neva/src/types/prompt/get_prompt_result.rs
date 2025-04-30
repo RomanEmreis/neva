@@ -1,8 +1,10 @@
 ﻿//! Types and utils for prompt request results
 
 use serde::{Serialize, Deserialize};
-use crate::{error::Error, types::{Content, IntoResponse, RequestId, Response, Role}};
-
+use crate::types::{Content, Role};
+#[cfg(feature = "server")]
+use crate::{error::Error, types::{IntoResponse, RequestId, Response}};
+    
 /// The server's response to a prompts/get request from the client.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
@@ -31,12 +33,14 @@ pub struct PromptMessage {
     pub role: Role,
 }
 
+#[cfg(feature = "server")]
 impl IntoResponse for GetPromptResult {
     fn into_response(self, req_id: RequestId) -> Response {
         Response::success(req_id, serde_json::to_value(self).unwrap())
     }
 }
 
+#[cfg(feature = "server")]
 impl<T: Into<Role>> From<(&str, T)> for PromptMessage {
     #[inline]
     fn from((msg, role): (&str, T)) -> Self {
@@ -44,6 +48,7 @@ impl<T: Into<Role>> From<(&str, T)> for PromptMessage {
     }
 }
 
+#[cfg(feature = "server")]
 impl<T: Into<Role>> From<(String, T)> for PromptMessage {
     #[inline]
     fn from((msg, role): (String, T)) -> Self {
@@ -54,6 +59,7 @@ impl<T: Into<Role>> From<(String, T)> for PromptMessage {
     }
 }
 
+#[cfg(feature = "server")]
 impl<T> From<T> for GetPromptResult
 where 
     T: Into<PromptMessage>
@@ -64,6 +70,7 @@ where
     }
 }
 
+#[cfg(feature = "server")]
 impl<T, E> TryFrom<Result<T, E>> for GetPromptResult
 where 
     T: Into<GetPromptResult>,
@@ -80,6 +87,7 @@ where
     }
 }
 
+#[cfg(feature = "server")]
 impl<T> From<Vec<T>> for GetPromptResult
 where
     T: Into<PromptMessage>
@@ -96,6 +104,7 @@ where
     }
 }
 
+#[cfg(feature = "server")]
 impl<const N: usize, T> From<[T; N]> for GetPromptResult
 where
     T: Into<PromptMessage>
@@ -112,6 +121,7 @@ where
     }
 }
 
+#[cfg(feature = "server")]
 impl PromptMessage {
     /// Creates a new [`PromptMessage`]
     #[inline]
@@ -128,6 +138,7 @@ impl PromptMessage {
     }
 }
 
+#[cfg(feature = "server")]
 impl GetPromptResult {
     /// Creates a new [`GetPromptResult`]
     #[inline]

@@ -1,21 +1,40 @@
 ﻿//! Represents an MCP resource
 
 use serde::{Deserialize, Serialize};
-use crate::types::{RequestId, Response, IntoResponse, Request, Cursor, Page};
-use crate::app::handler::{FromHandlerParams, HandlerParams};
+use crate::types::Cursor;
+use crate::types::request::RequestParamsMeta;
+#[cfg(feature = "server")]
 use crate::error::Error;
-use crate::types::request::{FromRequest, RequestParamsMeta};
+#[cfg(feature = "server")]
+use crate::types::request::FromRequest;
+#[cfg(feature = "server")]
+use crate::types::{RequestId, Response, IntoResponse, Request, Page};
+#[cfg(feature = "server")]
+use crate::app::{context::Context, handler::{FromHandlerParams, HandlerParams}};
 
 pub use uri::Uri;
 pub use read_resource_result::{ReadResourceResult, ResourceContents};
 pub use template::{ResourceTemplate, ListResourceTemplatesResult, ListResourceTemplatesRequestParams};
+
+#[cfg(feature = "server")]
 pub(crate) use route::Route;
 
-mod from_request;
 pub mod read_resource_result;
 pub mod uri;
 pub mod template;
+#[cfg(feature = "server")]
 pub(crate) mod route;
+#[cfg(feature = "server")]
+mod from_request;
+
+/// List of commands for Resources
+pub mod commands {
+    pub const LIST: &str = "resources/list";
+    pub const TEMPLATES_LIST: &str = "resources/templates/list";
+    pub const READ: &str = "resources/read";
+    pub const SUBSCRIBE: &str = "resources/subscribe";
+    pub const UNSUBSCRIBE: &str = "resources/unsubscribe";
+}
 
 /// Represents a known resource that the server is capable of reading.
 /// 
@@ -61,7 +80,7 @@ pub struct ReadResourceRequestParams {
     ///
     /// > **Note:** This can include progress tracking tokens and other protocol-specific properties
     /// > that are not part of the primary request parameters.
-    #[serde(rename = "_meta")]
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<RequestParamsMeta>,
 }
 
@@ -86,7 +105,7 @@ pub struct ListResourcesResult {
 /// Sent from the client to request resources/updated notifications 
 /// from the server whenever a particular resource changes.
 /// 
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Serialize, Deserialize)]
 pub struct SubscribeRequestParams {
     /// The URI of the resource to subscribe to. 
@@ -97,7 +116,7 @@ pub struct SubscribeRequestParams {
 /// Sent from the client to request not receiving updated notifications 
 /// from the server whenever a primitive resource changes.
 ///
-/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Serialize, Deserialize)]
 pub struct UnsubscribeRequestParams {
     /// The URI of the resource to unsubscribe from. 
@@ -105,6 +124,7 @@ pub struct UnsubscribeRequestParams {
     pub uri: String,
 }
 
+#[cfg(feature = "server")]
 impl IntoResponse for ListResourcesResult {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
@@ -112,6 +132,7 @@ impl IntoResponse for ListResourcesResult {
     }
 }
 
+#[cfg(feature = "server")]
 impl<const N: usize> From<[Resource; N]> for ListResourcesResult {
     #[inline]
     fn from(resources: [Resource; N]) -> Self {
@@ -122,6 +143,7 @@ impl<const N: usize> From<[Resource; N]> for ListResourcesResult {
     }
 }
 
+#[cfg(feature = "server")]
 impl From<Vec<Resource>> for ListResourcesResult {
     #[inline]
     fn from(resources: Vec<Resource>) -> Self {
@@ -132,6 +154,7 @@ impl From<Vec<Resource>> for ListResourcesResult {
     }
 }
 
+#[cfg(feature = "server")]
 impl From<Page<'_, Resource>> for ListResourcesResult {
     #[inline]
     fn from(page: Page<Resource>) -> Self {
@@ -142,6 +165,7 @@ impl From<Page<'_, Resource>> for ListResourcesResult {
     }
 }
 
+#[cfg(feature = "server")]
 impl FromHandlerParams for ListResourcesRequestParams {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
@@ -150,6 +174,7 @@ impl FromHandlerParams for ListResourcesRequestParams {
     }
 }
 
+#[cfg(feature = "server")]
 impl FromHandlerParams for ReadResourceRequestParams {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
@@ -158,6 +183,7 @@ impl FromHandlerParams for ReadResourceRequestParams {
     }
 }
 
+#[cfg(feature = "server")]
 impl FromHandlerParams for SubscribeRequestParams {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
@@ -166,6 +192,7 @@ impl FromHandlerParams for SubscribeRequestParams {
     }
 }
 
+#[cfg(feature = "server")]
 impl FromHandlerParams for UnsubscribeRequestParams {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
@@ -174,6 +201,7 @@ impl FromHandlerParams for UnsubscribeRequestParams {
     }
 }
 
+#[cfg(feature = "server")]
 impl ListResourcesResult {
     /// Creates a new [`ListResourcesResult`]
     #[inline]
@@ -206,6 +234,16 @@ impl From<String> for Resource {
     }
 }
 
+#[cfg(feature = "server")]
+impl ReadResourceRequestParams {
+    /// Includes [`Context`] into request metadata. If metadata is `None` it creates a new.
+    pub(crate) fn with_context(mut self, ctx: Context) -> Self {
+        self.meta.get_or_insert_default().context = Some(ctx);
+        self
+    }
+}
+
+#[cfg(feature = "server")]
 impl Resource {
     /// Creates a new [`Resource`]
     #[inline]
