@@ -6,6 +6,7 @@ use crate::PROTOCOL_VERSIONS;
 use crate::transport::{StdIoClient, stdio::options::StdIoOptions, TransportProto};
 use crate::types::capabilities::{RootsCapability, SamplingCapability};
 use crate::types::{Root, Implementation, Uri};
+use crate::types::sampling::SamplingHandler;
 
 const DEFAULT_REQUEST_TIMEOUT: u64 = 10;
 
@@ -22,6 +23,9 @@ pub struct McpOptions {
     
     /// Sampling capability options
     pub(super) sampling_capability: Option<SamplingCapability>,
+
+    /// Represents a handler function that runs when received a "sampling/createMessage" request
+    pub(super) sampling_handler: Option<SamplingHandler>,
     
     /// An MCP version that server supports
     protocol_ver: Option<&'static str>,
@@ -30,7 +34,7 @@ pub struct McpOptions {
     proto: Option<TransportProto>,
     
     /// Represents a list of roots that the client supports
-    roots: HashMap<Uri, Root>
+    roots: HashMap<Uri, Root>,
 }
 
 impl Default for McpOptions {
@@ -44,6 +48,7 @@ impl Default for McpOptions {
             sampling_capability: None,
             proto: None,
             protocol_ver: None,
+            sampling_handler: None
         }
     }
 }
@@ -149,6 +154,11 @@ impl McpOptions {
             .cloned()
             .collect()
     }
+    
+    /// Registers a handler for sampling requests
+    pub(crate) fn add_sampling_handler(&mut self, handler: SamplingHandler) {
+        self.sampling_handler = Some(handler);
+    }
 
     /// Returns [`RootsCapability`] if configured.
     /// If not configured but at least one [`Root`] exists, returns [`Default`].
@@ -160,12 +170,12 @@ impl McpOptions {
     }
 
     /// Returns [`SamplingCapability`] if configured.
-    /// If not configured but at least one Sampling exists, returns [`Default`].
+    /// If not configured but a sampling handler exists, returns [`Default`].
     /// Otherwise, returns `None`.
     pub(crate) fn sampling_capability(&self) -> Option<SamplingCapability> {
         self.sampling_capability
             .clone()
-            //.or_else(|| (!self.sampling.is_empty()).then(Default::default))
+            .or_else(|| self.sampling_handler.is_none().then(Default::default))
     }
 }
 

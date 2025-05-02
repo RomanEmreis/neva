@@ -27,6 +27,8 @@
 //!     app.run().await;
 //! } 
 //! # }
+//! ```
+//! ```no_run
 //! # #[cfg(feature = "client")] {
 //! use std::time::Duration;
 //! use neva::{Client, error::Error};
@@ -68,7 +70,7 @@ pub mod client;
 #[cfg(all(feature = "macros", feature = "server"))]
 pub use neva_macros::*;
 
-pub(crate) const SERVER_NAME: &str = "neva";
+pub(crate) const SDK_NAME: &str = "neva";
 #[cfg(any(feature = "server", feature = "client"))]
 pub(crate) const PROTOCOL_VERSIONS: [&str; 2] = [
     "2024-11-05", 

@@ -5,10 +5,7 @@ use tokio::{
     sync::RwLock, 
     time::timeout
 };
-use std::{
-    time::Duration,
-    sync::atomic::{AtomicI64, Ordering}
-};
+use std::{time::Duration, sync::atomic::{AtomicI64, Ordering}};
 use crate::{
     client::options::McpOptions,
     error::{Error, ErrorCode},
@@ -21,7 +18,8 @@ use crate::{
         IntoResponse, Response, Message, 
         RequestId, Request,
         notification::Notification,
-        Root, root::ListRootsResult
+        Root, root::ListRootsResult,
+        sampling::SamplingHandler
     }
 };
 
@@ -48,6 +46,9 @@ pub(super) struct RequestHandler {
     
     /// Cached list of [`Root`]
     roots: Roots,
+
+    /// Represents a handler function that runs when received a "sampling/createMessage" request
+    sampling_handler: Option<SamplingHandler>
 }
 
 impl Roots {
@@ -105,6 +106,7 @@ impl RequestHandler {
             pending: RequestQueue::default(),
             sender: tx,
             timeout: options.timeout,
+            sampling_handler: options.sampling_handler.clone()
         };
         
         handler.start(rx)
@@ -151,6 +153,7 @@ impl RequestHandler {
         let pending = self.pending.clone();
         let mut sender = self.sender.clone();
         let roots = self.roots.inner.clone();
+        let sampling_handler = self.sampling_handler.clone();
         tokio::task::spawn(async move {
             while let Ok(msg) = rx.recv().await {
                 match msg {
@@ -164,6 +167,18 @@ impl RequestHandler {
                                 };
                                 sender.send(roots.into_response(req.id()).into()).await.unwrap();    
                             },
+                            crate::types::sampling::commands::CREATE => {
+                                let id = req.id();
+                                let resp = if let Some(handler) = &sampling_handler  {
+                                    let result = handler(serde_json::from_value(req.params.unwrap()).unwrap()).await;
+                                    result.into_response(id)
+                                } else {
+                                    Response::error(
+                                        id, 
+                                        Error::new(ErrorCode::MethodNotFound, "Client does not support sampling requests"))
+                                };
+                                sender.send(resp.into()).await.unwrap();
+                            }
                             _ => {
                                 #[cfg(feature = "tracing")]
                                 tracing::debug!("Received notification method: {:?}", req.method);

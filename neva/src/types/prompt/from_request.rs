@@ -1,8 +1,6 @@
-﻿use crate::Context;
-use crate::types::{Meta, ProgressToken, request::RequestParamsMeta};
-use crate::error::{Error, ErrorCode};
+﻿use crate::error::Error;
 use super::GetPromptRequestParams;
-use serde::de::DeserializeOwned;
+use crate::types::helpers::extract::{RequestArgument, extract_arg};
 
 impl TryFrom<GetPromptRequestParams> for () {
     type Error = Error;
@@ -13,56 +11,19 @@ impl TryFrom<GetPromptRequestParams> for () {
     }
 }
 
-impl TryFrom<GetPromptRequestParams> for (Meta<RequestParamsMeta>,) {
-    type Error = Error;
-
-    #[inline]
-    fn try_from(params: GetPromptRequestParams) -> Result<Self, Self::Error> {
-        params.meta
-            .ok_or(Error::new(ErrorCode::InvalidParams, "Missing metadata"))
-            .map(|meta| (Meta(meta),))
-    }
-}
-
-impl TryFrom<GetPromptRequestParams> for (Meta<ProgressToken>,) {
-    type Error = Error;
-
-    #[inline]
-    fn try_from(params: GetPromptRequestParams) -> Result<Self, Self::Error> {
-        params.meta
-            .and_then(|meta| meta.progress_token)
-            .ok_or(Error::new(ErrorCode::InvalidParams, "Missing progress token"))
-            .map(|token| (Meta(token),))
-    }
-}
-
-impl TryFrom<GetPromptRequestParams> for (Context,) {
-    type Error = Error;
-
-    #[inline]
-    fn try_from(params: GetPromptRequestParams) -> Result<Self, Self::Error> {
-        params.meta
-            .and_then(|meta| meta.context)
-            .ok_or(Error::new(ErrorCode::InvalidParams, "Missing MCP request context"))
-            .map(|ctx| (ctx,))
-    }
-}
-
 macro_rules! impl_from_get_prompt_params {
     ($($T: ident),*) => {
-        impl<$($T: DeserializeOwned),+> TryFrom<GetPromptRequestParams> for ($($T,)+) {
+        impl<$($T: RequestArgument<Error = Error>),+> TryFrom<GetPromptRequestParams> for ($($T,)+) {
             type Error = Error;
             
             #[inline]
             fn try_from(params: GetPromptRequestParams) -> Result<Self, Self::Error> {
-                let args = params.args.ok_or(Error::new(ErrorCode::InvalidParams, "arguments missing"))?;
+                let args = params.args.unwrap_or_default();
                 let mut iter = args.iter();
                 let tuple = (
                     $(
-                    $T::deserialize(iter
-                            .next()
-                            .unwrap().1.clone())?,
-                    )*    
+                        extract_arg::<$T>(&params.meta, &mut iter)?,
+                    )*
                 );
                 Ok(tuple)
             }

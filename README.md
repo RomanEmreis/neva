@@ -1,8 +1,8 @@
 # Neva
 Easy configurable MCP server and client SDK for Rust
 
-[![latest](https://img.shields.io/badge/latest-0.0.6-d8eb34)](https://crates.io/crates/neva)
-[![latest](https://img.shields.io/badge/rustc-1.83+-964B00)](https://crates.io/crates/neva)
+[![latest](https://img.shields.io/badge/latest-0.0.7-d8eb34)](https://crates.io/crates/neva)
+[![latest](https://img.shields.io/badge/rustc-1.85+-964B00)](https://crates.io/crates/neva)
 [![License: MIT](https://img.shields.io/badge/License-MIT-624bd1.svg)](https://github.com/RomanEmreis/neva/blob/main/LICENSE)
 [![CI](https://github.com/RomanEmreis/neva/actions/workflows/rust.yml/badge.svg)](https://github.com/RomanEmreis/neva/actions/workflows/rust.yml)
 [![Release](https://github.com/RomanEmreis/neva/actions/workflows/release.yml/badge.svg)](https://github.com/RomanEmreis/neva/actions/workflows/release.yml)
@@ -16,7 +16,7 @@ Easy configurable MCP server and client SDK for Rust
 ### Dependencies
 ```toml
 [dependencies]
-neva = { version = "0.0.6", features = ["client-full"] }
+neva = { version = "0.0.7", features = ["client-full"] }
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -57,7 +57,7 @@ async fn main() -> Result<(), Error> {
 ### Dependencies
 ```toml
 [dependencies]
-neva = { version = "0.0.6", features = ["server-full"] }
+neva = { version = "0.0.7", features = ["server-full"] }
 tokio = { version = "1", features = ["full"] }
 ```
 

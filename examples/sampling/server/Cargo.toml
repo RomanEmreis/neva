@@ -2,8 +2,8 @@
 name = "server"
 version = "0.1.0"
 edition = "2024"
-rust-version.workspace = true
 publish = false
+rust-version.workspace = true
 
 [dependencies]
 neva = { path = "../../../neva", features = ["server", "tracing", "macros"] }

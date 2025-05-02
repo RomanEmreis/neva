@@ -7,8 +7,12 @@ use crate::types::Response;
 use super::{options::{McpOptions, RuntimeMcpOptions}, handler::RequestHandler};
 use crate::{
     shared::RequestQueue,
-    types::{RequestId, Request, root::{ListRootsRequestParams, ListRootsResult}},
-    transport::TransportProtoSender
+    transport::TransportProtoSender,
+    types::{
+        RequestId, Request, 
+        root::{ListRootsRequestParams, ListRootsResult},
+        sampling::{CreateMessageRequestParams, CreateMessageResult}
+    },
 };
 use std::{
     collections::HashMap,
@@ -80,7 +84,6 @@ impl ServerRuntime {
     }
 }
 
-
 impl Context {
     /// Requests a list of available roots from a client
     /// 
@@ -97,20 +100,43 @@ impl Context {
     /// }
     /// ```
     pub async fn list_roots(&mut self) -> Result<ListRootsResult, Error> {
-        let id = RequestId::String(crate::types::root::commands::LIST.into());
+        let method = crate::types::root::commands::LIST;
+        let id = RequestId::String(method.into());
         let req = Request::new(
             Some(id.clone()),
-            crate::types::root::commands::LIST,
+            method,
             Some(ListRootsRequestParams::default()));
 
-        let receiver = self.pending.push(&id).await;
+        self.send_request(&id, req)
+            .await?
+            .into_result()
+    }
+    
+    /// Send a sampling request to the client
+    pub async fn sample(&mut self, params: CreateMessageRequestParams) -> Result<CreateMessageResult, Error> {
+        let method = crate::types::sampling::commands::CREATE;
+        let id = RequestId::String(method.into());
+        let req = Request::new(
+            Some(id.clone()),
+            method,
+            Some(params));
+
+        self.send_request(&id, req)
+            .await?
+            .into_result()
+    }
+    
+    /// Sends a [`Request`] to a client
+    #[inline]
+    async fn send_request(&mut self, id: &RequestId, req: Request) -> Result<Response, Error> {
+        let receiver = self.pending.push(id).await;
         self.sender.send(req.into()).await?;
 
         match timeout(self.timeout, receiver).await {
-            Ok(Ok(resp)) => Ok(resp.into_result()?),
+            Ok(Ok(resp)) => Ok(resp),
             Ok(Err(_)) => Err(Error::new(ErrorCode::InternalError, "Response channel closed")),
             Err(_) => {
-                _ = self.pending.pop(&id).await;
+                _ = self.pending.pop(id).await;
                 Err(Error::new(ErrorCode::Timeout, "Request timed out"))
             }
         }

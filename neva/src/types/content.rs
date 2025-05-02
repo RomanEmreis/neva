@@ -3,14 +3,14 @@
 use serde::{Deserialize, Serialize};
 use crate::types::ResourceContents;
 
-/// Represents the content of response.
+/// Represents the content of the response.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Content {
     /// The type of content. This determines the structure of the content object. 
     /// 
-    /// Can be "image", "audio", "text", "resource".
+    /// It can be "image", "audio", "text", "resource".
     #[serde(rename = "type")]
     pub r#type: String,
     

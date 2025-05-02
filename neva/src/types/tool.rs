@@ -208,10 +208,10 @@ impl InputSchema {
     }
     
     /// Adds a new property into schema. 
-    /// If a property with this name already exists it overwrites it
+    /// If a property with this name already exists, it overwrites it
     pub fn add_property<T: Into<PropertyType>>(
-        mut self, name: 
-        &str, 
+        mut self, 
+        name: &str, 
         descr: &str, 
         property_type: T
     ) -> Self {

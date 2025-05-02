@@ -8,6 +8,8 @@ use std::{
 
 #[cfg(feature = "server")]
 pub mod macros;
+#[cfg(feature = "server")]
+pub(crate) mod extract;
 
 /// Represents a SchemaProperty type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +41,7 @@ impl From<&str> for PropertyType {
             "bool" => PropertyType::Bool,
             "boolean" => PropertyType::Bool,
             "object" => PropertyType::Object,
+            "none" => PropertyType::None,
             _ => PropertyType::Object,
         }
     }
@@ -47,15 +50,7 @@ impl From<&str> for PropertyType {
 impl From<String> for PropertyType {
     #[inline]
     fn from(s: String) -> Self {
-        match s.as_str() {
-            "array" => PropertyType::Array,
-            "string" => PropertyType::String,
-            "number" => PropertyType::Number,
-            "bool" => PropertyType::Bool,
-            "boolean" => PropertyType::Bool,
-            "object" => PropertyType::Object,
-            _ => PropertyType::Object,
-        }
+        Self::from(s.as_str())
     }
 }
 
@@ -68,7 +63,7 @@ impl Display for PropertyType {
             PropertyType::Number => write!(f, "number"),
             PropertyType::Bool => write!(f, "boolean"),
             PropertyType::Object => write!(f, "object"),
-            PropertyType::None => write!(f, "unknown"),
+            PropertyType::None => write!(f, "none"),
         }
     }
 }
