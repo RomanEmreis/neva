@@ -363,7 +363,7 @@ impl McpOptions {
 #[cfg(test)]
 mod tests {
     use crate::error::{Error, ErrorCode};
-    use crate::SERVER_NAME;
+    use crate::SDK_NAME;
     use crate::types::resource::template::ResourceFunc;
     use crate::types::resource::Uri;
     use crate::types::{GetPromptRequestParams, PromptMessage, ReadResourceRequestParams, ResourceContents, Role};
@@ -373,7 +373,7 @@ mod tests {
     fn it_creates_default_options() {
         let options = McpOptions::default();
         
-        assert_eq!(options.implementation.name, SERVER_NAME);
+        assert_eq!(options.implementation.name, SDK_NAME);
         assert_eq!(options.implementation.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(options.tools.len(), 0);
         assert_eq!(options.resources.len(), 0);

@@ -75,32 +75,12 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
             if let FnArg::Typed(pat_type) = arg {
                 if let Pat::Ident(pat_ident) = &*pat_type.pat {
                     let arg_name = pat_ident.ident.to_string();
-                    let arg_type = match &*pat_type.ty {
-                        Type::Array(_) => "array",
-                        Type::Slice(_) => "slice",
-                        Type::Path(type_path) => {
-                            let type_ident = type_path.path.segments
-                                .last()
-                                .unwrap()
-                                .ident
-                                .to_string();
-                            match type_ident.as_str() {
-                                "String" => "string",
-                                "str" => "string",
-                                "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => "number",
-                                "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => "number",
-                                "f32" | "f64" => "number",
-                                "bool" => "boolean",
-                                "Vec" => "array",
-                                _ => "object", // Default case for unknown types
-                            }
-                        }
-                        _ => "object", // Default fallback
-                    };
-
-                    schema_entries.push(quote! {
-                        .add_property(#arg_name, #arg_type, #arg_type)
-                    });
+                    let arg_type = get_arg_type(&pat_type.ty);
+                    if !arg_type.eq("none") {
+                        schema_entries.push(quote! {
+                            .add_property(#arg_name, #arg_type, #arg_type)
+                        });    
+                    }
                 }
             }
         }
@@ -288,9 +268,12 @@ pub fn prompt(attr: TokenStream, item: TokenStream) -> TokenStream {
             if let FnArg::Typed(pat_type) = arg {
                 if let Pat::Ident(pat_ident) = &*pat_type.pat {
                     let arg_name = pat_ident.ident.to_string();
-                    arg_entries.push(quote! {
-                        #arg_name
-                    });
+                    let arg_type = get_arg_type(&pat_type.ty);
+                    if !arg_type.eq("none") {
+                        arg_entries.push(quote! {
+                            #arg_name
+                        });   
+                    }
                 }
             }
         }
@@ -318,4 +301,32 @@ pub fn prompt(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     expanded.into()
+}
+
+#[inline]
+fn get_arg_type(t: &Type) -> &str {
+    match t {
+        Type::Array(_) => "array",
+        Type::Slice(_) => "slice",
+        Type::Path(type_path) => {
+            let type_ident = type_path.path.segments
+                .last()
+                .unwrap()
+                .ident
+                .to_string();
+            match type_ident.as_str() {
+                "String" => "string",
+                "str" => "string",
+                "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => "number",
+                "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => "number",
+                "f32" | "f64" => "number",
+                "bool" => "boolean",
+                "Vec" => "array",
+                "Context" => "none",
+                "Meta" => "none",
+                _ => "object", // Default case for unknown types
+            }
+        }
+        _ => "object", // Default fallback
+    }
 }

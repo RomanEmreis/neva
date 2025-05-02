@@ -1,8 +1,6 @@
-﻿use serde::de::DeserializeOwned;
-use crate::Context;
-use crate::error::{Error, ErrorCode};
-use crate::types::{Meta, ProgressToken, request::RequestParamsMeta};
+﻿use crate::error::Error;
 use super::CallToolRequestParams;
+use crate::types::helpers::extract::{RequestArgument, extract_arg};
 
 impl TryFrom<CallToolRequestParams> for () {
     type Error = Error;
@@ -13,57 +11,19 @@ impl TryFrom<CallToolRequestParams> for () {
     }
 }
 
-impl TryFrom<CallToolRequestParams> for (Meta<RequestParamsMeta>,) {
-    type Error = Error;
-
-    #[inline]
-    fn try_from(params: CallToolRequestParams) -> Result<Self, Self::Error> {
-        params.meta
-            .ok_or(Error::new(ErrorCode::InvalidParams, "Missing metadata"))
-            .map(|token| (Meta(token),))
-    }
-}
-
-impl TryFrom<CallToolRequestParams> for (Meta<ProgressToken>,) {
-    type Error = Error;
-
-    #[inline]
-    fn try_from(params: CallToolRequestParams) -> Result<Self, Self::Error> {
-        params.meta
-            .and_then(|meta| meta.progress_token)
-            .ok_or(Error::new(ErrorCode::InvalidParams, "Missing progress token"))
-            .map(|token| (Meta(token),))
-    }
-}
-
-impl TryFrom<CallToolRequestParams> for (Context,) {
-    type Error = Error;
-
-    #[inline]
-    fn try_from(params: CallToolRequestParams) -> Result<Self, Self::Error> {
-        params.meta
-            .and_then(|meta| meta.context)
-            .ok_or(Error::new(ErrorCode::InvalidParams, "Missing MCP context"))
-            .map(|ctx| (ctx,))
-    }
-}
-
 macro_rules! impl_from_call_tool_params {
     ($($T: ident),*) => {
-        impl<$($T: DeserializeOwned),+> TryFrom<CallToolRequestParams> for ($($T,)+) {
+        impl<$($T: RequestArgument<Error = Error>),+> TryFrom<CallToolRequestParams> for ($($T,)+) {
             type Error = Error;
             
             #[inline]
             fn try_from(params: CallToolRequestParams) -> Result<Self, Self::Error> {
-                let args = params.args.ok_or(Error::new(ErrorCode::InvalidParams, "Arguments missing"))?;
+                let args = params.args.unwrap_or_default();
                 let mut iter = args.iter();
                 let tuple = (
                     $(
-                    $T::deserialize(iter
-                        .next()
-                        .ok_or(Error::new(ErrorCode::InvalidParams, "Invalid param provided"))?
-                        .1.clone())?,
-                    )*    
+                        extract_arg::<$T>(&params.meta, &mut iter)?,
+                    )*
                 );
                 Ok(tuple)
             }
@@ -81,6 +41,7 @@ impl_from_call_tool_params! { T1, T2, T3, T4, T5 }
 mod tests {
     use std::collections::HashMap;
     use serde_json::{json, Value};
+    use crate::types::{Meta, ProgressToken, request::RequestParamsMeta};
     use super::*;
     
     #[test]

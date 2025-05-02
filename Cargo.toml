@@ -1,11 +1,11 @@
 [workspace]
 members = ["neva", "neva_macros", "examples/*"]
 default-members = ["neva", "neva_macros"]
-exclude = ["examples/roots"]
+exclude = ["examples/roots", "examples/sampling"]
 resolver = "2"
 
 [workspace.package]
-rust-version = "1.83.0"
+rust-version = "1.85.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -1,6 +1,8 @@
 ﻿//! Utilities for the MCP client
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::sync::Arc;
 use options::McpOptions;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -15,7 +17,8 @@ use crate::types::{
     ClientCapabilities, InitializeRequestParams, InitializeResult, 
     Request, RequestId, Response, request::RequestParamsMeta, 
     cursor::Cursor, 
-    notification::Notification, 
+    notification::Notification,
+    sampling::{CreateMessageRequestParams, CreateMessageResult, SamplingHandler},
     Root
 };
 
@@ -113,6 +116,21 @@ impl Client {
             let roots = self.options.roots();
             handler.notify_roots_changed(roots);
         }
+    }
+    
+    /// Registers a handler that will be running when a "sampling/createMessage" request is received
+    pub fn map_sampling<F, R>(&mut self, handler: F) -> &mut Self
+    where
+        F: Fn(CreateMessageRequestParams) -> R + Clone + Send + Sync + 'static,
+        R: Future + Send,
+        R::Output: Into<CreateMessageResult>,
+    {
+        let handler: SamplingHandler = Arc::new(move |params| {
+            let handler = handler.clone();
+            Box::pin(async move { handler(params).await.into() })
+        });
+        self.options.add_sampling_handler(handler);
+        self 
     }
     
     /// Connects the MCP client to the MCP server

@@ -8,8 +8,10 @@ use neva::{App, types::{Meta, ProgressToken}, tool};
 use neva::types::notification::NotificationFormatter;
 use tracing_subscriber::prelude::*;
 
-#[tool(no_schema)]
-async fn long_running_task(token: Meta<ProgressToken>) {
+#[tool]
+async fn long_running_task(token: Meta<ProgressToken>, command: String) {
+    tracing::info!("Starting {command}");
+    
     let mut progress = 0;
     // Simulating a long-running task
     loop {
@@ -27,6 +29,8 @@ async fn long_running_task(token: Meta<ProgressToken>) {
             total = 100
         );
     }
+
+    tracing::info!("{command} has been successfully completed!");
 }
 
 #[tokio::main]

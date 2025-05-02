@@ -1,6 +1,6 @@
 ﻿use std::fmt::Display;
 use serde::{Deserialize, Serialize};
-use crate::SERVER_NAME;
+use crate::SDK_NAME;
 
 #[cfg(feature = "server")]
 use crate::error::Error;
@@ -84,6 +84,7 @@ pub mod reference;
 pub mod notification;
 pub mod cursor;
 pub mod root;
+pub mod sampling;
 pub(crate) mod helpers;
 
 pub(super) const JSONRPC_VERSION: &str = "2.0";
@@ -240,7 +241,7 @@ impl From<String> for Role {
 impl Default for Implementation {
     fn default() -> Self {
         Self {
-            name: SERVER_NAME.into(),
+            name: SDK_NAME.into(),
             version: env!("CARGO_PKG_VERSION").into()
         }
     }
