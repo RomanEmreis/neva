@@ -234,6 +234,16 @@ impl From<String> for Resource {
     }
 }
 
+impl From<Uri> for ReadResourceRequestParams {
+    #[inline]
+    fn from(uri: Uri) -> Self {
+        Self {
+            meta: None,
+            uri
+        }
+    }
+}
+
 #[cfg(feature = "server")]
 impl ReadResourceRequestParams {
     /// Includes [`Context`] into request metadata. If metadata is `None` it creates a new.

@@ -22,7 +22,7 @@ pub(crate) type RequestHandler<T> = Arc<
 >;
 
 pub enum HandlerParams {
-    Request(Context, RuntimeMcpOptions, Request),
+    Request(Context, Request),
     Tool(CallToolRequestParams),
     Resource(ReadResourceRequestParams),
     Prompt(GetPromptRequestParams)
@@ -123,7 +123,7 @@ impl FromHandlerParams for Context {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
         match params {
-            HandlerParams::Request(context, _, _) => Ok(context.clone()),
+            HandlerParams::Request(context, _) => Ok(context.clone()),
             _ => Err(Error::new(ErrorCode::InternalError, "invalid handler parameters"))
         }
     }
@@ -133,7 +133,7 @@ impl FromHandlerParams for RuntimeMcpOptions {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
         match params {
-            HandlerParams::Request(_, options, _) => Ok(options.clone()),
+            HandlerParams::Request(ctx, _) => Ok(ctx.options.clone()),
             _ => Err(Error::new(ErrorCode::InternalError, "invalid handler parameters"))
         }
     }
@@ -143,7 +143,7 @@ impl FromHandlerParams for Request {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
         match params {
-            HandlerParams::Request(_, _, req) => Ok(req.clone()),
+            HandlerParams::Request(_, req) => Ok(req.clone()),
             _ => Err(Error::new(ErrorCode::InternalError, "invalid handler parameters"))
         }
     }

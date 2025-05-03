@@ -324,6 +324,7 @@ fn get_arg_type(t: &Type) -> &str {
                 "Vec" => "array",
                 "Context" => "none",
                 "Meta" => "none",
+                "Uri" => "string",
                 _ => "object", // Default case for unknown types
             }
         }

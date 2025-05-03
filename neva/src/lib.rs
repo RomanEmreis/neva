@@ -4,12 +4,11 @@
 //! ## Dependencies
 //! ```toml
 //! [dependencies]
-//! neva = { version = "0.0.6", features = ["full"] }
+//! neva = { version = "0.0.7", features = ["full"] }
 //! tokio = { version = "1", features = ["full"] }
 //! ```
 //! 
-//! ## Example
-//! 
+//! ## Example Server
 //! ```no_run
 //! # #[cfg(feature = "server")] {
 //! use neva::App;
@@ -28,6 +27,7 @@
 //! } 
 //! # }
 //! ```
+//! # Example Client
 //! ```no_run
 //! # #[cfg(feature = "client")] {
 //! use std::time::Duration;

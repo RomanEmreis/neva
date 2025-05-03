@@ -3,7 +3,7 @@
 use super::{PropertyType, TypeCategory};
 use serde_json::Value;
 use crate::types::{
-    Json, Meta,
+    Json, Meta, Uri,
     CallToolRequestParams,
     ReadResourceRequestParams,
     GetPromptRequestParams
@@ -32,6 +32,7 @@ macro_rules! impl_type_category {
 
 // Simple types
 impl_type_category!(String, PropertyType::String);
+impl_type_category!(Uri, PropertyType::String);
 impl_type_category!(bool, PropertyType::Bool);
 
 // Signed integer types

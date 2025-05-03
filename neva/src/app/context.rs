@@ -3,13 +3,15 @@
 use tokio::time::timeout;
 use crate::error::{Error, ErrorCode};
 use crate::transport::Sender;
-use crate::types::Response;
 use super::{options::{McpOptions, RuntimeMcpOptions}, handler::RequestHandler};
 use crate::{
     shared::RequestQueue,
     transport::TransportProtoSender,
     types::{
-        RequestId, Request, 
+        CallToolRequestParams, CallToolResponse,
+        ReadResourceRequestParams, ReadResourceResult,
+        GetPromptRequestParams, GetPromptResult,
+        RequestId, Request, Response, Uri,
         root::{ListRootsRequestParams, ListRootsResult},
         sampling::{CreateMessageRequestParams, CreateMessageResult}
     },
@@ -19,6 +21,7 @@ use std::{
     time::Duration,
     sync::Arc
 };
+use crate::types::resource::Route;
 
 type RequestHandlers = HashMap<String, RequestHandler<Response>>;
 
@@ -34,6 +37,7 @@ pub(crate) struct ServerRuntime {
 /// Represents MCP Request Context
 #[derive(Clone)]
 pub struct Context {
+    pub(crate) options: RuntimeMcpOptions,
     pending: RequestQueue,
     sender: TransportProtoSender,
     timeout: Duration,
@@ -74,6 +78,7 @@ impl ServerRuntime {
         Context {
             pending: self.pending.clone(),
             sender: self.sender.clone(),
+            options: self.options.clone(),
             timeout: self.options.request_timeout,
         }
     }
@@ -85,19 +90,77 @@ impl ServerRuntime {
 }
 
 impl Context {
+    /// Reads a resource contents
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(feature = "macros")] {
+    /// use neva::{Context, error::Error, types::Uri, tool};
+    ///
+    /// #[tool]
+    /// async fn summarize_document(mut ctx: Context, doc_uri: Uri) -> Result<(), Error> {
+    ///     let doc = ctx.resource(doc_uri).await?;
+    ///     
+    ///     // do something with the doc
+    ///
+    /// # Ok(())
+    /// }
+    /// # }
+    /// ```
+    pub async fn resource(&self, uri: impl Into<Uri>) -> Result<ReadResourceResult, Error> {
+        let uri = uri.into();
+        let params = ReadResourceRequestParams::from(uri);
+        self.clone()
+            .read_resource(params).await
+    }
+    
+    #[inline]
+    pub(crate) async fn read_resource(self, params: ReadResourceRequestParams) -> Result<ReadResourceResult, Error> {
+        let opt = self.options.clone();
+        let params = params.with_context(self);
+        match opt.read_resource(&params.uri) {
+            Some(Route::Handler(handler)) => handler
+                .call(params.into()).await,
+            _ => Err(Error::from(ErrorCode::ResourceNotFound)),
+        }
+    }
+
+    #[inline]
+    pub(crate) async fn get_prompt(self, params: GetPromptRequestParams) -> Result<GetPromptResult, Error> {
+        let opt = self.options.clone();
+        let params = params.with_context(self);
+        match opt.get_prompt(&params.name) {
+            Some(prompt) => prompt.call(params.into()).await,
+            None => Err(Error::new(ErrorCode::InvalidParams, "Prompt not found"))
+        }
+    }
+
+    #[inline]
+    pub(crate) async fn call_tool(self, params: CallToolRequestParams) -> Result<CallToolResponse, Error> {
+        let opt = self.options.clone();
+        let params = params.with_context(self);
+        match opt.get_tool(&params.name) {
+            Some(tool) => tool.call(params.into()).await,
+            None => Err(Error::new(ErrorCode::InvalidParams, "Tool not found"))
+        }
+    }
+    
     /// Requests a list of available roots from a client
     /// 
     /// # Example
     /// ```no_run
-    /// use neva::{Context, error::Error};
-    /// 
+    /// # #[cfg(feature = "macros")] {
+    /// use neva::{Context, error::Error, tool};
+    ///
+    /// #[tool]
     /// async fn handle_roots(mut ctx: Context) -> Result<(), Error> {
     ///     let roots = ctx.list_roots().await?;
-    /// 
+    ///
     ///     // do something with roots
-    /// 
+    ///
     /// # Ok(())
     /// }
+    /// # }
     /// ```
     pub async fn list_roots(&mut self) -> Result<ListRootsResult, Error> {
         let method = crate::types::root::commands::LIST;
@@ -113,6 +176,29 @@ impl Context {
     }
     
     /// Send a sampling request to the client
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(feature = "macros")] {
+    /// use neva::{
+    ///     Context, 
+    ///     error::Error, 
+    ///     types::sampling::CreateMessageRequestParams, 
+    ///     tool
+    /// };
+    ///
+    /// #[tool]
+    /// async fn generate_poem(mut ctx: Context, topic: String) -> Result<String, Error> {
+    ///     let params = CreateMessageRequestParams::message(
+    ///         &format!("Write a short poem about {topic}"),
+    ///         "You are a talented poet who writes concise, evocative verses."
+    ///     );
+    ///     let result = ctx.sample(params).await?;
+    ///
+    ///     Ok(format!("{:?}", result.content.text))
+    /// }
+    /// # }
+    /// ```
     pub async fn sample(&mut self, params: CreateMessageRequestParams) -> Result<CreateMessageResult, Error> {
         let method = crate::types::sampling::commands::CREATE;
         let id = RequestId::String(method.into());

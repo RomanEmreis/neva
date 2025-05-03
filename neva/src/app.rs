@@ -20,7 +20,7 @@ use crate::types::{
     ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate, 
     ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, 
     SubscribeRequestParams, UnsubscribeRequestParams, Resource, 
-    resource::{Route, template::ResourceFunc}, 
+    resource::template::ResourceFunc,
     ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult, 
     PromptHandler, Prompt, 
     notification::{Notification, CancelledNotificationParams},
@@ -356,39 +356,18 @@ impl App {
     }
     
     /// A tool call request handler
-    async fn tool(
-        ctx: Context,
-        options: RuntimeMcpOptions, 
-        params: CallToolRequestParams
-    ) -> Result<CallToolResponse, Error> {
-        match options.get_tool(&params.name) {
-            Some(tool) => tool.call(params.with_context(ctx).into()).await,
-            None => Err(Error::new(ErrorCode::InvalidParams, "Tool not found"))
-        }
+    async fn tool(ctx: Context, params: CallToolRequestParams) -> Result<CallToolResponse, Error> {
+        ctx.call_tool(params).await
     }
 
     /// A read resource request handler
-    async fn resource(
-        ctx: Context,
-        options: RuntimeMcpOptions, 
-        params: ReadResourceRequestParams
-    ) -> Result<ReadResourceResult, Error> {
-        match options.read_resource(&params.uri) {
-            Some(Route::Handler(handler)) => handler.call(params.with_context(ctx).into()).await,
-            _ => Err(Error::from(ErrorCode::ResourceNotFound)),
-        }
+    async fn resource(ctx: Context, params: ReadResourceRequestParams) -> Result<ReadResourceResult, Error> {
+        ctx.read_resource(params).await
     }
     
     /// A get prompt request handler
-    async fn prompt(
-        ctx: Context,
-        options: RuntimeMcpOptions, 
-        params: GetPromptRequestParams
-    ) -> Result<GetPromptResult, Error> {
-        match options.get_prompt(&params.name) {
-            Some(prompt) => prompt.call(params.with_context(ctx).into()).await,
-            None => Err(Error::new(ErrorCode::InvalidParams, "Prompt not found"))
-        }
+    async fn prompt(ctx: Context, params: GetPromptRequestParams) -> Result<GetPromptResult, Error> {
+        ctx.get_prompt(params).await
     }
 
     /// Ping request handler
@@ -452,7 +431,7 @@ impl App {
 
             let resp = if let Some(handler) = handlers.get(&req.method) {
                 tokio::select! {
-                    resp = handler.call(HandlerParams::Request(context, options.clone(), req)) => {
+                    resp = handler.call(HandlerParams::Request(context, req)) => {
                         options.complete_request(&req_id).await;
                         resp
                     }
