@@ -5,8 +5,14 @@
 //! ```
 
 use std::sync::Arc;
-use neva::{App, resource};
-use neva::types::{Resource, ListResourcesResult, Cursor, Pagination, Completion};
+use neva::{App, Context, error::Error, tool, resource};
+use neva::types::{Uri, Resource, ListResourcesResult, Cursor, Pagination, Completion};
+
+#[tool]
+async fn validate_resource(ctx: Context, uri: Uri) -> Result<bool, Error> {
+    let res = ctx.resource(uri).await?;
+    Ok(!res.contents.is_empty())
+}
 
 #[resource(uri = "res://{name}")]
 async fn get_resource(name: String) -> (String, String) {
@@ -62,6 +68,7 @@ async fn main() {
     app.map_completion(move |params| filter_resources(res.clone(), params.arg.value));
     
     map_get_resource(&mut app);
+    map_validate_resource(&mut app);
 
     app.run().await;
 }
