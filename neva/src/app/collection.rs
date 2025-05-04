@@ -6,8 +6,7 @@ use crate::error::{Error, ErrorCode};
 
 /// Generic collection with 2 states:
 /// - [`Collection::Init`] - initialization state can be mutated without blocking
-/// - [`Collection::Runtime`] - runtime state, the collection can be read by multiple readers 
-/// and will blocked by only one writer
+/// - [`Collection::Runtime`] - runtime state, the collection can be read by multiple readers and will blocked by only one writer
 pub(crate) enum Collection<T: Clone> {
     Init(HashMap<String, T>),
     Runtime(RwLock<HashMap<String, T>>)
