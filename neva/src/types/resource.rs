@@ -30,6 +30,7 @@ mod from_request;
 /// List of commands for Resources
 pub mod commands {
     pub const LIST: &str = "resources/list";
+    pub const LIST_CHANGED: &str = "notifications/resources/list_changed";
     pub const TEMPLATES_LIST: &str = "resources/templates/list";
     pub const READ: &str = "resources/read";
     pub const SUBSCRIBE: &str = "resources/subscribe";

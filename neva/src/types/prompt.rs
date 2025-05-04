@@ -36,6 +36,7 @@ pub mod get_prompt_result;
 /// List of commands for Prompts
 pub mod commands {
     pub const LIST: &str = "prompts/list";
+    pub const LIST_CHANGED: &str = "notifications/prompts/list_changed";
     pub const GET: &str = "prompts/get";
 }
 

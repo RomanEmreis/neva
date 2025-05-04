@@ -4,11 +4,12 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use crate::transport::{StdIoServer, TransportProto};
-use crate::app::handler::RequestHandler;
+use crate::app::{handler::RequestHandler, collection::Collection};
 use std::{
     borrow::Cow,
     collections::HashMap
 };
+
 use crate::PROTOCOL_VERSIONS;
 use crate::types::{
     RequestId,
@@ -46,6 +47,18 @@ pub struct McpOptions {
     /// Timeout for the requests from server to a client
     pub(crate) request_timeout: Duration,
 
+    /// A map of tools, where the _key_ is a tool _name_
+    pub(super) tools: Collection<Tool>,
+
+    /// A map of prompts, where the _key_ is a prompt _name_
+    pub(super) prompts: Collection<Prompt>,
+
+    /// A map of resources, where the _key_ is a resource name
+    pub(super) resources: Collection<Resource>,
+
+    /// A flat map of resource templates, where the _key_ is a resource template name
+    pub(super) resources_templates: Collection<ResourceTemplate>,
+
     /// Tools capability options
     tools_capability: Option<ToolsCapability>,
 
@@ -64,21 +77,9 @@ pub struct McpOptions {
     
     /// Current transport protocol that server uses
     proto: Option<TransportProto>,
-    
-    /// A map of tools, where the _key_ is a tool _name_
-    tools: HashMap<String, Tool>,
 
-    /// A map of resources, where the _key_ is a resource name
-    resources: HashMap<String, Resource>,
-
-    /// A flat map of resource templates, where the _key_ is a resource template name
-    resources_templates: HashMap<String, ResourceTemplate>,
-    
     /// A resource template routing data structure
     resource_routes: Route,
-
-    /// A map of prompts, where the _key_ is a prompt _name_
-    prompts: HashMap<String, Prompt>,
     
     /// Currently running requests
     requests: RwLock<HashMap<RequestId, CancellationToken>>
@@ -90,10 +91,10 @@ impl Default for McpOptions {
         Self {
             implementation: Default::default(),
             request_timeout: Duration::from_secs(10),
-            tools: Default::default(),
-            resources: Default::default(),
-            prompts: Default::default(),
-            resources_templates: Default::default(),
+            tools: Collection::new(),
+            resources: Collection::new(),
+            prompts: Collection::new(),
+            resources_templates: Collection::new(),
             proto: Default::default(),
             protocol_ver: Default::default(),
             tools_capability: Default::default(),
@@ -224,14 +225,22 @@ impl McpOptions {
     
     /// Adds a tool
     pub(crate) fn add_tool(&mut self, tool: Tool) -> &mut Tool {
+        self.tools_capability
+            .get_or_insert_default();
+
         self.tools
+            .as_mut()
             .entry(tool.name.clone())
             .or_insert(tool)
     }
 
     /// Adds a resource
     pub(crate) fn add_resource(&mut self, resource: Resource) -> &mut Resource {
+        self.resources_capability
+            .get_or_insert_default();
+        
         self.resources
+            .as_mut()
             .entry(resource.name.clone())
             .or_insert(resource)
     }
@@ -242,19 +251,27 @@ impl McpOptions {
         template: ResourceTemplate, 
         handler: RequestHandler<ReadResourceResult>
     ) -> &mut ResourceTemplate {
+        self.resources_capability
+            .get_or_insert_default();
+        
         let uri_parts: Vec<Cow<'static, str>> = template
             .uri_template
             .as_vec();
         
         self.resource_routes.insert(uri_parts.as_slice(), handler);
         self.resources_templates
+            .as_mut()
             .entry(template.name.clone())
             .or_insert(template.clone())
     }
 
     /// Adds a prompt
     pub(crate) fn add_prompt(&mut self, prompt: Prompt) -> &mut Prompt {
+        self.prompts_capability
+            .get_or_insert_default();
+        
         self.prompts
+            .as_mut()
             .entry(prompt.name.clone())
             .or_insert(prompt)
     }
@@ -276,17 +293,14 @@ impl McpOptions {
     
     /// Returns a tool by its name
     #[inline]
-    pub(crate) fn get_tool(&self, name: &str) -> Option<&Tool> {
-        self.tools.get(name)
+    pub(crate) async fn get_tool(&self, name: &str) -> Option<Tool> {
+        self.tools.get(name).await
     }
     
     /// Returns a list of available tools
     #[inline]
-    pub(crate) fn tools(&self) -> Vec<Tool> {
-        self.tools
-            .values()
-            .cloned()
-            .collect()
+    pub(crate) async fn list_tools(&self) -> Vec<Tool> {
+        self.tools.values().await
     }
 
     /// Reads a resource by it URI
@@ -299,64 +313,56 @@ impl McpOptions {
 
     /// Returns a list of available resources
     #[inline]
-    pub(crate) fn resources(&self) -> Vec<Resource> {
-        self.resources
-            .values()
-            .cloned()
-            .collect()
+    pub(crate) async fn list_resources(&self) -> Vec<Resource> {
+        self.resources.values().await
     }
 
     /// Returns a list of available resource templates
     #[inline]
-    pub(crate) fn resource_templates(&self) -> Vec<ResourceTemplate> {
-        self.resources_templates
-            .values()
-            .cloned()
-            .collect()
+    pub(crate) async fn list_resource_templates(&self) -> Vec<ResourceTemplate> {
+        self.resources_templates.values().await
     }
 
     /// Returns a tool by its name
     #[inline]
-    pub(crate) fn get_prompt(&self, name: &str) -> Option<&Prompt> {
-        self.prompts.get(name)
+    pub(crate) async fn get_prompt(&self, name: &str) -> Option<Prompt> {
+        self.prompts.get(name).await
     }
 
     /// Returns a list of available prompts
     #[inline]
-    pub(crate) fn prompts(&self) -> Vec<Prompt> {
-        self.prompts
-            .values()
-            .cloned()
-            .collect()
+    pub(crate) async fn list_prompts(&self) -> Vec<Prompt> {
+        self.prompts.values().await
     }
 
     /// Returns [`ToolsCapability`] if configured.
     /// If not configured but at least one [`Tool`] exists, returns [`Default`].
     /// Otherwise, returns `None`.
     pub(crate) fn tools_capability(&self) -> Option<ToolsCapability> {
-        self.tools_capability
-            .clone()
-            .or_else(|| (!self.tools.is_empty()).then(Default::default))
+        self.tools_capability.clone()
     }
 
     /// Returns [`ResourcesCapability`] if configured.
     /// If not configured but at least one [`Resource`] or [`ResourceTemplate`] exists, returns [`Default`].
     /// Otherwise, returns `None`.
     pub(crate) fn resources_capability(&self) -> Option<ResourcesCapability> {
-        self.resources_capability
-            .clone()
-            .or_else(
-                || (!self.resources.is_empty() 
-                || !self.resources_templates.is_empty()).then(Default::default))
+        self.resources_capability.clone()
     }
 
     /// Returns [`PromptsCapability`] if configured.
     /// If not configured but at least one [`Prompt`] exists, returns [`Default`].
     /// Otherwise, returns `None`.
     pub(crate) fn prompts_capability(&self) -> Option<PromptsCapability> {
-        self.prompts_capability
-            .clone()
-            .or_else(|| (!self.prompts.is_empty()).then(Default::default))
+        self.prompts_capability.clone()
+    }
+    
+    /// Turns [`McpOptions`] into [`RuntimeMcpOptions`]
+    pub(crate) fn into_runtime(mut self) -> RuntimeMcpOptions {
+        self.tools = self.tools.into_runtime();
+        self.prompts = self.prompts.into_runtime();
+        self.resources = self.resources.into_runtime();
+        self.resources_templates = self.resources_templates.into_runtime();
+        Arc::new(self)
     }
 }
 
@@ -375,9 +381,10 @@ mod tests {
         
         assert_eq!(options.implementation.name, SDK_NAME);
         assert_eq!(options.implementation.version, env!("CARGO_PKG_VERSION"));
-        assert_eq!(options.tools.len(), 0);
-        assert_eq!(options.resources.len(), 0);
-        assert_eq!(options.prompts.len(), 0);
+        assert_eq!(options.tools.as_ref().len(), 0);
+        assert_eq!(options.resources.as_ref().len(), 0);
+        assert_eq!(options.resources_templates.as_ref().len(), 0);
+        assert_eq!(options.prompts.as_ref().len(), 0);
         assert!(options.proto.is_none());
     }
 
@@ -416,33 +423,33 @@ mod tests {
         assert_eq!(options.implementation.version, "1");
     }
     
-    #[test]
-    fn it_adds_and_gets_tool() {
+    #[tokio::test]
+    async fn it_adds_and_gets_tool() {
         let mut options = McpOptions::default();
         
         options.add_tool(Tool::new("tool", || async { "test" }));
         
-        let tool = options.get_tool("tool").unwrap();
+        let tool = options.get_tool("tool").await.unwrap();
         assert_eq!(tool.name, "tool");
     }
 
-    #[test]
-    fn it_returns_tools() {
+    #[tokio::test]
+    async fn it_returns_tools() {
         let mut options = McpOptions::default();
 
         options.add_tool(Tool::new("tool", || async { "test" }));
 
-        let tools = options.tools();
+        let tools = options.list_tools().await;
         assert_eq!(tools.len(), 1);
     }
 
-    #[test]
-    fn it_returns_resources() {
+    #[tokio::test]
+    async fn it_returns_resources() {
         let mut options = McpOptions::default();
 
         options.add_resource(Resource::new("res://res", "res"));
 
-        let resources = options.resources();
+        let resources = options.list_resources().await;
         assert_eq!(resources.len(), 1);
     }
 
@@ -496,8 +503,8 @@ mod tests {
         assert!(res.is_err());
     }
 
-    #[test]
-    fn it_returns_resource_templates() {
+    #[tokio::test]
+    async fn it_returns_resource_templates() {
         let mut options = McpOptions::default();
 
         let handler = |uri: Uri| async move {
@@ -508,7 +515,7 @@ mod tests {
             ResourceTemplate::new("res://res", "test"),
             ResourceFunc::new(handler));
 
-        let resources = options.resource_templates();
+        let resources = options.list_resource_templates().await;
         assert_eq!(resources.len(), 1);
     }
 
@@ -520,7 +527,7 @@ mod tests {
             [("test", Role::User)]
         }));
 
-        let prompt = options.get_prompt("test").unwrap();
+        let prompt = options.get_prompt("test").await.unwrap();
         assert_eq!(prompt.name, "test");
 
         let req = GetPromptRequestParams {
@@ -544,7 +551,7 @@ mod tests {
             Err::<PromptMessage, _>(Error::from(ErrorCode::InternalError))
         }));
 
-        let prompt = options.get_prompt("test").unwrap();
+        let prompt = options.get_prompt("test").await.unwrap();
         assert_eq!(prompt.name, "test");
 
         let req = GetPromptRequestParams {
@@ -558,15 +565,15 @@ mod tests {
         assert!(result.is_err())
     }
 
-    #[test]
-    fn it_returns_prompts() {
+    #[tokio::test]
+    async fn it_returns_prompts() {
         let mut options = McpOptions::default();
 
         options.add_prompt(Prompt::new("test", || async {
             [("test", Role::User)]
         }));
 
-        let prompts = options.prompts();
+        let prompts = options.list_prompts().await;
         assert_eq!(prompts.len(), 1);
     }
     

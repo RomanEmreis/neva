@@ -213,7 +213,7 @@ dependencies = [
 
 [[package]]
 name = "neva"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "base64",
  "futures-util",
@@ -230,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "neva_macros"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "proc-macro2",
  "quote",

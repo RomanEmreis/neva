@@ -32,6 +32,7 @@ use crate::types::notification::SetLevelRequestParams;
 pub mod options;
 pub mod context;
 pub(crate) mod handler;
+mod collection;
 
 const DEFAULT_PAGE_SIZE: usize = 10;
 
@@ -320,7 +321,8 @@ impl App {
         options: RuntimeMcpOptions, 
         params: ListToolsRequestParams
     ) -> ListToolsResult {
-        options.tools()
+        options.list_tools()
+            .await
             .paginate(params.cursor, DEFAULT_PAGE_SIZE)
             .into()
     }
@@ -330,7 +332,8 @@ impl App {
         options: RuntimeMcpOptions,
         params: ListResourcesRequestParams
     ) -> ListResourcesResult {
-        options.resources()
+        options.list_resources()
+            .await
             .paginate(params.cursor, DEFAULT_PAGE_SIZE)
             .into()
     }
@@ -340,7 +343,8 @@ impl App {
         options: RuntimeMcpOptions, 
         params: ListResourceTemplatesRequestParams
     ) -> ListResourceTemplatesResult {
-        options.resource_templates()
+        options.list_resource_templates()
+            .await
             .paginate(params.cursor, DEFAULT_PAGE_SIZE)
             .into()
     }
@@ -350,7 +354,8 @@ impl App {
         options: RuntimeMcpOptions, 
         params: ListPromptsRequestParams
     ) -> ListPromptsResult {
-        options.prompts()
+        options.list_prompts()
+            .await
             .paginate(params.cursor, DEFAULT_PAGE_SIZE)
             .into()
     }
