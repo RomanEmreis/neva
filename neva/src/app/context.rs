@@ -8,10 +8,12 @@ use crate::{
     shared::RequestQueue,
     transport::TransportProtoSender,
     types::{
-        CallToolRequestParams, CallToolResponse,
-        ReadResourceRequestParams, ReadResourceResult,
-        GetPromptRequestParams, GetPromptResult,
+        Tool, CallToolRequestParams, CallToolResponse,
+        Resource, ReadResourceRequestParams, ReadResourceResult,
+        Prompt, GetPromptRequestParams, GetPromptResult,
         RequestId, Request, Response, Uri,
+        resource::Route,
+        notification::Notification,
         root::{ListRootsRequestParams, ListRootsResult},
         sampling::{CreateMessageRequestParams, CreateMessageResult}
     },
@@ -21,7 +23,6 @@ use std::{
     time::Duration,
     sync::Arc
 };
-use crate::types::resource::Route;
 
 type RequestHandlers = HashMap<String, RequestHandler<Response>>;
 
@@ -53,7 +54,7 @@ impl ServerRuntime {
         Self {
             pending: Default::default(),
             handlers: Arc::new(handlers),
-            options: Arc::new(options),
+            options: options.into_runtime(),
             sender,
         }
     }
@@ -114,6 +115,97 @@ impl Context {
             .read_resource(params).await
     }
     
+    /// Adds a new resource and notifies clients
+    pub async fn add_resource(&mut self, res: impl Into<Resource>) -> Result<(), Error> {
+        let res: Resource = res.into();
+        self.options
+            .resources
+            .insert(res.name.clone(), res)
+            .await?;
+
+        self.send_notification(
+            crate::types::resource::commands::LIST_CHANGED,
+            None
+        ).await
+    }
+
+    /// Removes a resource and notifies clients
+    pub async fn remove_resource(&mut self, uri: impl Into<Uri>) -> Result<Option<Resource>, Error> {
+        let removed = self.options
+            .resources
+            .remove(&uri.into())
+            .await?;
+
+        if removed.is_some() {
+            self.send_notification(
+                crate::types::resource::commands::LIST_CHANGED,
+                None
+            ).await?;   
+        }
+        
+        Ok(removed)
+    }
+
+    /// Adds a new prompt and notifies clients
+    pub async fn add_prompt(&mut self, prompt: Prompt) -> Result<(), Error> {
+        self.options
+            .prompts
+            .insert(prompt.name.clone(), prompt)
+            .await?;
+
+        self.send_notification(
+            crate::types::prompt::commands::LIST_CHANGED,
+            None
+        ).await
+    }
+
+    /// Removes a prompt and notifies clients
+    pub async fn remove_prompt(&mut self, name: impl Into<String>) -> Result<Option<Prompt>, Error> {
+        let removed = self.options
+            .prompts
+            .remove(&name.into())
+            .await?;
+
+        if removed.is_some() {
+            self.send_notification(
+                crate::types::prompt::commands::LIST_CHANGED,
+                None
+            ).await?;
+        }
+
+        Ok(removed)
+    }
+
+    /// Adds a new prompt and notifies clients
+    pub async fn add_tool(&mut self, tool: Tool) -> Result<(), Error> {
+        self.options
+            .tools
+            .insert(tool.name.clone(), tool)
+            .await?;
+
+        self.send_notification(
+            crate::types::tool::commands::LIST_CHANGED,
+            None
+        ).await
+    }
+
+    /// Removes a tool and notifies clients
+    pub async fn remove_tool(&mut self, name: impl Into<String>) -> Result<Option<Tool>, Error> {
+        let removed = self.options
+            .tools
+            .remove(&name.into())
+            .await?;
+
+        if removed.is_some() {
+            self.send_notification(
+                crate::types::prompt::commands::LIST_CHANGED,
+                None
+            ).await?;
+        }
+
+        Ok(removed)
+    }
+    
     #[inline]
     pub(crate) async fn read_resource(self, params: ReadResourceRequestParams) -> Result<ReadResourceResult, Error> {
         let opt = self.options.clone();
@@ -129,7 +221,7 @@ impl Context {
     pub(crate) async fn get_prompt(self, params: GetPromptRequestParams) -> Result<GetPromptResult, Error> {
         let opt = self.options.clone();
         let params = params.with_context(self);
-        match opt.get_prompt(&params.name) {
+        match opt.get_prompt(&params.name).await {
             Some(prompt) => prompt.call(params.into()).await,
             None => Err(Error::new(ErrorCode::InvalidParams, "Prompt not found"))
         }
@@ -139,7 +231,7 @@ impl Context {
     pub(crate) async fn call_tool(self, params: CallToolRequestParams) -> Result<CallToolResponse, Error> {
         let opt = self.options.clone();
         let params = params.with_context(self);
-        match opt.get_tool(&params.name) {
+        match opt.get_tool(&params.name).await {
             Some(tool) => tool.call(params.into()).await,
             None => Err(Error::new(ErrorCode::InvalidParams, "Tool not found"))
         }
@@ -226,5 +318,16 @@ impl Context {
                 Err(Error::new(ErrorCode::Timeout, "Request timed out"))
             }
         }
+    }
+
+    /// Sends a notification to a client
+    #[inline]
+    async fn send_notification(
+        &mut self, 
+        method: &str, 
+        params: Option<serde_json::Value>
+    ) -> Result<(), Error> {
+        let notification = Notification::new(method, params);
+        self.sender.send(notification.into()).await
     }
 }

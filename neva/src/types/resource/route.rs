@@ -127,12 +127,12 @@ mod tests {
     fn it_inserts_and_finds() {
         let uri1: Uri = "res://path/to/{resource}".into();
         let handler1 = ResourceFunc::new(|uri: Uri| async move {
-            ResourceContents::text(&uri, "text/plain", "some text 1")
+            ResourceContents::text(uri, "text/plain", "some text 1")
         });
 
         let uri2: Uri = "res://another/path/to/{resource}".into();
         let handler2 = ResourceFunc::new(|uri: Uri| async move {
-            ResourceContents::text(&uri, "text/plain", "some text 2")
+            ResourceContents::text(uri, "text/plain", "some text 2")
         });
         
         let mut route = Route::default();

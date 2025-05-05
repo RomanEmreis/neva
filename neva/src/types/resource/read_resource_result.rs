@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use base64::{engine::general_purpose, Engine};
 #[cfg(feature = "server")]
 use crate::{error::Error, types::{IntoResponse, RequestId, Response}};
+use crate::types::Uri;
 
 /// The server's response to a resources/read request from the client.
 ///
@@ -21,7 +22,7 @@ pub struct ReadResourceResult {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ResourceContents {
     /// The URI of the resource.
-    pub uri: String,
+    pub uri: Uri,
 
     /// The type of content.
     #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
@@ -75,7 +76,7 @@ impl From<(String, String)> for ResourceContents {
     #[inline]
     fn from((uri, text): (String, String)) -> Self {
         Self {
-            uri,
+            uri: uri.into(),
             text: Some(text),
             mime: Some("text/plain".into()),
             blob: None
@@ -88,7 +89,7 @@ impl From<(String, String, String)> for ResourceContents {
     #[inline]
     fn from((uri, mime, text): (String, String, String)) -> Self {
         Self {
-            uri,
+            uri: uri.into(),
             text: Some(text),
             mime: Some(mime),
             blob: None
@@ -159,7 +160,11 @@ where
 impl ReadResourceResult {
     /// Creates a text resource result
     #[inline]
-    pub fn text(uri: &str, mime: &str, text: &str) -> Self {
+    pub fn text(
+        uri: impl Into<Uri>,
+        mime: impl Into<String>,
+        text: impl Into<String>
+    ) -> Self {
         Self {
             contents: vec![ResourceContents::text(uri, mime, text)]
         }
@@ -167,7 +172,7 @@ impl ReadResourceResult {
 
     /// Creates a blob resource result
     #[inline]
-    pub fn blob(uri: &str, mime: &str, blob: impl AsRef<[u8]>) -> Self {
+    pub fn blob<U: Into<Uri>, S: Into<String>>(uri: U, mime: S, blob: impl AsRef<[u8]>) -> Self {
         Self {
             contents: vec![ResourceContents::blob(uri, mime, blob)]
         }
@@ -178,7 +183,11 @@ impl ReadResourceResult {
 impl ResourceContents {
     /// Creates a text resource content
     #[inline]
-    pub fn text(uri: &str, mime: &str, text: &str) -> Self {
+    pub fn text(
+        uri: impl Into<Uri>, 
+        mime: impl Into<String>, 
+        text: impl Into<String>
+    ) -> Self {
         Self {
             uri: uri.into(),
             mime: Some(mime.into()),
@@ -189,7 +198,7 @@ impl ResourceContents {
 
     /// Creates a blob resource content
     #[inline]
-    pub fn blob(uri: &str, mime: &str, blob: impl AsRef<[u8]>) -> ResourceContents {
+    pub fn blob<U: Into<Uri>, S: Into<String>>(uri: U, mime: S, blob: impl AsRef<[u8]>) -> ResourceContents {
         let blob = general_purpose::STANDARD.encode(blob);
         Self {
             uri: uri.into(),

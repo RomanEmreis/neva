@@ -43,6 +43,7 @@ pub mod call_tool_response;
 /// List of commands for Tools
 pub mod commands {
     pub const LIST: &str = "tools/list";
+    pub const LIST_CHANGED: &str = "notifications/tools/list_changed";
     pub const CALL: &str = "tools/call";
 }
 

@@ -1,0 +1,9 @@
+[package]
+name = "example-updates"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+neva = { path = "../../neva", features = ["server-full"] }
+tokio = { version = "1.44.2", features = ["full"] }

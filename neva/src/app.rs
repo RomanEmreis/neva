@@ -12,26 +12,14 @@ use crate::app::handler::{
     RequestFunc,
     RequestHandler
 };
-use crate::types::{
-    InitializeResult, InitializeRequestParams, 
-    IntoResponse, Response, Request, Message,
-    CompleteResult, CompleteRequestParams, 
-    ListToolsRequestParams, CallToolRequestParams, ListToolsResult, CallToolResponse, Tool, ToolHandler, 
-    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate, 
-    ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, 
-    SubscribeRequestParams, UnsubscribeRequestParams, Resource, 
-    resource::template::ResourceFunc,
-    ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult, 
-    PromptHandler, Prompt, 
-    notification::{Notification, CancelledNotificationParams},
-    cursor::Pagination
-};
+use crate::types::{InitializeResult, InitializeRequestParams, IntoResponse, Response, Request, Message, CompleteResult, CompleteRequestParams, ListToolsRequestParams, CallToolRequestParams, ListToolsResult, CallToolResponse, Tool, ToolHandler, ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate, ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, SubscribeRequestParams, UnsubscribeRequestParams, Resource, resource::template::ResourceFunc, ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt, notification::{Notification, CancelledNotificationParams}, cursor::Pagination, Uri};
 #[cfg(feature = "tracing")]
 use crate::types::notification::SetLevelRequestParams;
 
 pub mod options;
 pub mod context;
 pub(crate) mod handler;
+mod collection;
 
 const DEFAULT_PAGE_SIZE: usize = 10;
 
@@ -174,7 +162,7 @@ impl App {
     }
     
     /// Adds a known resource
-    pub fn add_resource(&mut self, uri: &'static str, name: &str) -> &mut Resource {
+    pub fn add_resource<U: Into<Uri>, S: Into<String>>(&mut self, uri: U, name: S) -> &mut Resource {
         let resource = Resource::new(uri, name);
         self.options.add_resource(resource)
     }
@@ -320,7 +308,8 @@ impl App {
         options: RuntimeMcpOptions, 
         params: ListToolsRequestParams
     ) -> ListToolsResult {
-        options.tools()
+        options.list_tools()
+            .await
             .paginate(params.cursor, DEFAULT_PAGE_SIZE)
             .into()
     }
@@ -330,7 +319,8 @@ impl App {
         options: RuntimeMcpOptions,
         params: ListResourcesRequestParams
     ) -> ListResourcesResult {
-        options.resources()
+        options.list_resources()
+            .await
             .paginate(params.cursor, DEFAULT_PAGE_SIZE)
             .into()
     }
@@ -340,7 +330,8 @@ impl App {
         options: RuntimeMcpOptions, 
         params: ListResourceTemplatesRequestParams
     ) -> ListResourceTemplatesResult {
-        options.resource_templates()
+        options.list_resource_templates()
+            .await
             .paginate(params.cursor, DEFAULT_PAGE_SIZE)
             .into()
     }
@@ -350,7 +341,8 @@ impl App {
         options: RuntimeMcpOptions, 
         params: ListPromptsRequestParams
     ) -> ListPromptsResult {
-        options.prompts()
+        options.list_prompts()
+            .await
             .paginate(params.cursor, DEFAULT_PAGE_SIZE)
             .into()
     }
