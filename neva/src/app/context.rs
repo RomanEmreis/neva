@@ -129,6 +129,23 @@ impl Context {
         ).await
     }
 
+    /// Removes a resource and notifies clients
+    pub async fn remove_resource(&mut self, uri: impl Into<Uri>) -> Result<Option<Resource>, Error> {
+        let removed = self.options
+            .resources
+            .remove(&uri.into())
+            .await?;
+
+        if removed.is_some() {
+            self.send_notification(
+                crate::types::resource::commands::LIST_CHANGED,
+                None
+            ).await?;   
+        }
+        
+        Ok(removed)
+    }
+
     /// Adds a new prompt and notifies clients
     pub async fn add_prompt(&mut self, prompt: Prompt) -> Result<(), Error> {
         self.options
@@ -142,6 +159,23 @@ impl Context {
         ).await
     }
 
+    /// Removes a prompt and notifies clients
+    pub async fn remove_prompt(&mut self, name: impl Into<String>) -> Result<Option<Prompt>, Error> {
+        let removed = self.options
+            .prompts
+            .remove(&name.into())
+            .await?;
+
+        if removed.is_some() {
+            self.send_notification(
+                crate::types::prompt::commands::LIST_CHANGED,
+                None
+            ).await?;
+        }
+
+        Ok(removed)
+    }
+
     /// Adds a new prompt and notifies clients
     pub async fn add_tool(&mut self, tool: Tool) -> Result<(), Error> {
         self.options
@@ -153,6 +187,23 @@ impl Context {
             crate::types::tool::commands::LIST_CHANGED,
             None
         ).await
+    }
+
+    /// Removes a tool and notifies clients
+    pub async fn remove_tool(&mut self, name: impl Into<String>) -> Result<Option<Tool>, Error> {
+        let removed = self.options
+            .tools
+            .remove(&name.into())
+            .await?;
+
+        if removed.is_some() {
+            self.send_notification(
+                crate::types::prompt::commands::LIST_CHANGED,
+                None
+            ).await?;
+        }
+
+        Ok(removed)
     }
     
     #[inline]

@@ -54,7 +54,11 @@ pub struct Resource {
 
     /// The MIME type of this resource, if known.
     #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
-    pub mime: Option<String>
+    pub mime: Option<String>,
+
+    /// The resource size in bytes, if known
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<usize>
 }
 
 /// Sent from the client to request a list of resources the server has.
@@ -111,7 +115,7 @@ pub struct ListResourcesResult {
 pub struct SubscribeRequestParams {
     /// The URI of the resource to subscribe to. 
     /// The URI can use any protocol; it is up to the server how to interpret it.
-    pub uri: String,
+    pub uri: Uri,
 }
 
 /// Sent from the client to request not receiving updated notifications 
@@ -218,6 +222,7 @@ impl From<Uri> for Resource {
             name: uri.to_string(),
             descr: None,
             mime: None,
+            size: None,
             uri
         }
     }
@@ -231,6 +236,7 @@ impl From<String> for Resource {
             uri: uri.into(),
             descr: None,
             mime: None,
+            size: None,
         }
     }
 }
@@ -258,24 +264,31 @@ impl ReadResourceRequestParams {
 impl Resource {
     /// Creates a new [`Resource`]
     #[inline]
-    pub fn new(uri: &'static str, name: &str) -> Self {
+    pub fn new<U: Into<Uri>, S: Into<String>>(uri: U, name: S) -> Self {
         Self { 
             uri: uri.into(), 
             name: name.into(), 
             descr: None, 
             mime: None,
+            size: None,
         }
     }
 
     /// Sets a description for a resource
-    pub fn with_description(mut self, description: &str) -> Self {
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.descr = Some(description.into());
         self
     }
 
     /// Sets a MIME type for a resource
-    pub fn with_mime(mut self, mime: &str) -> Self {
+    pub fn with_mime(mut self, mime: impl Into<String>) -> Self {
         self.mime = Some(mime.into());
+        self
+    }
+
+    /// Sets a resource size
+    pub fn with_size(mut self, size: usize) -> Self {
+        self.size = Some(size);
         self
     }
 }

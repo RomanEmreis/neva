@@ -34,9 +34,9 @@ impl From<String> for Uri {
     }
 }
 
-impl From<&'static str> for Uri {
+impl From<&str> for Uri {
     #[inline]
-    fn from(s: &'static str) -> Self {
+    fn from(s: &str) -> Self {
         Uri(s.to_owned())
     }
 }

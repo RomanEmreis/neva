@@ -44,7 +44,7 @@ impl<T: Clone> Collection<T> {
 
     /// Inserts a key-value pair into this [`Collection`] when it in [`Collection::Runtime`] state.
     /// 
-    /// For the [`Collection::Init`] state use the `as_mut().insert()` method.
+    /// For the [`Collection::Init`] state - use the `as_mut().insert()` method.
     #[inline]
     pub(crate) async fn insert(&self, key: String, value: T) -> Result<(), Error> {
         match self {
@@ -58,6 +58,24 @@ impl<T: Clone> Collection<T> {
             }
         };
         Ok(())
+    }
+
+    /// Removes an element from this [`Collection`] by a key when it in [`Collection::Runtime`] state.
+    ///
+    /// For the [`Collection::Init`] state - use the `as_mut().remove()` method.
+    #[inline]
+    pub(crate) async fn remove(&self, key: &str) -> Result<Option<T>, Error> {
+        let value = match self {
+            Self::Init(_) => return Err(Error::new(
+                ErrorCode::InternalError,
+                "Attempt to insert a value during runtime when collection is in the init state")),
+            Self::Runtime(lock) => {
+                lock.write()
+                    .await
+                    .remove(key)
+            }
+        };
+        Ok(value)
     }
 
     /// Return a list of values

@@ -241,7 +241,7 @@ impl McpOptions {
         
         self.resources
             .as_mut()
-            .entry(resource.name.clone())
+            .entry(resource.uri.to_string())
             .or_insert(resource)
     }
 
@@ -458,7 +458,7 @@ mod tests {
         let mut options = McpOptions::default();
 
         let handler = |uri: Uri| async move {
-            ResourceContents::text(&uri, "text/plain", "some text")
+            ResourceContents::text(uri, "text/plain", "some text")
         };
         
         options.add_resource_template(
@@ -508,7 +508,7 @@ mod tests {
         let mut options = McpOptions::default();
 
         let handler = |uri: Uri| async move {
-            ResourceContents::text(&uri, "text/plain", "some text")
+            ResourceContents::text(uri, "text/plain", "some text")
         };
 
         options.add_resource_template(
