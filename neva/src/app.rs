@@ -456,12 +456,9 @@ impl App {
     }
     
     async fn handle_notification(notification: Notification) {
-        match notification.method.as_str() { 
-            crate::types::notification::commands::MESSAGE => {
-                #[cfg(feature = "tracing")]
-                notification.write();
-            },
-            _ => ()
+        if let crate::types::notification::commands::MESSAGE = notification.method.as_str() {
+            #[cfg(feature = "tracing")]
+            notification.write();
         }
     }
 }
