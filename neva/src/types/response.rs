@@ -13,7 +13,15 @@ pub mod into_response;
 
 /// A response message in the JSON-RPC protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Response {
+#[serde(untagged)]
+pub enum Response {
+    Ok(OkResponse),
+    Err(ErrorResponse)
+}
+
+/// A successful response message in the JSON-RPC protocol.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OkResponse {
     /// JSON-RPC protocol version. 
     /// 
     /// > Note: always 2.0.
@@ -24,13 +32,24 @@ pub struct Response {
     pub id: RequestId,
     
     /// The result of the method invocation.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<Value>,
-    
-    /// Error information.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<ErrorDetails>,
+    pub result: Value
 }
+
+/// A response to a request that indicates an error occurred.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErrorResponse {
+    /// JSON-RPC protocol version. 
+    ///
+    /// > Note: always 2.0.
+    pub jsonrpc: String,
+
+    /// Request identifier matching the original request.
+    #[serde(default)]
+    pub id: RequestId,
+
+    /// Error information.
+    pub error: ErrorDetails,
+} 
 
 impl From<Response> for Message {
     #[inline]
@@ -42,45 +61,52 @@ impl From<Response> for Message {
 impl Response {
     /// Creates a successful response
     pub fn success(id: RequestId, result: Value) -> Self {
-        Self {
+        Response::Ok(OkResponse {
             jsonrpc: JSONRPC_VERSION.to_string(),
             id,
-            result: Some(result),
-            error: None,
-        }
+            result
+        })
     }
 
     /// Creates a dummy successful response
     pub fn empty(id: RequestId) -> Self {
-        Self {
+        Response::Ok(OkResponse {
             jsonrpc: JSONRPC_VERSION.to_string(),
             id,
-            result: Some(json!({})),
-            error: None,
-        }
+            result: json!({})
+        })
     }
 
     /// Creates an error response
     pub fn error(id: RequestId, error: Error) -> Self {
-        Self {
+        Response::Err(ErrorResponse {
             jsonrpc: JSONRPC_VERSION.to_string(),
             id,
-            result: None,
-            error: Some(error.into()),
+            error: error.into(),
+        })
+    }
+    
+    pub fn id(&self) -> &RequestId {
+        match &self {
+            Response::Ok(ok) => &ok.id,
+            Response::Err(err) => &err.id
         }
+    }
+    
+    /// Set the `id` for the response
+    pub fn set_id(mut self, id: RequestId) -> Self {
+        match &mut self {
+            Response::Ok(ok) => ok.id = id,
+            Response::Err(err) => err.id = id
+        }
+        self
     }
     
     /// Unwraps the [`Response`] into either result of `T` or [`Error`]
     pub fn into_result<T: DeserializeOwned>(self) -> Result<T, Error> {
-        match self.result {
-            Some(result) => serde_json::from_value::<T>(result)
-                .map_err(Into::into),
-            None => {
-                let error = self.error
-                    .unwrap_or_default()
-                    .into();
-                Err(error)
-            }
+        match self {
+            Response::Ok(ok) => serde_json::from_value::<T>(ok.result).map_err(Into::into),
+            Response::Err(err) => Err(err.error.into())
         }
     }
 }

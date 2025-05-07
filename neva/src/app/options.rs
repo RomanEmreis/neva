@@ -7,7 +7,7 @@ use crate::transport::{StdIoServer, TransportProto};
 use crate::app::{handler::RequestHandler, collection::Collection};
 use std::{
     borrow::Cow,
-    collections::HashMap
+    collections::{HashMap, HashSet}
 };
 
 use crate::PROTOCOL_VERSIONS;
@@ -59,6 +59,9 @@ pub struct McpOptions {
     /// A flat map of resource templates, where the _key_ is a resource template name
     pub(super) resources_templates: Collection<ResourceTemplate>,
 
+    /// Holds current subscriptions to resource changes
+    pub(super) resource_subscriptions: RwLock<HashSet<Uri>>,
+
     /// Tools capability options
     tools_capability: Option<ToolsCapability>,
 
@@ -82,7 +85,7 @@ pub struct McpOptions {
     resource_routes: Route,
     
     /// Currently running requests
-    requests: RwLock<HashMap<RequestId, CancellationToken>>
+    requests: RwLock<HashMap<RequestId, CancellationToken>>,
 }
 
 impl Default for McpOptions {
@@ -102,6 +105,7 @@ impl Default for McpOptions {
             prompts_capability: Default::default(),
             resource_routes: Default::default(),
             requests: Default::default(),
+            resource_subscriptions: Default::default(),
             #[cfg(feature = "tracing")]
             log_level: Default::default(),
         }
@@ -354,6 +358,38 @@ impl McpOptions {
     /// Otherwise, returns `None`.
     pub(crate) fn prompts_capability(&self) -> Option<PromptsCapability> {
         self.prompts_capability.clone()
+    }
+
+    /// Returns whether server is configured to send the "notifications/resources/updated"
+    #[inline]
+    pub(crate) fn is_resource_subscription_supported(&self) -> bool {
+        self.resources_capability
+            .as_ref()
+            .is_some_and(|res| res.subscribe)
+    }
+
+    /// Returns whether server is configured to send the "notifications/resources/list_changed"
+    #[inline]
+    pub(crate) fn is_resource_list_changed_supported(&self) -> bool {
+        self.resources_capability
+            .as_ref()
+            .is_some_and(|res| res.list_changed)
+    }
+
+    /// Returns whether server is configured to send the "notifications/tools/list_changed"
+    #[inline]
+    pub(crate) fn is_tools_list_changed_supported(&self) -> bool {
+        self.tools_capability
+            .as_ref()
+            .is_some_and(|tool| tool.list_changed)
+    }
+
+    /// Returns whether server is configured to send the "notifications/prompts/list_changed"
+    #[inline]
+    pub(crate) fn is_prompts_list_changed_supported(&self) -> bool {
+        self.prompts_capability
+            .as_ref()
+            .is_some_and(|prompt| prompt.list_changed)
     }
     
     /// Turns [`McpOptions`] into [`RuntimeMcpOptions`]

@@ -44,6 +44,9 @@ pub struct Request {
     ///
     /// > **Note:** always 2.0.
     pub jsonrpc: String,
+
+    /// Request identifier. Must be a string or number and unique within the session.
+    pub id: RequestId,
     
     /// Name of the method to invoke.
     pub method: String,
@@ -51,10 +54,6 @@ pub struct Request {
     /// Optional parameters for the method.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub params: Option<serde_json::Value>,
-    
-    /// Request identifier. Must be a string or number and unique within the session.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<RequestId>,
 }
 
 /// Provides metadata related to the request that provides additional protocol-level information.
@@ -127,7 +126,7 @@ impl Request {
     pub fn new<T: Serialize>(id: Option<RequestId>, method: &str, params: Option<T>) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.into(),
-            id: id.or_else(|| Some(RequestId::default())),
+            id: id.unwrap_or_default(),
             method: method.into(),
             params: params.and_then(|p| serde_json::to_value(p).ok())
         }
@@ -138,16 +137,13 @@ impl Request {
     /// Default: `(no id)`
     pub fn into_id(self) -> RequestId {
         self.id
-            .unwrap_or_default()
     }
 
     /// Returns request's id if it's specified, otherwise returns default value
     ///
     /// Default: `(no id)`
     pub fn id(&self) -> RequestId {
-        self.id
-            .clone()
-            .unwrap_or_default()
+        self.id.clone()
     }
     
     /// Returns [`Request`] params metadata

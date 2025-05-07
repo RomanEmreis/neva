@@ -6,6 +6,7 @@ use std::{
     borrow::Cow,
     ops::{Deref, DerefMut}
 };
+use std::fmt::{Display, Formatter};
 
 /// Represents a resource URI
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -24,6 +25,13 @@ impl DerefMut for Uri {
     #[inline]
     fn deref_mut(&mut self) -> &mut str {
         &mut self.0
+    }
+}
+
+impl Display for Uri {
+    #[inline]
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
     }
 }
 

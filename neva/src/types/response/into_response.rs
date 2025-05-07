@@ -16,9 +16,8 @@ pub trait IntoResponse {
 
 impl IntoResponse for Response {
     #[inline]
-    fn into_response(mut self, req_id: RequestId) -> Response {
-        self.id = req_id;
-        self
+    fn into_response(self, req_id: RequestId) -> Response {
+        self.set_id(req_id)
     }
 }
 

@@ -10,27 +10,35 @@ use handler::RequestHandler;
 use crate::error::{Error, ErrorCode};
 use crate::transport::Transport;
 use crate::types::{
-    ListToolsRequestParams, ListToolsResult, CallToolRequestParams, CallToolResponse, 
-    ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, 
+    ListToolsRequestParams, ListToolsResult, CallToolRequestParams, CallToolResponse,
+    ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult,
     ListResourceTemplatesRequestParams, ListResourceTemplatesResult, Uri, 
-    ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult, 
-    ClientCapabilities, InitializeRequestParams, InitializeResult, 
-    Request, RequestId, Response, request::RequestParamsMeta, 
-    cursor::Cursor, 
-    notification::Notification,
+    ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult,
+    ServerCapabilities, ClientCapabilities, Implementation, InitializeRequestParams, InitializeResult, 
+    Request, RequestId, Response, request::RequestParamsMeta, cursor::Cursor,
+    notification::Notification, 
+    resource::{SubscribeRequestParams, UnsubscribeRequestParams}, 
     sampling::{CreateMessageRequestParams, CreateMessageResult, SamplingHandler},
     Root
 };
 
 mod handler;
+mod notification_handler;
 pub mod options;
+pub mod subscribe;
 
 /// Represents an MCP client app 
 pub struct Client {
-    /// MCP client options
+    /// MCP client options.
     options: McpOptions,
+
+    /// Capabilities supported by the connected server.
+    server_capabilities: Option<ServerCapabilities>,
     
-    /// A [`CancellationToken`] that cancels transport background processes
+    /// Implementation information of the connected server.
+    server_info: Option<Implementation>,
+    
+    /// A [`CancellationToken`] that cancels transport background processes.
     cancellation_token: Option<CancellationToken>,
     
     /// Request handler
@@ -49,6 +57,8 @@ impl Client {
     pub fn new() -> Self {
         Self {
             options: McpOptions::default(),
+            server_capabilities: None,
+            server_info: None,
             cancellation_token: None,
             handler: None
         }
@@ -155,6 +165,9 @@ impl Client {
         let mut transport = self.options.transport();
         let token = transport.start();
         
+        #[cfg(feature = "tracing")]
+        self.register_tracing_notification_handlers();
+        
         self.cancellation_token = Some(token);
         self.handler = Some(RequestHandler::new(transport, &self.options));
         
@@ -181,11 +194,7 @@ impl Client {
     /// }
     /// ```
     pub async fn disconnect(mut self) -> Result<(), Error> {
-        let cancelled = Notification::new(
-            crate::types::notification::commands::CANCELLED, 
-            None); 
-        self.send_notification(cancelled).await?;
-
+        self.send_notification(crate::types::notification::commands::CANCELLED, None).await?;
         if let Some(token) = self.cancellation_token {
             token.cancel();
         }
@@ -209,15 +218,16 @@ impl Client {
         let resp = self.send_request(req).await?;
 
         let init_result = resp.into_result::<InitializeResult>()?;
+
         assert_eq!(
             init_result.protocol_ver,
             self.options.protocol_ver(),
             "Server protocol version mismatch.");
+        
+        self.server_capabilities = Some(init_result.capabilities);
+        self.server_info = Some(init_result.server_info);
 
-        let initialized = Notification::new(
-            crate::types::notification::commands::INITIALIZED, 
-            None); 
-        self.send_notification(initialized).await
+        self.send_notification(crate::types::notification::commands::INITIALIZED, None).await
     }
     
     /// Requests a list of tools that MCP server provides
@@ -474,6 +484,106 @@ impl Client {
             .await?
             .into_result()
     }
+    
+    /// Subscribes to a resource on the server to receive notifications when it changes.
+    pub async fn subscribe_to_resource(&mut self, uri: impl Into<Uri>) -> Result<(), Error> {
+        if !self.is_resource_subscription_supported() {
+            return Err(Error::new(
+                ErrorCode::MethodNotFound,
+                "Server does not support resource subscriptions",
+            ));
+        }
+        
+        let id = self.generate_id()?;
+        let request = Request::new(
+            Some(id.clone()),
+            crate::types::resource::commands::SUBSCRIBE,
+            Some(SubscribeRequestParams::from(uri))
+        );
+        let response = self.send_request(request).await?;
+        match response {
+            Response::Ok(_) => Ok(()),
+            Response::Err(err) => Err(err.error.into()),
+        }
+    }
+
+    /// Unsubscribes from a resource on the server to stop receiving notifications about its changes.
+    pub async fn unsubscribe_from_resource(&mut self, uri: impl Into<Uri>) -> Result<(), Error> {
+        if !self.is_resource_subscription_supported() {
+            return Err(Error::new(
+                ErrorCode::MethodNotFound,
+                "Server does not support resource subscriptions",
+            ));
+        }
+
+        let id = self.generate_id()?;
+        let request = Request::new(
+            Some(id.clone()),
+            crate::types::resource::commands::UNSUBSCRIBE,
+            Some(UnsubscribeRequestParams::from(uri))
+        );
+
+        let response = self.send_request(request).await?;
+        match response {
+            Response::Ok(_) => Ok(()),
+            Response::Err(err) => Err(err.error.into()),
+        }
+    }
+    
+    /// Maps the `handler` to a specific `event`
+    pub fn subscribe<F, R>(&mut self, event: &str, handler: F)
+    where
+        F: Fn(Notification) -> R + Clone + Send + Sync + 'static,
+        R: Future<Output = ()> + Send
+    {
+        self.options
+            .notification_handler
+            .get_or_insert_default()
+            .subscribe(event, handler);
+    }
+    
+    /// Unsubscribe a handler from the `event`
+    pub fn unsubscribe(&mut self, event: &str) {
+        if let Some(notification_handler) = &self.options.notification_handler {
+            notification_handler.unsubscribe(event);
+        } 
+    }
+
+    /// Returns whether server is configured to send the "notifications/resources/updated"
+    #[inline]
+    fn is_resource_subscription_supported(&self) -> bool {
+        self.server_capabilities
+            .as_ref()
+            .and_then(|cap| cap.resources.as_ref())
+            .is_some_and(|res| res.subscribe)
+    }
+
+    /// Returns whether server is configured to send the "notifications/resources/list_changed"
+    #[inline]
+    fn is_resource_list_changed_supported(&self) -> bool {
+        self.server_capabilities
+            .as_ref()
+            .and_then(|cap| cap.resources.as_ref())
+            .is_some_and(|res| res.list_changed)
+    }
+
+    /// Returns whether server is configured to send the "notifications/tools/list_changed"
+    #[inline]
+    fn is_tools_list_changed_supported(&self) -> bool {
+        self.server_capabilities
+            .as_ref()
+            .and_then(|cap| cap.tools.as_ref())
+            .is_some_and(|tool| tool.list_changed)
+    }
+
+    /// Returns whether server is configured to send the "notifications/prompts/list_changed"
+    #[inline]
+    fn is_prompts_list_changed_supported(&self) -> bool {
+        self.server_capabilities
+            .as_ref()
+            .and_then(|cap| cap.prompts.as_ref())
+            .is_some_and(|prompt| prompt.list_changed)
+    }
 
     /// Sends a request to the MCP server
     #[inline]
@@ -486,11 +596,30 @@ impl Client {
     
     /// Sends a notification to the MCP server
     #[inline]
-    async fn send_notification(&mut self, notification: Notification) -> Result<(), Error> {
+    async fn send_notification(
+        &mut self,
+        method: &str,
+        params: Option<serde_json::Value>
+    ) -> Result<(), Error> {
+        let notification = Notification::new(method, params);
         self.handler.as_mut()
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?
             .send_notification(notification)
             .await
+    }
+
+    #[cfg(feature = "tracing")]
+    fn register_tracing_notification_handlers(&mut self) {
+        use crate::types::notification::commands::*;
+        
+        self.subscribe(MESSAGE, Self::default_notification_handler);
+        self.subscribe(STDERR, Self::default_notification_handler);
+        self.subscribe(PROGRESS, Self::default_notification_handler);
+    }
+    
+    #[cfg(feature = "tracing")]
+    async fn default_notification_handler(notification: Notification) {
+        notification.write();
     }
 
     /// Generates a new [`RequestId`]

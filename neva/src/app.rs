@@ -184,7 +184,7 @@ impl App {
     /// # app.run().await;
     /// # }
     /// ```
-    pub fn map_resource<F, R, Args>(&mut self, uri: &'static str, name: &str, handler: F) -> &mut ResourceTemplate
+    pub fn map_resource<F, R, Args>(&mut self, uri: impl Into<Uri>, name: &str, handler: F) -> &mut ResourceTemplate
     where
         F: GenericHandler<Args, Output = R>,
         R: TryInto<ReadResourceResult> + Send + 'static,
@@ -254,7 +254,7 @@ impl App {
             let handler = handler.clone();
             async move { handler(params).await.into() }
         };
-        self.map_handler("resources/list", handler);
+        self.map_handler(crate::types::resource::commands::LIST, handler);
         self
     }
 
@@ -285,7 +285,7 @@ impl App {
             let handler = handler.clone();
             async move { handler(params).await.into() }
         };
-        self.map_handler("completion/complete", handler);
+        self.map_handler(crate::types::completion::commands::COMPLETE, handler);
         self
     }
 
@@ -378,18 +378,18 @@ impl App {
     
     /// A subscription to a resource change request handler
     async fn resource_subscribe(
-        _options: RuntimeMcpOptions, 
-        _params: SubscribeRequestParams
-    ) -> Error {
-        Error::new(ErrorCode::InvalidRequest, "resource_subscribe not implemented")
+        mut ctx: Context, 
+        params: SubscribeRequestParams
+    ) {
+        ctx.subscribe_to_resource(params.uri).await;
     }
 
     /// An unsubscription to from resource change request handler
     async fn resource_unsubscribe(
-        _options: RuntimeMcpOptions, 
-        _params: UnsubscribeRequestParams
-    ) -> Error {
-        Error::new(ErrorCode::InvalidRequest, "resource_unsubscribe not implemented")
+        mut ctx: Context,
+        params: UnsubscribeRequestParams
+    ) {
+        ctx.unsubscribe_from_resource(&params.uri).await;
     }
     
     /// Sets the logging level
@@ -455,9 +455,11 @@ impl App {
             .await;
     }
     
-    async fn handle_notification(_notification: Notification) {
-        #[cfg(feature = "tracing")]
-        _notification.write();
+    async fn handle_notification(notification: Notification) {
+        if let crate::types::notification::commands::MESSAGE = notification.method.as_str() {
+            #[cfg(feature = "tracing")]
+            notification.write();
+        }
     }
 }
 

@@ -1,6 +1,7 @@
 ﻿//! Utilities for Notifications
 
 use serde::{Serialize, Deserialize};
+use serde::de::DeserializeOwned;
 use crate::types::{RequestId, Message, JSONRPC_VERSION};
 #[cfg(feature = "server")]
 use crate::{error::Error, types::{FromRequest, Request}};
@@ -101,6 +102,15 @@ impl Notification {
         }
     }
     
+    /// Parses [`Notification`] params into specified type
+    #[inline]
+    pub fn params<T: DeserializeOwned>(&self) -> Option<T> {
+        match self.params { 
+            Some(ref params) => serde_json::from_value(params.clone()).ok(),
+            None => None,
+        }
+    }
+    
     /// Writes the [`Notification`]
     #[inline]
     #[cfg(feature = "tracing")]
@@ -110,8 +120,10 @@ impl Notification {
         if is_stderr {
             Self::write_err_internal(params);
         } else {
-            let log = serde_json::from_value::<LogMessage>(params).unwrap();
-            log.write();
+            match serde_json::from_value::<LogMessage>(params.clone()) { 
+                Ok(log) => log.write(),
+                Err(err) => tracing::error!(logger = "neva", "{}", err),
+            }
         }
     }
     
