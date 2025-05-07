@@ -35,6 +35,7 @@ pub mod commands {
     pub const READ: &str = "resources/read";
     pub const SUBSCRIBE: &str = "resources/subscribe";
     pub const UNSUBSCRIBE: &str = "resources/unsubscribe";
+    pub const UPDATED: &str = "notifications/resources/updated";
 }
 
 /// Represents a known resource that the server is capable of reading.
@@ -126,7 +127,21 @@ pub struct SubscribeRequestParams {
 pub struct UnsubscribeRequestParams {
     /// The URI of the resource to unsubscribe from. 
     /// The URI can use any protocol; it is up to the server how to interpret it. 
-    pub uri: String,
+    pub uri: Uri,
+}
+
+impl<T: Into<Uri>> From<T> for SubscribeRequestParams {
+    #[inline]
+    fn from(uri: T) -> Self {
+        Self { uri: uri.into() }
+    }
+}
+
+impl<T: Into<Uri>> From<T> for UnsubscribeRequestParams {
+    #[inline]
+    fn from(uri: T) -> Self {
+        Self { uri: uri.into() }
+    }
 }
 
 #[cfg(feature = "server")]

@@ -15,6 +15,7 @@ use crate::{
         resource::Route,
         notification::Notification,
         root::{ListRootsRequestParams, ListRootsResult},
+        resource::SubscribeRequestParams,
         sampling::{CreateMessageRequestParams, CreateMessageResult}
     },
 };
@@ -123,10 +124,14 @@ impl Context {
             .insert(res.name.clone(), res)
             .await?;
 
-        self.send_notification(
-            crate::types::resource::commands::LIST_CHANGED,
-            None
-        ).await
+        if self.options.is_resource_list_changed_supported() {
+            self.send_notification(
+                crate::types::resource::commands::LIST_CHANGED,
+                None
+            ).await 
+        } else { 
+            Ok(())
+        }
     }
 
     /// Removes a resource and notifies clients
@@ -136,7 +141,7 @@ impl Context {
             .remove(&uri.into())
             .await?;
 
-        if removed.is_some() {
+        if removed.is_some() && self.options.is_resource_list_changed_supported() {
             self.send_notification(
                 crate::types::resource::commands::LIST_CHANGED,
                 None
@@ -144,6 +149,50 @@ impl Context {
         }
         
         Ok(removed)
+    }
+    
+    /// Sends a [`Notification`] that the resource with the `uri` has been updated
+    pub async fn resource_updated(&mut self, uri: impl Into<Uri>) -> Result<(), Error> {
+        if !self.options.is_resource_subscription_supported() { 
+            return Err(Error::new(
+                ErrorCode::MethodNotFound, 
+                "Server does not support sending resource/updated notifications"))
+        }
+        
+        let uri = uri.into();
+        if self.is_subscribed(&uri).await {
+            let params = serde_json::to_value(SubscribeRequestParams::from(uri)).ok();
+            self.send_notification(crate::types::resource::commands::UPDATED, params).await   
+        } else { 
+            Ok(())
+        }
+    }
+
+    /// Adds a subscription to the resource with the [`Uri`]
+    pub async fn subscribe_to_resource(&mut self, uri: impl Into<Uri>) {
+        self.options
+            .resource_subscriptions
+            .write()
+            .await
+            .insert(uri.into());
+    }
+    
+    /// Removes a subscription to the resource with the [`Uri`]
+    pub async fn unsubscribe_from_resource(&mut self, uri: &Uri) {
+        self.options
+            .resource_subscriptions
+            .write()
+            .await
+            .remove(uri);
+    }
+    
+    /// Returns `true` if there is a subscription to changes of the resource with the [`Uri`]
+    pub async fn is_subscribed(&self, uri: &Uri) -> bool {
+        self.options
+            .resource_subscriptions
+            .read()
+            .await
+            .contains(uri)
     }
 
     /// Adds a new prompt and notifies clients
@@ -153,10 +202,14 @@ impl Context {
             .insert(prompt.name.clone(), prompt)
             .await?;
 
-        self.send_notification(
-            crate::types::prompt::commands::LIST_CHANGED,
-            None
-        ).await
+        if self.options.is_prompts_list_changed_supported() {
+            self.send_notification(
+                crate::types::prompt::commands::LIST_CHANGED,
+                None
+            ).await
+        } else {
+            Ok(())
+        }
     }
 
     /// Removes a prompt and notifies clients
@@ -166,7 +219,7 @@ impl Context {
             .remove(&name.into())
             .await?;
 
-        if removed.is_some() {
+        if removed.is_some() && self.options.is_prompts_list_changed_supported() {
             self.send_notification(
                 crate::types::prompt::commands::LIST_CHANGED,
                 None
@@ -183,10 +236,14 @@ impl Context {
             .insert(tool.name.clone(), tool)
             .await?;
 
-        self.send_notification(
-            crate::types::tool::commands::LIST_CHANGED,
-            None
-        ).await
+        if self.options.is_tools_list_changed_supported() {
+            self.send_notification(
+                crate::types::tool::commands::LIST_CHANGED,
+                None
+            ).await
+        } else {
+            Ok(())
+        }
     }
 
     /// Removes a tool and notifies clients
@@ -196,9 +253,9 @@ impl Context {
             .remove(&name.into())
             .await?;
 
-        if removed.is_some() {
+        if removed.is_some() && self.options.is_tools_list_changed_supported() {
             self.send_notification(
-                crate::types::prompt::commands::LIST_CHANGED,
+                crate::types::tool::commands::LIST_CHANGED,
                 None
             ).await?;
         }

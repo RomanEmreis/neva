@@ -174,7 +174,7 @@ where
 impl ResourceTemplate {
     /// Creates a new [`ResourceTemplate`]
     #[inline]
-    pub fn new(uri: &'static str, name: &str) -> Self {
+    pub fn new<U: Into<Uri>, S: Into<String>>(uri: U, name: S) -> Self {
         Self {
             uri_template: uri.into(),
             name: name.into(),

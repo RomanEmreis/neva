@@ -4,7 +4,7 @@
 //! ## Dependencies
 //! ```toml
 //! [dependencies]
-//! neva = { version = "0.0.7", features = ["full"] }
+//! neva = { version = "0.0.8", features = ["full"] }
 //! tokio = { version = "1", features = ["full"] }
 //! ```
 //! 

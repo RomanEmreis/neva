@@ -60,7 +60,7 @@ impl RequestQueue {
     /// Takes a [`Response`] and completes the request if it's still pending
     #[inline]
     pub(crate) async fn complete(&self, resp: Response) {
-        if let Some(sender) = self.pop(&resp.id).await {
+        if let Some(sender) = self.pop(resp.id()).await {
             sender.send(resp)
         }
     }
@@ -96,11 +96,14 @@ mod tests {
 
         let expected = Response::success(id, json!({ "content": "done" }));
         handle.send(expected.clone());
+        let Response::Ok(expected) = expected else { unreachable!() };
 
-        let actual = timeout(Duration::from_secs(1), receiver)
+        let Response::Ok(actual) = timeout(Duration::from_secs(1), receiver)
             .await
             .expect("Receiver should complete")
-            .expect("Sender should send");
+            .expect("Sender should send") else { 
+            unreachable!() 
+        };
 
         assert_eq!(actual.result, expected.result);
         assert_eq!(actual.id, expected.id);
@@ -115,11 +118,15 @@ mod tests {
 
         let response = Response::success(id, json!({ "content": "done" }));
         queue.complete(response.clone()).await;
-
-        let actual = timeout(Duration::from_secs(1), receiver)
+        
+        let Response::Ok(response) = response else { unreachable!() }; 
+        
+        let Response::Ok(actual) = timeout(Duration::from_secs(1), receiver)
             .await
             .expect("Should receive within timeout")
-            .expect("Should receive response");
+            .expect("Should receive response") else { 
+            unreachable!() 
+        };
 
         assert_eq!(actual.result, response.result);
     }

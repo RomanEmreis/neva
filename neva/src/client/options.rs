@@ -1,9 +1,11 @@
 ﻿//! MCP client options
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use crate::PROTOCOL_VERSIONS;
 use crate::transport::{StdIoClient, stdio::options::StdIoOptions, TransportProto};
+use crate::client::notification_handler::NotificationsHandler;
 use crate::types::capabilities::{RootsCapability, SamplingCapability};
 use crate::types::{Root, Implementation, Uri};
 use crate::types::sampling::SamplingHandler;
@@ -12,7 +14,7 @@ const DEFAULT_REQUEST_TIMEOUT: u64 = 10;
 
 /// Represents MCP client configuration options
 pub struct McpOptions {
-    /// Information of current server's implementation
+    /// Information of current client's implementation
     pub(crate) implementation: Implementation,
     
     /// Request timeout
@@ -27,7 +29,10 @@ pub struct McpOptions {
     /// Represents a handler function that runs when received a "sampling/createMessage" request
     pub(super) sampling_handler: Option<SamplingHandler>,
     
-    /// An MCP version that server supports
+    /// Represents a hash map of notification handlers
+    pub(super) notification_handler: Option<Arc<NotificationsHandler>>,
+    
+    /// An MCP version that client supports
     protocol_ver: Option<&'static str>,
 
     /// Current transport protocol that server uses
@@ -48,7 +53,8 @@ impl Default for McpOptions {
             sampling_capability: None,
             proto: None,
             protocol_ver: None,
-            sampling_handler: None
+            sampling_handler: None,
+            notification_handler: None
         }
     }
 }

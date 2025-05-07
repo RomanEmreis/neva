@@ -22,6 +22,7 @@ use crate::{
         sampling::SamplingHandler
     }
 };
+use crate::client::notification_handler::NotificationsHandler;
 
 struct Roots {
     /// Cached list of [`Root`]
@@ -48,7 +49,10 @@ pub(super) struct RequestHandler {
     roots: Roots,
 
     /// Represents a handler function that runs when received a "sampling/createMessage" request
-    sampling_handler: Option<SamplingHandler>
+    sampling_handler: Option<SamplingHandler>,
+
+    /// Represents a hash map of notification handlers
+    notification_handler: Option<Arc<NotificationsHandler>>,
 }
 
 impl Roots {
@@ -106,7 +110,8 @@ impl RequestHandler {
             pending: RequestQueue::default(),
             sender: tx,
             timeout: options.timeout,
-            sampling_handler: options.sampling_handler.clone()
+            sampling_handler: options.sampling_handler.clone(),
+            notification_handler: options.notification_handler.clone(),
         };
         
         handler.start(rx)
@@ -154,6 +159,8 @@ impl RequestHandler {
         let mut sender = self.sender.clone();
         let roots = self.roots.inner.clone();
         let sampling_handler = self.sampling_handler.clone();
+        let notification_handler = self.notification_handler.clone();
+        
         tokio::task::spawn(async move {
             while let Ok(msg) = rx.recv().await {
                 match msg {
@@ -178,16 +185,21 @@ impl RequestHandler {
                                         Error::new(ErrorCode::MethodNotFound, "Client does not support sampling requests"))
                                 };
                                 sender.send(resp.into()).await.unwrap();
-                            }
+                            },
                             _ => {
                                 #[cfg(feature = "tracing")]
                                 tracing::debug!("Received notification method: {:?}", req.method);
                             }
                         }
                     },
-                    Message::Notification(_notification) => {
-                        #[cfg(feature = "tracing")]
-                        _notification.write();
+                    Message::Notification(notification) => {
+                        match &notification_handler { 
+                            Some(handler) => handler.notify(notification).await,
+                            None => {
+                                #[cfg(feature = "tracing")]
+                                notification.write();
+                            }
+                        };
                     }
                 }
             }
