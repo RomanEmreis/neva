@@ -46,10 +46,5 @@ async fn main() {
         app.add_resource(format!("res://test_{i}"), format!("test_{i}"));
     }
 
-    map_add_resource(&mut app);
-    map_get_resource(&mut app);
-    map_remove_resource(&mut app);
-    map_update_resource(&mut app);
-
     app.run().await;
 }

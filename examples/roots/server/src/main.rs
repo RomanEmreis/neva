@@ -8,12 +8,10 @@ async fn roots_request(mut ctx: Context) -> Result<String, Error> {
 
 #[tokio::main]
 async fn main() {
-    let mut app = App::new()
+    App::new()
         .with_options(|opt| opt
             .with_stdio()
-            .with_mcp_version("2024-11-05"));
-    
-    map_roots_request(&mut app);
-    
-    app.run().await;
+            .with_mcp_version("2024-11-05"))
+        .run()
+        .await;
 }

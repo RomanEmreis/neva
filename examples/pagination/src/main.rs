@@ -66,9 +66,6 @@ async fn main() {
 
     let res = Arc::clone(&resources);
     app.map_completion(move |params| filter_resources(res.clone(), params.arg.value));
-    
-    map_get_resource(&mut app);
-    map_validate_resource(&mut app);
 
     app.run().await;
 }

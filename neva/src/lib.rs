@@ -4,7 +4,7 @@
 //! ## Dependencies
 //! ```toml
 //! [dependencies]
-//! neva = { version = "0.0.8", features = ["full"] }
+//! neva = { version = "0.0.9", features = ["full"] }
 //! tokio = { version = "1", features = ["full"] }
 //! ```
 //! 
@@ -69,6 +69,20 @@ pub mod client;
 
 #[cfg(all(feature = "macros", feature = "server"))]
 pub use neva_macros::*;
+
+#[cfg(all(feature = "macros", feature = "server"))]
+pub mod macros {
+    pub use inventory;
+
+    pub struct ItemRegistrar(pub fn(&mut crate::App));
+    inventory::collect!(ItemRegistrar);
+    
+    impl ItemRegistrar {
+        pub(crate) fn register(&self, app: &mut crate::App) {
+            self.0(app);
+        }
+    }
+}
 
 pub(crate) const SDK_NAME: &str = "neva";
 #[cfg(any(feature = "server", feature = "client"))]
