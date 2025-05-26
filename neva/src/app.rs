@@ -82,6 +82,9 @@ impl App {
     /// # }
     /// ```
     pub async fn run(mut self) {
+        #[cfg(feature = "macros")]
+        self.register_methods();
+        
         let mut transport = self.options.transport();
         let _ = transport.start();
         
@@ -459,6 +462,15 @@ impl App {
         if let crate::types::notification::commands::MESSAGE = notification.method.as_str() {
             #[cfg(feature = "tracing")]
             notification.write();
+        }
+    }
+
+    /// Registers all declared tools, prompts and resources
+    #[cfg(feature = "macros")]
+    fn register_methods(&mut self) {
+        use crate::macros::*;
+        for registrar in inventory::iter::<ItemRegistrar> {
+            registrar.register(self);
         }
     }
 }

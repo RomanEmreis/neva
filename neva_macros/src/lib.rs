@@ -110,6 +110,9 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
                 #description_code
                 #schema_code;
         }
+        neva::macros::inventory::submit! {
+            neva::macros::ItemRegistrar(#module_name)
+        }
     };
 
     expanded.into()
@@ -197,6 +200,9 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
                 #description_code
                 #mime_code
                 #annotations_code;
+        }
+        neva::macros::inventory::submit! {
+            neva::macros::ItemRegistrar(#module_name)
         }
     };
 
@@ -297,6 +303,9 @@ pub fn prompt(attr: TokenStream, item: TokenStream) -> TokenStream {
             app.map_prompt(stringify!(#func_name), #func_name)
                 #description_code
                 #args_code;
+        }
+        neva::macros::inventory::submit! {
+            neva::macros::ItemRegistrar(#module_name)
         }
     };
 

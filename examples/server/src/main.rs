@@ -113,17 +113,6 @@ async fn main() {
             .with_tools(|tools| tools
                 .with_list_changed()));
 
-    map_say_hello(&mut app);
-    map_say_hello_to(&mut app);
-    map_say_json(&mut app);
-    map_tool_error(&mut app);
-
-    map_get_res(&mut app);
-    map_err_resource(&mut app);
-
-    map_analyze_code(&mut app);
-    map_prompt_err(&mut app);
-
     app.map_resources(list_resources);
 
     app.run().await;

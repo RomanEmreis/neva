@@ -41,12 +41,10 @@ async fn main() {
             .event_format(NotificationFormatter)) // Specify the MCP notification formatter
         .init();
 
-    let mut app = App::new()
+    App::new()
         .with_options(|opt| opt
             .with_stdio()
-            .with_mcp_version("2024-11-05"));
-
-    map_long_running_task(&mut app);
-
-    app.run().await;
+            .with_mcp_version("2024-11-05"))
+        .run()
+        .await;
 }
