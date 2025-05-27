@@ -356,13 +356,10 @@ pub fn handler(attr: TokenStream, item: TokenStream) -> TokenStream {
             Meta::List(_) => {},
             Meta::NameValue(nv) => {
                 if let Some(ident) = nv.path.get_ident() {
-                    match ident.to_string().as_str() {
-                        "command" => {
-                            if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = &nv.value {
-                                command = Some(lit_str.value());
-                            }
-                        },
-                        _ => {}
+                    if let "command" = ident.to_string().as_str() {
+                        if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = &nv.value {
+                            command = Some(lit_str.value());
+                        }
                     }
                 }
             },
