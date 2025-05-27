@@ -66,23 +66,11 @@ pub mod shared;
 pub mod app;
 #[cfg(feature = "client")]
 pub mod client;
+#[cfg(all(feature = "macros", feature = "server"))]
+pub mod macros;
 
 #[cfg(all(feature = "macros", feature = "server"))]
 pub use neva_macros::*;
-
-#[cfg(all(feature = "macros", feature = "server"))]
-pub mod macros {
-    pub use inventory;
-
-    pub struct ItemRegistrar(pub fn(&mut crate::App));
-    inventory::collect!(ItemRegistrar);
-    
-    impl ItemRegistrar {
-        pub(crate) fn register(&self, app: &mut crate::App) {
-            self.0(app);
-        }
-    }
-}
 
 pub(crate) const SDK_NAME: &str = "neva";
 #[cfg(any(feature = "server", feature = "client"))]

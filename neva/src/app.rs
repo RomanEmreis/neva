@@ -464,15 +464,6 @@ impl App {
             notification.write();
         }
     }
-
-    /// Registers all declared tools, prompts and resources
-    #[cfg(feature = "macros")]
-    fn register_methods(&mut self) {
-        use crate::macros::*;
-        for registrar in inventory::iter::<ItemRegistrar> {
-            registrar.register(self);
-        }
-    }
 }
 
 #[cfg(test)]

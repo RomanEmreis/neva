@@ -7,7 +7,7 @@
 use neva::{
     App, 
     error::{Error, ErrorCode},
-    tool, resource, prompt, 
+    tool, resource, resources, prompt, handler,
     types::{Json, Resource, ListResourcesRequestParams, ListResourcesResult}
 };
 
@@ -91,6 +91,7 @@ async fn prompt_err() -> Result<(String, String), Error> {
     Err(Error::from(ErrorCode::InvalidRequest))
 }
 
+#[resources]
 async fn list_resources(_params: ListResourcesRequestParams) -> impl Into<ListResourcesResult> {
     [
         Resource::new("res://test1", "test 1")
@@ -102,18 +103,21 @@ async fn list_resources(_params: ListResourcesRequestParams) -> impl Into<ListRe
     ]
 }
 
+#[handler(command = "ping")]
+async fn ping_handler() {
+    eprintln!("pong");
+}
+
 #[tokio::main]
 async fn main() {
-    let mut app = App::new()
+    App::new()
         .with_options(|opt| opt
             .with_stdio()
             .with_mcp_version("2024-11-05")
             .with_name("Sample MCP Server")
             .with_version("0.1.0.0")
             .with_tools(|tools| tools
-                .with_list_changed()));
-
-    app.map_resources(list_resources);
-
-    app.run().await;
+                .with_list_changed()))
+        .run()
+        .await;
 }
