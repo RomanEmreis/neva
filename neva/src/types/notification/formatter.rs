@@ -123,7 +123,7 @@ where
         event: &Event<'_>,
     ) -> std::fmt::Result {
         use std::collections::BTreeMap;
-
+        
         let meta = event.metadata();
         let level = meta.level();
         

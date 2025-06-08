@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use tokio_util::sync::CancellationToken;
 use self::{context::{Context, ServerRuntime}, options::{McpOptions, RuntimeMcpOptions}};
 use crate::error::{Error, ErrorCode};
 use crate::transport::{Receiver, Sender, Transport};
@@ -12,7 +13,20 @@ use crate::app::handler::{
     RequestFunc,
     RequestHandler
 };
-use crate::types::{InitializeResult, InitializeRequestParams, IntoResponse, Response, Request, Message, CompleteResult, CompleteRequestParams, ListToolsRequestParams, CallToolRequestParams, ListToolsResult, CallToolResponse, Tool, ToolHandler, ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate, ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, SubscribeRequestParams, UnsubscribeRequestParams, Resource, resource::template::ResourceFunc, ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt, notification::{Notification, CancelledNotificationParams}, cursor::Pagination, Uri};
+use crate::shared;
+use crate::types::{
+    InitializeResult, InitializeRequestParams, IntoResponse, 
+    Response, Request, Message, 
+    CompleteResult, CompleteRequestParams, 
+    ListToolsRequestParams, CallToolRequestParams, ListToolsResult, CallToolResponse, Tool, ToolHandler, 
+    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate, 
+    ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, 
+    SubscribeRequestParams, UnsubscribeRequestParams, Resource, resource::template::ResourceFunc, ListPromptsRequestParams, 
+    ListPromptsResult, GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt, 
+    notification::{Notification, CancelledNotificationParams}, 
+    cursor::Pagination, 
+    Uri
+};
 #[cfg(feature = "tracing")]
 use crate::types::notification::SetLevelRequestParams;
 
@@ -86,16 +100,25 @@ impl App {
         self.register_methods();
         
         let mut transport = self.options.transport();
-        let _ = transport.start();
+        let cancellation_token = transport.start();
+        self.wait_for_shutdown_signal(cancellation_token.clone());
         
         let (sender, mut receiver) = transport.split();
         let runtime = ServerRuntime::new(sender, self.options, self.handlers);
-        
-        while let Ok(msg) = receiver.recv().await {
-            match msg { 
-                Message::Request(req) => Self::handle_request(req, &runtime).await,
-                Message::Response(resp) => Self::handle_response(resp, &runtime).await,
-                Message::Notification(notification) => Self::handle_notification(notification).await
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancellation_token.cancelled() => break,
+                msg = receiver.recv() => {
+                    match msg { 
+                        Ok(msg) => Self::handle_message(msg, &runtime).await,
+                        Err(_err) => {
+                            #[cfg(feature = "tracing")]
+                            tracing::error!("Error handling message: {:?}", _err);
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
@@ -410,6 +433,15 @@ impl App {
         options.set_log_level(params.level)
     }
     
+    #[inline]
+    async fn handle_message(msg: Message, runtime: &ServerRuntime) {
+        match msg {
+            Message::Request(req) => Self::handle_request(req, runtime).await,
+            Message::Response(resp) => Self::handle_response(resp, runtime).await,
+            Message::Notification(notification) => Self::handle_notification(notification).await
+        }
+    }
+    
     async fn handle_request(req: Request, runtime: &ServerRuntime) {
         let req_id = req.id();
         
@@ -463,6 +495,11 @@ impl App {
             #[cfg(feature = "tracing")]
             notification.write();
         }
+    }
+
+    #[inline]
+    fn wait_for_shutdown_signal(&mut self, token: CancellationToken) {
+        shared::wait_for_shutdown_signal(token);
     }
 }
 
