@@ -45,7 +45,7 @@ http-client = ["dep:uuid"]
 tls = ["http-server", "volga/tls"]
 macros = ["dep:neva_macros", "dep:inventory"]
 client = ["dep:windows", "dep:nix", "tokio/process", "tokio/signal"]
-server = []
+server = ["tokio/signal"]
 tracing = ["dep:tracing", "dep:tracing-subscriber", "volga?/tracing"]
 
 [package.metadata.docs.rs]

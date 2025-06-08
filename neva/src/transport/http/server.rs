@@ -70,7 +70,7 @@ async fn handle(
     
     server
         .map_err(handle_http_error)
-        .map_group(service_url.prefix)
+        .map_group(service_url.endpoint)
         .map_get("/", handle_connection)
         .map_post("/", move |msg: Json<Message>, headers: Headers| {
             handle_message(req_tx.clone(), headers, msg.into_inner())

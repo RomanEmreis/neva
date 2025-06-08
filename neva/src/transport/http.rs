@@ -18,7 +18,7 @@ use super::{
 pub(crate) mod server;
 
 const DEFAULT_ADDR: &str = "127.0.0.1:3000";
-const DEFAULT_PREFIX: &str = "/mcp";
+const DEFAULT_MCP_ENDPOINT: &str = "/mcp";
 
 /// Represents HTTP server transport
 #[cfg(feature = "server")]
@@ -32,7 +32,7 @@ pub struct HttpServer {
 #[derive(Clone)]
 pub struct ServiceUrl {
     addr: &'static str,
-    prefix: &'static str,
+    endpoint: &'static str,
 } 
 
 /// Represents HTTP sender
@@ -65,7 +65,7 @@ impl Default for ServiceUrl {
     fn default() -> Self {
         Self {
             addr: DEFAULT_ADDR,
-            prefix: DEFAULT_PREFIX,
+            endpoint: DEFAULT_MCP_ENDPOINT,
         }
     }
 }
@@ -78,7 +78,7 @@ impl Display for ServiceUrl {
         let proto = "https";
         #[cfg(not(feature = "tls"))]
         let proto = "http";
-        write!(f, "{proto}://{}{}", self.addr, self.prefix)
+        write!(f, "{proto}://{}{}", self.addr, self.endpoint)
     }
 }
 
@@ -118,11 +118,11 @@ impl HttpServer {
         self
     }
     
-    /// Sets the URL prefix
+    /// Sets the MCP endpoint
     /// 
     /// Default: `/mcp`
-    pub fn with_prefix(mut self, prefix: &'static str) -> Self {
-        self.url.prefix = prefix;
+    pub fn with_endpoint(mut self, prefix: &'static str) -> Self {
+        self.url.endpoint = prefix;
         self
     }
     
