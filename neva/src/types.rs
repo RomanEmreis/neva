@@ -263,6 +263,36 @@ impl FromHandlerParams for InitializeRequestParams {
     }
 }
 
+impl Message {
+    /// Returns [`Message`] ID
+    pub fn id(&self) -> RequestId {
+        match self { 
+            Message::Request(req) => req.id(),
+            Message::Response(resp) => resp.id().clone(),
+            Message::Notification(_) => RequestId::default()
+        }    
+    }
+    
+    /// Returns MCP Session ID
+    pub fn session_id(&self) -> Option<&str> {
+        match self { 
+            Message::Request(req) => req.session_id.as_deref(),
+            Message::Response(resp) => resp.session_id(),
+            Message::Notification(notification) => notification.session_id.as_deref()
+        }
+    }
+    
+    /// Sets MCP Session ID
+    pub fn set_session_id(mut self, id: String) -> Self {
+        match self { 
+            Message::Request(ref mut req) => req.session_id = Some(id),
+            Message::Notification(ref mut notification) => notification.session_id = Some(id),
+            Message::Response(resp) => self = Message::Response(resp.set_session_id(id)),
+        }
+        self
+    }
+}
+
 impl Annotations {
     /// Deserializes a new [`Annotations`] from JSON string
     #[inline]

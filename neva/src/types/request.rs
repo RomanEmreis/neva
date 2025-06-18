@@ -54,6 +54,10 @@ pub struct Request {
     /// Optional parameters for the method.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub params: Option<serde_json::Value>,
+    
+    /// Current MCP Session ID
+    #[serde(skip)]
+    pub session_id: Option<String>,
 }
 
 /// Provides metadata related to the request that provides additional protocol-level information.
@@ -126,9 +130,10 @@ impl Request {
     pub fn new<T: Serialize>(id: Option<RequestId>, method: &str, params: Option<T>) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.into(),
+            session_id: None,
             id: id.unwrap_or_default(),
             method: method.into(),
-            params: params.and_then(|p| serde_json::to_value(p).ok())
+            params: params.and_then(|p| serde_json::to_value(p).ok()),
         }
     }
     

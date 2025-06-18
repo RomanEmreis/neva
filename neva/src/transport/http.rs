@@ -162,11 +162,10 @@ impl Transport for HttpServer {
             tracing::error!(logger = "neva", "The HTTP writer is already in use");
             return token;
         };
-        
         tokio::spawn(server::serve(
             self.url(),
             self.receiver.tx.clone(), 
-            sender_rx, 
+            sender_rx,
             token.clone())
         );
         

@@ -1,22 +1,36 @@
 //! HTTP server implementation
 
-use crate::{error::Error, types::Message};
-use super::ServiceUrl;
+use std::sync::Arc;
+use dashmap::DashMap;
 use tokio::sync::{mpsc, oneshot};
+use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
-use tracing::Instrument;
+use super::ServiceUrl;
+use crate::{error::Error, types::{Message}};
+use crate::types::RequestId;
 use volga::{
-    App, Json, ok, status,
-    headers::{
-        Header,
-        Headers,
-        custom_headers
-    }
+    App, Json, HttpResult, di::Dc, status, ok, 
+    http::sse::Message as SseMessage, sse,
+    headers::Headers
 };
 
+#[cfg(feature = "tracing")]
+use crate::types::notification::fmt::{register_log_sender, unregister_log_sender, send};
+
 const MCP_SESSION_ID: &str = "Mcp-Session-Id";
-custom_headers! {
-    (McpSessionId, MCP_SESSION_ID)
+
+type RequestMap = Arc<DashMap<RequestId, oneshot::Sender<Message>>>;
+
+#[derive(Clone)]
+struct RequestManager {
+    pending: RequestMap,
+    sender: mpsc::Sender<Result<Message, Error>>,
+}
+
+impl Default for RequestManager {
+    fn default() -> Self {
+        unreachable!()
+    }
 }
 
 pub(super) async fn serve(
@@ -25,56 +39,51 @@ pub(super) async fn serve(
     sender_rx: mpsc::Receiver<Message>,
     token: CancellationToken
 ) {
-    let (req_tx, req_rx) = mpsc::channel::<(Message, oneshot::Sender<Message>)>(100);
+    let pending = Arc::new(DashMap::new());
+    let manager = RequestManager {
+        pending: pending.clone(),
+        sender: recv_tx,
+    };
     tokio::join!(
-        dispatch(recv_tx, sender_rx, req_rx, token.clone()),
-        handle(service_url, req_tx, token.clone())
+        dispatch(pending.clone(), sender_rx, token.clone()),
+        handle(service_url, manager, token.clone())
     );
 }
 
 async fn dispatch(
-    recv_tx: mpsc::Sender<Result<Message, Error>>,
+    pending: RequestMap,
     mut sender_rx: mpsc::Receiver<Message>,
-    mut req_rx: mpsc::Receiver<(Message, oneshot::Sender<Message>)>,
     token: CancellationToken
 ) {
-    while let Some((msg, resp_tx)) = req_rx.recv().await {
-        let recv_tx = recv_tx.clone();
-        tokio::spawn(async move {
-            if let Err(_e) = recv_tx.send(Ok(msg)).await {
+    while let Some(msg) = sender_rx.recv().await {
+        if let Some((_, resp_tx)) = pending.remove(&msg.id()) {
+            if let Err(_e) = resp_tx.send(msg) {
                 #[cfg(feature = "tracing")]
-                tracing::error!(logger = "neva", "Failed to send request: {:?}", _e);
+                tracing::error!(logger = "neva", "Failed to send response: {:?}", _e);
+                token.cancel();
             }
-        });
-        let Some(resp) = sender_rx.recv().await else {
-            #[cfg(feature = "tracing")]
-            tracing::error!(logger = "neva", "Failed to send response");
-            token.cancel();
-            return;
-        };
-        if let Err(_e) = resp_tx.send(resp) {
-            #[cfg(feature = "tracing")]
-            tracing::error!(logger = "neva", "Failed to send response: {:?}", _e);
-            token.cancel();
+        } else {
+            send(msg);
         }
     }
 }
 
 async fn handle(
     service_url: ServiceUrl,
-    req_tx: mpsc::Sender<(Message, oneshot::Sender<Message>)>, 
+    manager: RequestManager,
     token: CancellationToken
 ) {
+    let root = "/";
     let mut server = App::new()
         .bind(service_url.addr);
     
     server
+        .add_singleton(manager)
         .map_err(handle_http_error)
         .map_group(service_url.endpoint)
-        .map_get("/", handle_connection)
-        .map_post("/", move |msg: Json<Message>, headers: Headers| {
-            handle_message(req_tx.clone(), headers, msg.into_inner())
-        });
+        .map_delete(root, handle_session_end)
+        .map_get(root, handle_connection)
+        .map_post(root, handle_message);
     
     if let Err(_e) = server.run().await {
         #[cfg(feature = "tracing")]
@@ -83,56 +92,84 @@ async fn handle(
     }
 }
 
-async fn handle_connection(id: Header<McpSessionId>) {
-    println!("Connected with session-id: {id}");
+async fn handle_session_end(headers: Headers) {
+    let Some(id) = headers
+        .get(MCP_SESSION_ID)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string()) else {
+        return;
+    };
+    #[cfg(feature = "tracing")]
+    unregister_log_sender(&id);
+}
+
+async fn handle_connection(headers: Headers) -> HttpResult {
+    let Some(id) = headers
+        .get(MCP_SESSION_ID)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string()) else { 
+        return status!(405);
+    };
+
+    let (log_tx, log_rx) = mpsc::unbounded_channel::<Message>();
+    #[cfg(feature = "tracing")]
+    register_log_sender(id.clone(), log_tx);
+    
+    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(log_rx)
+        .map(handle_sse_message);
+    
+    sse!(stream, [
+        (MCP_SESSION_ID, id)
+    ])
 }
 
 async fn handle_message(
-    req_tx: mpsc::Sender<(Message, oneshot::Sender<Message>)>,
+    manager: Dc<RequestManager>,
     headers: Headers,
-    msg: Message
-) -> volga::HttpResult {
+    Json(msg): Json<Message>
+) -> HttpResult {
     if let Message::Notification(_) = msg {
         return status!(202);
     }
-
-    #[cfg(feature = "tracing")]
-    let span = {
-        let id = headers
-            .get(MCP_SESSION_ID)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("unknown")
-            .to_string();
-        tracing::trace_span!("request", mcp_session_id = %id)
-    };
+    let id = get_or_create_mcp_session(headers);
     
-    //let (log_tx, log_rx) = mpsc::unbounded_channel::<String>();
     let (resp_tx, resp_rx) = oneshot::channel::<Message>();
-
-    let fut = async move {
-        req_tx.send((msg, resp_tx))
-            .await
-            .map_err(sender_error)?;
-        resp_rx
-            .await
-            .map_err(receiver_error)  
-    };
+    manager.pending.insert(msg.id(), resp_tx);
+    manager.sender.send(Ok(msg.set_session_id(id.clone())))
+        .await
+        .map_err(sender_error)?;
+    let resp = resp_rx
+        .await
+        .map_err(receiver_error)?;
     
-    #[cfg(feature = "tracing")]
-    let fut = fut.instrument(span);
-    ok!(fut.await?)
+    ok!(resp, [
+        (MCP_SESSION_ID, id)
+    ])
 }
 
 async fn handle_http_error(err: volga::error::Error) {
     println!("Error: {:?}", err);
 }
 
-#[inline]
-fn sender_error(err: mpsc::error::SendError<(Message, oneshot::Sender<Message>)>) -> volga::error::Error {
+fn sender_error(err: mpsc::error::SendError<Result<Message, Error>>) -> volga::error::Error {
     volga::error::Error::new("/", err.to_string())
 }
 
-#[inline]
 fn receiver_error(err: oneshot::error::RecvError) -> volga::error::Error {
     volga::error::Error::new("/", err.to_string())
+}
+
+fn handle_sse_message(msg: Message) -> Result<SseMessage, volga::error::Error> {
+    Ok(SseMessage::new()
+        .id(uuid::Uuid::new_v4())
+        .json(msg))
+}
+
+#[inline]
+fn get_or_create_mcp_session(headers: Headers) -> String {
+    headers
+        .get(MCP_SESSION_ID)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
 }

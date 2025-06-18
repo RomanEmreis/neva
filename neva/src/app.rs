@@ -6,6 +6,7 @@ use tokio_util::sync::CancellationToken;
 use self::{context::{Context, ServerRuntime}, options::{McpOptions, RuntimeMcpOptions}};
 use crate::error::{Error, ErrorCode};
 use crate::transport::{Receiver, Sender, Transport};
+use crate::shared;
 use crate::app::handler::{
     FromHandlerParams,
     GenericHandler,
@@ -13,20 +14,9 @@ use crate::app::handler::{
     RequestFunc,
     RequestHandler
 };
-use crate::shared;
-use crate::types::{
-    InitializeResult, InitializeRequestParams, IntoResponse, 
-    Response, Request, Message, 
-    CompleteResult, CompleteRequestParams, 
-    ListToolsRequestParams, CallToolRequestParams, ListToolsResult, CallToolResponse, Tool, ToolHandler, 
-    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate, 
-    ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, 
-    SubscribeRequestParams, UnsubscribeRequestParams, Resource, resource::template::ResourceFunc, ListPromptsRequestParams, 
-    ListPromptsResult, GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt, 
-    notification::{Notification, CancelledNotificationParams}, 
-    cursor::Pagination, 
-    Uri
-};
+use crate::types::{InitializeResult, InitializeRequestParams, IntoResponse, Response, Request, Message, CompleteResult, CompleteRequestParams, ListToolsRequestParams, CallToolRequestParams, ListToolsResult, CallToolResponse, Tool, ToolHandler, ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate, ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, SubscribeRequestParams, UnsubscribeRequestParams, Resource, resource::template::ResourceFunc, ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt, notification::{Notification, CancelledNotificationParams}, cursor::Pagination, Uri, RequestId};
+#[cfg(feature = "tracing")]
+use tracing::Instrument;
 #[cfg(feature = "tracing")]
 use crate::types::notification::SetLevelRequestParams;
 
@@ -223,7 +213,7 @@ impl App {
         self.options.add_resource_template(template, handler)
     }
 
-    /// Maps an MCP get prompt request to a specific function
+    /// Maps an MCP get a prompt request to a specific function
     ///
     /// # Example
     /// ```no_run
@@ -325,7 +315,7 @@ impl App {
 
     /// Completion request handler
     async fn completion() -> CompleteResult {
-        // return default as it non-optional capability so far
+        // return default as its non-optional capability so far
         CompleteResult::default()
     }
     
@@ -445,17 +435,19 @@ impl App {
     async fn handle_request(req: Request, runtime: &ServerRuntime) {
         let req_id = req.id();
         
-        let context = runtime.context();
+        let context = runtime.context(req.session_id.clone());
         let options = runtime.options();
         let handlers = runtime.request_handlers();
         let mut sender = runtime.sender();
 
         let token = options.track_request(&req_id).await;
 
-        tokio::spawn(async move {
+        #[cfg(feature = "tracing")]
+        let span = create_tracing_span(&req);
+        
+        let req_fut = async move {
             #[cfg(feature = "tracing")]
             tracing::trace!(logger = "neva", "Received: {:?}", req);
-
             let resp = if let Some(handler) = handlers.get(&req.method) {
                 tokio::select! {
                     resp = handler.call(HandlerParams::Request(context, req)) => {
@@ -480,14 +472,25 @@ impl App {
                     logger = "neva", 
                     error = format!("Error sending response: {:?}", _err));
             }
-        });
+        };
+        #[cfg(feature = "tracing")]
+        let req_fut = req_fut.instrument(span);
+        tokio::spawn(req_fut);
     }
     
     async fn handle_response(resp: Response, runtime: &ServerRuntime) {
+        let resp_id = resp.id().clone();
+        let mut sender = runtime.sender();
         runtime
             .pending_requests()
             .complete(resp)
             .await;
+        if let Err(_err) = sender.send(Response::empty(resp_id).into()).await {
+            #[cfg(feature = "tracing")]
+            tracing::error!(
+                logger = "neva", 
+                error = format!("Error sending response: {:?}", _err));
+        }
     }
     
     async fn handle_notification(notification: Notification) {
@@ -500,6 +503,15 @@ impl App {
     #[inline]
     fn wait_for_shutdown_signal(&mut self, token: CancellationToken) {
         shared::wait_for_shutdown_signal(token);
+    }
+}
+
+#[cfg(feature = "tracing")]
+fn create_tracing_span(req: &Request) -> tracing::Span {
+    if let Some(mcp_session_id) = &req.session_id {
+        tracing::info_span!("request", mcp_session_id = %mcp_session_id)
+    } else {
+        tracing::info_span!("request")
     }
 }
 

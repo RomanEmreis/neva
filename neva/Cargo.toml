@@ -14,16 +14,19 @@ keywords = ["neva", "mcp", "server", "ai", "framework"]
 
 [dependencies]
 base64 = "0.22.1"
+dashmap = "6.1.0"
 futures-util = { version = "0.3.31", default-features = false, features = ["alloc"] }
 inventory = { version = "0.3.20", optional = true }
+once_cell = { version = "1.21.3", features = ["std"], optional = true }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 tokio = { version = "1.45.1", features = ["sync", "io-std", "io-util", "rt", "time", "macros"] }
+tokio-stream = { version = "0.1.17", optional = true }
 tokio-util = "0.7.15"
 tracing = { version = "0.1.41", optional = true }
 tracing-subscriber = { version = "0.3.19", features = ["fmt", "json"], optional = true }
-volga = { version = "0.5.8", optional = true }
-uuid = { version = "1.17.0", optional = true }
+volga = { version = "0.5.8", features = ["di"], optional = true }
+uuid = { version = "1.17.0", features = ["v4"], optional = true }
 neva_macros = { path = "../neva_macros", version = "0.1.0", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -40,13 +43,13 @@ default = []
 full = ["macros", "tracing", "server-full", "client-full"]
 server-full = ["server", "macros", "tracing", "http-server"]
 client-full = ["client", "tracing", "http-client"]
-http-server = ["dep:volga", "dep:uuid"]
+http-server = ["dep:volga", "dep:uuid", "dep:tokio-stream"]
 http-client = ["dep:uuid"]
 tls = ["http-server", "volga/tls"]
 macros = ["dep:neva_macros", "dep:inventory"]
 client = ["dep:windows", "dep:nix", "tokio/process", "tokio/signal"]
 server = ["tokio/signal"]
-tracing = ["dep:tracing", "dep:tracing-subscriber", "volga?/tracing"]
+tracing = ["dep:tracing", "dep:tracing-subscriber", "dep:once_cell", "volga?/tracing"]
 
 [package.metadata.docs.rs]
 all-features = true
