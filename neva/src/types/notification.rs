@@ -54,7 +54,7 @@ pub struct Notification {
 
     /// Current MCP Session ID
     #[serde(skip)]
-    pub session_id: Option<String>,
+    pub session_id: Option<uuid::Uuid>,
 }
 
 /// This notification can be sent by either side to indicate that it is cancelling 
@@ -106,6 +106,16 @@ impl Notification {
             session_id: None,
             method: method.into(), 
             params
+        }
+    }
+
+    /// Returns the full id (session_id?/"(no_id)")
+    pub fn full_id(&self) -> RequestId {
+        let id = RequestId::default();
+        if let Some(session_id) = self.session_id {
+            RequestId::String(format!("{}/{}", session_id, id))
+        } else {
+            id
         }
     }
     

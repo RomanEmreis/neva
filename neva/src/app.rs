@@ -443,16 +443,18 @@ impl App {
     
     async fn handle_request(req: Request, runtime: &ServerRuntime) {
         let req_id = req.id();
+        let session_id = req.session_id;
+        let full_id = req.full_id();
         
-        let context = runtime.context(req.session_id.clone());
+        let context = runtime.context(session_id);
         let options = runtime.options();
         let handlers = runtime.request_handlers();
         let mut sender = runtime.sender();
 
-        let token = options.track_request(&req_id).await;
+        let token = options.track_request(&full_id).await;
 
         #[cfg(feature = "tracing")]
-        let span = create_tracing_span(&req);
+        let span = create_tracing_span(session_id);
         
         let req_fut = async move {
             #[cfg(feature = "tracing")]
@@ -460,22 +462,27 @@ impl App {
             let resp = if let Some(handler) = handlers.get(&req.method) {
                 tokio::select! {
                     resp = handler.call(HandlerParams::Request(context, req)) => {
-                        options.complete_request(&req_id).await;
+                        options.complete_request(&full_id).await;
                         resp
                     }
                     _ = token.cancelled() => {
                         #[cfg(feature = "tracing")]
                         tracing::debug!(
                             logger = "neva", 
-                            "The request with ID: {} has been cancelled", req_id);
+                            "The request with ID: {} has been cancelled", full_id);
                         Err(Error::from(ErrorCode::RequestCancelled))
                     }
                 }
             } else {
                 Err(Error::from(ErrorCode::MethodNotFound))
             };
-
-            if let Err(_err) = sender.send(resp.into_response(req_id).into()).await {
+            
+            let mut resp = resp.into_response(req_id);
+            if let Some(session_id) = session_id {
+                resp = resp.set_session_id(session_id);
+            }
+            
+            if let Err(_err) = sender.send(resp.into()).await {
                 #[cfg(feature = "tracing")]
                 tracing::error!(
                     logger = "neva", 
@@ -489,12 +496,20 @@ impl App {
     
     async fn handle_response(resp: Response, runtime: &ServerRuntime) {
         let resp_id = resp.id().clone();
+        let session_id = resp.session_id().cloned();
         let mut sender = runtime.sender();
+        
         runtime
             .pending_requests()
             .complete(resp)
             .await;
-        if let Err(_err) = sender.send(Response::empty(resp_id).into()).await {
+
+        let mut resp = Response::empty(resp_id);
+        if let Some(session_id) = session_id {
+            resp = resp.set_session_id(session_id);
+        }
+        
+        if let Err(_err) = sender.send(resp.into()).await {
             #[cfg(feature = "tracing")]
             tracing::error!(
                 logger = "neva", 
@@ -516,9 +531,9 @@ impl App {
 }
 
 #[cfg(feature = "tracing")]
-fn create_tracing_span(req: &Request) -> tracing::Span {
-    if let Some(mcp_session_id) = &req.session_id {
-        tracing::info_span!("request", mcp_session_id = %mcp_session_id)
+fn create_tracing_span(session_id: Option<uuid::Uuid>) -> tracing::Span {
+    if let Some(mcp_session_id) = session_id {
+        tracing::info_span!("request", mcp_session_id = mcp_session_id.to_string())
     } else {
         tracing::info_span!("request")
     }

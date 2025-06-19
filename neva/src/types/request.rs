@@ -57,7 +57,7 @@ pub struct Request {
     
     /// Current MCP Session ID
     #[serde(skip)]
-    pub session_id: Option<String>,
+    pub session_id: Option<uuid::Uuid>,
 }
 
 /// Provides metadata related to the request that provides additional protocol-level information.
@@ -136,19 +136,22 @@ impl Request {
             params: params.and_then(|p| serde_json::to_value(p).ok()),
         }
     }
-    
-    /// Consumes the request and returns request's id if it's specified, otherwise returns default value
-    /// 
-    /// Default: `(no id)`
-    pub fn into_id(self) -> RequestId {
-        self.id
-    }
 
     /// Returns request's id if it's specified, otherwise returns default value
     ///
     /// Default: `(no id)`
     pub fn id(&self) -> RequestId {
         self.id.clone()
+    }
+
+    /// Returns the full id (session_id?/request_id)
+    pub fn full_id(&self) -> RequestId {
+        let id = &self.id;
+        if let Some(session_id) = self.session_id {
+            RequestId::String(format!("{}/{}", session_id, id))
+        } else {
+            id.clone()
+        }
     }
     
     /// Returns [`Request`] params metadata

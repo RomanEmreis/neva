@@ -1,41 +1,20 @@
 ﻿//! A generic tracing/logging formatting layer for notifications
 
 use once_cell::sync::Lazy;
-use dashmap::DashMap;
-use tokio::sync::mpsc::{channel, Sender, UnboundedSender};
+use tokio::sync::mpsc::{channel, Sender};
 use tracing::{Event, Id, Subscriber, field::Visit};
 use tracing::field::Field;
 use tracing::span::Attributes;
 use tracing_subscriber::{layer::Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 use std::io::{self, Write};
-use crate::types::{
-    notification::{Notification, formatter::build_notification},
-    Message
-};
+use crate::shared::message_registry::MessageRegistry;
+use crate::types::notification::{Notification, formatter::build_notification};
 
 const MCP_SESSION_ID: &str = "mcp_session_id";
 
-static LOG_REGISTRY: Lazy<DashMap<String, UnboundedSender<Message>>> =
-    Lazy::new(DashMap::new);
-
-#[inline]
-pub(crate) fn register_log_sender(key: String, sender: UnboundedSender<Message>) {
-    LOG_REGISTRY.insert(key, sender);
-}
-
-#[inline]
-pub(crate) fn unregister_log_sender(key: &str) {
-    LOG_REGISTRY.remove(key);
-}
-
-#[inline]
-pub(crate) fn send(message: Message) {
-    let Some(session_id) = message.session_id() else { return; };
-    if let Some(sender) = LOG_REGISTRY.get(session_id) {
-        let _ = sender.send(message);
-    }
-}
+pub(crate) static LOG_REGISTRY: Lazy<MessageRegistry> =
+    Lazy::new(MessageRegistry::new);
 
 /// Creates a custom tracing layer that delivers messages to MCP Client
 /// 
@@ -52,7 +31,7 @@ pub fn layer() -> MpscLayer {
     let (tx, mut rx) = channel::<Notification>(100);
     tokio::spawn(async move {
         while let Some(notification) = rx.recv().await {
-            send(notification.into());
+            let _ = LOG_REGISTRY.send(notification.into());
         }
     });
     MpscLayer {
@@ -113,7 +92,7 @@ where
         if let Some(span) = ctx.event_span(event) {
             notification.session_id = span
                 .extensions()
-                .get::<String>()
+                .get::<uuid::Uuid>()
                 .cloned();
             self.sender.send_notification(notification);            
         } else {
@@ -125,21 +104,31 @@ where
 }
 
 struct SpanVisitor {
-    session_id: Option<String>,
+    session_id: Option<uuid::Uuid>,
 }
 
 impl Visit for SpanVisitor {
     #[inline]
     fn record_str(&mut self, field: &Field, value: &str) {
         if field.name() == MCP_SESSION_ID {
-            self.session_id = Some(value.into());
+            if let Ok(session_id) = uuid::Uuid::parse_str(value) {
+                self.session_id = Some(session_id);
+            }
         }
     }
-
+    
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         // fallback if id was passed as %mcp_session_id or something else
         if field.name() == MCP_SESSION_ID && self.session_id.is_none() {
-            self.session_id = Some(format!("{:?}", value));
+            let formatted = format!("{value:?}");
+            let stripped = formatted
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .unwrap_or(&formatted);
+            
+            if let Ok(session_id) = uuid::Uuid::parse_str(stripped) { 
+                self.session_id = Some(session_id);
+            } 
         }
     }
 }

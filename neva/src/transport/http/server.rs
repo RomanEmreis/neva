@@ -3,11 +3,14 @@
 use std::sync::Arc;
 use dashmap::DashMap;
 use tokio::sync::{mpsc, oneshot};
-use tokio_stream::StreamExt;
+use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
 use tokio_util::sync::CancellationToken;
 use super::ServiceUrl;
-use crate::{error::Error, types::{Message}};
-use crate::types::RequestId;
+use crate::{
+    shared::message_registry::MessageRegistry,
+    types::{RequestId, Message},
+    error::Error
+};
 use volga::{
     App, Json, HttpResult, di::Dc, status, ok, 
     http::sse::Message as SseMessage, sse,
@@ -15,7 +18,7 @@ use volga::{
 };
 
 #[cfg(feature = "tracing")]
-use crate::types::notification::fmt::{register_log_sender, unregister_log_sender, send};
+use crate::types::notification::fmt::LOG_REGISTRY;
 
 const MCP_SESSION_ID: &str = "Mcp-Session-Id";
 
@@ -24,6 +27,7 @@ type RequestMap = Arc<DashMap<RequestId, oneshot::Sender<Message>>>;
 #[derive(Clone)]
 struct RequestManager {
     pending: RequestMap,
+    msg_registry: Arc<MessageRegistry>,
     sender: mpsc::Sender<Result<Message, Error>>,
 }
 
@@ -40,30 +44,34 @@ pub(super) async fn serve(
     token: CancellationToken
 ) {
     let pending = Arc::new(DashMap::new());
+    let registry = Arc::new(MessageRegistry::new());
     let manager = RequestManager {
         pending: pending.clone(),
+        msg_registry: registry.clone(),
         sender: recv_tx,
     };
     tokio::join!(
-        dispatch(pending.clone(), sender_rx, token.clone()),
+        dispatch(pending.clone(), registry.clone(), sender_rx, token.clone()),
         handle(service_url, manager, token.clone())
     );
 }
 
 async fn dispatch(
     pending: RequestMap,
+    msg_registry: Arc<MessageRegistry>,
     mut sender_rx: mpsc::Receiver<Message>,
     token: CancellationToken
 ) {
     while let Some(msg) = sender_rx.recv().await {
-        if let Some((_, resp_tx)) = pending.remove(&msg.id()) {
+        if let Some((_, resp_tx)) = pending.remove(&msg.full_id()) {
             if let Err(_e) = resp_tx.send(msg) {
                 #[cfg(feature = "tracing")]
                 tracing::error!(logger = "neva", "Failed to send response: {:?}", _e);
                 token.cancel();
             }
-        } else {
-            send(msg);
+        } else if let Err(_e) = msg_registry.send(msg) {
+            #[cfg(feature = "tracing")]
+            tracing::error!(logger = "neva", "Failed to send server request: {:?}", _e);
         }
     }
 }
@@ -81,9 +89,9 @@ async fn handle(
         .add_singleton(manager)
         .map_err(handle_http_error)
         .map_group(service_url.endpoint)
-        .map_delete(root, handle_session_end)
         .map_get(root, handle_connection)
-        .map_post(root, handle_message);
+        .map_post(root, handle_message)
+        .map_delete(root, handle_session_end);
     
     if let Err(_e) = server.run().await {
         #[cfg(feature = "tracing")]
@@ -92,34 +100,38 @@ async fn handle(
     }
 }
 
-async fn handle_session_end(headers: Headers) {
-    let Some(id) = headers
-        .get(MCP_SESSION_ID)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string()) else {
-        return;
+async fn handle_session_end(manager: Dc<RequestManager>, headers: Headers) -> HttpResult {
+    let Some(id) = get_mcp_session_id(headers) else {
+        return status!(405);
     };
+    
     #[cfg(feature = "tracing")]
-    unregister_log_sender(&id);
+    LOG_REGISTRY.unregister(&id);
+    manager.msg_registry.unregister(&id);
+    
+    ok!([
+        (MCP_SESSION_ID, id.to_string())
+    ])
 }
 
-async fn handle_connection(headers: Headers) -> HttpResult {
-    let Some(id) = headers
-        .get(MCP_SESSION_ID)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string()) else { 
+async fn handle_connection(manager: Dc<RequestManager>, headers: Headers) -> HttpResult {
+    let Some(id) = get_mcp_session_id(headers) else { 
         return status!(405);
     };
 
     let (log_tx, log_rx) = mpsc::unbounded_channel::<Message>();
+    let (msg_tx, msg_rx) = mpsc::unbounded_channel::<Message>();
+    
     #[cfg(feature = "tracing")]
-    register_log_sender(id.clone(), log_tx);
+    LOG_REGISTRY.register(id, log_tx);
+    manager.msg_registry.register(id, msg_tx);
     
-    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(log_rx)
-        .map(handle_sse_message);
+    let stream = futures_util::stream::select(
+        UnboundedReceiverStream::new(log_rx), 
+        UnboundedReceiverStream::new(msg_rx));
     
-    sse!(stream, [
-        (MCP_SESSION_ID, id)
+    sse!(stream.map(handle_sse_message), [
+        (MCP_SESSION_ID, id.to_string())
     ])
 }
 
@@ -128,14 +140,16 @@ async fn handle_message(
     headers: Headers,
     Json(msg): Json<Message>
 ) -> HttpResult {
-    if let Message::Notification(_) = msg {
-        return status!(202);
-    }
     let id = get_or_create_mcp_session(headers);
-    
+    if let Message::Notification(_) = msg {
+        return status!(202, [
+            (MCP_SESSION_ID, id.to_string())
+        ]);
+    }
+    let msg = msg.set_session_id(id);
     let (resp_tx, resp_rx) = oneshot::channel::<Message>();
-    manager.pending.insert(msg.id(), resp_tx);
-    manager.sender.send(Ok(msg.set_session_id(id.clone())))
+    manager.pending.insert(msg.full_id(), resp_tx);
+    manager.sender.send(Ok(msg))
         .await
         .map_err(sender_error)?;
     let resp = resp_rx
@@ -143,7 +157,7 @@ async fn handle_message(
         .map_err(receiver_error)?;
     
     ok!(resp, [
-        (MCP_SESSION_ID, id)
+        (MCP_SESSION_ID, id.to_string())
     ])
 }
 
@@ -166,10 +180,14 @@ fn handle_sse_message(msg: Message) -> Result<SseMessage, volga::error::Error> {
 }
 
 #[inline]
-fn get_or_create_mcp_session(headers: Headers) -> String {
+fn get_or_create_mcp_session(headers: Headers) -> uuid::Uuid {
+    get_mcp_session_id(headers).unwrap_or_else(uuid::Uuid::new_v4)
+}
+
+#[inline]
+fn get_mcp_session_id(headers: Headers) -> Option<uuid::Uuid> {
     headers
         .get(MCP_SESSION_ID)
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
 }

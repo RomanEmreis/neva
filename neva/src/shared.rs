@@ -4,6 +4,7 @@ use tokio_util::sync::CancellationToken;
 pub(crate) use requests_queue::RequestQueue;
 
 pub(crate) mod requests_queue;
+pub(crate) mod message_registry;
 
 #[inline]
 pub(crate) fn wait_for_shutdown_signal(token: CancellationToken) {

@@ -36,7 +36,7 @@ pub struct OkResponse {
 
     /// Current MCP Session ID
     #[serde(skip)]
-    pub session_id: Option<String>,
+    pub session_id: Option<uuid::Uuid>,
 }
 
 /// A response to a request that indicates an error occurred.
@@ -56,7 +56,7 @@ pub struct ErrorResponse {
 
     /// Current MCP Session ID
     #[serde(skip)]
-    pub session_id: Option<String>,
+    pub session_id: Option<uuid::Uuid>,
 } 
 
 impl From<Response> for Message {
@@ -97,11 +97,21 @@ impl Response {
         })
     }
     
-    /// Returns Response ID
+    /// Returns [`Response`] ID
     pub fn id(&self) -> &RequestId {
         match &self {
             Response::Ok(ok) => &ok.id,
             Response::Err(err) => &err.id
+        }
+    }
+    
+    /// Returns the full id (session_id?/response_id)
+    pub fn full_id(&self) -> RequestId {
+        let id = self.id();
+        if let Some(session_id) = self.session_id() {
+            RequestId::String(format!("{}/{}", session_id, id))
+        } else {
+            id.clone()
         }
     }
     
@@ -115,15 +125,16 @@ impl Response {
     }
 
     /// Returns MCP Session ID
-    pub fn session_id(&self) -> Option<&str> {
+    #[inline]
+    pub fn session_id(&self) -> Option<&uuid::Uuid> {
         match &self {
-            Response::Ok(ok) => ok.session_id.as_deref(),
-            Response::Err(err) => err.session_id.as_deref(),
+            Response::Ok(ok) => ok.session_id.as_ref(),
+            Response::Err(err) => err.session_id.as_ref(),
         }
     }
 
     /// Set MCP `session_id` for the response
-    pub fn set_session_id(mut self, id: String) -> Self {
+    pub fn set_session_id(mut self, id: uuid::Uuid) -> Self {
         match &mut self {
             Response::Ok(ok) => ok.session_id = Some(id),
             Response::Err(err) => err.session_id = Some(id)

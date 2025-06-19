@@ -39,7 +39,7 @@ pub(crate) struct ServerRuntime {
 /// Represents MCP Request Context
 #[derive(Clone)]
 pub struct Context {
-    pub session_id: Option<String>,
+    pub session_id: Option<uuid::Uuid>,
     pub(crate) options: RuntimeMcpOptions,
     pending: RequestQueue,
     sender: TransportProtoSender,
@@ -77,7 +77,7 @@ impl ServerRuntime {
     }
     
     /// Creates a new MCP request [`Context`]
-    pub(crate) fn context(&self, session_id: Option<String>) -> Context {
+    pub(crate) fn context(&self, session_id: Option<uuid::Uuid>) -> Context {
         Context {
             session_id,
             pending: self.pending.clone(),
@@ -364,12 +364,11 @@ impl Context {
     /// Sends a [`Request`] to a client
     #[inline]
     async fn send_request(&mut self, mut req: Request) -> Result<Response, Error> {
-        let mut id = req.id();
-        if let Some(session_id) = &self.session_id {
-            req.session_id = Some(session_id.clone());
-            id = RequestId::String(format!("{}/{}", session_id, id));
+        if let Some(session_id) = self.session_id {
+            req.session_id = Some(session_id);
         }
 
+        let id = req.full_id();
         let receiver = self.pending.push(&id).await;
         self.sender.send(req.into()).await?;
 
@@ -390,7 +389,10 @@ impl Context {
         method: &str, 
         params: Option<serde_json::Value>
     ) -> Result<(), Error> {
-        let notification = Notification::new(method, params);
+        let mut notification = Notification::new(method, params);
+        if let Some(session_id) = self.session_id {
+            notification.session_id = Some(session_id);
+        }
         self.sender.send(notification.into()).await
     }
 }
