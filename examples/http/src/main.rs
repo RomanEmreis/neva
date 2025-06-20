@@ -1,7 +1,9 @@
 //! Run with:
 //!
 //! ```no_rust
-//! npx @modelcontextprotocol/inspector cargo run -p example-http
+//! npx @modelcontextprotocol/inspector 
+//! 
+//! cargo run -p example-http
 //! ```
 use neva::{App, Context, tool};
 use tracing_subscriber::{filter, reload, prelude::*};

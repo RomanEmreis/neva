@@ -128,14 +128,14 @@ impl RequestHandler {
     #[inline]
     pub(super) async fn send_request(&mut self, request: Request) -> Result<Response, Error> {
         let id = request.id();
-        let receiver = self.pending.push(&id).await;
+        let receiver = self.pending.push(&id);
         self.sender.send(request.into()).await?;
 
         match timeout(self.timeout, receiver).await {
             Ok(Ok(resp)) => Ok(resp),
             Ok(Err(_)) => Err(Error::new(ErrorCode::InternalError, "Response channel closed")),
             Err(_) => {
-                _ = self.pending.pop(&id).await;
+                _ = self.pending.pop(&id);
                 Err(Error::new(ErrorCode::Timeout, "Request timed out"))
             }
         }
@@ -164,7 +164,7 @@ impl RequestHandler {
         tokio::task::spawn(async move {
             while let Ok(msg) = rx.recv().await {
                 match msg {
-                    Message::Response(resp) => pending.complete(resp).await,
+                    Message::Response(resp) => pending.complete(resp),
                     Message::Request(req) => {
                         match req.method.as_str() { 
                             crate::types::root::commands::LIST => {

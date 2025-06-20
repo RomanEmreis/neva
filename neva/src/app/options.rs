@@ -1,16 +1,12 @@
 ﻿//! MCP server options
 
-use std::{sync::Arc, time::Duration};
-use tokio::sync::RwLock;
+use dashmap::{DashMap, DashSet};
+use std::{borrow::Cow, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 use crate::transport::{StdIoServer, TransportProto};
 #[cfg(feature = "http-server")]
 use crate::transport::HttpServer;
 use crate::app::{handler::RequestHandler, collection::Collection};
-use std::{
-    borrow::Cow,
-    collections::{HashMap, HashSet}
-};
 
 use crate::PROTOCOL_VERSIONS;
 use crate::types::{
@@ -62,7 +58,7 @@ pub struct McpOptions {
     pub(super) resources_templates: Collection<ResourceTemplate>,
 
     /// Holds current subscriptions to resource changes
-    pub(super) resource_subscriptions: RwLock<HashSet<Uri>>,
+    pub(super) resource_subscriptions: DashSet<Uri>,
 
     /// Tools capability options
     tools_capability: Option<ToolsCapability>,
@@ -80,14 +76,14 @@ pub struct McpOptions {
     /// An MCP version that server supports
     protocol_ver: Option<&'static str>,
     
-    /// Current transport protocol that server uses
+    /// Current transport protocol that this server uses
     proto: Option<TransportProto>,
 
     /// A resource template routing data structure
     resource_routes: Route,
     
     /// Currently running requests
-    requests: RwLock<HashMap<RequestId, CancellationToken>>,
+    requests: DashMap<RequestId, CancellationToken>,
 }
 
 impl Default for McpOptions {
@@ -121,11 +117,22 @@ impl McpOptions {
         self
     }
 
-    /// Sets stdio as a transport protocol
+    /// Sets Streamable HTTP as a transport protocol
     #[cfg(feature = "http-server")]
     pub fn with_http<F: FnOnce(HttpServer) -> HttpServer>(mut self, config: F) -> Self {
         self.proto = Some(TransportProto::HttpServer(config(HttpServer::default())));
         self
+    }
+
+    /// Sets Streamable HTTP as a transport protocol with default configuration
+    /// 
+    /// Default:
+    /// * __IP__: 127.0.0.1
+    /// * __PORT__: 3000
+    /// * __ENDPOINT__: /mcp
+    #[cfg(feature = "http-server")]
+    pub fn with_default_http(self) -> Self {
+        self.with_http(|http| http)
     }
     
     /// Specifies MCP server name
@@ -134,7 +141,7 @@ impl McpOptions {
         self
     }
 
-    /// Specifies MCP server version
+    /// Specifies the MCP server version
     pub fn with_version(mut self, ver: &str) -> Self {
         self.implementation.version = ver.into();
         self
@@ -213,26 +220,22 @@ impl McpOptions {
     }
     
     /// Tracks the request with `req_id` and returns the [`CancellationToken`] for this request
-    pub(crate) async fn track_request(&self, req_id: &RequestId) -> CancellationToken {
+    pub(crate) fn track_request(&self, req_id: &RequestId) -> CancellationToken {
         let token = CancellationToken::new();
-
-        let mut requests = self.requests.write().await;
-        requests.insert(req_id.clone(), token.clone());
-        
+        self.requests.insert(req_id.clone(), token.clone());
         token
     }
     
     /// Cancels the request with `req_id` if it is present
-    pub(crate) async fn cancel_request(&self, req_id: &RequestId) {
-        if let Some(token) = self.requests.write().await.remove(req_id) {
+    pub(crate) fn cancel_request(&self, req_id: &RequestId) {
+        if let Some((_, token)) = self.requests.remove(req_id) {
             token.cancel();
         }
     }
 
     /// Completes the request with `req_id` if it is present
-    pub(crate) async fn complete_request(&self, req_id: &RequestId) {
-        self.requests.write()
-            .await
+    pub(crate) fn complete_request(&self, req_id: &RequestId) {
+        self.requests
             .remove(req_id);
     }
     

@@ -1,4 +1,4 @@
-﻿//! Represents a request from MCP client
+﻿//! Represents a request from an MCP client
 
 use std::fmt;
 use std::fmt::{Debug, Formatter};
@@ -9,33 +9,10 @@ use super::{ProgressToken, Message, JSONRPC_VERSION};
 use crate::Context;
 
 pub use from_request::FromRequest;
+pub use request_id::RequestId;
 
 pub mod from_request;
-
-/// A unique identifier for a request
-#[derive(Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum RequestId {
-    String(String),
-    Number(i64),
-}
-
-impl Clone for RequestId {
-    #[inline]
-    fn clone(&self) -> Self {
-        match self { 
-            RequestId::Number(num) => RequestId::Number(*num),
-            RequestId::String(string) => RequestId::String(string.clone()),
-        }
-    }
-}
-
-impl Default for RequestId {
-    #[inline]
-    fn default() -> RequestId {
-        Self::String("(no id)".into())
-    }
-}
+pub mod request_id;
 
 /// A request in the JSON-RPC protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,30 +64,10 @@ impl Debug for RequestParamsMeta {
     }
 }
 
-impl fmt::Display for RequestId {
-    #[inline]
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            RequestId::String(str) => write!(f, "{}", str),
-            RequestId::Number(num) => write!(f, "{}", num),
-        }
-    }
-}
-
 impl From<Request> for Message {
     #[inline]
     fn from(request: Request) -> Self {
         Self::Request(request)
-    }
-}
-
-impl From<&RequestId> for ProgressToken {
-    #[inline]
-    fn from(id: &RequestId) -> ProgressToken {
-        match id { 
-            RequestId::Number(num) => ProgressToken::Number(*num),
-            RequestId::String(str) => ProgressToken::String(str.clone()),
-        }
     }
 }
 
@@ -146,11 +103,11 @@ impl Request {
 
     /// Returns the full id (session_id?/request_id)
     pub fn full_id(&self) -> RequestId {
-        let id = &self.id;
+        let id = self.id.clone();
         if let Some(session_id) = self.session_id {
-            RequestId::String(format!("{}/{}", session_id, id))
+            id.concat(RequestId::Uuid(session_id))
         } else {
-            id.clone()
+            id
         }
     }
     
@@ -165,5 +122,5 @@ impl Request {
 
 #[cfg(test)]
 mod tests {
-
+    
 }

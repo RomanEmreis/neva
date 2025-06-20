@@ -162,7 +162,7 @@ impl Context {
         }
         
         let uri = uri.into();
-        if self.is_subscribed(&uri).await {
+        if self.is_subscribed(&uri) {
             let params = serde_json::to_value(SubscribeRequestParams::from(uri)).ok();
             self.send_notification(crate::types::resource::commands::UPDATED, params).await   
         } else { 
@@ -171,29 +171,23 @@ impl Context {
     }
 
     /// Adds a subscription to the resource with the [`Uri`]
-    pub async fn subscribe_to_resource(&mut self, uri: impl Into<Uri>) {
+    pub fn subscribe_to_resource(&mut self, uri: impl Into<Uri>) {
         self.options
             .resource_subscriptions
-            .write()
-            .await
             .insert(uri.into());
     }
     
     /// Removes a subscription to the resource with the [`Uri`]
-    pub async fn unsubscribe_from_resource(&mut self, uri: &Uri) {
+    pub fn unsubscribe_from_resource(&mut self, uri: &Uri) {
         self.options
             .resource_subscriptions
-            .write()
-            .await
             .remove(uri);
     }
     
     /// Returns `true` if there is a subscription to changes of the resource with the [`Uri`]
-    pub async fn is_subscribed(&self, uri: &Uri) -> bool {
+    pub fn is_subscribed(&self, uri: &Uri) -> bool {
         self.options
             .resource_subscriptions
-            .read()
-            .await
             .contains(uri)
     }
 
@@ -316,7 +310,7 @@ impl Context {
     pub async fn list_roots(&mut self) -> Result<ListRootsResult, Error> {
         let method = crate::types::root::commands::LIST;
         let req = Request::new(
-            Some(RequestId::String(method.into())),
+            Some(RequestId::Uuid(uuid::Uuid::new_v4())),
             method,
             Some(ListRootsRequestParams::default()));
         
@@ -352,7 +346,7 @@ impl Context {
     pub async fn sample(&mut self, params: CreateMessageRequestParams) -> Result<CreateMessageResult, Error> {
         let method = crate::types::sampling::commands::CREATE;
         let req = Request::new(
-            Some(RequestId::String(method.into())),
+            Some(RequestId::Uuid(uuid::Uuid::new_v4())),
             method,
             Some(params));
 
@@ -369,14 +363,14 @@ impl Context {
         }
 
         let id = req.full_id();
-        let receiver = self.pending.push(&id).await;
+        let receiver = self.pending.push(&id);
         self.sender.send(req.into()).await?;
 
         match timeout(self.timeout, receiver).await {
             Ok(Ok(resp)) => Ok(resp),
             Ok(Err(_)) => Err(Error::new(ErrorCode::InternalError, "Response channel closed")),
             Err(_) => {
-                _ = self.pending.pop(&id).await;
+                _ = self.pending.pop(&id);
                 Err(Error::new(ErrorCode::Timeout, "Request timed out"))
             }
         }

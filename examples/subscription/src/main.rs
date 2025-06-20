@@ -4,13 +4,13 @@
 //! cargo run -p example-subscription
 //! ```
 
-use neva::{Client, error::Error, types::resource::SubscribeRequestParams};
+use neva::{Client, error::Error, types::{notification, resource::SubscribeRequestParams}};
 use tracing_subscriber::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
+        .with(notification::fmt::layer())
         .init();
     
     let mut client = Client::new()

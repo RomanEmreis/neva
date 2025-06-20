@@ -113,7 +113,7 @@ impl Notification {
     pub fn full_id(&self) -> RequestId {
         let id = RequestId::default();
         if let Some(session_id) = self.session_id {
-            RequestId::String(format!("{}/{}", session_id, id))
+            id.concat(RequestId::Uuid(session_id))
         } else {
             id
         }
