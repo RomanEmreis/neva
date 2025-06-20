@@ -2,9 +2,11 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use tokio_util::sync::CancellationToken;
 use self::{context::{Context, ServerRuntime}, options::{McpOptions, RuntimeMcpOptions}};
 use crate::error::{Error, ErrorCode};
 use crate::transport::{Receiver, Sender, Transport};
+use crate::shared;
 use crate::app::handler::{
     FromHandlerParams,
     GenericHandler,
@@ -12,7 +14,18 @@ use crate::app::handler::{
     RequestFunc,
     RequestHandler
 };
-use crate::types::{InitializeResult, InitializeRequestParams, IntoResponse, Response, Request, Message, CompleteResult, CompleteRequestParams, ListToolsRequestParams, CallToolRequestParams, ListToolsResult, CallToolResponse, Tool, ToolHandler, ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate, ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, SubscribeRequestParams, UnsubscribeRequestParams, Resource, resource::template::ResourceFunc, ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt, notification::{Notification, CancelledNotificationParams}, cursor::Pagination, Uri};
+use crate::types::{
+    InitializeResult, InitializeRequestParams, IntoResponse, Response, Request, Message, 
+    CompleteResult, CompleteRequestParams, ListToolsRequestParams, CallToolRequestParams, ListToolsResult, CallToolResponse, Tool, ToolHandler, 
+    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate, 
+    ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, 
+    SubscribeRequestParams, UnsubscribeRequestParams, Resource, resource::template::ResourceFunc, 
+    ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt, 
+    notification::{Notification, CancelledNotificationParams}, 
+    cursor::Pagination, Uri
+};
+#[cfg(feature = "tracing")]
+use tracing::Instrument;
 #[cfg(feature = "tracing")]
 use crate::types::notification::SetLevelRequestParams;
 
@@ -86,16 +99,25 @@ impl App {
         self.register_methods();
         
         let mut transport = self.options.transport();
-        let _ = transport.start();
+        let cancellation_token = transport.start();
+        self.wait_for_shutdown_signal(cancellation_token.clone());
         
         let (sender, mut receiver) = transport.split();
         let runtime = ServerRuntime::new(sender, self.options, self.handlers);
-        
-        while let Ok(msg) = receiver.recv().await {
-            match msg { 
-                Message::Request(req) => Self::handle_request(req, &runtime).await,
-                Message::Response(resp) => Self::handle_response(resp, &runtime).await,
-                Message::Notification(notification) => Self::handle_notification(notification).await
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancellation_token.cancelled() => break,
+                msg = receiver.recv() => {
+                    match msg { 
+                        Ok(msg) => Self::handle_message(msg, &runtime).await,
+                        Err(_err) => {
+                            #[cfg(feature = "tracing")]
+                            tracing::error!("Error handling message: {:?}", _err);
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
@@ -200,7 +222,7 @@ impl App {
         self.options.add_resource_template(template, handler)
     }
 
-    /// Maps an MCP get prompt request to a specific function
+    /// Maps an MCP get a prompt request to a specific function
     ///
     /// # Example
     /// ```no_run
@@ -302,7 +324,7 @@ impl App {
 
     /// Completion request handler
     async fn completion() -> CompleteResult {
-        // return default as it non-optional capability so far
+        // return default as its non-optional capability so far
         CompleteResult::default()
     }
     
@@ -410,52 +432,89 @@ impl App {
         options.set_log_level(params.level)
     }
     
+    #[inline]
+    async fn handle_message(msg: Message, runtime: &ServerRuntime) {
+        match msg {
+            Message::Request(req) => Self::handle_request(req, runtime).await,
+            Message::Response(resp) => Self::handle_response(resp, runtime).await,
+            Message::Notification(notification) => Self::handle_notification(notification).await
+        }
+    }
+    
     async fn handle_request(req: Request, runtime: &ServerRuntime) {
         let req_id = req.id();
+        let session_id = req.session_id;
+        let full_id = req.full_id();
         
-        let context = runtime.context();
+        let context = runtime.context(session_id);
         let options = runtime.options();
         let handlers = runtime.request_handlers();
         let mut sender = runtime.sender();
 
-        let token = options.track_request(&req_id).await;
+        let token = options.track_request(&full_id).await;
 
-        tokio::spawn(async move {
+        #[cfg(feature = "tracing")]
+        let span = create_tracing_span(session_id);
+        
+        let req_fut = async move {
             #[cfg(feature = "tracing")]
             tracing::trace!(logger = "neva", "Received: {:?}", req);
-
             let resp = if let Some(handler) = handlers.get(&req.method) {
                 tokio::select! {
                     resp = handler.call(HandlerParams::Request(context, req)) => {
-                        options.complete_request(&req_id).await;
+                        options.complete_request(&full_id).await;
                         resp
                     }
                     _ = token.cancelled() => {
                         #[cfg(feature = "tracing")]
                         tracing::debug!(
                             logger = "neva", 
-                            "The request with ID: {} has been cancelled", req_id);
+                            "The request with ID: {} has been cancelled", full_id);
                         Err(Error::from(ErrorCode::RequestCancelled))
                     }
                 }
             } else {
                 Err(Error::from(ErrorCode::MethodNotFound))
             };
-
-            if let Err(_err) = sender.send(resp.into_response(req_id).into()).await {
+            
+            let mut resp = resp.into_response(req_id);
+            if let Some(session_id) = session_id {
+                resp = resp.set_session_id(session_id);
+            }
+            
+            if let Err(_err) = sender.send(resp.into()).await {
                 #[cfg(feature = "tracing")]
                 tracing::error!(
                     logger = "neva", 
                     error = format!("Error sending response: {:?}", _err));
             }
-        });
+        };
+        #[cfg(feature = "tracing")]
+        let req_fut = req_fut.instrument(span);
+        tokio::spawn(req_fut);
     }
     
     async fn handle_response(resp: Response, runtime: &ServerRuntime) {
+        let resp_id = resp.id().clone();
+        let session_id = resp.session_id().cloned();
+        let mut sender = runtime.sender();
+        
         runtime
             .pending_requests()
             .complete(resp)
             .await;
+
+        let mut resp = Response::empty(resp_id);
+        if let Some(session_id) = session_id {
+            resp = resp.set_session_id(session_id);
+        }
+        
+        if let Err(_err) = sender.send(resp.into()).await {
+            #[cfg(feature = "tracing")]
+            tracing::error!(
+                logger = "neva", 
+                error = format!("Error sending response: {:?}", _err));
+        }
     }
     
     async fn handle_notification(notification: Notification) {
@@ -463,6 +522,20 @@ impl App {
             #[cfg(feature = "tracing")]
             notification.write();
         }
+    }
+
+    #[inline]
+    fn wait_for_shutdown_signal(&mut self, token: CancellationToken) {
+        shared::wait_for_shutdown_signal(token);
+    }
+}
+
+#[cfg(feature = "tracing")]
+fn create_tracing_span(session_id: Option<uuid::Uuid>) -> tracing::Span {
+    if let Some(mcp_session_id) = session_id {
+        tracing::info_span!("request", mcp_session_id = mcp_session_id.to_string())
+    } else {
+        tracing::info_span!("request")
     }
 }
 

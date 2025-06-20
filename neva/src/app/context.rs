@@ -39,6 +39,7 @@ pub(crate) struct ServerRuntime {
 /// Represents MCP Request Context
 #[derive(Clone)]
 pub struct Context {
+    pub session_id: Option<uuid::Uuid>,
     pub(crate) options: RuntimeMcpOptions,
     pending: RequestQueue,
     sender: TransportProtoSender,
@@ -76,8 +77,9 @@ impl ServerRuntime {
     }
     
     /// Creates a new MCP request [`Context`]
-    pub(crate) fn context(&self) -> Context {
+    pub(crate) fn context(&self, session_id: Option<uuid::Uuid>) -> Context {
         Context {
+            session_id,
             pending: self.pending.clone(),
             sender: self.sender.clone(),
             options: self.options.clone(),
@@ -313,13 +315,12 @@ impl Context {
     /// ```
     pub async fn list_roots(&mut self) -> Result<ListRootsResult, Error> {
         let method = crate::types::root::commands::LIST;
-        let id = RequestId::String(method.into());
         let req = Request::new(
-            Some(id.clone()),
+            Some(RequestId::String(method.into())),
             method,
             Some(ListRootsRequestParams::default()));
-
-        self.send_request(&id, req)
+        
+        self.send_request(req)
             .await?
             .into_result()
     }
@@ -350,28 +351,32 @@ impl Context {
     /// ```
     pub async fn sample(&mut self, params: CreateMessageRequestParams) -> Result<CreateMessageResult, Error> {
         let method = crate::types::sampling::commands::CREATE;
-        let id = RequestId::String(method.into());
         let req = Request::new(
-            Some(id.clone()),
+            Some(RequestId::String(method.into())),
             method,
             Some(params));
 
-        self.send_request(&id, req)
+        self.send_request(req)
             .await?
             .into_result()
     }
     
     /// Sends a [`Request`] to a client
     #[inline]
-    async fn send_request(&mut self, id: &RequestId, req: Request) -> Result<Response, Error> {
-        let receiver = self.pending.push(id).await;
+    async fn send_request(&mut self, mut req: Request) -> Result<Response, Error> {
+        if let Some(session_id) = self.session_id {
+            req.session_id = Some(session_id);
+        }
+
+        let id = req.full_id();
+        let receiver = self.pending.push(&id).await;
         self.sender.send(req.into()).await?;
 
         match timeout(self.timeout, receiver).await {
             Ok(Ok(resp)) => Ok(resp),
             Ok(Err(_)) => Err(Error::new(ErrorCode::InternalError, "Response channel closed")),
             Err(_) => {
-                _ = self.pending.pop(id).await;
+                _ = self.pending.pop(&id).await;
                 Err(Error::new(ErrorCode::Timeout, "Request timed out"))
             }
         }
@@ -384,7 +389,10 @@ impl Context {
         method: &str, 
         params: Option<serde_json::Value>
     ) -> Result<(), Error> {
-        let notification = Notification::new(method, params);
+        let mut notification = Notification::new(method, params);
+        if let Some(session_id) = self.session_id {
+            notification.session_id = Some(session_id);
+        }
         self.sender.send(notification.into()).await
     }
 }

@@ -263,8 +263,49 @@ impl FromHandlerParams for InitializeRequestParams {
     }
 }
 
+impl Message {
+    /// Returns [`Message`] ID
+    #[inline]
+    pub fn id(&self) -> RequestId {
+        match self { 
+            Message::Request(req) => req.id(),
+            Message::Response(resp) => resp.id().clone(),
+            Message::Notification(_) => RequestId::default()
+        }    
+    }
+
+    /// Returns the full id (session_id?/message_id)
+    pub fn full_id(&self) -> RequestId {
+        match self {
+            Message::Request(req) => req.full_id(),
+            Message::Response(resp) => resp.full_id(),
+            Message::Notification(notification) => notification.full_id()
+        }
+    }
+    
+    /// Returns MCP Session ID
+    #[inline]
+    pub fn session_id(&self) -> Option<&uuid::Uuid> {
+        match self { 
+            Message::Request(req) => req.session_id.as_ref(),
+            Message::Response(resp) => resp.session_id(),
+            Message::Notification(notification) => notification.session_id.as_ref()
+        }
+    }
+    
+    /// Sets MCP Session ID
+    pub fn set_session_id(mut self, id: uuid::Uuid) -> Self {
+        match self { 
+            Message::Request(ref mut req) => req.session_id = Some(id),
+            Message::Notification(ref mut notification) => notification.session_id = Some(id),
+            Message::Response(resp) => self = Message::Response(resp.set_session_id(id)),
+        }
+        self
+    }
+}
+
 impl Annotations {
-    /// Deserializes a new [`Annotations`] from JSON string
+    /// Deserializes a new [`Annotations`] from a JSON string
     #[inline]
     pub fn from_json_str(json: &str) -> Self {
         serde_json::from_str(json)

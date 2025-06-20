@@ -60,7 +60,7 @@ impl RequestQueue {
     /// Takes a [`Response`] and completes the request if it's still pending
     #[inline]
     pub(crate) async fn complete(&self, resp: Response) {
-        if let Some(sender) = self.pop(resp.id()).await {
+        if let Some(sender) = self.pop(&resp.full_id()).await {
             sender.send(resp)
         }
     }

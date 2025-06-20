@@ -8,6 +8,7 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use handler::RequestHandler;
 use crate::error::{Error, ErrorCode};
+use crate::shared;
 use crate::transport::Transport;
 use crate::types::{
     ListToolsRequestParams, ListToolsResult, CallToolRequestParams, CallToolResponse,
@@ -644,21 +645,8 @@ impl Client {
     
     #[inline]
     fn wait_for_shutdown_signal(&mut self) {
-        let Some(token) = self.cancellation_token.clone() else {
-            return;
+        if let Some(token) = self.cancellation_token.clone() {
+            shared::wait_for_shutdown_signal(token);
         };
-        
-        tokio::task::spawn(async move {
-            match tokio::signal::ctrl_c().await {
-                Ok(_) => (),
-                #[cfg(feature = "tracing")]
-                Err(err) => tracing::error!(
-                    logger = "neva",
-                    "Unable to listen for shutdown signal: {}", err),
-                #[cfg(not(feature = "tracing"))]
-                Err(_) => ()
-            }
-            token.cancel();
-        });
     }
 }

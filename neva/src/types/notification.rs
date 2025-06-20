@@ -24,6 +24,8 @@ pub mod progress;
 pub mod log_message;
 #[cfg(feature = "tracing")]
 pub mod formatter;
+#[cfg(feature = "tracing")]
+pub mod fmt;
 
 /// List of commands for Notifications
 pub mod commands {
@@ -49,6 +51,10 @@ pub struct Notification {
     /// Optional parameters for the notifications.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub params: Option<serde_json::Value>,
+
+    /// Current MCP Session ID
+    #[serde(skip)]
+    pub session_id: Option<uuid::Uuid>,
 }
 
 /// This notification can be sent by either side to indicate that it is cancelling 
@@ -96,9 +102,20 @@ impl Notification {
     #[inline]
     pub fn new(method: &str, params: Option<serde_json::Value>) -> Self {
         Self { 
-            jsonrpc: JSONRPC_VERSION.into(), 
+            jsonrpc: JSONRPC_VERSION.into(),
+            session_id: None,
             method: method.into(), 
             params
+        }
+    }
+
+    /// Returns the full id (session_id?/"(no_id)")
+    pub fn full_id(&self) -> RequestId {
+        let id = RequestId::default();
+        if let Some(session_id) = self.session_id {
+            RequestId::String(format!("{}/{}", session_id, id))
+        } else {
+            id
         }
     }
     

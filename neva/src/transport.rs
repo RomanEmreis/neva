@@ -5,14 +5,18 @@ use crate::types::Message;
 
 #[cfg(feature = "server")]
 pub(crate) use stdio::StdIoServer;
+#[cfg(feature = "http-server")]
+pub(crate) use http::HttpServer;
 
 #[cfg(feature = "client")]
 pub(crate) use stdio::StdIoClient;
 
 pub(crate) mod stdio;
+#[cfg(any(feature = "http-server", feature = "http-client"))]
+pub(crate) mod http;
 
 /// Describes a sender that can send messages to a client 
-pub(crate) trait Sender{
+pub(crate) trait Sender {
     /// Sends messages to a client
     fn send(&mut self, resp: Message) -> impl Future<Output = Result<(), Error>>;
 }
@@ -42,8 +46,9 @@ pub(crate) enum TransportProto {
     StdioClient(StdIoClient),
     #[cfg(feature = "server")]
     StdIoServer(StdIoServer),
+    #[cfg(feature = "http-server")]
+    HttpServer(HttpServer),
     //Ws(Websocket),
-    //Sse(Sse),
     // add more options here...
 }
 
@@ -51,11 +56,15 @@ pub(crate) enum TransportProto {
 pub(crate) enum TransportProtoSender {
     None,
     Stdio(stdio::StdIoSender),
+    #[cfg(any(feature = "http-server", feature = "http-client"))]
+    Http(http::HttpSender)
 }
 
 pub(crate) enum TransportProtoReceiver {
     None,
     Stdio(stdio::StdIoReceiver),
+    #[cfg(any(feature = "http-server", feature = "http-client"))]
+    Http(http::HttpReceiver)
 }
 
 impl Default for TransportProto {
@@ -70,6 +79,8 @@ impl Sender for TransportProtoSender {
     async fn send(&mut self, resp: Message) -> Result<(), Error> {
         match self {
             TransportProtoSender::Stdio(stdio) => stdio.send(resp).await,
+            #[cfg(any(feature = "http-server", feature = "http-client"))]
+            TransportProtoSender::Http(http) => http.send(resp).await,
             TransportProtoSender::None => Err(Error::new(
                 ErrorCode::InternalError,
                 "Transport protocol must be specified"
@@ -83,6 +94,8 @@ impl Receiver for TransportProtoReceiver {
     async fn recv(&mut self) -> Result<Message, Error> {
         match self {
             TransportProtoReceiver::Stdio(stdio) => stdio.recv().await,
+            #[cfg(any(feature = "http-server", feature = "http-client"))]
+            TransportProtoReceiver::Http(http) => http.recv().await,
             TransportProtoReceiver::None => Err(Error::new(
                 ErrorCode::InternalError,
                 "Transport protocol must be specified"
@@ -102,6 +115,8 @@ impl Transport for TransportProto {
             TransportProto::StdIoServer(stdio) => stdio.start(),
             #[cfg(feature = "client")]
             TransportProto::StdioClient(stdio) => stdio.start(),
+            #[cfg(feature = "http-server")]
+            TransportProto::HttpServer(http) => http.start(),
             TransportProto::None => CancellationToken::new(),
         }
     }
@@ -112,6 +127,11 @@ impl Transport for TransportProto {
             TransportProto::StdIoServer(stdio) => {
                 let (tx, rx) = stdio.split();
                 (TransportProtoSender::Stdio(tx), TransportProtoReceiver::Stdio(rx))
+            },
+            #[cfg(feature = "http-server")]
+            TransportProto::HttpServer(http) => {
+                let (tx, rx) = http.split();
+                (TransportProtoSender::Http(tx), TransportProtoReceiver::Http(rx))
             },
             #[cfg(feature = "client")]
             TransportProto::StdioClient(stdio) => {

@@ -4,6 +4,8 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use crate::transport::{StdIoServer, TransportProto};
+#[cfg(feature = "http-server")]
+use crate::transport::HttpServer;
 use crate::app::{handler::RequestHandler, collection::Collection};
 use std::{
     borrow::Cow,
@@ -116,6 +118,13 @@ impl McpOptions {
     /// Sets stdio as a transport protocol
     pub fn with_stdio(mut self) -> Self {
         self.proto = Some(TransportProto::StdIoServer(StdIoServer::new()));
+        self
+    }
+
+    /// Sets stdio as a transport protocol
+    #[cfg(feature = "http-server")]
+    pub fn with_http<F: FnOnce(HttpServer) -> HttpServer>(mut self, config: F) -> Self {
+        self.proto = Some(TransportProto::HttpServer(config(HttpServer::default())));
         self
     }
     
