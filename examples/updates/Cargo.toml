@@ -5,5 +5,5 @@ edition = "2024"
 publish = false
 
 [dependencies]
-neva = { path = "../../neva", features = ["server-full"] }
+neva = { path = "../../neva", features = ["server", "tracing", "macros"] }
 tokio = { version = "1.44.2", features = ["full"] }

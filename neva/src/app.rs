@@ -398,7 +398,7 @@ impl App {
         options: RuntimeMcpOptions,
         params: CancelledNotificationParams
     ) {
-        options.cancel_request(&params.request_id).await;
+        options.cancel_request(&params.request_id);
     }
     
     /// A subscription to a resource change request handler
@@ -406,7 +406,7 @@ impl App {
         mut ctx: Context, 
         params: SubscribeRequestParams
     ) {
-        ctx.subscribe_to_resource(params.uri).await;
+        ctx.subscribe_to_resource(params.uri);
     }
 
     /// An unsubscription to from resource change request handler
@@ -414,7 +414,7 @@ impl App {
         mut ctx: Context,
         params: UnsubscribeRequestParams
     ) {
-        ctx.unsubscribe_from_resource(&params.uri).await;
+        ctx.unsubscribe_from_resource(&params.uri);
     }
     
     /// Sets the logging level
@@ -451,7 +451,7 @@ impl App {
         let handlers = runtime.request_handlers();
         let mut sender = runtime.sender();
 
-        let token = options.track_request(&full_id).await;
+        let token = options.track_request(&full_id);
 
         #[cfg(feature = "tracing")]
         let span = create_tracing_span(session_id);
@@ -462,7 +462,7 @@ impl App {
             let resp = if let Some(handler) = handlers.get(&req.method) {
                 tokio::select! {
                     resp = handler.call(HandlerParams::Request(context, req)) => {
-                        options.complete_request(&full_id).await;
+                        options.complete_request(&full_id);
                         resp
                     }
                     _ = token.cancelled() => {
@@ -501,8 +501,7 @@ impl App {
         
         runtime
             .pending_requests()
-            .complete(resp)
-            .await;
+            .complete(resp);
 
         let mut resp = Response::empty(resp_id);
         if let Some(session_id) = session_id {

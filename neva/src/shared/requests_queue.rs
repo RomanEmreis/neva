@@ -1,7 +1,8 @@
 ﻿//! Utilities for tracking requests
 
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::{oneshot, Mutex};
+use dashmap::DashMap;
+use std::sync::Arc;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use crate::types::{RequestId, Response};
 
@@ -11,11 +12,11 @@ pub(crate) struct RequestHandle {
     _cancellation_token: CancellationToken
 }
 
-/// Represents a request tracking "queue" that holds hash map of [`oneshot::Sender`] for requests
+/// Represents a request tracking "queue" that holds a hash map of [`oneshot::Sender`] for requests
 /// that are awaiting responses.
 #[derive(Default, Clone)]
 pub(crate) struct RequestQueue {
-    pending: Arc<Mutex<HashMap<RequestId, RequestHandle>>>
+    pending: Arc<DashMap<RequestId, RequestHandle>>
 }
 
 impl RequestHandle {
@@ -42,25 +43,24 @@ impl RequestQueue {
     /// Pushes a request with [`RequestId`] to the "queue" 
     /// and returns a [`oneshot::Receiver`] for the response.
     #[inline]
-    pub(crate) async fn push(&self, id: &RequestId) -> oneshot::Receiver<Response> {
+    pub(crate) fn push(&self, id: &RequestId) -> oneshot::Receiver<Response> {
         let (sender, receiver) = oneshot::channel();
-        let mut pending = self.pending.lock().await;
-        pending.insert(id.clone(), RequestHandle::new(sender));
-
+        self.pending.insert(id.clone(), RequestHandle::new(sender));
         receiver
     }
 
     /// Pops the [`RequestHandle`] by [`RequestId`] and removes it from the queue
     #[inline]
-    pub(crate) async fn pop(&self, id: &RequestId) -> Option<RequestHandle> {
-        let mut pending = self.pending.lock().await;
-        pending.remove(id)
+    pub(crate) fn pop(&self, id: &RequestId) -> Option<RequestHandle> {
+        self.pending
+            .remove(id)
+            .map(|(_, handle)| handle)
     }
     
     /// Takes a [`Response`] and completes the request if it's still pending
     #[inline]
-    pub(crate) async fn complete(&self, resp: Response) {
-        if let Some(sender) = self.pop(&resp.full_id()).await {
+    pub(crate) fn complete(&self, resp: Response) {
+        if let Some(sender) = self.pop(&resp.full_id()) {
             sender.send(resp)
         }
     }
@@ -72,16 +72,16 @@ mod tests {
     use tokio::time::{timeout, Duration};
     use serde_json::json;
 
-    #[tokio::test]
-    async fn it_pushes_and_pops_request() {
+    #[test]
+    fn it_pushes_and_pops_request() {
         let queue = RequestQueue::default();
         let id = RequestId::Number(1);
 
-        let receiver = queue.push(&id).await;
-        let handle = queue.pop(&id).await;
+        let receiver = queue.push(&id);
+        let handle = queue.pop(&id);
 
         assert!(handle.is_some(), "Expected handle to exist");
-        assert!(queue.pop(&id).await.is_none(), "Handle should be removed after pop");
+        assert!(queue.pop(&id).is_none(), "Handle should be removed after pop");
 
         drop(receiver); // Avoid warning for unused receiver
     }
@@ -91,8 +91,8 @@ mod tests {
         let queue = RequestQueue::default();
         let id = RequestId::Number(1);
 
-        let receiver = queue.push(&id).await;
-        let handle = queue.pop(&id).await.expect("Should have handle");
+        let receiver = queue.push(&id);
+        let handle = queue.pop(&id).expect("Should have handle");
 
         let expected = Response::success(id, json!({ "content": "done" }));
         handle.send(expected.clone());
@@ -114,10 +114,10 @@ mod tests {
         let queue = RequestQueue::default();
         let id = RequestId::Number(1);
 
-        let receiver = queue.push(&id).await;
+        let receiver = queue.push(&id);
 
         let response = Response::success(id, json!({ "content": "done" }));
-        queue.complete(response.clone()).await;
+        queue.complete(response.clone());
         
         let Response::Ok(response) = response else { unreachable!() }; 
         
@@ -131,15 +131,15 @@ mod tests {
         assert_eq!(actual.result, response.result);
     }
 
-    #[tokio::test]
-    async fn it_does_nothing_if_not_pending() {
+    #[test]
+    fn it_does_nothing_if_not_pending() {
         let queue = RequestQueue::default();
         let id = RequestId::Number(1);
 
         let response = Response::success(id, json!({ "content": "done" }));
 
         // No push before complete
-        queue.complete(response).await;
+        queue.complete(response);
 
         // Nothing to assert really, just verifying it doesn't panic or error
     }

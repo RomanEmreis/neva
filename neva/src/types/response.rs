@@ -107,11 +107,11 @@ impl Response {
     
     /// Returns the full id (session_id?/response_id)
     pub fn full_id(&self) -> RequestId {
-        let id = self.id();
+        let id = self.id().clone();
         if let Some(session_id) = self.session_id() {
-            RequestId::String(format!("{}/{}", session_id, id))
+            id.concat(RequestId::Uuid(*session_id))
         } else {
-            id.clone()
+            id
         }
     }
     

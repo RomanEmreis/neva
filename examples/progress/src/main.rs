@@ -1,11 +1,12 @@
 //! Run with:
 //!
 //! ```no_rust
-//! npx @modelcontextprotocol/inspector cargo run -p example-progress
+//! npx @modelcontextprotocol/inspector 
+//! 
+//! cargo run -p example-progress
 //! ```
 
-use neva::{App, types::{Meta, ProgressToken}, tool};
-use neva::types::notification::NotificationFormatter;
+use neva::{App, types::notification, types::{Meta, ProgressToken}, tool};
 use tracing_subscriber::prelude::*;
 
 #[tool]
@@ -25,7 +26,7 @@ async fn long_running_task(token: Meta<ProgressToken>, command: String) {
         tracing::info!(
             target: "progress", 
             token = %token, 
-            value = %progress, 
+            value = progress, 
             total = 100
         );
     }
@@ -37,14 +38,12 @@ async fn long_running_task(token: Meta<ProgressToken>, command: String) {
 async fn main() {
     // Configure logging
     tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer()
-            .event_format(NotificationFormatter)) // Specify the MCP notification formatter
+        .with(notification::fmt::layer())
         .init();
 
     App::new()
         .with_options(|opt| opt
-            .with_stdio()
-            .with_mcp_version("2024-11-05"))
+            .with_default_http())
         .run()
         .await;
 }
