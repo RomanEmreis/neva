@@ -5,7 +5,7 @@ use crate::SDK_NAME;
 #[cfg(feature = "server")]
 use crate::error::Error;
 
-use crate::types::notification::{Notification, ProgressNotification};
+use crate::types::notification::Notification;
 
 #[cfg(feature = "server")]
 use crate::types::request::FromRequest;
@@ -71,6 +71,7 @@ pub use prompt::{
 pub use prompt::PromptHandler;
 
 pub use root::Root;
+pub use progress::ProgressToken;
 
 pub mod request;
 pub mod response;
@@ -85,6 +86,7 @@ pub mod notification;
 pub mod cursor;
 pub mod root;
 pub mod sampling;
+pub mod progress;
 pub(crate) mod helpers;
 
 pub(super) const JSONRPC_VERSION: &str = "2.0";
@@ -175,35 +177,6 @@ pub struct Annotations {
     
     /// Describes how important this data is for operating the server (0 to 1).
     priority: f32
-}
-
-/// Represents a progress token, which can be either a string or an integer.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ProgressToken {
-    String(String),
-    Number(i64),
-}
-
-impl Display for ProgressToken {
-    #[inline]
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self { 
-            ProgressToken::String(s) => write!(f, "{}", s),
-            ProgressToken::Number(n) => write!(f, "{}", n),
-        }
-    }
-}
-
-impl ProgressToken {
-    /// Creates a [`ProgressNotification`]
-    pub fn notify(&self, progress: f64, total: Option<f64>) -> ProgressNotification {
-        ProgressNotification {
-            progress_token: self.clone(),
-            progress,
-            total
-        }
-    }
 }
 
 impl Display for Role {

@@ -1,7 +1,9 @@
 //! Run with:
 //!
 //! ```no_rust
-//! npx @modelcontextprotocol/inspector cargo run -p example-pagination
+//! npx @modelcontextprotocol/inspector 
+//! 
+//! cargo run -p example-pagination
 //! ```
 
 use std::sync::Arc;
@@ -55,8 +57,7 @@ async fn filter_resources(resources: Arc<Vec<Resource>>, filter: String) -> Comp
 async fn main() {
     let mut app = App::new()
         .with_options(|opt| opt
-            .with_stdio()
-            .with_mcp_version("2024-11-05"));
+            .with_http(|http| http.bind("127.0.0.1:3000")));
 
     // Some global resource list
     let resources = Arc::new(all_resources());

@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-neva = { path = "../../neva", features = ["client-full"] }
+neva = { path = "../../neva", features = ["client", "tracing"] }
 tokio = { version = "1.44.2", features = ["full"] }
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"

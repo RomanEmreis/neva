@@ -177,7 +177,10 @@ impl Visit for Visitor<'_> {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         // Only use this if nothing else handled it
         if !self.map.contains_key(field.name()) {
-            self.map.insert(field.name(), serde_json::Value::String(format!("{:?}", value)));
+            let formatted = format!("{:?}", value);
+            let value = serde_json::to_value(&formatted)
+                .unwrap_or(serde_json::Value::String(formatted));
+            self.map.insert(field.name(), value);
         }
     }
 }

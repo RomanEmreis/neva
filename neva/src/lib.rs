@@ -4,7 +4,7 @@
 //! ## Dependencies
 //! ```toml
 //! [dependencies]
-//! neva = { version = "0.0.9", features = ["full"] }
+//! neva = { version = "0.1.0", features = ["full"] }
 //! tokio = { version = "1", features = ["full"] }
 //! ```
 //! 
@@ -60,7 +60,6 @@ pub mod types;
 #[cfg(any(feature = "server", feature = "client"))]
 pub mod transport;
 pub mod error;
-#[cfg(any(feature = "server", feature = "client"))]
 pub mod shared;
 #[cfg(feature = "server")]
 pub mod app;
