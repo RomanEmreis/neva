@@ -175,6 +175,7 @@ impl HttpClient {
     }
 
     /// Returns service URL (IP, port and URL prefix)
+    #[allow(dead_code)]
     pub(crate) fn url(&self) -> ServiceUrl {
         self.url.clone()
     }
