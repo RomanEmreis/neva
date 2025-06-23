@@ -6,7 +6,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-neva = { path = "../../../neva", features = ["client", "tracing"] }
+neva = { path = "../../../neva", features = ["client-full"] }
 tokio = { version = "1.44.1", features = ["full"] }
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"

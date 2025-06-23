@@ -9,9 +9,8 @@ async fn main() -> Result<(), Error> {
 
     let mut client = Client::new()
         .with_options(|opt| opt
-            .with_stdio("cargo", ["run", "--manifest-path", "examples/roots/server/Cargo.toml"])
-            .with_roots(|roots| roots.with_list_changed())
-            .with_mcp_version("2024-11-05"));
+            .with_default_http()
+            .with_roots(|roots| roots.with_list_changed()));
 
     client.add_root("file:///home/user/projects/my_project", "My Project");
 

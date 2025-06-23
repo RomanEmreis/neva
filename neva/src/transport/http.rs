@@ -6,6 +6,7 @@ use tokio_util::sync::CancellationToken;
 use tokio::sync::{mpsc::{self, Receiver, Sender}};
 use crate::{
     error::{Error, ErrorCode},
+    shared::MemChr,
     types::Message
 };
 use super::{
@@ -28,7 +29,13 @@ pub struct HttpServer {
     receiver: HttpReceiver,
 }
 
-#[cfg(feature = "server")]
+#[cfg(feature = "client")]
+pub struct HttpClient {
+    url: ServiceUrl,
+    sender: HttpSender,
+    receiver: HttpReceiver,
+}
+
 #[derive(Clone)]
 pub struct ServiceUrl {
     addr: &'static str,
@@ -59,7 +66,18 @@ impl Default for HttpServer {
     }
 }
 
-#[cfg(feature = "server")]
+#[cfg(feature = "client")]
+impl Default for HttpClient {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            url: ServiceUrl::default(),
+            receiver: HttpReceiver::new(),
+            sender: HttpSender::new()
+        }
+    }
+}
+
 impl Default for ServiceUrl {
     #[inline]
     fn default() -> Self {
@@ -70,7 +88,6 @@ impl Default for ServiceUrl {
     }
 }
 
-#[cfg(feature = "server")]
 impl Display for ServiceUrl {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -79,6 +96,17 @@ impl Display for ServiceUrl {
         #[cfg(not(feature = "tls"))]
         let proto = "http";
         write!(f, "{proto}://{}{}", self.addr, self.endpoint)
+    }
+}
+
+impl From<&'static str> for ServiceUrl {
+    #[inline]
+    fn from(url: &'static str) -> Self {
+        let mut parts = MemChr::split(url, b'/');
+        Self {
+            addr: parts.nth(0).unwrap_or(DEFAULT_ADDR),
+            endpoint: parts.nth(1).unwrap_or(DEFAULT_MCP_ENDPOINT),
+        }
     }
 }
 
@@ -98,8 +126,6 @@ impl HttpSender {
         let (tx, rx) = mpsc::channel(100);
         Self { tx, rx: Some(rx) }
     }
-    
-    
 }
 
 impl HttpReceiver {
@@ -126,6 +152,28 @@ impl HttpServer {
         self
     }
     
+    /// Returns service URL (IP, port and URL prefix)
+    pub(crate) fn url(&self) -> ServiceUrl {
+        self.url.clone()
+    }
+}
+
+#[cfg(feature = "client")]
+impl HttpClient {
+    /// Binds HTTP serve to address and port    
+    pub fn bind(mut self, addr: &'static str) -> Self {
+        self.url.addr = addr;
+        self
+    }
+
+    /// Sets the MCP endpoint
+    ///
+    /// Default: `/mcp`
+    pub fn with_endpoint(mut self, prefix: &'static str) -> Self {
+        self.url.endpoint = prefix;
+        self
+    }
+
     /// Returns service URL (IP, port and URL prefix)
     pub(crate) fn url(&self) -> ServiceUrl {
         self.url.clone()
@@ -176,4 +224,54 @@ impl Transport for HttpServer {
     fn split(self) -> (Self::Sender, Self::Receiver) {
         (self.sender, self.receiver)
     }
+}
+
+#[cfg(feature = "client")]
+impl Transport for HttpClient {
+    type Sender = HttpSender;
+    type Receiver = HttpReceiver;
+
+    fn start(&mut self) -> CancellationToken {
+        let token = CancellationToken::new();
+        let url = self.url.to_string();
+        let client = reqwest::Client::new();
+        
+        let Some(mut sender) = self.sender.rx.take() else { 
+            return token;
+        };
+        
+        let resp_tx = self.receiver.tx.clone();
+        tokio::spawn(async move {
+            while let Some(req) = sender.recv().await {
+                let resp = client
+                    .post(&url)
+                    .json(&req)
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json, text/event-stream")
+                    .send()
+                    .await
+                    .unwrap()
+                    .json::<Message>()
+                    .await;
+                
+                if let Err(_err) = resp_tx
+                    .send(resp.map_err(|err| Error::new(ErrorCode::InvalidRequest, err.to_string())))
+                    .await {
+                    #[cfg(feature = "tracing")]
+                    tracing::error!("Failed to send response: {}", _err);
+                }
+            }
+        });
+        
+        token
+    }
+
+    fn split(self) -> (Self::Sender, Self::Receiver) {
+        (self.sender, self.receiver)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    
 }

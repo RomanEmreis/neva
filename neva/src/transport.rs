@@ -10,6 +10,8 @@ pub(crate) use http::HttpServer;
 
 #[cfg(feature = "client")]
 pub(crate) use stdio::StdIoClient;
+#[cfg(feature = "http-client")]
+pub use crate::transport::http::HttpClient;
 
 pub(crate) mod stdio;
 #[cfg(any(feature = "http-server", feature = "http-client"))]
@@ -48,6 +50,8 @@ pub(crate) enum TransportProto {
     StdIoServer(StdIoServer),
     #[cfg(feature = "http-server")]
     HttpServer(HttpServer),
+    #[cfg(feature = "client")]
+    HttpClient(HttpClient),
     //Ws(Websocket),
     // add more options here...
 }
@@ -117,6 +121,8 @@ impl Transport for TransportProto {
             TransportProto::StdioClient(stdio) => stdio.start(),
             #[cfg(feature = "http-server")]
             TransportProto::HttpServer(http) => http.start(),
+            #[cfg(feature = "http-client")]
+            TransportProto::HttpClient(http) => http.start(),
             TransportProto::None => CancellationToken::new(),
         }
     }
@@ -137,6 +143,11 @@ impl Transport for TransportProto {
             TransportProto::StdioClient(stdio) => {
                 let (tx, rx) = stdio.split();
                 (TransportProtoSender::Stdio(tx), TransportProtoReceiver::Stdio(rx))
+            },
+            #[cfg(feature = "http-client")]
+            TransportProto::HttpClient(http) => {
+                let (tx, rx) = http.split();
+                (TransportProtoSender::Http(tx), TransportProtoReceiver::Http(rx))
             },
             TransportProto::None => (TransportProtoSender::None, TransportProtoReceiver::None),
         }
