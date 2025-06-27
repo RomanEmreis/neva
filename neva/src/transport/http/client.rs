@@ -146,7 +146,7 @@ async fn start_sse_connection(
     let token = session.cancellation_token();
     tokio::select! {
         biased;
-        _ = token.cancelled() => return,
+        _ = token.cancelled() => (),
         _ = session.notify.notified() => {
             tokio::spawn(handle_sse_connection(session.clone(), resp_tx));        
         }
