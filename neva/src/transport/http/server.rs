@@ -5,7 +5,7 @@ use dashmap::DashMap;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
 use tokio_util::sync::CancellationToken;
-use super::ServiceUrl;
+use super::{ServiceUrl, MCP_SESSION_ID, get_mcp_session_id};
 use crate::{
     shared::message_registry::MessageRegistry,
     types::{RequestId, Message},
@@ -19,8 +19,6 @@ use volga::{
 
 #[cfg(feature = "tracing")]
 use crate::types::notification::fmt::LOG_REGISTRY;
-
-const MCP_SESSION_ID: &str = "Mcp-Session-Id";
 
 type RequestMap = Arc<DashMap<RequestId, oneshot::Sender<Message>>>;
 
@@ -101,7 +99,7 @@ async fn handle(
 }
 
 async fn handle_session_end(manager: Dc<RequestManager>, headers: Headers) -> HttpResult {
-    let Some(id) = get_mcp_session_id(headers) else {
+    let Some(id) = get_mcp_session_id(&headers) else {
         return status!(405);
     };
     
@@ -115,7 +113,7 @@ async fn handle_session_end(manager: Dc<RequestManager>, headers: Headers) -> Ht
 }
 
 async fn handle_connection(manager: Dc<RequestManager>, headers: Headers) -> HttpResult {
-    let Some(id) = get_mcp_session_id(headers) else { 
+    let Some(id) = get_mcp_session_id(&headers) else { 
         return status!(405);
     };
 
@@ -175,19 +173,11 @@ fn receiver_error(err: oneshot::error::RecvError) -> volga::error::Error {
 
 fn handle_sse_message(msg: Message) -> Result<SseMessage, volga::error::Error> {
     Ok(SseMessage::new()
-        .id(uuid::Uuid::new_v4())
+        .id(uuid::Uuid::new_v4().to_string())
         .json(msg))
 }
 
 #[inline]
 fn get_or_create_mcp_session(headers: Headers) -> uuid::Uuid {
-    get_mcp_session_id(headers).unwrap_or_else(uuid::Uuid::new_v4)
-}
-
-#[inline]
-fn get_mcp_session_id(headers: Headers) -> Option<uuid::Uuid> {
-    headers
-        .get(MCP_SESSION_ID)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+    get_mcp_session_id(&headers).unwrap_or_else(uuid::Uuid::new_v4)
 }

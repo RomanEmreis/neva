@@ -13,7 +13,7 @@ use crate::types::sampling::SamplingHandler;
 #[cfg(feature = "http-client")]
 use crate::transport::http::HttpClient;
 
-const DEFAULT_REQUEST_TIMEOUT: u64 = 10;
+const DEFAULT_REQUEST_TIMEOUT: u64 = 10; // 10 seconds
 
 /// Represents MCP client configuration options
 pub struct McpOptions {

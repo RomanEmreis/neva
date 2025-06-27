@@ -1,7 +1,13 @@
 //! Streamable HTTP transport implementation
 
-use std::fmt::Display;
+#[cfg(all(feature = "client", not(feature = "server")))]
+use reqwest::header::HeaderMap;
+
+#[cfg(feature = "server")]
+use volga::headers::HeaderMap;
+
 use futures_util::TryFutureExt;
+use std::fmt::Display;
 use tokio_util::sync::CancellationToken;
 use tokio::sync::{mpsc::{self, Receiver, Sender}};
 use crate::{
@@ -17,9 +23,20 @@ use super::{
 
 #[cfg(feature = "server")]
 pub(crate) mod server;
+#[cfg(feature = "client")]
+pub(crate) mod client;
 
+pub(super) const MCP_SESSION_ID: &str = "Mcp-Session-Id";
 const DEFAULT_ADDR: &str = "127.0.0.1:3000";
 const DEFAULT_MCP_ENDPOINT: &str = "/mcp";
+
+#[inline]
+pub(super) fn get_mcp_session_id(headers: &HeaderMap) -> Option<uuid::Uuid> {
+    headers
+        .get(MCP_SESSION_ID)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+}
 
 /// Represents HTTP server transport
 #[cfg(feature = "server")]
@@ -234,35 +251,17 @@ impl Transport for HttpClient {
 
     fn start(&mut self) -> CancellationToken {
         let token = CancellationToken::new();
-        let url = self.url.to_string();
-        let client = reqwest::Client::new();
-        
-        let Some(mut sender) = self.sender.rx.take() else { 
+        let Some(sender_rx) = self.sender.rx.take() else {
+            #[cfg(feature = "tracing")]
+            tracing::error!(logger = "neva", "The HTTP writer is already in use");
             return token;
         };
-        
-        let resp_tx = self.receiver.tx.clone();
-        tokio::spawn(async move {
-            while let Some(req) = sender.recv().await {
-                let resp = client
-                    .post(&url)
-                    .json(&req)
-                    .header("Content-Type", "application/json")
-                    .header("Accept", "application/json, text/event-stream")
-                    .send()
-                    .await
-                    .unwrap()
-                    .json::<Message>()
-                    .await;
-                
-                if let Err(_err) = resp_tx
-                    .send(resp.map_err(|err| Error::new(ErrorCode::InvalidRequest, err.to_string())))
-                    .await {
-                    #[cfg(feature = "tracing")]
-                    tracing::error!("Failed to send response: {}", _err);
-                }
-            }
-        });
+        tokio::spawn(client::connect(
+            self.url(),
+            self.receiver.tx.clone(),
+            sender_rx,
+            token.clone()
+        ));
         
         token
     }

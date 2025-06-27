@@ -16,6 +16,8 @@ async fn main() -> Result<(), Error> {
 
     client.connect().await?;
 
+    //tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    
     let result = client.call_tool("roots_request", None::<Vec<(&'static str, String)>>).await?;
     tracing::info!("Received result: {:?}", result.content);
     

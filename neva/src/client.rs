@@ -215,7 +215,11 @@ impl Client {
             })
         };
 
-        let req = Request::new(None, crate::commands::INIT, Some(params));
+        let req = Request::new(
+            Some(RequestId::Uuid(uuid::Uuid::new_v4())), 
+            crate::commands::INIT, 
+            Some(params));
+        
         let resp = self.send_request(req).await?;
 
         let init_result = resp.into_result::<InitializeResult>()?;

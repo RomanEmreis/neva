@@ -92,7 +92,7 @@ pub(crate) mod helpers;
 pub(super) const JSONRPC_VERSION: &str = "2.0";
 
 /// Represents a JSON RPC message that could be either [`Request`] or [`Response`] or [`Notification`]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Message {
     /// See [`Request`]

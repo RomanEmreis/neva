@@ -20,6 +20,7 @@ inventory = { version = "0.3.20", optional = true }
 memchr = "2.7.5"
 once_cell = { version = "1.21.3", features = ["std"], optional = true }
 reqwest = { version = "0.12.20", features = ["stream", "json"], optional = true }
+eventsource-client = { version = "0.15.0", default-features = false, optional = true }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 tokio = { version = "1.45.1", features = ["sync", "io-std", "io-util", "rt", "time", "macros"] }
@@ -46,8 +47,8 @@ full = ["macros", "tracing", "server-full", "client-full"]
 server-full = ["server", "macros", "tracing", "http-server"]
 client-full = ["client", "tracing", "http-client"]
 http-server = ["dep:volga", "dep:tokio-stream"]
-http-client = ["dep:reqwest", "dep:tokio-stream"]
-tls = ["http-server", "volga/tls"]
+http-client = ["dep:reqwest", "dep:eventsource-client", "dep:tokio-stream", "dep:once_cell"]
+tls = ["http-server", "volga?/tls", "eventsource-client?/rustls"]
 macros = ["dep:neva_macros", "dep:inventory"]
 client = ["dep:windows", "dep:nix", "tokio/process", "tokio/signal"]
 server = ["tokio/signal"]
