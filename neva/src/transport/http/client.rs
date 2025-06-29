@@ -1,54 +1,19 @@
 ﻿//! HTTP client implementation
 
-use once_cell::sync::OnceCell;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use futures_util::{TryStreamExt, StreamExt};
 use eventsource_client::{Client, ClientBuilder, ReconnectOptionsBuilder, SSE};
 use reqwest::{RequestBuilder, header::{CONTENT_TYPE, ACCEPT}};
+use self::mcp_session::McpSession;
 use crate::{
     transport::http::{ServiceUrl, get_mcp_session_id, MCP_SESSION_ID},
     types::Message,
     error::{Error, ErrorCode}
 };
 
-struct McpSession {
-    notify: Notify,
-    url: String,
-    session_id: OnceCell<uuid::Uuid>,
-    cancellation_token: CancellationToken
-}
-
-impl McpSession {
-    fn new(url: ServiceUrl, token: CancellationToken) -> Self {
-        Self {
-            notify: Notify::new(),
-            url: url.to_string(),
-            session_id: OnceCell::new(),
-            cancellation_token: token,
-        }
-    }
-    
-    fn cancellation_token(&self) -> CancellationToken {
-        self.cancellation_token.clone()
-    }
-    
-    fn has_session_id(&self) -> bool {
-        self.session_id.get().is_some()
-    }
-    
-    fn session_id(&self) -> Option<&uuid::Uuid> {
-        self.session_id.get()
-    }
-    
-    fn set_session_id(&self, id: uuid::Uuid) {
-        if let Err(_err) = self.session_id.set(id) {
-            #[cfg(feature = "tracing")]
-            tracing::info!("MCP Session Id already set");
-        }
-    }
-}
+pub(super) mod mcp_session;
 
 pub(super) async fn connect(
     service_url: ServiceUrl,
@@ -81,7 +46,7 @@ async fn handle_connection(
                     break;
                 };
                 let mut resp = client
-                    .post(&session.url)
+                    .post(session.url().as_str().as_ref())
                     .json(&req)
                     .header(CONTENT_TYPE, "application/json")
                     .header(ACCEPT, "application/json, text/event-stream");
@@ -89,13 +54,14 @@ async fn handle_connection(
                 if let Some(session_id) = session.session_id() {
                     resp = resp.header(MCP_SESSION_ID, session_id.to_string())
                 }
-
+                
                 tokio::spawn(send_request(
                     session.clone(),
                     resp,
                     req,
                     recv_tx.clone()
                 ));
+                tokio::time::sleep(std::time::Duration::ZERO).await;
             }
         }
     }
@@ -128,7 +94,7 @@ async fn send_request(
 
     if let Message::Request(r) = req {
         if r.method == crate::commands::INIT {
-            session.notify.notify_one();
+            session.notify_session_initialized();
         }
     }
 
@@ -147,7 +113,7 @@ async fn start_sse_connection(
     tokio::select! {
         biased;
         _ = token.cancelled() => (),
-        _ = session.notify.notified() => {
+        _ = session.initialized() => {
             tokio::spawn(handle_sse_connection(session.clone(), resp_tx));        
         }
     }
@@ -157,7 +123,7 @@ async fn handle_sse_connection(
     session: Arc<McpSession>,
     resp_tx: mpsc::Sender<Result<Message, Error>>
 ) {
-    let Ok(mut client) = ClientBuilder::for_url(&session.url) else { 
+    let Ok(mut client) = ClientBuilder::for_url(session.url().as_str().as_ref()) else { 
         #[cfg(feature = "tracing")]
         tracing::error!(logger = "neva", "Failed to create SSE client");
         return;

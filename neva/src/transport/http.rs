@@ -7,6 +7,7 @@ use reqwest::header::HeaderMap;
 use volga::headers::HeaderMap;
 
 use futures_util::TryFutureExt;
+use std::borrow::Cow;
 use std::fmt::Display;
 use tokio_util::sync::CancellationToken;
 use tokio::sync::{mpsc::{self, Receiver, Sender}};
@@ -53,7 +54,7 @@ pub struct HttpClient {
     receiver: HttpReceiver,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct ServiceUrl {
     addr: &'static str,
     endpoint: &'static str,
@@ -95,6 +96,17 @@ impl Default for HttpClient {
     }
 }
 
+impl ServiceUrl {
+    #[inline]
+    pub fn as_str<'a>(&self) -> Cow<'a, str> {
+        #[cfg(feature = "tls")]
+        let proto = "https";
+        #[cfg(not(feature = "tls"))]
+        let proto = "http";
+        Cow::Owned(format!("{proto}://{}/{}", self.addr, self.endpoint))
+    }
+}
+
 impl Default for ServiceUrl {
     #[inline]
     fn default() -> Self {
@@ -108,11 +120,7 @@ impl Default for ServiceUrl {
 impl Display for ServiceUrl {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        #[cfg(feature = "tls")]
-        let proto = "https";
-        #[cfg(not(feature = "tls"))]
-        let proto = "http";
-        write!(f, "{proto}://{}{}", self.addr, self.endpoint)
+        self.as_str().fmt(f)
     }
 }
 
@@ -171,7 +179,7 @@ impl HttpServer {
     
     /// Returns service URL (IP, port and URL prefix)
     pub(crate) fn url(&self) -> ServiceUrl {
-        self.url.clone()
+        self.url
     }
 }
 
@@ -194,7 +202,7 @@ impl HttpClient {
     /// Returns service URL (IP, port and URL prefix)
     #[allow(dead_code)]
     pub(crate) fn url(&self) -> ServiceUrl {
-        self.url.clone()
+        self.url
     }
 }
 
