@@ -9,9 +9,7 @@ async fn roots_request(mut ctx: Context) -> Result<String, Error> {
 #[tokio::main]
 async fn main() {
     App::new()
-        .with_options(|opt| opt
-            .with_stdio()
-            .with_mcp_version("2024-11-05"))
+        .with_options(|opt| opt.with_default_http())
         .run()
         .await;
 }

@@ -5,7 +5,7 @@ use dashmap::DashMap;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
 use tokio_util::sync::CancellationToken;
-use super::ServiceUrl;
+use super::{ServiceUrl, MCP_SESSION_ID, get_mcp_session_id};
 use crate::{
     shared::message_registry::MessageRegistry,
     types::{RequestId, Message},
@@ -19,8 +19,6 @@ use volga::{
 
 #[cfg(feature = "tracing")]
 use crate::types::notification::fmt::LOG_REGISTRY;
-
-const MCP_SESSION_ID: &str = "Mcp-Session-Id";
 
 type RequestMap = Arc<DashMap<RequestId, oneshot::Sender<Message>>>;
 
@@ -62,16 +60,22 @@ async fn dispatch(
     mut sender_rx: mpsc::Receiver<Message>,
     token: CancellationToken
 ) {
-    while let Some(msg) = sender_rx.recv().await {
-        if let Some((_, resp_tx)) = pending.remove(&msg.full_id()) {
-            if let Err(_e) = resp_tx.send(msg) {
-                #[cfg(feature = "tracing")]
-                tracing::error!(logger = "neva", "Failed to send response: {:?}", _e);
-                token.cancel();
+    loop {
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => break,
+            Some(msg) = sender_rx.recv() => {
+                if let Some((_, resp_tx)) = pending.remove(&msg.full_id()) {
+                    if let Err(_e) = resp_tx.send(msg) {
+                        #[cfg(feature = "tracing")]
+                        tracing::error!(logger = "neva", "Failed to send response: {:?}", _e);
+                        token.cancel();
+                    }
+                } else if let Err(_e) = msg_registry.send(msg) {
+                    #[cfg(feature = "tracing")]
+                    tracing::error!(logger = "neva", "Failed to send server request: {:?}", _e);
+                }
             }
-        } else if let Err(_e) = msg_registry.send(msg) {
-            #[cfg(feature = "tracing")]
-            tracing::error!(logger = "neva", "Failed to send server request: {:?}", _e);
         }
     }
 }
@@ -101,7 +105,7 @@ async fn handle(
 }
 
 async fn handle_session_end(manager: Dc<RequestManager>, headers: Headers) -> HttpResult {
-    let Some(id) = get_mcp_session_id(headers) else {
+    let Some(id) = get_mcp_session_id(&headers) else {
         return status!(405);
     };
     
@@ -109,13 +113,11 @@ async fn handle_session_end(manager: Dc<RequestManager>, headers: Headers) -> Ht
     LOG_REGISTRY.unregister(&id);
     manager.msg_registry.unregister(&id);
     
-    ok!([
-        (MCP_SESSION_ID, id.to_string())
-    ])
+    ok!([(MCP_SESSION_ID, id.to_string())])
 }
 
 async fn handle_connection(manager: Dc<RequestManager>, headers: Headers) -> HttpResult {
-    let Some(id) = get_mcp_session_id(headers) else { 
+    let Some(id) = get_mcp_session_id(&headers) else { 
         return status!(405);
     };
 
@@ -161,8 +163,9 @@ async fn handle_message(
     ])
 }
 
-async fn handle_http_error(err: volga::error::Error) {
-    println!("Error: {:?}", err);
+async fn handle_http_error(_err: volga::error::Error) {
+    #[cfg(feature = "tracing")]
+    tracing::error!(logger = "neva", "HTTP error: {:?}", _err)
 }
 
 fn sender_error(err: mpsc::error::SendError<Result<Message, Error>>) -> volga::error::Error {
@@ -175,19 +178,12 @@ fn receiver_error(err: oneshot::error::RecvError) -> volga::error::Error {
 
 fn handle_sse_message(msg: Message) -> Result<SseMessage, volga::error::Error> {
     Ok(SseMessage::new()
-        .id(uuid::Uuid::new_v4())
+        .id(uuid::Uuid::new_v4().to_string())
         .json(msg))
 }
 
+/// Fetches the [`MCP_SESSION_ID`] header value or created the new [`uuid::Uuid`] if `None`
 #[inline]
 fn get_or_create_mcp_session(headers: Headers) -> uuid::Uuid {
-    get_mcp_session_id(headers).unwrap_or_else(uuid::Uuid::new_v4)
-}
-
-#[inline]
-fn get_mcp_session_id(headers: Headers) -> Option<uuid::Uuid> {
-    headers
-        .get(MCP_SESSION_ID)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+    get_mcp_session_id(&headers).unwrap_or_else(uuid::Uuid::new_v4)
 }

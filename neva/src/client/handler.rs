@@ -199,7 +199,7 @@ impl RequestHandler {
                                 #[cfg(feature = "tracing")]
                                 notification.write();
                             }
-                        };
+                        }
                     }
                 }
             }

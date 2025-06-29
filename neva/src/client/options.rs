@@ -10,7 +10,10 @@ use crate::types::capabilities::{RootsCapability, SamplingCapability};
 use crate::types::{Root, Implementation, Uri};
 use crate::types::sampling::SamplingHandler;
 
-const DEFAULT_REQUEST_TIMEOUT: u64 = 10;
+#[cfg(feature = "http-client")]
+use crate::transport::http::HttpClient;
+
+const DEFAULT_REQUEST_TIMEOUT: u64 = 10; // 10 seconds
 
 /// Represents MCP client configuration options
 pub struct McpOptions {
@@ -67,6 +70,24 @@ impl McpOptions {
     {
         self.proto = Some(TransportProto::StdioClient(StdIoClient::new(StdIoOptions::new(command, args))));
         self
+    }
+
+    /// Sets Streamable HTTP as a transport protocol
+    #[cfg(feature = "http-client")]
+    pub fn with_http<F: FnOnce(HttpClient) -> HttpClient>(mut self, config: F) -> Self {
+        self.proto = Some(TransportProto::HttpClient(config(HttpClient::default())));
+        self
+    }
+
+    /// Sets Streamable HTTP as a transport protocol with default configuration
+    ///
+    /// Default:
+    /// * __IP__: 127.0.0.1
+    /// * __PORT__: 3000
+    /// * __ENDPOINT__: /mcp
+    #[cfg(feature = "http-client")]
+    pub fn with_default_http(self) -> Self {
+        self.with_http(|http| http)
     }
 
     /// Specifies MCP client name

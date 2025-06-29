@@ -16,10 +16,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run all features
         run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: Run server
-        run: cargo clippy --all-targets --features server -- -D warnings
-      - name: Run client
-        run: cargo clippy --all-targets --features client -- -D warnings
+      - name: Run slim server
+        run: cargo clippy --all-targets --features server -- -D warnings  
+      - name: Run all features server
+        run: cargo clippy --all-targets --features server-full -- -D warnings
+      - name: Run slim client
+        run: cargo clippy --all-targets --features client -- -D warnings  
+      - name: Run all features client
+        run: cargo clippy --all-targets --features client-full -- -D warnings
   
   build:
     environment: CICD
@@ -33,6 +37,6 @@ jobs:
       - name: Run all features tests
         run: cargo test --all-features --verbose
       - name: Run server tests
-        run: cargo test --features server --verbose
+        run: cargo test --features server-full --verbose
       - name: Run client tests
-        run: cargo test --features client --verbose
+        run: cargo test --features client-full --verbose
