@@ -921,7 +921,7 @@ dependencies = [
 
 [[package]]
 name = "neva"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "base64 0.22.1",
  "dashmap",
@@ -947,7 +947,7 @@ dependencies = [
 
 [[package]]
 name = "neva_macros"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "proc-macro2",
  "quote",

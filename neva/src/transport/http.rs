@@ -7,8 +7,7 @@ use reqwest::header::HeaderMap;
 use volga::headers::HeaderMap;
 
 use futures_util::TryFutureExt;
-use std::borrow::Cow;
-use std::fmt::Display;
+use std::{borrow::Cow, fmt::Display};
 use tokio_util::sync::CancellationToken;
 use tokio::sync::{mpsc::{self, Receiver, Sender}};
 use crate::{

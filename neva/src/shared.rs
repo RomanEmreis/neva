@@ -12,6 +12,8 @@ pub(crate) use arc_slice::ArcSlice;
 pub(crate) mod requests_queue;
 #[cfg(any(feature = "server", feature = "client"))]
 pub(crate) mod message_registry;
+#[cfg(feature = "http-client")]
+pub mod mt;
 pub(crate) mod arc_str;
 pub(crate) mod arc_slice;
 
@@ -23,14 +25,15 @@ pub(crate) fn wait_for_shutdown_signal(token: CancellationToken) {
             Ok(_) => (),
             #[cfg(feature = "tracing")]
             Err(err) => tracing::error!(
-                    logger = "neva",
-                    "Unable to listen for shutdown signal: {}", err),
+                logger = "neva",
+                "Unable to listen for shutdown signal: {}", err),
             #[cfg(not(feature = "tracing"))]
             Err(_) => ()
         }
         token.cancel();
     });
 }
+
 
 pub(crate) struct MemChr;
 impl MemChr {

@@ -55,13 +55,12 @@ async fn handle_connection(
                     resp = resp.header(MCP_SESSION_ID, session_id.to_string())
                 }
                 
-                tokio::spawn(send_request(
+                crate::spawn_fair!(send_request(
                     session.clone(),
                     resp,
                     req,
                     recv_tx.clone()
                 ));
-                tokio::time::sleep(std::time::Duration::ZERO).await;
             }
         }
     }
