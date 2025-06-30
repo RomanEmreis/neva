@@ -1,6 +1,6 @@
 [package]
 name = "neva"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 rust-version = "1.85.0"
 authors = ["Roman Emreis <roman.emreis@outlook.com>"]
@@ -30,7 +30,7 @@ tracing = { version = "0.1.41", optional = true }
 tracing-subscriber = { version = "0.3.19", features = ["fmt", "json"], optional = true }
 volga = { version = "0.5.8", features = ["di"], optional = true }
 uuid = { version = "1.17.0", features = ["v4", "serde"] }
-neva_macros = { path = "../neva_macros", version = "0.1.1", optional = true }
+neva_macros = { path = "../neva_macros", version = "0.1.2", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61.1", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_System_Diagnostics", "Win32_System_Diagnostics_ToolHelp"], optional = true }
