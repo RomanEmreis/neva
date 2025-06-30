@@ -10,9 +10,9 @@
 ///
 /// ## Example
 /// ```rust
-/// # use crate::shared::mt::spawn_fair;
+/// # use neva::spawn_fair;
 /// # async fn dox() {
-/// # let (tx, mut rx) = tokio::sync::mpsc::channel(10).split();
+/// # let (tx, mut rx) = tokio::sync::mpsc::channel(10);
 /// while let Some(msg) = rx.recv().await {
 ///     spawn_fair!(async move {
 ///         handle(msg).await;
@@ -65,9 +65,9 @@ macro_rules! spawn_fair {
 ///
 /// ## Example
 /// ```no_run
-/// # use crate::shared::mt::yield_fair;
+/// # use neva::shared::mt::yield_fair;
 /// # async fn dox() {
-/// # let (tx, mut rx) = tokio::sync::mpsc::channel(10).split();
+/// # let (tx, mut rx) = tokio::sync::mpsc::channel(10);
 /// while let Some(msg) = rx.recv().await {
 ///     yield_fair().await;
 ///     tokio::spawn(handle(msg));

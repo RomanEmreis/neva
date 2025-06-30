@@ -13,7 +13,7 @@ pub(crate) mod requests_queue;
 #[cfg(any(feature = "server", feature = "client"))]
 pub(crate) mod message_registry;
 #[cfg(feature = "http-client")]
-pub(crate) mod mt;
+pub mod mt;
 pub(crate) mod arc_str;
 pub(crate) mod arc_slice;
 
