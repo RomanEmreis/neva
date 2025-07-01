@@ -28,6 +28,14 @@ const CMD: &str = "cmd";
 
 /// Job Object wrapper for automatic handle closing
 pub(super) struct Job(HANDLE);
+
+// SAFETY:
+// It is safe to implement `Send` for `Job` because:
+// - `HANDLE` is just a raw pointer-like type (`isize`) and can be safely transferred between threads.
+// - The Windows Job Object API is thread-safe: the handle can be used (e.g., assigned to processes or closed)
+//   from any thread without violating memory safety or causing data races.
+// - `Job` does not provide interior mutability or expose any mutable aliasing of its internals.
+// - We do not implement `Sync`, so shared concurrent access is disallowed, aligning with typical handle semantics.
 unsafe impl Send for Job {}
 
 impl Job {
@@ -49,6 +57,12 @@ impl Job {
 
 impl Drop for Job {
     fn drop(&mut self) {
+        // SAFETY:
+        // This is safe because:
+        // - `self.0` is a valid handle to a Job Object created by `CreateJobObjectW`.
+        // - The handle is owned by this `Job` wrapper, and not aliased elsewhere.
+        // - This is the only place where the handle is closed (via `Drop`), ensuring it is closed exactly once.
+        // - `CloseHandle` is safe to call on a valid handle, and we ignore the result to prevent panicking during drop.
         unsafe { _ = CloseHandle(self.0); }
     }
 }
@@ -57,6 +71,21 @@ impl Drop for Job {
 /// All processes within will be terminated when the job is dropped.
 #[inline]
 fn create_job_object_with_kill_on_close(command: &str, args: Vec<&str>) -> Result<(HANDLE, Child)> {
+    // SAFETY:
+    // This block performs a sequence of Windows API calls that require unsafe operations.
+    //
+    // - `CreateJobObjectW`: Returns a valid job handle on success, which is managed and eventually closed by the caller.
+    // - `SetInformationJobObject`: Safe to call with a properly initialized `JOBOBJECT_EXTENDED_LIMIT_INFORMATION`
+    //   struct. The pointer cast is safe because `info` is stack-allocated and lives long enough for the call.
+    // - `Command::spawn` with `CREATE_SUSPENDED` is safe; the child is immediately suspended.
+    // - `OpenThread` and `OpenProcess` are given thread/process IDs returned from `child.id()` and `get_main_thread_id`.
+    //   We assume these functions return valid IDs for the current child process.
+    // - `AssignProcessToJobObject`: The job and process handles are valid and open at this point.
+    // - `ResumeThread`: Called only after the thread handle is successfully opened.
+    // - `CloseHandle`: Closes valid handles after they are no longer needed.
+    //
+    // Invariant: The caller must ensure that `job` is eventually closed (e.g., with `CloseHandle` or wrapped in a RAII type),
+    // and the returned `Child` is managed (e.g., `wait` or `kill`) to avoid leaking resources.
     unsafe {
         let job = CreateJobObjectW(None, None)?;
         // Configure Job Object
@@ -105,6 +134,23 @@ fn create_job_object_with_kill_on_close(command: &str, args: Vec<&str>) -> Resul
 /// Finds the main thread ID for the specified process.
 #[inline]
 unsafe fn get_main_thread_id(process_id: u32) -> Option<u32> {
+    // SAFETY:
+    // This function is marked `unsafe` because it performs raw Windows API calls and dereferences pointers internally.
+    //
+    // - `CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)` returns a snapshot of all threads in the system.
+    //   The returned handle is valid if `ok()?` succeeds.
+    //
+    // - `THREADENTRY32` is a POD struct and is safely initialized with a known size and default zeroed fields.
+    //   `dwSize` is set to the expected size as required by the API.
+    //
+    // - `Thread32First` and `Thread32Next` fill in `thread_entry` with thread information. These calls are safe
+    //   as long as `thread_entry` is properly initialized and its lifetime outlives the calls, which it does here.
+    //
+    // - The function returns the first thread found in the snapshot belonging to the given `process_id`,
+    //   which is typically the main thread but is not guaranteed by Windows. This heuristic is commonly used
+    //   and works in most real-world scenarios.
+    //
+    // - The snapshot handle is closed automatically by `CloseHandle` via the RAII wrapper in `Ok(Handle)`.
     let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0).ok()?;
     let mut thread_entry = THREADENTRY32 {
         dwSize: size_of::<THREADENTRY32>() as u32,
