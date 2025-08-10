@@ -219,7 +219,7 @@ pub fn resources(_: TokenStream, item: TokenStream) -> TokenStream {
     let function = parse_macro_input!(item as ItemFn);
     let func_name = &function.sig.ident;
 
-    let module_name = syn::Ident::new(&format!("map_{}", func_name), func_name.span());
+    let module_name = syn::Ident::new(&format!("map_{func_name}"), func_name.span());
 
     // Expand the function and apply the tool functionality
     let expanded = quote! {
