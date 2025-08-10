@@ -93,13 +93,13 @@ mod tests {
     #[test]
     fn display_arcstr() {
         let s = ArcStr::from("test");
-        assert_eq!(format!("{}", s), "test");
+        assert_eq!(format!("{s}"), "test");
     }
 
     #[test]
     fn debug_arcstr() {
         let s = ArcStr::from("test");
-        assert_eq!(format!("{:?}", s), r#"ArcStr("test")"#);
+        assert_eq!(format!("{s:?}"), r#"ArcStr("test")"#);
     }
 
     #[test]

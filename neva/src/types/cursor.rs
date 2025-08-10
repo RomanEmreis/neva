@@ -141,7 +141,7 @@ mod tests {
     fn it_returns_invalid_json_inside_base64() {
         // base64 of "not_json" (just bytes, not valid JSON)
         let invalid = general_purpose::STANDARD.encode(b"not_json");
-        let json = format!("\"{}\"", invalid);
+        let json = format!("\"{invalid}\"");
         let result: Result<Cursor, _> = serde_json::from_str(&json);
         assert!(result.is_err());
     }
