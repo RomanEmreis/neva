@@ -41,10 +41,10 @@ impl Display for RequestId {
     #[inline]
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            RequestId::Number(num) => write!(f, "{}", num),
-            RequestId::Uuid(uuid) => write!(f, "{}", uuid),
-            RequestId::String(str) => write!(f, "{}", str),
-            RequestId::Slice(slice) => write!(f, "{}", slice)
+            RequestId::Number(num) => write!(f, "{num}"),
+            RequestId::Uuid(uuid) => write!(f, "{uuid}"),
+            RequestId::String(str) => write!(f, "{str}"),
+            RequestId::Slice(slice) => write!(f, "{slice}")
         }
     }
 }
@@ -104,7 +104,7 @@ struct RequestIdVisitor;
 impl serde::de::Visitor<'_> for RequestIdVisitor {
     type Value = RequestId;
 
-    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+    fn expecting(&self, formatter: &mut Formatter) -> fmt::Result {
         formatter.write_str("a number, UUID, string, or slash-separated path")
     }
 
