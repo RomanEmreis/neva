@@ -79,7 +79,7 @@ pub(crate) const PROTOCOL_VERSIONS: [&str; 3] = [
     "2025-06-18"
 ];
 
-#[cfg(all(feature = "server", feature = "http-server"))]
+#[cfg(feature = "http-server")]
 pub mod auth {
     pub use volga::auth::{Algorithm, Authorizer, Claims};
     pub use crate::transport::http::server::{AuthConfig, DefaultClaims};
