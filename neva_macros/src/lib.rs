@@ -108,7 +108,7 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! { .with_permissions([#(#permission_literals),*]) }
     });
     
-    let module_name = syn::Ident::new(&format!("map_{}", func_name), func_name.span());
+    let module_name = syn::Ident::new(&format!("map_{func_name}"), func_name.span());
     
     // Expand the function and apply the tool functionality
     let expanded = quote! {
@@ -192,7 +192,7 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     });
 
-    let module_name = syn::Ident::new(&format!("map_{}", func_name), func_name.span());
+    let module_name = syn::Ident::new(&format!("map_{func_name}"), func_name.span());
 
     // Expand the function and apply the tool functionality
     let expanded = quote! {
@@ -312,7 +312,7 @@ pub fn prompt(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! {}
     };
 
-    let module_name = syn::Ident::new(&format!("map_{}", func_name), func_name.span());
+    let module_name = syn::Ident::new(&format!("map_{func_name}"), func_name.span());
 
     // Expand the function and apply the tool functionality
     let expanded = quote! {
@@ -361,7 +361,7 @@ pub fn handler(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     let command = command.expect("command parameter must be specified");
-    let module_name = syn::Ident::new(&format!("map_{}", func_name), func_name.span());
+    let module_name = syn::Ident::new(&format!("map_{func_name}"), func_name.span());
 
     // Expand the function and apply the tool functionality
     let expanded = quote! {
