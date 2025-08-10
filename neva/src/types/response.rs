@@ -4,9 +4,13 @@ use crate::error::Error;
 use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
+use crate::types::{RequestId, Message, JSONRPC_VERSION};
+
+#[cfg(all(feature = "server", feature = "http-server"))]
+use volga::headers::HeaderMap;
+
 pub use error_details::ErrorDetails;
 pub use into_response::IntoResponse;
-use crate::types::{RequestId, Message, JSONRPC_VERSION};
 
 pub mod error_details;
 pub mod into_response;
@@ -37,6 +41,11 @@ pub struct OkResponse {
     /// Current MCP Session ID
     #[serde(skip)]
     pub session_id: Option<uuid::Uuid>,
+
+    /// HTTP headers
+    #[serde(skip)]
+    #[cfg(all(feature = "server", feature = "http-server"))]
+    pub headers: HeaderMap
 }
 
 /// A response to a request that indicates an error occurred.
@@ -57,6 +66,11 @@ pub struct ErrorResponse {
     /// Current MCP Session ID
     #[serde(skip)]
     pub session_id: Option<uuid::Uuid>,
+
+    /// HTTP headers
+    #[serde(skip)]
+    #[cfg(all(feature = "server", feature = "http-server"))]
+    pub headers: HeaderMap
 } 
 
 impl From<Response> for Message {
@@ -72,6 +86,8 @@ impl Response {
         Response::Ok(OkResponse {
             jsonrpc: JSONRPC_VERSION.to_string(),
             session_id: None,
+            #[cfg(all(feature = "server", feature = "http-server"))]
+            headers: HeaderMap::with_capacity(8),
             id,
             result
         })
@@ -82,6 +98,8 @@ impl Response {
         Response::Ok(OkResponse {
             jsonrpc: JSONRPC_VERSION.to_string(),
             session_id: None,
+            #[cfg(all(feature = "server", feature = "http-server"))]
+            headers: HeaderMap::new(),
             id,
             result: json!({})
         })
@@ -92,6 +110,8 @@ impl Response {
         Response::Err(ErrorResponse {
             jsonrpc: JSONRPC_VERSION.to_string(),
             session_id: None,
+            #[cfg(all(feature = "server", feature = "http-server"))]
+            headers: HeaderMap::with_capacity(8),
             id,
             error: error.into(),
         })
@@ -138,6 +158,16 @@ impl Response {
         match &mut self {
             Response::Ok(ok) => ok.session_id = Some(id),
             Response::Err(err) => err.session_id = Some(id)
+        }
+        self
+    }
+
+    /// Set HTTP headers for the response
+    #[cfg(all(feature = "server", feature = "http-server"))]
+    pub fn set_headers(mut self, headers: HeaderMap) -> Self {
+        match &mut self {
+            Response::Ok(ok) => ok.headers = headers,
+            Response::Err(err) => err.headers = headers
         }
         self
     }

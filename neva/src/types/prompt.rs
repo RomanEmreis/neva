@@ -283,7 +283,7 @@ where
     Args: TryFrom<GetPromptRequestParams, Error = Error> + Send + Sync
 {
     #[inline]
-    fn call(&self, params: HandlerParams) -> BoxFuture<Result<GetPromptResult, Error>> {
+    fn call(&self, params: HandlerParams) -> BoxFuture<'_, Result<GetPromptResult, Error>> {
         let HandlerParams::Prompt(params) = params else {
             unreachable!()
         };

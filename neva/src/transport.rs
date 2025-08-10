@@ -25,7 +25,7 @@ pub(crate) trait Sender {
 
 /// Describes a receiver that can receive messages from a client
 pub(crate) trait Receiver {
-    /// Receives a messages from a client
+    /// Receives messages from a client
     fn recv(&mut self) -> impl Future<Output = Result<Message, Error>>;
 }
 
@@ -49,7 +49,7 @@ pub(crate) enum TransportProto {
     #[cfg(feature = "server")]
     StdIoServer(StdIoServer),
     #[cfg(all(feature = "server", feature = "http-server"))]
-    HttpServer(HttpServer),
+    HttpServer(Box<HttpServer>),
     #[cfg(all(feature = "client", feature = "http-client"))]
     HttpClient(HttpClient),
     //Ws(Websocket),

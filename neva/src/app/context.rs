@@ -25,6 +25,12 @@ use std::{
     sync::Arc
 };
 
+#[cfg(feature = "http-server")]
+use {
+    crate::auth::DefaultClaims,
+    volga::headers::HeaderMap
+};
+
 type RequestHandlers = HashMap<String, RequestHandler<Response>>;
 
 /// Represents a Server runtime
@@ -40,6 +46,10 @@ pub(crate) struct ServerRuntime {
 #[derive(Clone)]
 pub struct Context {
     pub session_id: Option<uuid::Uuid>,
+    #[cfg(feature = "http-server")]
+    pub headers: HeaderMap,
+    #[cfg(feature = "http-server")]
+    pub(crate) claims: Option<DefaultClaims>,
     pub(crate) options: RuntimeMcpOptions,
     pending: RequestQueue,
     sender: TransportProtoSender,
@@ -77,9 +87,29 @@ impl ServerRuntime {
     }
     
     /// Creates a new MCP request [`Context`]
+    #[cfg(not(feature = "http-server"))]
     pub(crate) fn context(&self, session_id: Option<uuid::Uuid>) -> Context {
         Context {
             session_id,
+            pending: self.pending.clone(),
+            sender: self.sender.clone(),
+            options: self.options.clone(),
+            timeout: self.options.request_timeout,
+        }
+    }
+
+    /// Creates a new MCP request [`Context`]
+    #[cfg(feature = "http-server")]
+    pub(crate) fn context(
+        &self, 
+        session_id: Option<uuid::Uuid>, 
+        headers: HeaderMap, 
+        claims: Option<DefaultClaims>
+    ) -> Context {
+        Context {
+            session_id,
+            headers,
+            claims,
             pending: self.pending.clone(),
             sender: self.sender.clone(),
             options: self.options.clone(),

@@ -51,9 +51,10 @@ impl From<GetPromptRequestParams> for HandlerParams {
 
 /// Represents a Request -> Response handler
 pub(crate) trait Handler<T: IntoResponse> {
-    fn call(&self, params: HandlerParams) -> BoxFuture<Result<T, Error>>;
+    fn call(&self, params: HandlerParams) -> BoxFuture<'_, Result<T, Error>>;
 }
 
+/// Represents an extractor trait from handler parameters
 pub trait FromHandlerParams: Sized {
     fn from_params(params: &HandlerParams) -> Result<Self, Error>;
 }
@@ -94,7 +95,7 @@ where
     Args: FromHandlerParams + Send + Sync
 {
     #[inline]
-    fn call(&self, params: HandlerParams) -> BoxFuture<Result<Response, Error>> {
+    fn call(&self, params: HandlerParams) -> BoxFuture<'_, Result<Response, Error>> {
         Box::pin(async move {
             let id = RequestId::from_params(&params)?;
             let args = Args::from_params(&params)?;

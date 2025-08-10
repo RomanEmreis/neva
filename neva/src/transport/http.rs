@@ -3,8 +3,11 @@
 #[cfg(all(feature = "client", not(feature = "server")))]
 use reqwest::header::HeaderMap;
 
-#[cfg(feature = "server")]
-use volga::headers::HeaderMap;
+#[cfg(feature = "http-server")]
+use {
+    volga::{auth::AuthClaims, headers::HeaderMap},
+    server::AuthConfig
+};
 
 use futures_util::TryFutureExt;
 use std::{borrow::Cow, fmt::Display};
@@ -15,15 +18,16 @@ use crate::{
     shared::MemChr,
     types::Message
 };
+use crate::auth::DefaultClaims;
 use super::{
     Transport,
     Sender as TransportSender,
     Receiver as TransportReceiver
 };
 
-#[cfg(feature = "server")]
+#[cfg(feature = "http-server")]
 pub(crate) mod server;
-#[cfg(feature = "client")]
+#[cfg(feature = "http-client")]
 pub(crate) mod client;
 
 pub(super) const MCP_SESSION_ID: &str = "Mcp-Session-Id";
@@ -39,14 +43,15 @@ pub(super) fn get_mcp_session_id(headers: &HeaderMap) -> Option<uuid::Uuid> {
 }
 
 /// Represents HTTP server transport
-#[cfg(feature = "server")]
-pub struct HttpServer {
+#[cfg(feature = "http-server")]
+pub struct HttpServer<C: AuthClaims = DefaultClaims> {
     url: ServiceUrl,
+    auth: Option<AuthConfig<C>>,
     sender: HttpSender,
     receiver: HttpReceiver,
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "http-client")]
 pub struct HttpClient {
     url: ServiceUrl,
     sender: HttpSender,
@@ -57,7 +62,15 @@ pub struct HttpClient {
 pub struct ServiceUrl {
     addr: &'static str,
     endpoint: &'static str,
-} 
+}
+
+#[cfg(feature = "http-server")]
+pub(super) struct HttpRuntimeContext {
+    url: ServiceUrl,
+    tx: Sender<Result<Message, Error>>,
+    rx: Receiver<Message>,
+    auth: Option<AuthConfig>,
+}
 
 /// Represents HTTP sender
 pub(crate) struct HttpSender {
@@ -71,19 +84,20 @@ pub(crate) struct HttpReceiver {
     rx: Receiver<Result<Message, Error>>
 }
 
-#[cfg(feature = "server")]
+#[cfg(feature = "http-server")]
 impl Default for HttpServer {
     #[inline]
     fn default() -> Self {
         Self {
             url: ServiceUrl::default(),
+            auth: None,
             receiver: HttpReceiver::new(),
             sender: HttpSender::new()
         }
     }
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "http-client")]
 impl Default for HttpClient {
     #[inline]
     fn default() -> Self {
@@ -160,7 +174,7 @@ impl HttpReceiver {
     }
 }
 
-#[cfg(feature = "server")]
+#[cfg(feature = "http-server")]
 impl HttpServer {
     /// Binds HTTP serve to address and port    
     pub fn bind(mut self, addr: &'static str) -> Self {
@@ -176,13 +190,29 @@ impl HttpServer {
         self
     }
     
-    /// Returns service URL (IP, port and URL prefix)
-    pub(crate) fn url(&self) -> ServiceUrl {
-        self.url
+    /// Configures authentication and authorization
+    pub fn with_auth<F>(mut self, config: F) -> Self
+    where 
+        F: FnOnce(AuthConfig) -> AuthConfig
+    {
+        self.auth = Some(config(AuthConfig::default()));
+        self    
+    }
+    
+    fn runtime(&mut self) -> Result<HttpRuntimeContext, Error> {
+        let Some(sender_rx) = self.sender.rx.take() else {
+            return Err(Error::new(ErrorCode::InternalError, "The HTTP writer is already in use"));
+        };
+        Ok(HttpRuntimeContext {
+            url: self.url,
+            tx: self.receiver.tx.clone(),
+            rx: sender_rx,
+            auth: self.auth.take(),
+        })
     }
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "http-client")]
 impl HttpClient {
     /// Binds HTTP serve to address and port    
     pub fn bind(mut self, addr: &'static str) -> Self {
@@ -223,22 +253,23 @@ impl TransportReceiver for HttpReceiver {
     }
 }
 
-#[cfg(feature = "server")]
+#[cfg(feature = "http-server")]
 impl Transport for HttpServer {
     type Sender = HttpSender;
     type Receiver = HttpReceiver;
 
     fn start(&mut self) -> CancellationToken {
         let token = CancellationToken::new();
-        let Some(sender_rx) = self.sender.rx.take() else {
-            #[cfg(feature = "tracing")]
-            tracing::error!(logger = "neva", "The HTTP writer is already in use");
-            return token;
+        let runtime = match self.runtime() {
+            Ok(runtime) => runtime,
+            Err(_err) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(logger = "neva", "Failed to start HTTP server: {}", _err);
+                return token;
+            }
         };
         tokio::spawn(server::serve(
-            self.url(),
-            self.receiver.tx.clone(), 
-            sender_rx,
+            runtime,
             token.clone())
         );
         
@@ -251,7 +282,7 @@ impl Transport for HttpServer {
     }
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "http-client")]
 impl Transport for HttpClient {
     type Sender = HttpSender;
     type Receiver = HttpReceiver;

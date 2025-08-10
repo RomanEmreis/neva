@@ -61,14 +61,22 @@ pub struct Tool {
     
     /// A JSON Schema object defining the expected parameters for the tool.
     /// 
-    /// > Note: Needs to a valid JSON schema object that additionally is of type object.
+    /// > Note: Needs to a valid JSON schema object that additionally is of a type object.
     #[serde(rename = "inputSchema")]
     pub input_schema: InputSchema,
     
     /// A tool call handler
     #[serde(skip)]
     #[cfg(feature = "server")]
-    handler: Option<RequestHandler<CallToolResponse>>
+    handler: Option<RequestHandler<CallToolResponse>>,
+
+    #[serde(skip)]
+    #[cfg(feature = "http-server")]
+    roles: Option<Vec<String>>,
+
+    #[serde(skip)]
+    #[cfg(feature = "http-server")]
+    permissions: Option<Vec<String>>,
 }
 
 /// Sent from the client to request a list of tools the server has.
@@ -201,14 +209,14 @@ impl InputSchema {
         Self { r#type: PropertyType::Object, properties: props }
     }
     
-    /// Deserializes a new [`InputSchema`] from JSON string
+    /// Deserializes a new [`InputSchema`] from a JSON string
     #[inline]
     pub fn from_json_str(json: &str) -> Self {
         serde_json::from_str(json)
             .expect("InputSchema: Incorrect JSON string provided")
     }
     
-    /// Adds a new property into schema. 
+    /// Adds a new property into the schema. 
     /// If a property with this name already exists, it overwrites it
     pub fn add_property<T: Into<PropertyType>>(
         mut self, 
@@ -298,7 +306,7 @@ where
     Args: TryFrom<CallToolRequestParams, Error = Error> + Send + Sync,
 {
     #[inline]
-    fn call(&self, params: HandlerParams) -> BoxFuture<Result<CallToolResponse, Error>> {
+    fn call(&self, params: HandlerParams) -> BoxFuture<'_, Result<CallToolResponse, Error>> {
         let HandlerParams::Tool(params) = params else { 
             unreachable!()
         };
@@ -337,6 +345,10 @@ impl Tool {
             descr: None,
             input_schema, 
             handler: Some(handler),
+            #[cfg(feature = "http-server")]
+            roles: None,
+            #[cfg(feature = "http-server")]
+            permissions: None,
         }
     }
     
@@ -357,9 +369,92 @@ impl Tool {
         self
     }
     
+    /// Sets a list of roles that are allowed to invoke the tool
+    #[cfg(all(feature = "server", feature = "http-server"))]
+    pub fn with_roles<T, I>(&mut self, roles: T) -> &mut Self
+    where 
+        T: IntoIterator<Item = I>,
+        I: Into<String>
+    {
+        self.roles = Some(roles
+            .into_iter()
+            .map(Into::into)
+            .collect());
+        self
+    }
+    
+    /// Sets a list of permissions that are allowed to invoke the tool
+    #[cfg(all(feature = "server", feature = "http-server"))]
+    pub fn with_permissions<T, I>(&mut self, permissions: T) -> &mut Self
+    where
+        T: IntoIterator<Item = I>,
+        I: Into<String>
+    {
+        self.permissions = Some(permissions
+            .into_iter()
+            .map(Into::into)
+            .collect());
+        self
+    }
+    
+    /// Validates tool params
+    #[inline]
+    #[cfg(feature = "http-server")]
+    pub(crate) fn validate(&self, params: &HandlerParams) -> Result<(), Error> {
+        use volga::auth::AuthClaims;
+
+        let HandlerParams::Tool(tool_params) = params else {
+            return Err(ErrorCode::InvalidParams.into());
+        };
+
+        if self.roles.is_none() && self.permissions.is_none() {
+            return Ok(());
+        }
+
+        const ERR_NO_CLAIMS: &str = "Claims are not provided";
+        const ERR_UNAUTHORIZED: &str = "Subject is not authorized to invoke this tool";
+
+        let claims = tool_params
+            .meta
+            .as_ref()
+            .and_then(|m| m.context.as_ref())
+            .and_then(|ctx| ctx.claims.as_ref());
+
+        if claims.is_none() {
+            return Err(Error::new(ErrorCode::InvalidParams, ERR_NO_CLAIMS));
+        }
+
+        let contains_any = |have: Option<&[String]>, required: &[String]| {
+            have.is_some_and(|vals| vals.iter().any(|v| required.contains(v)))
+        };
+
+        let contains = |have: Option<&str>, required: &[String]| {
+            have.is_some_and(|val| required.iter().any(|r| r == val))
+        };
+
+        // Roles check
+        if let Some(required_roles) = &self.roles {
+            if !contains(claims.and_then(|c| c.role()), required_roles) &&
+                !contains_any(claims.and_then(|c| c.roles()), required_roles) {
+                return Err(Error::new(ErrorCode::InvalidParams, ERR_UNAUTHORIZED));
+            }
+        }
+
+        // Permissions check
+        if let Some(required_permissions) = &self.permissions {
+            if !contains_any(claims.and_then(|c| c.permissions()), required_permissions) {
+                return Err(Error::new(ErrorCode::InvalidParams, ERR_UNAUTHORIZED));
+            }
+        }
+
+        Ok(())
+    }
+    
     /// Invoke a tool
     #[inline]
     pub(crate) async fn call(&self, params: HandlerParams) -> Result<CallToolResponse, Error> {
+        #[cfg(feature = "http-server")]
+        self.validate(&params)?;
         match self.handler { 
             Some(ref handler) => handler.call(params).await,
             None => Err(Error::new(ErrorCode::InternalError, "Tool handler not specified"))

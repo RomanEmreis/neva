@@ -1,19 +1,20 @@
 ﻿use std::fmt::Display;
 use serde::{Deserialize, Serialize};
 use crate::SDK_NAME;
-
-#[cfg(feature = "server")]
-use crate::error::Error;
-
 use crate::types::notification::Notification;
 
 #[cfg(feature = "server")]
-use crate::types::request::FromRequest;
-
-#[cfg(feature = "server")]
 use crate::{
+    app::handler::{FromHandlerParams, HandlerParams},
+    types::request::FromRequest,
     options::McpOptions,
-    app::handler::{FromHandlerParams, HandlerParams}
+    error::Error,
+};
+
+#[cfg(all(feature = "server", feature = "http-server"))]
+use {
+    crate::auth::DefaultClaims,
+    volga::headers::HeaderMap
 };
 
 pub use helpers::{Json, Meta, PropertyType};
@@ -272,6 +273,26 @@ impl Message {
             Message::Request(ref mut req) => req.session_id = Some(id),
             Message::Notification(ref mut notification) => notification.session_id = Some(id),
             Message::Response(resp) => self = Message::Response(resp.set_session_id(id)),
+        }
+        self
+    }
+    
+    /// Sets HTTP headers for [`Request`] or [`Response`] message
+    #[cfg(all(feature = "server", feature = "http-server"))]
+    pub fn set_headers(mut self, headers: HeaderMap) -> Self {
+        match self { 
+            Message::Request(ref mut req) => req.headers = headers,
+            Message::Response(resp) => self = Message::Response(resp.set_headers(headers)),
+            _ => ()
+        }
+        self
+    }
+
+    /// Sets Authentication and Authorization claims for [`Request`] message
+    #[cfg(all(feature = "server", feature = "http-server"))]
+    pub(crate) fn set_claims(mut self, claims: DefaultClaims) -> Self {
+        if let Message::Request(ref mut req) = self {
+            req.claims = Some(Box::new(claims));
         }
         self
     }

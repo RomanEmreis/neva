@@ -120,7 +120,7 @@ impl McpOptions {
     /// Sets Streamable HTTP as a transport protocol
     #[cfg(feature = "http-server")]
     pub fn with_http<F: FnOnce(HttpServer) -> HttpServer>(mut self, config: F) -> Self {
-        self.proto = Some(TransportProto::HttpServer(config(HttpServer::default())));
+        self.proto = Some(TransportProto::HttpServer(Box::new(config(HttpServer::default()))));
         self
     }
 
@@ -292,7 +292,7 @@ impl McpOptions {
             .or_insert(prompt)
     }
     
-    /// Returns a Model Context Protocol version that server supports
+    /// Returns a Model Context Protocol version that this server supports
     #[inline]
     pub(crate) fn protocol_ver(&self) -> &'static str {
         match self.protocol_ver { 
@@ -319,7 +319,7 @@ impl McpOptions {
         self.tools.values().await
     }
 
-    /// Reads a resource by it URI
+    /// Reads a resource by its URI
     #[inline]
     pub(crate) fn read_resource(&self, uri: &Uri) -> Option<&Route> {
         let uri_parts = uri.as_vec();
@@ -372,7 +372,7 @@ impl McpOptions {
         self.prompts_capability.clone()
     }
 
-    /// Returns whether server is configured to send the "notifications/resources/updated"
+    /// Returns whether the server is configured to send the "notifications/resources/updated"
     #[inline]
     pub(crate) fn is_resource_subscription_supported(&self) -> bool {
         self.resources_capability
@@ -380,7 +380,7 @@ impl McpOptions {
             .is_some_and(|res| res.subscribe)
     }
 
-    /// Returns whether server is configured to send the "notifications/resources/list_changed"
+    /// Returns whether the server is configured to send the "notifications/resources/list_changed"
     #[inline]
     pub(crate) fn is_resource_list_changed_supported(&self) -> bool {
         self.resources_capability
@@ -388,7 +388,7 @@ impl McpOptions {
             .is_some_and(|res| res.list_changed)
     }
 
-    /// Returns whether server is configured to send the "notifications/tools/list_changed"
+    /// Returns whether the server is configured to send the "notifications/tools/list_changed"
     #[inline]
     pub(crate) fn is_tools_list_changed_supported(&self) -> bool {
         self.tools_capability
@@ -396,7 +396,7 @@ impl McpOptions {
             .is_some_and(|tool| tool.list_changed)
     }
 
-    /// Returns whether server is configured to send the "notifications/prompts/list_changed"
+    /// Returns whether the server is configured to send the "notifications/prompts/list_changed"
     #[inline]
     pub(crate) fn is_prompts_list_changed_supported(&self) -> bool {
         self.prompts_capability

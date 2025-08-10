@@ -155,7 +155,7 @@ where
     Args: TryFrom<ReadResourceRequestParams, Error = Error> + Send + Sync,
 {
     #[inline]
-    fn call(&self, params: HandlerParams) -> BoxFuture<Result<ReadResourceResult, Error>> {
+    fn call(&self, params: HandlerParams) -> BoxFuture<'_, Result<ReadResourceResult, Error>> {
         let HandlerParams::Resource(params) = params else {
             unreachable!()
         };

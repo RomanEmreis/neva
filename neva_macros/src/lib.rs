@@ -13,6 +13,8 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Parse the attribute for metadata
     let mut description = None;
     let mut schema = None;
+    let mut roles = None;
+    let mut permissions = None;
     let mut no_schema = false;
 
     // Parse the attribute input as key-value pairs
@@ -32,21 +34,19 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
                 if let Some(ident) = nv.path.get_ident() {
                     match ident.to_string().as_str() {
                         "descr" => {
-                            if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = &nv.value {
-                                description = Some(lit_str.value());
-                            }
+                            description = get_str_param(&nv.value);
                         }
                         "schema" => {
-                            if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = &nv.value {
-                                schema = Some(lit_str.value());
-                            }
+                            schema = get_str_param(&nv.value);
+                        }
+                        "roles" => {
+                            roles = get_params_arr(&nv.value);
+                        }
+                        "permissions" => {
+                            permissions = get_params_arr(&nv.value);
                         }
                         "no_schema" => {
-                            if let Expr::Lit(syn::ExprLit { lit: Lit::Bool(lit), .. }) = &nv.value {
-                                if lit.value {
-                                    no_schema = true;
-                                } 
-                            }
+                            no_schema = get_bool_param(&nv.value);
                         }
                         _ => {}
                     }
@@ -97,6 +97,16 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     } else {
         quote! {}
     };
+
+    let roles_code = roles.map(|roles| {
+        let role_literals = roles.iter().map(|r| quote::quote! { #r });
+        quote! { .with_roles([#(#role_literals),*]) }
+    });
+
+    let permission_code = permissions.map(|permission| {
+        let permission_literals = permission.iter().map(|r| quote::quote! { #r });
+        quote! { .with_permissions([#(#permission_literals),*]) }
+    });
     
     let module_name = syn::Ident::new(&format!("map_{}", func_name), func_name.span());
     
@@ -108,7 +118,9 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
         fn #module_name(app: &mut neva::App) {
             app.map_tool(stringify!(#func_name), #func_name)
                 #description_code
-                #schema_code;
+                #schema_code
+                #roles_code
+                #permission_code;
         }
         neva::macros::inventory::submit! {
             neva::macros::ItemRegistrar(#module_name)
@@ -143,24 +155,16 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
                 if let Some(ident) = nv.path.get_ident() {
                     match ident.to_string().as_str() {
                         "uri" => {
-                            if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = &nv.value {
-                                uri = Some(lit_str.value());
-                            }
+                            uri = get_str_param(&nv.value);
                         }
                         "descr" => {
-                            if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = &nv.value {
-                                description = Some(lit_str.value());
-                            }
+                            description = get_str_param(&nv.value);
                         }
                         "mime" => {
-                            if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = &nv.value {
-                                mime = Some(lit_str.value());
-                            }
+                            mime = get_str_param(&nv.value);
                         }
                         "annotations" => {
-                            if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = &nv.value {
-                                annotations = Some(lit_str.value());
-                            }
+                            annotations = get_str_param(&nv.value);
                         }
                         _ => {}
                     }
@@ -194,7 +198,7 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
     let expanded = quote! {
         // Original function
         #function
-        // Register resource function
+        // Register a resource function
         fn #module_name(app: &mut neva::App) {
             app.map_resource(#uri_code, stringify!(#func_name), #func_name)
                 #description_code
@@ -221,7 +225,7 @@ pub fn resources(_: TokenStream, item: TokenStream) -> TokenStream {
     let expanded = quote! {
         // Original function
         #function
-        // Register resource function
+        // Register a resource function
         fn #module_name(app: &mut neva::App) {
             app.map_resources(#func_name);
         }
@@ -260,21 +264,13 @@ pub fn prompt(attr: TokenStream, item: TokenStream) -> TokenStream {
                 if let Some(ident) = nv.path.get_ident() {
                     match ident.to_string().as_str() {
                         "descr" => {
-                            if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = &nv.value {
-                                description = Some(lit_str.value());
-                            }
+                            description = get_str_param(&nv.value);   
                         }
                         "args" => {
-                            if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = &nv.value {
-                                args = Some(lit_str.value());
-                            }
+                            args = get_str_param(&nv.value);
                         }
                         "no_args" => {
-                            if let Expr::Lit(syn::ExprLit { lit: Lit::Bool(lit), .. }) = &nv.value {
-                                if lit.value {
-                                    no_args = true;
-                                }
-                            }
+                            no_args = get_bool_param(&nv.value);
                         }
                         _ => {}
                     }
@@ -357,9 +353,7 @@ pub fn handler(attr: TokenStream, item: TokenStream) -> TokenStream {
             Meta::NameValue(nv) => {
                 if let Some(ident) = nv.path.get_ident() {
                     if let "command" = ident.to_string().as_str() {
-                        if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = &nv.value {
-                            command = Some(lit_str.value());
-                        }
+                        command = get_str_param(&nv.value);
                     }
                 }
             },
@@ -373,7 +367,7 @@ pub fn handler(attr: TokenStream, item: TokenStream) -> TokenStream {
     let expanded = quote! {
         // Original function
         #function
-        // Register resource function
+        // Register a handler function
         fn #module_name(app: &mut neva::App) {
             app.map_handler(#command, #func_name);
         }
@@ -411,5 +405,46 @@ fn get_arg_type(t: &Type) -> &str {
             }
         }
         _ => "object", // Default fallback
+    }
+}
+
+#[inline]
+fn get_str_param(value: &Expr) -> Option<String> {
+    if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = value {
+        Some(lit_str.value())
+    } else { 
+        None   
+    }
+}
+
+#[inline]
+fn get_bool_param(value: &Expr) -> bool {
+    if let Expr::Lit(syn::ExprLit { lit: Lit::Bool(lit), .. }) = value {
+        lit.value
+    } else { 
+        false
+    }
+}
+
+#[inline]
+fn get_params_arr(value: &Expr) -> Option<Vec<String>> {
+    match value {
+        Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) => {
+            Some(vec![lit_str.value()])
+        }
+        Expr::Array(array) => {
+            let mut role_list = Vec::new();
+            for elem in &array.elems {
+                if let Expr::Lit(syn::ExprLit { lit: Lit::Str(lit_str), .. }) = elem {
+                    role_list.push(lit_str.value());
+                }
+            }
+            if !role_list.is_empty() { 
+                Some(role_list)
+            } else { 
+                None
+            }
+        }
+        _ => None
     }
 }
