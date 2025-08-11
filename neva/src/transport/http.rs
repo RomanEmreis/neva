@@ -6,7 +6,7 @@ use reqwest::header::HeaderMap;
 #[cfg(feature = "http-server")]
 use {
     volga::{auth::AuthClaims, headers::HeaderMap},
-    server::AuthConfig
+    server::{AuthConfig, DefaultClaims}
 };
 
 use futures_util::TryFutureExt;
@@ -18,7 +18,7 @@ use crate::{
     shared::MemChr,
     types::Message
 };
-use crate::auth::DefaultClaims;
+
 use super::{
     Transport,
     Sender as TransportSender,
