@@ -5,8 +5,9 @@
 //!
 //! JWT_SECRET=a-string-secret-at-least-256-bits-long cargo run -p protected-server
 //! ```
-use neva::{App, types::notification, tool};
+use neva::{App, types::notification, tool, resource, prompt};
 use tracing_subscriber::{filter, reload, prelude::*};
+use neva::types::Uri;
 
 /// A tool that allowed to everyone
 #[tool]
@@ -20,10 +21,18 @@ async fn admin_tool(name: String) {
     tracing::debug!("running admin tool: {}", name);
 }
 
-/// A tool that allowed only to admins with the `read` permission
-#[tool(roles = ["admin"], permissions = ["read"])]
-async fn restricted_tool(name: String) {
-    tracing::debug!("running restricted tool: {}", name);
+/// A prompt that allowed only to admins with the `read` permission
+#[prompt(roles = ["admin"], permissions = ["read"])]
+async fn restricted_prompt(name: String) -> (&'static str, &'static str) {
+    tracing::debug!("getting restricted prompt: {}", name);
+    ("this is the restricted prompt", "admin")
+}
+
+/// A resource that allowed only with the `read` permission
+#[resource(uri = "res://restricted/{name}", permissions = ["read"])]
+async fn restricted_resource(uri: Uri, name: String) -> (String, String) {
+    tracing::debug!("requested resource: {}", name);
+    (uri.to_string(), name)
 }
 
 #[tokio::main]

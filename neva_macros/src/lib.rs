@@ -140,6 +140,8 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut description = None;
     let mut mime = None;
     let mut annotations = None;
+    let mut roles = None;
+    let mut permissions = None;
     
     // Parse the attribute input as key-value pairs
     let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
@@ -165,6 +167,12 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
                         }
                         "annotations" => {
                             annotations = get_str_param(&nv.value);
+                        }
+                        "roles" => {
+                            roles = get_params_arr(&nv.value);
+                        }
+                        "permissions" => {
+                            permissions = get_params_arr(&nv.value);
                         }
                         _ => {}
                     }
@@ -192,6 +200,16 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     });
 
+    let roles_code = roles.map(|roles| {
+        let role_literals = roles.iter().map(|r| quote::quote! { #r });
+        quote! { .with_roles([#(#role_literals),*]) }
+    });
+
+    let permission_code = permissions.map(|permission| {
+        let permission_literals = permission.iter().map(|r| quote::quote! { #r });
+        quote! { .with_permissions([#(#permission_literals),*]) }
+    });
+
     let module_name = syn::Ident::new(&format!("map_{func_name}"), func_name.span());
 
     // Expand the function and apply the tool functionality
@@ -203,7 +221,9 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
             app.map_resource(#uri_code, stringify!(#func_name), #func_name)
                 #description_code
                 #mime_code
-                #annotations_code;
+                #annotations_code
+                #roles_code
+                #permission_code;
         }
         neva::macros::inventory::submit! {
             neva::macros::ItemRegistrar(#module_name)
@@ -245,6 +265,8 @@ pub fn prompt(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Parse the attribute for metadata
     let mut description = None;
     let mut args = None;
+    let mut roles = None;
+    let mut permissions = None;
     let mut no_args = false;
 
     // Parse the attribute input as key-value pairs
@@ -271,6 +293,12 @@ pub fn prompt(attr: TokenStream, item: TokenStream) -> TokenStream {
                         }
                         "no_args" => {
                             no_args = get_bool_param(&nv.value);
+                        }
+                        "roles" => {
+                            roles = get_params_arr(&nv.value);
+                        }
+                        "permissions" => {
+                            permissions = get_params_arr(&nv.value);
                         }
                         _ => {}
                     }
@@ -312,6 +340,16 @@ pub fn prompt(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! {}
     };
 
+    let roles_code = roles.map(|roles| {
+        let role_literals = roles.iter().map(|r| quote::quote! { #r });
+        quote! { .with_roles([#(#role_literals),*]) }
+    });
+
+    let permission_code = permissions.map(|permission| {
+        let permission_literals = permission.iter().map(|r| quote::quote! { #r });
+        quote! { .with_permissions([#(#permission_literals),*]) }
+    });
+    
     let module_name = syn::Ident::new(&format!("map_{func_name}"), func_name.span());
 
     // Expand the function and apply the tool functionality
@@ -322,7 +360,9 @@ pub fn prompt(attr: TokenStream, item: TokenStream) -> TokenStream {
         fn #module_name(app: &mut App) {
             app.map_prompt(stringify!(#func_name), #func_name)
                 #description_code
-                #args_code;
+                #args_code
+                #roles_code
+                #permission_code;
         }
         neva::macros::inventory::submit! {
             neva::macros::ItemRegistrar(#module_name)

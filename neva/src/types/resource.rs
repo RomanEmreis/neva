@@ -1,5 +1,6 @@
 ﻿//! Represents an MCP resource
 
+use std::borrow::Cow;
 use serde::{Deserialize, Serialize};
 use crate::types::Cursor;
 use crate::types::request::RequestParamsMeta;
@@ -88,6 +89,11 @@ pub struct ReadResourceRequestParams {
     /// > that are not part of the primary request parameters.
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<RequestParamsMeta>,
+    
+    /// Path arguments extracted from [`Uri`]
+    #[serde(skip)]
+    #[cfg(feature = "server")]
+    pub(crate) args: Option<Box<[Cow<'static, str>]>>
 }
 
 /// The server's response to a resources/list request from the client.
@@ -261,6 +267,8 @@ impl From<Uri> for ReadResourceRequestParams {
     fn from(uri: Uri) -> Self {
         Self {
             meta: None,
+            #[cfg(feature = "server")]
+            args: None,
             uri
         }
     }
@@ -271,6 +279,13 @@ impl ReadResourceRequestParams {
     /// Includes [`Context`] into request metadata. If metadata is `None` it creates a new.
     pub(crate) fn with_context(mut self, ctx: Context) -> Self {
         self.meta.get_or_insert_default().context = Some(ctx);
+        self
+    }
+    
+    /// Includes path arguments extracted from [`Uri`] 
+    #[cfg(feature = "server")]
+    pub(crate) fn with_args(mut self, args: Box<[Cow<'static, str>]>) -> Self {
+        self.args = Some(args);
         self
     }
 }

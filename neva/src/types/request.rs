@@ -8,7 +8,7 @@ use super::{ProgressToken, Message, JSONRPC_VERSION};
 #[cfg(feature = "server")]
 use crate::Context;
 
-#[cfg(all(feature = "server", feature = "http-server"))]
+#[cfg(feature = "http-server")]
 use {
     crate::auth::DefaultClaims,
     volga::headers::HeaderMap
@@ -44,12 +44,12 @@ pub struct Request {
 
     /// HTTP headers
     #[serde(skip)]
-    #[cfg(all(feature = "server", feature = "http-server"))]
+    #[cfg(feature = "http-server")]
     pub headers: HeaderMap,
 
     /// Authentication and Authorization claims
     #[serde(skip)]
-    #[cfg(all(feature = "server", feature = "http-server"))]
+    #[cfg(feature = "http-server")]
     pub claims: Option<Box<DefaultClaims>>,
 }
 
@@ -107,9 +107,9 @@ impl Request {
             id: id.unwrap_or_default(),
             method: method.into(),
             params: params.and_then(|p| serde_json::to_value(p).ok()),
-            #[cfg(all(feature = "server", feature = "http-server"))]
+            #[cfg(feature = "http-server")]
             headers: HeaderMap::with_capacity(8),
-            #[cfg(all(feature = "server", feature = "http-server"))]
+            #[cfg(feature = "http-server")]
             claims: None,
         }
     }

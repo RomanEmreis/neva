@@ -22,6 +22,7 @@ use volga::{
 use crate::types::notification::fmt::LOG_REGISTRY;
 
 pub use auth_config::{AuthConfig, DefaultClaims};
+pub(crate) use auth_config::{validate_permissions, validate_roles};
 
 pub mod auth_config;
 

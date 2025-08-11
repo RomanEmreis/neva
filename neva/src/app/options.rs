@@ -270,15 +270,16 @@ impl McpOptions {
         self.resources_capability
             .get_or_insert_default();
         
+        let name = template.name.clone();
         let uri_parts: Vec<Cow<'static, str>> = template
             .uri_template
             .as_vec();
         
-        self.resource_routes.insert(uri_parts.as_slice(), handler);
+        self.resource_routes.insert(uri_parts.as_slice(), name.clone(), handler);
         self.resources_templates
             .as_mut()
-            .entry(template.name.clone())
-            .or_insert(template.clone())
+            .entry(name)
+            .or_insert(template)
     }
 
     /// Adds a prompt
@@ -321,7 +322,7 @@ impl McpOptions {
 
     /// Reads a resource by its URI
     #[inline]
-    pub(crate) fn read_resource(&self, uri: &Uri) -> Option<&Route> {
+    pub(crate) fn read_resource(&self, uri: &Uri) -> Option<(&Route, Box<[Cow<'static, str>]>)> {
         let uri_parts = uri.as_vec();
         self.resource_routes
             .find(uri_parts.as_slice())
@@ -515,12 +516,13 @@ mod tests {
 
         let req = ReadResourceRequestParams {
             uri: "res://res".into(),
-            meta: None
+            meta: None,
+            args: None
         };
         
         let res = options.read_resource(&req.uri).unwrap();
         let res = match res { 
-            Route::Handler(handler) => handler.call(req.into()).await.unwrap(),
+            (Route::Handler(handler), _) => handler.call(req.into()).await.unwrap(),
             _ => unreachable!()
         };
         assert_eq!(res.contents.len(), 1);
@@ -540,12 +542,13 @@ mod tests {
 
         let req = ReadResourceRequestParams {
             uri: "res://res".into(),
-            meta: None
+            meta: None,
+            args: None
         };
 
         let res = options.read_resource(&req.uri).unwrap();
         let res = match res {
-            Route::Handler(handler) => handler.call(req.into()).await,
+            (Route::Handler(handler), _)=> handler.call(req.into()).await,
             _ => unreachable!()
         };
         assert!(res.is_err());

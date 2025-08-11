@@ -6,7 +6,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use crate::types::{RequestId, Message, JSONRPC_VERSION};
 
-#[cfg(all(feature = "server", feature = "http-server"))]
+#[cfg(feature = "http-server")]
 use volga::headers::HeaderMap;
 
 pub use error_details::ErrorDetails;
@@ -44,7 +44,7 @@ pub struct OkResponse {
 
     /// HTTP headers
     #[serde(skip)]
-    #[cfg(all(feature = "server", feature = "http-server"))]
+    #[cfg(feature = "http-server")]
     pub headers: HeaderMap
 }
 
@@ -69,7 +69,7 @@ pub struct ErrorResponse {
 
     /// HTTP headers
     #[serde(skip)]
-    #[cfg(all(feature = "server", feature = "http-server"))]
+    #[cfg(feature = "http-server")]
     pub headers: HeaderMap
 } 
 
@@ -86,7 +86,7 @@ impl Response {
         Response::Ok(OkResponse {
             jsonrpc: JSONRPC_VERSION.to_string(),
             session_id: None,
-            #[cfg(all(feature = "server", feature = "http-server"))]
+            #[cfg(feature = "http-server")]
             headers: HeaderMap::with_capacity(8),
             id,
             result
@@ -98,7 +98,7 @@ impl Response {
         Response::Ok(OkResponse {
             jsonrpc: JSONRPC_VERSION.to_string(),
             session_id: None,
-            #[cfg(all(feature = "server", feature = "http-server"))]
+            #[cfg(feature = "http-server")]
             headers: HeaderMap::new(),
             id,
             result: json!({})
@@ -110,7 +110,7 @@ impl Response {
         Response::Err(ErrorResponse {
             jsonrpc: JSONRPC_VERSION.to_string(),
             session_id: None,
-            #[cfg(all(feature = "server", feature = "http-server"))]
+            #[cfg(feature = "http-server")]
             headers: HeaderMap::with_capacity(8),
             id,
             error: error.into(),
@@ -163,7 +163,7 @@ impl Response {
     }
 
     /// Set HTTP headers for the response
-    #[cfg(all(feature = "server", feature = "http-server"))]
+    #[cfg(feature = "http-server")]
     pub fn set_headers(mut self, headers: HeaderMap) -> Self {
         match &mut self {
             Response::Ok(ok) => ok.headers = headers,

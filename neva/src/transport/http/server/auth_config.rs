@@ -1,10 +1,14 @@
 //! Authentication and Authorization configuration tools
 
+use crate::error::{Error, ErrorCode};
 use serde::Deserialize;
 use volga::auth::{
     BearerAuthConfig, DecodingKey, Algorithm, Authorizer, 
     predicate, AuthClaims
 };
+
+const ERR_NO_CLAIMS: &str = "Claims are not provided";
+const ERR_UNAUTHORIZED: &str = "Subject is not authorized to invoke this tool";
 
 /// Represents default claims
 #[derive(Clone, Debug, Deserialize)]
@@ -225,6 +229,48 @@ impl<C: AuthClaims> AuthConfig<C> {
     pub(crate) fn into_parts(self) -> (BearerAuthConfig, Authorizer<C>) {
         (self.inner, self.authorizer)
     }
+}
+
+/// Validates JWT claims against required permissions
+#[inline]
+pub(crate) fn validate_permissions<C: AuthClaims>(claims: Option<&C>, required: Option<&[String]>) -> Result<(), Error> {
+    let claims = claims.ok_or_else(claims_missing)?;
+    required.map_or(Ok(()), |req| {
+        contains_any(claims.permissions(), req)
+            .then_some(())
+            .ok_or_else(unauthorized)
+    })
+}
+
+/// Validates JWT claims against required roles
+#[inline]
+pub(crate) fn validate_roles<C: AuthClaims>(claims: Option<&C>, required: Option<&[String]>) -> Result<(), Error> {
+    let claims = claims.ok_or_else(claims_missing)?;
+    required.map_or(Ok(()), |req| { 
+        (contains(claims.role(), req) || contains_any(claims.roles(), req))
+            .then_some(())
+            .ok_or_else(unauthorized)
+    })
+}
+
+#[inline]
+fn contains_any(have: Option<&[String]>, required: &[String]) -> bool {
+    have.is_some_and(|vals| vals.iter().any(|v| required.contains(v)))
+}
+
+#[inline]
+fn contains(have: Option<&str>, required: &[String]) -> bool {
+    have.is_some_and(|val| required.iter().any(|r| r == val))
+}
+
+#[inline]
+fn unauthorized() -> Error {
+    Error::new(ErrorCode::InvalidParams, ERR_UNAUTHORIZED)
+}
+
+#[inline]
+fn claims_missing() -> Error {
+    Error::new(ErrorCode::InvalidParams, ERR_NO_CLAIMS)
 }
 
 /// Creates default authorization and authentication rules

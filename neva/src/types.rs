@@ -11,7 +11,7 @@ use crate::{
     error::Error,
 };
 
-#[cfg(all(feature = "server", feature = "http-server"))]
+#[cfg(feature = "http-server")]
 use {
     crate::auth::DefaultClaims,
     volga::headers::HeaderMap
@@ -278,7 +278,7 @@ impl Message {
     }
     
     /// Sets HTTP headers for [`Request`] or [`Response`] message
-    #[cfg(all(feature = "server", feature = "http-server"))]
+    #[cfg(feature = "http-server")]
     pub fn set_headers(mut self, headers: HeaderMap) -> Self {
         match self { 
             Message::Request(ref mut req) => req.headers = headers,
@@ -289,7 +289,7 @@ impl Message {
     }
 
     /// Sets Authentication and Authorization claims for [`Request`] message
-    #[cfg(all(feature = "server", feature = "http-server"))]
+    #[cfg(feature = "http-server")]
     pub(crate) fn set_claims(mut self, claims: DefaultClaims) -> Self {
         if let Message::Request(ref mut req) = self {
             req.claims = Some(Box::new(claims));

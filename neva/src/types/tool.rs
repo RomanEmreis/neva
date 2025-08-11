@@ -1,12 +1,13 @@
 ﻿//! Represents an MCP tool
 
 use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
 #[cfg(feature = "server")]
 use std::{future::Future, sync::Arc};
 #[cfg(feature = "server")]
 use futures_util::future::BoxFuture;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 #[cfg(feature = "server")]
 use crate::error::{Error, ErrorCode};
 #[cfg(feature = "server")]
@@ -30,7 +31,7 @@ use crate::{
         Handler,
         HandlerParams,
         GenericHandler,
-        RequestHandler,
+        RequestHandler
     }
 };
 
@@ -70,13 +71,15 @@ pub struct Tool {
     #[cfg(feature = "server")]
     handler: Option<RequestHandler<CallToolResponse>>,
 
+    /// A list of roles that are allowed to invoke the tool
     #[serde(skip)]
     #[cfg(feature = "http-server")]
-    roles: Option<Vec<String>>,
+    pub(crate) roles: Option<Vec<String>>,
 
+    /// A list of permissions that are allowed to invoke the tool
     #[serde(skip)]
     #[cfg(feature = "http-server")]
-    permissions: Option<Vec<String>>,
+    pub(crate) permissions: Option<Vec<String>>,
 }
 
 /// Sent from the client to request a list of tools the server has.
@@ -370,7 +373,7 @@ impl Tool {
     }
     
     /// Sets a list of roles that are allowed to invoke the tool
-    #[cfg(all(feature = "server", feature = "http-server"))]
+    #[cfg(feature = "http-server")]
     pub fn with_roles<T, I>(&mut self, roles: T) -> &mut Self
     where 
         T: IntoIterator<Item = I>,
@@ -384,7 +387,7 @@ impl Tool {
     }
     
     /// Sets a list of permissions that are allowed to invoke the tool
-    #[cfg(all(feature = "server", feature = "http-server"))]
+    #[cfg(feature = "http-server")]
     pub fn with_permissions<T, I>(&mut self, permissions: T) -> &mut Self
     where
         T: IntoIterator<Item = I>,
@@ -397,64 +400,9 @@ impl Tool {
         self
     }
     
-    /// Validates tool params
-    #[inline]
-    #[cfg(feature = "http-server")]
-    pub(crate) fn validate(&self, params: &HandlerParams) -> Result<(), Error> {
-        use volga::auth::AuthClaims;
-
-        let HandlerParams::Tool(tool_params) = params else {
-            return Err(ErrorCode::InvalidParams.into());
-        };
-
-        if self.roles.is_none() && self.permissions.is_none() {
-            return Ok(());
-        }
-
-        const ERR_NO_CLAIMS: &str = "Claims are not provided";
-        const ERR_UNAUTHORIZED: &str = "Subject is not authorized to invoke this tool";
-
-        let claims = tool_params
-            .meta
-            .as_ref()
-            .and_then(|m| m.context.as_ref())
-            .and_then(|ctx| ctx.claims.as_ref());
-
-        if claims.is_none() {
-            return Err(Error::new(ErrorCode::InvalidParams, ERR_NO_CLAIMS));
-        }
-
-        let contains_any = |have: Option<&[String]>, required: &[String]| {
-            have.is_some_and(|vals| vals.iter().any(|v| required.contains(v)))
-        };
-
-        let contains = |have: Option<&str>, required: &[String]| {
-            have.is_some_and(|val| required.iter().any(|r| r == val))
-        };
-
-        // Roles check
-        if let Some(required_roles) = &self.roles {
-            if !contains(claims.and_then(|c| c.role()), required_roles) &&
-                !contains_any(claims.and_then(|c| c.roles()), required_roles) {
-                return Err(Error::new(ErrorCode::InvalidParams, ERR_UNAUTHORIZED));
-            }
-        }
-
-        // Permissions check
-        if let Some(required_permissions) = &self.permissions {
-            if !contains_any(claims.and_then(|c| c.permissions()), required_permissions) {
-                return Err(Error::new(ErrorCode::InvalidParams, ERR_UNAUTHORIZED));
-            }
-        }
-
-        Ok(())
-    }
-    
     /// Invoke a tool
     #[inline]
     pub(crate) async fn call(&self, params: HandlerParams) -> Result<CallToolResponse, Error> {
-        #[cfg(feature = "http-server")]
-        self.validate(&params)?;
         match self.handler { 
             Some(ref handler) => handler.call(params).await,
             None => Err(Error::new(ErrorCode::InternalError, "Tool handler not specified"))
