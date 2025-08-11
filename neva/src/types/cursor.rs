@@ -66,19 +66,19 @@ pub struct Page<'a, T> {
 
 /// A trait for types that need pagination support
 pub trait Pagination<T> {
-    fn paginate(&self, cursor: Option<Cursor>, page_size: usize) -> Page<T>;
+    fn paginate(&self, cursor: Option<Cursor>, page_size: usize) -> Page<'_, T>;
 }
 
 impl<T> Pagination<T> for Vec<T> {
     #[inline]
-    fn paginate(&self, cursor: Option<Cursor>, page_size: usize) -> Page<T> {
+    fn paginate(&self, cursor: Option<Cursor>, page_size: usize) -> Page<'_, T> {
         self.as_slice().paginate(cursor, page_size)
     }
 }
 
 impl<T> Pagination<T> for [T] {
     #[inline]
-    fn paginate(&self, cursor: Option<Cursor>, page_size: usize) -> Page<T> {
+    fn paginate(&self, cursor: Option<Cursor>, page_size: usize) -> Page<'_, T> {
         let start = *cursor.unwrap_or_default();
         let end = usize::min(start + page_size, self.len());
 
@@ -141,7 +141,7 @@ mod tests {
     fn it_returns_invalid_json_inside_base64() {
         // base64 of "not_json" (just bytes, not valid JSON)
         let invalid = general_purpose::STANDARD.encode(b"not_json");
-        let json = format!("\"{}\"", invalid);
+        let json = format!("\"{invalid}\"");
         let result: Result<Cursor, _> = serde_json::from_str(&json);
         assert!(result.is_err());
     }

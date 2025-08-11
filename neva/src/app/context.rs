@@ -25,6 +25,13 @@ use std::{
     sync::Arc
 };
 
+#[cfg(feature = "http-server")]
+use {
+    crate::transport::http::server::{validate_roles, validate_permissions},
+    crate::auth::DefaultClaims,
+    volga::headers::HeaderMap
+};
+
 type RequestHandlers = HashMap<String, RequestHandler<Response>>;
 
 /// Represents a Server runtime
@@ -40,6 +47,10 @@ pub(crate) struct ServerRuntime {
 #[derive(Clone)]
 pub struct Context {
     pub session_id: Option<uuid::Uuid>,
+    #[cfg(feature = "http-server")]
+    pub headers: HeaderMap,
+    #[cfg(feature = "http-server")]
+    pub(crate) claims: Option<DefaultClaims>,
     pub(crate) options: RuntimeMcpOptions,
     pending: RequestQueue,
     sender: TransportProtoSender,
@@ -77,9 +88,29 @@ impl ServerRuntime {
     }
     
     /// Creates a new MCP request [`Context`]
+    #[cfg(not(feature = "http-server"))]
     pub(crate) fn context(&self, session_id: Option<uuid::Uuid>) -> Context {
         Context {
             session_id,
+            pending: self.pending.clone(),
+            sender: self.sender.clone(),
+            options: self.options.clone(),
+            timeout: self.options.request_timeout,
+        }
+    }
+
+    /// Creates a new MCP request [`Context`]
+    #[cfg(feature = "http-server")]
+    pub(crate) fn context(
+        &self, 
+        session_id: Option<uuid::Uuid>, 
+        headers: HeaderMap, 
+        claims: Option<DefaultClaims>
+    ) -> Context {
+        Context {
+            session_id,
+            headers,
+            claims,
             pending: self.pending.clone(),
             sender: self.sender.clone(),
             options: self.options.clone(),
@@ -262,10 +293,23 @@ impl Context {
     #[inline]
     pub(crate) async fn read_resource(self, params: ReadResourceRequestParams) -> Result<ReadResourceResult, Error> {
         let opt = self.options.clone();
-        let params = params.with_context(self);
         match opt.read_resource(&params.uri) {
-            Some(Route::Handler(handler)) => handler
-                .call(params.into()).await,
+            Some((Route::Handler(handler), args)) => {
+                #[cfg(feature = "http-server")]
+                {
+                    let template = opt.resources_templates
+                        .get(&handler.template)
+                        .await;
+                    self.validate_claims(
+                        template.as_ref().and_then(|t| t.roles.as_deref()),
+                        template.as_ref().and_then(|t| t.permissions.as_deref()))
+                }?;
+                handler.call(params
+                    .with_args(args)
+                    .with_context(self)
+                    .into()
+                ).await
+            },
             _ => Err(Error::from(ErrorCode::ResourceNotFound)),
         }
     }
@@ -273,20 +317,26 @@ impl Context {
     #[inline]
     pub(crate) async fn get_prompt(self, params: GetPromptRequestParams) -> Result<GetPromptResult, Error> {
         let opt = self.options.clone();
-        let params = params.with_context(self);
         match opt.get_prompt(&params.name).await {
-            Some(prompt) => prompt.call(params.into()).await,
-            None => Err(Error::new(ErrorCode::InvalidParams, "Prompt not found"))
+            None => Err(Error::new(ErrorCode::InvalidParams, "Prompt not found")),
+            Some(prompt) => {
+                #[cfg(feature = "http-server")]
+                self.validate_claims(prompt.roles.as_deref(), prompt.permissions.as_deref())?;
+                prompt.call(params.with_context(self).into()).await
+            },
         }
     }
 
     #[inline]
     pub(crate) async fn call_tool(self, params: CallToolRequestParams) -> Result<CallToolResponse, Error> {
         let opt = self.options.clone();
-        let params = params.with_context(self);
         match opt.get_tool(&params.name).await {
-            Some(tool) => tool.call(params.into()).await,
-            None => Err(Error::new(ErrorCode::InvalidParams, "Tool not found"))
+            None => Err(Error::new(ErrorCode::InvalidParams, "Tool not found")),
+            Some(tool) => {
+                #[cfg(feature = "http-server")]
+                self.validate_claims(tool.roles.as_deref(), tool.permissions.as_deref())?;
+                tool.call(params.with_context(self).into()).await
+            }
         }
     }
     
@@ -353,6 +403,15 @@ impl Context {
         self.send_request(req)
             .await?
             .into_result()
+    }
+    
+    #[inline]
+    #[cfg(feature = "http-server")]
+    fn validate_claims(&self, roles: Option<&[String]>, permissions: Option<&[String]>) -> Result<(), Error> {
+        let claims = self.claims.as_ref(); 
+        validate_roles(claims, roles)?;
+        validate_permissions(claims, permissions)?;
+        Ok(())
     }
     
     /// Sends a [`Request`] to a client

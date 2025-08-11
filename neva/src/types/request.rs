@@ -8,6 +8,12 @@ use super::{ProgressToken, Message, JSONRPC_VERSION};
 #[cfg(feature = "server")]
 use crate::Context;
 
+#[cfg(feature = "http-server")]
+use {
+    crate::auth::DefaultClaims,
+    volga::headers::HeaderMap
+};
+
 pub use from_request::FromRequest;
 pub use request_id::RequestId;
 
@@ -35,6 +41,16 @@ pub struct Request {
     /// Current MCP Session ID
     #[serde(skip)]
     pub session_id: Option<uuid::Uuid>,
+
+    /// HTTP headers
+    #[serde(skip)]
+    #[cfg(feature = "http-server")]
+    pub headers: HeaderMap,
+
+    /// Authentication and Authorization claims
+    #[serde(skip)]
+    #[cfg(feature = "http-server")]
+    pub claims: Option<Box<DefaultClaims>>,
 }
 
 /// Provides metadata related to the request that provides additional protocol-level information.
@@ -91,6 +107,10 @@ impl Request {
             id: id.unwrap_or_default(),
             method: method.into(),
             params: params.and_then(|p| serde_json::to_value(p).ok()),
+            #[cfg(feature = "http-server")]
+            headers: HeaderMap::with_capacity(8),
+            #[cfg(feature = "http-server")]
+            claims: None,
         }
     }
 

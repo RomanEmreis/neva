@@ -5,20 +5,26 @@ use dashmap::DashMap;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
 use tokio_util::sync::CancellationToken;
-use super::{ServiceUrl, MCP_SESSION_ID, get_mcp_session_id};
+use super::{HttpRuntimeContext, ServiceUrl, MCP_SESSION_ID, get_mcp_session_id};
 use crate::{
     shared::message_registry::MessageRegistry,
     types::{RequestId, Message},
     error::Error
 };
 use volga::{
-    App, Json, HttpResult, di::Dc, status, ok, 
+    App, Json, HttpResult, di::Dc, status, ok,
+    auth::{BearerTokenService, Bearer},
     http::sse::Message as SseMessage, sse,
-    headers::Headers
+    headers::{HttpHeaders, AUTHORIZATION}
 };
 
 #[cfg(feature = "tracing")]
 use crate::types::notification::fmt::LOG_REGISTRY;
+
+pub use auth_config::{AuthConfig, DefaultClaims};
+pub(crate) use auth_config::{validate_permissions, validate_roles};
+
+pub mod auth_config;
 
 type RequestMap = Arc<DashMap<RequestId, oneshot::Sender<Message>>>;
 
@@ -36,9 +42,7 @@ impl Default for RequestManager {
 }
 
 pub(super) async fn serve(
-    service_url: ServiceUrl,
-    recv_tx: mpsc::Sender<Result<Message, Error>>,
-    sender_rx: mpsc::Receiver<Message>,
+    rt: HttpRuntimeContext,
     token: CancellationToken
 ) {
     let pending = Arc::new(DashMap::new());
@@ -46,11 +50,11 @@ pub(super) async fn serve(
     let manager = RequestManager {
         pending: pending.clone(),
         msg_registry: registry.clone(),
-        sender: recv_tx,
+        sender: rt.tx,
     };
     tokio::join!(
-        dispatch(pending.clone(), registry.clone(), sender_rx, token.clone()),
-        handle(service_url, manager, token.clone())
+        dispatch(pending.clone(), registry.clone(), rt.rx, token.clone()),
+        handle(rt.url, rt.auth, manager, token.clone())
     );
 }
 
@@ -82,12 +86,22 @@ async fn dispatch(
 
 async fn handle(
     service_url: ServiceUrl,
+    auth: Option<AuthConfig>,
     manager: RequestManager,
     token: CancellationToken
 ) {
     let root = "/";
     let mut server = App::new()
-        .bind(service_url.addr);
+        .bind(service_url.addr)
+        .with_no_delay()
+        .without_greeter()
+        .with_bearer_auth(|auth| auth);
+    
+    if let Some(auth) = auth {
+        let (auth, rules) = auth.into_parts();
+        server = server.with_bearer_auth(|_| auth);
+        server.authorize(rules);
+    }
     
     server
         .add_singleton(manager)
@@ -104,7 +118,7 @@ async fn handle(
     }
 }
 
-async fn handle_session_end(manager: Dc<RequestManager>, headers: Headers) -> HttpResult {
+async fn handle_session_end(manager: Dc<RequestManager>, headers: HttpHeaders) -> HttpResult {
     let Some(id) = get_mcp_session_id(&headers) else {
         return status!(405);
     };
@@ -116,16 +130,16 @@ async fn handle_session_end(manager: Dc<RequestManager>, headers: Headers) -> Ht
     ok!([(MCP_SESSION_ID, id.to_string())])
 }
 
-async fn handle_connection(manager: Dc<RequestManager>, headers: Headers) -> HttpResult {
+async fn handle_connection(manager: Dc<RequestManager>, headers: HttpHeaders) -> HttpResult {
     let Some(id) = get_mcp_session_id(&headers) else { 
         return status!(405);
     };
 
-    let (log_tx, log_rx) = mpsc::unbounded_channel::<Message>();
+    let (_log_tx, log_rx) = mpsc::unbounded_channel::<Message>();
     let (msg_tx, msg_rx) = mpsc::unbounded_channel::<Message>();
     
     #[cfg(feature = "tracing")]
-    LOG_REGISTRY.register(id, log_tx);
+    LOG_REGISTRY.register(id, _log_tx);
     manager.msg_registry.register(id, msg_tx);
     
     let stream = futures_util::stream::select(
@@ -139,16 +153,30 @@ async fn handle_connection(manager: Dc<RequestManager>, headers: Headers) -> Htt
 
 async fn handle_message(
     manager: Dc<RequestManager>,
-    headers: Headers,
+    mut headers: HttpHeaders,
+    bearer: Bearer,
+    bts: BearerTokenService,
     Json(msg): Json<Message>
 ) -> HttpResult {
-    let id = get_or_create_mcp_session(headers);
+    let id = get_or_create_mcp_session(&headers);
     if let Message::Notification(_) = msg {
         return status!(202, [
             (MCP_SESSION_ID, id.to_string())
         ]);
     }
-    let msg = msg.set_session_id(id);
+
+    headers.remove(AUTHORIZATION);
+    
+    let msg = msg
+        .set_session_id(id)
+        .set_headers(headers.into_inner());
+
+    let msg = if let Ok(claims) = bts.decode::<DefaultClaims>(bearer) {
+        msg.set_claims(claims)
+    } else { 
+        msg
+    };
+    
     let (resp_tx, resp_rx) = oneshot::channel::<Message>();
     manager.pending.insert(msg.full_id(), resp_tx);
     manager.sender.send(Ok(msg))
@@ -184,6 +212,6 @@ fn handle_sse_message(msg: Message) -> Result<SseMessage, volga::error::Error> {
 
 /// Fetches the [`MCP_SESSION_ID`] header value or created the new [`uuid::Uuid`] if `None`
 #[inline]
-fn get_or_create_mcp_session(headers: Headers) -> uuid::Uuid {
-    get_mcp_session_id(&headers).unwrap_or_else(uuid::Uuid::new_v4)
+fn get_or_create_mcp_session(headers: &HttpHeaders) -> uuid::Uuid {
+    get_mcp_session_id(headers).unwrap_or_else(uuid::Uuid::new_v4)
 }

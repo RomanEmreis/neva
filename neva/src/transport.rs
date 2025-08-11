@@ -25,7 +25,7 @@ pub(crate) trait Sender {
 
 /// Describes a receiver that can receive messages from a client
 pub(crate) trait Receiver {
-    /// Receives a messages from a client
+    /// Receives messages from a client
     fn recv(&mut self) -> impl Future<Output = Result<Message, Error>>;
 }
 
@@ -48,9 +48,9 @@ pub(crate) enum TransportProto {
     StdioClient(StdIoClient),
     #[cfg(feature = "server")]
     StdIoServer(StdIoServer),
-    #[cfg(all(feature = "server", feature = "http-server"))]
-    HttpServer(HttpServer),
-    #[cfg(all(feature = "client", feature = "http-client"))]
+    #[cfg(feature = "http-server")]
+    HttpServer(Box<HttpServer>),
+    #[cfg(feature = "http-client")]
     HttpClient(HttpClient),
     //Ws(Websocket),
     // add more options here...
@@ -119,9 +119,9 @@ impl Transport for TransportProto {
             TransportProto::StdIoServer(stdio) => stdio.start(),
             #[cfg(feature = "client")]
             TransportProto::StdioClient(stdio) => stdio.start(),
-            #[cfg(all(feature = "server", feature = "http-server"))]
+            #[cfg(feature = "http-server")]
             TransportProto::HttpServer(http) => http.start(),
-            #[cfg(all(feature = "client", feature = "http-client"))]
+            #[cfg(feature = "http-client")]
             TransportProto::HttpClient(http) => http.start(),
             TransportProto::None => CancellationToken::new(),
         }
@@ -134,7 +134,7 @@ impl Transport for TransportProto {
                 let (tx, rx) = stdio.split();
                 (TransportProtoSender::Stdio(tx), TransportProtoReceiver::Stdio(rx))
             },
-            #[cfg(all(feature = "server", feature = "http-server"))]
+            #[cfg(feature = "http-server")]
             TransportProto::HttpServer(http) => {
                 let (tx, rx) = http.split();
                 (TransportProtoSender::Http(tx), TransportProtoReceiver::Http(rx))
@@ -144,7 +144,7 @@ impl Transport for TransportProto {
                 let (tx, rx) = stdio.split();
                 (TransportProtoSender::Stdio(tx), TransportProtoReceiver::Stdio(rx))
             },
-            #[cfg(all(feature = "client", feature = "http-client"))]
+            #[cfg(feature = "http-client")]
             TransportProto::HttpClient(http) => {
                 let (tx, rx) = http.split();
                 (TransportProtoSender::Http(tx), TransportProtoReceiver::Http(rx))

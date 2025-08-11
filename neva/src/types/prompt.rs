@@ -59,7 +59,17 @@ pub struct Prompt {
     /// A get prompt handler
     #[serde(skip)]
     #[cfg(feature = "server")]
-    handler: Option<RequestHandler<GetPromptResult>>
+    handler: Option<RequestHandler<GetPromptResult>>,
+
+    /// A list of roles that are allowed to get the prompt
+    #[serde(skip)]
+    #[cfg(feature = "http-server")]
+    pub(crate) roles: Option<Vec<String>>,
+
+    /// A list of permissions that are allowed to get the prompt
+    #[serde(skip)]
+    #[cfg(feature = "http-server")]
+    pub(crate) permissions: Option<Vec<String>>,
 }
 
 /// Describes an argument that a prompt can accept.
@@ -283,7 +293,7 @@ where
     Args: TryFrom<GetPromptRequestParams, Error = Error> + Send + Sync
 {
     #[inline]
-    fn call(&self, params: HandlerParams) -> BoxFuture<Result<GetPromptResult, Error>> {
+    fn call(&self, params: HandlerParams) -> BoxFuture<'_, Result<GetPromptResult, Error>> {
         let HandlerParams::Prompt(params) = params else {
             unreachable!()
         };
@@ -324,7 +334,11 @@ impl Prompt {
             name: name.into(), 
             descr: None, 
             args,
-            handler: Some(handler)
+            handler: Some(handler),
+            #[cfg(feature = "http-server")]
+            roles: None,
+            #[cfg(feature = "http-server")]
+            permissions: None,
         }
     }
     
@@ -341,6 +355,34 @@ impl Prompt {
         A: Into<PromptArgument>,
     {
         self.args = Some(args
+            .into_iter()
+            .map(Into::into)
+            .collect());
+        self
+    }
+
+    /// Sets a list of roles that are allowed to get the prompt
+    #[cfg(feature = "http-server")]
+    pub fn with_roles<T, I>(&mut self, roles: T) -> &mut Self
+    where
+        T: IntoIterator<Item = I>,
+        I: Into<String>
+    {
+        self.roles = Some(roles
+            .into_iter()
+            .map(Into::into)
+            .collect());
+        self
+    }
+
+    /// Sets a list of permissions that are allowed to get the prompt
+    #[cfg(feature = "http-server")]
+    pub fn with_permissions<T, I>(&mut self, permissions: T) -> &mut Self
+    where
+        T: IntoIterator<Item = I>,
+        I: Into<String>
+    {
+        self.permissions = Some(permissions
             .into_iter()
             .map(Into::into)
             .collect());

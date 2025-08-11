@@ -81,7 +81,7 @@ impl<'de> Deserialize<'de> for ErrorCode {
     {
         let value = i32::deserialize(deserializer)?;
         ErrorCode::try_from(value).map_err(|_| {
-            serde::de::Error::custom(format!("Invalid error code: {}", value))
+            serde::de::Error::custom(format!("Invalid error code: {value}"))
         })
     }
 }

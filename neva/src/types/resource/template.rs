@@ -14,6 +14,7 @@ use crate::app::handler::{
     Handler, 
     HandlerParams
 };
+
 use crate::types::{
     resource::Uri, Annotations, IntoResponse, 
     RequestId, Response, 
@@ -43,7 +44,17 @@ pub struct ResourceTemplate {
 
     /// Optional annotations for the resource template.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub annotations: Option<Annotations>
+    pub annotations: Option<Annotations>,
+
+    /// A list of roles that are allowed to read the resource
+    #[serde(skip)]
+    #[cfg(feature = "http-server")]
+    pub(crate) roles: Option<Vec<String>>,
+
+    /// A list of permissions that are allowed to read the resource
+    #[serde(skip)]
+    #[cfg(feature = "http-server")]
+    pub(crate) permissions: Option<Vec<String>>,
 }
 
 /// Sent from the client to request a list of resource templates the server has.
@@ -155,11 +166,12 @@ where
     Args: TryFrom<ReadResourceRequestParams, Error = Error> + Send + Sync,
 {
     #[inline]
-    fn call(&self, params: HandlerParams) -> BoxFuture<Result<ReadResourceResult, Error>> {
+    fn call(&self, params: HandlerParams) -> BoxFuture<'_, Result<ReadResourceResult, Error>> {
         let HandlerParams::Resource(params) = params else {
             unreachable!()
         };
         Box::pin(async move {
+            //let mut iter = params.args.into_iter().flatten().next();
             let args = Args::try_from(params)?;
             self.func
                 .call(args)
@@ -180,7 +192,11 @@ impl ResourceTemplate {
             name: name.into(),
             mime: None,
             descr: None,
-            annotations: None
+            annotations: None,
+            #[cfg(feature = "http-server")]
+            roles: None,
+            #[cfg(feature = "http-server")]
+            permissions: None,
         }
     }
 
@@ -202,6 +218,34 @@ impl ResourceTemplate {
         F: FnOnce(Annotations) -> Annotations 
     {
         self.annotations = Some(config(Default::default()));
+        self
+    }
+
+    /// Sets a list of roles that are allowed to read the resource
+    #[cfg(feature = "http-server")]
+    pub fn with_roles<T, I>(&mut self, roles: T) -> &mut Self
+    where
+        T: IntoIterator<Item = I>,
+        I: Into<String>
+    {
+        self.roles = Some(roles
+            .into_iter()
+            .map(Into::into)
+            .collect());
+        self
+    }
+
+    /// Sets a list of permissions that are allowed to read the resource
+    #[cfg(feature = "http-server")]
+    pub fn with_permissions<T, I>(&mut self, permissions: T) -> &mut Self
+    where
+        T: IntoIterator<Item = I>,
+        I: Into<String>
+    {
+        self.permissions = Some(permissions
+            .into_iter()
+            .map(Into::into)
+            .collect());
         self
     }
 }

@@ -437,7 +437,9 @@ impl Client {
             crate::types::resource::commands::READ,
             Some(ReadResourceRequestParams {
                 uri: uri.into(),
-                meta: Some(RequestParamsMeta::new(&id))
+                meta: Some(RequestParamsMeta::new(&id)),
+                #[cfg(feature = "server")]
+                args: None
             })
         );
 

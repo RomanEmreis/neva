@@ -3,6 +3,7 @@
 use super::ReadResourceResult;
 use crate::app::handler::RequestHandler;
 use std::{borrow::Cow, collections::HashMap};
+use std::ops::Deref;
 
 const END_OF_ROUTE: &str = "";
 const OPEN_BRACKET: char = '{';
@@ -12,7 +13,22 @@ const CLOSE_BRACKET: char = '}';
 pub(crate) enum Route {
     Static(HashMap<Cow<'static, str>, Route>),
     Dynamic(HashMap<Cow<'static, str>, Route>),
-    Handler(RequestHandler<ReadResourceResult>)
+    Handler(ResourceHandler)
+}
+
+pub(crate) struct ResourceHandler {
+    #[cfg(feature = "http-server")]
+    pub(crate) template: String,
+    handler: RequestHandler<ReadResourceResult>
+}
+
+impl Deref for ResourceHandler {
+    type Target = RequestHandler<ReadResourceResult>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.handler
+    }
 }
 
 impl Default for Route {
@@ -27,6 +43,7 @@ impl Route {
     pub(crate) fn insert(
         &mut self,
         path_segments: &[Cow<'static, str>],
+        _template: String,
         handler: RequestHandler<ReadResourceResult>
     ) {
         let mut current = self;
@@ -54,7 +71,11 @@ impl Route {
                             Route::Static(ref mut map) => {
                                 map.insert(
                                     END_OF_ROUTE.into(),
-                                    Route::Handler(handler.clone())
+                                    Route::Handler(ResourceHandler {
+                                        #[cfg(feature = "http-server")]
+                                        template: _template.clone(),
+                                        handler: handler.clone(),
+                                    })
                                 );
                             },
                             _ => ()
@@ -68,8 +89,9 @@ impl Route {
     }
 
     /// Searches for a route handler
-    pub(crate) fn find(&self, path_segments: &[Cow<'static, str>]) -> Option<&Route> {
+    pub(crate) fn find(&self, path_segments: &[Cow<'static, str>]) -> Option<(&Route, Box<[Cow<'static, str>]>)> {
         let mut current = Some(self);
+        let mut params = Vec::with_capacity(4);
         for (index, segment) in path_segments.iter().enumerate() {
             let is_last = index == path_segments.len() - 1;
 
@@ -83,7 +105,15 @@ impl Route {
                     let resolved_route = direct_match.or_else(|| {
                         map.iter()
                             .filter(|(key, _)| Self::is_dynamic_segment(key))
-                            .map(|(_, route)| route)
+                            .map(|(key, route)| {
+                                if key
+                                    .strip_prefix(OPEN_BRACKET)
+                                    .and_then(|k| k.strip_suffix(CLOSE_BRACKET))
+                                    .is_some() {
+                                    params.push(segment.clone());
+                                }
+                                route
+                            })
                             .next()
                     });
 
@@ -107,7 +137,7 @@ impl Route {
                 _ => None,
             };
         }
-        current
+        current.map(|route| (route, params.into_boxed_slice()))
     }
 
     #[inline]
@@ -136,11 +166,11 @@ mod tests {
         });
         
         let mut route = Route::default();
-        route.insert(uri1.as_vec().as_slice(), handler1);
-        route.insert(uri2.as_vec().as_slice(), handler2);
+        route.insert(uri1.as_vec().as_slice(), "templ_1".into(), handler1);
+        route.insert(uri2.as_vec().as_slice(), "templ_2".into(), handler2);
         
-        let h1 = route.find(uri1.as_vec().as_slice()).unwrap();
-        let h2 = route.find(uri2.as_vec().as_slice()).unwrap();
+        let (h1, _) = route.find(uri1.as_vec().as_slice()).unwrap();
+        let (h2, _) = route.find(uri2.as_vec().as_slice()).unwrap();
         
         matches!(h1, Route::Handler(_));
         matches!(h2, Route::Handler(_));

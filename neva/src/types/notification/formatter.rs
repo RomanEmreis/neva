@@ -96,7 +96,7 @@ where
     ) -> std::fmt::Result {
         let notification = build_notification(event);
         let json = serde_json::to_string(&notification).unwrap();
-        writeln!(writer, "{}", json)
+        writeln!(writer, "{json}")
     }
 }
 
@@ -177,7 +177,7 @@ impl Visit for Visitor<'_> {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         // Only use this if nothing else handled it
         if !self.map.contains_key(field.name()) {
-            let formatted = format!("{:?}", value);
+            let formatted = format!("{value:?}");
             let value = serde_json::to_value(&formatted)
                 .unwrap_or(serde_json::Value::String(formatted));
             self.map.insert(field.name(), value);

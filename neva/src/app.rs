@@ -25,9 +25,10 @@ use crate::types::{
     cursor::Pagination, Uri
 };
 #[cfg(feature = "tracing")]
-use tracing::Instrument;
-#[cfg(feature = "tracing")]
-use crate::types::notification::SetLevelRequestParams;
+use {
+    crate::types::notification::SetLevelRequestParams,
+    tracing::Instrument
+};
 
 pub mod options;
 pub mod context;
@@ -442,11 +443,24 @@ impl App {
     }
     
     async fn handle_request(req: Request, runtime: &ServerRuntime) {
+        #[cfg(feature = "http-server")]
+        let mut req = req;
         let req_id = req.id();
         let session_id = req.session_id;
         let full_id = req.full_id();
-        
+
+        #[cfg(not(feature = "http-server"))]
         let context = runtime.context(session_id);
+        
+        #[cfg(feature = "http-server")]
+        let context = {
+            let headers = std::mem::take(&mut req.headers);
+            let claims = req.claims
+                .take()
+                .map(|c| *c);
+            runtime.context(session_id, headers, claims)
+        };
+        
         let options = runtime.options();
         let handlers = runtime.request_handlers();
         let mut sender = runtime.sender();

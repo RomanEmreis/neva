@@ -20,12 +20,12 @@ pub enum ProgressToken {
 
 impl Display for ProgressToken {
     #[inline]
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ProgressToken::Number(n) => write!(f, "{}", n),
-            ProgressToken::Uuid(u) => write!(f, "{}", u),
-            ProgressToken::String(s) => write!(f, "{}", s),
-            ProgressToken::Slice(s) => write!(f, "{}", s)
+            ProgressToken::Number(n) => write!(f, "{n}"),
+            ProgressToken::Uuid(u) => write!(f, "{u}"),
+            ProgressToken::String(s) => write!(f, "{s}"),
+            ProgressToken::Slice(s) => write!(f, "{s}")
         }
     }
 }

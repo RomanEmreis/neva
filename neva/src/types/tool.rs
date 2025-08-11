@@ -1,12 +1,13 @@
 ﻿//! Represents an MCP tool
 
 use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
 #[cfg(feature = "server")]
 use std::{future::Future, sync::Arc};
 #[cfg(feature = "server")]
 use futures_util::future::BoxFuture;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 #[cfg(feature = "server")]
 use crate::error::{Error, ErrorCode};
 #[cfg(feature = "server")]
@@ -30,7 +31,7 @@ use crate::{
         Handler,
         HandlerParams,
         GenericHandler,
-        RequestHandler,
+        RequestHandler
     }
 };
 
@@ -61,14 +62,24 @@ pub struct Tool {
     
     /// A JSON Schema object defining the expected parameters for the tool.
     /// 
-    /// > Note: Needs to a valid JSON schema object that additionally is of type object.
+    /// > Note: Needs to a valid JSON schema object that additionally is of a type object.
     #[serde(rename = "inputSchema")]
     pub input_schema: InputSchema,
     
     /// A tool call handler
     #[serde(skip)]
     #[cfg(feature = "server")]
-    handler: Option<RequestHandler<CallToolResponse>>
+    handler: Option<RequestHandler<CallToolResponse>>,
+
+    /// A list of roles that are allowed to invoke the tool
+    #[serde(skip)]
+    #[cfg(feature = "http-server")]
+    pub(crate) roles: Option<Vec<String>>,
+
+    /// A list of permissions that are allowed to invoke the tool
+    #[serde(skip)]
+    #[cfg(feature = "http-server")]
+    pub(crate) permissions: Option<Vec<String>>,
 }
 
 /// Sent from the client to request a list of tools the server has.
@@ -201,14 +212,14 @@ impl InputSchema {
         Self { r#type: PropertyType::Object, properties: props }
     }
     
-    /// Deserializes a new [`InputSchema`] from JSON string
+    /// Deserializes a new [`InputSchema`] from a JSON string
     #[inline]
     pub fn from_json_str(json: &str) -> Self {
         serde_json::from_str(json)
             .expect("InputSchema: Incorrect JSON string provided")
     }
     
-    /// Adds a new property into schema. 
+    /// Adds a new property into the schema. 
     /// If a property with this name already exists, it overwrites it
     pub fn add_property<T: Into<PropertyType>>(
         mut self, 
@@ -298,7 +309,7 @@ where
     Args: TryFrom<CallToolRequestParams, Error = Error> + Send + Sync,
 {
     #[inline]
-    fn call(&self, params: HandlerParams) -> BoxFuture<Result<CallToolResponse, Error>> {
+    fn call(&self, params: HandlerParams) -> BoxFuture<'_, Result<CallToolResponse, Error>> {
         let HandlerParams::Tool(params) = params else { 
             unreachable!()
         };
@@ -337,6 +348,10 @@ impl Tool {
             descr: None,
             input_schema, 
             handler: Some(handler),
+            #[cfg(feature = "http-server")]
+            roles: None,
+            #[cfg(feature = "http-server")]
+            permissions: None,
         }
     }
     
@@ -354,6 +369,34 @@ impl Tool {
         F: FnOnce(InputSchema) -> InputSchema
     {
         self.input_schema = config(Default::default());
+        self
+    }
+    
+    /// Sets a list of roles that are allowed to invoke the tool
+    #[cfg(feature = "http-server")]
+    pub fn with_roles<T, I>(&mut self, roles: T) -> &mut Self
+    where 
+        T: IntoIterator<Item = I>,
+        I: Into<String>
+    {
+        self.roles = Some(roles
+            .into_iter()
+            .map(Into::into)
+            .collect());
+        self
+    }
+    
+    /// Sets a list of permissions that are allowed to invoke the tool
+    #[cfg(feature = "http-server")]
+    pub fn with_permissions<T, I>(&mut self, permissions: T) -> &mut Self
+    where
+        T: IntoIterator<Item = I>,
+        I: Into<String>
+    {
+        self.permissions = Some(permissions
+            .into_iter()
+            .map(Into::into)
+            .collect());
         self
     }
     

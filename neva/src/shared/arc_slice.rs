@@ -14,9 +14,9 @@ impl<T: Display> Display for ArcSlice<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (i, seg) in self.iter().enumerate() {
             if i > 0 {
-                write!(f, "/{}", seg)?;
+                write!(f, "/{seg}")?;
             } else { 
-                write!(f, "{}", seg)?;
+                write!(f, "{seg}")?;
             }
         }
         Ok(())

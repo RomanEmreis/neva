@@ -179,8 +179,8 @@ macro_rules! impl_from_read_resource_params {
             
             #[inline]
             fn try_from(params: ReadResourceRequestParams) -> Result<Self, Self::Error> {
-                let uri: Uri = params.uri;
-                let mut iter = uri.parts()?;
+                let uri = params.uri;
+                let mut iter = params.args.into_iter().flatten();
                 let tuple = (
                     $(
                         extract_arg::<$T>(&uri, &params.meta, &mut iter)?,   

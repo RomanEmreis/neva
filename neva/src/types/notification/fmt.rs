@@ -98,7 +98,7 @@ where
         } else {
             let mut stderr = io::stderr();
             let json = serde_json::to_string(&notification).unwrap();
-            let _ = writeln!(stderr, "{}", json);
+            let _ = writeln!(stderr, "{json}");
         }
     }
 }

@@ -1,7 +1,7 @@
 //! Run with:
-//!
+//! 
 //! ```no_rust
-//! npx @modelcontextprotocol/inspector 
+//! npx @modelcontextprotocol/inspector
 //! 
 //! cargo run -p example-http
 //! ```

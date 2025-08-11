@@ -113,7 +113,7 @@ async fn main() {
     App::new()
         .with_options(|opt| opt
             .with_stdio()
-            .with_mcp_version("2024-11-05")
+            .with_mcp_version("2025-06-18")
             .with_name("Sample MCP Server")
             .with_version("0.1.0.0")
             .with_tools(|tools| tools

@@ -4,7 +4,7 @@
 //! ## Dependencies
 //! ```toml
 //! [dependencies]
-//! neva = { version = "0.1.2", features = ["full"] }
+//! neva = { version = "0.1.3", features = ["full"] }
 //! tokio = { version = "1", features = ["full"] }
 //! ```
 //! 
@@ -73,10 +73,17 @@ pub use neva_macros::*;
 
 pub(crate) const SDK_NAME: &str = "neva";
 #[cfg(any(feature = "server", feature = "client"))]
-pub(crate) const PROTOCOL_VERSIONS: [&str; 2] = [
+pub(crate) const PROTOCOL_VERSIONS: [&str; 3] = [
     "2024-11-05", 
-    "2025-03-26"
+    "2025-03-26",
+    "2025-06-18"
 ];
+
+#[cfg(feature = "http-server")]
+pub mod auth {
+    pub use volga::auth::{Algorithm, Authorizer, Claims};
+    pub use crate::transport::http::server::{AuthConfig, DefaultClaims};
+}
 
 /// List of commands
 pub mod commands {
