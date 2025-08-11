@@ -1,9 +1,10 @@
 ﻿//! Represents an MCP resource
 
-use std::borrow::Cow;
 use serde::{Deserialize, Serialize};
 use crate::types::Cursor;
 use crate::types::request::RequestParamsMeta;
+#[cfg(feature = "server")]
+use std::borrow::Cow;
 #[cfg(feature = "server")]
 use crate::error::Error;
 #[cfg(feature = "server")]

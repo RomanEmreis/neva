@@ -191,9 +191,9 @@ fn handle_connected() {
 }
 
 #[inline]
-fn handle_comment(comment: String) {
+fn handle_comment(_comment: String) {
     #[cfg(feature = "tracing")]
-    tracing::trace!(logger = "neva", "Received a comment: {}", comment);
+    tracing::trace!(logger = "neva", "Received a comment: {}", _comment);
 }
 
 #[inline]

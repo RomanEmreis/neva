@@ -17,6 +17,7 @@ pub(crate) enum Route {
 }
 
 pub(crate) struct ResourceHandler {
+    #[cfg(feature = "http-server")]
     pub(crate) template: String,
     handler: RequestHandler<ReadResourceResult>
 }
@@ -42,7 +43,7 @@ impl Route {
     pub(crate) fn insert(
         &mut self,
         path_segments: &[Cow<'static, str>],
-        template: String,
+        _template: String,
         handler: RequestHandler<ReadResourceResult>
     ) {
         let mut current = self;
@@ -71,7 +72,8 @@ impl Route {
                                 map.insert(
                                     END_OF_ROUTE.into(),
                                     Route::Handler(ResourceHandler {
-                                        template: template.clone(),
+                                        #[cfg(feature = "http-server")]
+                                        template: _template.clone(),
                                         handler: handler.clone(),
                                     })
                                 );
