@@ -20,6 +20,7 @@ use crate::types::{
     notification::Notification, 
     resource::{SubscribeRequestParams, UnsubscribeRequestParams}, 
     sampling::{CreateMessageRequestParams, CreateMessageResult, SamplingHandler},
+    elicitation::{ElicitRequestParams, ElicitResult, ElicitationHandler},
     Root
 };
 
@@ -128,7 +129,7 @@ impl Client {
             handler.notify_roots_changed(roots);
         }
     }
-    
+
     /// Registers a handler that will be running when a "sampling/createMessage" request is received
     pub fn map_sampling<F, R>(&mut self, handler: F) -> &mut Self
     where
@@ -141,7 +142,22 @@ impl Client {
             Box::pin(async move { handler(params).await.into() })
         });
         self.options.add_sampling_handler(handler);
-        self 
+        self
+    }
+
+    /// Registers a handler that will be running when a "elicitation/create" request is received
+    pub fn map_elicitation<F, R>(&mut self, handler: F) -> &mut Self
+    where
+        F: Fn(ElicitRequestParams) -> R + Clone + Send + Sync + 'static,
+        R: Future + Send,
+        R::Output: Into<ElicitResult>,
+    {
+        let handler: ElicitationHandler = Arc::new(move |params| {
+            let handler = handler.clone();
+            Box::pin(async move { handler(params).await.into() })
+        });
+        self.options.add_elicitation_handler(handler);
+        self
     }
     
     /// Connects the MCP client to the MCP server
@@ -211,6 +227,7 @@ impl Client {
             capabilities: Some(ClientCapabilities {
                 roots: self.options.roots_capability(),
                 sampling: self.options.sampling_capability(),
+                elicitation: self.options.elicitation_capability(),
                 experimental: None,
             })
         };

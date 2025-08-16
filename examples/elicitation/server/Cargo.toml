@@ -1,0 +1,10 @@
+[package]
+name = "server"
+version = "0.1.0"
+edition = "2024"
+publish = false
+rust-version.workspace = true
+
+[dependencies]
+neva = { path = "../../../neva", features = ["server", "tracing", "macros"] }
+tokio = { version = "1.47.1", features = ["full"] }

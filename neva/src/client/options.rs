@@ -6,9 +6,10 @@ use std::time::Duration;
 use crate::PROTOCOL_VERSIONS;
 use crate::transport::{StdIoClient, stdio::options::StdIoOptions, TransportProto};
 use crate::client::notification_handler::NotificationsHandler;
-use crate::types::capabilities::{RootsCapability, SamplingCapability};
+use crate::types::capabilities::{RootsCapability, SamplingCapability, ElicitationCapability};
 use crate::types::{Root, Implementation, Uri};
 use crate::types::sampling::SamplingHandler;
+use crate::types::elicitation::ElicitationHandler;
 
 #[cfg(feature = "http-client")]
 use crate::transport::http::HttpClient;
@@ -29,8 +30,14 @@ pub struct McpOptions {
     /// Sampling capability options
     pub(super) sampling_capability: Option<SamplingCapability>,
 
+    /// Elicitation capability options
+    pub(super) elicitation_capability: Option<ElicitationCapability>,
+
     /// Represents a handler function that runs when received a "sampling/createMessage" request
     pub(super) sampling_handler: Option<SamplingHandler>,
+
+    /// Represents a handler function that runs when received a "elicitation/create" request
+    pub(super) elicitation_handler: Option<ElicitationHandler>,
     
     /// Represents a hash map of notification handlers
     pub(super) notification_handler: Option<Arc<NotificationsHandler>>,
@@ -54,9 +61,11 @@ impl Default for McpOptions {
             roots: Default::default(),
             roots_capability: None,
             sampling_capability: None,
+            elicitation_capability: None,
             proto: None,
             protocol_ver: None,
             sampling_handler: None,
+            elicitation_handler: None,
             notification_handler: None
         }
     }
@@ -187,6 +196,11 @@ impl McpOptions {
         self.sampling_handler = Some(handler);
     }
 
+    /// Registers a handler for elicitation requests
+    pub(crate) fn add_elicitation_handler(&mut self, handler: ElicitationHandler) {
+        self.elicitation_handler = Some(handler);
+    }
+
     /// Returns [`RootsCapability`] if configured.
     /// If not configured but at least one [`Root`] exists, returns [`Default`].
     /// Otherwise, returns `None`.
@@ -197,12 +211,21 @@ impl McpOptions {
     }
 
     /// Returns [`SamplingCapability`] if configured.
-    /// If not configured but a sampling handler exists, returns [`Default`].
+    /// If not configured but a sampling handler exists, it returns [`Default`].
     /// Otherwise, returns `None`.
     pub(crate) fn sampling_capability(&self) -> Option<SamplingCapability> {
         self.sampling_capability
             .clone()
             .or_else(|| self.sampling_handler.is_none().then(Default::default))
+    }
+
+    /// Returns [`ElicitationCapability`] if configured.
+    /// If not configured but an elicitation handler exists, it returns [`Default`].
+    /// Otherwise, returns `None`.
+    pub(crate) fn elicitation_capability(&self) -> Option<ElicitationCapability> {
+        self.elicitation_capability
+            .clone()
+            .or_else(|| self.elicitation_handler.is_none().then(Default::default))
     }
 }
 

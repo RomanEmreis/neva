@@ -7,7 +7,7 @@ use std::{pin::Pin, sync::Arc, future::Future};
 
 const DEFAULT_MESSAGE_MAX_TOKENS: i32 = 512;
 
-/// List of commands for Roots
+/// List of commands for Sampling
 pub mod commands {
     pub const CREATE: &str = "sampling/createMessage";
 }

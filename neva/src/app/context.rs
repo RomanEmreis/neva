@@ -16,7 +16,8 @@ use crate::{
         notification::Notification,
         root::{ListRootsRequestParams, ListRootsResult},
         resource::SubscribeRequestParams,
-        sampling::{CreateMessageRequestParams, CreateMessageResult}
+        sampling::{CreateMessageRequestParams, CreateMessageResult},
+        elicitation::{ElicitRequestParams, ElicitResult}
     },
 };
 use std::{
@@ -369,7 +370,7 @@ impl Context {
             .into_result()
     }
     
-    /// Send a sampling request to the client
+    /// Sends the sampling request to the client
     ///
     /// # Example
     /// ```no_run
@@ -395,6 +396,39 @@ impl Context {
     /// ```
     pub async fn sample(&mut self, params: CreateMessageRequestParams) -> Result<CreateMessageResult, Error> {
         let method = crate::types::sampling::commands::CREATE;
+        let req = Request::new(
+            Some(RequestId::Uuid(uuid::Uuid::new_v4())),
+            method,
+            Some(params));
+
+        self.send_request(req)
+            .await?
+            .into_result()
+    }
+
+    /// Sends the elicitation request to the client
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(feature = "macros")] {
+    /// use neva::{
+    ///     Context, 
+    ///     error::Error, 
+    ///     types::elicitation::ElicitRequestParams, 
+    ///     tool
+    /// };
+    ///
+    /// #[tool]
+    /// async fn generate_poem(mut ctx: Context, _topic: String) -> Result<String, Error> {
+    ///     let params = ElicitRequestParams::new("What is the poem mood you'd like?")
+    ///         .with_required(("mood", "string"));
+    ///     let result = ctx.elicit(params).await?;
+    ///     Ok(format!("{:?}", result.content))
+    /// }
+    /// # }
+    /// ```
+    pub async fn elicit(&mut self, params: ElicitRequestParams) -> Result<ElicitResult, Error> {
+        let method = crate::types::elicitation::commands::CREATE;
         let req = Request::new(
             Some(RequestId::Uuid(uuid::Uuid::new_v4())),
             method,
