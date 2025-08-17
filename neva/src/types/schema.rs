@@ -1,12 +1,13 @@
 //! Utilities for Primitive JSON schema definitions
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use crate::types::PropertyType;
 
 /// Represents restricted subset of JSON Schema: 
 /// [`StringSchema`], [`NumberSchema`], [`BooleanSchema`], or [`EnumSchema`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
+//#[serde(untagged)]
 pub enum Schema {
     /// See [`StringSchema`]
     String(StringSchema),
@@ -112,7 +113,7 @@ pub struct EnumSchema {
     #[serde(rename = "enum")]
     pub r#enum: Vec<String>,
  
-    /// ptional display names corresponding to the enum values
+    /// Optional display names corresponding to the enum values
     #[serde(rename = "enumNames", skip_serializing_if = "Option::is_none")]
     pub enum_names: Option<Vec<String>>,   
 }
@@ -177,6 +178,98 @@ impl From<&str> for Schema {
             "boolean" => Self::boolean(),
             "enum" => Self::enumeration(),
             _ => Self::string(),
+        }
+    }
+}
+
+impl From<&Value> for Schema {
+    #[inline]
+    fn from(value: &Value) -> Self {
+        let type_str = value.get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("string");
+        match type_str {
+            "number" | "integer" => Schema::Number(NumberSchema::from(value)),
+            "string" => Schema::String(StringSchema::from(value)),
+            "boolean" => Schema::Boolean(BooleanSchema::from(value)),
+            _ => Schema::Enum(EnumSchema::from(value)),       
+        }
+    }
+}
+
+impl From<&Value> for NumberSchema {
+    #[inline]
+    fn from(value: &Value) -> Self {
+        Self {
+            r#type: PropertyType::Number,
+            title: value.get("title")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string()),
+            descr: value.get("description")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string()),
+            min: value.get("min")
+                .and_then(|v| v.as_f64()),
+            max: value.get("max")
+                .and_then(|v| v.as_f64())
+        }
+    }
+}
+
+impl From<&Value> for StringSchema {
+    #[inline]
+    fn from(value: &Value) -> Self {
+        Self {
+            r#type: PropertyType::String,
+            title: value.get("title")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string()),
+            descr: value.get("description")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string()),
+            format: value.get("format")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string()),
+            min_length: value.get("min_length")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize),
+            max_length: value.get("max_length")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize)
+        }
+    }
+}
+
+impl From<&Value> for BooleanSchema {
+    #[inline]
+    fn from(value: &Value) -> Self {
+        Self {
+            r#type: PropertyType::Bool,
+            title: value.get("title")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string()),
+            descr: value.get("description")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string()),
+            default: value.get("default")
+                .and_then(|v| v.as_bool())
+        }
+    }
+}
+
+impl From<&Value> for EnumSchema {
+    #[inline]
+    fn from(value: &Value) -> Self {
+        Self {
+            r#type: PropertyType::Bool,
+            title: value.get("title")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string()),
+            descr: value.get("description")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string()),
+            r#enum: Vec::new(),
+            enum_names: None,
         }
     }
 }

@@ -582,7 +582,7 @@ impl Client {
             .is_some_and(|res| res.subscribe)
     }
 
-    /// Returns whether server is configured to send the "notifications/resources/list_changed"
+    /// Returns whether the server is configured to send the "notifications/resources/list_changed"
     #[inline]
     fn is_resource_list_changed_supported(&self) -> bool {
         self.server_capabilities
@@ -591,7 +591,7 @@ impl Client {
             .is_some_and(|res| res.list_changed)
     }
 
-    /// Returns whether server is configured to send the "notifications/tools/list_changed"
+    /// Returns whether the server is configured to send the "notifications/tools/list_changed"
     #[inline]
     fn is_tools_list_changed_supported(&self) -> bool {
         self.server_capabilities
@@ -600,7 +600,7 @@ impl Client {
             .is_some_and(|tool| tool.list_changed)
     }
 
-    /// Returns whether server is configured to send the "notifications/prompts/list_changed"
+    /// Returns whether the server is configured to send the "notifications/prompts/list_changed"
     #[inline]
     fn is_prompts_list_changed_supported(&self) -> bool {
         self.server_capabilities

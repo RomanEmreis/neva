@@ -1,17 +1,24 @@
-use std::collections::HashMap;
+use serde::Serialize;
+use schemars::JsonSchema;
 use tracing_subscriber::prelude::*;
 use neva::{
     Client, error::Error,
-    types::elicitation::{ElicitRequestParams, ElicitationAction, ElicitResult}
+    types::elicitation::{ElicitRequestParams, ElicitResult},
 };
 
-async fn elicitation_handler(_params: ElicitRequestParams) -> ElicitResult {
-    ElicitResult {
-        action: ElicitationAction::Accept,
-        content: Some(HashMap::from([
-            ("mood".into(), "fun".into())
-        ])),
-    }
+#[derive(Debug, JsonSchema, Serialize)]
+struct Contact {
+    name: String,
+    email: String,
+    age: u32,
+}
+
+async fn elicitation_handler(params: ElicitRequestParams) -> ElicitResult {
+    params.validate_schema(Contact {
+        name: "John".to_string(),
+        email: "john@email.com".to_string(),
+        age: 30,
+    })
 }
 
 #[tokio::main]
@@ -30,8 +37,7 @@ async fn main() -> Result<(), Error> {
 
     client.connect().await?;
 
-    let args = [("topic", "winter snow")];
-    let result = client.call_tool("generate_poem", Some(args)).await?;
+    let result = client.call_tool::<[(&str, &str); 1], _>("generate_business_card", None).await?;
     tracing::info!("Received result: {:?}", result.content);
 
     client.disconnect().await
