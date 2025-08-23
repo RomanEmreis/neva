@@ -65,7 +65,7 @@ pub mod shared;
 pub mod app;
 #[cfg(feature = "client")]
 pub mod client;
-#[cfg(all(feature = "macros", feature = "server"))]
+#[cfg(feature = "macros")]
 pub mod macros;
 
 #[cfg(all(feature = "macros", feature = "server"))]

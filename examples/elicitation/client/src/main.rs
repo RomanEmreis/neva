@@ -1,7 +1,7 @@
 use tracing_subscriber::prelude::*;
 use neva::{
     Client, error::Error,
-    types::elicitation::{ElicitRequestParams, ElicitResult},
+    types::elicitation::{Validator, ElicitRequestParams, ElicitResult},
     json_schema,
 };
 
@@ -13,11 +13,14 @@ struct Contact {
 }
 
 async fn elicitation_handler(params: ElicitRequestParams) -> ElicitResult {
-    params.validate_schema(Contact {
+    let contact = Contact {
         name: "John".to_string(),
         email: "john@email.com".to_string(),
         age: 30,
-    })
+    };
+    Validator::new(params)
+        .validate(contact)
+        .into()
 }
 
 #[tokio::main]

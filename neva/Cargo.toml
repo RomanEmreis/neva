@@ -16,13 +16,13 @@ keywords = ["neva", "mcp", "server", "ai", "framework"]
 base64 = "0.22.1"
 dashmap = "6.1.0"
 futures-util = { version = "0.3.31", default-features = false, features = ["alloc"] }
-inventory = { version = "0.3.20", optional = true }
+inventory = { version = "0.3.21", optional = true }
 memchr = "2.7.5"
 once_cell = { version = "1.21.3", features = ["std"], optional = true }
 reqwest = { version = "0.12.23", features = ["stream", "json"], optional = true }
 eventsource-client = { version = "0.15.0", default-features = false, optional = true }
 serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.142"
+serde_json = "1.0.143"
 schemars = { version = "1.0.4" }
 tokio = { version = "1.47.1", features = ["sync", "io-std", "io-util", "rt", "time", "macros"] }
 tokio-stream = { version = "0.1.17", optional = true }

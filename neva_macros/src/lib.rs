@@ -124,7 +124,7 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
                 #permission_code;
         }
         neva::macros::inventory::submit! {
-            neva::macros::ItemRegistrar(#module_name)
+            neva::macros::server::ItemRegistrar(#module_name)
         }
     };
 
@@ -228,7 +228,7 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
                 #permission_code;
         }
         neva::macros::inventory::submit! {
-            neva::macros::ItemRegistrar(#module_name)
+            neva::macros::server::ItemRegistrar(#module_name)
         }
     };
 
@@ -253,7 +253,7 @@ pub fn resources(_: TokenStream, item: TokenStream) -> TokenStream {
             app.map_resources(#func_name);
         }
         neva::macros::inventory::submit! {
-            neva::macros::ItemRegistrar(#module_name)
+            neva::macros::server::ItemRegistrar(#module_name)
         }
     };
 
@@ -369,7 +369,7 @@ pub fn prompt(attr: TokenStream, item: TokenStream) -> TokenStream {
                 #permission_code;
         }
         neva::macros::inventory::submit! {
-            neva::macros::ItemRegistrar(#module_name)
+            neva::macros::server::ItemRegistrar(#module_name)
         }
     };
 
@@ -417,7 +417,7 @@ pub fn handler(attr: TokenStream, item: TokenStream) -> TokenStream {
             app.map_handler(#command, #func_name);
         }
         neva::macros::inventory::submit! {
-            neva::macros::ItemRegistrar(#module_name)
+            neva::macros::server::ItemRegistrar(#module_name)
         }
     };
 

@@ -1,8 +1,7 @@
 use neva::{
-    App, Context, error::{ErrorCode, Error},
+    App, Context, error::Error,
     types::elicitation::{ElicitRequestParams},
-    json_schema,
-    tool
+    json_schema, tool
 };
 
 #[json_schema(de)]
@@ -17,14 +16,14 @@ async fn generate_business_card(mut ctx: Context) -> Result<String, Error> {
     let params = ElicitRequestParams::new("Please provide your contact information")
         .with_schema::<Contact>();
     
-    let result = ctx.elicit(params).await?;
+    ctx
+        .elicit(params)
+        .await?
+        .map(format_contact)
+}
 
-    if result.is_accepted() {
-        let content = result.content::<Contact>().unwrap();
-        Ok(format!("Name: {}, Age: {}, email: {}", content.name, content.age, content.email))   
-    } else { 
-        Err(Error::new(ErrorCode::InvalidRequest, "User rejected the request"))
-    }
+fn format_contact(c: Contact) -> String {
+    format!("Name: {}, Age: {}, email: {}", c.name, c.age, c.email)
 }
 
 #[tokio::main]
