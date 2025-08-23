@@ -1,12 +1,11 @@
-use serde::Serialize;
-use schemars::JsonSchema;
 use tracing_subscriber::prelude::*;
 use neva::{
     Client, error::Error,
     types::elicitation::{ElicitRequestParams, ElicitResult},
+    json_schema,
 };
 
-#[derive(Debug, JsonSchema, Serialize)]
+#[json_schema(ser)]
 struct Contact {
     name: String,
     email: String,

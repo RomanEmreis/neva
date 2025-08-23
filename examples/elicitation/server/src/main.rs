@@ -1,12 +1,11 @@
-use serde::Deserialize;
-use schemars::JsonSchema;
 use neva::{
     App, Context, error::{ErrorCode, Error},
     types::elicitation::{ElicitRequestParams},
+    json_schema,
     tool
 };
 
-#[derive(Debug, JsonSchema, Deserialize)]
+#[json_schema(de)]
 struct Contact {
     name: String,
     email: String,
