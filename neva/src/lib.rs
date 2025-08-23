@@ -65,11 +65,14 @@ pub mod shared;
 pub mod app;
 #[cfg(feature = "client")]
 pub mod client;
-#[cfg(all(feature = "macros", feature = "server"))]
+#[cfg(feature = "macros")]
 pub mod macros;
 
 #[cfg(all(feature = "macros", feature = "server"))]
-pub use neva_macros::*;
+pub use neva_macros::{tool, prompt, resource, resources, handler, json_schema};
+
+#[cfg(all(feature = "macros", all(feature = "client", not(feature = "server"))))]
+pub use neva_macros::json_schema;
 
 pub(crate) const SDK_NAME: &str = "neva";
 #[cfg(any(feature = "server", feature = "client"))]
@@ -83,6 +86,12 @@ pub(crate) const PROTOCOL_VERSIONS: [&str; 3] = [
 pub mod auth {
     pub use volga::auth::{Algorithm, Authorizer, Claims};
     pub use crate::transport::http::server::{AuthConfig, DefaultClaims};
+}
+
+pub mod json {
+    pub use schemars::JsonSchema;
+    #[doc(hidden)]
+    pub use schemars;
 }
 
 /// List of commands

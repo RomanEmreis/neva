@@ -67,6 +67,13 @@ pub use prompt::{
     PromptArgument,
     PromptMessage,
 };
+pub use schema::{
+    Schema,
+    StringSchema,
+    NumberSchema,
+    BooleanSchema,
+    EnumSchema,
+};
 
 #[cfg(feature = "server")]
 pub use prompt::PromptHandler;
@@ -88,6 +95,8 @@ pub mod cursor;
 pub mod root;
 pub mod sampling;
 pub mod progress;
+pub mod elicitation;
+pub mod schema;
 pub(crate) mod helpers;
 
 pub(super) const JSONRPC_VERSION: &str = "2.0";

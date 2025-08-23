@@ -22,6 +22,11 @@ pub struct ClientCapabilities {
     /// supports issuing requests to an LLM on behalf of the server.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sampling: Option<SamplingCapability>,
+
+    /// Gets or sets the client's elicitation capability, which indicates whether the client 
+    /// supports elicitation of additional information from the user on behalf of the server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elicitation: Option<ElicitationCapability>,
     
     /// Gets or sets experimental, non-standard capabilities that the client supports.
     ///
@@ -68,6 +73,19 @@ pub struct RootsCapability {
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct SamplingCapability {
     // Currently empty in the spec, but may be extended in the future
+}
+
+/// Represents the capability for a client to provide server-requested additional information during interactions.
+/// 
+/// > **Note:** This capability enables the MCP client to respond to elicitation requests from an MCP server.
+/// >
+/// > When this capability is enabled, an MCP server can request the client to provide additional information
+/// > during interactions. The client must set a <see cref="ElicitationHandler"/> to process these requests.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct ElicitationCapability {
+    // Currently empty in the spec, but may be extended in the future.
 }
 
 /// Represents the capabilities that a server may support.

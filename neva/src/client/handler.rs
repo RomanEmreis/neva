@@ -1,11 +1,9 @@
 ﻿//! Request handling utilities
 
 use std::sync::Arc;
-use tokio::{
-    sync::RwLock, 
-    time::timeout
-};
+use tokio::{sync::RwLock, time::timeout};
 use std::{time::Duration, sync::atomic::{AtomicI64, Ordering}};
+use crate::client::notification_handler::NotificationsHandler;
 use crate::{
     client::options::McpOptions,
     error::{Error, ErrorCode},
@@ -19,10 +17,10 @@ use crate::{
         RequestId, Request,
         notification::Notification,
         Root, root::ListRootsResult,
-        sampling::SamplingHandler
+        sampling::SamplingHandler,
+        elicitation::ElicitationHandler
     }
 };
-use crate::client::notification_handler::NotificationsHandler;
 
 struct Roots {
     /// Cached list of [`Root`]
@@ -50,6 +48,9 @@ pub(super) struct RequestHandler {
 
     /// Represents a handler function that runs when received a "sampling/createMessage" request
     sampling_handler: Option<SamplingHandler>,
+
+    /// Represents a handler function that runs when received an "elicitation/create" request
+    elicitation_handler: Option<ElicitationHandler>,
 
     /// Represents a hash map of notification handlers
     notification_handler: Option<Arc<NotificationsHandler>>,
@@ -111,6 +112,7 @@ impl RequestHandler {
             sender: tx,
             timeout: options.timeout,
             sampling_handler: options.sampling_handler.clone(),
+            elicitation_handler: options.elicitation_handler.clone(),
             notification_handler: options.notification_handler.clone(),
         };
         
@@ -159,6 +161,7 @@ impl RequestHandler {
         let mut sender = self.sender.clone();
         let roots = self.roots.inner.clone();
         let sampling_handler = self.sampling_handler.clone();
+        let elicitation_handler = self.elicitation_handler.clone();
         let notification_handler = self.notification_handler.clone();
         
         tokio::task::spawn(async move {
@@ -183,6 +186,18 @@ impl RequestHandler {
                                     Response::error(
                                         id, 
                                         Error::new(ErrorCode::MethodNotFound, "Client does not support sampling requests"))
+                                };
+                                sender.send(resp.into()).await.unwrap();
+                            },
+                            crate::types::elicitation::commands::CREATE => {
+                                let id = req.id();
+                                let resp = if let Some(handler) = &elicitation_handler  {
+                                    let result = handler(serde_json::from_value(req.params.unwrap()).unwrap()).await;
+                                    result.into_response(id)
+                                } else {
+                                    Response::error(
+                                        id,
+                                        Error::new(ErrorCode::MethodNotFound, "Client does not support elicitation requests"))
                                 };
                                 sender.send(resp.into()).await.unwrap();
                             },

@@ -7,6 +7,7 @@ use syn::{parse_macro_input, ItemFn, FnArg, Pat, Type, Lit, Expr, punctuated::Pu
 
 /// Maps the function to a tool
 #[proc_macro_attribute]
+#[cfg(feature = "server")]
 pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     let function = parse_macro_input!(item as ItemFn);
     let func_name = &function.sig.ident;
@@ -123,7 +124,7 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
                 #permission_code;
         }
         neva::macros::inventory::submit! {
-            neva::macros::ItemRegistrar(#module_name)
+            neva::macros::server::ItemRegistrar(#module_name)
         }
     };
 
@@ -132,6 +133,7 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Maps the function to a resource template
 #[proc_macro_attribute]
+#[cfg(feature = "server")]
 pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
     let function = parse_macro_input!(item as ItemFn);
     let func_name = &function.sig.ident;
@@ -226,7 +228,7 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
                 #permission_code;
         }
         neva::macros::inventory::submit! {
-            neva::macros::ItemRegistrar(#module_name)
+            neva::macros::server::ItemRegistrar(#module_name)
         }
     };
 
@@ -235,6 +237,7 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Maps the list of resources function
 #[proc_macro_attribute]
+#[cfg(feature = "server")]
 pub fn resources(_: TokenStream, item: TokenStream) -> TokenStream {
     let function = parse_macro_input!(item as ItemFn);
     let func_name = &function.sig.ident;
@@ -250,7 +253,7 @@ pub fn resources(_: TokenStream, item: TokenStream) -> TokenStream {
             app.map_resources(#func_name);
         }
         neva::macros::inventory::submit! {
-            neva::macros::ItemRegistrar(#module_name)
+            neva::macros::server::ItemRegistrar(#module_name)
         }
     };
 
@@ -259,6 +262,7 @@ pub fn resources(_: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Maps the function to a prompt
 #[proc_macro_attribute]
+#[cfg(feature = "server")]
 pub fn prompt(attr: TokenStream, item: TokenStream) -> TokenStream {
     let function = parse_macro_input!(item as ItemFn);
     let func_name = &function.sig.ident;
@@ -365,7 +369,7 @@ pub fn prompt(attr: TokenStream, item: TokenStream) -> TokenStream {
                 #permission_code;
         }
         neva::macros::inventory::submit! {
-            neva::macros::ItemRegistrar(#module_name)
+            neva::macros::server::ItemRegistrar(#module_name)
         }
     };
 
@@ -374,6 +378,7 @@ pub fn prompt(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Maps the function to a command handler
 #[proc_macro_attribute]
+#[cfg(feature = "server")]
 pub fn handler(attr: TokenStream, item: TokenStream) -> TokenStream {
     let function = parse_macro_input!(item as ItemFn);
     let func_name = &function.sig.ident;
@@ -412,11 +417,48 @@ pub fn handler(attr: TokenStream, item: TokenStream) -> TokenStream {
             app.map_handler(#command, #func_name);
         }
         neva::macros::inventory::submit! {
-            neva::macros::ItemRegistrar(#module_name)
+            neva::macros::server::ItemRegistrar(#module_name)
         }
     };
 
     expanded.into()
+}
+
+#[proc_macro_attribute]
+#[cfg(any(feature = "server", feature = "client"))]
+pub fn json_schema(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr with Punctuated::<syn::Path, Token![,]>::parse_terminated);
+    let input = parse_macro_input!(item as syn::DeriveInput);
+
+    let mut include_ser = false;
+    let mut include_de = false;
+
+    for path in args {
+        if path.is_ident("all") {
+            include_ser = true;
+            include_de = true;
+        } else if path.is_ident("ser") {
+            include_ser = true;
+        } else if path.is_ident("de") {
+            include_de = true;
+        }
+    }
+
+    let mut derives = vec![quote!(neva::json::JsonSchema)];
+    if include_ser {
+        derives.push(quote!(serde::Serialize));
+    }
+    if include_de {
+        derives.push(quote!(serde::Deserialize));
+    }
+
+    let expanded = quote! {
+        #[derive(#(#derives),*)]
+        #[schemars(crate = "neva::json::schemars")]
+        #input
+    };
+
+    TokenStream::from(expanded)
 }
 
 #[inline]
