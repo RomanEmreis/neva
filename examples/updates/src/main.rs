@@ -6,7 +6,7 @@
 
 use neva::{App, Context, tool, resource};
 use neva::error::Error;
-use neva::types::{ReadResourceResult, Resource, Uri};
+use neva::types::{ResourceContents, Resource, Uri};
 
 #[tool]
 async fn add_resource(mut ctx: Context, uri: Uri) -> Result<(), Error> {
@@ -25,11 +25,10 @@ async fn update_resource(mut ctx: Context, uri: Uri) -> Result<(), Error> {
 }
 
 #[resource(uri = "res://{name}")]
-async fn get_resource(uri: Uri) -> ReadResourceResult {
-    ReadResourceResult::text(
-        uri.clone(), 
-        "text/plain", 
-        format!("Test resource {}",  uri.into_inner()))
+async fn get_resource(uri: Uri) -> ResourceContents {
+    ResourceContents::new(uri.clone())
+        .with_mime("text/plain")
+        .with_text(format!("Test resource {uri}"))
 }
 
 #[tokio::main]

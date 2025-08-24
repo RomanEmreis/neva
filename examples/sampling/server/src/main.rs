@@ -6,10 +6,10 @@ use neva::{
 
 #[tool]
 async fn generate_poem(mut ctx: Context, topic: String) -> Result<String, Error> {
-    let params = CreateMessageRequestParams::message(
-        &format!("Write a short poem about {topic}"),
-        "You are a talented poet who writes concise, evocative verses."
-    );
+    let params = CreateMessageRequestParams::new()
+        .with_message(format!("Write a short poem about {topic}"))
+        .with_sys_prompt("You are a talented poet who writes concise, evocative verses.");
+    
     let result = ctx.sample(params).await?;
     Ok(format!("{:?}", result.content.text))
 }

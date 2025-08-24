@@ -75,7 +75,7 @@ pub struct ListResourcesRequestParams {
     pub cursor: Option<Cursor>,
 }
 
-/// Sent from the client to the server, to read a specific resource URI.
+/// Sent from the client to the server to read a specific resource URI.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Serialize, Deserialize)]
@@ -304,9 +304,15 @@ impl Resource {
             size: None,
         }
     }
+    
+    /// Sets a name for a resource
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
 
     /// Sets a description for a resource
-    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+    pub fn with_descr(mut self, description: impl Into<String>) -> Self {
         self.descr = Some(description.into());
         self
     }

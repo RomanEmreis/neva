@@ -63,7 +63,10 @@ tokio = { version = "1", features = ["full"] }
 
 ### Code
 ```rust
-use neva::{App, tool, resource, prompt};
+use neva::{
+    App, ResourceContents, PromptMessage, 
+    tool, resource, prompt
+};
 
 #[tool(descr = "A say hello tool")]
 async fn hello(name: String) -> String {
@@ -71,16 +74,16 @@ async fn hello(name: String) -> String {
 }
 
 #[resource(uri = "res://{name}", descr = "Some details about resource")]
-async fn get_res(name: String) -> (String, String) {
-    (
-        format!("res://{name}"),
-        format!("Some details about resource: {name}")
-    )
+async fn get_res(name: String) -> ResourceContents {
+    ResourceContents::new(format!("res://{name}"))
+        .with_mime("plain/text")
+        .with_text(format!("Some details about resource: {name}"))
 }
 
 #[prompt(descr = "Analyze code for potential improvements")]
-async fn analyze_code(lang: String) -> (String, String) {
-    (format!("Language: {lang}"), "user".into())
+async fn analyze_code(lang: String) -> PromptMessage {
+    PromptMessage::user()
+        .with(format!("Language: {lang}"))
 }
 
 #[tokio::main]

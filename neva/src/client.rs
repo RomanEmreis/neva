@@ -179,6 +179,9 @@ impl Client {
     /// }
     /// ```
     pub async fn connect(&mut self) -> Result<(), Error> {
+        #[cfg(feature = "macros")]
+        self.register_methods();
+        
         let mut transport = self.options.transport();
         let token = transport.start();
         

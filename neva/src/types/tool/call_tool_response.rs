@@ -94,7 +94,7 @@ impl From<&'static str> for CallToolResponse {
 impl From<String> for CallToolResponse {
     #[inline]
     fn from(str: String) -> Self {
-        Self::text(&str)
+        Self::text(str)
     }
 }
 
@@ -130,7 +130,7 @@ macro_rules! impl_from_for_call_tool_response {
         $(impl From<$type> for CallToolResponse {
             #[inline]
             fn from(value: $type) -> Self {
-                Self::text(&value.to_string())
+                Self::text(value.to_string())
             }
         })*
     };
@@ -148,22 +148,23 @@ impl_from_for_call_tool_response! {
 impl CallToolResponse {
     /// Creates a single text response
     #[inline]
-    pub fn text(text: &str) -> Self {
+    pub fn text(text: impl Into<Content>) -> Self {
         Self { 
-            content: vec![Content::text(text)],
+            content: vec![text.into()],
             is_error: false,
         }
     }
 
     /// Creates a list of strings response
     #[inline]
-    pub fn texts<T>(texts: T) -> Self
+    pub fn texts<T, I>(texts: T) -> Self
     where
-        T: IntoIterator<Item = &'static str>
+        T: IntoIterator<Item = I>,
+        I: Into<Content>
     {
         let content = texts
             .into_iter()
-            .map(Content::text)
+            .map(Into::into)
             .collect();
         Self { content, is_error: false }
     }

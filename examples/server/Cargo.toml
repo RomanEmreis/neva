@@ -5,6 +5,6 @@ edition = "2024"
 publish = false
 
 [dependencies]
-neva = { path = "../../neva", features = ["server", "macros"] }
+neva = { path = "../../neva", features = ["server-macros"] }
 serde = { version = "1.0.219", features = ["derive"] }
 tokio = { version = "1.44.1", features = ["full"] }

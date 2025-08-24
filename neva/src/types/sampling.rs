@@ -131,7 +131,7 @@ pub enum ContextInclusion {
 /// > balance them against other considerations.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct ModelPreferences {
     /// Represents how much to prioritize cost when selecting a model.
     /// 
@@ -167,7 +167,7 @@ pub struct ModelPreferences {
 /// > Clients should prioritize these hints over numeric priorities.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct ModelHint {
     /// A hint for a model name.
     /// 
@@ -194,7 +194,7 @@ pub struct CreateMessageResult {
     /// > **Note:** This should contain the specific model identifier such as _"claude-3-5-sonnet-20241022"_ or _"o3-mini"_.
     /// > 
     /// > This property allows the server to know which model was used to generate the response,
-    /// > enabling appropriate handling based on the model's capabilities and characteristics.
+    /// > enabling the appropriate handling based on the model's capabilities and characteristics.
     pub model: String,
 
     /// Reason why message generation (sampling) stopped, if known.
@@ -212,7 +212,7 @@ impl Default for CreateMessageRequestParams {
     fn default() -> Self {
         Self {
             max_tokens: DEFAULT_MESSAGE_MAX_TOKENS,
-            messages: Vec::new(),
+            messages: Vec::with_capacity(8),
             sys_prompt: None,
             include_context: None,
             meta: None,
@@ -233,14 +233,106 @@ impl IntoResponse for CreateMessageResult {
 impl From<&str> for SamplingMessage {
     #[inline]
     fn from(s: &str) -> Self {
-        Self::new(Role::User, Content::text(s))
+        Self::user().with(s)
+    }
+}
+
+impl From<String> for SamplingMessage {
+    #[inline]
+    fn from(s: String) -> Self {
+        Self::user().with(s)
+    }
+}
+
+impl From<&str> for ModelHint {
+    #[inline]
+    fn from(s: &str) -> Self {
+        Self::new(s)
+    }
+}
+
+impl From<String> for ModelHint {
+    #[inline]
+    fn from(s: String) -> Self {
+        Self::new(s)
     }
 }
 
 impl SamplingMessage {
     /// Creates a new [`SamplingMessage`]
-    pub fn new<T: Into<Content>>(role: Role, content: T) -> Self {
-        Self { role, content: content.into() }
+    #[inline]
+    pub fn new(role: Role) -> Self {
+        Self { role, content: Content::empty() }
+    }
+    
+    /// Creates a new [`SamplingMessage`] with a user role
+    pub fn user() -> Self {
+        Self::new(Role::User)
+    }
+    
+    /// Creates a new [`SamplingMessage`] with an assistant role
+    pub fn assistant() -> Self {
+        Self::new(Role::Assistant)
+    }
+    
+    /// Sets the content
+    pub fn with<T: Into<Content>>(mut self, content: T) -> Self {
+        self.content = content.into();
+        self
+    }
+}
+
+impl ModelPreferences {
+    /// Creates a new [`ModelPreferences`]
+    #[inline]
+    pub fn new() -> Self {
+        Self::default()
+    }
+    
+    /// Sets the cost priority
+    pub fn with_cost_priority(mut self, priority: f32) -> Self {
+        self.cost_priority = Some(priority);
+        self
+    }
+    
+    /// Sets the speed priority
+    pub fn with_speed_priority(mut self, priority: f32) -> Self {
+        self.speed_priority = Some(priority);
+        self
+    }
+    
+    /// Sets the intelligence priority
+    pub fn with_intel_priority(mut self, priority: f32) -> Self {
+        self.intelligence_priority = Some(priority);
+        self
+    }
+    
+    /// Sets the model hint
+    pub fn with_hint(mut self, hint: impl Into<ModelHint>) -> Self {
+        self.hints
+            .get_or_insert_with(Vec::new)
+            .push(hint.into());
+        self
+    }
+
+    /// Sets the model hints
+    pub fn with_hints<T , I>(mut self, hint: T) -> Self
+    where 
+        T: IntoIterator<Item = I>,
+        I: Into<ModelHint>
+    {
+        self.hints
+            .get_or_insert_with(Vec::new)
+            .extend(hint.into_iter().map(Into::into));
+        self
+    }
+}
+
+impl ModelHint {
+    /// Creates a new [`ModelHint`]
+    #[inline]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: Some(name.into()) }
     }
 }
 
@@ -251,35 +343,142 @@ impl CreateMessageRequestParams {
     }
     
     /// Creates params for a single message request
-    pub fn message(message: &str, sys_prompt: &str) -> Self {
-        let mut params = Self::default();
-        params.messages.push(message.into());
-        params.sys_prompt = Some(sys_prompt.into());
-        params
+    pub fn with_message(mut self, message: impl Into<SamplingMessage>) -> Self {
+        self.messages.push(message.into());
+        self
     }
     
-    /// Creates params for many messages request
-    pub fn messages<T, I>(messages: I, sys_prompt: &str) -> Self
+    /// Creates params for multiple messages request
+    pub fn with_messages<T, I>(mut self, messages: I) -> Self
     where
         I: IntoIterator<Item = T>,
         T: Into<SamplingMessage>,
     {
-        let mut params = Self::default();
-        params.messages.extend(messages.into_iter().map(Into::into));
-        params.sys_prompt = Some(sys_prompt.into());
-        params
+        self.messages
+            .extend(messages.into_iter().map(Into::into));
+        self
+    }
+    
+    pub fn with_sys_prompt(mut self, sys_prompt: impl Into<String>) -> Self {
+        self.sys_prompt = Some(sys_prompt.into());
+        self
+    }
+    
+    /// Sets the `max_tokens` for this [`CreateMessageRequestParams`]
+    pub fn with_max_tokens(mut self, max_tokens: i32) -> Self {
+        self.max_tokens = max_tokens;
+        self
+    }
+    
+    /// Sets the [`ContextInclusion`] for this [`CreateMessageRequestParams`]
+    pub fn with_include_ctx(mut self, inc: ContextInclusion) -> Self {
+        self.include_context = Some(inc);
+        self
+    }
+
+    /// Sets the [`ContextInclusion::None`] for this [`CreateMessageRequestParams`]
+    pub fn with_no_ctx(mut self) -> Self {
+        self.include_context = Some(ContextInclusion::None);
+        self
+    }
+
+    /// Sets the [`ContextInclusion::ThisServer`] for this [`CreateMessageRequestParams`]
+    pub fn with_this_server(mut self) -> Self {
+        self.include_context = Some(ContextInclusion::ThisServer);
+        self
+    }
+
+    /// Sets the [`ContextInclusion::AllServers`] for this [`CreateMessageRequestParams`]
+    pub fn with_all_servers(mut self) -> Self {
+        self.include_context = Some(ContextInclusion::AllServers);
+        self
+    }
+    
+    /// Sets the [`ModelPreferences`] for this [`CreateMessageRequestParams`]
+    pub fn with_pref(mut self, pref: ModelPreferences) -> Self {
+        self.model_pref = Some(pref);
+        self
+    }
+    
+    /// Sets a temperature for this [`CreateMessageRequestParams`]
+    pub fn with_temp(mut self, temp: f32) -> Self {
+        self.temp = Some(temp);
+        self
+    }
+    
+    /// Sets the stop sequences for this [`CreateMessageRequestParams`]
+    pub fn with_stop_seq(mut self, stop_sequences: Vec<String>) -> Self {
+        self.stop_sequences = Some(stop_sequences);
+        self
+    }
+    
+    /// Returns an iterator of text messages
+    pub fn text(&self) -> impl Iterator<Item = &Content> {
+        self.msg_iter("text")
+    }
+
+    /// Returns an iterator of audio messages
+    pub fn audio(&self) -> impl Iterator<Item = &Content> {
+        self.msg_iter("audio")
+    }
+
+    /// Returns an iterator of image messages
+    pub fn images(&self) -> impl Iterator<Item = &Content> {
+        self.msg_iter("image")
+    }
+    
+    #[inline]
+    fn msg_iter(&self, t: &'static str) -> impl Iterator<Item = &Content> {
+        self.messages
+            .iter()
+            .filter_map(move |m| {
+                if m.content.r#type == t {
+                    Some(&m.content)
+                } else {
+                    None
+                }
+            })
     }
 }
 
 impl CreateMessageResult {
     /// Creates a new [`CreateMessageResult`]
-    pub fn new<T: Into<Content>>(role: Role, model: &str, content: T) -> Self {
+    #[inline]
+    pub fn new(role: Role) -> Self {
         Self {
             stop_reason: None,
-            model: model.into(),
-            content: content.into(),
+            model: String::new(),
+            content: Content::empty(),
             role,
         }
+    }
+    
+    /// Creates a new [`CreateMessageResult`] with a user role
+    pub fn user() -> Self {
+        Self::new(Role::User)
+    }
+    
+    /// Creates a new [`CreateMessageResult`] with an assistant role
+    pub fn assistant() -> Self {
+        Self::new(Role::Assistant)
+    }
+    
+    /// Sets the stop reason
+    pub fn with_stop_reason(mut self, reason: impl Into<String>) -> Self {
+        self.stop_reason = Some(reason.into());
+        self
+    }
+    
+    /// Sets the model name
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = model.into();
+        self
+    }
+    
+    /// Sets the content
+    pub fn with_content<T: Into<Content>>(mut self, content: T) -> Self {
+        self.content = content.into();
+        self
     }
 }
 

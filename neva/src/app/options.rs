@@ -507,7 +507,9 @@ mod tests {
         let mut options = McpOptions::default();
 
         let handler = |uri: Uri| async move {
-            ResourceContents::text(uri, "text/plain", "some text")
+            ResourceContents::new(uri)
+                .with_mime("text/plain")
+                .with_text("some text")
         };
         
         options.add_resource_template(
@@ -559,7 +561,9 @@ mod tests {
         let mut options = McpOptions::default();
 
         let handler = |uri: Uri| async move {
-            ResourceContents::text(uri, "text/plain", "some text")
+            ResourceContents::new(uri)
+                .with_mime("text/plain")
+                .with_text("some text")
         };
 
         options.add_resource_template(

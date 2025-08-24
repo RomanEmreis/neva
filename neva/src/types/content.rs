@@ -41,13 +41,7 @@ impl From<&str> for Content {
 impl From<String> for Content {
     #[inline]
     fn from(value: String) -> Self {
-        Self {
-            text: Some(value),
-            r#type: "text".into(),
-            mime: Some("text/plain".into()),
-            data: None,
-            resource: None
-        }
+        Self::text(value)
     }
 }
 
@@ -61,7 +55,7 @@ impl From<serde_json::Value> for Content {
 impl Content {
     /// Creates a text [`Content`]
     #[inline]
-    pub fn text(text: &str) -> Self {
+    pub fn text(text: impl Into<String>) -> Self {
         Self {
             text: Some(text.into()),
             r#type: "text".into(),

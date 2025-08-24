@@ -46,9 +46,13 @@ impl IntoResponse for ReadResourceResult {
 }
 
 #[cfg(feature = "server")]
-impl From<(&str, &str)> for ResourceContents {
+impl<T1, T2> From<(T1, T2)> for ResourceContents 
+where 
+    T1: Into<Uri>,
+    T2: Into<String>
+{
     #[inline]
-    fn from((uri, text): (&str, &str)) -> Self {
+    fn from((uri, text): (T1, T2)) -> Self {
         Self {
             uri: uri.into(),
             text: Some(text.into()),
@@ -59,39 +63,18 @@ impl From<(&str, &str)> for ResourceContents {
 }
 
 #[cfg(feature = "server")]
-impl From<(&str, &str, &str)> for ResourceContents {
+impl<T1, T2, T3> From<(T1, T2, T3)> for ResourceContents
+where
+    T1: Into<Uri>,
+    T2: Into<String>,
+    T3: Into<String>
+{
     #[inline]
-    fn from((uri, mime, text): (&str, &str, &str)) -> Self {
+    fn from((uri, mime, text): (T1, T2, T3)) -> Self {
         Self {
             uri: uri.into(),
             text: Some(text.into()),
             mime: Some(mime.into()),
-            blob: None
-        }
-    }
-}
-
-#[cfg(feature = "server")]
-impl From<(String, String)> for ResourceContents {
-    #[inline]
-    fn from((uri, text): (String, String)) -> Self {
-        Self {
-            uri: uri.into(),
-            text: Some(text),
-            mime: Some("text/plain".into()),
-            blob: None
-        }
-    }
-}
-
-#[cfg(feature = "server")]
-impl From<(String, String, String)> for ResourceContents {
-    #[inline]
-    fn from((uri, mime, text): (String, String, String)) -> Self {
-        Self {
-            uri: uri.into(),
-            text: Some(text),
-            mime: Some(mime),
             blob: None
         }
     }
@@ -158,54 +141,65 @@ where
 
 #[cfg(feature = "server")]
 impl ReadResourceResult {
-    /// Creates a text resource result
+    /// Creates a new read resource result
     #[inline]
-    pub fn text(
-        uri: impl Into<Uri>,
-        mime: impl Into<String>,
-        text: impl Into<String>
-    ) -> Self {
-        Self {
-            contents: vec![ResourceContents::text(uri, mime, text)]
-        }
+    pub fn new() -> Self {
+        Self { 
+            contents: Vec::with_capacity(8)
+        }   
     }
-
-    /// Creates a blob resource result
+    
+    /// Add a resource content to the result
     #[inline]
-    pub fn blob<U: Into<Uri>, S: Into<String>>(uri: U, mime: S, blob: impl AsRef<[u8]>) -> Self {
-        Self {
-            contents: vec![ResourceContents::blob(uri, mime, blob)]
-        }
+    pub fn with_content(mut self, content: impl Into<ResourceContents>) -> Self {
+        self.contents.push(content.into());
+        self
+    }
+    
+    /// Add multiple resource contents to the result
+    pub fn with_contents<T, I>(mut self, contents: T) -> Self
+    where 
+        T: IntoIterator<Item = I>,
+        I: Into<ResourceContents>
+    {
+        self.contents
+            .extend(contents.into_iter().map(Into::into));
+        self
     }
 }
 
 #[cfg(feature = "server")]
 impl ResourceContents {
-    /// Creates a text resource content
+    /// Creates a resource content
     #[inline]
-    pub fn text(
-        uri: impl Into<Uri>, 
-        mime: impl Into<String>, 
-        text: impl Into<String>
-    ) -> Self {
+    pub  fn new(uri: impl Into<Uri>) -> Self {
         Self {
             uri: uri.into(),
-            mime: Some(mime.into()),
-            text: Some(text.into()),
+            mime: None,
+            text: None,
             blob: None
         }
     }
-
-    /// Creates a blob resource content
+    
+    /// Sets the mime type of the resource content
     #[inline]
-    pub fn blob<U: Into<Uri>, S: Into<String>>(uri: U, mime: S, blob: impl AsRef<[u8]>) -> ResourceContents {
-        let blob = general_purpose::STANDARD.encode(blob);
-        Self {
-            uri: uri.into(),
-            mime: Some(mime.into()),
-            blob: Some(blob),
-            text: None,
-        }
+    pub fn with_mime(mut self, mime: impl Into<String>) -> Self {
+        self.mime = Some(mime.into());
+        self
+    }
+    
+    /// Sets the text content of the resource
+    pub fn with_text(mut self, text: impl Into<String>) -> Self {
+        self.text = Some(text.into());
+        self.blob = None;
+        self
+    }
+    
+    /// Sets the binary content of the resource
+    pub fn with_blob(mut self, blob: impl AsRef<[u8]>) -> Self {
+        self.blob = Some(general_purpose::STANDARD.encode(blob));
+        self.text = None;
+        self
     }
 }
 
@@ -217,8 +211,12 @@ mod tests {
     #[test]
     fn it_creates_result_from_array_of_contents() {
         let result = ReadResourceResult::from([
-            ResourceContents::text("/res1", "plain/text", "test 1"),
-            ResourceContents::text("/res1", "plain/text", "test 1")
+            ResourceContents::new("/res1")
+                .with_mime("plain/text")
+                .with_text("test 1"),
+            ResourceContents::new("/res1")
+                .with_mime("plain/text")
+                .with_text("test 1")
         ]);
 
         let json = serde_json::to_string(&result).unwrap();
