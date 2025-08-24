@@ -17,11 +17,19 @@ jobs:
       - name: Run all features
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Run slim server
-        run: cargo clippy --all-targets --features server -- -D warnings  
+        run: cargo clippy --all-targets --features server -- -D warnings
+      - name: Run server with macros
+        run: cargo clippy --all-targets --features server-macros -- -D warnings
+      - name: Run http server
+        run: cargo clippy --all-targets --features http-server -- -D warnings
       - name: Run all features server
         run: cargo clippy --all-targets --features server-full -- -D warnings
       - name: Run slim client
-        run: cargo clippy --all-targets --features client -- -D warnings  
+        run: cargo clippy --all-targets --features client -- -D warnings
+      - name: Run client with macros
+        run: cargo clippy --all-targets --features client-macros -- -D warnings
+      - name: Run http client
+        run: cargo clippy --all-targets --features http-client -- -D warnings
       - name: Run all features client
         run: cargo clippy --all-targets --features client-full -- -D warnings
   

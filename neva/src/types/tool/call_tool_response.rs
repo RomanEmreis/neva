@@ -173,7 +173,7 @@ impl CallToolResponse {
     #[inline]
     pub fn error(error: Error) -> Self {
         Self {
-            content: vec![Content::text(&error.to_string())],
+            content: vec![Content::text(error.to_string())],
             is_error: true,
         }
     }

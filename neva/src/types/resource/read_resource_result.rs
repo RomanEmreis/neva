@@ -45,6 +45,15 @@ impl IntoResponse for ReadResourceResult {
     }
 }
 
+impl Default for ReadResourceResult {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            contents: Vec::with_capacity(8)
+        }
+    }
+}
+
 #[cfg(feature = "server")]
 impl<T1, T2> From<(T1, T2)> for ResourceContents 
 where 
@@ -144,9 +153,7 @@ impl ReadResourceResult {
     /// Creates a new read resource result
     #[inline]
     pub fn new() -> Self {
-        Self { 
-            contents: Vec::with_capacity(8)
-        }   
+        Self::default()  
     }
     
     /// Add a resource content to the result
