@@ -1,4 +1,4 @@
-﻿//! A route handling tools
+﻿//! A set of route handling tools
 
 use super::ReadResourceResult;
 use crate::app::handler::RequestHandler;
@@ -157,12 +157,16 @@ mod tests {
     fn it_inserts_and_finds() {
         let uri1: Uri = "res://path/to/{resource}".into();
         let handler1 = ResourceFunc::new(|uri: Uri| async move {
-            ResourceContents::text(uri, "text/plain", "some text 1")
+            ResourceContents::new(uri)
+                .with_mime("text/plain")
+                .with_text("some text 1")
         });
 
         let uri2: Uri = "res://another/path/to/{resource}".into();
         let handler2 = ResourceFunc::new(|uri: Uri| async move {
-            ResourceContents::text(uri, "text/plain", "some text 2")
+            ResourceContents::new(uri)
+                .with_mime("text/plain")
+                .with_text("some text 2")
         });
         
         let mut route = Route::default();

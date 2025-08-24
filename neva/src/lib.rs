@@ -68,10 +68,11 @@ pub mod client;
 #[cfg(feature = "macros")]
 pub mod macros;
 
-#[cfg(all(feature = "macros", feature = "server"))]
-pub use neva_macros::{tool, prompt, resource, resources, handler, json_schema};
-
-#[cfg(all(feature = "macros", all(feature = "client", not(feature = "server"))))]
+#[cfg(feature = "server-macros")]
+pub use neva_macros::{tool, prompt, resource, resources, handler};
+#[cfg(feature = "client-macros")]
+pub use neva_macros::{sampling, elicitation};
+#[cfg(feature = "macros")]
 pub use neva_macros::json_schema;
 
 pub(crate) const SDK_NAME: &str = "neva";

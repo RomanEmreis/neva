@@ -2,7 +2,7 @@ use tracing_subscriber::prelude::*;
 use neva::{
     Client, error::Error,
     types::elicitation::{Validator, ElicitRequestParams, ElicitResult},
-    json_schema,
+    elicitation, json_schema,
 };
 
 #[json_schema(ser)]
@@ -12,6 +12,7 @@ struct Contact {
     age: u32,
 }
 
+#[elicitation]
 async fn elicitation_handler(params: ElicitRequestParams) -> ElicitResult {
     let contact = Contact {
         name: "John".to_string(),
@@ -34,8 +35,6 @@ async fn main() -> Result<(), Error> {
             .with_stdio(
                 "cargo", 
                 ["run", "--manifest-path", "examples/elicitation/server/Cargo.toml"]));
-
-    client.map_elicitation(elicitation_handler);
 
     client.connect().await?;
 

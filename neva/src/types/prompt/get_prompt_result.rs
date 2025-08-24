@@ -41,21 +41,14 @@ impl IntoResponse for GetPromptResult {
 }
 
 #[cfg(feature = "server")]
-impl<T: Into<Role>> From<(&str, T)> for PromptMessage {
+impl<T1, T2> From<(T1, T2)> for PromptMessage
+where 
+    T1: Into<Content>,
+    T2: Into<Role>
+{
     #[inline]
-    fn from((msg, role): (&str, T)) -> Self {
-        Self::text(msg, role.into())
-    }
-}
-
-#[cfg(feature = "server")]
-impl<T: Into<Role>> From<(String, T)> for PromptMessage {
-    #[inline]
-    fn from((msg, role): (String, T)) -> Self {
-        Self {
-            content: msg.into(),
-            role: role.into(),
-        }
+    fn from((msg, role): (T1, T2)) -> Self {
+        Self::new(role).with(msg)
     }
 }
 
@@ -125,16 +118,27 @@ where
 impl PromptMessage {
     /// Creates a new [`PromptMessage`]
     #[inline]
-    pub fn new(content: Content, role: Role) -> Self {
-        Self { content, role }
+    pub fn new(role: impl Into<Role>) -> Self {
+        Self { 
+            content: Content::empty(), 
+            role: role.into()
+        }
     }
     
-    #[inline]
-    pub fn text(content: &str, role: Role) -> Self {
-        Self {
-            content: content.into(),
-            role,
-        }
+    /// Creates a new [`PromptMessage`] with the user role
+    pub fn user() -> Self {
+        Self::new(Role::User)
+    }
+    
+    /// Creates a new [`PromptMessage`] with the assistant role
+    pub fn assistant() -> Self {
+        Self::new(Role::Assistant)
+    }
+    
+    /// Sets the content of [`PromptMessage`]
+    pub fn with<T: Into<Content>>(mut self, content: T) -> Self {
+        self.content = content.into();
+        self
     }
 }
 
@@ -142,8 +146,34 @@ impl PromptMessage {
 impl GetPromptResult {
     /// Creates a new [`GetPromptResult`]
     #[inline]
-    pub fn new(descr: Option<String>, messages: impl Iterator<Item = PromptMessage>) -> Self {
-        Self { descr, messages: messages.collect() }
+    pub fn new() -> Self {
+        Self { 
+            messages: Vec::with_capacity(8),
+            descr: None
+        }
+    }
+    
+    /// Sets the description of the result
+    pub fn with_descr<T: Into<String>>(mut self, descr: T) -> Self {
+        self.descr = Some(descr.into());
+        self
+    }
+
+    /// Adds a message to the result
+    pub fn with_message<T: Into<PromptMessage>>(mut self, message: T) -> Self {
+        self.messages.push(message.into());
+        self
+    }
+    
+    /// Adds multiple messages to the result
+    pub fn with_messages<T, I>(mut self, messages: T) -> Self
+    where 
+        T: IntoIterator<Item = I>,
+        I: Into<PromptMessage>
+    {
+        self.messages
+            .extend(messages.into_iter().map(Into::into));
+        self
     }
 }
 

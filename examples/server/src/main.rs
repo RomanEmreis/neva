@@ -5,10 +5,13 @@
 //! ```
 
 use neva::{
-    App, 
+    App, tool, resource, resources, prompt, handler, 
     error::{Error, ErrorCode},
-    tool, resource, resources, prompt, handler,
-    types::{Json, Resource, ListResourcesRequestParams, ListResourcesResult}
+    types::{
+        Json, PromptMessage,
+        Resource, ResourceContents,
+        ListResourcesRequestParams, ListResourcesResult 
+    }
 };
 
 #[derive(serde::Deserialize)]
@@ -59,16 +62,14 @@ async fn tool_error() -> Result<String, Error> {
         "priority": 1.0
     }"#
 )]
-async fn get_res(name: String) -> (String, String) {
-    let content = (
-        format!("res://{name}"),
-        format!("Some details about resource: {name}")
-    );
-    content
+async fn get_res(name: String) -> ResourceContents {
+    ResourceContents::new(format!("res://{name}"))
+        .with_mime("plain/text")
+        .with_text(format!("Some details about resource: {name}"))
 }
 
 #[resource(uri = "res://err/{uri}")]
-async fn err_resource(_uri: neva::types::Uri) -> Result<(String, String), Error> {
+async fn err_resource(_uri: neva::types::Uri) -> Result<ResourceContents, Error> {
     Err(Error::from(ErrorCode::ResourceNotFound))
 }
 
@@ -82,12 +83,13 @@ async fn err_resource(_uri: neva::types::Uri) -> Result<(String, String), Error>
         }    
     ]"#
 )]
-async fn analyze_code(lang: String) -> (String, String) {
-    (format!("Language: {lang}"), "user".into())
+async fn analyze_code(lang: String) -> PromptMessage {
+    PromptMessage::user()
+        .with(format!("Language: {lang}"))
 }
 
 #[prompt(descr = "A prompt that return error")]
-async fn prompt_err() -> Result<(String, String), Error> {
+async fn prompt_err() -> Result<PromptMessage, Error> {
     Err(Error::from(ErrorCode::InvalidRequest))
 }
 
@@ -95,10 +97,10 @@ async fn prompt_err() -> Result<(String, String), Error> {
 async fn list_resources(_params: ListResourcesRequestParams) -> impl Into<ListResourcesResult> {
     [
         Resource::new("res://test1", "test 1")
-            .with_description("A test resource 1")
+            .with_descr("A test resource 1")
             .with_mime("text/plain"),
         Resource::new("res://test2", "test 2")
-            .with_description("A test resource 2")
+            .with_descr("A test resource 2")
             .with_mime("text/plain"),
     ]
 }
