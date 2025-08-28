@@ -32,11 +32,9 @@ async fn main() -> Result<(), Error> {
     }
     
     // Call a tool
-    let args = [
-        ("message", "Hello MCP!")
-    ];
+    let args = ("message", "Hello MCP!");
     tracing::info!("--- CALL TOOL ---");
-    let result = client.call_tool("echo", Some(args)).await?;
+    let result = client.call_tool("echo", args).await?;
     tracing::info!("{:?}", result.content);
     
     // List resources
@@ -79,7 +77,7 @@ async fn main() -> Result<(), Error> {
         ("temperature", "50"),
         ("style", "anything")
     ];
-    let prompt = client.get_prompt("complex_prompt", Some(args)).await?;
+    let prompt = client.get_prompt("complex_prompt", args).await?;
     tracing::info!("{:?}: {:?}", prompt.descr, prompt.messages);
     
     // This can be uncommented to check the log notifications from MCP server

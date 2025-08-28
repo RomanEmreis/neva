@@ -37,8 +37,8 @@ async fn main() -> Result<(), Error> {
 
     client.connect().await?;
 
-    let args = [("topic", "winter snow")];
-    let result = client.call_tool("generate_poem", Some(args)).await?;
+    let args = ("topic", "winter snow");
+    let result = client.call_tool("generate_poem", args).await?;
     tracing::info!("Received result: {:?}", result.content);
 
     client.disconnect().await
