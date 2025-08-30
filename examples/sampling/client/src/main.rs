@@ -7,6 +7,9 @@ use neva::{
     }
 };
 
+const ACCESS_TOKEN: &str =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwiaXNzIjoic29tZSBpc3N1ZXIiLCJhdWQiOiJzb21lIGF1ZCIsImV4cCI6MH0.BYf42WI95BvIkpaXdTKKKvVtuVbcqQiZ1loXxSvNHBY";
+
 #[sampling]
 async fn sampling_handler(params: CreateMessageRequestParams) -> CreateMessageResult {
     let prompt: Vec<String> = params.text()
@@ -32,8 +35,8 @@ async fn main() -> Result<(), Error> {
 
     let mut client = Client::new()
         .with_options(|opt| opt
-            .with_stdio("cargo", ["run", "--manifest-path", "examples/sampling/server/Cargo.toml"])
-            .with_mcp_version("2024-11-05"));
+            .with_http(|http| http
+                .with_auth(ACCESS_TOKEN)));
 
     client.connect().await?;
 
