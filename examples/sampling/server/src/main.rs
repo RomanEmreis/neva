@@ -16,10 +16,17 @@ async fn generate_poem(mut ctx: Context, topic: String) -> Result<String, Error>
 
 #[tokio::main]
 async fn main() {
+    let secret = std::env::var("JWT_SECRET")
+        .expect("JWT_SECRET must be set");
+    
     App::new()
         .with_options(|opt| opt
-            .with_stdio()
-            .with_mcp_version("2024-11-05"))
+            .with_http(|http| http
+                .with_auth(|auth| auth
+                    .validate_exp(false)
+                    .with_aud(["some aud"])
+                    .with_iss(["some issuer"])
+                    .set_decoding_key(secret.as_bytes()))))
         .run()
         .await;
 }

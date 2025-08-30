@@ -54,6 +54,7 @@ pub struct HttpServer<C: AuthClaims = DefaultClaims> {
 #[cfg(feature = "http-client")]
 pub struct HttpClient {
     url: ServiceUrl,
+    access_token: Option<Box<[u8]>>,
     sender: HttpSender,
     receiver: HttpReceiver,
 }
@@ -70,6 +71,14 @@ pub(super) struct HttpRuntimeContext {
     tx: Sender<Result<Message, Error>>,
     rx: Receiver<Message>,
     auth: Option<AuthConfig>,
+}
+
+#[cfg(feature = "http-client")]
+pub(super) struct ClientRuntimeContext {
+    url: ServiceUrl,
+    tx: Sender<Result<Message, Error>>,
+    rx: Receiver<Message>,
+    access_token: Option<Box<[u8]>>,
 }
 
 /// Represents HTTP sender
@@ -103,6 +112,7 @@ impl Default for HttpClient {
     fn default() -> Self {
         Self {
             url: ServiceUrl::default(),
+            access_token: None,
             receiver: HttpReceiver::new(),
             sender: HttpSender::new()
         }
@@ -227,11 +237,25 @@ impl HttpClient {
         self.url.endpoint = prefix;
         self
     }
+    
+    /// Set the bearer token for requests
+    ///
+    ///Default: `None` 
+    pub fn with_auth(mut self, access_token: impl Into<String>) -> Self {
+        self.access_token = Some(access_token.into().into_bytes().into_boxed_slice());
+        self
+    }
 
-    /// Returns service URL (IP, port and URL prefix)
-    #[allow(dead_code)]
-    pub(crate) fn url(&self) -> ServiceUrl {
-        self.url
+    fn runtime(&mut self) -> Result<ClientRuntimeContext, Error> {
+        let Some(sender_rx) = self.sender.rx.take() else {
+            return Err(Error::new(ErrorCode::InternalError, "The HTTP writer is already in use"));
+        };
+        Ok(ClientRuntimeContext {
+            url: self.url,
+            tx: self.receiver.tx.clone(),
+            rx: sender_rx,
+            access_token: self.access_token.take(),
+        })
     }
 }
 
@@ -289,15 +313,16 @@ impl Transport for HttpClient {
 
     fn start(&mut self) -> CancellationToken {
         let token = CancellationToken::new();
-        let Some(sender_rx) = self.sender.rx.take() else {
-            #[cfg(feature = "tracing")]
-            tracing::error!(logger = "neva", "The HTTP writer is already in use");
-            return token;
+        let runtime = match self.runtime() {
+            Ok(runtime) => runtime,
+            Err(_err) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(logger = "neva", "Failed to start HTTP client: {}", _err);
+                return token;
+            }
         };
         tokio::spawn(client::connect(
-            self.url(),
-            self.receiver.tx.clone(),
-            sender_rx,
+            runtime,
             token.clone()
         ));
         

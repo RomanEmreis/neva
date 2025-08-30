@@ -195,7 +195,7 @@ impl Client {
         self.init().await
     }
 
-    /// Disconnects the MCP client from MCP server
+    /// Disconnects the MCP client from the MCP server
     ///
     /// # Example
     /// ```no_run
@@ -268,7 +268,7 @@ impl Client {
     ///
     ///     client.connect().await?;
     ///
-    ///     // Fetch all or initial list of tools if MCP server provides pagination
+    ///     // Fetch all or initial list of tools if the MCP server provides pagination
     ///     let tools = client.list_tools(None).await?;
     ///     
     ///     // Fetch the next page of tools is any   
@@ -302,7 +302,7 @@ impl Client {
     ///
     ///     client.connect().await?;
     ///
-    ///     // Fetch all or initial list of resources if MCP server provides pagination
+    ///     // Fetch all or initial list of resources if the MCP server provides pagination
     ///     let resources = client.list_resources(None).await?;
     ///     
     ///     // Fetch the next page of resources is any   
@@ -336,7 +336,7 @@ impl Client {
     ///
     ///     client.connect().await?;
     ///
-    ///     // Fetch all or initial list of resource templates if MCP server provides pagination
+    ///     // Fetch all or initial list of resource templates if the MCP server provides pagination
     ///     let templates = client.list_resource_templates(None).await?;
     ///     
     ///     // Fetch the next page of resource templates is any   
@@ -370,7 +370,7 @@ impl Client {
     ///
     ///     client.connect().await?;
     ///
-    ///     // Fetch all or initial list of prompts if MCP server provides pagination
+    ///     // Fetch all or initial list of prompts if the MCP server provides pagination
     ///     let prompts = client.list_prompts(None).await?;
     ///     
     ///     // Fetch the next page of prompts templates is any   
@@ -404,18 +404,14 @@ impl Client {
     ///
     ///     client.connect().await?;
     ///
-    ///     let args = [("message", "Hello MCP!")];
-    ///     let result = client.call_tool("echo", Some(args)).await?;
+    ///     let args = [("message", "Hello MCP!")]; // or let args = ("message", "Hello MCP!"); 
+    ///     let result = client.call_tool("echo", args).await?;
     ///     // Do something with the result
     ///
     ///     client.disconnect().await
     /// }
     /// ``` 
-    pub async fn call_tool<I, T>(&mut self, name: &str, args: Option<I>) -> Result<CallToolResponse, Error>
-    where
-        I: IntoIterator<Item = (&'static str, T)>,
-        T: Serialize,
-    {
+    pub async fn call_tool<Args: IntoArgs>(&mut self, name: &str, args: Args) -> Result<CallToolResponse, Error> {
         let id = self.generate_id()?;
         let request = Request::new(
             Some(id.clone()),
@@ -423,7 +419,7 @@ impl Client {
             Some(CallToolRequestParams {
                 name: name.into(),
                 meta: Some(RequestParamsMeta::new(&id)),
-                args: Self::create_args(args)
+                args: args.into_args()
             }));
         
         self.send_request(request)
@@ -485,17 +481,13 @@ impl Client {
     ///         ("temperature", "50"),
     ///         ("style", "anything")
     ///     ];
-    ///     let prompt = client.get_prompt("complex_prompt", Some(args)).await?;
+    ///     let prompt = client.get_prompt("complex_prompt", args).await?;
     ///     // Do something with the prompt
     ///
     ///     client.disconnect().await
     /// }
     /// ``` 
-    pub async fn get_prompt<I, T>(&mut self, name: &str, args: Option<I>) -> Result<GetPromptResult, Error>
-    where
-        I: IntoIterator<Item = (&'static str, T)>,
-        T: Serialize,
-    {
+    pub async fn get_prompt<Args: IntoArgs>(&mut self, name: &str, args: Args) -> Result<GetPromptResult, Error> {
         let id = self.generate_id()?;
         let request = Request::new(
             Some(id.clone()),
@@ -503,7 +495,7 @@ impl Client {
             Some(GetPromptRequestParams {
                 name: name.into(),
                 meta: Some(RequestParamsMeta::new(&id)),
-                args: Self::create_args(args)
+                args: args.into_args()
             })
         );
 
@@ -576,7 +568,7 @@ impl Client {
         } 
     }
 
-    /// Returns whether server is configured to send the "notifications/resources/updated"
+    /// Returns whether the server is configured to send the "notifications/resources/updated"
     #[inline]
     fn is_resource_subscription_supported(&self) -> bool {
         self.server_capabilities
@@ -657,22 +649,88 @@ impl Client {
             .map(|h| h.next_id())
     }
     
-    /// Creates arguments for tools and prompts from iterator
-    #[inline]
-    fn create_args<I, T>(args: Option<I>) -> Option<HashMap<String, serde_json::Value>>
-    where
-        I: IntoIterator<Item = (&'static str, T)>,
-        T: Serialize,
-    {
-        args.map(|args| HashMap::from_iter(args
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), serde_json::to_value(v).unwrap()))))
-    }
-    
     #[inline]
     fn wait_for_shutdown_signal(&mut self) {
         if let Some(token) = self.cancellation_token.clone() {
             shared::wait_for_shutdown_signal(token);
         };
     }
+}
+
+/// A trait describes arguments for tools and prompts
+pub trait IntoArgs {
+    fn into_args(self) -> Option<HashMap<String, serde_json::Value>>;
+}
+
+impl IntoArgs for () {
+    #[inline]
+    fn into_args(self) -> Option<HashMap<String, serde_json::Value>> {
+        None
+    }
+}
+
+impl<T: IntoArgs> IntoArgs for Option<T> {
+    #[inline]
+    fn into_args(self) -> Option<HashMap<String, serde_json::Value>> {
+        self.and_then(|args| args.into_args())
+    }
+}
+
+impl<K, T> IntoArgs for (K, T)
+where
+    K: Into<String>,
+    T: Serialize,
+{
+    #[inline]
+    fn into_args(self) -> Option<HashMap<String, serde_json::Value>> {
+        Some(HashMap::from([
+            (self.0.into(), serde_json::to_value(self.1).unwrap())
+        ]))
+    }
+}
+
+impl<K, T, const N: usize> IntoArgs for [(K, T); N]
+where
+    K: Into<String>,
+    T: Serialize,
+{
+    #[inline]
+    fn into_args(self) -> Option<HashMap<String, serde_json::Value>> {
+        Some(create_args(self))
+    }
+}
+
+impl<K, T> IntoArgs for Vec<(K, T)>
+where
+    K: Into<String>,
+    T: Serialize,
+{
+    #[inline]
+    fn into_args(self) -> Option<HashMap<String, serde_json::Value>> {
+        Some(create_args(self))
+    }
+}
+
+impl<K, T> IntoArgs for HashMap<K, T>
+where
+    K: Into<String>,
+    T: Serialize,
+{
+    #[inline]
+    fn into_args(self) -> Option<HashMap<String, serde_json::Value>> {
+        Some(create_args(self))
+    }
+}
+
+/// Creates arguments for tools and prompts from iterator
+#[inline]
+fn create_args<I, K, T>(args: I) -> HashMap<String, serde_json::Value>
+where
+    I: IntoIterator<Item = (K, T)>,
+    K: Into<String>,
+    T: Serialize,
+{
+    HashMap::from_iter(args
+        .into_iter()
+        .map(|(k, v)| (k.into(), serde_json::to_value(v).unwrap())))
 }

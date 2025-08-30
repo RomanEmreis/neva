@@ -154,7 +154,6 @@ async fn handle_connection(manager: Dc<RequestManager>, headers: HttpHeaders) ->
 async fn handle_message(
     manager: Dc<RequestManager>,
     mut headers: HttpHeaders,
-    bearer: Bearer,
     bts: BearerTokenService,
     Json(msg): Json<Message>
 ) -> HttpResult {
@@ -165,17 +164,19 @@ async fn handle_message(
         ]);
     }
 
+    let msg = match headers.get(AUTHORIZATION)
+        .and_then(|bearer| Bearer::try_from(bearer).ok())
+        .and_then(|bearer| bts.decode::<DefaultClaims>(bearer).ok())
+    {
+        Some(claims) => msg.set_claims(claims),
+        None => msg.set_claims(DefaultClaims::default()),
+    };
+    
     headers.remove(AUTHORIZATION);
     
     let msg = msg
         .set_session_id(id)
         .set_headers(headers.into_inner());
-
-    let msg = if let Ok(claims) = bts.decode::<DefaultClaims>(bearer) {
-        msg.set_claims(claims)
-    } else { 
-        msg
-    };
     
     let (resp_tx, resp_rx) = oneshot::channel::<Message>();
     manager.pending.insert(msg.full_id(), resp_tx);

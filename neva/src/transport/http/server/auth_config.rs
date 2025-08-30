@@ -11,7 +11,7 @@ const ERR_NO_CLAIMS: &str = "Claims are not provided";
 const ERR_UNAUTHORIZED: &str = "Subject is not authorized to invoke this tool";
 
 /// Represents default claims
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Default, Clone, Debug, Deserialize)]
 pub struct DefaultClaims {
     /// Subject
     #[serde(skip_serializing_if = "Option::is_none")]

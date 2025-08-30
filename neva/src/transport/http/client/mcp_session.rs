@@ -58,7 +58,7 @@ impl McpSession {
         self.notify.notify_one();
     }
 
-    /// Waits for MCP Session be initialized
+    /// Waits for MCP Session to be initialized
     #[inline]
     pub(super) async fn initialized(&self) {
         self.notify.notified().await;
@@ -133,7 +133,7 @@ mod tests {
             }
         });
 
-        // Notify after short_set_and_get delay
+        // Notify after a short_set_and_get delay
         tokio::time::sleep(Duration::from_millis(10)).await;
         session.notify_session_initialized();
 

@@ -16,12 +16,12 @@ async fn main() -> Result<(), Error> {
 
     client.connect().await?;
 
-    let result = client.call_tool("roots_request", None::<Vec<(&'static str, String)>>).await?;
+    let result = client.call_tool("roots_request", ()).await?;
     tracing::info!("Received result: {:?}", result.content);
     
     client.add_root("file:///home/user/projects/my_another_project", "My Another Project");
 
-    let result = client.call_tool("roots_request", None::<Vec<(&'static str, String)>>).await?;
+    let result = client.call_tool("roots_request", ()).await?;
     tracing::info!("Received result: {:?}", result.content);
     
     client.disconnect().await

@@ -5,10 +5,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use futures_util::{TryStreamExt, StreamExt};
 use eventsource_client::{Client, ClientBuilder, ReconnectOptionsBuilder, SSE};
-use reqwest::{RequestBuilder, header::{CONTENT_TYPE, ACCEPT}};
+use reqwest::{RequestBuilder, header::{CONTENT_TYPE, ACCEPT, AUTHORIZATION}};
 use self::mcp_session::McpSession;
 use crate::{
-    transport::http::{ServiceUrl, get_mcp_session_id, MCP_SESSION_ID},
+    transport::http::{ClientRuntimeContext, get_mcp_session_id, MCP_SESSION_ID},
     types::Message,
     error::{Error, ErrorCode}
 };
@@ -16,15 +16,14 @@ use crate::{
 pub(super) mod mcp_session;
 
 pub(super) async fn connect(
-    service_url: ServiceUrl,
-    recv_tx: mpsc::Sender<Result<Message, Error>>,
-    sender_rx: mpsc::Receiver<Message>,
+    rt: ClientRuntimeContext,
     token: CancellationToken
 ) {
-    let session = Arc::new(McpSession::new(service_url, token));
+    let session = Arc::new(McpSession::new(rt.url, token));
+    let access_token: Option<Arc<[u8]>> = rt.access_token.map(|t| t.into());
     tokio::join!(
-        handle_connection(session.clone(), sender_rx, recv_tx.clone()),
-        start_sse_connection(session.clone(), recv_tx.clone())
+        handle_connection(session.clone(), rt.rx, rt.tx.clone(), access_token.clone()),
+        start_sse_connection(session.clone(), rt.tx.clone(), access_token.clone())
     );
 }
 
@@ -32,6 +31,7 @@ async fn handle_connection(
     session: Arc<McpSession>,
     mut sender_rx: mpsc::Receiver<Message>,
     recv_tx: mpsc::Sender<Result<Message, Error>>,
+    access_token: Option<Arc<[u8]>>
 ) {
     let client = reqwest::Client::new();
     let token = session.cancellation_token();
@@ -53,6 +53,10 @@ async fn handle_connection(
 
                 if let Some(session_id) = session.session_id() {
                     resp = resp.header(MCP_SESSION_ID, session_id.to_string())
+                }
+                
+                if let Some(access_token) = &access_token {
+                    resp = resp.bearer_auth(String::from_utf8_lossy(access_token))
                 }
                 
                 crate::spawn_fair!(send_request(
@@ -106,21 +110,23 @@ async fn send_request(
 
 async fn start_sse_connection(
     session: Arc<McpSession>,
-    resp_tx: mpsc::Sender<Result<Message, Error>>
+    resp_tx: mpsc::Sender<Result<Message, Error>>,
+    access_token: Option<Arc<[u8]>>
 ) {
     let token = session.cancellation_token();
     tokio::select! {
         biased;
         _ = token.cancelled() => (),
         _ = session.initialized() => {
-            tokio::spawn(handle_sse_connection(session.clone(), resp_tx));        
+            tokio::spawn(handle_sse_connection(session.clone(), resp_tx, access_token));        
         }
     }
 }
 
 async fn handle_sse_connection(
     session: Arc<McpSession>,
-    resp_tx: mpsc::Sender<Result<Message, Error>>
+    resp_tx: mpsc::Sender<Result<Message, Error>>,
+    access_token: Option<Arc<[u8]>>
 ) {
     let Ok(mut client) = ClientBuilder::for_url(session.url().as_str().as_ref()) else { 
         #[cfg(feature = "tracing")]
@@ -139,6 +145,16 @@ async fn handle_sse_connection(
 
     if let Some(session_id) = session.session_id() {
         let Ok(with_header) = client.header(MCP_SESSION_ID, &session_id.to_string()) else { 
+            #[cfg(feature = "tracing")]
+            tracing::error!(logger = "neva", "Failed to create SSE client");
+            return;
+        };
+        client = with_header;
+    }
+
+    if let Some(access_token) = &access_token  {
+        let access_token = format!("Bearer {}", String::from_utf8_lossy(access_token));
+        let Ok(with_header) = client.header(AUTHORIZATION.as_str(), &access_token) else {
             #[cfg(feature = "tracing")]
             tracing::error!(logger = "neva", "Failed to create SSE client");
             return;

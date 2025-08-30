@@ -38,7 +38,7 @@ async fn main() -> Result<(), Error> {
 
     client.connect().await?;
 
-    let result = client.call_tool::<[(&str, &str); 1], _>("generate_business_card", None).await?;
+    let result = client.call_tool("generate_business_card", ()).await?;
     tracing::info!("Received result: {:?}", result.content);
 
     client.disconnect().await
