@@ -13,7 +13,7 @@ const ACCESS_TOKEN: &str =
 #[sampling]
 async fn sampling_handler(params: CreateMessageRequestParams) -> CreateMessageResult {
     let prompt: Vec<String> = params.text()
-        .map(|c| c.text.clone().unwrap())
+        .flat_map(|c| c.as_text().map(|t| t.text.clone()))
         .collect();
     
     let sys_prompt = params

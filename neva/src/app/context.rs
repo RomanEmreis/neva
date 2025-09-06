@@ -389,7 +389,7 @@ impl Context {
     ///         .with_sys_prompt("You are a talented poet who writes concise, evocative verses.");
     /// 
     ///     let result = ctx.sample(params).await?;
-    ///     Ok(format!("{:?}", result.content.text))
+    ///     Ok(format!("{:?}", result.content))
     /// }
     /// # }
     /// ```

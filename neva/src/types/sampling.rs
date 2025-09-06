@@ -426,13 +426,23 @@ impl CreateMessageRequestParams {
     pub fn images(&self) -> impl Iterator<Item = &Content> {
         self.msg_iter("image")
     }
+
+    /// Returns an iterator of resource link messages
+    pub fn links(&self) -> impl Iterator<Item = &Content> {
+        self.msg_iter("resource_link")
+    }
+
+    /// Returns an iterator of embedded resource messages
+    pub fn resources(&self) -> impl Iterator<Item = &Content> {
+        self.msg_iter("resource")
+    }
     
     #[inline]
     fn msg_iter(&self, t: &'static str) -> impl Iterator<Item = &Content> {
         self.messages
             .iter()
             .filter_map(move |m| {
-                if m.content.r#type == t {
+                if m.content.get_type() == t {
                     Some(&m.content)
                 } else {
                     None

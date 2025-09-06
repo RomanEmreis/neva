@@ -64,8 +64,8 @@ async fn tool_error() -> Result<String, Error> {
 )]
 async fn get_res(name: String) -> ResourceContents {
     ResourceContents::new(format!("res://{name}"))
-        .with_mime("plain/text")
         .with_text(format!("Some details about resource: {name}"))
+        .with_mime("plain/text")
 }
 
 #[resource(uri = "res://err/{uri}")]

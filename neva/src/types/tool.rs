@@ -469,7 +469,7 @@ mod tests {
         let resp = tool.call(params.into()).await.unwrap();
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"content":[{"type":"text","text":"7","mimeType":"text/plain"}],"isError":false}"#);
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"7"}],"isError":false}"#);
     }
     
     #[test]
