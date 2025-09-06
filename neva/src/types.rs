@@ -1,4 +1,5 @@
 ﻿use std::fmt::Display;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use crate::SDK_NAME;
 use crate::types::notification::Notification;
@@ -178,14 +179,28 @@ pub enum Role {
 }
 
 /// Represents annotations that can be attached to content.
+/// The client can use annotations to inform how objects are used or displayed
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Annotations {
     /// Describes who the intended customer of this object or data is.
     audience: Vec<Role>,
     
+    /// The moment the resource was last modified, as an ISO 8601 formatted string.
+    /// 
+    /// Should be an ISO 8601 formatted string (e.g., **"2025-01-12T15:00:58Z"**).
+    /// 
+    /// **Examples:** last activity timestamp in an open file, timestamp when the resource
+    /// was attached, etc.
+    #[serde(rename = "lastModified", skip_serializing_if = "Option::is_none")]
+    last_modified: Option<DateTime<Utc>>,
+    
     /// Describes how important this data is for operating the server (0 to 1).
+    /// 
+    /// A value of 1 means **most important** and indicates that the data is
+    /// effectively required, while 0 means **least important** and indicates that
+    /// the data is entirely optional.
     priority: f32
 }
 
@@ -316,14 +331,20 @@ impl Annotations {
     }
     
     /// Adds audience
-    pub fn add_audience<T: Into<Role>>(mut self, role: T) -> Self {
+    pub fn with_audience<T: Into<Role>>(mut self, role: T) -> Self {
         self.audience.push(role.into());
         self
     }
     
     /// Sets the priority
-    pub fn set_priority(mut self, priority: f32) -> Self {
+    pub fn with_priority(mut self, priority: f32) -> Self {
         self.priority = priority;
+        self
+    }
+    
+    /// Sets the moment the object was last modified
+    pub fn with_last_modified(mut self, last_modified: DateTime<Utc>) -> Self {
+        self.last_modified = Some(last_modified);
         self
     }
 }

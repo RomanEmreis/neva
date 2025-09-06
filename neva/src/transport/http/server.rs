@@ -169,7 +169,7 @@ async fn handle_message(
                 .and_then(|bearer| Bearer::try_from(bearer).ok())
                 .and_then(|bearer| bts.decode::<DefaultClaims>(bearer).ok())
         })
-        .unwrap_or_else(|| DefaultClaims::default());
+        .unwrap_or_default();
 
     headers.remove(AUTHORIZATION);
     

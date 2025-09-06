@@ -73,3 +73,15 @@ impl Uri {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    
+    #[test]
+    fn it_converts_from_str() {
+        let uri = Uri::from("res://test1");
+        
+        assert_eq!(uri.to_string(), "res://test1");
+    }
+}
