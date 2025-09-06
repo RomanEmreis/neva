@@ -512,7 +512,6 @@ impl EmbeddedResource {
 
 #[cfg(test)]
 mod test {
-    use crate::types::Role;
     use super::*;
     
     #[test]
@@ -586,6 +585,8 @@ mod test {
     #[test]
     #[cfg(feature = "server")]
     fn it_deserializes_resource_content_to_json() {
+        use crate::types::Role;
+        
         let json = r#"{"type":"resource","resource":{"uri":"res://resource","text":"hello world","title":"some resource","mimeType":"text/plain","annotations":{"audience":["user"],"priority":1.0}}}"#;
         let content = serde_json::from_str::<Content>(json)
             .unwrap();
@@ -619,6 +620,8 @@ mod test {
     #[test]
     #[cfg(feature = "server")]
     fn it_deserializes_resource_link_content_to_json() {
+        use crate::types::Role;
+        
         let json = r#"{"type":"resource_link","uri":"res://resource","name":"some resource","size":2,"title":"some resource","description":"some resource","annotations":{"audience":["user"],"priority":1.0}}"#;
         let content = serde_json::from_str::<Content>(json)
             .unwrap();
