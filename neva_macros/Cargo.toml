@@ -1,6 +1,6 @@
 [package]
 name = "neva_macros"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 rust-version = "1.85.0"
 authors = ["Roman Emreis <roman.emreis@outlook.com>"]
@@ -9,8 +9,8 @@ repository = "https://github.com/RomanEmreis/neva"
 description = "Macros for Neva"
 documentation = "https://docs.rs/neva"
 readme = "../README.md"
-categories = ["web-programming::http-server"]
-keywords = ["neva", "mcp", "server", "ai", "framework"]
+categories = ["web-programming::http-server", "web-programming::http-client", "network-programming", "asynchronous"]
+keywords = ["modelcontextprotocol", "mcp", "sdk", "ai", "framework"]
 
 [lib]
 proc-macro = true

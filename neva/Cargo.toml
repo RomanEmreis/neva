@@ -1,6 +1,6 @@
 [package]
 name = "neva"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 rust-version = "1.85.0"
 authors = ["Roman Emreis <roman.emreis@outlook.com>"]
@@ -9,8 +9,8 @@ repository = "https://github.com/RomanEmreis/neva"
 description = "MCP SDK for Rust"
 documentation = "https://docs.rs/neva"
 readme = "../README.md"
-categories = ["web-programming::http-server"]
-keywords = ["neva", "mcp", "server", "ai", "framework"]
+categories = ["web-programming::http-server", "network-programming", "asynchronous"]
+keywords = ["modelcontextprotocol", "mcp", "sdk", "ai", "framework"]
 
 [dependencies]
 base64 = "0.22.1"
@@ -29,12 +29,12 @@ tokio-stream = { version = "0.1.17", optional = true }
 tokio-util = "0.7.16"
 tracing = { version = "0.1.41", optional = true }
 tracing-subscriber = { version = "0.3.20", features = ["fmt", "json"], optional = true }
-volga = { version = "0.6.3", features = ["di", "jwt-auth-full"], optional = true }
+volga = { version = "0.6.4", features = ["di", "jwt-auth-full"], optional = true }
 uuid = { version = "1.18.0", features = ["v4", "serde"] }
-neva_macros = { path = "../neva_macros", version = "0.1.4", optional = true }
+neva_macros = { path = "../neva_macros", version = "0.1.5", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.61.1", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_System_Diagnostics", "Win32_System_Diagnostics_ToolHelp"], optional = true }
+windows = { version = "0.62.0", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_System_Diagnostics", "Win32_System_Diagnostics_ToolHelp"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.30.0", features = ["signal"], optional = true }

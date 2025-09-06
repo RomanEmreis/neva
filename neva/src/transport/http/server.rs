@@ -94,8 +94,7 @@ async fn handle(
     let mut server = App::new()
         .bind(service_url.addr)
         .with_no_delay()
-        .without_greeter()
-        .with_bearer_auth(|auth| auth);
+        .without_greeter();
     
     if let Some(auth) = auth {
         let (auth, rules) = auth.into_parts();
@@ -154,7 +153,7 @@ async fn handle_connection(manager: Dc<RequestManager>, headers: HttpHeaders) ->
 async fn handle_message(
     manager: Dc<RequestManager>,
     mut headers: HttpHeaders,
-    bts: BearerTokenService,
+    bts: Option<BearerTokenService>,
     Json(msg): Json<Message>
 ) -> HttpResult {
     let id = get_or_create_mcp_session(&headers);
@@ -164,18 +163,19 @@ async fn handle_message(
         ]);
     }
 
-    let msg = match headers.get(AUTHORIZATION)
-        .and_then(|bearer| Bearer::try_from(bearer).ok())
-        .and_then(|bearer| bts.decode::<DefaultClaims>(bearer).ok())
-    {
-        Some(claims) => msg.set_claims(claims),
-        None => msg.set_claims(DefaultClaims::default()),
-    };
-    
+    let claims = bts
+        .and_then(|bts| {
+            headers.get(AUTHORIZATION)
+                .and_then(|bearer| Bearer::try_from(bearer).ok())
+                .and_then(|bearer| bts.decode::<DefaultClaims>(bearer).ok())
+        })
+        .unwrap_or_else(|| DefaultClaims::default());
+
     headers.remove(AUTHORIZATION);
     
     let msg = msg
         .set_session_id(id)
+        .set_claims(claims)
         .set_headers(headers.into_inner());
     
     let (resp_tx, resp_rx) = oneshot::channel::<Message>();
