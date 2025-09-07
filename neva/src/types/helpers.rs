@@ -1,5 +1,6 @@
 ﻿//! A set of helpers for types
 
+use crate::json::{JsonSchema, schemars::{schema_for, Schema}};
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::{self, Display, Formatter},
@@ -93,6 +94,14 @@ impl<T> Json<T> {
     #[inline]
     pub fn into_inner(self) -> T {
         self.0
+    }
+}
+
+impl<T: JsonSchema> Json<T> {
+    /// Generates a JSON schema of `T`
+    #[inline]
+    pub fn schema() -> Schema {
+        schema_for!(T)
     }
 }
 

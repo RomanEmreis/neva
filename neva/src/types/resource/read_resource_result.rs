@@ -44,8 +44,8 @@ pub struct BlobResourceContents {
     /// where `annotations.title` should be given precedence over using `name`, if present).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    
-    /// The type of content.
+
+    /// The MIME type of content.
     #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
     pub mime: Option<String>,
 
@@ -76,8 +76,8 @@ pub struct TextResourceContents {
     /// where `annotations.title` should be given precedence over using `name`, if present).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    
-    /// The type of content.
+
+    /// The MIME type of content.
     #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
     pub mime: Option<String>,
 
@@ -95,6 +95,26 @@ pub struct TextResourceContents {
 pub struct EmptyResourceContents {
     /// The URI of the resource.
     pub uri: Uri,
+
+    /// Intended for UI and end-user contexts - optimized to be human-readable and easily understood,
+    /// even by those unfamiliar with domain-specific terminology.
+    ///
+    /// If not provided, the name should be used for display (except for Tool,
+    /// where `annotations.title` should be given precedence over using `name`, if present).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+
+    /// The MIME type of content.
+    #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+
+    /// Optional annotations for the client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Annotations>,
+
+    /// Metadata reserved by MCP for protocol-level metadata.
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
 }
 
 #[cfg(feature = "server")]
@@ -283,7 +303,7 @@ impl ResourceContents {
     /// Creates a new resource content
     #[inline]
     pub fn new(uri: impl Into<Uri>) -> Self {
-        Self::Empty(EmptyResourceContents { uri: uri.into() })
+        Self::Empty(EmptyResourceContents::new(uri))
     }
     
     /// Returns the URI of the resource content
@@ -312,7 +332,7 @@ impl ResourceContents {
         match self {
             Self::Text(text) => text.title.as_deref(),
             Self::Blob(blob) => blob.title.as_deref(),
-            Self::Empty(_) => None
+            Self::Empty(empty) => empty.title.as_deref()
         }
     }
 
@@ -322,7 +342,7 @@ impl ResourceContents {
         match self {
             Self::Text(text) => text.annotations.as_ref(),
             Self::Blob(blob) => blob.annotations.as_ref(),
-            Self::Empty(_) => None
+            Self::Empty(empty) => empty.annotations.as_ref()
         }
     }
 
@@ -342,7 +362,7 @@ impl ResourceContents {
         match self { 
             Self::Text(text) => text.mime.as_deref(),
             Self::Blob(blob) => blob.mime.as_deref(),
-            Self::Empty(_) => None
+            Self::Empty(empty) => empty.mime.as_deref()
         }
     }
     
@@ -352,7 +372,7 @@ impl ResourceContents {
         match self {
             Self::Text(ref mut text) => text.mime = Some(mime.into()),
             Self::Blob(ref mut blob) => blob.mime = Some(mime.into()),
-            Self::Empty(_) => ()
+            Self::Empty(ref mut empty) => empty.mime = Some(mime.into()),
         }
         self
     }
@@ -363,12 +383,13 @@ impl ResourceContents {
         match self {
             Self::Text(ref mut text) => text.title = Some(title.into()),
             Self::Blob(ref mut blob) => blob.title = Some(title.into()),
-            Self::Empty(_) => ()
+            Self::Empty(ref mut empty) => empty.title = Some(title.into()),
         }
         self
     }
 
     /// Sets annotations for the client
+    #[inline]
     pub fn with_annotations<F>(self, config: F) -> Self
     where
         F: FnOnce(Annotations) -> Annotations
@@ -376,7 +397,7 @@ impl ResourceContents {
         match self {
             Self::Text(text) => Self::Text(text.with_annotations(config)),
             Self::Blob(blob) => Self::Blob(blob.with_annotations(config)),
-            Self::Empty(_) => self
+            Self::Empty(empty) => Self::Empty(empty.with_annotations(config)),
         }
     }
     
@@ -403,7 +424,7 @@ impl ResourceContents {
             }),
             Self::Empty(content) => Self::Text(TextResourceContents {
                 uri: content.uri,
-                mime: Some("text/plain".into()),
+                mime: content.mime.or_else(|| Some("text/plain".into())),
                 title: None,
                 annotations: None,
                 meta: None,
@@ -521,6 +542,42 @@ impl BlobResourceContents {
     }
 }
 
+impl EmptyResourceContents {
+    /// Creates a empty resource content
+    #[inline]
+    pub fn new(uri: impl Into<Uri>) -> Self {
+        Self {
+            uri: uri.into(),
+            title: None,
+            mime: None,
+            annotations: None,
+            meta: None,
+        }
+    }
+    /// Sets the mime type of the blob resource content
+    #[inline]
+    pub fn with_mime(mut self, mime: impl Into<String>) -> Self {
+        self.mime = Some(mime.into());
+        self
+    }
+
+    /// Sets the title of the resource
+    #[inline]
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+    
+    /// Sets annotations for the client
+    pub fn with_annotations<F>(mut self, config: F) -> Self
+    where
+        F: FnOnce(Annotations) -> Annotations
+    {
+        self.annotations = Some(config(Default::default()));
+        self
+    }
+}
+
 #[cfg(test)]
 #[cfg(feature = "server")]
 mod tests {
@@ -530,11 +587,11 @@ mod tests {
     fn it_creates_result_from_array_of_contents() {
         let result = ReadResourceResult::from([
             ResourceContents::new("/res1")
-                .with_text("test 1")
-                .with_mime("plain/text"),
-            ResourceContents::new("/res1")
-                .with_text("test 1")
                 .with_mime("plain/text")
+                .with_text("test 1"),
+            ResourceContents::new("/res1")
+                .with_mime("plain/text")
+                .with_text("test 1")
         ]);
 
         let json = serde_json::to_string(&result).unwrap();

@@ -24,6 +24,10 @@ use crate::types::Json;
 pub struct CallToolResponse {
     /// The server's response to a tools/call request from the client.
     pub content: Vec<Content>,
+    
+    /// An optional JSON object that represents the structured result of the tool call.
+    #[serde(rename = "structuredContent", skip_serializing_if = "Option::is_none")]
+    pub struct_content: Option<serde_json::Value>,
 
     /// Whether the tool call was unsuccessful. If true, the call was unsuccessful.
     #[serde(default, rename = "isError")]
@@ -86,7 +90,7 @@ impl From<()> for CallToolResponse {
 impl From<&'static str> for CallToolResponse {
     #[inline]
     fn from(str: &str) -> Self {
-        Self::text(str)
+        Self::new(str)
     }
 }
 
@@ -94,7 +98,7 @@ impl From<&'static str> for CallToolResponse {
 impl From<String> for CallToolResponse {
     #[inline]
     fn from(str: String) -> Self {
-        Self::text(str)
+        Self::new(str)
     }
 }
 
@@ -102,9 +106,7 @@ impl From<String> for CallToolResponse {
 impl<T: Serialize> From<Json<T>> for CallToolResponse {
     #[inline]
     fn from(value: Json<T>) -> Self {
-        serde_json::to_value(&value)
-            .map_err(Error::from)
-            .into()
+        Self::json(value.0)
     }
 }
 
@@ -112,7 +114,7 @@ impl<T: Serialize> From<Json<T>> for CallToolResponse {
 impl From<Vec<&'static str>> for CallToolResponse {
     #[inline]
     fn from(values: Vec<&'static str>) -> Self {
-        Self::texts(values)
+        Self::array(values)
     }
 }
 
@@ -130,7 +132,7 @@ macro_rules! impl_from_for_call_tool_response {
         $(impl From<$type> for CallToolResponse {
             #[inline]
             fn from(value: $type) -> Self {
-                Self::text(value.to_string())
+                Self::new(value.to_string())
             }
         })*
     };
@@ -146,18 +148,19 @@ impl_from_for_call_tool_response! {
 
 #[cfg(feature = "server")]
 impl CallToolResponse {
-    /// Creates a single text response
+    /// Creates a single response
     #[inline]
-    pub fn text(text: impl Into<Content>) -> Self {
+    pub fn new(text: impl Into<Content>) -> Self {
         Self { 
             content: vec![text.into()],
+            struct_content: None,
             is_error: false,
         }
     }
 
-    /// Creates a list of strings response
+    /// Creates an array of strings response
     #[inline]
-    pub fn texts<T, I>(texts: T) -> Self
+    pub fn array<T, I>(texts: T) -> Self
     where
         T: IntoIterator<Item = I>,
         I: Into<Content>
@@ -166,7 +169,40 @@ impl CallToolResponse {
             .into_iter()
             .map(Into::into)
             .collect();
-        Self { content, is_error: false }
+        Self { content, struct_content: None, is_error: false }
+    }
+    
+    /// Creates a single structured JSON response
+    #[inline]
+    pub fn json<T: Serialize>(data: T) -> Self {
+        match serde_json::to_value(&data) {
+            Err(err) => Self::error(err.into()),
+            Ok(structure) => Self {
+                content: vec![Content::json(&data)],
+                struct_content: Some(structure),
+                is_error: false,
+            },
+        }
+    }
+
+    /// Creates an array of structured JSON data response
+    #[inline]
+    pub fn array_json<T, I>(data: T) -> Self
+    where
+        T: IntoIterator<Item = I>,
+        I: Serialize
+    {
+        let vec = data.into_iter().collect::<Vec<I>>();
+        match serde_json::to_value(&vec) { 
+            Err(err) => Self::error(err.into()),
+            Ok(structure) => Self {
+                struct_content: Some(structure),
+                is_error: false,
+                content: vec.into_iter()
+                    .map(|item| Content::json(&item))
+                    .collect::<Vec<Content>>(),
+            }
+        }
     }
 
     /// Creates an error response
@@ -174,6 +210,7 @@ impl CallToolResponse {
     pub fn error(error: Error) -> Self {
         Self {
             content: vec![Content::text(error.to_string())],
+            struct_content: None,
             is_error: true,
         }
     }
@@ -183,8 +220,37 @@ impl CallToolResponse {
     pub fn empty() -> Self {
         Self {
             content: vec![],
+            struct_content: None,
             is_error: false,
         }
+    }
+
+    /// Creates a structure for existing text content.
+    /// 
+    /// **Note:** If the content type is not a text, this won't get any effect.
+    #[inline]
+    pub fn with_structure(mut self) -> Self {
+        let item = &self.content[0];
+        if self.content.len() == 1 {
+            if let Content::Text(text) = item {
+                match serde_json::from_str(&text.text) { 
+                    Ok(structure) => self.struct_content = Some(structure),
+                    Err(err) => return Self::error(err.into()),
+                }
+            }
+        } else if let Content::Text(_) = item {
+            let data = self.content
+                .iter()
+                .filter_map(|item| item
+                    .as_text()
+                    .and_then(|c| serde_json::from_str(&c.text).ok()))
+                .collect::<Vec<serde_json::Value>>();
+            match serde_json::to_value(&data) {
+                Ok(structure) => self.struct_content = Some(structure),
+                Err(err) => return Self::error(err.into()),
+            }
+        }
+        self
     }
 }
 
@@ -293,7 +359,61 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"content":[{"type":"text","text":"{\"msg\":\"test\"}"}],"isError":false}"#);
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"{\"msg\":\"test\"}"}],"structuredContent":{"msg":"test"},"isError":false}"#);
+    }
+
+    #[test]
+    fn it_creates_with_structured_content() {
+        let json = Test { msg: "test".into() };
+        let resp = CallToolResponse::json(json);
+
+        let json = serde_json::to_string(&resp).unwrap();
+
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"{\"msg\":\"test\"}"}],"structuredContent":{"msg":"test"},"isError":false}"#);
+    }
+
+    #[test]
+    fn it_creates_with_array_of_structured_content() {
+        let resp = CallToolResponse::array_json([
+            Test { msg: "test 1".into() },
+            Test { msg: "test 2".into() }
+        ]);
+
+        let json = serde_json::to_string(&resp).unwrap();
+
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"{\"msg\":\"test 1\"}"},{"type":"text","text":"{\"msg\":\"test 2\"}"}],"structuredContent":[{"msg":"test 1"},{"msg":"test 2"}],"isError":false}"#);
+    }
+
+    #[test]
+    fn it_adds_structured_content() {
+        let resp = CallToolResponse::new(r#"{"msg":"test"}"#)
+            .with_structure();
+
+        let json = serde_json::to_string(&resp).unwrap();
+
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"{\"msg\":\"test\"}"}],"structuredContent":{"msg":"test"},"isError":false}"#);
+    }
+
+    #[test]
+    fn it_adds_structured_content_for_string_array() {
+        let resp = CallToolResponse::new(r#"[{"msg":"test 1"},{"msg":"test 2"}]"#)
+            .with_structure();
+
+        let json = serde_json::to_string(&resp).unwrap();
+
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"[{\"msg\":\"test 1\"},{\"msg\":\"test 2\"}]"}],"structuredContent":[{"msg":"test 1"},{"msg":"test 2"}],"isError":false}"#);
+    }
+
+    #[test]
+    fn it_adds_structured_content_for_array() {
+        let resp = CallToolResponse::array([
+            r#"{"msg":"test 1"}"#,
+            r#"{"msg":"test 2"}"#
+        ]).with_structure();
+
+        let json = serde_json::to_string(&resp).unwrap();
+
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"{\"msg\":\"test 1\"}"},{"type":"text","text":"{\"msg\":\"test 2\"}"}],"structuredContent":[{"msg":"test 1"},{"msg":"test 2"}],"isError":false}"#);
     }
     
     #[derive(Serialize)]

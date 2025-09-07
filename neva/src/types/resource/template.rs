@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 #[cfg(feature = "server")]
 use futures_util::future::BoxFuture;
+use serde_json::Value;
 #[cfg(feature = "server")]
 use crate::error::Error;
 #[cfg(feature = "server")]
@@ -35,6 +36,14 @@ pub struct ResourceTemplate {
     /// A human-readable name for this resource template.
     pub name: String,
 
+    /// Intended for UI and end-user contexts — optimized to be human-readable and easily understood,
+    /// even by those unfamiliar with domain-specific terminology.
+    ///
+    /// If not provided, the name should be used for display (except for Tool,
+    /// where `annotations.title` should be given precedence over using `name`, if present).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+
     /// A description of what this resource template represents.
     pub descr: Option<String>,
 
@@ -46,6 +55,10 @@ pub struct ResourceTemplate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<Annotations>,
 
+    /// Metadata reserved by MCP for protocol-level metadata.
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+    
     /// A list of roles that are allowed to read the resource
     #[serde(skip)]
     #[cfg(feature = "http-server")]
@@ -190,14 +203,22 @@ impl ResourceTemplate {
         Self {
             uri_template: uri.into(),
             name: name.into(),
+            title: None,
             mime: None,
             descr: None,
             annotations: None,
+            meta: None,
             #[cfg(feature = "http-server")]
             roles: None,
             #[cfg(feature = "http-server")]
             permissions: None,
         }
+    }
+    
+    /// Sets a title for a resource template
+    pub fn with_title(&mut self, title: impl Into<String>) -> &mut Self {
+        self.title = Some(title.into());
+        self
     }
 
     /// Sets a description for a resource template

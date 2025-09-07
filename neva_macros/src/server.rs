@@ -51,6 +51,7 @@ pub(super) fn get_arg_type(t: &Type) -> &str {
     match t {
         Type::Array(_) => "array",
         Type::Slice(_) => "slice",
+        Type::Reference(_) => "none",
         Type::Path(type_path) => {
             let type_ident = type_path.path.segments
                 .last()
@@ -67,13 +68,36 @@ pub(super) fn get_arg_type(t: &Type) -> &str {
                 "Vec" => "array",
                 "Context" => "none",
                 "Meta" => "none",
+                "Result" => "none",
+                "Option" => "none",
                 "Uri" => "string",
+                "Error" => "none",
                 _ => "object", // Default case for unknown types
             }
         }
         _ => "object", // Default fallback
     }
 }
+
+#[inline]
+pub(super) fn get_inner_type_from_generic(ty: &Type) -> Option<&Type> {
+    if let Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            match segment.ident.to_string().as_str() {
+                "Result" | "Option" | "Vec" | "Meta" | "Json" => {
+                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                        if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
+                            return Some(inner_ty);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 
 #[inline]
 pub(super) fn get_str_param(value: &Expr) -> Option<String> {

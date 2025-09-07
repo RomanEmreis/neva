@@ -201,7 +201,7 @@ impl From<Resource> for Content {
 impl From<serde_json::Value> for Content {
     #[inline]
     fn from(value: serde_json::Value) -> Self {
-        Self::json(value)
+        Self::Text(TextContent::new(value.to_string()))
     }
 }
 
@@ -321,8 +321,9 @@ impl Content {
 
     /// Creates a JSON [`Content`]
     #[inline]
-    pub fn json(json: serde_json::Value) -> Self {
-        Self::Text(TextContent::new(json.to_string()))
+    pub fn json<T: Serialize>(json: T) -> Self {
+        let json = serde_json::to_value(json).unwrap();
+        Self::from(json)
     }
     
     /// Creates an image [`Content`]

@@ -9,6 +9,7 @@ pub fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<
     let func_name = &function.sig.ident;
     let mut description = None;
     let mut args = None;
+    let mut title = None;
     let mut roles = None;
     let mut permissions = None;
     let mut no_args = false;
@@ -23,6 +24,9 @@ pub fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<
             Meta::NameValue(nv) => {
                 if let Some(ident) = nv.path.get_ident() {
                     match ident.to_string().as_str() {
+                        "title" => {
+                            title = get_str_param(&nv.value);
+                        }
                         "descr" => {
                             description = get_str_param(&nv.value);
                         }
@@ -49,6 +53,10 @@ pub fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<
     // Generate the function registration and metadata setup
     let description_code = description.map(|desc| {
         quote! { .with_description(#desc) }
+    });
+
+    let title_code = title.map(|title| {
+        quote! { .with_title(#title) }
     });
 
     // If no schema is provided, generate it automatically from function arguments
@@ -97,6 +105,7 @@ pub fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<
         
         fn #module_name(app: &mut App) {
             app.map_prompt(stringify!(#func_name), #func_name)
+                #title_code
                 #description_code
                 #args_code
                 #roles_code

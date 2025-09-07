@@ -100,3 +100,24 @@ pub mod commands {
     pub const INIT: &str = "initialize";
     pub const PING: &str = "ping";
 }
+
+pub mod prelude {
+    pub use crate::types::*;
+    pub use crate::error::*;
+    pub use crate::json::*;
+
+    #[cfg(feature = "server")]
+    pub use crate::app::{App, context::Context, options};
+    #[cfg(feature = "client")]
+    pub use crate::client::Client;
+    
+    #[cfg(feature = "server-macros")]
+    pub use crate::{tool, prompt, resource, resources, handler};
+    #[cfg(feature = "client-macros")]
+    pub use crate::{sampling, elicitation};
+    #[cfg(feature = "macros")]
+    pub use crate::json_schema;
+
+    #[cfg(feature = "http-server")]
+    pub use crate::auth::*;
+}

@@ -22,9 +22,7 @@ tokio = { version = "1", features = ["full"] }
 
 ### Code
 ```rust
-use std::time::Duration;
-use neva::Client;
-use neva::error::Error;
+use neva::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
@@ -63,10 +61,7 @@ tokio = { version = "1", features = ["full"] }
 
 ### Code
 ```rust
-use neva::{
-    App, ResourceContents, PromptMessage, 
-    tool, resource, prompt
-};
+use neva::prelude::*;
 
 #[tool(descr = "A say hello tool")]
 async fn hello(name: String) -> String {

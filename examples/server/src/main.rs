@@ -4,15 +4,7 @@
 //! npx @modelcontextprotocol/inspector cargo run -p example-server
 //! ```
 
-use neva::{
-    App, tool, resource, resources, prompt, handler, 
-    error::{Error, ErrorCode},
-    types::{
-        Json, PromptMessage,
-        Resource, ResourceContents,
-        ListResourcesRequestParams, ListResourcesResult 
-    }
-};
+use neva::prelude::*;
 
 #[derive(serde::Deserialize)]
 struct Payload {
@@ -20,7 +12,7 @@ struct Payload {
     name: String,
 }
 
-#[derive(serde::Serialize)]
+#[json_schema(ser)]
 struct Results {
     message: String,
 }
@@ -32,7 +24,7 @@ async fn say_hello() -> &'static str {
 
 #[tool(
     descr = "Hello to name tool",
-    schema = r#"{
+    input_schema = r#"{
         "properties": {
             "name": { "type": "string", "description": "A name to whom say Hello" }
         }
@@ -42,19 +34,53 @@ async fn say_hello_to(name: String) -> String {
     format!("Hello, {name}!")
 }
 
-#[tool(descr = "Say from JSON")]
+#[tool(
+    descr = "Say from JSON",
+    output_schema = r#"{
+        "properties": {
+            "message": { "type": "string", "description": "A message to say" }
+        },
+        "required": ["message"]
+    }"#
+)]
 async fn say_json(arg: Json<Payload>) -> Json<Results> {
     let result = Results { message: format!("{}, {}!", arg.say, arg.name) };
     result.into()
 }
 
-#[tool(descr = "A tool with error")]
+#[tool(
+    title = "JSON Hello",
+    descr = "Say from JSON",
+    input_schema = r#"{
+        "properties": {
+            "say": { "type": "string", "description": "A message to say" },
+            "name": { "type": "string", "description": "A name to whom say Hello" }
+        },
+        "required": ["say", "name"]
+    }"#
+)]
+async fn say_out_json(say: String, name: String) -> Json<Results> {
+    let result = Results { message: format!("{say}, {name}!") };
+    result.into()
+}
+
+#[tool(
+    descr = "A tool with error",
+    annotations = r#"{
+        "title": "Error Tool",
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+    }"#
+)]
 async fn tool_error() -> Result<String, Error> {
     Err(Error::from(ErrorCode::InternalError))
 }
 
 #[resource(
     uri = "res://{name}",
+    title = "Read resource",
     descr = "Some details about resource",
     mime = "text/plain",
     annotations = r#"{
@@ -62,21 +88,22 @@ async fn tool_error() -> Result<String, Error> {
         "priority": 1.0
     }"#
 )]
-async fn get_res(name: String) -> ResourceContents {
-    ResourceContents::new(format!("res://{name}"))
-        .with_text(format!("Some details about resource: {name}"))
-        .with_mime("plain/text")
+async fn get_res(name: String) -> TextResourceContents {
+    TextResourceContents::new(
+        format!("res://{name}"), 
+        format!("Some details about resource: {name}"))
 }
 
 #[resource(uri = "res://err/{uri}")]
-async fn err_resource(_uri: neva::types::Uri) -> Result<ResourceContents, Error> {
+async fn err_resource(_uri: Uri) -> Result<ResourceContents, Error> {
     Err(Error::from(ErrorCode::ResourceNotFound))
 }
 
 #[prompt(
+    title = "Code Analyzer",
     descr = "Analyze code for potential improvements",
     args = r#"[
-        { 
+        {
             "name": "lang", 
             "description": "A language to use", 
             "required": true

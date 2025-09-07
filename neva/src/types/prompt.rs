@@ -56,6 +56,18 @@ pub struct Prompt {
     #[serde(rename = "arguments", skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<PromptArgument>>,
 
+    /// Intended for UI and end-user contexts - optimized to be human-readable and easily understood,
+    /// even by those unfamiliar with domain-specific terminology.
+    ///
+    /// If not provided, the name should be used for display (except for Tool,
+    /// where `annotations.title` should be given precedence over using `name`, if present).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    
+    /// Metadata reserved by MCP for protocol-level metadata.
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+    
     /// A get prompt handler
     #[serde(skip)]
     #[cfg(feature = "server")]
@@ -332,7 +344,9 @@ impl Prompt {
         let args = F::args();
         Self { 
             name: name.into(), 
-            descr: None, 
+            title: None,
+            descr: None,
+            meta: None,
             args,
             handler: Some(handler),
             #[cfg(feature = "http-server")]
@@ -340,6 +354,12 @@ impl Prompt {
             #[cfg(feature = "http-server")]
             permissions: None,
         }
+    }
+    
+    /// Sets a [`Prompt`] title
+    pub fn with_title(&mut self, title: &str) -> &mut Self {
+        self.title = Some(title.into());
+        self
     }
     
     /// Sets a [`Prompt`] description

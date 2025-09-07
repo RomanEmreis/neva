@@ -23,8 +23,15 @@ pub use request::{RequestId, Request};
 pub use response::{IntoResponse, Response};
 pub use reference::Reference;
 pub use completion::{Completion, CompleteRequestParams, Argument, CompleteResult};
-pub use content::Content;
 pub use cursor::{Cursor, Page, Pagination};
+pub use content::{
+    Content, 
+    TextContent, 
+    AudioContent, 
+    ImageContent,
+    ResourceLink,
+    EmbeddedResource,
+};
 pub use capabilities::{
     ClientCapabilities, 
     ServerCapabilities, 
@@ -32,13 +39,18 @@ pub use capabilities::{
     ResourcesCapability,
     PromptsCapability,
     LoggingCapability,
-    CompletionsCapability
+    CompletionsCapability,
+    ElicitationCapability,
+    SamplingCapability,
+    RootsCapability
 };
 pub use tool::{
     ListToolsRequestParams,
     CallToolRequestParams,
     CallToolResponse,
-    Tool, 
+    Tool,
+    ToolSchema,
+    ToolAnnotations,
     ListToolsResult
 };
 
@@ -53,7 +65,9 @@ pub use resource::{
     ListResourceTemplatesResult,
     Resource,
     ResourceTemplate,
-    ResourceContents, 
+    ResourceContents,
+    TextResourceContents,
+    BlobResourceContents,
     ReadResourceResult, 
     ReadResourceRequestParams,
     SubscribeRequestParams,

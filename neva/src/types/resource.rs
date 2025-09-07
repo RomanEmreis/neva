@@ -15,8 +15,17 @@ use crate::types::{RequestId, Response, IntoResponse, Request, Page};
 use crate::app::{context::Context, handler::{FromHandlerParams, HandlerParams}};
 
 pub use uri::Uri;
-pub use read_resource_result::{ReadResourceResult, ResourceContents};
-pub use template::{ResourceTemplate, ListResourceTemplatesResult, ListResourceTemplatesRequestParams};
+pub use read_resource_result::{
+    ReadResourceResult, 
+    ResourceContents, 
+    TextResourceContents, 
+    BlobResourceContents,
+};
+pub use template::{
+    ResourceTemplate, 
+    ListResourceTemplatesResult, 
+    ListResourceTemplatesRequestParams
+};
 
 #[cfg(feature = "server")]
 pub(crate) use route::Route;
