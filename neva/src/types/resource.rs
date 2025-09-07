@@ -1,7 +1,7 @@
 ﻿//! Represents an MCP resource
 
 use serde::{Deserialize, Serialize};
-use crate::types::Cursor;
+use crate::types::{Annotations, Cursor};
 use crate::types::request::RequestParamsMeta;
 #[cfg(feature = "server")]
 use std::borrow::Cow;
@@ -15,8 +15,17 @@ use crate::types::{RequestId, Response, IntoResponse, Request, Page};
 use crate::app::{context::Context, handler::{FromHandlerParams, HandlerParams}};
 
 pub use uri::Uri;
-pub use read_resource_result::{ReadResourceResult, ResourceContents};
-pub use template::{ResourceTemplate, ListResourceTemplatesResult, ListResourceTemplatesRequestParams};
+pub use read_resource_result::{
+    ReadResourceResult, 
+    ResourceContents, 
+    TextResourceContents, 
+    BlobResourceContents,
+};
+pub use template::{
+    ResourceTemplate, 
+    ListResourceTemplatesResult, 
+    ListResourceTemplatesRequestParams
+};
 
 #[cfg(feature = "server")]
 pub(crate) use route::Route;
@@ -61,7 +70,23 @@ pub struct Resource {
 
     /// The resource size in bytes, if known
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub size: Option<usize>
+    pub size: Option<usize>,
+
+    /// Intended for UI and end-user contexts - optimized to be human-readable and easily understood,
+    /// even by those unfamiliar with domain-specific terminology.
+    ///
+    /// If not provided, the name should be used for display (except for Tool,
+    /// where `annotations.title` should be given precedence over using `name`, if present).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+
+    /// Optional annotations for the client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Annotations>,
+
+    /// Metadata reserved by MCP for protocol-level metadata.
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
 }
 
 /// Sent from the client to request a list of resources the server has.
@@ -242,9 +267,12 @@ impl From<Uri> for Resource {
     fn from(uri: Uri) -> Self {
         Self {
             name: uri.to_string(),
+            title: None,
             descr: None,
             mime: None,
             size: None,
+            annotations: None,
+            meta: None,
             uri
         }
     }
@@ -255,10 +283,13 @@ impl From<String> for Resource {
     fn from(uri: String) -> Self {
         Self {
             name: uri.clone(),
+            title: None,
             uri: uri.into(),
             descr: None,
             mime: None,
             size: None,
+            annotations: None,
+            meta: None,
         }
     }
 }
@@ -298,10 +329,13 @@ impl Resource {
     pub fn new<U: Into<Uri>, S: Into<String>>(uri: U, name: S) -> Self {
         Self { 
             uri: uri.into(), 
-            name: name.into(), 
+            name: name.into(),
+            title: None,
             descr: None, 
             mime: None,
             size: None,
+            annotations: None,
+            meta: None,
         }
     }
     
@@ -326,6 +360,21 @@ impl Resource {
     /// Sets a resource size
     pub fn with_size(mut self, size: usize) -> Self {
         self.size = Some(size);
+        self
+    }
+
+    /// Sets annotations for the client
+    pub fn with_annotations<F>(mut self, config: F) -> Self
+    where
+        F: FnOnce(Annotations) -> Annotations
+    {
+        self.annotations = Some(config(Default::default()));
+        self
+    }
+    
+    /// Sets a title for a resource
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
         self
     }
 }

@@ -5,8 +5,7 @@
 //! ```
 
 use std::time::Duration;
-use neva::Client;
-use neva::error::Error;
+use neva::prelude::*;
 use tracing_subscriber::prelude::*;
 
 #[tokio::main]

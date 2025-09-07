@@ -9,6 +9,8 @@ use std::{future::Future, sync::Arc};
 #[cfg(feature = "server")]
 use futures_util::future::BoxFuture;
 #[cfg(feature = "server")]
+use schemars::JsonSchema;
+#[cfg(feature = "server")]
 use crate::error::{Error, ErrorCode};
 #[cfg(feature = "server")]
 use super::helpers::TypeCategory;
@@ -56,6 +58,14 @@ pub struct Tool {
     /// The name of the tool.
     pub name: String,
     
+    /// Intended for UI and end-user contexts — optimized to be human-readable and easily understood,
+    /// even by those unfamiliar with domain-specific terminology.
+    /// 
+    /// If not provided, the name should be used for display (except for Tool,
+    /// where `annotations.title` should be given precedence over using `name`, if present).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    
     /// A human-readable description of the tool.
     #[serde(rename = "description", skip_serializing_if = "Option::is_none")]
     pub descr: Option<String>,
@@ -64,12 +74,24 @@ pub struct Tool {
     /// 
     /// > Note: Needs to a valid JSON schema object that additionally is of a type object.
     #[serde(rename = "inputSchema")]
-    pub input_schema: InputSchema,
+    pub input_schema: ToolSchema,
+
+    /// An optional JSON Schema object defining the structure of the tool's output returned in
+    /// the `structuredContent` field of a [`CallToolResult`].
+    ///
+    /// > Note: Needs to a valid JSON schema object that additionally is of a type object.
+    #[serde(rename = "outputSchema", skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<ToolSchema>,
+
+    /// Optional additional tool information.
+    /// 
+    /// Display name precedence order is: title, annotations.title, then name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<ToolAnnotations>,
     
-    /// A tool call handler
-    #[serde(skip)]
-    #[cfg(feature = "server")]
-    handler: Option<RequestHandler<CallToolResponse>>,
+    /// Metadata reserved by MCP for protocol-level metadata.
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
 
     /// A list of roles that are allowed to invoke the tool
     #[serde(skip)]
@@ -80,6 +102,11 @@ pub struct Tool {
     #[serde(skip)]
     #[cfg(feature = "http-server")]
     pub(crate) permissions: Option<Vec<String>>,
+    
+    /// A tool call handler
+    #[serde(skip)]
+    #[cfg(feature = "server")]
+    handler: Option<RequestHandler<CallToolResponse>>,
 }
 
 /// Sent from the client to request a list of tools the server has.
@@ -131,8 +158,9 @@ pub struct CallToolRequestParams {
     pub meta: Option<RequestParamsMeta>,
 }
 
+/// Represents an input schema
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct InputSchema {
+pub struct ToolSchema {
     /// Schema object type
     /// 
     /// > Note: always "object"
@@ -142,8 +170,13 @@ pub struct InputSchema {
     /// A list of properties for command
     #[serde(skip_serializing_if = "Option::is_none")]
     pub properties: Option<HashMap<String, SchemaProperty>>,
+
+    /// The required properties of the schema
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required: Option<Vec<String>>,
 }
 
+/// Represents schema property description
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SchemaProperty {
     /// Property type
@@ -153,6 +186,54 @@ pub struct SchemaProperty {
     /// A Human-readable description of a property
     #[serde(rename = "description", skip_serializing_if = "Option::is_none")]
     pub descr: Option<String>,
+}
+
+/// Additional properties describing a Tool to clients.
+/// 
+/// > **Note:** All properties in ToolAnnotations are **hints**.
+/// > They are not guaranteed to provide a faithful description of
+/// > tool behavior (including descriptive properties like `title`).
+/// > Clients should never make tool use decisions based on [`ToolAnnotations`]
+/// > received from untrusted servers.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ToolAnnotations {
+    /// A human-readable title for the tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    
+    /// If `true`, the tool may perform destructive updates to its environment.
+    /// If `false`, the tool performs only additive updates.
+    /// 
+    /// **Note:** This property is meaningful only when `readonly == false`
+    /// 
+    /// Default: `true`
+    #[serde(rename = "destructiveHint", skip_serializing_if = "Option::is_none")]
+    pub destructive: Option<bool>,
+
+    /// If `true`, calling the tool repeatedly with the same arguments
+    /// will have no additional effect on its environment.
+    /// 
+    /// **Note:** This property is meaningful only when `readonly == false`
+    /// 
+    /// Default: `false`
+    #[serde(rename = "idempotentHint", skip_serializing_if = "Option::is_none")]
+    pub idempotent: Option<bool>,
+
+    /// If `true`, this tool may interact with an **"open world"** of external entities.
+    /// If `false`, the tool's domain of interaction is closed.
+    /// 
+    /// For example, the world of a web search tool is open, whereas that
+    /// of a memory tool is not.
+    /// 
+    /// Default: `true`
+    #[serde(rename = "openWorldHint", skip_serializing_if = "Option::is_none")]
+    pub open_world: Option<bool>,
+
+    /// If `true`, the tool does not modify its environment.
+    /// 
+    /// Default: `false`
+    #[serde(rename = "readOnlyHint", skip_serializing_if = "Option::is_none")]
+    pub readonly: Option<bool>,
 }
 
 #[cfg(feature = "server")]
@@ -194,25 +275,39 @@ impl ListToolsResult {
     }
 }
 
-impl Default for InputSchema {
+impl Default for ToolSchema {
     #[inline]
     fn default() -> Self {
         Self { 
             r#type: PropertyType::Object, 
-            properties: Some(HashMap::new())
+            properties: Some(HashMap::new()),
+            required: None
+        }
+    }
+}
+
+impl Default for ToolAnnotations {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            title: None,
+            destructive: Some(true),
+            idempotent: Some(false),
+            open_world: Some(true),
+            readonly: Some(false),
         }
     }
 }
 
 #[cfg(feature = "server")]
-impl InputSchema {
-    /// Creates a new [`InputSchema`] object
+impl ToolSchema {
+    /// Creates a new [`ToolSchema`] object
     #[inline]
     pub(crate) fn new(props: Option<HashMap<String, SchemaProperty>>) -> Self {
-        Self { r#type: PropertyType::Object, properties: props }
+        Self { r#type: PropertyType::Object, properties: props, required: None }
     }
     
-    /// Deserializes a new [`InputSchema`] from a JSON string
+    /// Deserializes a new [`ToolSchema`] from a JSON string
     #[inline]
     pub fn from_json_str(json: &str) -> Self {
         serde_json::from_str(json)
@@ -221,18 +316,89 @@ impl InputSchema {
     
     /// Adds a new property into the schema. 
     /// If a property with this name already exists, it overwrites it
-    pub fn add_property<T: Into<PropertyType>>(
-        mut self, 
+    pub fn with_prop<T: Into<PropertyType>>(
+        self, 
         name: &str, 
         descr: &str, 
         property_type: T
     ) -> Self {
+        self.add_property_impl(name, descr, property_type.into())
+    }
+
+    /// Adds a new required property into the schema. 
+    /// If a property with this name already exists, it overwrites it
+    pub fn with_required<T: Into<PropertyType>>(
+        self,
+        name: &str,
+        descr: &str,
+        property_type: T
+    ) -> Self {
+        self.add_required_property_impl(name, descr, property_type.into())
+    }
+    
+    /// Creates a new [`ToolSchema`] from a [`JsonSchema`] object
+    pub fn with_schema<T: JsonSchema>(self) -> Self {
+        let json_schema = schemars::schema_for!(T);
+        self.with_schema_impl(json_schema)
+    }
+    
+    /// Creates a new [`ToolSchema`] from a [`schemars::Schema`]
+    pub fn from_schema(json_schema: schemars::Schema) -> Self {
+        Self::default().with_schema_impl(json_schema)
+    }
+
+    #[inline]
+    fn with_schema_impl(mut self, json_schema: schemars::Schema) -> Self {
+        let required = json_schema
+            .get("required")
+            .and_then(|v| v.as_array());
+        if let Some(props) = json_schema
+            .get("properties")
+            .and_then(|v| v.as_object()) {
+            for (field, def) in props {
+                let req = required
+                    .map(|arr| !arr.iter().any(|v| v == field))
+                    .unwrap_or(true);
+                let type_str = def.get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("string");
+                self = if req {
+                    self.add_required_property_impl(field, field, type_str.into())
+                } else {
+                    self.add_property_impl(field, field, type_str.into())
+                };
+            }
+        }
+        self
+    }
+
+    #[inline]
+    fn add_property_impl(
+        mut self,
+        name: &str,
+        descr: &str,
+        property_type: PropertyType
+    ) -> Self {
         self.properties
             .get_or_insert_with(HashMap::new)
-            .insert(name.into(), SchemaProperty { 
-                r#type: property_type.into(), 
+            .insert(name.into(), SchemaProperty {
+                r#type: property_type,
                 descr: Some(descr.into())
             });
+        self
+    }
+
+    #[inline]
+    fn add_required_property_impl(
+        mut self,
+        name: &str,
+        descr: &str,
+        property_type: PropertyType
+    ) -> Self {
+        self = self.add_property_impl(name, descr, property_type);
+        self.required
+            .get_or_insert_with(Vec::new)
+            .push(name.into());
         self
     }
 }
@@ -342,11 +508,15 @@ impl Tool {
         Args: TryFrom<CallToolRequestParams, Error = Error> + Send + Sync + 'static,
     {
         let handler = ToolFunc::new(handler);
-        let input_schema = InputSchema::new(F::args());
+        let input_schema = ToolSchema::new(F::args());
         Self {
             name: name.into(),
+            title: None,
             descr: None,
-            input_schema, 
+            input_schema,
+            output_schema: None,
+            meta: None,
+            annotations: None,
             handler: Some(handler),
             #[cfg(feature = "http-server")]
             roles: None,
@@ -355,20 +525,37 @@ impl Tool {
         }
     }
     
+    /// Sets a title for a tool
+    pub fn with_title(&mut self, title: impl Into<String>) -> &mut Self {
+        self.title = Some(title.into());
+        self
+    }
+    
     /// Sets a description for a tool
     pub fn with_description(&mut self, description: &str) -> &mut Self {
         self.descr = Some(description.into());
         self
     }
     
-    /// Sets an [`InputSchema`] for the tool. 
+    /// Sets an input schema for the tool. 
     /// 
     /// > **Note:** Automatically generated schema will be overwritten
-    pub fn with_schema<F>(&mut self, config: F) -> &mut Self
+    pub fn with_input_schema<F>(&mut self, config: F) -> &mut Self
     where 
-        F: FnOnce(InputSchema) -> InputSchema
+        F: FnOnce(ToolSchema) -> ToolSchema
     {
         self.input_schema = config(Default::default());
+        self
+    }
+
+    /// Sets an output schema for the tool. 
+    ///
+    /// > **Note:** Automatically generated schema will be overwritten
+    pub fn with_output_schema<F>(&mut self, config: F) -> &mut Self
+    where
+        F: FnOnce(ToolSchema) -> ToolSchema
+    {
+        self.output_schema = Some(config(Default::default()));
         self
     }
     
@@ -400,6 +587,15 @@ impl Tool {
         self
     }
     
+    /// Configures the annotations for the tool
+    pub fn with_annotations<F>(&mut self, config: F) -> &mut Self
+    where
+        F: FnOnce(ToolAnnotations) -> ToolAnnotations
+    {
+        self.annotations = Some(config(Default::default()));
+        self
+    }
+    
     /// Invoke a tool
     #[inline]
     pub(crate) async fn call(&self, params: HandlerParams) -> Result<CallToolResponse, Error> {
@@ -407,6 +603,57 @@ impl Tool {
             Some(ref handler) => handler.call(params).await,
             None => Err(Error::new(ErrorCode::InternalError, "Tool handler not specified"))
         }
+    }
+}
+
+#[cfg(feature = "server")]
+impl ToolAnnotations {
+    /// Creates a new [`ToolAnnotations`]
+    #[inline]
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    /// Deserializes a new [`ToolAnnotations`] from a JSON string
+    #[inline]
+    pub fn from_json_str(json: &str) -> Self {
+        serde_json::from_str(json)
+            .expect("ToolAnnotations: Incorrect JSON string provided")
+    }
+    
+    /// Sets a title for the tool.
+    #[inline]
+    pub fn with_title(mut self, title: &str) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+    
+    /// Sets/Unsets a hint that the tool may perform destructive updates to its environment.
+    /// 
+    /// Also sets the readonly hint to `false`
+    #[inline]
+    pub fn with_destructive(mut self, destructive: bool) -> Self {
+        self.destructive = Some(destructive);
+        self.readonly = Some(false);
+        self
+    }
+
+    /// Sets/Unsets a hint that the tool is idempotent. 
+    /// So calling it repeatedly when it's `true` with the same arguments 
+    /// will have no additional effect on its environment.
+    /// 
+    /// Also sets the readonly hint to `false`
+    pub fn with_idempotent(mut self, idempotent: bool) -> Self {
+        self.idempotent = Some(idempotent);
+        self.readonly = Some(false);
+        self
+    }
+    
+    /// Sets/Unsets the hint that the tool may interact with an **"open world"** of external entities.
+    #[inline]
+    pub fn with_open_world(mut self, open_world: bool) -> Self {
+        self.open_world = Some(open_world);
+        self
     }
 }
 
@@ -469,7 +716,7 @@ mod tests {
         let resp = tool.call(params.into()).await.unwrap();
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"content":[{"type":"text","text":"7","mimeType":"text/plain"}],"isError":false}"#);
+        assert_eq!(json, r#"{"content":[{"type":"text","text":"7"}],"isError":false}"#);
     }
     
     #[test]
@@ -483,7 +730,7 @@ mod tests {
             }
         }"#;
         
-        let schema: InputSchema = serde_json::from_str(json).unwrap();
+        let schema: ToolSchema = serde_json::from_str(json).unwrap();
         
         assert_eq!(schema.r#type, PropertyType::Object);
         assert!(schema.properties.is_some());

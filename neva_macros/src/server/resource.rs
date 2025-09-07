@@ -8,6 +8,7 @@ use quote::quote;
 pub fn expand_resource(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<TokenStream> {
     let func_name = &function.sig.ident;
     let mut uri = None;
+    let mut title = None;
     let mut description = None;
     let mut mime = None;
     let mut annotations = None;
@@ -23,6 +24,9 @@ pub fn expand_resource(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn
                     match ident.to_string().as_str() {
                         "uri" => {
                             uri = get_str_param(&nv.value);
+                        }
+                        "title" => {
+                            title = get_str_param(&nv.value);
                         }
                         "descr" => {
                             description = get_str_param(&nv.value);
@@ -51,6 +55,10 @@ pub fn expand_resource(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn
     // Generate the function registration and metadata setup
     let description_code = description.map(|desc| {
         quote! { .with_description(#desc) }
+    });
+
+    let title_code = title.map(|title| {
+        quote! { .with_title(#title) }
     });
 
     let mime_code = mime.map(|mime| {
@@ -84,6 +92,7 @@ pub fn expand_resource(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn
         // Register a resource function
         fn #module_name(app: &mut neva::App) {
             app.map_resource(#uri_code, stringify!(#func_name), #func_name)
+                #title_code
                 #description_code
                 #mime_code
                 #annotations_code

@@ -1,5 +1,5 @@
 ﻿use std::borrow::Cow;
-use std::str::FromStr;
+use std::path::PathBuf;
 use crate::Context;
 use crate::error::{Error, ErrorCode};
 use crate::types::{Meta, ProgressToken};
@@ -94,15 +94,37 @@ impl ResourceArgument for Uri {
     }
 }
 
-impl<T: FromStr> ResourceArgument for T {
+impl ResourceArgument for String {
     type Error = Error;
 
     #[inline]
     fn extract(payload: Payload) -> Result<Self, Self::Error> {
         let part = payload.expect_uri_part();
-        part.parse::<T>()
-            .map_err(|_| Error::new(ErrorCode::InvalidParams, "Unable to parse URI params"))
+        Ok(part.to_string())
     }
+}
+
+macro_rules! impl_resource_argument {
+    { $($type:ty),* $(,)? } => {
+        $(impl ResourceArgument for $type {
+            type Error = Error;
+            #[inline]
+            fn extract(payload: Payload) -> Result<Self, Self::Error> {
+                let part = payload.expect_uri_part();
+                    part.parse::<$type>()
+                    .map_err(|_| Error::new(ErrorCode::InvalidParams, "Unable to parse URI params"))
+            }
+        })*
+    };
+}
+
+impl_resource_argument! {
+    bool, 
+    char,
+    i8, i16, i32, i64, i128, isize,
+    u8, u16, u32, u64, u128, usize,
+    f32, f64,
+    PathBuf
 }
 
 impl ResourceArgument for Meta<RequestParamsMeta> {
