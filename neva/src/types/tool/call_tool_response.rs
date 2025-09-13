@@ -4,11 +4,15 @@ use crate::types::{Content, IntoResponse, RequestId, Response};
 use serde::{Serialize, Deserialize};
 #[cfg(feature = "server")]
 use crate::types::Json;
+#[cfg(any(feature = "server", feature = "client"))]
+use {
+    crate::error::Error,
+    serde_json::Value,
+};
 #[cfg(feature = "client")]
 use {
-    crate::error::{Error, ErrorCode},
-    serde::de::DeserializeOwned,
-    serde_json::Value,
+    crate::error::ErrorCode,
+    serde::de::DeserializeOwned
 };
 
 #[cfg(feature = "client")]
@@ -250,7 +254,7 @@ impl CallToolResponse {
                 .filter_map(|item| item
                     .as_text()
                     .and_then(|c| serde_json::from_str(&c.text).ok()))
-                .collect::<Vec<serde_json::Value>>();
+                .collect::<Vec<Value>>();
             match serde_json::to_value(&data) {
                 Ok(structure) => self.struct_content = Some(structure),
                 Err(err) => return Self::error(err.into()),
@@ -281,7 +285,7 @@ impl CallToolResponse {
 #[cfg(test)]
 #[cfg(feature = "server")]
 mod tests {
-    use crate::error::ErrorCode;
+    use crate::error::{Error, ErrorCode};
 
     use super::*;
     
