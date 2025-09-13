@@ -3,39 +3,41 @@
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-#[cfg(feature = "server")]
-use std::{future::Future, sync::Arc};
-#[cfg(feature = "server")]
-use futures_util::future::BoxFuture;
-#[cfg(feature = "server")]
-use schemars::JsonSchema;
-#[cfg(feature = "server")]
+use crate::types::{
+    request::RequestParamsMeta,
+    PropertyType,
+    Cursor,
+};
+#[cfg(any(feature = "server", feature = "client"))]
 use crate::error::{Error, ErrorCode};
 #[cfg(feature = "server")]
-use super::helpers::TypeCategory;
-use crate::types::{
-    PropertyType,
-    request::RequestParamsMeta,
-    Cursor
-};
-#[cfg(feature = "server")]
-use crate::types::{IntoResponse, Page, RequestId, Response};
-
-#[cfg(feature = "server")]
-use crate::types::{FromRequest, Request};
-
-#[cfg(feature = "server")]
-use crate::{
-    Context,
-    app::handler::{
-        FromHandlerParams,
-        Handler,
-        HandlerParams,
-        GenericHandler,
-        RequestHandler
+use {
+    std::{future::Future, sync::Arc},
+    futures_util::future::BoxFuture,
+    super::helpers::TypeCategory,
+    crate::json::JsonSchema,
+    crate::{
+        Context,
+        app::handler::{
+            FromHandlerParams,
+            Handler,
+            HandlerParams,
+            GenericHandler,
+            RequestHandler
+        }
+    },
+    crate::types::{
+        FromRequest,
+        IntoResponse,
+        Page, 
+        RequestId,
+        Request,
+        Response
     }
 };
+
+#[cfg(feature = "client")]
+use jsonschema::validator_for;
 
 pub use call_tool_response::CallToolResponse;
 
@@ -272,6 +274,26 @@ impl ListToolsResult {
     #[inline]
     pub fn new() -> Self {
         Default::default()
+    }
+}
+
+#[cfg(feature = "client")]
+impl ListToolsResult {
+    /// Get tool by name
+    #[inline]
+    pub fn get(&self, name: &str) -> Option<&Tool> {
+        self.get_by(|t| t.name == name)
+    }
+
+    /// Get tool by condition
+    #[inline]
+    pub fn get_by<F>(&self, mut f: F) -> Option<&Tool>
+    where
+        F: FnMut(&Tool) -> bool
+    {
+        self.tools
+            .iter()
+            .find(|&t| f(t))
     }
 }
 
@@ -603,6 +625,26 @@ impl Tool {
             Some(ref handler) => handler.call(params).await,
             None => Err(Error::new(ErrorCode::InternalError, "Tool handler not specified"))
         }
+    }
+}
+
+#[cfg(feature = "client")]
+impl Tool {
+    /// Validates [`CallToolResponse`] against this tool output schema
+    pub fn validate(&self, resp: &CallToolResponse) -> Result<(), Error> {
+        let schema = self.output_schema
+            .as_ref()
+            .map_or_else(
+                || Err(Error::new(ErrorCode::ParseError, "Tool: Output schema not specified")), 
+                |s| serde_json::to_value(s.clone()).map_err(Into::into))?;
+        
+        let validator = validator_for(&schema)
+            .map_err(|err| Error::new(ErrorCode::ParseError, err))?;
+        
+        let content = resp.struct_content()?;
+        validator
+            .validate(content)
+            .map_err(|err| Error::new(ErrorCode::ParseError, err.to_string()))
     }
 }
 

@@ -8,6 +8,15 @@ use std::time::Duration;
 use neva::prelude::*;
 use tracing_subscriber::prelude::*;
 
+#[derive(Debug)]
+#[allow(dead_code)]
+#[json_schema(de)]
+struct Weather {
+    conditions: String,
+    temperature: f32,
+    humidity: f32,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     tracing_subscriber::registry()
@@ -26,7 +35,7 @@ async fn main() -> Result<(), Error> {
     // List tools
     tracing::info!("--- LIST TOOLS ---");
     let tools = client.list_tools(None).await?;
-    for tool in tools.tools {
+    for tool in tools.tools.iter() {
         tracing::info!("- {}", tool.name);
     }
     
@@ -35,6 +44,16 @@ async fn main() -> Result<(), Error> {
     tracing::info!("--- CALL TOOL ---");
     let result = client.call_tool("echo", args).await?;
     tracing::info!("{:?}", result.content);
+
+    // Structured content
+    tracing::info!("--- STRUCTURED CONTENT ---");
+    let tool = tools.get("structuredContent").unwrap();
+    let args = ("location", "London");
+    let result = client.call_tool(&tool.name, args).await?;
+    match tool.validate(&result) {
+        Ok(_) => tracing::info!("{:?}", result.into_json::<Weather>()?),
+        Err(err) => tracing::error!("{err:#}")
+    }
     
     // List resources
     tracing::info!("--- LIST RESOURCES ---");

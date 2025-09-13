@@ -1,6 +1,7 @@
 ﻿//! Any Text, Image, Audio, Video content utilities
 
 use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
 use crate::error::{Error, ErrorCode};
 use crate::types::{Annotations, Resource, ResourceContents, Uri};
 
@@ -374,6 +375,15 @@ impl Content {
     pub fn as_text(&self) -> Option<&TextContent> {
         match self {
             Self::Text(c) => Some(c),
+            _ => None
+        }
+    }
+    
+    /// Returns the content as a deserialized struct
+    #[inline]
+    pub fn as_json<T: DeserializeOwned>(&self) -> Option<T> {
+        match self { 
+            Self::Text(c) => serde_json::from_str(&c.text).ok(),
             _ => None
         }
     }
