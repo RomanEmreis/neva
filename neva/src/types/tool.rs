@@ -631,7 +631,7 @@ impl Tool {
 #[cfg(feature = "client")]
 impl Tool {
     /// Validates [`CallToolResponse`] against this tool output schema
-    pub fn validate(&self, resp: &CallToolResponse) -> Result<(), Error> {
+    pub fn validate<'a>(&self, resp: &'a CallToolResponse) -> Result<&'a CallToolResponse, Error> {
         let schema = self.output_schema
             .as_ref()
             .map_or_else(
@@ -644,6 +644,7 @@ impl Tool {
         let content = resp.struct_content()?;
         validator
             .validate(content)
+            .map(|_| resp)
             .map_err(|err| Error::new(ErrorCode::ParseError, err.to_string()))
     }
 }

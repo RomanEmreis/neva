@@ -50,10 +50,10 @@ async fn main() -> Result<(), Error> {
     let tool = tools.get("structuredContent").unwrap();
     let args = ("location", "London");
     let result = client.call_tool(&tool.name, args).await?;
-    match tool.validate(&result) {
-        Ok(_) => tracing::info!("{:?}", result.into_json::<Weather>()?),
-        Err(err) => tracing::error!("{err:#}")
-    }
+    let weather = tool
+        .validate(&result)
+        .and_then(|res| res.as_json::<Weather>())?;
+    tracing::info!("{:?}", weather);
     
     // List resources
     tracing::info!("--- LIST RESOURCES ---");

@@ -4,7 +4,7 @@
 //! cargo run -p example-subscription
 //! ```
 
-use neva::{Client, error::Error, types::{notification, resource::SubscribeRequestParams}};
+use neva::prelude::*;
 use tracing_subscriber::prelude::*;
 
 #[tokio::main]

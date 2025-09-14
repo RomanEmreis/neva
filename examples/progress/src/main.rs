@@ -6,7 +6,7 @@
 //! cargo run -p example-progress
 //! ```
 
-use neva::{App, types::notification, types::{Meta, ProgressToken}, tool};
+use neva::prelude::*;
 use tracing_subscriber::prelude::*;
 
 #[tool]

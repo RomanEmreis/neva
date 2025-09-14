@@ -267,11 +267,9 @@ impl CallToolResponse {
 #[cfg(feature = "client")]
 impl CallToolResponse {
     /// Turns [`CallToolResponse`]'s structured content into `T`
-    pub fn into_json<T: DeserializeOwned>(self) -> Result<T, Error> {
-        self.struct_content
-            .map_or_else(
-                || Err(Error::new(ErrorCode::ParseError, MISSING_STRUCTURED_CONTENT)),
-                |structure| serde_json::from_value(structure).map_err(Into::into))
+    pub fn as_json<T: DeserializeOwned>(&self) -> Result<T, Error> {
+        self.struct_content()
+            .and_then(|c| serde_json::from_value(c.clone()).map_err(Into::into))
     }
     
     /// Returns a reference to a [`Value`] of structured content

@@ -5,9 +5,8 @@
 //! 
 //! cargo run -p example-http
 //! ```
-use neva::{App, Context, tool};
+use neva::prelude::*;
 use tracing_subscriber::{filter, reload, prelude::*};
-use neva::types::notification;
 
 #[tool]
 async fn remote_tool(name: String, mut ctx: Context) {

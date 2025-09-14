@@ -82,6 +82,16 @@ pub use prompt::{
     PromptArgument,
     PromptMessage,
 };
+pub use sampling::{
+    CreateMessageRequestParams,
+    CreateMessageResult,
+    SamplingMessage,
+};
+pub use elicitation::{
+    ElicitRequestParams,
+    ElicitationAction,
+    ElicitResult,
+};
 pub use schema::{
     Schema,
     StringSchema,
