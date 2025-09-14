@@ -2,9 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 use bytes::Bytes;
-use crate::error::Error;
 #[cfg(feature = "server")]
-use crate::types::{IntoResponse, RequestId, Response};
+use crate::{error::Error, types::{IntoResponse, RequestId, Response}};
 use crate::types::{Annotations, Uri};
 use crate::types::helpers::{deserialize_base64_as_bytes, serialize_bytes_as_base64};
 
