@@ -5,7 +5,7 @@
 //!
 //! JWT_SECRET=a-string-secret-at-least-256-bits-long cargo run -p protected-server
 //! ```
-use neva::{App, types::{notification, Uri}, tool, resource, prompt};
+use neva::prelude::*;
 use tracing_subscriber::{filter, reload, prelude::*};
 
 /// A tool that allowed to everyone

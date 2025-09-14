@@ -30,7 +30,7 @@ pub struct ElicitRequestParams {
     pub schema: RequestSchema,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestSchema {
     /// The type of the schema.
     /// 
@@ -480,3 +480,826 @@ pub(crate) type ElicitationHandler = Arc<
     + Send
     + Sync
 >;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{StringSchema, NumberSchema, BooleanSchema, EnumSchema};
+    use schemars::JsonSchema;
+
+    #[derive(Serialize, JsonSchema)]
+    struct TestStruct {
+        name: String,
+        age: u32,
+        active: bool,
+    }
+
+    fn create_test_schema() -> RequestSchema {
+        let mut schema = RequestSchema::new();
+        schema.properties.insert(
+            "name".to_string(),
+            Schema::String(StringSchema {
+                r#type: PropertyType::String,
+                title: None,
+                descr: None,
+                min_length: Some(2),
+                max_length: Some(50),
+                format: None,
+            })
+        );
+        schema.properties.insert(
+            "age".to_string(),
+            Schema::Number(NumberSchema {
+                r#type: PropertyType::Number,
+                title: None,
+                descr: None,
+                min: Some(0.0),
+                max: Some(120.0),
+            })
+        );
+        schema.properties.insert(
+            "active".to_string(),
+            Schema::Boolean(BooleanSchema::default())
+        );
+        schema.required = Some(vec!["name".to_string(), "age".to_string()]);
+        schema
+    }
+
+    fn create_params_with_schema(schema: RequestSchema) -> ElicitRequestParams {
+        ElicitRequestParams {
+            message: "Test message".to_string(),
+            schema,
+        }
+    }
+
+    #[test]
+    fn it_creates_validator_for_params_with_schema() {
+        let schema = create_test_schema();
+        let params = create_params_with_schema(schema.clone());
+        let validator = Validator::new(params);
+
+        assert_eq!(validator.schema.properties.len(), schema.properties.len());
+        assert_eq!(validator.schema.required, schema.required);
+    }
+
+    #[test]
+    fn it_validates_compatible_schema_success() {
+        let schema = create_test_schema();
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content = TestStruct {
+            name: "John Doe".to_string(),
+            age: 30,
+            active: true,
+        };
+
+        let result = validator.validate(content);
+        assert!(result.is_ok());
+
+        let json_value = result.unwrap();
+        assert_eq!(json_value["name"], "John Doe");
+        assert_eq!(json_value["age"], 30);
+        assert_eq!(json_value["active"], true);
+    }
+
+    #[test]
+    fn it_validates_missing_property_in_source() {
+        let mut schema = create_test_schema();
+        schema.properties.insert(
+            "missing_prop".to_string(),
+            Schema::String(StringSchema::default())
+        );
+
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content = TestStruct {
+            name: "John Doe".to_string(),
+            age: 30,
+            active: true,
+        };
+
+        let result = validator.validate(content);
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert!(error.to_string().contains("Missing property: missing_prop"));
+    }
+
+    #[test]
+    fn it_validates_missing_required_property() {
+        let mut schema = create_test_schema();
+        schema.required = Some(vec!["name".to_string(), "age".to_string(), "missing_required".to_string()]);
+
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content = TestStruct {
+            name: "John Doe".to_string(),
+            age: 30,
+            active: true,
+        };
+
+        let result = validator.validate(content);
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert!(error.to_string().contains("Required property not marked as required"));
+    }
+
+    #[test]
+    fn it_validates_content_constraints_missing_required() {
+        let schema = create_test_schema();
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        // Create content missing the required field
+        let content_json = serde_json::json!({
+            "active": true
+            // Missing required "name" and "age" fields
+        });
+
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert!(error.to_string().contains("Missing required property"));
+    }
+
+    #[test]
+    fn it_validates_content_constraints_not_object() {
+        let schema = create_test_schema();
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content_json = serde_json::json!("not an object");
+
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert!(error.to_string().contains("Content is not an object"));
+    }
+
+    #[test]
+    fn it_validates_string_property_success() {
+        let schema = create_test_schema();
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content_json = serde_json::json!({
+            "name": "John",
+            "age": 25,
+            "active": true
+        });
+
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn it_validates_string_property_too_short() {
+        let schema = create_test_schema();
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content_json = serde_json::json!({
+            "name": "J", // Too short (min_length is 2)
+            "age": 25,
+            "active": true
+        });
+
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("String too short: 1 < 2"));
+    }
+
+    #[test]
+    fn it_validates_string_property_too_long() {
+        let schema = create_test_schema();
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let long_name = "a".repeat(51); // Too long (max_length is 50)
+        let content_json = serde_json::json!({
+            "name": long_name,
+            "age": 25,
+            "active": true
+        });
+
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("String too long: 51 > 50"));
+    }
+
+    #[test]
+    fn it_validates_string_property_invalid_type() {
+        let schema = create_test_schema();
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content_json = serde_json::json!({
+            "name": 123, // Should be string
+            "age": 25,
+            "active": true
+        });
+
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("Expected string value"));
+    }
+
+    #[test]
+    fn it_validates_number_property_success() {
+        let schema = create_test_schema();
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content_json = serde_json::json!({
+            "name": "John",
+            "age": 50, // Within range [0, 120]
+            "active": true
+        });
+
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn it_validates_number_property_too_small() {
+        let schema = create_test_schema();
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content_json = serde_json::json!({
+            "name": "John",
+            "age": -5, // Below minimum (0)
+            "active": true
+        });
+
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("Number too small: -5 < 0"));
+    }
+
+    #[test]
+    fn it_validates_number_property_too_large() {
+        let schema = create_test_schema();
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content_json = serde_json::json!({
+            "name": "John",
+            "age": 150, // Above maximum (120)
+            "active": true
+        });
+
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("Number too large: 150 > 120"));
+    }
+
+    #[test]
+    fn it_validatess_number_property_invalid_type() {
+        let schema = create_test_schema();
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content_json = serde_json::json!({
+            "name": "John",
+            "age": "not a number", // Should be number
+            "active": true
+        });
+
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("Expected number value"));
+    }
+
+    #[test]
+    fn it_validates_boolean_property_success() {
+        let schema = create_test_schema();
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content_json = serde_json::json!({
+            "name": "John",
+            "age": 25,
+            "active": false
+        });
+
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn it_validates_boolean_property_invalid_type() {
+        let schema = create_test_schema();
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content_json = serde_json::json!({
+            "name": "John",
+            "age": 25,
+            "active": "not a boolean" // Should be boolean
+        });
+
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("Expected boolean value"));
+    }
+
+    #[test]
+    fn it_validates_enum_property_success() {
+        let mut schema = RequestSchema::new();
+        schema.properties.insert(
+            "status".to_string(),
+            Schema::Enum(EnumSchema {
+                r#type: PropertyType::String,
+                title: None,
+                descr: None,
+                r#enum: vec!["active".to_string(), "inactive".to_string(), "pending".to_string()],
+                enum_names: None,
+            })
+        );
+        schema.required = Some(vec!["status".to_string()]);
+
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content_json = serde_json::json!({
+            "status": "active"
+        });
+
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn it_validates_enum_property_invalid_value() {
+        let mut schema = RequestSchema::new();
+        schema.properties.insert(
+            "status".to_string(),
+            Schema::Enum(EnumSchema {
+                r#type: PropertyType::String,
+                title: None,
+                descr: None,
+                r#enum: vec!["active".to_string(), "inactive".to_string()],
+                enum_names: None,
+            })
+        );
+        schema.required = Some(vec!["status".to_string()]);
+
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content_json = serde_json::json!({
+            "status": "invalid_status"
+        });
+
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("Invalid enum value: invalid_status"));
+    }
+
+    #[test]
+    fn it_validates_enum_property_invalid_type() {
+        let mut schema = RequestSchema::new();
+        schema.properties.insert(
+            "status".to_string(),
+            Schema::Enum(EnumSchema {
+                r#type: PropertyType::String,
+                title: None,
+                descr: None,
+                r#enum: vec!["active".to_string(), "inactive".to_string()],
+                enum_names: None,
+            })
+        );
+        schema.required = Some(vec!["status".to_string()]);
+
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content_json = serde_json::json!({
+            "status": 123 // Should be string for enum
+        });
+
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("Expected string value for enum"));
+    }
+
+    #[test]
+    fn it_validates_string_format_email_success() {
+        let mut schema = RequestSchema::new();
+        schema.properties.insert(
+            "email".to_string(),
+            Schema::String(StringSchema {
+                r#type: PropertyType::String,
+                title: None,
+                descr: None,
+                min_length: None,
+                max_length: None,
+                format: Some("email".to_string()),
+            })
+        );
+        schema.required = Some(vec!["email".to_string()]);
+
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content_json = serde_json::json!({
+            "email": "test@example.com"
+        });
+
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn it_validates_string_format_email_invalid() {
+        let mut schema = RequestSchema::new();
+        schema.properties.insert(
+            "email".to_string(),
+            Schema::String(StringSchema {
+                r#type: PropertyType::String,
+                title: None,
+                descr: None,
+                min_length: None,
+                max_length: None,
+                format: Some("email".to_string()),
+            })
+        );
+        schema.required = Some(vec!["email".to_string()]);
+
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content_json = serde_json::json!({
+            "email": "invalid-email"
+        });
+
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("Invalid email format"));
+    }
+
+    #[test]
+    fn it_validates_string_format_uri_success() {
+        let mut schema = RequestSchema::new();
+        schema.properties.insert(
+            "website".to_string(),
+            Schema::String(StringSchema {
+                r#type: PropertyType::String,
+                title: None,
+                descr: None,
+                min_length: None,
+                max_length: None,
+                format: Some("uri".to_string()),
+            })
+        );
+
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let test_cases = vec![
+            "http://example.com",
+            "https://example.com",
+            "file://path/to/file",
+        ];
+
+        for uri in test_cases {
+            let content_json = serde_json::json!({
+                "website": uri
+            });
+
+            let result = validator.validate_content_constraints(&content_json);
+            assert!(result.is_ok(), "Failed for URI: {}", uri);
+        }
+    }
+
+    #[test]
+    fn it_validates_string_format_uri_invalid() {
+        let mut schema = RequestSchema::new();
+        schema.properties.insert(
+            "website".to_string(),
+            Schema::String(StringSchema {
+                r#type: PropertyType::String,
+                title: None,
+                descr: None,
+                min_length: None,
+                max_length: None,
+                format: Some("uri".to_string()),
+            })
+        );
+
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content_json = serde_json::json!({
+            "website": "not-a-uri"
+        });
+
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("Invalid URI format"));
+    }
+
+    #[test]
+    fn it_validates_string_format_date_success() {
+        let mut schema = RequestSchema::new();
+        schema.properties.insert(
+            "birth_date".to_string(),
+            Schema::String(StringSchema {
+                r#type: PropertyType::String,
+                title: None,
+                descr: None,
+                min_length: None,
+                max_length: None,
+                format: Some("date".to_string()),
+            })
+        );
+
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content_json = serde_json::json!({
+            "birth_date": "1990-05-15"
+        });
+
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn it_validates_string_format_date_invalid() {
+        let mut schema = RequestSchema::new();
+        schema.properties.insert(
+            "birth_date".to_string(),
+            Schema::String(StringSchema {
+                r#type: PropertyType::String,
+                title: None,
+                descr: None,
+                min_length: None,
+                max_length: None,
+                format: Some("date".to_string()),
+            })
+        );
+
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let test_cases = vec![
+            "1990/05/15",     // Wrong separators
+            "90-05-15",       // Wrong year format
+            "1990-5-15",      // Missing zero padding
+            "not-a-date",     // Invalid format
+        ];
+
+        for invalid_date in test_cases {
+            let content_json = serde_json::json!({
+                "birth_date": invalid_date
+            });
+
+            let result = validator.validate_content_constraints(&content_json);
+            assert!(result.is_err(), "Should fail for invalid date: {}", invalid_date);
+
+            let error = result.unwrap_err();
+            assert!(error.to_string().contains("Invalid date format"));
+        }
+    }
+
+    #[test]
+    fn it_validates_string_format_datetime_success() {
+        let mut schema = RequestSchema::new();
+        schema.properties.insert(
+            "updated_at".to_string(),
+            Schema::String(StringSchema {
+                r#type: PropertyType::String,
+                title: None,
+                descr: None,
+                min_length: None,
+                max_length: None,
+                format: Some("date-time".to_string()),
+            })
+        );
+
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content_json = serde_json::json!({
+            "updated_at": "2023-05-15T14:30:00Z"
+        });
+
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn it_validates_string_format_datetime_invalid() {
+        let mut schema = RequestSchema::new();
+        schema.properties.insert(
+            "updated_at".to_string(),
+            Schema::String(StringSchema {
+                r#type: PropertyType::String,
+                title: None,
+                descr: None,
+                min_length: None,
+                max_length: None,
+                format: Some("date-time".to_string()),
+            })
+        );
+
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content_json = serde_json::json!({
+            "updated_at": "2023-05-15 14:30:00" // Missing 'T' separator
+        });
+
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("Invalid date format"));
+    }
+
+    #[test]
+    fn it_validates_string_format_unknown_format() {
+        let mut schema = RequestSchema::new();
+        schema.properties.insert(
+            "custom_field".to_string(),
+            Schema::String(StringSchema {
+                r#type: PropertyType::String,
+                title: None,
+                descr: None,
+                min_length: None,
+                max_length: None,
+                format: Some("unknown-format".to_string()),
+            })
+        );
+
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content_json = serde_json::json!({
+            "custom_field": "any value should work"
+        });
+
+        // Unknown formats should be skipped and pass validation
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn it_validates_optional_properties() {
+        let mut schema = RequestSchema::new();
+        schema.properties.insert(
+            "required_field".to_string(),
+            Schema::String(StringSchema::default())
+        );
+        schema.properties.insert(
+            "optional_field".to_string(),
+            Schema::String(StringSchema::default())
+        );
+        schema.required = Some(vec!["required_field".to_string()]);
+
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        // Test with only the required field
+        let content_json = serde_json::json!({
+            "required_field": "value"
+        });
+
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_ok());
+
+        // Test with both required and optional fields
+        let content_json = serde_json::json!({
+            "required_field": "value",
+            "optional_field": "optional_value"
+        });
+
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn it_validates_no_required_properties() {
+        let mut schema = RequestSchema::new();
+        schema.properties.insert(
+            "optional_field".to_string(),
+            Schema::String(StringSchema::default())
+        );
+        // No required fields
+        schema.required = None;
+
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content_json = serde_json::json!({});
+
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn it_validates_schema_compatibility_no_properties() {
+        let schema = RequestSchema::new(); // Empty schema
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content = TestStruct {
+            name: "John Doe".to_string(),
+            age: 30,
+            active: true,
+        };
+
+        // Should succeed since the target schema has no requirements
+        let result = validator.validate(content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn it_tests_serialize_error_handling() {
+        let schema = create_test_schema();
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        // This would normally cause a serialization error if we had a type that can't serialize
+        // For this test, we'll use a valid serializable type
+        let content = TestStruct {
+            name: "John Doe".to_string(),
+            age: 30,
+            active: true,
+        };
+
+        let result = validator.validate(content);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn it_tests_request_schema_default() {
+        let schema = RequestSchema::default();
+
+        assert_eq!(schema.r#type, PropertyType::Object);
+        assert!(schema.properties.is_empty());
+        assert_eq!(schema.required, None);
+    }
+
+    #[test]
+    fn it_tests_edge_case_empty_enum() {
+        let mut schema = RequestSchema::new();
+        schema.properties.insert(
+            "status".to_string(),
+            Schema::Enum(EnumSchema {
+                r#type: PropertyType::String,
+                title: None,
+                descr: None,
+                r#enum: vec![], // Empty enum
+                enum_names: None,
+            })
+        );
+
+        let params = create_params_with_schema(schema);
+        let validator = Validator::new(params);
+
+        let content_json = serde_json::json!({
+            "status": "any_value"
+        });
+
+        let result = validator.validate_content_constraints(&content_json);
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("Invalid enum value"));
+    }
+}

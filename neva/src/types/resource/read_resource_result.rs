@@ -1,10 +1,14 @@
 ﻿//! Types and utils for handling read resource results
 
 use serde::{Deserialize, Serialize};
-use base64::{engine::general_purpose, Engine};
+use bytes::Bytes;
+use crate::error::Error;
 #[cfg(feature = "server")]
-use crate::{error::Error, types::{IntoResponse, RequestId, Response}};
+use crate::types::{IntoResponse, RequestId, Response};
 use crate::types::{Annotations, Uri};
+use crate::types::helpers::{deserialize_base64_as_bytes, serialize_bytes_as_base64};
+
+const CHUNK_SIZE: usize = 8192;
 
 /// The server's response to a resources/read request from the client.
 ///
@@ -34,8 +38,13 @@ pub struct BlobResourceContents {
     /// The URI of the resource.
     pub uri: Uri,
 
-    /// The base64-encoded binary content of the resource.
-    pub blob: String,
+    /// Raw binary data of the resource.
+    ///
+    /// **Note:** will be serialized as a base64-encoded string
+    #[serde(
+        serialize_with = "serialize_bytes_as_base64",
+        deserialize_with = "deserialize_base64_as_bytes")]
+    pub blob: Bytes,
 
     /// Intended for UI and end-user contexts - optimized to be human-readable and easily understood,
     /// even by those unfamiliar with domain-specific terminology.
@@ -348,7 +357,7 @@ impl ResourceContents {
 
     /// Returns the URI of the resource content
     #[inline]
-    pub fn blob(&self) -> Option<&str> {
+    pub fn blob(&self) -> Option<&[u8]> {
         match self {
             Self::Blob(blob) => Some(&blob.blob),
             Self::Text(_) => None,
@@ -435,8 +444,8 @@ impl ResourceContents {
 
     /// Sets the text of the resource content and make it [`TextResourceContents`]
     #[inline]
-    pub fn with_blob(self, blob: impl AsRef<[u8]>) -> Self {
-        let blob = general_purpose::STANDARD.encode(blob);
+    pub fn with_blob(self, blob: impl Into<Bytes>) -> Self {
+        let blob = blob.into();
         match self {
             Self::Text(content) => Self::Blob(BlobResourceContents {
                 uri: content.uri,
@@ -507,10 +516,10 @@ impl TextResourceContents {
 impl BlobResourceContents {
     /// Creates a blob resource content
     #[inline]
-    pub fn new(uri: impl Into<Uri>, blob: impl AsRef<[u8]>) -> Self {
+    pub fn new(uri: impl Into<Uri>, blob: impl Into<Bytes>) -> Self {
         Self {
             uri: uri.into(),
-            blob: general_purpose::STANDARD.encode(blob),
+            blob: blob.into(),
             mime: None,
             title: None,
             annotations: None,
@@ -539,6 +548,23 @@ impl BlobResourceContents {
     {
         self.annotations = Some(config(Default::default()));
         self
+    }
+
+    /// Returns audio data as a slice of bytes
+    pub fn as_slice(&self) -> &[u8] {
+        &self.blob
+    }
+
+    /// Turns this [`BlobResourceContents`] into a chunked stream of bytes
+    pub fn into_stream(self) -> impl futures_util::Stream<Item = Result<Bytes, Error>> {
+        futures_util::stream::try_unfold(self.blob, |mut remaining_data| async move {
+            if remaining_data.is_empty() {
+                return Ok(None);
+            }
+            let chunk_size = remaining_data.len().min(CHUNK_SIZE);
+            let chunk = remaining_data.split_to(chunk_size);
+            Ok(Some((chunk, remaining_data)))
+        })
     }
 }
 
@@ -581,6 +607,7 @@ impl EmptyResourceContents {
 #[cfg(test)]
 #[cfg(feature = "server")]
 mod tests {
+    use futures_util::StreamExt;
     use super::*;
     
     #[test]
@@ -655,5 +682,90 @@ mod tests {
         let json = serde_json::to_string(&result).unwrap();
 
         assert_eq!(json, r#"{"contents":[{"uri":"/res","text":"test","mimeType":"text/plain"}]}"#);
+    }
+
+    #[test]
+    fn it_tests_blob_content_serialization() {
+        let blob = BlobResourceContents::new("file://hello", "hello world");
+
+        let json = serde_json::to_string(&blob).expect("Should serialize");
+        let deserialized: BlobResourceContents = serde_json::from_str(&json).expect("Should deserialize");
+
+        assert_eq!(blob.blob, deserialized.blob);
+        assert_eq!(blob.mime, deserialized.mime);
+    }
+
+    #[tokio::test]
+    async fn it_tests_blob_content_into_stream_single_chunk() {
+        // Test data that will be smaller than CHUNK_SIZE
+        let test_data = "hello world";
+        let blob = BlobResourceContents::new("file://hello", test_data.as_bytes());
+
+        let stream = blob.into_stream();
+        let mut stream = Box::pin(stream);
+        let mut collected_data = Vec::new();
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.expect("Should not have error");
+            collected_data.extend_from_slice(&chunk);
+        }
+
+        let result_string = String::from_utf8(collected_data).expect("Should be valid UTF-8");
+        assert_eq!(result_string, test_data);
+    }
+
+    #[tokio::test]
+    async fn it_tests_blob_content_into_stream_multiple_chunks() {
+        // Create data larger than CHUNK_SIZE to test chunking
+        let test_data = "hello world".repeat(1000); // Much larger than 8192 bytes
+        let blob = BlobResourceContents::new("file://hello", test_data.clone());
+
+        let stream = blob.into_stream();
+        let mut stream = Box::pin(stream);
+        let mut collected_data = Vec::new();
+        let mut chunk_count = 0;
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.expect("Should not have error");
+            collected_data.extend_from_slice(&chunk);
+            chunk_count += 1;
+        }
+
+        let result_string = String::from_utf8(collected_data).expect("Should be valid UTF-8");
+        assert_eq!(result_string, test_data);
+        assert!(chunk_count > 1, "Should have multiple chunks for large data");
+    }
+
+    #[tokio::test]
+    async fn it_tests_blob_content_into_stream_empty() {
+        let blob = BlobResourceContents::new("file://hello", Bytes::new());
+
+        let stream = blob.into_stream();
+        let mut stream = Box::pin(stream);
+        let result = stream.next().await;
+
+        assert!(result.is_none(), "Empty data should produce no chunks");
+    }
+
+    #[tokio::test]
+    async fn it_tests_blob_content_into_stream_exact_chunk_size() {
+        // Create data exactly CHUNK_SIZE bytes
+        let test_data = "a".repeat(CHUNK_SIZE);
+        let blob = BlobResourceContents::new("file://hello", test_data.clone());
+
+        let stream = blob.into_stream();
+        let mut stream = Box::pin(stream);
+        let mut collected_data = Vec::new();
+        let mut chunk_count = 0;
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.expect("Should not have error");
+            collected_data.extend_from_slice(&chunk);
+            chunk_count += 1;
+        }
+
+        let result_string = String::from_utf8(collected_data).expect("Should be valid UTF-8");
+        assert_eq!(result_string, test_data);
+        assert_eq!(chunk_count, 1, "Exactly CHUNK_SIZE data should produce one chunk");
     }
 }

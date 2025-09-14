@@ -1,4 +1,4 @@
-use neva::{Client, error::Error};
+use neva::prelude::*;
 use tracing_subscriber::prelude::*;
 
 #[tokio::main]

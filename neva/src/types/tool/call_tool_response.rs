@@ -1,12 +1,22 @@
 ﻿//! Types and util for handling tool results
 
-use serde::{Serialize, Deserialize};
 use crate::types::{Content, IntoResponse, RequestId, Response};
-
-#[cfg(feature = "server")]
-use crate::error::Error;
+use serde::{Serialize, Deserialize};
 #[cfg(feature = "server")]
 use crate::types::Json;
+#[cfg(any(feature = "server", feature = "client"))]
+use {
+    crate::error::Error,
+    serde_json::Value,
+};
+#[cfg(feature = "client")]
+use {
+    crate::error::ErrorCode,
+    serde::de::DeserializeOwned
+};
+
+#[cfg(feature = "client")]
+const MISSING_STRUCTURED_CONTENT: &str = "Tool: Missing structured content";
 
 /// The server's response to a tool call.
 ///
@@ -244,7 +254,7 @@ impl CallToolResponse {
                 .filter_map(|item| item
                     .as_text()
                     .and_then(|c| serde_json::from_str(&c.text).ok()))
-                .collect::<Vec<serde_json::Value>>();
+                .collect::<Vec<Value>>();
             match serde_json::to_value(&data) {
                 Ok(structure) => self.struct_content = Some(structure),
                 Err(err) => return Self::error(err.into()),
@@ -254,10 +264,26 @@ impl CallToolResponse {
     }
 }
 
+#[cfg(feature = "client")]
+impl CallToolResponse {
+    /// Turns [`CallToolResponse`]'s structured content into `T`
+    pub fn as_json<T: DeserializeOwned>(&self) -> Result<T, Error> {
+        self.struct_content()
+            .and_then(|c| serde_json::from_value(c.clone()).map_err(Into::into))
+    }
+    
+    /// Returns a reference to a [`Value`] of structured content
+    pub(crate) fn struct_content(&self) -> Result<&Value, Error> {
+        self.struct_content
+            .as_ref()
+            .ok_or_else(|| Error::new(ErrorCode::ParseError, MISSING_STRUCTURED_CONTENT))
+    }
+}
+
 #[cfg(test)]
 #[cfg(feature = "server")]
 mod tests {
-    use crate::error::ErrorCode;
+    use crate::error::{Error, ErrorCode};
 
     use super::*;
     

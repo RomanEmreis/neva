@@ -1,9 +1,5 @@
 use tracing_subscriber::prelude::*;
-use neva::{
-    Client, error::Error,
-    types::elicitation::{Validator, ElicitRequestParams, ElicitResult},
-    elicitation, json_schema,
-};
+use neva::prelude::*;
 
 #[json_schema(ser)]
 struct Contact {
@@ -19,7 +15,7 @@ async fn elicitation_handler(params: ElicitRequestParams) -> ElicitResult {
         email: "john@email.com".to_string(),
         age: 30,
     };
-    Validator::new(params)
+    elicitation::Validator::new(params)
         .validate(contact)
         .into()
 }

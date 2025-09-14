@@ -4,8 +4,7 @@
 //! npx @modelcontextprotocol/inspector cargo run -p example-logging
 //! ```
 
-use neva::{App, tool};
-use neva::types::notification::NotificationFormatter;
+use neva::prelude::*;
 use tracing_subscriber::{filter, reload, prelude::*};
 
 #[tool]
@@ -22,9 +21,9 @@ async fn main() {
     
     // Configure logging
     tracing_subscriber::registry()
-        .with(filter)                             // Specify the default logging level
+        .with(filter)                                           // Specify the default logging level
         .with(tracing_subscriber::fmt::layer()
-            .event_format(NotificationFormatter)) // Specify the MCP notification formatter
+            .event_format(notification::NotificationFormatter)) // Specify the MCP notification formatter
         .init();
     
     App::new()

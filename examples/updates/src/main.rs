@@ -4,9 +4,7 @@
 //! npx @modelcontextprotocol/inspector cargo run -p example-updates
 //! ```
 
-use neva::{App, Context, tool, resource};
-use neva::error::Error;
-use neva::types::{ResourceContents, Resource, Uri};
+use neva::prelude::*;
 
 #[tool]
 async fn add_resource(mut ctx: Context, uri: Uri) -> Result<(), Error> {

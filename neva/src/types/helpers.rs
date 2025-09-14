@@ -1,6 +1,8 @@
 ﻿//! A set of helpers for types
 
 use crate::json::{JsonSchema, schemars::{schema_for, Schema}};
+use base64::{engine::general_purpose, Engine};
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::{self, Display, Formatter},
@@ -11,6 +13,28 @@ use std::{
 pub mod macros;
 #[cfg(feature = "server")]
 pub(crate) mod extract;
+
+/// Serializes bytes as base64 string 
+#[inline]
+pub(crate) fn serialize_bytes_as_base64<S>(bytes: &Bytes, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer
+{
+    let encoded = general_purpose::STANDARD.encode(bytes);
+    serializer.serialize_str(&encoded)
+}
+
+/// Deserializes base64 string as bytes
+#[inline]
+pub(crate) fn deserialize_base64_as_bytes<'de, D>(deserializer: D) -> Result<Bytes, D::Error>
+where
+    D: serde::Deserializer<'de>
+{
+    let s = String::deserialize(deserializer)?;
+    let decoded = general_purpose::STANDARD.decode(&s)
+        .map_err(serde::de::Error::custom)?;
+    Ok(Bytes::from(decoded))
+}
 
 /// Represents a SchemaProperty type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

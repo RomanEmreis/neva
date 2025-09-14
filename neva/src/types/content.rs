@@ -1,8 +1,13 @@
 ﻿//! Any Text, Image, Audio, Video content utilities
 
 use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
+use bytes::Bytes;
 use crate::error::{Error, ErrorCode};
 use crate::types::{Annotations, Resource, ResourceContents, Uri};
+use crate::types::helpers::{deserialize_base64_as_bytes, serialize_bytes_as_base64};
+
+const CHUNK_SIZE: usize = 8192;
 
 /// Represents the content of the response.
 /// 
@@ -61,8 +66,13 @@ pub struct TextContent {
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema) for details
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AudioContent {
-    /// The base64-encoded audio data.
-    pub data: String,
+    /// Raw audio data.
+    ///
+    /// **Note:** will be serialized as a base64-encoded string
+    #[serde(
+        serialize_with = "serialize_bytes_as_base64",
+        deserialize_with = "deserialize_base64_as_bytes")]
+    pub data: Bytes,
 
     /// The MIME type of the audio content, e.g. "audio/mpeg" or "audio/wav".
     #[serde(rename = "mimeType")]
@@ -82,8 +92,13 @@ pub struct AudioContent {
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema) for details
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ImageContent {
-    /// The base64-encoded image data.
-    pub data: String,
+    /// Raw image data.
+    /// 
+    /// **Note:** will be serialized as a base64-encoded string
+    #[serde(
+        serialize_with = "serialize_bytes_as_base64", 
+        deserialize_with = "deserialize_base64_as_bytes")]
+    pub data: Bytes,
 
     /// The MIME type of the audio content, e.g. "image/jpg" or "image/png".
     #[serde(rename = "mimeType")]
@@ -328,13 +343,13 @@ impl Content {
     
     /// Creates an image [`Content`]
     #[inline]
-    pub fn image(data: impl Into<String>) -> Self {
+    pub fn image(data: impl Into<Bytes>) -> Self {
         Self::Image(ImageContent::new(data))
     }
 
     /// Creates an audio [`Content`]
     #[inline]
-    pub fn audio(data: impl Into<String>) -> Self {
+    pub fn audio(data: impl Into<Bytes>) -> Self {
         Self::Audio(AudioContent::new(data))
     }
     
@@ -374,6 +389,15 @@ impl Content {
     pub fn as_text(&self) -> Option<&TextContent> {
         match self {
             Self::Text(c) => Some(c),
+            _ => None
+        }
+    }
+    
+    /// Returns the content as a deserialized struct
+    #[inline]
+    pub fn as_json<T: DeserializeOwned>(&self) -> Option<T> {
+        match self { 
+            Self::Text(c) => serde_json::from_str(&c.text).ok(),
             _ => None
         }
     }
@@ -439,7 +463,7 @@ impl TextContent {
 impl AudioContent {
     /// Creates a new [`AudioContent`]
     #[inline]
-    pub fn new(data: impl Into<String>) -> Self {
+    pub fn new(data: impl Into<Bytes>) -> Self {
         Self {
             data: data.into(),
             mime: "audio/wav".into(),
@@ -448,7 +472,7 @@ impl AudioContent {
         }
     }
 
-    /// Sets mime type for the audio content
+    /// Sets a mime type for the audio content
     pub fn with_mime(mut self, mime: impl Into<String>) -> Self {
         self.mime = mime.into();
         self
@@ -462,12 +486,29 @@ impl AudioContent {
         self.annotations = Some(config(Default::default()));
         self
     }
+    
+    /// Returns audio data as a slice of bytes
+    pub fn as_slice(&self) -> &[u8] {
+        &self.data
+    }
+
+    /// Turns this [`AudioContent`] into a chunked stream of bytes
+    pub fn into_stream(self) -> impl futures_util::Stream<Item = Result<Bytes, Error>> {
+        futures_util::stream::try_unfold(self.data, |mut remaining_data| async move {
+            if remaining_data.is_empty() {
+                return Ok(None);
+            }
+            let chunk_size = remaining_data.len().min(CHUNK_SIZE);
+            let chunk = remaining_data.split_to(chunk_size);
+            Ok(Some((chunk, remaining_data)))
+        })
+    }
 }
 
 impl ImageContent {
     /// Creates a new [`ImageContent`]
     #[inline]
-    pub fn new(data: impl Into<String>) -> Self {
+    pub fn new(data: impl Into<Bytes>) -> Self {
         Self {
             data: data.into(),
             mime: "image/jpg".into(),
@@ -476,7 +517,7 @@ impl ImageContent {
         }
     }
 
-    /// Sets mime type for the image content
+    /// Sets a mime type for the image content
     pub fn with_mime(mut self, mime: impl Into<String>) -> Self {
         self.mime = mime.into();
         self
@@ -489,6 +530,23 @@ impl ImageContent {
     {
         self.annotations = Some(config(Default::default()));
         self
+    }
+
+    /// Returns audio data as a slice of bytes
+    pub fn as_slice(&self) -> &[u8] {
+        &self.data
+    }
+
+    /// Turns this [`ImageContent`] into a chunked stream of bytes
+    pub fn into_stream(self) -> impl futures_util::Stream<Item = Result<Bytes, Error>> {
+        futures_util::stream::try_unfold(self.data, |mut remaining_data| async move {
+            if remaining_data.is_empty() {
+                return Ok(None);
+            }
+            let chunk_size = remaining_data.len().min(CHUNK_SIZE);
+            let chunk = remaining_data.split_to(chunk_size);
+            Ok(Some((chunk, remaining_data)))
+        })
     }
 }
 
@@ -514,6 +572,13 @@ impl EmbeddedResource {
 #[cfg(test)]
 mod test {
     use super::*;
+    use futures_util::StreamExt;
+    
+    #[derive(Deserialize)]
+    struct Test {
+        name: String,
+        age: u32
+    }
     
     #[test]
     fn it_serializes_text_content_to_json() {
@@ -533,20 +598,32 @@ mod test {
     }
 
     #[test]
+    fn it_deserializes_structures_text_content_to_json() {
+        let json = r#"{"type":"text","text":"{\"name\":\"John\",\"age\":30}"}"#;
+        let content = serde_json::from_str::<Content>(json)
+            .unwrap();
+
+        let user: Test = content.as_json().unwrap();
+        
+        assert_eq!(user.name, "John");
+        assert_eq!(user.age, 30);
+    }
+
+    #[test]
     fn it_serializes_audio_content_to_json() {
         let content = Content::audio("hello world");
         let json = serde_json::to_string(&content).unwrap();
 
-        assert_eq!(json, r#"{"type":"audio","data":"hello world","mimeType":"audio/wav"}"#);
+        assert_eq!(json, r#"{"type":"audio","data":"aGVsbG8gd29ybGQ=","mimeType":"audio/wav"}"#);
     }
 
     #[test]
     fn it_deserializes_audio_content_to_json() {
-        let json = r#"{"type":"audio","data":"hello world","mimeType":"audio/wav"}"#;
+        let json = r#"{"type":"audio","data":"aGVsbG8gd29ybGQ=","mimeType":"audio/wav"}"#;
         let content = serde_json::from_str::<Content>(json)
             .unwrap();
 
-        assert_eq!(content.as_audio().unwrap().data, "hello world");
+        assert_eq!(String::from_utf8_lossy(content.as_audio().unwrap().as_slice()), "hello world");
         assert_eq!(content.as_audio().unwrap().mime, "audio/wav");
     }
 
@@ -555,16 +632,16 @@ mod test {
         let content = Content::image("hello world");
         let json = serde_json::to_string(&content).unwrap();
 
-        assert_eq!(json, r#"{"type":"image","data":"hello world","mimeType":"image/jpg"}"#);
+        assert_eq!(json, r#"{"type":"image","data":"aGVsbG8gd29ybGQ=","mimeType":"image/jpg"}"#);
     }
 
     #[test]
     fn it_deserializes_image_content_to_json() {
-        let json = r#"{"type":"image","data":"hello world","mimeType":"image/jpg"}"#;
+        let json = r#"{"type":"image","data":"aGVsbG8gd29ybGQ=","mimeType":"image/jpg"}"#;
         let content = serde_json::from_str::<Content>(json)
             .unwrap();
 
-        assert_eq!(content.as_image().unwrap().data, "hello world");
+        assert_eq!(String::from_utf8_lossy(content.as_image().unwrap().as_slice()), "hello world");
         assert_eq!(content.as_image().unwrap().mime, "image/jpg");
     }
 
@@ -635,5 +712,185 @@ mod test {
         assert_eq!(res.title.as_deref(), Some("some resource"));
         assert_eq!(res.annotations.as_ref().unwrap().audience, [Role::User]);
         assert_eq!(res.annotations.as_ref().unwrap().priority, 1.0);
+    }
+
+    #[tokio::test]
+    async fn it_tests_audio_content_into_stream_single_chunk() {
+        // Test data that will be smaller than CHUNK_SIZE
+        let test_data = "hello world";
+        let audio = AudioContent::new(test_data.as_bytes());
+
+        let stream = audio.into_stream();
+        let mut stream = Box::pin(stream);
+        let mut collected_data = Vec::new();
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.expect("Should not have error");
+            collected_data.extend_from_slice(&chunk);
+        }
+
+        let result_string = String::from_utf8(collected_data).expect("Should be valid UTF-8");
+        assert_eq!(result_string, test_data);
+    }
+
+    #[tokio::test]
+    async fn it_tests_audio_content_into_stream_multiple_chunks() {
+        // Create data larger than CHUNK_SIZE to test chunking
+        let test_data = "hello world".repeat(1000); // Much larger than 8192 bytes
+        let audio = AudioContent::new(test_data.clone());
+
+        let stream = audio.into_stream();
+        let mut stream = Box::pin(stream);
+        let mut collected_data = Vec::new();
+        let mut chunk_count = 0;
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.expect("Should not have error");
+            collected_data.extend_from_slice(&chunk);
+            chunk_count += 1;
+        }
+
+        let result_string = String::from_utf8(collected_data).expect("Should be valid UTF-8");
+        assert_eq!(result_string, test_data);
+        assert!(chunk_count > 1, "Should have multiple chunks for large data");
+    }
+
+    #[tokio::test]
+    async fn it_tests_audio_content_into_stream_empty() {
+        let audio = AudioContent::new(Bytes::new());
+
+        let stream = audio.into_stream();
+        let mut stream = Box::pin(stream);
+        let result = stream.next().await;
+
+        assert!(result.is_none(), "Empty data should produce no chunks");
+    }
+
+    #[tokio::test]
+    async fn it_tests_audio_content_into_stream_exact_chunk_size() {
+        // Create data exactly CHUNK_SIZE bytes
+        let test_data = "a".repeat(CHUNK_SIZE);
+        let audio = AudioContent::new(test_data.clone());
+
+        let stream = audio.into_stream();
+        let mut stream = Box::pin(stream);
+        let mut collected_data = Vec::new();
+        let mut chunk_count = 0;
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.expect("Should not have error");
+            collected_data.extend_from_slice(&chunk);
+            chunk_count += 1;
+        }
+
+        let result_string = String::from_utf8(collected_data).expect("Should be valid UTF-8");
+        assert_eq!(result_string, test_data);
+        assert_eq!(chunk_count, 1, "Exactly CHUNK_SIZE data should produce one chunk");
+    }
+
+    #[tokio::test]
+    async fn it_tests_image_content_into_stream_single_chunk() {
+        let test_data = "hello world";
+        let image = ImageContent::new(test_data.as_bytes());
+
+        let stream = image.into_stream();
+        let mut stream = Box::pin(stream);
+        let mut collected_data = Vec::new();
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.expect("Should not have error");
+            collected_data.extend_from_slice(&chunk);
+        }
+
+        let result_string = String::from_utf8(collected_data).expect("Should be valid UTF-8");
+        assert_eq!(result_string, test_data);
+    }
+
+    #[tokio::test]
+    async fn it_tests_image_content_into_stream_multiple_chunks() {
+        let test_data = "hello world".repeat(1000);
+        let image = ImageContent::new(test_data.clone());
+
+        let stream = image.into_stream();
+        let mut stream = Box::pin(stream);
+        let mut collected_data = Vec::new();
+        let mut chunk_count = 0;
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.expect("Should not have error");
+            collected_data.extend_from_slice(&chunk);
+            chunk_count += 1;
+        }
+
+        let result_string = String::from_utf8(collected_data).expect("Should be valid UTF-8");
+        assert_eq!(result_string, test_data);
+        assert!(chunk_count > 1, "Should have multiple chunks for large data");
+    }
+
+    #[tokio::test]
+    async fn it_tests_stream_chunk_sizes() {
+        let test_data = "hello world".repeat(500); // Create data that will span multiple chunks
+        let audio = AudioContent::new(test_data.clone());
+
+        let stream = audio.into_stream();
+        let mut stream = Box::pin(stream);
+        let mut total_size = 0;
+        let mut max_chunk_size = 0;
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.expect("Should not have error");
+            let chunk_size = chunk.len();
+            total_size += chunk_size;
+            max_chunk_size = max_chunk_size.max(chunk_size);
+
+            // Each chunk should not exceed CHUNK_SIZE
+            assert!(chunk_size <= CHUNK_SIZE, "Chunk size should not exceed CHUNK_SIZE");
+        }
+
+        assert_eq!(total_size, test_data.len());
+        assert!(max_chunk_size <= CHUNK_SIZE);
+    }
+
+    #[tokio::test]
+    async fn it_tests_stream_preserves_binary_data() {
+        let test_data: Vec<u8> = (0..=255u8).cycle().take(1000).collect();
+        let audio = AudioContent::new(test_data.clone());
+
+        let stream = audio.into_stream();
+        let mut stream = Box::pin(stream);
+        let mut collected_data = Vec::new();
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.expect("Should not have error");
+            collected_data.extend_from_slice(&chunk);
+        }
+
+        assert_eq!(collected_data, test_data);
+    }
+
+    #[tokio::test]
+    async fn it_tests_audio_content_collect_alternative() {
+        let test_data = "hello world";
+        let audio = AudioContent::new(test_data.as_bytes());
+
+        let stream = audio.into_stream();
+        let chunks: Result<Vec<_>, _> = tokio_stream::StreamExt::collect::<Result<Vec<_>, _>>(stream).await;
+
+        let chunks = chunks.expect("Should collect without error");
+        let collected_data: Vec<u8> = chunks.into_iter().flatten().collect();
+
+        let result_string = String::from_utf8(collected_data).expect("Should be valid UTF-8");
+        assert_eq!(result_string, test_data);
+    }
+
+    #[test]
+    fn it_tests_audio_content_serialization() {
+        let audio = AudioContent::new("hello world");
+
+        let json = serde_json::to_string(&audio).expect("Should serialize");
+        let deserialized: AudioContent = serde_json::from_str(&json).expect("Should deserialize");
+
+        assert_eq!(audio.data, deserialized.data);
+        assert_eq!(audio.mime, deserialized.mime);
     }
 }

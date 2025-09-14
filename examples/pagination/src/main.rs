@@ -7,8 +7,7 @@
 //! ```
 
 use std::sync::Arc;
-use neva::{App, Context, error::Error, tool, resource};
-use neva::types::{Uri, Resource, ListResourcesResult, Cursor, Pagination, Completion};
+use neva::prelude::*;
 
 #[tool]
 async fn validate_resource(ctx: Context, uri: Uri) -> Result<bool, Error> {
