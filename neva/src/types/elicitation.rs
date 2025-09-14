@@ -257,7 +257,8 @@ impl Validator {
                 }
             },
             "uri" => {
-                if !value.starts_with("http://") && !value.starts_with("https://") && !value.starts_with("file://") {
+                let parts: Vec<&str> = value.splitn(2, "://").collect();
+                if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
                     return Err(Error::new(ErrorCode::InvalidParams, "Invalid URI format"));
                 }
             },
@@ -991,6 +992,7 @@ mod tests {
             "http://example.com",
             "https://example.com",
             "file://path/to/file",
+            "res://resource_1"
         ];
 
         for uri in test_cases {
