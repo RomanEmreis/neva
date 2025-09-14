@@ -2,9 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 use bytes::Bytes;
-use crate::error::Error;
 #[cfg(feature = "server")]
-use crate::types::{IntoResponse, RequestId, Response};
+use crate::{error::Error, types::{IntoResponse, RequestId, Response}};
 use crate::types::{Annotations, Uri};
 use crate::types::helpers::{deserialize_base64_as_bytes, serialize_bytes_as_base64};
 
@@ -556,14 +555,14 @@ impl BlobResourceContents {
     }
 
     /// Turns this [`BlobResourceContents`] into a chunked stream of bytes
-    pub fn into_stream(self) -> impl futures_util::Stream<Item = Result<Bytes, Error>> {
-        futures_util::stream::try_unfold(self.blob, |mut remaining_data| async move {
+    pub fn into_stream(self) -> impl futures_util::Stream<Item = Bytes> {
+        futures_util::stream::unfold(self.blob, |mut remaining_data| async move {
             if remaining_data.is_empty() {
-                return Ok(None);
+                return None;
             }
             let chunk_size = remaining_data.len().min(CHUNK_SIZE);
             let chunk = remaining_data.split_to(chunk_size);
-            Ok(Some((chunk, remaining_data)))
+            Some((chunk, remaining_data))
         })
     }
 }
@@ -705,8 +704,7 @@ mod tests {
         let mut stream = Box::pin(stream);
         let mut collected_data = Vec::new();
 
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result.expect("Should not have error");
+        while let Some(chunk) = stream.next().await {
             collected_data.extend_from_slice(&chunk);
         }
 
@@ -725,8 +723,7 @@ mod tests {
         let mut collected_data = Vec::new();
         let mut chunk_count = 0;
 
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result.expect("Should not have error");
+        while let Some(chunk) = stream.next().await {
             collected_data.extend_from_slice(&chunk);
             chunk_count += 1;
         }
@@ -758,8 +755,7 @@ mod tests {
         let mut collected_data = Vec::new();
         let mut chunk_count = 0;
 
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result.expect("Should not have error");
+        while let Some(chunk) = stream.next().await {
             collected_data.extend_from_slice(&chunk);
             chunk_count += 1;
         }

@@ -493,14 +493,14 @@ impl AudioContent {
     }
 
     /// Turns this [`AudioContent`] into a chunked stream of bytes
-    pub fn into_stream(self) -> impl futures_util::Stream<Item = Result<Bytes, Error>> {
-        futures_util::stream::try_unfold(self.data, |mut remaining_data| async move {
+    pub fn into_stream(self) -> impl futures_util::Stream<Item = Bytes> {
+        futures_util::stream::unfold(self.data, |mut remaining_data| async move {
             if remaining_data.is_empty() {
-                return Ok(None);
+                return None;
             }
             let chunk_size = remaining_data.len().min(CHUNK_SIZE);
             let chunk = remaining_data.split_to(chunk_size);
-            Ok(Some((chunk, remaining_data)))
+            Some((chunk, remaining_data))
         })
     }
 }
@@ -538,14 +538,14 @@ impl ImageContent {
     }
 
     /// Turns this [`ImageContent`] into a chunked stream of bytes
-    pub fn into_stream(self) -> impl futures_util::Stream<Item = Result<Bytes, Error>> {
-        futures_util::stream::try_unfold(self.data, |mut remaining_data| async move {
+    pub fn into_stream(self) -> impl futures_util::Stream<Item = Bytes> {
+        futures_util::stream::unfold(self.data, |mut remaining_data| async move {
             if remaining_data.is_empty() {
-                return Ok(None);
+                return None;
             }
             let chunk_size = remaining_data.len().min(CHUNK_SIZE);
             let chunk = remaining_data.split_to(chunk_size);
-            Ok(Some((chunk, remaining_data)))
+            Some((chunk, remaining_data))
         })
     }
 }
@@ -724,8 +724,7 @@ mod test {
         let mut stream = Box::pin(stream);
         let mut collected_data = Vec::new();
 
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result.expect("Should not have error");
+        while let Some(chunk) = stream.next().await {
             collected_data.extend_from_slice(&chunk);
         }
 
@@ -744,8 +743,7 @@ mod test {
         let mut collected_data = Vec::new();
         let mut chunk_count = 0;
 
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result.expect("Should not have error");
+        while let Some(chunk) = stream.next().await {
             collected_data.extend_from_slice(&chunk);
             chunk_count += 1;
         }
@@ -777,8 +775,7 @@ mod test {
         let mut collected_data = Vec::new();
         let mut chunk_count = 0;
 
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result.expect("Should not have error");
+        while let Some(chunk) = stream.next().await {
             collected_data.extend_from_slice(&chunk);
             chunk_count += 1;
         }
@@ -797,8 +794,7 @@ mod test {
         let mut stream = Box::pin(stream);
         let mut collected_data = Vec::new();
 
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result.expect("Should not have error");
+        while let Some(chunk) = stream.next().await {
             collected_data.extend_from_slice(&chunk);
         }
 
@@ -816,8 +812,7 @@ mod test {
         let mut collected_data = Vec::new();
         let mut chunk_count = 0;
 
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result.expect("Should not have error");
+        while let Some(chunk) = stream.next().await {
             collected_data.extend_from_slice(&chunk);
             chunk_count += 1;
         }
@@ -837,8 +832,7 @@ mod test {
         let mut total_size = 0;
         let mut max_chunk_size = 0;
 
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result.expect("Should not have error");
+        while let Some(chunk) = stream.next().await {
             let chunk_size = chunk.len();
             total_size += chunk_size;
             max_chunk_size = max_chunk_size.max(chunk_size);
@@ -860,8 +854,7 @@ mod test {
         let mut stream = Box::pin(stream);
         let mut collected_data = Vec::new();
 
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result.expect("Should not have error");
+        while let Some(chunk) = stream.next().await {
             collected_data.extend_from_slice(&chunk);
         }
 
@@ -874,9 +867,8 @@ mod test {
         let audio = AudioContent::new(test_data.as_bytes());
 
         let stream = audio.into_stream();
-        let chunks: Result<Vec<_>, _> = tokio_stream::StreamExt::collect::<Result<Vec<_>, _>>(stream).await;
+        let chunks: Vec<_> = tokio_stream::StreamExt::collect::<Vec<_>>(stream).await;
 
-        let chunks = chunks.expect("Should collect without error");
         let collected_data: Vec<u8> = chunks.into_iter().flatten().collect();
 
         let result_string = String::from_utf8(collected_data).expect("Should be valid UTF-8");
