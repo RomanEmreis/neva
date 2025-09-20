@@ -52,7 +52,7 @@
 //! ```
 
 #[cfg(feature = "server")]
-pub use app::{App, context::Context, options};
+pub use app::{App, context::Context};
 #[cfg(feature = "client")]
 pub use client::Client;
 

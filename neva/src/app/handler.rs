@@ -4,7 +4,7 @@ use std::future::Future;
 use std::sync::Arc;
 use futures_util::future::BoxFuture;
 use crate::error::{Error, ErrorCode};
-use crate::options::RuntimeMcpOptions;
+use crate::app::options::RuntimeMcpOptions;
 use crate::Context;
 use crate::types::{
     CallToolRequestParams, 

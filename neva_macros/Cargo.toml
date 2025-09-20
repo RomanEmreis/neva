@@ -1,6 +1,6 @@
 [package]
 name = "neva_macros"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 rust-version = "1.85.0"
 authors = ["Roman Emreis <roman.emreis@outlook.com>"]
@@ -8,7 +8,7 @@ license = "MIT"
 repository = "https://github.com/RomanEmreis/neva"
 description = "Macros for Neva"
 documentation = "https://docs.rs/neva"
-readme = "../README.md"
+readme = "README.md"
 categories = ["web-programming::http-server", "web-programming::http-client", "network-programming", "asynchronous"]
 keywords = ["modelcontextprotocol", "mcp", "sdk", "ai", "framework"]
 
@@ -17,8 +17,8 @@ proc-macro = true
 
 [dependencies]
 quote = "1.0.40"
-syn = { version = "2.0.104", features = ["full"] }
-proc-macro2 = "1.0.95"
+syn = { version = "2.0.106", features = ["full"] }
+proc-macro2 = "1.0.101"
 
 [features]
 default = []
