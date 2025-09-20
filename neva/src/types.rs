@@ -7,8 +7,8 @@ use crate::types::notification::Notification;
 #[cfg(feature = "server")]
 use crate::{
     app::handler::{FromHandlerParams, HandlerParams},
+    app::options::McpOptions,
     types::request::FromRequest,
-    options::McpOptions,
     error::Error,
 };
 
