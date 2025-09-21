@@ -130,7 +130,7 @@ impl Context {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(feature = "macros")] {
+    /// # #[cfg(feature = "server-macros")] {
     /// use neva::{Context, error::Error, types::Uri, tool};
     ///
     /// #[tool]
@@ -345,7 +345,7 @@ impl Context {
     /// 
     /// # Example
     /// ```no_run
-    /// # #[cfg(feature = "macros")] {
+    /// # #[cfg(feature = "server-macros")] {
     /// use neva::{Context, error::Error, tool};
     ///
     /// #[tool]
@@ -374,7 +374,7 @@ impl Context {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(feature = "macros")] {
+    /// # #[cfg(feature = "server-macros")] {
     /// use neva::{
     ///     Context, 
     ///     error::Error, 
@@ -409,7 +409,7 @@ impl Context {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(feature = "macros")] {
+    /// # #[cfg(feature = "serve-macros")] {
     /// use neva::{
     ///     Context, 
     ///     error::Error, 
