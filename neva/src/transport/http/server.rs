@@ -17,7 +17,8 @@ use volga::{
     http::sse::Message as SseMessage, sse,
     headers::{HttpHeaders, AUTHORIZATION}
 };
-
+#[cfg(feature = "tls")]
+use volga::tls::TlsConfig;
 #[cfg(feature = "tracing")]
 use crate::types::notification::fmt::LOG_REGISTRY;
 
@@ -54,7 +55,13 @@ pub(super) async fn serve(
     };
     tokio::join!(
         dispatch(pending.clone(), registry.clone(), rt.rx, token.clone()),
-        handle(rt.url, rt.auth, manager, token.clone())
+        handle(
+            rt.url, 
+            rt.auth,
+            #[cfg(feature = "tls")]
+            rt.tls_config, 
+            manager, 
+            token.clone())
     );
 }
 
@@ -87,6 +94,8 @@ async fn dispatch(
 async fn handle(
     service_url: ServiceUrl,
     auth: Option<AuthConfig>,
+    #[cfg(feature = "tls")]
+    tls: Option<TlsConfig>,
     manager: RequestManager,
     token: CancellationToken
 ) {
@@ -100,6 +109,12 @@ async fn handle(
         let (auth, rules) = auth.into_parts();
         server = server.with_bearer_auth(|_| auth);
         server.authorize(rules);
+    }
+
+    #[cfg(feature = "tls")]
+    if let Some(tls) = tls {
+        server = server.set_tls(tls);
+        server.use_hsts();
     }
     
     server

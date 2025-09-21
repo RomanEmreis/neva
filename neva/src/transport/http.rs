@@ -25,6 +25,15 @@ use super::{
     Receiver as TransportReceiver
 };
 
+#[cfg(all(feature = "http-server", feature = "tls"))]
+pub use volga::tls::TlsConfig;
+
+#[cfg(all(feature = "http-client", feature = "tls"))]
+use {
+    std::path::PathBuf,
+    reqwest::Certificate
+};
+
 #[cfg(feature = "http-server")]
 pub(crate) mod server;
 #[cfg(feature = "http-client")]
@@ -42,11 +51,21 @@ pub(super) fn get_mcp_session_id(headers: &HeaderMap) -> Option<uuid::Uuid> {
         .and_then(|s| uuid::Uuid::parse_str(s).ok())
 }
 
+/// HTTP type
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum HttpProto {
+    Http,
+    #[cfg(feature = "tls")]
+    Https
+}
+
 /// Represents HTTP server transport
 #[cfg(feature = "http-server")]
 pub struct HttpServer<C: AuthClaims = DefaultClaims> {
     url: ServiceUrl,
     auth: Option<AuthConfig<C>>,
+    #[cfg(feature = "tls")]
+    tls_config: Option<TlsConfig>,
     sender: HttpSender,
     receiver: HttpReceiver,
 }
@@ -55,12 +74,15 @@ pub struct HttpServer<C: AuthClaims = DefaultClaims> {
 pub struct HttpClient {
     url: ServiceUrl,
     access_token: Option<Box<[u8]>>,
+    #[cfg(feature = "tls")]
+    ca_cert: Option<PathBuf>,
     sender: HttpSender,
     receiver: HttpReceiver,
 }
 
 #[derive(Clone, Copy)]
 pub struct ServiceUrl {
+    proto: HttpProto,
     addr: &'static str,
     endpoint: &'static str,
 }
@@ -69,6 +91,8 @@ pub struct ServiceUrl {
 pub(super) struct HttpRuntimeContext {
     url: ServiceUrl,
     tx: Sender<Result<Message, Error>>,
+    #[cfg(feature = "tls")]
+    tls_config: Option<TlsConfig>,
     rx: Receiver<Message>,
     auth: Option<AuthConfig>,
 }
@@ -79,6 +103,8 @@ pub(super) struct ClientRuntimeContext {
     tx: Sender<Result<Message, Error>>,
     rx: Receiver<Message>,
     access_token: Option<Box<[u8]>>,
+    #[cfg(feature = "tls")]
+    ca_cert: Option<Certificate>,
 }
 
 /// Represents HTTP sender
@@ -100,6 +126,8 @@ impl Default for HttpServer {
         Self {
             url: ServiceUrl::default(),
             auth: None,
+            #[cfg(feature = "tls")]
+            tls_config: None,
             receiver: HttpReceiver::new(),
             sender: HttpSender::new()
         }
@@ -113,6 +141,8 @@ impl Default for HttpClient {
         Self {
             url: ServiceUrl::default(),
             access_token: None,
+            #[cfg(feature = "tls")]
+            ca_cert: None,
             receiver: HttpReceiver::new(),
             sender: HttpSender::new()
         }
@@ -122,11 +152,18 @@ impl Default for HttpClient {
 impl ServiceUrl {
     #[inline]
     pub fn as_str<'a>(&self) -> Cow<'a, str> {
-        #[cfg(feature = "tls")]
-        let proto = "https";
-        #[cfg(not(feature = "tls"))]
-        let proto = "http";
-        Cow::Owned(format!("{proto}://{}/{}", self.addr, self.endpoint))
+        Cow::Owned(format!("{}://{}{}", self.proto, self.addr, self.endpoint))
+    }
+}
+
+impl Display for HttpProto {
+    #[inline]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self { 
+            HttpProto::Http => f.write_str("http"),
+            #[cfg(feature = "tls")]
+            HttpProto::Https => f.write_str("https"),
+        }
     }
 }
 
@@ -134,6 +171,7 @@ impl Default for ServiceUrl {
     #[inline]
     fn default() -> Self {
         Self {
+            proto: HttpProto::Http,
             addr: DEFAULT_ADDR,
             endpoint: DEFAULT_MCP_ENDPOINT,
         }
@@ -152,6 +190,7 @@ impl From<&'static str> for ServiceUrl {
     fn from(url: &'static str) -> Self {
         let mut parts = MemChr::split(url, b'/');
         Self {
+            proto: HttpProto::Http,
             addr: parts.nth(0).unwrap_or(DEFAULT_ADDR),
             endpoint: parts.nth(1).unwrap_or(DEFAULT_MCP_ENDPOINT),
         }
@@ -186,6 +225,12 @@ impl HttpReceiver {
 
 #[cfg(feature = "http-server")]
 impl HttpServer {
+    /// Creates a new [`HttpServer`]
+    #[inline]
+    pub fn new(addr: &'static str) -> Self {
+        Self::default().bind(addr)
+    }
+    
     /// Binds HTTP serve to address and port    
     pub fn bind(mut self, addr: &'static str) -> Self {
         self.url.addr = addr;
@@ -197,6 +242,17 @@ impl HttpServer {
     /// Default: `/mcp`
     pub fn with_endpoint(mut self, prefix: &'static str) -> Self {
         self.url.endpoint = prefix;
+        self
+    }
+
+    /// Configures HTTP server's TLS configuration
+    #[cfg(feature = "tls")]
+    pub fn with_tls<F>(mut self, config: F) -> Self
+    where
+        F: FnOnce(TlsConfig) -> TlsConfig
+    {
+        self.tls_config = Some(config(Default::default()));
+        self.url.proto = HttpProto::Https;
         self
     }
     
@@ -218,6 +274,8 @@ impl HttpServer {
             tx: self.receiver.tx.clone(),
             rx: sender_rx,
             auth: self.auth.take(),
+            #[cfg(feature = "tls")]
+            tls_config: self.tls_config.take(),
         })
     }
 }
@@ -235,6 +293,13 @@ impl HttpClient {
     /// Default: `/mcp`
     pub fn with_endpoint(mut self, prefix: &'static str) -> Self {
         self.url.endpoint = prefix;
+        self
+    }
+
+    #[cfg(feature = "tls")]
+    pub fn with_tls(mut self, cert: impl Into<PathBuf>) -> Self {
+        self.ca_cert = Some(cert.into());
+        self.url.proto = HttpProto::Https;
         self
     }
     
@@ -255,6 +320,12 @@ impl HttpClient {
             tx: self.receiver.tx.clone(),
             rx: sender_rx,
             access_token: self.access_token.take(),
+            #[cfg(feature = "tls")]
+            ca_cert: self.ca_cert
+                .take()
+                .and_then(|p| Certificate::from_pem(&std::fs::read(p)
+                    .expect("Expected CA"))
+                    .ok())
         })
     }
 }

@@ -8,3 +8,5 @@ rust-version.workspace = true
 [dependencies]
 neva = { path = "../../../neva", features = ["server-full"] }
 tokio = { version = "1.47.1", features = ["full"] }
+tracing = "0.1.41"
+tracing-subscriber = "0.3.20"

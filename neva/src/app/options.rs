@@ -119,6 +119,13 @@ impl McpOptions {
 
     /// Sets Streamable HTTP as a transport protocol
     #[cfg(feature = "http-server")]
+    pub fn set_http(mut self, http: HttpServer) -> Self {
+        self.proto = Some(TransportProto::HttpServer(Box::new(http)));
+        self
+    }
+    
+    /// Sets Streamable HTTP as a transport protocol
+    #[cfg(feature = "http-server")]
     pub fn with_http<F: FnOnce(HttpServer) -> HttpServer>(mut self, config: F) -> Self {
         self.proto = Some(TransportProto::HttpServer(Box::new(config(HttpServer::default()))));
         self

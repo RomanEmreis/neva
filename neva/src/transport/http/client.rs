@@ -13,6 +13,9 @@ use crate::{
     error::{Error, ErrorCode}
 };
 
+#[cfg(feature = "tls")]
+use reqwest::Certificate;
+
 pub(super) mod mcp_session;
 
 pub(super) async fn connect(
@@ -22,8 +25,20 @@ pub(super) async fn connect(
     let session = Arc::new(McpSession::new(rt.url, token));
     let access_token: Option<Arc<[u8]>> = rt.access_token.map(|t| t.into());
     tokio::join!(
-        handle_connection(session.clone(), rt.rx, rt.tx.clone(), access_token.clone()),
-        start_sse_connection(session.clone(), rt.tx.clone(), access_token.clone())
+        handle_connection(
+            session.clone(), 
+            rt.rx, 
+            rt.tx.clone(), 
+            access_token.clone(),
+            #[cfg(feature = "tls")]
+            rt.ca_cert.clone()),
+        start_sse_connection(
+            session.clone(), 
+            rt.tx.clone(), 
+            access_token.clone(),
+            #[cfg(feature = "tls")]
+            rt.ca_cert.clone()
+        )
     );
 }
 
@@ -31,9 +46,24 @@ async fn handle_connection(
     session: Arc<McpSession>,
     mut sender_rx: mpsc::Receiver<Message>,
     recv_tx: mpsc::Sender<Result<Message, Error>>,
-    access_token: Option<Arc<[u8]>>
+    access_token: Option<Arc<[u8]>>,
+    #[cfg(feature = "tls")]
+    ca_cert: Option<Certificate>,
 ) {
-    let client = reqwest::Client::new();
+    #[cfg(feature = "tls")]
+    let mut builder = reqwest::Client::builder();
+    #[cfg(not(feature = "tls"))]
+    let builder = reqwest::Client::builder();
+    
+    #[cfg(feature = "tls")]
+    if let Some(ca_cert) = ca_cert { 
+        builder = builder
+            .add_root_certificate(ca_cert);
+    } 
+    
+    let client = builder.build()
+        .expect("Unable to build HTTP client");
+    
     let token = session.cancellation_token();
     loop {
         tokio::select! {
@@ -111,14 +141,21 @@ async fn send_request(
 async fn start_sse_connection(
     session: Arc<McpSession>,
     resp_tx: mpsc::Sender<Result<Message, Error>>,
-    access_token: Option<Arc<[u8]>>
+    access_token: Option<Arc<[u8]>>,
+    #[cfg(feature = "tls")]
+    ca_cert: Option<Certificate>,
 ) {
     let token = session.cancellation_token();
     tokio::select! {
         biased;
         _ = token.cancelled() => (),
         _ = session.initialized() => {
-            tokio::spawn(handle_sse_connection(session.clone(), resp_tx, access_token));        
+            tokio::spawn(handle_sse_connection(
+                session.clone(), 
+                resp_tx, 
+                access_token,
+                #[cfg(feature = "tls")]
+                ca_cert));        
         }
     }
 }
@@ -126,7 +163,9 @@ async fn start_sse_connection(
 async fn handle_sse_connection(
     session: Arc<McpSession>,
     resp_tx: mpsc::Sender<Result<Message, Error>>,
-    access_token: Option<Arc<[u8]>>
+    access_token: Option<Arc<[u8]>>,
+    #[cfg(feature = "tls")]
+    ca_cert: Option<Certificate>,
 ) {
     let Ok(mut client) = ClientBuilder::for_url(session.url().as_str().as_ref()) else { 
         #[cfg(feature = "tracing")]
@@ -162,8 +201,17 @@ async fn handle_sse_connection(
         client = with_header;
     }
     
+    #[cfg(feature = "tls")]
+    let client = if let Some(_ca_cert) = ca_cert  { 
+        client.build()
+    } else {
+        client.build()
+    };
+
+    #[cfg(not(feature = "tls"))]
+    let client = client.build_http();
+    
     let mut stream = client
-        .build_http()
         .stream()
         .fuse()
         .map_ok(|event| handle_event(event, &resp_tx))

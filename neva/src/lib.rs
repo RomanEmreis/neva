@@ -106,6 +106,11 @@ pub mod prelude {
     pub use crate::error::*;
     pub use crate::json::*;
 
+    #[cfg(feature = "http-server")]
+    pub use crate::transport::HttpServer;
+    #[cfg(all(feature = "http-server", feature = "tls"))]
+    pub use crate::transport::http::TlsConfig;
+    
     #[cfg(feature = "server")]
     pub use crate::app::{App, context::Context, options};
     #[cfg(feature = "client")]

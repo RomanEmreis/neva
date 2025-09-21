@@ -6,7 +6,7 @@ use crate::types::Message;
 #[cfg(feature = "server")]
 pub(crate) use stdio::StdIoServer;
 #[cfg(feature = "http-server")]
-pub(crate) use http::HttpServer;
+pub use http::HttpServer;
 
 #[cfg(feature = "client")]
 pub(crate) use stdio::StdIoClient;

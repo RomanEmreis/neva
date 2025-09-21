@@ -24,8 +24,8 @@ memchr = "2.7.5"
 once_cell = { version = "1.21.3", features = ["std"], optional = true }
 reqwest = { version = "0.12.23", features = ["stream", "json"], optional = true }
 eventsource-client = { version = "0.15.0", default-features = false, optional = true }
-serde = { version = "1.0.221", features = ["derive"] }
-serde_json = "1.0.144"
+serde = { version = "1.0.226", features = ["derive"] }
+serde_json = "1.0.145"
 schemars = { version = "1.0.4" }
 tokio = { version = "1.47.1", features = ["sync", "io-std", "io-util", "rt", "time", "macros"] }
 tokio-stream = { version = "0.1.17", optional = true }
@@ -49,11 +49,11 @@ tokio-stream = { version = "0.1.17" }
 [features]
 default = []
 full = ["server-full", "client-full"]
-server-full = ["server-macros", "tracing", "http-server"]
-client-full = ["client-macros", "tracing", "http-client"]
+server-full = ["server-macros", "tracing", "http-server", "tls"]
+client-full = ["client-macros", "tracing", "http-client", "tls"]
 http-server = ["server", "dep:volga", "dep:tokio-stream"]
 http-client = ["client", "dep:reqwest", "dep:eventsource-client", "dep:tokio-stream", "dep:once_cell"]
-tls = ["http-server", "volga?/tls", "eventsource-client?/rustls"]
+tls = ["http-server", "volga?/tls", "reqwest?/rustls-tls", "eventsource-client?/rustls"]
 macros = ["dep:neva_macros", "dep:inventory"]
 client-macros = ["client", "macros", "neva_macros?/client"]
 server-macros = ["server", "macros", "neva_macros?/server"]

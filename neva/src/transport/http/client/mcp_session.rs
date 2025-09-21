@@ -72,9 +72,11 @@ mod tests {
     use uuid::Uuid;
     use tokio::time::{timeout, Duration};
     use tokio_util::sync::CancellationToken;
+    use crate::transport::http::HttpProto;
 
     fn create_session() -> McpSession {
         let url = ServiceUrl {
+            proto: HttpProto::Http,
             addr: "localhost",
             endpoint: "init",
         };
