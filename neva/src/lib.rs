@@ -108,7 +108,7 @@ pub mod prelude {
 
     #[cfg(feature = "http-server")]
     pub use crate::transport::HttpServer;
-    #[cfg(all(feature = "http-server", feature = "tls"))]
+    #[cfg(all(feature = "http-server", feature = "server-tls"))]
     pub use crate::transport::http::TlsConfig;
     
     #[cfg(feature = "server")]

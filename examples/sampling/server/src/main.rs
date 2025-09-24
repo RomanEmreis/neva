@@ -21,12 +21,10 @@ async fn main() {
     let secret = std::env::var("JWT_SECRET")
         .expect("JWT_SECRET must be set");
     
-    let http = HttpServer::new("127.0.0.1:3000")
+    let http = HttpServer::new("localhost:7878")
         .with_tls(|tls| tls
-            .set_cert("examples/sampling/cert/server.pem")
-            .set_key("examples/sampling/cert/server.key")
-            .with_https_redirection()
-            .with_http_port(3001))
+            .set_cert("examples/sampling/cert/dev-server.pem")
+            .set_key("examples/sampling/cert/dev-server.key"))
         .with_auth(|auth| auth
             .validate_exp(false)
             .with_aud(["some aud"])

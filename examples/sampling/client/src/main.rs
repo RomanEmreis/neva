@@ -30,11 +30,12 @@ async fn main() -> Result<(), Error> {
     let mut client = Client::new()
         .with_options(|opt| opt
             .with_http(|http| http
-                .with_tls("examples/sampling/cert/ca.pem")
+                .bind("localhost:7878")
+                .with_tls(|tls| tls.with_ca("examples/sampling/cert/dev-ca.pem"))
                 .with_auth(ACCESS_TOKEN)));
 
     client.connect().await?;
-    
+
     let args = ("topic", "winter snow");
     let result = client.call_tool("generate_poem", args).await?;
     tracing::info!("Received result: {:?}", result.content);

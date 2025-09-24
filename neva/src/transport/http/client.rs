@@ -4,19 +4,19 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use futures_util::{TryStreamExt, StreamExt};
-use eventsource_client::{Client, ClientBuilder, ReconnectOptionsBuilder, SSE};
-use reqwest::{RequestBuilder, header::{CONTENT_TYPE, ACCEPT, AUTHORIZATION}};
+use reqwest::{RequestBuilder, header::{CONTENT_TYPE, CACHE_CONTROL, ACCEPT}};
 use self::mcp_session::McpSession;
 use crate::{
     transport::http::{ClientRuntimeContext, get_mcp_session_id, MCP_SESSION_ID},
     types::Message,
     error::{Error, ErrorCode}
 };
-
-#[cfg(feature = "tls")]
-use reqwest::Certificate;
+#[cfg(feature = "client-tls")]
+use tls_config::ClientTlsConfig;
 
 pub(super) mod mcp_session;
+#[cfg(feature = "client-tls")]
+pub mod tls_config;
 
 pub(super) async fn connect(
     rt: ClientRuntimeContext,
@@ -30,14 +30,15 @@ pub(super) async fn connect(
             rt.rx, 
             rt.tx.clone(), 
             access_token.clone(),
-            #[cfg(feature = "tls")]
-            rt.ca_cert.clone()),
+            #[cfg(feature = "client-tls")]
+            rt.tls_config.clone()
+        ),
         start_sse_connection(
             session.clone(), 
             rt.tx.clone(), 
             access_token.clone(),
-            #[cfg(feature = "tls")]
-            rt.ca_cert.clone()
+            #[cfg(feature = "client-tls")]
+            rt.tls_config.clone()
         )
     );
 }
@@ -47,22 +48,28 @@ async fn handle_connection(
     mut sender_rx: mpsc::Receiver<Message>,
     recv_tx: mpsc::Sender<Result<Message, Error>>,
     access_token: Option<Arc<[u8]>>,
-    #[cfg(feature = "tls")]
-    ca_cert: Option<Certificate>,
+    #[cfg(feature = "client-tls")]
+    tls_config: Option<ClientTlsConfig>,
 ) {
-    #[cfg(feature = "tls")]
-    let mut builder = reqwest::Client::builder();
-    #[cfg(not(feature = "tls"))]
-    let builder = reqwest::Client::builder();
-    
-    #[cfg(feature = "tls")]
-    if let Some(ca_cert) = ca_cert { 
-        builder = builder
-            .add_root_certificate(ca_cert);
-    } 
-    
-    let client = builder.build()
-        .expect("Unable to build HTTP client");
+    #[cfg(not(feature = "client-tls"))]
+    let client = match create_client() {
+        Ok(client) => client,
+        Err(_err) => {
+            #[cfg(feature = "tracing")]
+            tracing::error!(logger = "neva", "HTTP client error: {_err:#}");
+            return;
+        }
+    };
+
+    #[cfg(feature = "client-tls")]
+    let client = match create_client(tls_config) {
+        Ok(client) => client,
+        Err(_err) => {
+            #[cfg(feature = "tracing")]
+            tracing::error!(logger = "neva", "HTTP client error: {_err:#}");
+            return;
+        }
+    };
     
     let token = session.cancellation_token();
     loop {
@@ -110,7 +117,7 @@ async fn send_request(
         Ok(resp) => resp,
         Err(_err) => {
             #[cfg(feature = "tracing")]
-            tracing::error!(logger = "neva", "Failed to send request: {}", _err);
+            tracing::error!(logger = "neva", "Failed to send HTTP request: {}", _err);
             return;
         }
     };
@@ -128,10 +135,12 @@ async fn send_request(
     if let Message::Request(r) = req {
         if r.method == crate::commands::INIT {
             session.notify_session_initialized();
+            session.sse_ready().await;
         }
     }
 
     let resp = resp.json::<Message>().await;
+    
     if let Err(_err) = resp_tx.send(resp.map_err(Error::from)).await {
         #[cfg(feature = "tracing")]
         tracing::error!(logger = "neva", "Failed to send response: {}", _err);
@@ -142,8 +151,8 @@ async fn start_sse_connection(
     session: Arc<McpSession>,
     resp_tx: mpsc::Sender<Result<Message, Error>>,
     access_token: Option<Arc<[u8]>>,
-    #[cfg(feature = "tls")]
-    ca_cert: Option<Certificate>,
+    #[cfg(feature = "client-tls")]
+    tls_config: Option<ClientTlsConfig>,
 ) {
     let token = session.cancellation_token();
     tokio::select! {
@@ -154,8 +163,9 @@ async fn start_sse_connection(
                 session.clone(), 
                 resp_tx, 
                 access_token,
-                #[cfg(feature = "tls")]
-                ca_cert));        
+                #[cfg(feature = "client-tls")]
+                tls_config
+            ));        
         }
     }
 }
@@ -164,66 +174,65 @@ async fn handle_sse_connection(
     session: Arc<McpSession>,
     resp_tx: mpsc::Sender<Result<Message, Error>>,
     access_token: Option<Arc<[u8]>>,
-    #[cfg(feature = "tls")]
-    ca_cert: Option<Certificate>,
+    #[cfg(feature = "client-tls")]
+    tls_config: Option<ClientTlsConfig>,
 ) {
-    let Ok(mut client) = ClientBuilder::for_url(session.url().as_str().as_ref()) else { 
-        #[cfg(feature = "tracing")]
-        tracing::error!(logger = "neva", "Failed to create SSE client");
-        return;
+    #[cfg(not(feature = "client-tls"))]
+    let client = match create_client() {
+        Ok(client) => client,
+        Err(_err) => {
+            #[cfg(feature = "tracing")]
+            tracing::error!(logger = "neva", "SSE client error: {_err:#}");
+            return;
+        }
     };
     
-    client = client
-        .reconnect(
-            ReconnectOptionsBuilder::new(true)
-                .retry_initial(true)
-                .delay(std::time::Duration::from_secs(5))
-                .delay_max(std::time::Duration::from_secs(10))
-                .build(),
-        );
+    #[cfg(feature = "client-tls")]
+    let client = match create_client(tls_config) {
+        Ok(client) => client,
+        Err(_err) => {
+            #[cfg(feature = "tracing")]
+            tracing::error!(logger = "neva", "SSE client error: {_err:#}");
+            return;
+        }
+    };
+    
+    let mut resp = client
+        .get(session.url().as_str().as_ref())
+        .header(ACCEPT, "application/json, text/event-stream")
+        .header(CACHE_CONTROL, "no-cache");
+
+    if let Some(access_token) = access_token {
+        resp = resp.bearer_auth(String::from_utf8_lossy(&access_token));
+    }
 
     if let Some(session_id) = session.session_id() {
-        let Ok(with_header) = client.header(MCP_SESSION_ID, &session_id.to_string()) else { 
-            #[cfg(feature = "tracing")]
-            tracing::error!(logger = "neva", "Failed to create SSE client");
-            return;
-        };
-        client = with_header;
+        resp = resp.header(MCP_SESSION_ID, session_id.to_string());
     }
 
-    if let Some(access_token) = &access_token  {
-        let access_token = format!("Bearer {}", String::from_utf8_lossy(access_token));
-        let Ok(with_header) = client.header(AUTHORIZATION.as_str(), &access_token) else {
+    let resp = match resp.send().await {
+        Ok(resp) => resp,
+        Err(_err) => {
             #[cfg(feature = "tracing")]
-            tracing::error!(logger = "neva", "Failed to create SSE client");
+            tracing::error!(logger = "neva", "Failed to send SSE request: {}", _err);
             return;
-        };
-        client = with_header;
-    }
-    
-    #[cfg(feature = "tls")]
-    let client = if let Some(_ca_cert) = ca_cert  { 
-        client.build()
-    } else {
-        client.build()
+        }
     };
-
-    #[cfg(not(feature = "tls"))]
-    let client = client.build_http();
     
-    let mut stream = client
-        .stream()
+    let mut stream = sse_stream::SseStream::from_byte_stream(resp.bytes_stream())
         .fuse()
         .map_ok(|event| handle_event(event, &resp_tx))
         .map_err(handle_error);
-
+    
+    session.notify_sse_initialized();
+    
     let token = session.cancellation_token();
     loop {
         tokio::select! {
             biased;
             _ = token.cancelled() => break,
-            fut = stream.try_next() => {
-                let Ok(Some(fut)) = fut else {
+            fut = stream.next() => {
+                let Some(Ok(fut)) = fut else {
                     #[cfg(feature = "tracing")]
                     tracing::error!(logger = "neva", "Unexpected stream end");
                     break;
@@ -234,39 +243,55 @@ async fn handle_sse_connection(
     }
 }
 
-async fn handle_event(event: SSE, resp_tx: &mpsc::Sender<Result<Message, Error>>) {
-    match event {
-        SSE::Connected(_) => handle_connected(),
-        SSE::Comment(comment) => handle_comment(comment),
-        SSE::Event(event) => handle_msg(event, resp_tx).await,
+async fn handle_event(event: sse_stream::Sse, resp_tx: &mpsc::Sender<Result<Message, Error>>) {
+    if event.is_message() {
+        handle_msg(event, resp_tx).await
+    } else { 
+        #[cfg(feature = "tracing")]
+        tracing::debug!(logger = "neva", event = ?event);
     }
 }
 
 #[inline]
-fn handle_error(_err: eventsource_client::Error) {
+fn handle_error(_err: sse_stream::Error) {
     #[cfg(feature = "tracing")]
     tracing::error!(logger = "neva", "SSE Error: {}", _err);
 }
 
 #[inline]
-fn handle_connected() {
-    #[cfg(feature = "tracing")]
-    tracing::trace!(logger = "neva", "SSE Connection opened");
-}
-
-#[inline]
-fn handle_comment(_comment: String) {
-    #[cfg(feature = "tracing")]
-    tracing::trace!(logger = "neva", "Received a comment: {}", _comment);
-}
-
-#[inline]
-async fn handle_msg(event: eventsource_client::Event, resp_tx: &mpsc::Sender<Result<Message, Error>>) {
-    let msg = serde_json::from_str::<Message>(&event.data);
+async fn handle_msg(event: sse_stream::Sse, resp_tx: &mpsc::Sender<Result<Message, Error>>) {
+    let msg = serde_json::from_str::<Message>(&event.data.unwrap());
     if let Err(_err) = resp_tx.send(msg.map_err(Error::from)).await {
         #[cfg(feature = "tracing")]
         tracing::error!(logger = "neva", "Failed to send server request: {}", _err);
     }
+}
+
+#[inline]
+#[cfg(not(feature = "client-tls"))]
+fn create_client() -> Result<reqwest::Client, Error> {
+    reqwest::Client::builder()
+        .build()
+        .map_err(Error::from)
+}
+
+#[inline]
+#[cfg(feature = "client-tls")]
+fn create_client(mut tls_config: Option<ClientTlsConfig>) -> Result<reqwest::Client, Error> {
+    let mut builder = reqwest::ClientBuilder::new();
+    if let Some(ca_cert) = tls_config
+        .as_mut()
+        .and_then(|tls| tls.ca.take()) {
+        builder = builder.add_root_certificate(ca_cert);
+    }
+    if let Some(identity) = tls_config
+        .as_mut()
+        .and_then(|tls| tls.identity.take()) {
+        builder = builder.identity(identity);
+    }
+    builder
+        .build()
+        .map_err(Error::from)
 }
 
 impl From<reqwest::Error> for Error {
