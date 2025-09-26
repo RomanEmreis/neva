@@ -118,7 +118,7 @@ fn create_job_object_with_kill_on_close(command: &str, args: Vec<&str>) -> Resul
         AssignProcessToJobObject(job, process_handle)?;
 
         if ResumeThread(thread_handle) == u32::MAX {
-            return Err(Error::from_win32());
+            return Err(Error::from_thread());
         }
 
         CloseHandle(thread_handle)?;
@@ -126,7 +126,7 @@ fn create_job_object_with_kill_on_close(command: &str, args: Vec<&str>) -> Resul
         
         match result {
             Ok(_) => Ok((job, child)),
-            Err(_) => Err(Error::from_win32()),
+            Err(_) => Err(Error::from_thread()),
         }
     }
 }

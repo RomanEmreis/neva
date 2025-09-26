@@ -1,7 +1,10 @@
 # Neva
-Easy configurable MCP server and client SDK for Rust
 
-[![latest](https://img.shields.io/badge/latest-0.1.6-d8eb34)](https://crates.io/crates/neva)
+Blazingly fast and easily configurable [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server and client SDK for Rust.
+With simple configuration and ergonomic APIs, it provides everything you need to quickly build MCP clients and servers, 
+fully aligned with the latest MCP specification.
+
+[![latest](https://img.shields.io/badge/latest-0.1.7-d8eb34)](https://crates.io/crates/neva)
 [![latest](https://img.shields.io/badge/rustc-1.85+-964B00)](https://crates.io/crates/neva)
 [![License: MIT](https://img.shields.io/badge/License-MIT-624bd1.svg)](https://github.com/RomanEmreis/neva/blob/main/LICENSE)
 [![CI](https://github.com/RomanEmreis/neva/actions/workflows/rust.yml/badge.svg)](https://github.com/RomanEmreis/neva/actions/workflows/rust.yml)
@@ -11,16 +14,25 @@ Easy configurable MCP server and client SDK for Rust
 
 [API Docs](https://docs.rs/neva/latest/neva/) | [Examples](https://github.com/RomanEmreis/neva/tree/main/examples)
 
-## MCP Client
+## Key Features
+- **Client & Server SDK** - one library to build both MCP clients and servers with the powers of Rust.
+- **Performance** - asynchronous and Tokio-powered.
+- **Transports** - **stdio** for local integrations and **Streamable HTTP** for remote, bidirectional communication.
+- **Tools**, **Resources** & **Prompts** - full-house support for defining and consuming the main MCP entities.
+- **Authentication & Authorization** - bearer token authentication, role-based access control, and more to fit high security standards.
+- **Structured Data** - output validation, embedded resources, and resource links out of the box.
+- **Spec Alignment** - designed to track the latest MCP specification and cover its core functionality.
 
-### Dependencies
+## Quick Start
+### MCP Client
+#### Dependencies
 ```toml
 [dependencies]
 neva = { version = "0.1.6", features = ["client-full"] }
 tokio = { version = "1", features = ["full"] }
 ```
 
-### Code
+#### Code
 ```rust
 use neva::prelude::*;
 
@@ -50,16 +62,14 @@ async fn main() -> Result<(), Error> {
 }
 ```
 
-## MCP Server
-
-### Dependencies
+### MCP Server
+#### Dependencies
 ```toml
 [dependencies]
 neva = { version = "0.1.6", features = ["server-full"] }
 tokio = { version = "1", features = ["full"] }
 ```
-
-### Code
+#### Code
 ```rust
 use neva::prelude::*;
 

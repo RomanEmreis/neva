@@ -23,7 +23,11 @@ pub struct Root {
     pub uri: Uri,
     
     /// A human-readable name for the root.
-    pub name: String
+    pub name: String,
+
+    /// Metadata reserved by MCP for protocol-level metadata.
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
 }
 
 /// Represents the parameters used to request a list of roots available from the client.
@@ -84,7 +88,8 @@ impl Root {
     pub fn new(uri: &str, name: &str) -> Self {
         Self { 
             uri: Uri::from(uri.to_string()), 
-            name: name.into()
+            name: name.into(),
+            meta: None,
         }
     }
     

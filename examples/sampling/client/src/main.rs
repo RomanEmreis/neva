@@ -30,6 +30,8 @@ async fn main() -> Result<(), Error> {
     let mut client = Client::new()
         .with_options(|opt| opt
             .with_http(|http| http
+                .bind("localhost:7878")
+                .with_tls(|tls| tls.with_ca("examples/sampling/cert/dev-ca.pem"))
                 .with_auth(ACCESS_TOKEN)));
 
     client.connect().await?;

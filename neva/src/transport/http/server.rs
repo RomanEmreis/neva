@@ -17,7 +17,8 @@ use volga::{
     http::sse::Message as SseMessage, sse,
     headers::{HttpHeaders, AUTHORIZATION}
 };
-
+#[cfg(feature = "server-tls")]
+use volga::tls::TlsConfig;
 #[cfg(feature = "tracing")]
 use crate::types::notification::fmt::LOG_REGISTRY;
 
@@ -54,7 +55,13 @@ pub(super) async fn serve(
     };
     tokio::join!(
         dispatch(pending.clone(), registry.clone(), rt.rx, token.clone()),
-        handle(rt.url, rt.auth, manager, token.clone())
+        handle(
+            rt.url, 
+            rt.auth,
+            #[cfg(feature = "server-tls")]
+            rt.tls_config, 
+            manager, 
+            token.clone())
     );
 }
 
@@ -87,6 +94,8 @@ async fn dispatch(
 async fn handle(
     service_url: ServiceUrl,
     auth: Option<AuthConfig>,
+    #[cfg(feature = "server-tls")]
+    tls: Option<TlsConfig>,
     manager: RequestManager,
     token: CancellationToken
 ) {
@@ -100,6 +109,12 @@ async fn handle(
         let (auth, rules) = auth.into_parts();
         server = server.with_bearer_auth(|_| auth);
         server.authorize(rules);
+    }
+
+    #[cfg(feature = "server-tls")]
+    if let Some(tls) = tls {
+        server = server.set_tls(tls);
+        server.use_hsts();
     }
     
     server
@@ -129,7 +144,7 @@ async fn handle_session_end(manager: Dc<RequestManager>, headers: HttpHeaders) -
     ok!([(MCP_SESSION_ID, id.to_string())])
 }
 
-async fn handle_connection(manager: Dc<RequestManager>, headers: HttpHeaders) -> HttpResult {
+async fn handle_connection(headers: HttpHeaders, manager: Dc<RequestManager>) -> HttpResult {
     let Some(id) = get_mcp_session_id(&headers) else { 
         return status!(405);
     };
@@ -151,8 +166,8 @@ async fn handle_connection(manager: Dc<RequestManager>, headers: HttpHeaders) ->
 }
 
 async fn handle_message(
-    manager: Dc<RequestManager>,
     mut headers: HttpHeaders,
+    manager: Dc<RequestManager>,
     bts: Option<BearerTokenService>,
     Json(msg): Json<Message>
 ) -> HttpResult {

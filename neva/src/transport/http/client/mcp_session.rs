@@ -7,7 +7,8 @@ use crate::transport::http::ServiceUrl;
 
 /// Represents current MCP Session
 pub(super) struct McpSession {
-    notify: Notify,
+    initialized: Notify,
+    sse_ready: Notify,
     url: ServiceUrl,
     session_id: OnceCell<uuid::Uuid>,
     cancellation_token: CancellationToken
@@ -17,7 +18,8 @@ impl McpSession {
     /// Creates a new [`McpSession`]
     pub(super) fn new(url: ServiceUrl, token: CancellationToken) -> Self {
         Self {
-            notify: Notify::new(),
+            initialized: Notify::new(),
+            sse_ready: Notify::new(),
             session_id: OnceCell::new(),
             cancellation_token: token,
             url
@@ -55,13 +57,25 @@ impl McpSession {
     /// Sends a signal that this MCP Session has been initialized
     #[inline]
     pub(super) fn notify_session_initialized(&self) {
-        self.notify.notify_one();
+        self.initialized.notify_one();
+    }
+
+    /// Sends a signal that the SSE-connection has been initialized
+    #[inline]
+    pub(super) fn notify_sse_initialized(&self) {
+        self.sse_ready.notify_one();
     }
 
     /// Waits for MCP Session to be initialized
     #[inline]
     pub(super) async fn initialized(&self) {
-        self.notify.notified().await;
+        self.initialized.notified().await;
+    }
+
+    /// Waits for SSE connection to be initialized
+    #[inline]
+    pub(super) async fn sse_ready(&self) {
+        self.sse_ready.notified().await;
     }
 }
 
@@ -72,9 +86,11 @@ mod tests {
     use uuid::Uuid;
     use tokio::time::{timeout, Duration};
     use tokio_util::sync::CancellationToken;
+    use crate::transport::http::HttpProto;
 
     fn create_session() -> McpSession {
         let url = ServiceUrl {
+            proto: HttpProto::Http,
             addr: "localhost",
             endpoint: "init",
         };

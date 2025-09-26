@@ -52,7 +52,7 @@
 //! ```
 
 #[cfg(feature = "server")]
-pub use app::{App, context::Context, options};
+pub use app::{App, context::Context};
 #[cfg(feature = "client")]
 pub use client::Client;
 
@@ -106,6 +106,11 @@ pub mod prelude {
     pub use crate::error::*;
     pub use crate::json::*;
 
+    #[cfg(feature = "http-server")]
+    pub use crate::transport::HttpServer;
+    #[cfg(all(feature = "http-server", feature = "server-tls"))]
+    pub use crate::transport::http::TlsConfig;
+    
     #[cfg(feature = "server")]
     pub use crate::app::{App, context::Context, options};
     #[cfg(feature = "client")]
