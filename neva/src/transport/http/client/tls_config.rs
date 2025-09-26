@@ -4,11 +4,13 @@ use std::path::PathBuf;
 use reqwest::{Certificate, Identity};
 use crate::error::Error;
 
+/// Represents TLS configuration for MCP client
 pub struct TlsConfig {
     ca_path: Option<PathBuf>,
     cert_path: Option<PathBuf>,
 }
 
+/// Represents TLS certificates secrets
 #[derive(Clone)]
 pub(crate) struct ClientTlsConfig {
     pub(crate) ca: Option<Certificate>,

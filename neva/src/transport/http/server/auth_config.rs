@@ -8,7 +8,7 @@ use volga::auth::{
 };
 
 const ERR_NO_CLAIMS: &str = "Claims are not provided";
-const ERR_UNAUTHORIZED: &str = "Subject is not authorized to invoke this tool";
+const ERR_UNAUTHORIZED: &str = "Subject is not authorized to invoke this";
 
 /// Represents default claims
 #[derive(Default, Clone, Debug, Deserialize)]
