@@ -289,6 +289,9 @@ fn create_client(mut tls_config: Option<ClientTlsConfig>) -> Result<reqwest::Cli
         .and_then(|tls| tls.identity.take()) {
         builder = builder.identity(identity);
     }
+    if tls_config.is_some_and(|tls| !tls.certs_verification) { 
+        builder = builder.danger_accept_invalid_certs(true);        
+    } 
     builder
         .build()
         .map_err(Error::from)

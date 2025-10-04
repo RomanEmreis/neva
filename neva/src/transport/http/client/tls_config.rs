@@ -8,6 +8,7 @@ use crate::error::Error;
 pub struct TlsConfig {
     ca_path: Option<PathBuf>,
     cert_path: Option<PathBuf>,
+    certs_verification: bool,
 }
 
 /// Represents TLS certificates secrets
@@ -15,6 +16,7 @@ pub struct TlsConfig {
 pub(crate) struct ClientTlsConfig {
     pub(crate) ca: Option<Certificate>,
     pub(crate) identity: Option<Identity>,
+    pub(crate) certs_verification: bool,
 }
 
 impl Default for TlsConfig {
@@ -23,20 +25,38 @@ impl Default for TlsConfig {
         Self {
             ca_path: None,
             cert_path: None,
+            certs_verification: true,
         }
     }
 }
 
 impl TlsConfig {
-    /// Sets the path to certificate file
+    /// Sets the path to a certificate file
     pub fn with_cert(mut self, cert: impl Into<PathBuf>) -> Self {
         self.cert_path = Some(cert.into());
         self
     }
     
-    /// Sets the path to CA (Client Authority) file
+    /// Sets the path to the CA (Client Authority) file
     pub fn with_ca(mut self, path: impl Into<PathBuf>) -> Self {
         self.ca_path = Some(path.into());
+        self
+    }
+    
+    /// Controls the use of certificate validation.
+    /// Setting this to `false` disables TLS certificate validation.
+    /// 
+    /// Default: `true`.
+    ///
+    /// # Warning
+    ///
+    /// You should think very carefully before using this method. If
+    /// invalid certificates are trusted, *any* certificate for *any* site
+    /// will be trusted for use. This includes expired certificates. This
+    /// introduces significant vulnerabilities and should only be used
+    /// as a last resort.
+    pub fn with_certs_verification(mut self, certs_verification: bool) -> Self {
+        self.certs_verification = certs_verification;
         self
     }
     
@@ -60,6 +80,6 @@ impl TlsConfig {
             None
         };
 
-        Ok(ClientTlsConfig { ca, identity })
+        Ok(ClientTlsConfig { ca, identity, certs_verification: self.certs_verification })
     }
 }

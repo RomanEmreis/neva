@@ -26,7 +26,7 @@ use super::{
 };
 
 #[cfg(all(feature = "http-server", feature = "server-tls"))]
-pub use volga::tls::TlsConfig;
+pub use volga::tls::{TlsConfig, DevCertMode};
 
 #[cfg(all(feature = "http-client", feature = "client-tls"))]
 use crate::transport::http::client::tls_config::{

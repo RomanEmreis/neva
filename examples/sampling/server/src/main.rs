@@ -1,5 +1,4 @@
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::prelude::*;
 use neva::prelude::*;
 
 #[tool]
@@ -23,8 +22,7 @@ async fn main() {
     
     let http = HttpServer::new("localhost:7878")
         .with_tls(|tls| tls
-            .set_cert("examples/sampling/cert/dev-server.pem")
-            .set_key("examples/sampling/cert/dev-server.key"))
+            .with_dev_cert(DevCertMode::Auto))
         .with_auth(|auth| auth
             .validate_exp(false)
             .with_aud(["some aud"])

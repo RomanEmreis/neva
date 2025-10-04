@@ -1,8 +1,6 @@
 ﻿//! Utilities for the MCP client
 
-use std::collections::HashMap;
-use std::future::Future;
-use std::sync::Arc;
+use std::{collections::HashMap, future::Future, sync::Arc};
 use options::McpOptions;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -137,25 +135,19 @@ impl Client {
         R: Future + Send,
         R::Output: Into<CreateMessageResult>,
     {
-        let handler: SamplingHandler = Arc::new(move |params| {
-            let handler = handler.clone();
-            Box::pin(async move { handler(params).await.into() })
-        });
+        let handler: SamplingHandler = make_handler(handler);
         self.options.add_sampling_handler(handler);
         self
     }
 
-    /// Registers a handler that will be running when a "elicitation/create" request is received
+    /// Registers a handler that will be running when an "elicitation/create" request is received
     pub fn map_elicitation<F, R>(&mut self, handler: F) -> &mut Self
     where
         F: Fn(ElicitRequestParams) -> R + Clone + Send + Sync + 'static,
         R: Future + Send,
         R::Output: Into<ElicitResult>,
     {
-        let handler: ElicitationHandler = Arc::new(move |params| {
-            let handler = handler.clone();
-            Box::pin(async move { handler(params).await.into() })
-        });
+        let handler: ElicitationHandler = make_handler(handler);
         self.options.add_elicitation_handler(handler);
         self
     }
@@ -696,7 +688,7 @@ where
 {
     #[inline]
     fn into_args(self) -> Option<HashMap<String, serde_json::Value>> {
-        Some(create_args(self))
+        Some(make_args(self))
     }
 }
 
@@ -707,7 +699,7 @@ where
 {
     #[inline]
     fn into_args(self) -> Option<HashMap<String, serde_json::Value>> {
-        Some(create_args(self))
+        Some(make_args(self))
     }
 }
 
@@ -718,13 +710,13 @@ where
 {
     #[inline]
     fn into_args(self) -> Option<HashMap<String, serde_json::Value>> {
-        Some(create_args(self))
+        Some(make_args(self))
     }
 }
 
 /// Creates arguments for tools and prompts from iterator
 #[inline]
-fn create_args<I, K, T>(args: I) -> HashMap<String, serde_json::Value>
+fn make_args<I, K, T>(args: I) -> HashMap<String, serde_json::Value>
 where
     I: IntoIterator<Item = (K, T)>,
     K: Into<String>,
@@ -734,3 +726,24 @@ where
         .into_iter()
         .map(|(k, v)| (k.into(), serde_json::to_value(v).unwrap())))
 }
+
+#[inline]
+fn make_handler<F, R, P, O>(handler: F) -> Handler<P, O>
+where
+    F: Fn(P) -> R + Clone + Send + Sync + 'static,
+    R: Future + Send,
+    R::Output: Into<O>,
+    P: Send + 'static,
+    O: Send + 'static,
+{
+    Arc::new(move |params: P| {
+        let handler = handler.clone();
+        Box::pin(async move { handler(params).await.into() })
+    })
+}
+
+type Handler<P, O> = Arc<
+    dyn Fn(P) -> std::pin::Pin<Box<dyn Future<Output = O> + Send>>
+    + Send
+    + Sync
+>;
