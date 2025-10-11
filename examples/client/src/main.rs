@@ -8,9 +8,8 @@ use std::time::Duration;
 use neva::prelude::*;
 use tracing_subscriber::prelude::*;
 
-#[derive(Debug)]
 #[allow(dead_code)]
-#[json_schema(de)]
+#[json_schema(de, debug)]
 struct Weather {
     conditions: String,
     temperature: f32,
@@ -40,8 +39,8 @@ async fn main() -> Result<(), Error> {
     }
     
     // Call a tool
-    let args = ("message", "Hello MCP!");
     tracing::info!("--- CALL TOOL ---");
+    let args = ("message", "Hello MCP!");
     let result = client.call_tool("echo", args).await?;
     tracing::info!("{:?}", result.content);
 
@@ -50,9 +49,9 @@ async fn main() -> Result<(), Error> {
     let tool = tools.get("structuredContent").unwrap();
     let args = ("location", "London");
     let result = client.call_tool(&tool.name, args).await?;
-    let weather = tool
+    let weather: Weather = tool
         .validate(&result)
-        .and_then(|res| res.as_json::<Weather>())?;
+        .and_then(|res| res.as_json())?;
     tracing::info!("{:?}", weather);
     
     // List resources

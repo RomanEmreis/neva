@@ -9,7 +9,7 @@ struct Contact {
 }
 
 #[elicitation]
-async fn elicitation_handler(params: ElicitRequestParams) -> ElicitResult {
+async fn elicitation_handler(params: ElicitRequestParams) -> impl Into<ElicitResult> {
     let contact = Contact {
         name: "John".to_string(),
         email: "john@email.com".to_string(),
@@ -17,7 +17,6 @@ async fn elicitation_handler(params: ElicitRequestParams) -> ElicitResult {
     };
     elicitation::Validator::new(params)
         .validate(contact)
-        .into()
 }
 
 #[tokio::main]

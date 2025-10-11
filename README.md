@@ -4,7 +4,7 @@ Blazingly fast and easily configurable [Model Context Protocol (MCP)](https://mo
 With simple configuration and ergonomic APIs, it provides everything you need to quickly build MCP clients and servers, 
 fully aligned with the latest MCP specification.
 
-[![latest](https://img.shields.io/badge/latest-0.1.8-d8eb34)](https://crates.io/crates/neva)
+[![latest](https://img.shields.io/badge/latest-0.1.9-d8eb34)](https://crates.io/crates/neva)
 [![latest](https://img.shields.io/badge/rustc-1.85+-964B00)](https://crates.io/crates/neva)
 [![License: MIT](https://img.shields.io/badge/License-MIT-624bd1.svg)](https://github.com/RomanEmreis/neva/blob/main/LICENSE)
 [![CI](https://github.com/RomanEmreis/neva/actions/workflows/rust.yml/badge.svg)](https://github.com/RomanEmreis/neva/actions/workflows/rust.yml)
@@ -12,7 +12,7 @@ fully aligned with the latest MCP specification.
 
 > 💡 **Note**: This project is currently in preview. Breaking changes can be introduced without prior notice.
 
-[API Docs](https://docs.rs/neva/latest/neva/) | [Examples](https://github.com/RomanEmreis/neva/tree/main/examples)
+[Tutorial](https://romanemreis.github.io/neva-docs/) | [API Docs](https://docs.rs/neva/latest/neva/) | [Examples](https://github.com/RomanEmreis/neva/tree/main/examples)
 
 ## Key Features
 - **Client & Server SDK** - one library to build both MCP clients and servers with the powers of Rust.
@@ -28,7 +28,7 @@ fully aligned with the latest MCP specification.
 #### Dependencies
 ```toml
 [dependencies]
-neva = { version = "0.1.8", features = ["client-full"] }
+neva = { version = "0.1.9", features = ["client-full"] }
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -66,7 +66,7 @@ async fn main() -> Result<(), Error> {
 #### Dependencies
 ```toml
 [dependencies]
-neva = { version = "0.1.8", features = ["server-full"] }
+neva = { version = "0.1.9", features = ["server-full"] }
 tokio = { version = "1", features = ["full"] }
 ```
 #### Code

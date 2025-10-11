@@ -220,6 +220,18 @@ impl From<&str> for PromptArgument {
 }
 
 #[cfg(feature = "server")]
+impl From<Box<str>> for PromptArgument {
+    #[inline]
+    fn from(name: Box<str>) -> Self {
+        Self {
+            name: name.into(),
+            descr: None,
+            required: Some(true)
+        }
+    }
+}
+
+#[cfg(feature = "server")]
 impl From<Value> for PromptArgument {
     #[inline]
     fn from(json: Value) -> Self {
@@ -241,17 +253,17 @@ impl From<String> for PromptArgument {
 }
 
 #[cfg(feature = "server")]
-impl From<(&str, &str)> for PromptArgument {
+impl<T: Into<String>> From<(T, T)> for PromptArgument {
     #[inline]
-    fn from((name, description): (&str, &str)) -> Self {
+    fn from((name, description): (T, T)) -> Self {
         Self::required(name, description)
     }
 }
 
 #[cfg(feature = "server")]
-impl From<(&str, &str, bool)> for PromptArgument {
+impl<T: Into<String>> From<(T, T, bool)> for PromptArgument {
     #[inline]
-    fn from((name, description, required): (&str, &str, bool)) -> Self {
+    fn from((name, description, required): (T, T, bool)) -> Self {
         Self {
             name: name.into(),
             descr: Some(description.into()),
@@ -333,7 +345,7 @@ impl GetPromptRequestParams {
 impl Prompt {
     /// Creates a new [`Prompt`]
     #[inline]
-    pub fn new<F, R, Args>(name: &str, handler: F) -> Self
+    pub fn new<F, R, Args>(name: impl Into<String>, handler: F) -> Self
     where
         F: PromptHandler<Args, Output = R>,
         R: TryInto<GetPromptResult> + Send + 'static,
@@ -357,13 +369,13 @@ impl Prompt {
     }
     
     /// Sets a [`Prompt`] title
-    pub fn with_title(&mut self, title: &str) -> &mut Self {
+    pub fn with_title(&mut self, title: impl Into<String>) -> &mut Self {
         self.title = Some(title.into());
         self
     }
     
     /// Sets a [`Prompt`] description
-    pub fn with_description(&mut self, descr: &str) -> &mut Self {
+    pub fn with_description(&mut self, descr: impl Into<String>) -> &mut Self {
         self.descr = Some(descr.into());
         self
     }
@@ -443,7 +455,7 @@ impl PromptArgument {
     }
     
     /// Creates a new required [`PromptArgument`]
-    pub fn required(name: &str, descr: &str) -> Self {
+    pub fn required<T: Into<String>>(name: T, descr: T) -> Self {
         Self {
             name: name.into(),
             descr: Some(descr.into()),
@@ -452,7 +464,7 @@ impl PromptArgument {
     }
 
     /// Creates a new required [`PromptArgument`]
-    pub fn optional(name: &str, descr: &str) -> Self {
+    pub fn optional<T: Into<String>>(name: T, descr: T) -> Self {
         Self {
             name: name.into(),
             descr: Some(descr.into()),

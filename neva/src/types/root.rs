@@ -75,9 +75,13 @@ impl From<Vec<Root>> for ListRootsResult {
     }
 }
 
-impl From<(&str, &str)> for Root {
+impl<U, N> From<(U, N)> for Root
+where
+    U: Into<Uri>,
+    N: Into<String>,
+{
     #[inline]
-    fn from(parts: (&str, &str)) -> Self {
+    fn from(parts: (U, N)) -> Self {
         let (uri, name) = parts;
         Self::new(uri, name)
     }
@@ -85,9 +89,9 @@ impl From<(&str, &str)> for Root {
 
 impl Root {
     /// Creates a new [`Root`]
-    pub fn new(uri: &str, name: &str) -> Self {
+    pub fn new(uri: impl Into<Uri>, name: impl Into<String>) -> Self {
         Self { 
-            uri: Uri::from(uri.to_string()), 
+            uri: uri.into(), 
             name: name.into(),
             meta: None,
         }

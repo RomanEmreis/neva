@@ -87,7 +87,7 @@ impl Client {
     /// # client.disconnect().await
     /// # }
     /// ```    
-    pub fn add_root(&mut self, uri: &str, name: &str) -> &mut Self {
+    pub fn add_root(&mut self, uri: impl Into<Uri>, name: impl Into<String>) -> &mut Self {
         self.options.add_root(Root::new(uri, name));
         self.publish_roots_changed();
         self
@@ -402,8 +402,45 @@ impl Client {
     ///
     ///     client.disconnect().await
     /// }
-    /// ``` 
-    pub async fn call_tool<Args: IntoArgs>(&mut self, name: &str, args: Args) -> Result<CallToolResponse, Error> {
+    /// ```
+    ///
+    /// # Structured output
+    /// ```no_run
+    /// use neva::prelude::*;
+    /// 
+    /// #[json_schema(de)]
+    /// struct Weather {
+    ///     conditions: String,
+    ///     temperature: f32,
+    ///     humidity: f32,
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let mut client = Client::new();
+    ///
+    ///     client.connect().await?;
+    ///
+    ///     let tools = client.list_tools(None).await?;
+    /// 
+    ///     // Get the tool by name
+    ///     let tool: &Tool = tools.get("weather-forecast")
+    ///         .expect("Weather forecast tool not found");
+    /// 
+    ///     let args = ("location", "London");
+    ///     let result = client.call_tool("weather-forecast", args).await?;
+    /// 
+    ///     // Validate the output structure and deserialize the result
+    ///     let weather: Weather = tool
+    ///         .validate(&result)
+    ///         .and_then(|res| res.as_json())?;
+    ///     
+    ///     // Do something with the result
+    ///
+    ///     client.disconnect().await
+    /// }
+    /// ```
+    pub async fn call_tool<Args: IntoArgs>(&mut self, name: impl Into<String>, args: Args) -> Result<CallToolResponse, Error> {
         let id = self.generate_id()?;
         let request = Request::new(
             Some(id.clone()),
@@ -479,7 +516,7 @@ impl Client {
     ///     client.disconnect().await
     /// }
     /// ``` 
-    pub async fn get_prompt<Args: IntoArgs>(&mut self, name: &str, args: Args) -> Result<GetPromptResult, Error> {
+    pub async fn get_prompt<Args: IntoArgs>(&mut self, name: impl Into<String>, args: Args) -> Result<GetPromptResult, Error> {
         let id = self.generate_id()?;
         let request = Request::new(
             Some(id.clone()),
@@ -542,8 +579,9 @@ impl Client {
     }
     
     /// Maps the `handler` to a specific `event`
-    pub fn subscribe<F, R>(&mut self, event: &str, handler: F)
+    pub fn subscribe<E, F, R>(&mut self, event: E, handler: F)
     where
+        E: Into<String>,
         F: Fn(Notification) -> R + Clone + Send + Sync + 'static,
         R: Future<Output = ()> + Send
     {
@@ -554,7 +592,7 @@ impl Client {
     }
     
     /// Unsubscribe a handler from the `event`
-    pub fn unsubscribe(&mut self, event: &str) {
+    pub fn unsubscribe(&mut self, event: impl AsRef<str>) {
         if let Some(notification_handler) = &self.options.notification_handler {
             notification_handler.unsubscribe(event);
         } 

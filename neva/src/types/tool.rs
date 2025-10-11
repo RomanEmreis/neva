@@ -281,8 +281,8 @@ impl ListToolsResult {
 impl ListToolsResult {
     /// Get tool by name
     #[inline]
-    pub fn get(&self, name: &str) -> Option<&Tool> {
-        self.get_by(|t| t.name == name)
+    pub fn get(&self, name: impl AsRef<str>) -> Option<&Tool> {
+        self.get_by(|t| t.name == name.as_ref())
     }
 
     /// Get tool by condition
@@ -523,7 +523,7 @@ impl CallToolRequestParams {
 #[cfg(feature = "server")]
 impl Tool {
     /// Initializes a new [`Tool`]
-    pub fn new<F, Args, R>(name: &str, handler: F) -> Self 
+    pub fn new<F, Args, R>(name: impl Into<String>, handler: F) -> Self 
     where
         F: ToolHandler<Args, Output = R>,
         R: Into<CallToolResponse> + Send + 'static,
