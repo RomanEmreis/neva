@@ -32,6 +32,20 @@ async fn say_hello_to(name: String) -> String {
 
 #[tool(
     descr = "Say from JSON",
+    input_schema = r#"{
+        "properties": {
+            "arg": { 
+                "type": "object", 
+                "description": "A message in JSON format", 
+                "properties": {
+                    "say": { "type": "string", "description": "A message to say" },
+                    "name": { "type": "string", "description": "A name to whom say Hello" }
+                },
+                "required": ["say", "name"] 
+            }
+        },
+        "required": ["arg"]
+    }"#,
     output_schema = r#"{
         "properties": {
             "message": { "type": "string", "description": "A message to say" }

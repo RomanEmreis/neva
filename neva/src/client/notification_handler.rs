@@ -24,8 +24,9 @@ pub(super) struct NotificationsHandler {
 
 impl NotificationsHandler {
     /// Subscribes to the `event` with the `handler` 
-    pub(super) fn subscribe<F, R>(&self, event: &str, handler: F)
+    pub(super) fn subscribe<E, F, R>(&self, event: E, handler: F)
     where
+        E: Into<String>,
         F: Fn(Notification) -> R + Clone + Send + Sync + 'static,
         R: Future<Output = ()> + Send,
     {
@@ -41,11 +42,11 @@ impl NotificationsHandler {
     }
     
     /// Unsubscribes from the `event`
-    pub(super) fn unsubscribe(&self, event: &str) {
+    pub(super) fn unsubscribe(&self, event: impl AsRef<str>) {
         tokio::task::block_in_place(|| {
             self.handlers
                 .blocking_write()
-                .remove(event);
+                .remove(event.as_ref());
         });
     }
     

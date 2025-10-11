@@ -149,7 +149,7 @@ impl App {
     /// # app.run().await;
     /// # }
     /// ```
-    pub fn map_handler<F, R, Args>(&mut self, name: &str, handler: F) -> &mut Self
+    pub fn map_handler<F, R, Args>(&mut self, name: impl Into<String>, handler: F) -> &mut Self
     where 
         F: GenericHandler<Args, Output = R>,
         R: IntoResponse + Send + 'static,
@@ -178,7 +178,7 @@ impl App {
     /// # app.run().await;
     /// # }
     /// ```
-    pub fn map_tool<F, R, Args>(&mut self, name: &str, handler: F) -> &mut Tool
+    pub fn map_tool<F, R, Args>(&mut self, name: impl Into<String>, handler: F) -> &mut Tool
     where
         F: ToolHandler<Args, Output = R>,
         R: Into<CallToolResponse> + Send + 'static,
@@ -210,7 +210,12 @@ impl App {
     /// # app.run().await;
     /// # }
     /// ```
-    pub fn map_resource<F, R, Args>(&mut self, uri: impl Into<Uri>, name: &str, handler: F) -> &mut ResourceTemplate
+    pub fn map_resource<F, R, Args>(
+        &mut self, 
+        uri: impl Into<Uri>, 
+        name: impl Into<String>, 
+        handler: F
+    ) -> &mut ResourceTemplate
     where
         F: GenericHandler<Args, Output = R>,
         R: TryInto<ReadResourceResult> + Send + 'static,
@@ -240,7 +245,7 @@ impl App {
     /// # app.run().await;
     /// # }
     /// ```
-    pub fn map_prompt<F, R, Args>(&mut self, name: &str, handler: F) -> &mut Prompt
+    pub fn map_prompt<F, R, Args>(&mut self, name: impl Into<String>, handler: F) -> &mut Prompt
     where
         F: PromptHandler<Args, Output = R>,
         R: TryInto<GetPromptResult> + Send + 'static,
