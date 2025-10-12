@@ -21,7 +21,7 @@ pub struct ReadResourceResult {
 /// Represents the content of a resource.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ResourceContents {
     Text(TextResourceContents),
@@ -32,7 +32,7 @@ pub enum ResourceContents {
 /// Represents a blob resource content
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlobResourceContents {
     /// The URI of the resource.
     pub uri: Uri,
@@ -69,7 +69,7 @@ pub struct BlobResourceContents {
 /// Represents a text resource content
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextResourceContents {
     /// The URI of the resource.
     pub uri: Uri,
@@ -99,7 +99,7 @@ pub struct TextResourceContents {
 }
 
 /// Represents an empty/unknown resource content
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmptyResourceContents {
     /// The URI of the resource.
     pub uri: Uri,

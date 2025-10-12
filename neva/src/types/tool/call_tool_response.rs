@@ -113,6 +113,14 @@ impl From<String> for CallToolResponse {
 }
 
 #[cfg(feature = "server")]
+impl From<Content> for CallToolResponse {
+    #[inline]
+    fn from(content: Content) -> Self {
+        Self::new(content)
+    }
+}
+
+#[cfg(feature = "server")]
 impl<T: Serialize> From<Json<T>> for CallToolResponse {
     #[inline]
     fn from(value: Json<T>) -> Self {
