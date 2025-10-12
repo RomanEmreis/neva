@@ -87,3 +87,13 @@ async fn say_out_json(say: String, name: String) -> Json<Results> {
 async fn tool_error() -> Result<String, Error> {
     Err(Error::from(ErrorCode::InternalError))
 }
+
+#[tool(descr = "Resource metadata")]
+async fn read_resource(ctx: Context, res: Uri) -> Result<Content, Error> {
+    let result = ctx.resource(res).await?;
+    let resource = result.contents
+        .first()
+        .cloned()
+        .expect("No resource contents");
+    Ok(Content::resource(resource))
+}
