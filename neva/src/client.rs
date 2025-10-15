@@ -247,6 +247,45 @@ impl Client {
         self.send_notification(crate::types::notification::commands::INITIALIZED, None).await
     }
     
+    /// Sends a ping to the MCP server
+    pub async fn ping(&mut self) -> Result<Response, Error> {
+        self.command::<()>(crate::commands::PING, None).await
+    }
+    
+    /// Sends a command to the MCP server
+    /// 
+    /// # Example
+    /// ```no_run
+    /// use neva::prelude::*;
+    /// 
+    /// #[derive(serde::Serialize)]
+    /// struct MyCommandParams {
+    ///     param: String,
+    /// }
+    /// 
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let mut client = Client::new();
+    ///
+    ///     client.connect().await?;
+    ///
+    ///     let params = MyCommandParams { param: "Hello MCP!".to_string() };
+    ///     let tools = client.command("my-command", Some(params)).await?;
+    ///
+    ///     client.disconnect().await
+    /// }
+    /// ```
+    #[inline]
+    pub async fn command<T: Serialize>(
+        &mut self, 
+        command: impl Into<String>, 
+        params: Option<T>
+    ) -> Result<Response, Error> {
+        let id = self.generate_id()?;
+        let request = Request::new(Some(id), command, params);
+        self.send_request(request).await
+    }
+    
     /// Requests a list of tools that MCP server provides
     ///
     /// # Example
@@ -270,17 +309,12 @@ impl Client {
     /// }
     /// ``` 
     pub async fn list_tools(&mut self, cursor: Option<Cursor>) -> Result<ListToolsResult, Error> {
-        let id = self.generate_id()?;
-        let request = Request::new(
-            Some(id),
-            crate::types::tool::commands::LIST,
-            Some(ListToolsRequestParams { cursor }));
-
-        self.send_request(request)
+        let params = ListToolsRequestParams { cursor };
+        self.command(crate::types::tool::commands::LIST, Some(params))
             .await?
             .into_result()
     }
-
+    
     /// Requests a list of resources that MCP server provides
     ///
     /// # Example
@@ -304,13 +338,8 @@ impl Client {
     /// }
     /// ``` 
     pub async fn list_resources(&mut self, cursor: Option<Cursor>) -> Result<ListResourcesResult, Error> {
-        let id = self.generate_id()?;
-        let request = Request::new(
-            Some(id),
-            crate::types::resource::commands::LIST, 
-            Some(ListResourcesRequestParams { cursor }));
-
-        self.send_request(request)
+        let params = ListResourcesRequestParams { cursor };
+        self.command(crate::types::resource::commands::LIST, Some(params))
             .await?
             .into_result()
     }
@@ -338,13 +367,8 @@ impl Client {
     /// }
     /// ``` 
     pub async fn list_resource_templates(&mut self, cursor: Option<Cursor>) -> Result<ListResourceTemplatesResult, Error> {
-        let id = self.generate_id()?;
-        let request = Request::new(
-            Some(id),
-            crate::types::resource::commands::TEMPLATES_LIST,
-            Some(ListResourceTemplatesRequestParams { cursor }));
-
-        self.send_request(request)
+        let params = ListResourceTemplatesRequestParams { cursor };
+        self.command(crate::types::resource::commands::TEMPLATES_LIST, Some(params))
             .await?
             .into_result()
     }
@@ -372,13 +396,8 @@ impl Client {
     /// }
     /// ``` 
     pub async fn list_prompts(&mut self, cursor: Option<Cursor>) -> Result<ListPromptsResult, Error> {
-        let id = self.generate_id()?;
-        let request = Request::new(
-            Some(id),
-            crate::types::prompt::commands::LIST,
-            Some(ListPromptsRequestParams { cursor }));
-
-        self.send_request(request)
+        let params = ListPromptsRequestParams { cursor };
+        self.command(crate::types::prompt::commands::LIST, Some(params))
             .await?
             .into_result()
     }
@@ -542,14 +561,12 @@ impl Client {
             ));
         }
         
-        let id = self.generate_id()?;
-        let request = Request::new(
-            Some(id.clone()),
-            crate::types::resource::commands::SUBSCRIBE,
-            Some(SubscribeRequestParams::from(uri))
-        );
-        let response = self.send_request(request).await?;
-        match response {
+        let params = SubscribeRequestParams::from(uri);
+        let resp = self
+            .command(crate::types::resource::commands::SUBSCRIBE, Some(params))
+            .await?;
+        
+        match resp {
             Response::Ok(_) => Ok(()),
             Response::Err(err) => Err(err.error.into()),
         }
@@ -564,15 +581,12 @@ impl Client {
             ));
         }
 
-        let id = self.generate_id()?;
-        let request = Request::new(
-            Some(id.clone()),
-            crate::types::resource::commands::UNSUBSCRIBE,
-            Some(UnsubscribeRequestParams::from(uri))
-        );
-
-        let response = self.send_request(request).await?;
-        match response {
+        let params = UnsubscribeRequestParams::from(uri);
+        let resp = self
+            .command(crate::types::resource::commands::UNSUBSCRIBE, Some(params))
+            .await?;
+        
+        match resp {
             Response::Ok(_) => Ok(()),
             Response::Err(err) => Err(err.error.into()),
         }
