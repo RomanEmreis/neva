@@ -17,7 +17,8 @@ use super::helpers::TypeCategory;
 use crate::error::{Error, ErrorCode};
 #[cfg(feature = "server")]
 use crate::types::FromRequest;
-
+#[cfg(feature = "server")]
+use crate::shared;
 #[cfg(feature = "server")]
 use crate::types::{IntoResponse, Page, PropertyType, Request, RequestId, Response};
 
@@ -334,6 +335,21 @@ where
 
 #[cfg(feature = "server")]
 impl GetPromptRequestParams {
+    /// Creates a new [`GetPromptRequestParams`] for the given tool name
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            args: None,
+            meta: None
+        }
+    }
+
+    /// Specifies tool arguments
+    pub fn with_args<Args: shared::IntoArgs>(mut self, args: Args) -> Self {
+        self.args = args.into_args();
+        self
+    }
+    
     /// Includes [`Context`] into request metadata. If metadata is `None` it creates a new.
     pub(crate) fn with_context(mut self, ctx: Context) -> Self {
         self.meta.get_or_insert_default().context = Some(ctx);

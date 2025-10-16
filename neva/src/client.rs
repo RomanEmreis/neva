@@ -1,6 +1,6 @@
 ﻿//! Utilities for the MCP client
 
-use std::{collections::HashMap, future::Future, sync::Arc};
+use std::{future::Future, sync::Arc};
 use options::McpOptions;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -459,7 +459,15 @@ impl Client {
     ///     client.disconnect().await
     /// }
     /// ```
-    pub async fn call_tool<Args: IntoArgs>(&mut self, name: impl Into<String>, args: Args) -> Result<CallToolResponse, Error> {
+    pub async fn call_tool<N, Args>(
+        &mut self, 
+        name: N, 
+        args: Args
+    ) -> Result<CallToolResponse, Error>
+    where
+        N: Into<String>,
+        Args: shared::IntoArgs
+    {
         let id = self.generate_id()?;
         let request = Request::new(
             Some(id.clone()),
@@ -535,7 +543,15 @@ impl Client {
     ///     client.disconnect().await
     /// }
     /// ``` 
-    pub async fn get_prompt<Args: IntoArgs>(&mut self, name: impl Into<String>, args: Args) -> Result<GetPromptResult, Error> {
+    pub async fn get_prompt<N, Args>(
+        &mut self, 
+        name: N,
+        args: Args
+    ) -> Result<GetPromptResult, Error>
+    where
+        N: Into<String>,
+        Args: shared::IntoArgs
+    {
         let id = self.generate_id()?;
         let request = Request::new(
             Some(id.clone()),
@@ -699,84 +715,6 @@ impl Client {
             shared::wait_for_shutdown_signal(token);
         };
     }
-}
-
-/// A trait describes arguments for tools and prompts
-pub trait IntoArgs {
-    fn into_args(self) -> Option<HashMap<String, serde_json::Value>>;
-}
-
-impl IntoArgs for () {
-    #[inline]
-    fn into_args(self) -> Option<HashMap<String, serde_json::Value>> {
-        None
-    }
-}
-
-impl<T: IntoArgs> IntoArgs for Option<T> {
-    #[inline]
-    fn into_args(self) -> Option<HashMap<String, serde_json::Value>> {
-        self.and_then(|args| args.into_args())
-    }
-}
-
-impl<K, T> IntoArgs for (K, T)
-where
-    K: Into<String>,
-    T: Serialize,
-{
-    #[inline]
-    fn into_args(self) -> Option<HashMap<String, serde_json::Value>> {
-        Some(HashMap::from([
-            (self.0.into(), serde_json::to_value(self.1).unwrap())
-        ]))
-    }
-}
-
-impl<K, T, const N: usize> IntoArgs for [(K, T); N]
-where
-    K: Into<String>,
-    T: Serialize,
-{
-    #[inline]
-    fn into_args(self) -> Option<HashMap<String, serde_json::Value>> {
-        Some(make_args(self))
-    }
-}
-
-impl<K, T> IntoArgs for Vec<(K, T)>
-where
-    K: Into<String>,
-    T: Serialize,
-{
-    #[inline]
-    fn into_args(self) -> Option<HashMap<String, serde_json::Value>> {
-        Some(make_args(self))
-    }
-}
-
-impl<K, T> IntoArgs for HashMap<K, T>
-where
-    K: Into<String>,
-    T: Serialize,
-{
-    #[inline]
-    fn into_args(self) -> Option<HashMap<String, serde_json::Value>> {
-        Some(make_args(self))
-    }
-}
-
-/// Creates arguments for tools and prompts from iterator
-#[inline]
-fn make_args<I, K, T>(args: I) -> HashMap<String, serde_json::Value>
-where
-    I: IntoIterator<Item = (K, T)>,
-    K: Into<String>,
-    T: Serialize,
-{
-    HashMap::from_iter(args
-        .into_iter()
-        .map(|(k, v)| (k.into(), serde_json::to_value(v).unwrap())))
 }
 
 #[inline]

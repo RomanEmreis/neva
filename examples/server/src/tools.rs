@@ -2,13 +2,13 @@
 
 use neva::prelude::*;
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct Payload {
     say: String,
     name: String,
 }
 
-#[json_schema(ser)]
+#[json_schema(serde)]
 struct Results {
     message: String,
 }
@@ -96,4 +96,20 @@ async fn read_resource(ctx: Context, res: Uri) -> Result<Content, Error> {
         .next()
         .expect("No resource contents");
     Ok(Content::resource(resource))
+}
+
+#[tool(descr = "call a tool from tool")]
+async fn call_say_hello_tool(ctx: Context, say: String, name: String) -> Result<Json<Results>, Error> {
+    let arg = ("arg", Payload { say, name });
+    ctx.tool("say_json").await?
+        .call(arg).await?
+        .as_json()
+}
+
+#[tool(descr = "call a prompt from a tool")]
+async fn call_analyze_prompt(ctx: Context, lang: String) -> Result<Vec<PromptMessage>, Error> {
+    let arg = ("lang", lang);
+    ctx.prompt("analyze_code").await?
+        .get(arg).await
+        .map(|p| p.messages)
 }

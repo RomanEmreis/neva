@@ -3,6 +3,7 @@
 use tokio::time::timeout;
 use crate::error::{Error, ErrorCode};
 use crate::transport::Sender;
+use crate::shared::IntoArgs;
 use super::{options::{McpOptions, RuntimeMcpOptions}, handler::RequestHandler};
 use crate::{
     shared::RequestQueue,
@@ -147,7 +148,76 @@ impl Context {
         let uri = uri.into();
         let params = ReadResourceRequestParams::from(uri);
         self.clone()
-            .read_resource(params).await
+            .read_resource(params)
+            .await
+    }
+
+    /// Returns a tool handle that registered in the current MCP Server
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(feature = "server-macros")] {
+    /// use neva::prelude::*;
+    ///
+    /// #[tool]
+    /// async fn read_file(path: String) -> Result<String, Error> {
+    ///     // read the file
+    /// 
+    /// # Ok(String::new())
+    /// }
+    /// 
+    /// #[tool]
+    /// async fn summarize_document(mut ctx: Context, path: String) -> Result<(), Error> {
+    ///     let tool = ctx.tool("read_file").await?;
+    ///     let resp = tool.call(("path", path)).await?;
+    ///     
+    ///     // do something
+    ///
+    /// # Ok(())
+    /// }
+    /// # }
+    /// ```
+    pub async fn tool<N>(&self, name: N) -> Result<ToolContext, Error>
+    where
+        N: Into<String> + AsRef<str>,
+    {
+        self.clone()
+            .get_tool_ctx(name.as_ref())
+            .await
+    }
+
+    /// Returns a prompt handle that registered in the current MCP Server
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(feature = "server-macros")] {
+    /// use neva::prelude::*;
+    ///
+    /// #[prompt]
+    /// async fn summarize(path: String) -> PromptMessage {
+    ///     // read the file
+    ///
+    /// # PromptMessage::user()
+    /// }
+    ///
+    /// #[tool]
+    /// async fn summarize_document(mut ctx: Context, path: String) -> Result<(), Error> {
+    ///     let prompt = ctx.prompt("summarize").await?;
+    ///     let resp = prompt.get(("path", path)).await?;
+    ///     
+    ///     // do something
+    ///
+    /// # Ok(())
+    /// }
+    /// # }
+    /// ```
+    pub async fn prompt<N>(&self, name: N) -> Result<PromptContext, Error>
+    where
+        N: Into<String> + AsRef<str>,
+    {
+        self.clone()
+            .get_prompt_ctx(name.as_ref())
+            .await
     }
     
     /// Adds a new resource and notifies clients
@@ -317,30 +387,36 @@ impl Context {
 
     #[inline]
     pub(crate) async fn get_prompt(self, params: GetPromptRequestParams) -> Result<GetPromptResult, Error> {
-        let opt = self.options.clone();
-        match opt.get_prompt(&params.name).await {
-            None => Err(Error::new(ErrorCode::InvalidParams, "Prompt not found")),
-            Some(prompt) => {
-                #[cfg(feature = "http-server")]
-                self.validate_claims(prompt.roles.as_deref(), prompt.permissions.as_deref())?;
-                prompt.call(params.with_context(self).into()).await
-            },
+        match self.get_prompt_ctx(&params.name).await {
+            Err(err) => Err(err),
+            Ok(ctx) => ctx.get_impl(params).await
         }
     }
 
     #[inline]
     pub(crate) async fn call_tool(self, params: CallToolRequestParams) -> Result<CallToolResponse, Error> {
-        let opt = self.options.clone();
-        match opt.get_tool(&params.name).await {
-            None => Err(Error::new(ErrorCode::InvalidParams, "Tool not found")),
-            Some(tool) => {
-                #[cfg(feature = "http-server")]
-                self.validate_claims(tool.roles.as_deref(), tool.permissions.as_deref())?;
-                tool.call(params.with_context(self).into()).await
-            }
+        match self.get_tool_ctx(&params.name).await { 
+            Err(err) => Err(err),
+            Ok(ctx) => ctx.call_impl(params).await
         }
     }
     
+    #[inline]
+    pub(crate) async fn get_tool_ctx(self, name: impl AsRef<str>) -> Result<ToolContext, Error> {
+        match self.options.get_tool(name.as_ref()).await {
+            None => Err(Error::new(ErrorCode::InvalidParams, "Tool not found")),
+            Some(tool) => Ok(ToolContext(tool, self))
+        }
+    }
+
+    #[inline]
+    pub(crate) async fn get_prompt_ctx(self, name: impl AsRef<str>) -> Result<PromptContext, Error> {
+        match self.options.get_prompt(name.as_ref()).await {
+            None => Err(Error::new(ErrorCode::InvalidParams, "Prompt not found")),
+            Some(prompt) => Ok(PromptContext(prompt, self))
+        }
+    }
+
     /// Requests a list of available roots from a client
     /// 
     /// # Example
@@ -480,5 +556,49 @@ impl Context {
             notification.session_id = Some(session_id);
         }
         self.sender.send(notification.into()).await
+    }
+}
+
+/// Represents a tool handle that points to a registered tool and current MCP Context
+pub struct ToolContext(Tool, Context);
+
+impl ToolContext {
+    /// Calls this tool
+    pub async fn call<Args: IntoArgs>(self, args: Args) -> Result<CallToolResponse, Error> {
+        let params = CallToolRequestParams::new(&self.0.name)
+            .with_args(args);
+        self.call_impl(params).await
+    }
+
+    #[inline]
+    pub(super) async fn call_impl(self, params: CallToolRequestParams) -> Result<CallToolResponse, Error> {
+        let ToolContext(tool, ctx) = self;
+        
+        #[cfg(feature = "http-server")]
+        ctx.validate_claims(tool.roles.as_deref(), tool.permissions.as_deref())?;
+        
+        tool.call(params.with_context(ctx).into()).await
+    }
+}
+
+/// Represents a prompt handle that points to a registered prompt and current MCP Context
+pub struct PromptContext(Prompt, Context);
+
+impl PromptContext {
+    /// Gets this prompt
+    pub async fn get<Args: IntoArgs>(self, args: Args) -> Result<GetPromptResult, Error> {
+        let params = GetPromptRequestParams::new(&self.0.name)
+            .with_args(args);
+        self.get_impl(params).await
+    }
+
+    #[inline]
+    pub(super) async fn get_impl(self, params: GetPromptRequestParams) -> Result<GetPromptResult, Error> {
+        let PromptContext(prompt, ctx) = self;
+
+        #[cfg(feature = "http-server")]
+        ctx.validate_claims(prompt.roles.as_deref(), prompt.permissions.as_deref())?;
+        
+        prompt.call(params.with_context(ctx).into()).await
     }
 }
