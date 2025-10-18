@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use crate::shared;
 use crate::types::Cursor;
 use crate::types::request::RequestParamsMeta;
 #[cfg(feature = "server")]
@@ -17,7 +18,6 @@ use super::helpers::TypeCategory;
 use crate::error::{Error, ErrorCode};
 #[cfg(feature = "server")]
 use crate::types::FromRequest;
-
 #[cfg(feature = "server")]
 use crate::types::{IntoResponse, Page, PropertyType, Request, RequestId, Response};
 
@@ -329,6 +329,23 @@ where
                 .try_into()
                 .map_err(Into::into)
         })
+    }
+}
+
+impl GetPromptRequestParams {
+    /// Creates a new [`GetPromptRequestParams`] for the given tool name
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            args: None,
+            meta: None
+        }
+    }
+
+    /// Specifies tool arguments
+    pub fn with_args<Args: shared::IntoArgs>(mut self, args: Args) -> Self {
+        self.args = args.into_args();
+        self
     }
 }
 

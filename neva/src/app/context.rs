@@ -38,23 +38,43 @@ type RequestHandlers = HashMap<String, RequestHandler<Response>>;
 /// Represents a Server runtime
 #[derive(Clone)]
 pub(crate) struct ServerRuntime {
+    /// Represents MCP server options
     options: RuntimeMcpOptions,
+    
+    /// Represents registered request handlers
     handlers: Arc<RequestHandlers>,
+    
+    /// Represents a queue of pending requests
     pending: RequestQueue,
+    
+    /// Represents a sender that depends on selected transport protocol
     sender: TransportProtoSender,
 }
 
 /// Represents MCP Request Context
 #[derive(Clone)]
 pub struct Context {
+    /// Represents current session id
     pub session_id: Option<uuid::Uuid>,
+    
+    /// Represents HTTP headers of the current request
     #[cfg(feature = "http-server")]
     pub headers: HeaderMap,
+    
+    /// Represents JWT claims of the current request
     #[cfg(feature = "http-server")]
     pub(crate) claims: Option<DefaultClaims>,
+    
+    /// Represents MCP server options
     pub(crate) options: RuntimeMcpOptions,
+    
+    /// Represents a queue of pending requests
     pending: RequestQueue,
+    
+    /// Represents a sender that depends on selected transport protocol
     sender: TransportProtoSender,
+    
+    /// Represents a timeout for the current request
     timeout: Duration,
 }
 
@@ -147,7 +167,8 @@ impl Context {
         let uri = uri.into();
         let params = ReadResourceRequestParams::from(uri);
         self.clone()
-            .read_resource(params).await
+            .read_resource(params)
+            .await
     }
     
     /// Adds a new resource and notifies clients
@@ -317,21 +338,19 @@ impl Context {
 
     #[inline]
     pub(crate) async fn get_prompt(self, params: GetPromptRequestParams) -> Result<GetPromptResult, Error> {
-        let opt = self.options.clone();
-        match opt.get_prompt(&params.name).await {
+        match self.options.get_prompt(&params.name).await {
             None => Err(Error::new(ErrorCode::InvalidParams, "Prompt not found")),
             Some(prompt) => {
                 #[cfg(feature = "http-server")]
                 self.validate_claims(prompt.roles.as_deref(), prompt.permissions.as_deref())?;
                 prompt.call(params.with_context(self).into()).await
-            },
+            }
         }
     }
 
     #[inline]
     pub(crate) async fn call_tool(self, params: CallToolRequestParams) -> Result<CallToolResponse, Error> {
-        let opt = self.options.clone();
-        match opt.get_tool(&params.name).await {
+        match self.options.get_tool(&params.name).await {
             None => Err(Error::new(ErrorCode::InvalidParams, "Tool not found")),
             Some(tool) => {
                 #[cfg(feature = "http-server")]
@@ -340,7 +359,7 @@ impl Context {
             }
         }
     }
-    
+
     /// Requests a list of available roots from a client
     /// 
     /// # Example

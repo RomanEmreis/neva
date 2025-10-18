@@ -8,6 +8,8 @@ pub(crate) use requests_queue::RequestQueue;
 pub(crate) use arc_str::ArcStr;
 pub(crate) use arc_slice::ArcSlice;
 
+pub use into_args::IntoArgs;
+
 #[cfg(any(feature = "server", feature = "client"))]
 pub(crate) mod requests_queue;
 #[cfg(any(feature = "server", feature = "client"))]
@@ -16,6 +18,7 @@ pub(crate) mod message_registry;
 pub mod mt;
 pub(crate) mod arc_str;
 pub(crate) mod arc_slice;
+pub mod into_args;
 
 #[inline]
 #[cfg(any(feature = "server", feature = "client"))]

@@ -2,13 +2,13 @@
 
 use neva::prelude::*;
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct Payload {
     say: String,
     name: String,
 }
 
-#[json_schema(ser)]
+#[json_schema(serde)]
 struct Results {
     message: String,
 }
@@ -92,8 +92,8 @@ async fn tool_error() -> Result<String, Error> {
 async fn read_resource(ctx: Context, res: Uri) -> Result<Content, Error> {
     let result = ctx.resource(res).await?;
     let resource = result.contents
-        .first()
-        .cloned()
+        .into_iter()
+        .next()
         .expect("No resource contents");
     Ok(Content::resource(resource))
 }

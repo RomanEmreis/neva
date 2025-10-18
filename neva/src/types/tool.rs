@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use crate::shared;
 use crate::types::{
     request::RequestParamsMeta,
     PropertyType,
@@ -490,7 +491,7 @@ where
 }
 
 #[cfg(feature = "server")]
-impl<F, R ,Args> Handler<CallToolResponse> for ToolFunc<F, R, Args>
+impl<F, R, Args> Handler<CallToolResponse> for ToolFunc<F, R, Args>
 where
     F: ToolHandler<Args, Output = R>,
     R: Into<CallToolResponse>,
@@ -508,6 +509,23 @@ where
                 .await
                 .into())
         })
+    }
+}
+
+impl CallToolRequestParams {
+    /// Creates a new [`CallToolRequestParams`] for the given tool name
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            args: None,
+            meta: None
+        }
+    }
+
+    /// Specifies tool arguments
+    pub fn with_args<Args: shared::IntoArgs>(mut self, args: Args) -> Self {
+        self.args = args.into_args();
+        self
     }
 }
 

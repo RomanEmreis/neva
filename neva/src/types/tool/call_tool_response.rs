@@ -97,25 +97,9 @@ impl From<()> for CallToolResponse {
 }
 
 #[cfg(feature = "server")]
-impl From<&'static str> for CallToolResponse {
+impl<T: Into<Content>> From<T> for CallToolResponse {
     #[inline]
-    fn from(str: &str) -> Self {
-        Self::new(str)
-    }
-}
-
-#[cfg(feature = "server")]
-impl From<String> for CallToolResponse {
-    #[inline]
-    fn from(str: String) -> Self {
-        Self::new(str)
-    }
-}
-
-#[cfg(feature = "server")]
-impl From<Content> for CallToolResponse {
-    #[inline]
-    fn from(content: Content) -> Self {
+    fn from(content: T) -> Self {
         Self::new(content)
     }
 }
@@ -129,18 +113,10 @@ impl<T: Serialize> From<Json<T>> for CallToolResponse {
 }
 
 #[cfg(feature = "server")]
-impl From<Vec<&'static str>> for CallToolResponse {
+impl<T: Into<Content>> From<Vec<T>> for CallToolResponse {
     #[inline]
-    fn from(values: Vec<&'static str>) -> Self {
+    fn from(values: Vec<T>) -> Self {
         Self::array(values)
-    }
-}
-
-#[cfg(feature = "server")]
-impl From<serde_json::Value> for CallToolResponse {
-    #[inline]
-    fn from(value: serde_json::Value) -> Self {
-        value.to_string().into()
     }
 }
 

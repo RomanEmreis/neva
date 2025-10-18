@@ -1,6 +1,6 @@
 ﻿//! Utilities for the MCP client
 
-use std::{collections::HashMap, future::Future, sync::Arc};
+use std::{future::Future, sync::Arc};
 use options::McpOptions;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -247,6 +247,45 @@ impl Client {
         self.send_notification(crate::types::notification::commands::INITIALIZED, None).await
     }
     
+    /// Sends a ping to the MCP server
+    pub async fn ping(&mut self) -> Result<Response, Error> {
+        self.command::<()>(crate::commands::PING, None).await
+    }
+    
+    /// Sends a command to the MCP server
+    /// 
+    /// # Example
+    /// ```no_run
+    /// use neva::prelude::*;
+    /// 
+    /// #[derive(serde::Serialize)]
+    /// struct MyCommandParams {
+    ///     param: String,
+    /// }
+    /// 
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let mut client = Client::new();
+    ///
+    ///     client.connect().await?;
+    ///
+    ///     let params = MyCommandParams { param: "Hello MCP!".to_string() };
+    ///     let tools = client.command("my-command", Some(params)).await?;
+    ///
+    ///     client.disconnect().await
+    /// }
+    /// ```
+    #[inline]
+    pub async fn command<T: Serialize>(
+        &mut self, 
+        command: impl Into<String>, 
+        params: Option<T>
+    ) -> Result<Response, Error> {
+        let id = self.generate_id()?;
+        let request = Request::new(Some(id), command, params);
+        self.send_request(request).await
+    }
+    
     /// Requests a list of tools that MCP server provides
     ///
     /// # Example
@@ -270,17 +309,12 @@ impl Client {
     /// }
     /// ``` 
     pub async fn list_tools(&mut self, cursor: Option<Cursor>) -> Result<ListToolsResult, Error> {
-        let id = self.generate_id()?;
-        let request = Request::new(
-            Some(id),
-            crate::types::tool::commands::LIST,
-            Some(ListToolsRequestParams { cursor }));
-
-        self.send_request(request)
+        let params = ListToolsRequestParams { cursor };
+        self.command(crate::types::tool::commands::LIST, Some(params))
             .await?
             .into_result()
     }
-
+    
     /// Requests a list of resources that MCP server provides
     ///
     /// # Example
@@ -304,13 +338,8 @@ impl Client {
     /// }
     /// ``` 
     pub async fn list_resources(&mut self, cursor: Option<Cursor>) -> Result<ListResourcesResult, Error> {
-        let id = self.generate_id()?;
-        let request = Request::new(
-            Some(id),
-            crate::types::resource::commands::LIST, 
-            Some(ListResourcesRequestParams { cursor }));
-
-        self.send_request(request)
+        let params = ListResourcesRequestParams { cursor };
+        self.command(crate::types::resource::commands::LIST, Some(params))
             .await?
             .into_result()
     }
@@ -338,13 +367,8 @@ impl Client {
     /// }
     /// ``` 
     pub async fn list_resource_templates(&mut self, cursor: Option<Cursor>) -> Result<ListResourceTemplatesResult, Error> {
-        let id = self.generate_id()?;
-        let request = Request::new(
-            Some(id),
-            crate::types::resource::commands::TEMPLATES_LIST,
-            Some(ListResourceTemplatesRequestParams { cursor }));
-
-        self.send_request(request)
+        let params = ListResourceTemplatesRequestParams { cursor };
+        self.command(crate::types::resource::commands::TEMPLATES_LIST, Some(params))
             .await?
             .into_result()
     }
@@ -372,13 +396,8 @@ impl Client {
     /// }
     /// ``` 
     pub async fn list_prompts(&mut self, cursor: Option<Cursor>) -> Result<ListPromptsResult, Error> {
-        let id = self.generate_id()?;
-        let request = Request::new(
-            Some(id),
-            crate::types::prompt::commands::LIST,
-            Some(ListPromptsRequestParams { cursor }));
-
-        self.send_request(request)
+        let params = ListPromptsRequestParams { cursor };
+        self.command(crate::types::prompt::commands::LIST, Some(params))
             .await?
             .into_result()
     }
@@ -440,7 +459,15 @@ impl Client {
     ///     client.disconnect().await
     /// }
     /// ```
-    pub async fn call_tool<Args: IntoArgs>(&mut self, name: impl Into<String>, args: Args) -> Result<CallToolResponse, Error> {
+    pub async fn call_tool<N, Args>(
+        &mut self, 
+        name: N, 
+        args: Args
+    ) -> Result<CallToolResponse, Error>
+    where
+        N: Into<String>,
+        Args: shared::IntoArgs
+    {
         let id = self.generate_id()?;
         let request = Request::new(
             Some(id.clone()),
@@ -516,7 +543,15 @@ impl Client {
     ///     client.disconnect().await
     /// }
     /// ``` 
-    pub async fn get_prompt<Args: IntoArgs>(&mut self, name: impl Into<String>, args: Args) -> Result<GetPromptResult, Error> {
+    pub async fn get_prompt<N, Args>(
+        &mut self, 
+        name: N,
+        args: Args
+    ) -> Result<GetPromptResult, Error>
+    where
+        N: Into<String>,
+        Args: shared::IntoArgs
+    {
         let id = self.generate_id()?;
         let request = Request::new(
             Some(id.clone()),
@@ -542,14 +577,12 @@ impl Client {
             ));
         }
         
-        let id = self.generate_id()?;
-        let request = Request::new(
-            Some(id.clone()),
-            crate::types::resource::commands::SUBSCRIBE,
-            Some(SubscribeRequestParams::from(uri))
-        );
-        let response = self.send_request(request).await?;
-        match response {
+        let params = SubscribeRequestParams::from(uri);
+        let resp = self
+            .command(crate::types::resource::commands::SUBSCRIBE, Some(params))
+            .await?;
+        
+        match resp {
             Response::Ok(_) => Ok(()),
             Response::Err(err) => Err(err.error.into()),
         }
@@ -564,15 +597,12 @@ impl Client {
             ));
         }
 
-        let id = self.generate_id()?;
-        let request = Request::new(
-            Some(id.clone()),
-            crate::types::resource::commands::UNSUBSCRIBE,
-            Some(UnsubscribeRequestParams::from(uri))
-        );
-
-        let response = self.send_request(request).await?;
-        match response {
+        let params = UnsubscribeRequestParams::from(uri);
+        let resp = self
+            .command(crate::types::resource::commands::UNSUBSCRIBE, Some(params))
+            .await?;
+        
+        match resp {
             Response::Ok(_) => Ok(()),
             Response::Err(err) => Err(err.error.into()),
         }
@@ -685,84 +715,6 @@ impl Client {
             shared::wait_for_shutdown_signal(token);
         };
     }
-}
-
-/// A trait describes arguments for tools and prompts
-pub trait IntoArgs {
-    fn into_args(self) -> Option<HashMap<String, serde_json::Value>>;
-}
-
-impl IntoArgs for () {
-    #[inline]
-    fn into_args(self) -> Option<HashMap<String, serde_json::Value>> {
-        None
-    }
-}
-
-impl<T: IntoArgs> IntoArgs for Option<T> {
-    #[inline]
-    fn into_args(self) -> Option<HashMap<String, serde_json::Value>> {
-        self.and_then(|args| args.into_args())
-    }
-}
-
-impl<K, T> IntoArgs for (K, T)
-where
-    K: Into<String>,
-    T: Serialize,
-{
-    #[inline]
-    fn into_args(self) -> Option<HashMap<String, serde_json::Value>> {
-        Some(HashMap::from([
-            (self.0.into(), serde_json::to_value(self.1).unwrap())
-        ]))
-    }
-}
-
-impl<K, T, const N: usize> IntoArgs for [(K, T); N]
-where
-    K: Into<String>,
-    T: Serialize,
-{
-    #[inline]
-    fn into_args(self) -> Option<HashMap<String, serde_json::Value>> {
-        Some(make_args(self))
-    }
-}
-
-impl<K, T> IntoArgs for Vec<(K, T)>
-where
-    K: Into<String>,
-    T: Serialize,
-{
-    #[inline]
-    fn into_args(self) -> Option<HashMap<String, serde_json::Value>> {
-        Some(make_args(self))
-    }
-}
-
-impl<K, T> IntoArgs for HashMap<K, T>
-where
-    K: Into<String>,
-    T: Serialize,
-{
-    #[inline]
-    fn into_args(self) -> Option<HashMap<String, serde_json::Value>> {
-        Some(make_args(self))
-    }
-}
-
-/// Creates arguments for tools and prompts from iterator
-#[inline]
-fn make_args<I, K, T>(args: I) -> HashMap<String, serde_json::Value>
-where
-    I: IntoIterator<Item = (K, T)>,
-    K: Into<String>,
-    T: Serialize,
-{
-    HashMap::from_iter(args
-        .into_iter()
-        .map(|(k, v)| (k.into(), serde_json::to_value(v).unwrap())))
 }
 
 #[inline]

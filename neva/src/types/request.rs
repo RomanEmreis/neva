@@ -100,7 +100,7 @@ impl RequestParamsMeta {
 
 impl Request {
     /// Creates a new [`Request`]
-    pub fn new<T: Serialize>(id: Option<RequestId>, method: &str, params: Option<T>) -> Self {
+    pub fn new<T: Serialize>(id: Option<RequestId>, method: impl Into<String>, params: Option<T>) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.into(),
             session_id: None,
