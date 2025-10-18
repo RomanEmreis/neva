@@ -333,7 +333,6 @@ where
     }
 }
 
-#[cfg(feature = "server")]
 impl GetPromptRequestParams {
     /// Creates a new [`GetPromptRequestParams`] for the given tool name
     pub fn new(name: impl Into<String>) -> Self {
@@ -349,7 +348,10 @@ impl GetPromptRequestParams {
         self.args = args.into_args();
         self
     }
-    
+}
+
+#[cfg(feature = "server")]
+impl GetPromptRequestParams {
     /// Includes [`Context`] into request metadata. If metadata is `None` it creates a new.
     pub(crate) fn with_context(mut self, ctx: Context) -> Self {
         self.meta.get_or_insert_default().context = Some(ctx);

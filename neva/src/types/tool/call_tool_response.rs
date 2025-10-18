@@ -6,12 +6,16 @@ use serde::{Serialize, Deserialize};
 use crate::types::Json;
 #[cfg(any(feature = "server", feature = "client"))]
 use {
-    crate::error::{Error, ErrorCode},
+    crate::error::Error,
     serde_json::Value,
-    serde::de::DeserializeOwned,
+};
+#[cfg(feature = "client")]
+use {
+    crate::error::ErrorCode,
+    serde::de::DeserializeOwned
 };
 
-#[cfg(any(feature = "server", feature = "client"))]
+#[cfg(feature = "client")]
 const MISSING_STRUCTURED_CONTENT: &str = "Tool: Missing structured content";
 
 /// The server's response to a tool call.
@@ -93,25 +97,9 @@ impl From<()> for CallToolResponse {
 }
 
 #[cfg(feature = "server")]
-impl From<&'static str> for CallToolResponse {
+impl<T: Into<Content>> From<T> for CallToolResponse {
     #[inline]
-    fn from(str: &str) -> Self {
-        Self::new(str)
-    }
-}
-
-#[cfg(feature = "server")]
-impl From<String> for CallToolResponse {
-    #[inline]
-    fn from(str: String) -> Self {
-        Self::new(str)
-    }
-}
-
-#[cfg(feature = "server")]
-impl From<Content> for CallToolResponse {
-    #[inline]
-    fn from(content: Content) -> Self {
+    fn from(content: T) -> Self {
         Self::new(content)
     }
 }
@@ -129,14 +117,6 @@ impl<T: Into<Content>> From<Vec<T>> for CallToolResponse {
     #[inline]
     fn from(values: Vec<T>) -> Self {
         Self::array(values)
-    }
-}
-
-#[cfg(feature = "server")]
-impl From<Value> for CallToolResponse {
-    #[inline]
-    fn from(value: Value) -> Self {
-        value.to_string().into()
     }
 }
 
@@ -268,7 +248,7 @@ impl CallToolResponse {
     }
 }
 
-#[cfg(any(feature = "server", feature = "client"))]
+#[cfg(feature = "client")]
 impl CallToolResponse {
     /// Turns [`CallToolResponse`]'s structured content into `T`
     pub fn as_json<T: DeserializeOwned>(&self) -> Result<T, Error> {

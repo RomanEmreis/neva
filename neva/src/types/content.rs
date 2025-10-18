@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
 use bytes::Bytes;
 use crate::error::{Error, ErrorCode};
-use crate::types::{Annotations, PromptMessage, Resource, ResourceContents, Uri};
+use crate::types::{Annotations, Resource, ResourceContents, Uri};
 use crate::types::helpers::{deserialize_base64_as_bytes, serialize_bytes_as_base64};
 
 const CHUNK_SIZE: usize = 8192;
@@ -210,13 +210,6 @@ impl From<Resource> for Content {
     #[inline]
     fn from(res: Resource) -> Self {
         Self::ResourceLink(res.into())
-    }
-}
-
-impl From<PromptMessage> for Content {
-    #[inline]
-    fn from(msg: PromptMessage) -> Self {
-        Self::json(msg)
     }
 }
 
