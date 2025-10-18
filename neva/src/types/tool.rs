@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use crate::shared;
 use crate::types::{
     request::RequestParamsMeta,
     PropertyType,
@@ -16,7 +17,6 @@ use {
     futures_util::future::BoxFuture,
     super::helpers::TypeCategory,
     crate::json::JsonSchema,
-    crate::shared,
     crate::{
         Context,
         app::handler::{
