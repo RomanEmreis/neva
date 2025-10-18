@@ -67,6 +67,7 @@ pub mod app;
 pub mod client;
 #[cfg(feature = "macros")]
 pub mod macros;
+pub mod commands;
 
 #[cfg(feature = "server-macros")]
 pub use neva_macros::{tool, prompt, resource, resources, handler};
@@ -93,12 +94,6 @@ pub mod json {
     pub use schemars::JsonSchema;
     #[doc(hidden)]
     pub use schemars;
-}
-
-/// List of commands
-pub mod commands {
-    pub const INIT: &str = "initialize";
-    pub const PING: &str = "ping";
 }
 
 pub mod prelude {

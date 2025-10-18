@@ -491,7 +491,7 @@ where
 }
 
 #[cfg(feature = "server")]
-impl<F, R ,Args> Handler<CallToolResponse> for ToolFunc<F, R, Args>
+impl<F, R, Args> Handler<CallToolResponse> for ToolFunc<F, R, Args>
 where
     F: ToolHandler<Args, Output = R>,
     R: Into<CallToolResponse>,
