@@ -6,12 +6,14 @@ use crate::transport::Sender;
 use super::{options::{McpOptions, RuntimeMcpOptions}, handler::RequestHandler};
 use crate::{
     shared::RequestQueue,
+    middleware::{MwContext, Next},
     transport::TransportProtoSender,
     types::{
         Tool, CallToolRequestParams, CallToolResponse,
         Resource, ReadResourceRequestParams, ReadResourceResult,
         Prompt, GetPromptRequestParams, GetPromptResult,
         RequestId, Request, Response, Uri,
+        Message,
         resource::Route,
         notification::Notification,
         root::{ListRootsRequestParams, ListRootsResult},
@@ -49,6 +51,9 @@ pub(crate) struct ServerRuntime {
     
     /// Represents a sender that depends on selected transport protocol
     sender: TransportProtoSender,
+    
+    /// Global middlewares entrypoint
+    mw_start: Option<Next>
 }
 
 /// Represents MCP Request Context
@@ -82,13 +87,15 @@ impl ServerRuntime {
     /// Creates a new server runtime
     pub(crate) fn new(
         sender: TransportProtoSender, 
-        options: McpOptions,
+        mut options: McpOptions,
         handlers: RequestHandlers,
     ) -> Self {
+        let middlewares = options.middlewares.take();
         Self {
             pending: Default::default(),
             handlers: Arc::new(handlers),
             options: options.into_runtime(),
+            mw_start: middlewares.and_then(|mw| mw.compose()),
             sender,
         }
     }
@@ -142,6 +149,14 @@ impl ServerRuntime {
     /// Provides a "queue" of pending requests
     pub(crate) fn pending_requests(&self) -> &RequestQueue {
         &self.pending
+    }
+    
+    /// Starts the middleware pipeline
+    #[inline]
+    pub(crate) async fn execute(self, msg: Message) {
+        if let Some(mw_start) = self.mw_start.clone() {
+            mw_start(MwContext::msg(msg, self)).await;
+        }
     }
 }
 

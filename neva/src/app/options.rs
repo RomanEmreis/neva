@@ -8,6 +8,8 @@ use crate::transport::{StdIoServer, TransportProto};
 use crate::transport::HttpServer;
 use crate::app::{handler::RequestHandler, collection::Collection};
 
+use crate::middleware::{Middleware, Middlewares};
+
 use crate::PROTOCOL_VERSIONS;
 use crate::types::{
     RequestId,
@@ -59,6 +61,9 @@ pub struct McpOptions {
 
     /// Holds current subscriptions to resource changes
     pub(super) resource_subscriptions: DashSet<Uri>,
+    
+    /// An ordered list of middlewares
+    pub(super) middlewares: Option<Middlewares>,
 
     /// Tools capability options
     tools_capability: Option<ToolsCapability>,
@@ -104,6 +109,7 @@ impl Default for McpOptions {
             resource_routes: Default::default(),
             requests: Default::default(),
             resource_subscriptions: Default::default(),
+            middlewares: None,
             #[cfg(feature = "tracing")]
             log_level: Default::default(),
         }
@@ -298,6 +304,14 @@ impl McpOptions {
             .as_mut()
             .entry(prompt.name.clone())
             .or_insert(prompt)
+    }
+    
+    /// Registers a middleware
+    #[inline]
+    pub(crate) fn add_middleware(&mut self, middleware: Middleware) {
+        self.middlewares
+            .get_or_insert_with(Middlewares::new)
+            .add(middleware);
     }
     
     /// Returns a Model Context Protocol version that this server supports
