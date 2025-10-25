@@ -139,3 +139,23 @@ pub(super) fn get_params_arr(value: &Expr) -> Option<Vec<String>> {
         _ => None
     }
 }
+
+#[inline]
+pub(super) fn get_exprs_arr(value: &Expr) -> Option<Vec<Expr>> {
+    match value {
+        Expr::Array(array) => {
+            let mut exprs = Vec::new();
+            for elem in &array.elems {
+                exprs.push(elem.clone());
+            }
+            if !exprs.is_empty() {
+                Some(exprs)
+            } else {
+                None
+            }
+        }
+        expr => {
+            Some(vec![expr.clone()])
+        }
+    }
+}

@@ -7,10 +7,7 @@ use self::{context::{Context, ServerRuntime}, options::{McpOptions, RuntimeMcpOp
 use crate::error::{Error, ErrorCode};
 use crate::transport::{Receiver, Sender, Transport};
 use crate::shared;
-use crate::middleware::{
-    MwContext, Next,
-    MessageContext
-};
+use crate::middleware::{MwContext, Next, make_mw};
 use crate::app::handler::{
     FromHandlerParams,
     GenericHandler,
@@ -104,8 +101,8 @@ impl App {
         self.register_methods();
         
         #[cfg(feature = "tracing")]
-        self.with_ref(Self::tracing_middleware);
-        self.with_ref(Self::message_middleware);
+        self.options.add_middleware(make_mw(Self::tracing_middleware));
+        self.options.add_middleware(make_mw(Self::message_middleware));
         
         let mut transport = self.options.transport();
         let cancellation_token = transport.start();
@@ -120,8 +117,7 @@ impl App {
                 msg = receiver.recv() => {
                     match msg { 
                         Ok(msg) => {
-                            let runtime = runtime.clone();
-                            tokio::spawn(Self::execute(msg, runtime));
+                            tokio::spawn(Self::execute(msg, runtime.clone()));
                         },
                         Err(_err) => {
                             #[cfg(feature = "tracing")]
@@ -172,7 +168,7 @@ impl App {
     }
 
     /// Maps an MCP tool call request to a specific function and returns a mutable reference to the
-    /// [`Tool`] for further cDefault::default()onfiguration
+    /// [`Tool`] for further configuration
     ///
     /// # Example
     /// ```no_run
@@ -463,14 +459,7 @@ impl App {
     }
 
     async fn message_middleware(ctx: MwContext, _: Next) -> Response {
-        let MwContext::Message(MessageContext { msg, runtime }) = ctx else {
-            #[cfg(feature = "tracing")]
-            tracing::error!(
-                logger = "neva", 
-                error = "Invalid operation");
-            return Response::empty(ctx.id());
-        };
-        
+        let MwContext { msg, runtime } = ctx;
         let id = msg.id();
         let mut sender = runtime.sender();
         
@@ -522,15 +511,15 @@ impl App {
         tracing::trace!(logger = "neva", "Received: {:?}", req);
         let resp = if let Some(handler) = handlers.get(&req.method) {
             tokio::select! {
-                    resp = handler.call(HandlerParams::Request(context, req)) => {
-                        options.complete_request(&full_id);
-                        resp
-                    }
-                    _ = token.cancelled() => {
-                        #[cfg(feature = "tracing")]
-                        tracing::debug!(
-                            logger = "neva", 
-                            "The request with ID: {} has been cancelled", full_id);
+                resp = handler.call(HandlerParams::Request(context, req)) => {
+                    options.complete_request(&full_id);
+                    resp
+                }
+                _ = token.cancelled() => {
+                    #[cfg(feature = "tracing")]
+                    tracing::debug!(
+                        logger = "neva", 
+                        "The request with ID: {} has been cancelled", full_id);
                         Err(Error::from(ErrorCode::RequestCancelled))
                     }
                 }

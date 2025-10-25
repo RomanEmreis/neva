@@ -1,7 +1,7 @@
 //! Macros for MCP server tools
 
 use syn::{ItemFn, FnArg, Pat, Meta, ReturnType, punctuated::Punctuated, token::Comma};
-use super::{get_str_param, get_params_arr, get_bool_param, get_arg_type, get_inner_type_from_generic};
+use super::{get_str_param, get_params_arr, get_exprs_arr, get_bool_param, get_arg_type, get_inner_type_from_generic};
 use proc_macro2::TokenStream;
 use quote::quote;
 
@@ -14,6 +14,7 @@ pub fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<
     let mut title = None;
     let mut roles = None;
     let mut permissions = None;
+    let mut middleware = None;
     let mut no_schema = false;
 
     for meta in attr {
@@ -46,6 +47,9 @@ pub fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<
                         }
                         "permissions" => {
                             permissions = get_params_arr(&nv.value);
+                        }
+                        "middleware" => {
+                            middleware = get_exprs_arr(&nv.value);
                         }
                         "no_schema" => {
                             no_schema = get_bool_param(&nv.value);
@@ -165,6 +169,13 @@ pub fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<
         quote! { .with_permissions([#(#permission_literals),*]) }
     });
 
+    let middleware_code = middleware.map(|mws| {
+        let mw_calls = mws.iter().map(|mw| {
+            quote! { .for_tool(stringify!(#func_name), #mw) }
+        });
+        quote! { #(#mw_calls)* }
+    });
+
     let module_name = syn::Ident::new(&format!("map_{func_name}"), func_name.span());
 
     // Expand the function and apply the tool functionality
@@ -173,7 +184,9 @@ pub fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<
         #function
         // Register the tool with the app
         fn #module_name(app: &mut neva::App) {
-            app.map_tool(stringify!(#func_name), #func_name)
+            app
+                #middleware_code
+                .map_tool(stringify!(#func_name), #func_name)
                 #title_code
                 #description_code
                 #input_schema_code

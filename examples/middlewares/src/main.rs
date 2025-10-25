@@ -7,9 +7,26 @@
 use neva::prelude::*;
 use tracing_subscriber::{prelude::*, filter, reload};
 
-#[tool]
+#[tool(middleware = [specific_tool_middleware])]
 async fn hello_world(name: String) -> String {
     format!("Hello, {}!", name)
+}
+
+#[tool]
+async fn another_tool() -> &'static str {
+    "Hello, World!"
+}
+
+#[resource(uri = "res://{name}")]
+async fn resource(name: String) -> ResourceContents {
+    ResourceContents::new(name)
+        .with_text("Hello, world!")
+}
+
+#[prompt]
+async fn prompt(topic: String) -> PromptMessage {
+    PromptMessage::user()
+        .with(format!("Sample prompt of {topic}"))
 }
 
 async fn logging_middleware(ctx: MwContext, next: Next) -> Response {
@@ -22,13 +39,13 @@ async fn logging_middleware(ctx: MwContext, next: Next) -> Response {
     resp
 }
 
-async fn filter_middleware(ctx: MwContext, next: Next) -> Response {
-    if ctx.request().is_some_and(|c| c.params.is_none()) {
-        return Response::error(ctx.id(), Error::new(
-            ErrorCode::InvalidParams,
-            "Request params are empty"
-        ));
-    }
+async fn global_tool_middleware(ctx: MwContext, next: Next) -> Response {
+    tracing::info!("Tool called");
+    next(ctx).await
+}
+
+async fn specific_tool_middleware(ctx: MwContext, next: Next) -> Response {
+    tracing::info!("Hello tool called");
     next(ctx).await
 }
 
@@ -46,7 +63,7 @@ async fn main() {
             .with_stdio()
             .with_logging(handle))
         .with(logging_middleware)
-        .with(filter_middleware)
+        .with_tool(global_tool_middleware)
         .run()
         .await;
 }
