@@ -12,6 +12,7 @@ pub(crate) mod prompt;
 pub fn expand_handler(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<TokenStream> {
     let func_name = &function.sig.ident;
     let mut command = None;
+    let mut middleware = None;
 
     for meta in attr {
         match &meta {
@@ -19,9 +20,15 @@ pub fn expand_handler(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn:
             Meta::List(_) => {},
             Meta::NameValue(nv) => {
                 if let Some(ident) = nv.path.get_ident() {
-                    if let "command" = ident.to_string().as_str() {
-                        command = get_str_param(&nv.value);
-                    }
+                    match ident.to_string().as_str() {
+                        "command" => {
+                            command = get_str_param(&nv.value);
+                        }
+                        "middleware" => {
+                            middleware = get_exprs_arr(&nv.value);
+                        }
+                        _ => {}
+                    } 
                 }
             },
         }
@@ -29,14 +36,22 @@ pub fn expand_handler(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn:
 
     let command = command.expect("command parameter must be specified");
     let module_name = syn::Ident::new(&format!("map_{func_name}"), func_name.span());
-
+    let middleware_code = middleware.map(|mws| {
+        let mw_calls = mws.iter().map(|mw| {
+            quote! { .wrap_command(#command, #mw) }
+        });
+        quote! { #(#mw_calls)* }
+    });
+    
     // Expand the function and apply the tool functionality
     let expanded = quote! {
         // Original function
         #function
         // Register a handler function
         fn #module_name(app: &mut neva::App) {
-            app.map_handler(#command, #func_name);
+            app
+                #middleware_code
+                .map_handler(#command, #func_name);
         }
         neva::macros::inventory::submit! {
             neva::macros::server::ItemRegistrar(#module_name)
@@ -137,5 +152,25 @@ pub(super) fn get_params_arr(value: &Expr) -> Option<Vec<String>> {
             }
         }
         _ => None
+    }
+}
+
+#[inline]
+pub(super) fn get_exprs_arr(value: &Expr) -> Option<Vec<Expr>> {
+    match value {
+        Expr::Array(array) => {
+            let mut exprs = Vec::new();
+            for elem in &array.elems {
+                exprs.push(elem.clone());
+            }
+            if !exprs.is_empty() {
+                Some(exprs)
+            } else {
+                None
+            }
+        }
+        expr => {
+            Some(vec![expr.clone()])
+        }
     }
 }

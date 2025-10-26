@@ -68,6 +68,8 @@ pub mod client;
 #[cfg(feature = "macros")]
 pub mod macros;
 pub mod commands;
+#[cfg(feature = "server")]
+pub mod middleware;
 
 #[cfg(feature = "server-macros")]
 pub use neva_macros::{tool, prompt, resource, resources, handler};
@@ -108,6 +110,9 @@ pub mod prelude {
     
     #[cfg(feature = "server")]
     pub use crate::app::{App, context::Context, options};
+    #[cfg(feature = "server")]
+    pub use crate::middleware::{MwContext, Next};
+    
     #[cfg(feature = "client")]
     pub use crate::client::Client;
     

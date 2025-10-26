@@ -2,10 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 use bytes::Bytes;
-#[cfg(feature = "server")]
-use crate::{error::Error, types::{IntoResponse, RequestId, Response}};
 use crate::types::{Annotations, Uri};
 use crate::types::helpers::{deserialize_base64_as_bytes, serialize_bytes_as_base64};
+#[cfg(feature = "server")]
+use {
+    crate::{error::{Error, ErrorCode}, types::{IntoResponse, RequestId, Response}},
+    serde::de::DeserializeOwned
+};
 
 const CHUNK_SIZE: usize = 8192;
 
@@ -25,6 +28,7 @@ pub struct ReadResourceResult {
 #[serde(untagged)]
 pub enum ResourceContents {
     Text(TextResourceContents),
+    Json(JsonResourceContents),
     Blob(BlobResourceContents),
     Empty(EmptyResourceContents),
 }
@@ -98,6 +102,41 @@ pub struct TextResourceContents {
     pub meta: Option<serde_json::Value>,
 }
 
+/// Represents a JSON resource content
+/// 
+/// > **Note:** This is a specialization of [`TextResourceContents`] for JSON content.
+///
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonResourceContents {
+    /// The URI of the resource.
+    pub uri: Uri,
+
+    /// The JSON content of the resource.
+    #[serde(rename = "text")]
+    pub value: serde_json::Value,
+
+    /// Intended for UI and end-user contexts - optimized to be human-readable and easily understood,
+    /// even by those unfamiliar with domain-specific terminology.
+    ///
+    /// If not provided, the name should be used for display (except for Tool,
+    /// where `annotations.title` should be given precedence over using `name`, if present).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+
+    /// The MIME type of content.
+    #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+
+    /// Optional annotations for the client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Annotations>,
+
+    /// Metadata reserved by MCP for protocol-level metadata.
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
+}
+
 /// Represents an empty/unknown resource content
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmptyResourceContents {
@@ -146,6 +185,13 @@ impl From<TextResourceContents> for ResourceContents {
     #[inline]
     fn from(value: TextResourceContents) -> Self {
         Self::Text(value)
+    }
+}
+
+impl From<JsonResourceContents> for ResourceContents {
+    #[inline]
+    fn from(value: JsonResourceContents) -> Self {
+        Self::Json(value)
     }
 }
 
@@ -319,6 +365,7 @@ impl ResourceContents {
     pub fn uri(&self) -> &Uri {
         match self {
             Self::Text(ref text) => &text.uri,
+            Self::Json(ref json) => &json.uri,
             Self::Blob(ref blob) => &blob.uri,
             Self::Empty(ref empty) => &empty.uri
         }
@@ -329,6 +376,7 @@ impl ResourceContents {
     pub fn text(&self) -> Option<&str> {
         match self {
             Self::Text(text) => Some(&text.text),
+            Self::Json(json) => json.value.as_str(),
             Self::Blob(_) => None,
             Self::Empty(_) => None
         }
@@ -339,6 +387,7 @@ impl ResourceContents {
     pub fn title(&self) -> Option<&str> {
         match self {
             Self::Text(text) => text.title.as_deref(),
+            Self::Json(json) => json.title.as_deref(),
             Self::Blob(blob) => blob.title.as_deref(),
             Self::Empty(empty) => empty.title.as_deref()
         }
@@ -349,6 +398,7 @@ impl ResourceContents {
     pub fn annotations(&self) -> Option<&Annotations> {
         match self {
             Self::Text(text) => text.annotations.as_ref(),
+            Self::Json(json) => json.annotations.as_ref(),
             Self::Blob(blob) => blob.annotations.as_ref(),
             Self::Empty(empty) => empty.annotations.as_ref()
         }
@@ -359,8 +409,22 @@ impl ResourceContents {
     pub fn blob(&self) -> Option<&[u8]> {
         match self {
             Self::Blob(blob) => Some(&blob.blob),
+            Self::Json(_) => None,
             Self::Text(_) => None,
             Self::Empty(_) => None
+        }
+    }
+
+    /// Returns the URI of the resource content
+    #[inline]
+    pub fn json<T: DeserializeOwned>(&self) -> Result<T, Error> {
+        match self {
+            Self::Text(text) => serde_json::from_str(&text.text)
+                .map_err(Error::from),
+            Self::Json(json) => serde_json::from_value(json.value.clone())
+                .map_err(Error::from),
+            Self::Blob(_) => Err(Error::new(ErrorCode::InvalidRequest, "Cannot deserialize blob")),
+            Self::Empty(_) => Err(Error::new(ErrorCode::InvalidRequest, "Cannot empty resource"))
         }
     }
 
@@ -369,6 +433,7 @@ impl ResourceContents {
     pub fn mime(&self) -> Option<&str> {
         match self { 
             Self::Text(text) => text.mime.as_deref(),
+            Self::Json(json) => json.mime.as_deref(),
             Self::Blob(blob) => blob.mime.as_deref(),
             Self::Empty(empty) => empty.mime.as_deref()
         }
@@ -379,6 +444,7 @@ impl ResourceContents {
     pub fn with_mime(mut self, mime: impl Into<String>) -> Self {
         match self {
             Self::Text(ref mut text) => text.mime = Some(mime.into()),
+            Self::Json(ref mut json) => json.mime = Some(mime.into()),
             Self::Blob(ref mut blob) => blob.mime = Some(mime.into()),
             Self::Empty(ref mut empty) => empty.mime = Some(mime.into()),
         }
@@ -390,6 +456,7 @@ impl ResourceContents {
     pub fn with_title(mut self, title: impl Into<String>) -> Self {
         match self {
             Self::Text(ref mut text) => text.title = Some(title.into()),
+            Self::Json(ref mut json) => json.title = Some(title.into()),
             Self::Blob(ref mut blob) => blob.title = Some(title.into()),
             Self::Empty(ref mut empty) => empty.title = Some(title.into()),
         }
@@ -404,6 +471,7 @@ impl ResourceContents {
     {
         match self {
             Self::Text(text) => Self::Text(text.with_annotations(config)),
+            Self::Json(json) => Self::Json(json.with_annotations(config)),
             Self::Blob(blob) => Self::Blob(blob.with_annotations(config)),
             Self::Empty(empty) => Self::Empty(empty.with_annotations(config)),
         }
@@ -417,6 +485,14 @@ impl ResourceContents {
             Self::Text(content) => Self::Text(TextResourceContents {
                 uri: content.uri,
                 mime: content.mime,
+                title: content.title,
+                annotations: content.annotations,
+                meta: content.meta,
+                text,
+            }),
+            Self::Json(content) => Self::Text(TextResourceContents {
+                uri: content.uri,
+                mime: Some("text/plain".into()),
                 title: content.title,
                 annotations: content.annotations,
                 meta: content.meta,
@@ -454,6 +530,14 @@ impl ResourceContents {
                 meta: content.meta,
                 blob,
             }),
+            Self::Json(content) => Self::Blob(BlobResourceContents {
+                uri: content.uri,
+                mime: content.mime,
+                title: content.title,
+                annotations: content.annotations,
+                meta: content.meta,
+                blob,
+            }),
             Self::Blob(content) => Self::Blob(BlobResourceContents {
                 uri: content.uri,
                 mime: None,
@@ -469,6 +553,47 @@ impl ResourceContents {
                 annotations: None,
                 meta: None,
                 blob,
+            })
+        }
+    }
+
+    /// Sets the JSON text of the resource content and make it [`TextResourceContents`]
+    #[inline]
+    pub fn with_json<T: Serialize>(self, data: T) -> Self {
+        let value = serde_json::to_value(data)
+            .expect("Failed to serialize JSON");
+        match self {
+            Self::Text(content) => Self::Json(JsonResourceContents {
+                uri: content.uri,
+                mime: Some("application/json".into()),
+                title: content.title,
+                annotations: content.annotations,
+                meta: content.meta,
+                value,
+            }),
+            Self::Json(content) => Self::Json(JsonResourceContents {
+                uri: content.uri,
+                mime: content.mime.or_else(|| Some("application/json".into())),
+                title: content.title,
+                annotations: content.annotations,
+                meta: content.meta,
+                value,
+            }),
+            Self::Blob(content) => Self::Json(JsonResourceContents {
+                uri: content.uri,
+                mime: Some("application/json".into()),
+                title: content.title,
+                annotations: content.annotations,
+                meta: content.meta,
+                value,
+            }),
+            Self::Empty(content) => Self::Json(JsonResourceContents {
+                uri: content.uri,
+                mime: content.mime.or_else(|| Some("application/json".into())),
+                title: None,
+                annotations: None,
+                meta: None,
+                value,
             })
         }
     }
@@ -495,6 +620,44 @@ impl TextResourceContents {
         self
     }
     
+    /// Sets the title of the resource
+    #[inline]
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Sets annotations for the client
+    pub fn with_annotations<F>(mut self, config: F) -> Self
+    where
+        F: FnOnce(Annotations) -> Annotations
+    {
+        self.annotations = Some(config(Default::default()));
+        self
+    }
+}
+
+impl JsonResourceContents {
+    /// Creates a JSON resource content
+    #[inline]
+    pub fn new<T: Serialize>(uri: impl Into<Uri>, value: T) -> Self {
+        Self {
+            uri: uri.into(),
+            value: serde_json::to_value(value).expect("Failed to serialize JSON"),
+            mime: Some("text/plain".into()),
+            title: None,
+            annotations: None,
+            meta: None,
+        }
+    }
+
+    /// Sets the mime type of the JSON resource content
+    #[inline]
+    pub fn with_mime(mut self, mime: impl Into<String>) -> Self {
+        self.mime = Some(mime.into());
+        self
+    }
+
     /// Sets the title of the resource
     #[inline]
     pub fn with_title(mut self, title: impl Into<String>) -> Self {
@@ -609,6 +772,12 @@ mod tests {
     use futures_util::StreamExt;
     use super::*;
     
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct User {
+        name: String,
+        age: u8,
+    }
+    
     #[test]
     fn it_creates_result_from_array_of_contents() {
         let result = ReadResourceResult::from([
@@ -681,6 +850,18 @@ mod tests {
         let json = serde_json::to_string(&result).unwrap();
 
         assert_eq!(json, r#"{"contents":[{"uri":"/res","text":"test","mimeType":"text/plain"}]}"#);
+    }
+
+    #[test]
+    fn it_creates_result_from_objet_content() {
+        let content = ResourceContents::new("/res")
+            .with_json(User { name: "John".into(), age: 33 });
+        
+        let result: ReadResourceResult = content.into();
+
+        let json = serde_json::to_string(&result).unwrap();
+
+        assert_eq!(json, r#"{"contents":[{"uri":"/res","text":{"age":33,"name":"John"},"mimeType":"application/json"}]}"#);
     }
 
     #[test]

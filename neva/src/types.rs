@@ -286,6 +286,24 @@ impl FromHandlerParams for InitializeRequestParams {
 }
 
 impl Message {
+    /// Returns `true` is the current message is [`Request`]
+    #[inline]
+    pub fn is_request(&self) -> bool {
+        matches!(self, Message::Request(_))
+    }
+
+    /// Returns `true` is the current message is [`Response`]
+    #[inline]
+    pub fn is_response(&self) -> bool {
+        matches!(self, Message::Response(_))
+    }
+
+    /// Returns `true` is the current message is [`Notification`]
+    #[inline]
+    pub fn is_notification(&self) -> bool {
+        matches!(self, Message::Notification(_))
+    }
+    
     /// Returns [`Message`] ID
     #[inline]
     pub fn id(&self) -> RequestId {

@@ -18,6 +18,7 @@ mod shared;
 /// * `output_schema` - Schema for the tool output.
 /// * `annotations` - Arbitrary [metadata](https://docs.rs/neva/latest/neva/types/tool/struct.ToolAnnotations.html).
 /// * `roles` & `permissions` - Define which users can run the tool when using Streamable HTTP transport with OAuth.
+/// * `middleware` - Middleware list to apply to the tool.
 /// * `no_schema` - Explicitly disables input schema generation if it's not set in `input_schema`.
 /// 
 /// # Simple Example
@@ -167,6 +168,7 @@ pub fn resources(_: TokenStream, item: TokenStream) -> TokenStream {
 /// * `descr` - Prompt description.
 /// * `args` - Prompt arguments.
 /// * `no_args` - Explicitly disables argument generation if it's not set in `args`.
+/// * `middleware` - Middleware list to apply to the prompt.
 /// * `roles` & `permissions` - Define which users can read the resource when using Streamable HTTP transport with OAuth.
 /// 
 /// # Simple Example
@@ -215,6 +217,10 @@ pub fn prompt(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// Maps the function to a command handler
+///
+/// # Parameters
+/// * `command` - Command name.
+/// * `middleware` - Middleware list to apply to the command.
 /// 
 /// # Example
 /// ```ignore

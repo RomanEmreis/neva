@@ -7,6 +7,7 @@ use self::{context::{Context, ServerRuntime}, options::{McpOptions, RuntimeMcpOp
 use crate::error::{Error, ErrorCode};
 use crate::transport::{Receiver, Sender, Transport};
 use crate::shared;
+use crate::middleware::{MwContext, Next, make_fn::make_mw};
 use crate::app::handler::{
     FromHandlerParams,
     GenericHandler,
@@ -15,7 +16,7 @@ use crate::app::handler::{
     RequestHandler
 };
 use crate::types::{
-    InitializeResult, InitializeRequestParams, IntoResponse, Response, Request, Message, 
+    InitializeResult, InitializeRequestParams, IntoResponse, Response, Request, RequestId, Message, 
     CompleteResult, CompleteRequestParams, ListToolsRequestParams, CallToolRequestParams, ListToolsResult, CallToolResponse, Tool, ToolHandler, 
     ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate, 
     ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, 
@@ -42,7 +43,7 @@ type RequestHandlers = HashMap<String, RequestHandler<Response>>;
 /// Represents an MCP server application
 #[derive(Default)]
 pub struct App {
-    options: McpOptions,
+    pub(super) options: McpOptions,
     handlers: RequestHandlers,
 }
 
@@ -99,6 +100,10 @@ impl App {
         #[cfg(feature = "macros")]
         self.register_methods();
         
+        #[cfg(feature = "tracing")]
+        self.options.add_middleware(make_mw(Self::tracing_middleware));
+        self.options.add_middleware(make_mw(Self::message_middleware));
+        
         let mut transport = self.options.transport();
         let cancellation_token = transport.start();
         self.wait_for_shutdown_signal(cancellation_token.clone());
@@ -111,7 +116,9 @@ impl App {
                 _ = cancellation_token.cancelled() => break,
                 msg = receiver.recv() => {
                     match msg { 
-                        Ok(msg) => Self::handle_message(msg, &runtime).await,
+                        Ok(msg) => {
+                            tokio::spawn(Self::execute(msg, runtime.clone()));
+                        },
                         Err(_err) => {
                             #[cfg(feature = "tracing")]
                             tracing::error!("Error handling message: {:?}", _err);
@@ -438,8 +445,38 @@ impl App {
         options.set_log_level(params.level)
     }
     
+    #[cfg(feature = "tracing")]
+    async fn tracing_middleware(ctx: MwContext, next: Next) -> Response {
+        let span = create_tracing_span(ctx.session_id().cloned());
+        next(ctx)
+            .instrument(span)
+            .await
+    }
+
     #[inline]
-    async fn handle_message(msg: Message, runtime: &ServerRuntime) {
+    async fn execute(msg: Message, runtime: ServerRuntime) {
+        runtime.execute(msg).await;
+    }
+
+    async fn message_middleware(ctx: MwContext, _: Next) -> Response {
+        let MwContext { msg, runtime } = ctx;
+        let id = msg.id();
+        let mut sender = runtime.sender();
+        
+        let resp = Self::handle_message(msg, runtime).await;
+
+        if let Err(_err) = sender.send(resp.into()).await {
+            #[cfg(feature = "tracing")]
+            tracing::error!(
+                logger = "neva", 
+                error = format!("Error sending response: {:?}", _err));
+        }
+        
+        Response::empty(id)
+    }
+    
+    #[inline]
+    async fn handle_message(msg: Message, runtime: ServerRuntime) -> Response {
         match msg {
             Message::Request(req) => Self::handle_request(req, runtime).await,
             Message::Response(resp) => Self::handle_response(resp, runtime).await,
@@ -447,7 +484,7 @@ impl App {
         }
     }
     
-    async fn handle_request(req: Request, runtime: &ServerRuntime) {
+    async fn handle_request(req: Request, runtime: ServerRuntime) -> Response {
         #[cfg(feature = "http-server")]
         let mut req = req;
         let req_id = req.id();
@@ -468,55 +505,40 @@ impl App {
         
         let options = runtime.options();
         let handlers = runtime.request_handlers();
-        let mut sender = runtime.sender();
-
         let token = options.track_request(&full_id);
 
         #[cfg(feature = "tracing")]
-        let span = create_tracing_span(session_id);
-        
-        let req_fut = async move {
-            #[cfg(feature = "tracing")]
-            tracing::trace!(logger = "neva", "Received: {:?}", req);
-            let resp = if let Some(handler) = handlers.get(&req.method) {
-                tokio::select! {
-                    resp = handler.call(HandlerParams::Request(context, req)) => {
-                        options.complete_request(&full_id);
-                        resp
-                    }
-                    _ = token.cancelled() => {
-                        #[cfg(feature = "tracing")]
-                        tracing::debug!(
-                            logger = "neva", 
-                            "The request with ID: {} has been cancelled", full_id);
+        tracing::trace!(logger = "neva", "Received: {:?}", req);
+        let resp = if let Some(handler) = handlers.get(&req.method) {
+            tokio::select! {
+                resp = handler.call(HandlerParams::Request(context, req)) => {
+                    options.complete_request(&full_id);
+                    resp
+                }
+                _ = token.cancelled() => {
+                    #[cfg(feature = "tracing")]
+                    tracing::debug!(
+                        logger = "neva", 
+                        "The request with ID: {} has been cancelled", full_id);
                         Err(Error::from(ErrorCode::RequestCancelled))
                     }
                 }
-            } else {
-                Err(Error::from(ErrorCode::MethodNotFound))
-            };
-            
-            let mut resp = resp.into_response(req_id);
-            if let Some(session_id) = session_id {
-                resp = resp.set_session_id(session_id);
-            }
-            
-            if let Err(_err) = sender.send(resp.into()).await {
-                #[cfg(feature = "tracing")]
-                tracing::error!(
-                    logger = "neva", 
-                    error = format!("Error sending response: {:?}", _err));
-            }
+        } else {
+            Err(Error::from(ErrorCode::MethodNotFound))
         };
-        #[cfg(feature = "tracing")]
-        let req_fut = req_fut.instrument(span);
-        tokio::spawn(req_fut);
+
+        let mut resp = resp.into_response(req_id);
+        if let Some(session_id) = session_id {
+            resp = resp.set_session_id(session_id);
+        }
+        resp
     }
     
-    async fn handle_response(resp: Response, runtime: &ServerRuntime) {
+    async fn handle_response(resp: Response, runtime: ServerRuntime) -> Response {
         let resp_id = resp.id().clone();
-        let session_id = resp.session_id().cloned();
-        let mut sender = runtime.sender();
+        let session_id = resp
+            .session_id()
+            .cloned();
         
         runtime
             .pending_requests()
@@ -526,20 +548,16 @@ impl App {
         if let Some(session_id) = session_id {
             resp = resp.set_session_id(session_id);
         }
-        
-        if let Err(_err) = sender.send(resp.into()).await {
-            #[cfg(feature = "tracing")]
-            tracing::error!(
-                logger = "neva", 
-                error = format!("Error sending response: {:?}", _err));
-        }
+        resp
     }
     
-    async fn handle_notification(notification: Notification) {
+    #[inline]
+    async fn handle_notification(notification: Notification) -> Response {
         if let crate::types::notification::commands::MESSAGE = notification.method.as_str() {
             #[cfg(feature = "tracing")]
             notification.write();
         }
+        Response::empty(RequestId::default())
     }
 
     #[inline]
