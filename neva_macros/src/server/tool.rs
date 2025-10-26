@@ -171,7 +171,7 @@ pub fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<
 
     let middleware_code = middleware.map(|mws| {
         let mw_calls = mws.iter().map(|mw| {
-            quote! { .for_tool(stringify!(#func_name), #mw) }
+            quote! { .wrap_tool(stringify!(#func_name), #mw) }
         });
         quote! { #(#mw_calls)* }
     });

@@ -7,7 +7,7 @@ use self::{context::{Context, ServerRuntime}, options::{McpOptions, RuntimeMcpOp
 use crate::error::{Error, ErrorCode};
 use crate::transport::{Receiver, Sender, Transport};
 use crate::shared;
-use crate::middleware::{MwContext, Next, make_mw};
+use crate::middleware::{MwContext, Next, make_fn::make_mw};
 use crate::app::handler::{
     FromHandlerParams,
     GenericHandler,

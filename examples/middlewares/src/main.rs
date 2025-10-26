@@ -7,13 +7,13 @@
 use neva::prelude::*;
 use tracing_subscriber::{prelude::*, filter, reload};
 
-#[tool(middleware = [specific_tool_middleware])]
-async fn hello_world(name: String) -> String {
+#[tool(middleware = [specific_middleware])]
+async fn greeter(name: String) -> String {
     format!("Hello, {}!", name)
 }
 
 #[tool]
-async fn another_tool() -> &'static str {
+async fn hello_world() -> &'static str {
     "Hello, World!"
 }
 
@@ -23,10 +23,21 @@ async fn resource(name: String) -> ResourceContents {
         .with_text("Hello, world!")
 }
 
-#[prompt]
+#[prompt(middleware = [specific_middleware])]
 async fn prompt(topic: String) -> PromptMessage {
     PromptMessage::user()
         .with(format!("Sample prompt of {topic}"))
+}
+
+#[prompt]
+async fn another_prompt(topic: String) -> PromptMessage {
+    PromptMessage::user()
+        .with(format!("Another sample prompt of {topic}"))
+}
+
+#[handler(command = "ping", middleware = [specific_middleware])]
+async fn ping_handler() {
+    eprintln!("pong");
 }
 
 async fn logging_middleware(ctx: MwContext, next: Next) -> Response {
@@ -44,8 +55,9 @@ async fn global_tool_middleware(ctx: MwContext, next: Next) -> Response {
     next(ctx).await
 }
 
-async fn specific_tool_middleware(ctx: MwContext, next: Next) -> Response {
-    tracing::info!("Hello tool called");
+// Wraps all requests for the "greeter" tool, "prompt" prompt and ping handler 
+async fn specific_middleware(ctx: MwContext, next: Next) -> Response {
+    tracing::info!("Hello from specific middleware");
     next(ctx).await
 }
 
@@ -62,8 +74,8 @@ async fn main() {
         .with_options(|opt| opt
             .with_stdio()
             .with_logging(handle))
-        .with(logging_middleware)
-        .with_tool(global_tool_middleware)
+        .wrap(logging_middleware)           // Wraps all requests that pass through the server
+        .wrap_tools(global_tool_middleware) // Wraps all tools/call requests that pass through the server
         .run()
         .await;
 }

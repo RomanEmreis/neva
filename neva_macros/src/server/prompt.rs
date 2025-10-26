@@ -1,7 +1,7 @@
 //! Macros for MCP prompts
 
 use syn::{ItemFn, FnArg, Pat, Meta, punctuated::Punctuated, token::Comma};
-use super::{get_str_param, get_params_arr, get_bool_param, get_arg_type};
+use super::{get_str_param, get_params_arr, get_exprs_arr, get_bool_param, get_arg_type};
 use proc_macro2::TokenStream;
 use quote::quote;
 
@@ -12,6 +12,7 @@ pub fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<
     let mut title = None;
     let mut roles = None;
     let mut permissions = None;
+    let mut middleware = None;
     let mut no_args = false;
 
     for meta in attr {
@@ -41,6 +42,9 @@ pub fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<
                         }
                         "permissions" => {
                             permissions = get_params_arr(&nv.value);
+                        }
+                        "middleware" => {
+                            middleware = get_exprs_arr(&nv.value);
                         }
                         _ => {}
                     }
@@ -96,6 +100,13 @@ pub fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<
         quote! { .with_permissions([#(#permission_literals),*]) }
     });
 
+    let middleware_code = middleware.map(|mws| {
+        let mw_calls = mws.iter().map(|mw| {
+            quote! { .wrap_prompt(stringify!(#func_name), #mw) }
+        });
+        quote! { #(#mw_calls)* }
+    });
+
     let module_name = syn::Ident::new(&format!("map_{func_name}"), func_name.span());
 
     // Expand the function and apply the tool functionality
@@ -104,7 +115,9 @@ pub fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<
         #function
         
         fn #module_name(app: &mut App) {
-            app.map_prompt(stringify!(#func_name), #func_name)
+            app
+                #middleware_code
+                .map_prompt(stringify!(#func_name), #func_name)
                 #title_code
                 #description_code
                 #args_code
