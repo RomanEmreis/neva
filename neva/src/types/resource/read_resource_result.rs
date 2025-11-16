@@ -15,7 +15,7 @@ const CHUNK_SIZE: usize = 8192;
 /// The server's response to a resources/read request from the client.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ReadResourceResult {
     /// A list of ResourceContents that this resource contains.
     pub contents: Vec<ResourceContents>
@@ -27,9 +27,16 @@ pub struct ReadResourceResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ResourceContents {
+    /// Represents a text resource content
     Text(TextResourceContents),
+    
+    /// Represents a JSON resource content
     Json(JsonResourceContents),
+    
+    /// Represents a blob resource content
     Blob(BlobResourceContents),
+    
+    /// Represents an empty/unknown resource content
     Empty(EmptyResourceContents),
 }
 
@@ -364,10 +371,10 @@ impl ResourceContents {
     #[inline]
     pub fn uri(&self) -> &Uri {
         match self {
-            Self::Text(ref text) => &text.uri,
-            Self::Json(ref json) => &json.uri,
-            Self::Blob(ref blob) => &blob.uri,
-            Self::Empty(ref empty) => &empty.uri
+            Self::Text(text) => &text.uri,
+            Self::Json(json) => &json.uri,
+            Self::Blob(blob) => &blob.uri,
+            Self::Empty(empty) => &empty.uri
         }
     }
 

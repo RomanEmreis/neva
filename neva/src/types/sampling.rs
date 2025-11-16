@@ -9,6 +9,7 @@ const DEFAULT_MESSAGE_MAX_TOKENS: i32 = 512;
 
 /// List of commands for Sampling
 pub mod commands {
+    /// Command name for sampling
     pub const CREATE: &str = "sampling/createMessage";
 }
 
@@ -25,7 +26,7 @@ pub mod commands {
 /// > operations rather than the enhanced resource embedding capabilities provided by [`PromptMessage`].
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SamplingMessage {
     /// The role of the message sender, indicating whether it's from a _user_ or an _assistant_.
     pub role: Role,
@@ -38,7 +39,7 @@ pub struct SamplingMessage {
 /// request from a server to sample an LLM via the client.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreateMessageRequestParams {
     /// The messages requested by the server to be included in the prompt.
     pub messages: Vec<SamplingMessage>,
@@ -103,7 +104,7 @@ pub struct CreateMessageRequestParams {
 /// Specifies the context inclusion options for a request in the Model Context Protocol (MCP).
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum ContextInclusion {
     /// Indicates that no context should be included.
     #[serde(rename = "none")]
@@ -131,7 +132,7 @@ pub enum ContextInclusion {
 /// > balance them against other considerations.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ModelPreferences {
     /// Represents how much to prioritize cost when selecting a model.
     /// 
@@ -167,7 +168,7 @@ pub struct ModelPreferences {
 /// > Clients should prioritize these hints over numeric priorities.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ModelHint {
     /// A hint for a model name.
     /// 
@@ -181,7 +182,7 @@ pub struct ModelHint {
 /// Represents a client's response to a _"sampling/createMessage"_ from the server.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreateMessageResult {
     /// Role of the user who generated the message.
     pub role: Role,
@@ -359,6 +360,7 @@ impl CreateMessageRequestParams {
         self
     }
     
+    /// Sets the system prompt for this [`CreateMessageRequestParams`]
     pub fn with_sys_prompt(mut self, sys_prompt: impl Into<String>) -> Self {
         self.sys_prompt = Some(sys_prompt.into());
         self

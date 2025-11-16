@@ -1,6 +1,7 @@
 ﻿//! Represents an MCP tool
 
 use std::collections::HashMap;
+use std::fmt::{Debug, Formatter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use crate::shared;
@@ -48,8 +49,13 @@ pub mod call_tool_response;
 
 /// List of commands for Tools
 pub mod commands {
+    /// Command name that returns a list of tools available on the server.
     pub const LIST: &str = "tools/list";
+    
+    /// Name of a notification that indicates that the list of tools has changed.
     pub const LIST_CHANGED: &str = "notifications/tools/list_changed";
+    
+    /// Command name that calls a tool on the server.
     pub const CALL: &str = "tools/call";
 }
 
@@ -115,7 +121,7 @@ pub struct Tool {
 /// Sent from the client to request a list of tools the server has.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ListToolsRequestParams {
     /// An opaque token representing the current pagination position.
     /// If provided, the server should return results starting after this cursor.
@@ -126,7 +132,7 @@ pub struct ListToolsRequestParams {
 /// A response to a request to list the tools available on the server.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ListToolsResult {
     /// The server's response to a tools/list request from the client.
     pub tools: Vec<Tool>,
@@ -261,7 +267,7 @@ impl From<Vec<Tool>> for ListToolsResult {
 #[cfg(feature = "server")]
 impl From<Page<'_, Tool>> for ListToolsResult {
     #[inline]
-    fn from(page: Page<Tool>) -> Self {
+    fn from(page: Page<'_, Tool>) -> Self {
         Self {
             next_cursor: page.next_cursor,
             tools: page.items.to_vec()
@@ -459,6 +465,7 @@ impl FromHandlerParams for ListToolsRequestParams {
 /// Describes a generic MCP Tool handler
 #[cfg(feature = "server")]
 pub trait ToolHandler<Args>: GenericHandler<Args> {
+    /// Returns a tool arguments schema
     #[inline]
     fn args() -> Option<HashMap<String, SchemaProperty>> {
         None
@@ -535,6 +542,21 @@ impl CallToolRequestParams {
     pub(crate) fn with_context(mut self, ctx: Context) -> Self {
         self.meta.get_or_insert_default().context = Some(ctx);
         self
+    }
+}
+
+impl Debug for Tool {
+    #[inline]
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tool")
+            .field("name", &self.name)
+            .field("title", &self.title)
+            .field("descr", &self.descr)
+            .field("input_schema", &self.input_schema)
+            .field("output_schema", &self.output_schema)
+            .field("annotations", &self.annotations)
+            .field("meta", &self.meta)
+            .finish()
     }
 }
 

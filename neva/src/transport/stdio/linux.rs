@@ -8,7 +8,6 @@ use nix::{
 
 /// Process group wrapper for automatic handle closing
 pub(super) struct Job(i32);
-unsafe impl Send for Job {}
 
 impl Job {
     /// Creates and returns a new child process ['Child'] and ['Job'] - process group wrapper

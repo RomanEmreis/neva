@@ -5,7 +5,10 @@ use crate::types::{Uri, request::RequestParamsMeta, IntoResponse, RequestId, Res
 
 /// List of commands for Roots
 pub mod commands {
+    /// Command name that requests a list of roots available from the client.
     pub const LIST: &str = "roots/list";
+    
+    /// Notification name that indicates that the list of roots has changed.
     pub const LIST_CHANGED: &str = "notifications/roots/list_changed";
 }
 
@@ -45,7 +48,12 @@ pub struct ListRootsRequestParams {
     pub meta: Option<RequestParamsMeta>,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+/// Represents the client's response to a `roots/list` request from the server.
+/// This result contains an array of Root objects, each representing a root directory 
+/// or file that the server can operate on.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ListRootsResult {
     /// The list of root URIs provided by the client.
     ///

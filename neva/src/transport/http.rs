@@ -80,8 +80,8 @@ pub struct HttpClient {
     receiver: HttpReceiver,
 }
 
-#[derive(Clone, Copy)]
-pub struct ServiceUrl {
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ServiceUrl {
     proto: HttpProto,
     addr: &'static str,
     endpoint: &'static str,
@@ -120,6 +120,16 @@ pub(crate) struct HttpReceiver {
 }
 
 #[cfg(feature = "http-server")]
+impl std::fmt::Debug for HttpServer {
+    #[inline]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpServer")
+            .field("url", &self.url)
+            .finish()
+    }
+}
+
+#[cfg(feature = "http-server")]
 impl Default for HttpServer {
     #[inline]
     fn default() -> Self {
@@ -149,9 +159,19 @@ impl Default for HttpClient {
     }
 }
 
+#[cfg(feature = "http-client")]
+impl std::fmt::Debug for HttpClient {
+    #[inline]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpClient")
+            .field("url", &self.url)
+            .finish()
+    }
+}
+
 impl ServiceUrl {
     #[inline]
-    pub fn as_str<'a>(&self) -> Cow<'a, str> {
+    pub(crate) fn as_str<'a>(&self) -> Cow<'a, str> {
         Cow::Owned(format!("{}://{}{}", self.proto, self.addr, self.endpoint))
     }
 }

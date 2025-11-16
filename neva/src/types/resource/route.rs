@@ -67,8 +67,8 @@ impl Route {
                     if is_last {
                         // Assumes the inserted or existing route has HashMap as associated data
                         match entry {
-                            Route::Dynamic(ref mut map) |
-                            Route::Static(ref mut map) => {
+                            Route::Dynamic(map) |
+                            Route::Static(map) => {
                                 map.insert(
                                     END_OF_ROUTE.into(),
                                     Route::Handler(ResourceHandler {

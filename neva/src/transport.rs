@@ -1,4 +1,6 @@
-﻿use std::future::Future;
+﻿//! Transport protocols and utilities for communicating between server and client
+
+use std::future::Future;
 use tokio_util::sync::CancellationToken;
 use crate::error::{Error, ErrorCode};
 use crate::types::Message;

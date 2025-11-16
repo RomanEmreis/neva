@@ -30,7 +30,7 @@ const MISSING_STRUCTURED_CONTENT: &str = "Tool: Missing structured content";
 /// should be reported as an MCP error response.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CallToolResponse {
     /// The server's response to a tools/call request from the client.
     pub content: Vec<Content>,

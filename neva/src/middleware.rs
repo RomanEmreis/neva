@@ -1,5 +1,6 @@
 //! MCP Server middleware utilities
 
+use std::fmt::Debug;
 use std::sync::Arc;
 use futures_util::future::BoxFuture;
 use crate::{
@@ -14,8 +15,20 @@ const DEFAULT_MW_CAPACITY: usize = 8;
 
 /// Current middleware operation context.
 pub struct MwContext {
+    /// Current JSON-RPC message
     pub msg: Message,
+    
+    /// Server runtime reference
     pub(super) runtime: ServerRuntime
+}
+
+impl Debug for MwContext {
+    #[inline]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MwContext")
+            .field("msg", &self.msg)
+            .finish()
+    }
 }
 
 /// A reference to the next middleware in the chain

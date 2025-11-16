@@ -7,6 +7,7 @@ use serde_json::Value;
 
 /// A trait describes arguments for tools and prompts
 pub trait IntoArgs {
+    /// Converts self into arguments for tools and prompts
     fn into_args(self) -> Option<HashMap<String, Value>>;
 }
 

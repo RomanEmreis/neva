@@ -62,7 +62,7 @@ pub(crate) trait ResourceArgument: Sized {
     type Error;
 
     /// Extracts a type value from [`crate::types::helpers::extract::Payload`]
-    fn extract(payload: Payload) -> Result<Self, Self::Error>;
+    fn extract(payload: Payload<'_>) -> Result<Self, Self::Error>;
 
     /// Returns a [`Source`] that the type needs to be extracted from
     #[inline]
@@ -84,7 +84,7 @@ impl ResourceArgument for Uri {
     type Error = Error;
 
     #[inline]
-    fn extract(payload: Payload) -> Result<Self, Self::Error> {
+    fn extract(payload: Payload<'_>) -> Result<Self, Self::Error> {
         Ok(payload.expect_uri().clone())
     }
 
@@ -98,7 +98,7 @@ impl ResourceArgument for String {
     type Error = Error;
 
     #[inline]
-    fn extract(payload: Payload) -> Result<Self, Self::Error> {
+    fn extract(payload: Payload<'_>) -> Result<Self, Self::Error> {
         let part = payload.expect_uri_part();
         Ok(part.to_string())
     }
@@ -109,7 +109,7 @@ macro_rules! impl_resource_argument {
         $(impl ResourceArgument for $type {
             type Error = Error;
             #[inline]
-            fn extract(payload: Payload) -> Result<Self, Self::Error> {
+            fn extract(payload: Payload<'_>) -> Result<Self, Self::Error> {
                 let part = payload.expect_uri_part();
                     part.parse::<$type>()
                     .map_err(|_| Error::new(ErrorCode::InvalidParams, "Unable to parse URI params"))
@@ -131,7 +131,7 @@ impl ResourceArgument for Meta<RequestParamsMeta> {
     type Error = Error;
 
     #[inline]
-    fn extract(payload: Payload) -> Result<Self, Self::Error> {
+    fn extract(payload: Payload<'_>) -> Result<Self, Self::Error> {
         let meta = payload.expect_meta();
         meta.clone()
             .ok_or(Error::new(ErrorCode::InvalidParams, "Missing metadata"))
@@ -148,7 +148,7 @@ impl ResourceArgument for Meta<ProgressToken> {
     type Error = Error;
 
     #[inline]
-    fn extract(payload: Payload) -> Result<Self, Self::Error> {
+    fn extract(payload: Payload<'_>) -> Result<Self, Self::Error> {
         let meta = payload.expect_meta();
         meta.as_ref()
             .and_then(|meta| meta.progress_token.clone())
@@ -166,7 +166,7 @@ impl ResourceArgument for Context {
     type Error = Error;
 
     #[inline]
-    fn extract(payload: Payload) -> Result<Self, Self::Error> {
+    fn extract(payload: Payload<'_>) -> Result<Self, Self::Error> {
         let meta = payload.expect_meta();
         meta.as_ref()
             .and_then(|meta| meta.context.clone())

@@ -4,7 +4,7 @@ use syn::ItemFn;
 use proc_macro2::TokenStream;
 use quote::quote;
 
-pub fn expand_elicitation(function: &ItemFn) -> syn::Result<TokenStream> {
+pub(super) fn expand_elicitation(function: &ItemFn) -> syn::Result<TokenStream> {
     let func_name = &function.sig.ident;
     let module_name = syn::Ident::new(&format!("map_{func_name}"), func_name.span());
     // Expand the function and apply the tool functionality
@@ -23,7 +23,7 @@ pub fn expand_elicitation(function: &ItemFn) -> syn::Result<TokenStream> {
     Ok(expanded)
 }
 
-pub fn expand_sampling(function: &ItemFn) -> syn::Result<TokenStream> {
+pub(super) fn expand_sampling(function: &ItemFn) -> syn::Result<TokenStream> {
     let func_name = &function.sig.ident;
     let module_name = syn::Ident::new(&format!("map_{func_name}"), func_name.span());
     // Expand the function and apply the tool functionality

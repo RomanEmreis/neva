@@ -40,6 +40,7 @@ pub fn layer() -> MpscLayer {
 }
 
 /// Keeps a [`Sender`] 
+#[derive(Debug)]
 struct NotificationSender {
     sender: Sender<Notification>,
 }
@@ -65,6 +66,7 @@ impl NotificationSender {
 ///     .with(notification::fmt::layer())
 ///     .init();
 /// ```
+#[derive(Debug)]
 pub struct MpscLayer {
     sender: NotificationSender
 }
@@ -77,12 +79,11 @@ where
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
         let mut visitor = SpanVisitor { session_id: None };
         attrs.record(&mut visitor);
-        if let Some(span) = ctx.span(id) {
-            if let Some(mcp_session_id) = visitor.session_id {
-                span
-                    .extensions_mut()
-                    .insert(mcp_session_id);
-            }
+        if let Some(span) = ctx.span(id)
+            && let Some(mcp_session_id) = visitor.session_id {
+            span
+                .extensions_mut()
+                .insert(mcp_session_id);
         }
     }
     
@@ -110,10 +111,9 @@ struct SpanVisitor {
 impl Visit for SpanVisitor {
     #[inline]
     fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == MCP_SESSION_ID {
-            if let Ok(session_id) = uuid::Uuid::parse_str(value) {
-                self.session_id = Some(session_id);
-            }
+        if field.name() == MCP_SESSION_ID
+            && let Ok(session_id) = uuid::Uuid::parse_str(value) {
+            self.session_id = Some(session_id);
         }
     }
     

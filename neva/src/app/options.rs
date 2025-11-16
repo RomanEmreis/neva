@@ -2,6 +2,7 @@
 
 use dashmap::{DashMap, DashSet};
 use std::{borrow::Cow, sync::Arc, time::Duration};
+use std::fmt::{Debug, Formatter};
 use tokio_util::sync::CancellationToken;
 use crate::transport::{StdIoServer, TransportProto};
 #[cfg(feature = "http-server")]
@@ -89,6 +90,20 @@ pub struct McpOptions {
     
     /// Currently running requests
     requests: DashMap<RequestId, CancellationToken>,
+}
+
+impl Debug for McpOptions {
+    #[inline]
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpOptions")
+            .field("implementation", &self.implementation)
+            .field("request_timeout", &self.request_timeout)
+            .field("tools_capability", &self.tools_capability)
+            .field("resources_capability", &self.resources_capability)
+            .field("prompts_capability", &self.prompts_capability)
+            .field("protocol_ver", &self.protocol_ver)
+            .finish()
+    }
 }
 
 impl Default for McpOptions {

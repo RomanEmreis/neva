@@ -1,6 +1,7 @@
 ﻿//! Represents an MCP prompt
 
 use std::collections::HashMap;
+use std::fmt::{Debug, Formatter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use crate::shared;
@@ -35,8 +36,13 @@ pub mod get_prompt_result;
 
 /// List of commands for Prompts
 pub mod commands {
+    /// Command name that returns a list of prompts the server has.
     pub const LIST: &str = "prompts/list";
+    
+    /// Notification name that indicates that the list of prompts has changed.
     pub const LIST_CHANGED: &str = "notifications/prompts/list_changed";
+    
+    /// Command name that returns a prompt provided by the server.
     pub const GET: &str = "prompts/get";
 }
 
@@ -87,7 +93,7 @@ pub struct Prompt {
 /// Describes an argument that a prompt can accept.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptArgument {
     /// The name of the argument.
     pub name: String,
@@ -104,7 +110,7 @@ pub struct PromptArgument {
 /// Sent from the client to request a list of prompts and prompt templates the server has.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ListPromptsRequestParams {
     /// An opaque token representing the current pagination position.
     /// If provided, the server should return results starting after this cursor.
@@ -115,7 +121,7 @@ pub struct ListPromptsRequestParams {
 /// Used by the client to get a prompt provided by the server.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct GetPromptRequestParams {
     /// The name of the prompt or prompt template.
     pub name: String,
@@ -135,7 +141,7 @@ pub struct GetPromptRequestParams {
 /// The server's response to a prompts/list request from the client.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ListPromptsResult {
     /// A list of prompts or prompt templates that the server offers.
     pub prompts: Vec<Prompt>,
@@ -172,7 +178,7 @@ impl From<Vec<Prompt>> for ListPromptsResult {
 #[cfg(feature = "server")]
 impl From<Page<'_, Prompt>> for ListPromptsResult {
     #[inline]
-    fn from(page: Page<Prompt>) -> Self {
+    fn from(page: Page<'_, Prompt>) -> Self {
         Self {
             next_cursor: page.next_cursor,
             prompts: page.items.to_vec()
@@ -275,6 +281,7 @@ impl<T: Into<String>> From<(T, T, bool)> for PromptArgument {
 /// Describes a generic get prompt handler
 #[cfg(feature = "server")]
 pub trait PromptHandler<Args>: GenericHandler<Args> {
+    /// Returns a prompt arguments schema
     #[inline]
     fn args() -> Option<Vec<PromptArgument>> {
         None
@@ -355,6 +362,18 @@ impl GetPromptRequestParams {
     pub(crate) fn with_context(mut self, ctx: Context) -> Self {
         self.meta.get_or_insert_default().context = Some(ctx);
         self
+    }
+}
+
+impl Debug for Prompt {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Prompt")
+            .field("name", &self.name)
+            .field("title", &self.title)
+            .field("descr", &self.descr)
+            .field("meta", &self.meta)
+            .field("args", &self.args)
+            .finish()
     }
 }
 
@@ -448,11 +467,14 @@ impl Prompt {
     }
 }
 
+/// Prompt arguments helper
 #[cfg(feature = "server")]
+#[allow(missing_debug_implementations)]
 pub struct PromptArguments;
+
 #[cfg(feature = "server")]
 impl PromptArguments {
-    /// Deserializes a [`Vec`] of [`PromptArgument`] from JSON string
+    /// Deserializes a [`Vec`] of [`PromptArgument`] from a JSON string
     #[inline]
     pub fn from_json_str(json: &str) -> Vec<Value> {
         serde_json::from_str(json)

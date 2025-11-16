@@ -14,13 +14,14 @@ use super::{IntoResponse, RequestId, Response, Request};
 
 /// List of commands for Completion
 pub mod commands {
+    /// Command name that returns autocompletion options.
     pub const COMPLETE: &str = "completion/complete";
 }
 
 /// Represents a completion object in the server's response
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Completion {
     /// An array of completion values. Must not exceed 100 items.
     pub values: Vec<String>,
@@ -36,10 +37,10 @@ pub struct Completion {
     pub has_more: Option<bool>,
 }
 
-/// A request from the client to the server, to ask for completion options.
+/// A request from the client to the server to ask for completion options.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CompleteRequestParams {
     /// The reference's information
     #[serde(rename = "ref")]
@@ -53,7 +54,7 @@ pub struct CompleteRequestParams {
 /// Used for completion requests to provide additional context for the completion options.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Argument {
     /// The name of the argument.
     pub name: String,
@@ -65,7 +66,7 @@ pub struct Argument {
 /// The server's response to a completion/complete request
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct CompleteResult {
     /// The completion object containing the completion values.
     pub completion: Completion,

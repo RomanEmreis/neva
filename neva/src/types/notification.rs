@@ -29,11 +29,22 @@ pub mod fmt;
 
 /// List of commands for Notifications
 pub mod commands {
+    /// Notification name that indicates that the notifications have initialized.
     pub const INITIALIZED: &str = "notifications/initialized";
+    
+    /// Notification name that indicates that notifications have been canceled.
     pub const CANCELLED: &str = "notifications/cancelled";
+    
+    /// Notification name that indicates that a new log message has been received.
     pub const MESSAGE: &str = "notifications/message";
+    
+    /// Notification name that indicates that a progress notification has been received.
     pub const PROGRESS: &str = "notifications/progress";
+    
+    /// Notification name that indicates that a log message has been received on stderr.
     pub const STDERR: &str = "notifications/stderr";
+    
+    /// Command name that sets the log level.
     pub const SET_LOG_LEVEL: &str = "logging/setLevel";
 }
 
@@ -159,6 +170,7 @@ impl Notification {
         }
     }
     
+    /// Serializes the [`Notification`] to JSON string
     pub fn to_json(self) -> String {
         serde_json::to_string(&self).unwrap()
     }

@@ -56,6 +56,7 @@ impl DerefMut for Cursor {
 }
 
 /// Represents a current page of items
+#[derive(Debug)]
 pub struct Page<'a, T> {
     /// Page items
     pub items: &'a [T],
@@ -66,6 +67,7 @@ pub struct Page<'a, T> {
 
 /// A trait for types that need pagination support
 pub trait Pagination<T> {
+    /// Returns a page of `page_size` based on the cursor.
     fn paginate(&self, cursor: Option<Cursor>, page_size: usize) -> Page<'_, T>;
 }
 

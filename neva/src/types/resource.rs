@@ -40,19 +40,32 @@ mod from_request;
 
 /// List of commands for Resources
 pub mod commands {
+    /// Command name that returns a list of resources available on MCP server
     pub const LIST: &str = "resources/list";
+    
+    /// Notification name that indicates that the list of resources has changed.
     pub const LIST_CHANGED: &str = "notifications/resources/list_changed";
+    
+    /// Command name that returns a list of resource templates available on MCP server.
     pub const TEMPLATES_LIST: &str = "resources/templates/list";
+    
+    /// Command name that returns the resource data
     pub const READ: &str = "resources/read";
+    
+    /// Command name that subscribes to resource updates.
     pub const SUBSCRIBE: &str = "resources/subscribe";
+    
+    /// Command name that unsubscribes from resource updates.
     pub const UNSUBSCRIBE: &str = "resources/unsubscribe";
+    
+    /// Notification name that indicates that the resource has been updated.
     pub const UPDATED: &str = "notifications/resources/updated";
 }
 
 /// Represents a known resource that the server is capable of reading.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Resource {
     /// The URI of this resource.
     pub uri: Uri,
@@ -92,7 +105,7 @@ pub struct Resource {
 /// Sent from the client to request a list of resources the server has.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ListResourcesRequestParams {
     /// An opaque token representing the current pagination position.
     /// If provided, the server should return results starting after this cursor.
@@ -103,7 +116,7 @@ pub struct ListResourcesRequestParams {
 /// Sent from the client to the server to read a specific resource URI.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ReadResourceRequestParams {
     /// The URI of the resource to read. The URI can use any protocol; 
     /// it is up to the server how to interpret it.
@@ -125,7 +138,7 @@ pub struct ReadResourceRequestParams {
 /// The server's response to a resources/list request from the client.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ListResourcesResult {
     /// A list of resources that the server offers.
     pub resources: Vec<Resource>,
@@ -144,7 +157,7 @@ pub struct ListResourcesResult {
 /// from the server whenever a particular resource changes.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SubscribeRequestParams {
     /// The URI of the resource to subscribe to. 
     /// The URI can use any protocol; it is up to the server how to interpret it.
@@ -155,7 +168,7 @@ pub struct SubscribeRequestParams {
 /// from the server whenever a primitive resource changes.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct UnsubscribeRequestParams {
     /// The URI of the resource to unsubscribe from. 
     /// The URI can use any protocol; it is up to the server how to interpret it. 
@@ -209,7 +222,7 @@ impl From<Vec<Resource>> for ListResourcesResult {
 #[cfg(feature = "server")]
 impl From<Page<'_, Resource>> for ListResourcesResult {
     #[inline]
-    fn from(page: Page<Resource>) -> Self {
+    fn from(page: Page<'_, Resource>) -> Self {
         Self {
             next_cursor: page.next_cursor,
             resources: page.items.to_vec()

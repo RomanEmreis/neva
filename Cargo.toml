@@ -5,7 +5,13 @@ exclude = ["examples/roots", "examples/sampling", "examples/elicitation"]
 resolver = "2"
 
 [workspace.package]
-rust-version = "1.85.0"
+license = "MIT"
+edition = "2024"
+rust-version = "1.90.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+unreachable_pub = "warn"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }

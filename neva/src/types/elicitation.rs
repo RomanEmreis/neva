@@ -13,11 +13,12 @@ use crate::{
 
 /// List of commands for Elicitation
 pub mod commands {
+    /// Command name for creating a new elicitation request
     pub const CREATE: &str = "elicitation/create";
 }
 
 /// Represents a message issued from the server to elicit additional information from the user via the client.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ElicitRequestParams {
     /// The message to present to the user.
     pub message: String,
@@ -30,6 +31,7 @@ pub struct ElicitRequestParams {
     pub schema: RequestSchema,
 }
 
+/// Represents a JSON Schema that can be used to validate the content of an elicitation request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestSchema {
     /// The type of the schema.
@@ -47,7 +49,7 @@ pub struct RequestSchema {
 }
 
 /// Represents the client's response to an elicitation request.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ElicitResult {
     /// The user action in response to the elicitation.
     /// 
@@ -77,6 +79,7 @@ pub enum ElicitationAction {
 }
 
 /// Represents a validator for elicitation content
+#[derive(Debug)]
 pub struct Validator {
     schema: RequestSchema,
 }
@@ -186,21 +189,19 @@ impl Validator {
                 let str_value = value.as_str()
                     .ok_or(Error::new(ErrorCode::InvalidParams, "Expected string value"))?;
 
-                if let Some(min_len) = string_schema.min_length {
-                    if str_value.len() < min_len {
-                        return Err(Error::new(
-                            ErrorCode::InvalidParams, 
-                            format!("String too short: {} < {min_len}", str_value.len())));
-                    }
+                if let Some(min_len) = string_schema.min_length
+                    && str_value.len() < min_len {
+                    return Err(Error::new(
+                        ErrorCode::InvalidParams, 
+                        format!("String too short: {} < {min_len}", str_value.len())));
                 }
 
-                if let Some(max_len) = string_schema.max_length {
-                    if str_value.len() > max_len {
-                        return Err(Error::new(
-                            ErrorCode::InvalidParams, 
-                            format!("String too long: {} > {max_len}", str_value.len())));
+                if let Some(max_len) = string_schema.max_length
+                    && str_value.len() > max_len {
+                    return Err(Error::new(
+                        ErrorCode::InvalidParams, 
+                        format!("String too long: {} > {max_len}", str_value.len())));
                     }
-                }
 
                 // Validate format if specified
                 if let Some(format) = &string_schema.format {
@@ -211,21 +212,19 @@ impl Validator {
                 let num_value = value.as_f64()
                     .ok_or(Error::new(ErrorCode::InvalidParams, "Expected number value"))?;
 
-                if let Some(min) = number_schema.min {
-                    if num_value < min {
-                        return Err(Error::new(
-                            ErrorCode::InvalidParams, 
-                            format!("Number too small: {num_value} < {min}")));
-                    }
+                if let Some(min) = number_schema.min
+                    && num_value < min {
+                    return Err(Error::new(
+                        ErrorCode::InvalidParams, 
+                        format!("Number too small: {num_value} < {min}")));
                 }
 
-                if let Some(max) = number_schema.max {
-                    if num_value > max {
-                        return Err(
-                            Error::new(
-                                ErrorCode::InvalidParams, 
-                                format!("Number too large: {num_value} > {max}")));
-                    }
+                if let Some(max) = number_schema.max
+                    && num_value > max {
+                    return Err(
+                        Error::new(
+                            ErrorCode::InvalidParams, 
+                            format!("Number too large: {num_value} > {max}")));
                 }
             },
             Schema::Boolean(_) => {

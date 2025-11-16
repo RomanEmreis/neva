@@ -12,9 +12,16 @@ const SEPARATOR: u8 = b'/';
 /// Represents a progress token, which can be either a string or an integer.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ProgressToken {
+    /// Represents a numeric progress token.
     Number(i64),
+    
+    /// Represents a UUID progress token.
     Uuid(uuid::Uuid),
+    
+    /// Represents a string progress token.
     String(ArcStr),
+    
+    /// Represents a slash-separated progress token.
     Slice(ArcSlice<ProgressToken>)
 }
 
@@ -69,7 +76,7 @@ struct ProgressTokenVisitor;
 impl serde::de::Visitor<'_> for ProgressTokenVisitor {
     type Value = ProgressToken;
 
-    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("a number, UUID, string, or slash-separated path")
     }
 

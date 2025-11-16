@@ -50,11 +50,13 @@ impl From<&str> for Uri {
 }
 
 impl Uri {
+    /// Returns the inner URL string
     #[inline]
     pub fn into_inner(self) -> String {
         self.0
     }
 
+    /// Splits a URL path by slashes and returns the iterator of parts.
     #[inline]
     pub fn parts<'a>(&self) -> Result<impl Iterator<Item = Cow<'a, str>> + use<'a, '_>, Error> {
         let parts = self.rsplit("//")
@@ -65,6 +67,7 @@ impl Uri {
         Ok(parts)
     }
     
+    /// Splits a URL path by slashes and returns a vector.
     #[inline]
     pub fn as_vec<'a>(&self) -> Vec<Cow<'a, str>> {
         match self.parts() {

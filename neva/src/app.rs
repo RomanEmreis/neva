@@ -1,6 +1,7 @@
 ﻿//! Represents an MCP application
 
 use std::collections::HashMap;
+use std::fmt::{Debug, Formatter};
 use std::future::Future;
 use tokio_util::sync::CancellationToken;
 use self::{context::{Context, ServerRuntime}, options::{McpOptions, RuntimeMcpOptions}};
@@ -45,6 +46,13 @@ type RequestHandlers = HashMap<String, RequestHandler<Response>>;
 pub struct App {
     pub(super) options: McpOptions,
     handlers: RequestHandlers,
+}
+
+impl Debug for App {
+    #[inline]
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str("App { ... }")
+    }
 }
 
 impl App {

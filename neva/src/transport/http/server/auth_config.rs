@@ -1,5 +1,6 @@
 //! Authentication and Authorization configuration tools
 
+use std::fmt::Debug;
 use crate::error::{Error, ErrorCode};
 use serde::Deserialize;
 use volga::auth::{
@@ -71,9 +72,17 @@ impl AuthClaims for DefaultClaims {
     }
 }
 
+/// Represents authentication and authorization configuration
 pub struct AuthConfig<C: AuthClaims = DefaultClaims> {
     inner: BearerAuthConfig,
     authorizer: Authorizer<C>
+}
+
+impl Debug for AuthConfig {
+    #[inline]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AuthConfig { .. }")
+    }
 }
 
 impl Default for AuthConfig {

@@ -1,6 +1,7 @@
 ﻿//! Utilities for the MCP client
 
 use std::{future::Future, sync::Arc};
+use std::fmt::{Debug, Formatter};
 use options::McpOptions;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -43,6 +44,17 @@ pub struct Client {
     
     /// Request handler
     handler: Option<RequestHandler>
+}
+
+impl Debug for Client {
+    #[inline]
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client")
+            .field("options", &self.options)
+            .field("server_capabilities", &self.server_capabilities)
+            .field("server_info", &self.server_info)
+            .finish()
+    }
 }
 
 impl Default for Client {

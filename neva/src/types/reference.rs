@@ -7,7 +7,7 @@ use serde::{Serialize, Deserialize};
 /// Umbrella type for both ResourceReference and PromptReference from the spec schema.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Reference {
     /// The type of content. Can be ref/resource or ref/prompt.
     #[serde(rename = "type")]

@@ -25,7 +25,7 @@ use crate::types::notification::fmt::LOG_REGISTRY;
 pub use auth_config::{AuthConfig, DefaultClaims};
 pub(crate) use auth_config::{validate_permissions, validate_roles};
 
-pub mod auth_config;
+pub(crate) mod auth_config;
 
 type RequestMap = Arc<DashMap<RequestId, oneshot::Sender<Message>>>;
 
@@ -34,12 +34,6 @@ struct RequestManager {
     pending: RequestMap,
     msg_registry: Arc<MessageRegistry>,
     sender: mpsc::Sender<Result<Message, Error>>,
-}
-
-impl Default for RequestManager {
-    fn default() -> Self {
-        unreachable!()
-    }
 }
 
 pub(super) async fn serve(

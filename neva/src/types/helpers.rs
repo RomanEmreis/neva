@@ -10,7 +10,7 @@ use std::{
 };
 
 #[cfg(feature = "server")]
-pub mod macros;
+pub(crate) mod macros;
 #[cfg(feature = "server")]
 pub(crate) mod extract;
 
@@ -40,12 +40,23 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PropertyType {
+    /// Unknown type.
     None,
+    
+    /// Array type
     Array,
+    
+    /// String type
     String,
+    
+    /// Number type
     Number,
+    
+    /// Boolean type
     #[serde(alias = "boolean")]
     Bool,
+    
+    /// Object type.
     Object,
 }
 
@@ -81,7 +92,7 @@ impl From<String> for PropertyType {
 
 impl Display for PropertyType {
     #[inline]
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self { 
             PropertyType::Array => write!(f, "array"),
             PropertyType::String => write!(f, "string"),
@@ -96,7 +107,7 @@ impl Display for PropertyType {
 // Preventing conflicts
 #[cfg(feature = "server")]
 mod sealed {
-    pub trait TypeCategorySealed {}
+    pub(crate) trait TypeCategorySealed {}
 }
 
 /// A trait that helps to determine a category of an object type

@@ -1,5 +1,6 @@
 ﻿//! Utilities for Resource templates
 
+use std::fmt::Debug;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "server")]
 use std::sync::Arc;
@@ -30,6 +31,7 @@ use crate::types::{FromRequest, ReadResourceRequestParams, ReadResourceResult, R
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ResourceTemplate {
+    /// The URI template that identifies this resource template.
     #[serde(rename = "uriTemplate")]
     pub uri_template: Uri,
     
@@ -73,7 +75,7 @@ pub struct ResourceTemplate {
 /// Sent from the client to request a list of resource templates the server has.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ListResourceTemplatesRequestParams {
     /// An opaque token representing the current pagination position.
     /// If provided, the server should return results starting after this cursor.
@@ -84,7 +86,7 @@ pub struct ListResourceTemplatesRequestParams {
 /// The server's response to a resources/templates/list request from the client.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ListResourceTemplatesResult {
     /// A list of resource templates that the server offers.
     #[serde(rename = "resourceTemplates")]
@@ -119,7 +121,7 @@ impl From<Vec<ResourceTemplate>> for ListResourceTemplatesResult {
 
 impl From<Page<'_, ResourceTemplate>> for ListResourceTemplatesResult {
     #[inline]
-    fn from(page: Page<ResourceTemplate>) -> Self {
+    fn from(page: Page<'_, ResourceTemplate>) -> Self {
         Self {
             next_cursor: page.next_cursor,
             templates: page.items.to_vec()
@@ -192,6 +194,21 @@ where
                 .try_into()
                 .map_err(Into::into)
         })
+    }
+}
+
+impl Debug for ResourceTemplate {
+    #[inline]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResourceTemplate")
+            .field("uri_template", &self.uri_template)
+            .field("name", &self.name)
+            .field("title", &self.title)
+            .field("descr", &self.descr)
+            .field("mime", &self.mime)
+            .field("annotations", &self.annotations)
+            .field("meta", &self.meta)
+            .finish()
     }
 }
 
