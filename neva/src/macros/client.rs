@@ -4,6 +4,7 @@ use crate::Client;
 use super::inventory;
 
 /// Registrar unit for tools, resources, templates and prompts
+#[derive(Debug)]
 pub struct ItemRegistrar(pub fn(&mut Client));
 inventory::collect!(ItemRegistrar);
 

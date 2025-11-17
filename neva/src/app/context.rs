@@ -27,7 +27,7 @@ use std::{
     time::Duration,
     sync::Arc
 };
-
+use std::fmt::{Debug, Formatter};
 #[cfg(feature = "http-server")]
 use {
     crate::transport::http::server::{validate_roles, validate_permissions},
@@ -81,6 +81,16 @@ pub struct Context {
     
     /// Represents a timeout for the current request
     timeout: Duration,
+}
+
+impl Debug for Context {
+    #[inline]
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Context")
+            .field("session_id", &self.session_id)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
 }
 
 impl ServerRuntime {

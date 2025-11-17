@@ -21,6 +21,7 @@ pub(crate) type RequestHandler<T> = Arc<
     + Sync
 >;
 
+#[derive(Debug)]
 pub enum HandlerParams {
     Request(Context, Request),
     Tool(CallToolRequestParams),

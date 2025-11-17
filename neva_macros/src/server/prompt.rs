@@ -5,7 +5,7 @@ use super::{get_str_param, get_params_arr, get_exprs_arr, get_bool_param, get_ar
 use proc_macro2::TokenStream;
 use quote::quote;
 
-pub fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<TokenStream> {
+pub(crate) fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<TokenStream> {
     let func_name = &function.sig.ident;
     let mut description = None;
     let mut args = None;
@@ -69,15 +69,14 @@ pub fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<
     } else if !no_args {
         let mut arg_entries = Vec::new();
         for arg in &function.sig.inputs {
-            if let FnArg::Typed(pat_type) = arg {
-                if let Pat::Ident(pat_ident) = &*pat_type.pat {
-                    let arg_name = pat_ident.ident.to_string();
-                    let arg_type = get_arg_type(&pat_type.ty);
-                    if !arg_type.eq("none") {
-                        arg_entries.push(quote! {
-                            #arg_name
-                        });
-                    }
+            if let FnArg::Typed(pat_type) = arg
+                && let Pat::Ident(pat_ident) = &*pat_type.pat {
+                let arg_name = pat_ident.ident.to_string();
+                let arg_type = get_arg_type(&pat_type.ty);
+                if !arg_type.eq("none") {
+                    arg_entries.push(quote! {
+                        #arg_name
+                    });
                 }
             }
         }

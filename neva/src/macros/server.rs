@@ -4,6 +4,7 @@ use crate::App;
 use super::inventory;
 
 /// Registrar unit for tools, resources, templates and prompts
+#[derive(Debug)]
 pub struct ItemRegistrar(pub fn(&mut App));
 inventory::collect!(ItemRegistrar);
 

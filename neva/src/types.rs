@@ -1,4 +1,8 @@
-﻿use std::fmt::Display;
+﻿//! Types used by the MCP protocol
+//! 
+//! See the [specification](https://github.com/modelcontextprotocol/specification) for details
+
+use std::fmt::Display;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use crate::SDK_NAME;

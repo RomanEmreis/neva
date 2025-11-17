@@ -19,7 +19,10 @@ pub mod into_response;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Response {
+    /// A successful response.
     Ok(OkResponse),
+    
+    /// A response that indicates an error occurred.
     Err(ErrorResponse)
 }
 

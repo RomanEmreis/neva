@@ -16,7 +16,7 @@ use tls_config::ClientTlsConfig;
 
 pub(super) mod mcp_session;
 #[cfg(feature = "client-tls")]
-pub mod tls_config;
+pub(crate) mod tls_config;
 
 pub(super) async fn connect(
     rt: ClientRuntimeContext,
@@ -126,17 +126,15 @@ async fn send_request(
         return;
     }
     
-    if !session.has_session_id() {
-        if let Some(session_id) = get_mcp_session_id(resp.headers()) { 
-            session.set_session_id(session_id);
-        }
+    if !session.has_session_id()
+        && let Some(session_id) = get_mcp_session_id(resp.headers()) { 
+        session.set_session_id(session_id);
     }
 
-    if let Message::Request(r) = req {
-        if r.method == crate::commands::INIT {
-            session.notify_session_initialized();
-            session.sse_ready().await;
-        }
+    if let Message::Request(r) = req
+        && r.method == crate::commands::INIT {
+        session.notify_session_initialized();
+        session.sse_ready().await;
     }
 
     let resp = resp.json::<Message>().await;

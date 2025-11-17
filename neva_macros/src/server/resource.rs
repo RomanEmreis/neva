@@ -5,7 +5,7 @@ use super::{get_str_param, get_params_arr};
 use proc_macro2::TokenStream;
 use quote::quote;
 
-pub fn expand_resource(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<TokenStream> {
+pub(crate) fn expand_resource(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<TokenStream> {
     let func_name = &function.sig.ident;
     let mut uri = None;
     let mut title = None;
@@ -107,7 +107,7 @@ pub fn expand_resource(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn
     Ok(expanded)
 }
 
-pub fn expand_resources(function: &ItemFn) -> syn::Result<TokenStream> {
+pub(crate) fn expand_resources(function: &ItemFn) -> syn::Result<TokenStream> {
     let func_name = &function.sig.ident;
     let module_name = syn::Ident::new(&format!("map_{func_name}"), func_name.span());
     // Expand the function and apply the tool functionality

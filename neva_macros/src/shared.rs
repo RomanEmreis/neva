@@ -4,7 +4,7 @@ use syn::{Path, punctuated::Punctuated, token::Comma};
 use proc_macro2::TokenStream;
 use quote::quote;
 
-pub fn expand_json_schema(attr: &Punctuated<Path, Comma>, input: &syn::DeriveInput) -> syn::Result<TokenStream>  {
+pub(super) fn expand_json_schema(attr: &Punctuated<Path, Comma>, input: &syn::DeriveInput) -> syn::Result<TokenStream>  {
     let mut include_ser = false;
     let mut include_de = false;
     let mut include_debug = false;

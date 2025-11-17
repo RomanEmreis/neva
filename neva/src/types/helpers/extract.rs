@@ -29,7 +29,7 @@ pub(crate) trait RequestArgument: Sized {
     type Error;
 
     /// Extracts a type value from [`Payload`]
-    fn extract(payload: Payload) -> Result<Self, Self::Error>;
+    fn extract(payload: Payload<'_>) -> Result<Self, Self::Error>;
 
     /// Returns a [`Source`] that the type needs to be extracted from
     #[inline]
@@ -62,7 +62,7 @@ impl<T: DeserializeOwned> RequestArgument for T {
     type Error = Error;
 
     #[inline]
-    fn extract(payload: Payload) -> Result<Self, Self::Error> {
+    fn extract(payload: Payload<'_>) -> Result<Self, Self::Error> {
         let arg = payload.expect_args();
         T::deserialize(arg).map_err(Error::from)
     }
@@ -72,7 +72,7 @@ impl RequestArgument for Meta<RequestParamsMeta> {
     type Error = Error;
 
     #[inline]
-    fn extract(payload: Payload) -> Result<Self, Self::Error> {
+    fn extract(payload: Payload<'_>) -> Result<Self, Self::Error> {
         let meta = payload.expect_meta();
         meta.clone()
             .ok_or(Error::new(ErrorCode::InvalidParams, "Missing metadata"))
@@ -89,7 +89,7 @@ impl RequestArgument for Meta<ProgressToken> {
     type Error = Error;
 
     #[inline]
-    fn extract(payload: Payload) -> Result<Self, Self::Error> {
+    fn extract(payload: Payload<'_>) -> Result<Self, Self::Error> {
         let meta = payload.expect_meta();
         meta.as_ref()
             .and_then(|meta| meta.progress_token.clone())
@@ -107,7 +107,7 @@ impl RequestArgument for Context {
     type Error = Error;
 
     #[inline]
-    fn extract(payload: Payload) -> Result<Self, Self::Error> {
+    fn extract(payload: Payload<'_>) -> Result<Self, Self::Error> {
         let meta = payload.expect_meta();
         meta.as_ref()
             .and_then(|meta| meta.context.clone())
@@ -123,7 +123,7 @@ impl RequestArgument for Context {
 #[inline]
 pub(crate) fn extract_arg<T: RequestArgument<Error = Error>>(
     meta: &Option<RequestParamsMeta>,
-    iter: &mut Iter<String, serde_json::Value>
+    iter: &mut Iter<'_, String, serde_json::Value>
 ) -> Result<T, Error> {
     match T::source() {
         Source::Meta => T::extract(Payload::Meta(meta)),

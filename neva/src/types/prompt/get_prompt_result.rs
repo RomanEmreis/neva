@@ -8,7 +8,7 @@ use crate::{error::Error, types::{IntoResponse, RequestId, Response}};
 /// The server's response to a prompts/get request from the client.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct GetPromptResult {
     /// An optional description for the prompt.
     #[serde(rename = "description", skip_serializing_if = "Option::is_none")]

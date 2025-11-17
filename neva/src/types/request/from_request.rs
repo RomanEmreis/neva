@@ -6,6 +6,7 @@ use crate::types::Request;
 
 /// A trait that helps the extract typed _params_ from request
 pub trait FromRequest: Sized {
+    /// Extracts typed _params_ from request
     fn from_request(request: Request) -> Result<Self, Error>;
 }
 

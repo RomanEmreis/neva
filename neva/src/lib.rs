@@ -4,7 +4,7 @@
 //! ## Dependencies
 //! ```toml
 //! [dependencies]
-//! neva = { version = "0.1.5", features = ["full"] }
+//! neva = { version = "0.2.1", features = ["full"] }
 //! tokio = { version = "1", features = ["full"] }
 //! ```
 //! 
@@ -88,17 +88,23 @@ pub(crate) const PROTOCOL_VERSIONS: [&str; 3] = [
 
 #[cfg(feature = "http-server")]
 pub mod auth {
+    //! Authentication utilities
+    
     pub use volga::auth::{Algorithm, Authorizer, Claims};
     pub use crate::transport::http::server::{AuthConfig, DefaultClaims};
 }
 
 pub mod json {
+    //! JSON utilities
+    
     pub use schemars::JsonSchema;
     #[doc(hidden)]
     pub use schemars;
 }
 
 pub mod prelude {
+    //! Prelude with commonly used items
+    
     pub use crate::types::*;
     pub use crate::error::*;
     pub use crate::json::*;

@@ -46,6 +46,7 @@ impl From<ErrorDetails> for Error {
 }
 
 impl ErrorDetails {
+    /// Creates a new [`ErrorDetails`]
     #[inline]
     pub fn new(err: &str) -> Self {
         Self { 

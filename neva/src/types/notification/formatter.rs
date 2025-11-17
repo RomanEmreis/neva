@@ -22,6 +22,7 @@ use crate::types::notification::{
 use crate::types::ProgressToken;
 
 /// A formatter that formats tracing events into MCP notification logs
+#[allow(missing_debug_implementations)]
 pub struct NotificationFormatter;
 
 impl From<&Level> for LoggingLevel {

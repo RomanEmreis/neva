@@ -5,7 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::error::Error;
 
 /// Standard JSON-RPC error codes as defined in the MCP specification.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ErrorCode {
     /// The server received invalid JSON.
     ParseError = -32700,
@@ -20,22 +20,17 @@ pub enum ErrorCode {
     InvalidParams = -32602,
 
     /// Internal JSON-RPC error.
+    #[default]
     InternalError = -32603,
 
     /// The resource does not exist / is not available.
     ResourceNotFound = -32002,
     
-    /// [Internal code] The request has been cancelled
+    /// [Internal code] The request has been canceled
     RequestCancelled = -99999,
 
     /// [Internal code] The request has been timed out
     Timeout = -99998,
-}
-
-impl Default for ErrorCode {
-    fn default() -> Self {
-        Self::InternalError
-    }
 }
 
 impl From<ErrorCode> for i32 {
@@ -87,7 +82,7 @@ impl<'de> Deserialize<'de> for ErrorCode {
 }
 
 impl Display for ErrorCode {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self { 
             ErrorCode::ParseError => write!(f, "Parse error"),
             ErrorCode::InvalidRequest => write!(f, "Invalid request"),

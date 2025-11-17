@@ -12,9 +12,16 @@ const SEPARATOR: u8 = b'/';
 /// A unique identifier for a request
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub enum RequestId {
+    /// A numeric identifier
     Number(i64),
+    
+    /// A UUID identifier
     Uuid(uuid::Uuid),
+    
+    /// A string identifier
     String(ArcStr),
+    
+    /// A slash-separated path of identifiers
     Slice(ArcSlice<RequestId>)
 }
 
@@ -104,7 +111,7 @@ struct RequestIdVisitor;
 impl serde::de::Visitor<'_> for RequestIdVisitor {
     type Value = RequestId;
 
-    fn expecting(&self, formatter: &mut Formatter) -> fmt::Result {
+    fn expecting(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter.write_str("a number, UUID, string, or slash-separated path")
     }
 

@@ -7,9 +7,9 @@ use quote::quote;
 
 pub(crate) mod tool;
 pub(crate) mod resource;
-pub(crate) mod prompt;
+pub(super) mod prompt;
 
-pub fn expand_handler(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<TokenStream> {
+pub(super) fn expand_handler(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<TokenStream> {
     let func_name = &function.sig.ident;
     let mut command = None;
     let mut middleware = None;
@@ -96,18 +96,16 @@ pub(super) fn get_arg_type(t: &Type) -> &str {
 
 #[inline]
 pub(super) fn get_inner_type_from_generic(ty: &Type) -> Option<&Type> {
-    if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.last() {
-            match segment.ident.to_string().as_str() {
-                "Result" | "Option" | "Vec" | "Meta" | "Json" => {
-                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                        if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
-                            return Some(inner_ty);
-                        }
-                    }
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.last() {
+        match segment.ident.to_string().as_str() {
+            "Result" | "Option" | "Vec" | "Meta" | "Json" => {
+                if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+                    && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
+                    return Some(inner_ty);
                 }
-                _ => {}
             }
+            _ => {} 
         }
     }
     None

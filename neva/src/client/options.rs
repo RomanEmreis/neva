@@ -1,6 +1,7 @@
 ﻿//! MCP client options
 
 use std::collections::HashMap;
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use std::time::Duration;
 use crate::PROTOCOL_VERSIONS;
@@ -50,6 +51,20 @@ pub struct McpOptions {
     
     /// Represents a list of roots that the client supports
     roots: HashMap<Uri, Root>,
+}
+
+impl Debug for McpOptions {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpOptions")
+            .field("implementation", &self.implementation)
+            .field("timeout", &self.timeout)
+            .field("roots_capability", &self.roots_capability)
+            .field("elicitation_capability", &self.elicitation_capability)
+            .field("sampling_capability", &self.sampling_capability)
+            .field("protocol_ver", &self.protocol_ver)
+            .field("roots", &self.roots)
+            .finish()
+    }
 }
 
 impl Default for McpOptions {
