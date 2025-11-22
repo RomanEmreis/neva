@@ -1,6 +1,6 @@
 [package]
 name = "neva_macros"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.90.0"
 authors = ["Roman Emreis <roman.emreis@outlook.com>"]

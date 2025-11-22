@@ -1,5 +1,4 @@
-﻿use std::borrow::Cow;
-use std::path::PathBuf;
+﻿use std::path::PathBuf;
 use crate::Context;
 use crate::error::{Error, ErrorCode};
 use crate::types::{Meta, ProgressToken};
@@ -12,7 +11,7 @@ pub(crate) enum Payload<'a> {
     Uri(&'a Uri),
     
     /// Resource URI part
-    UriPart(Cow<'a, str>),
+    UriPart(String),
     
     /// Request metadata ("_meta")
     Meta(&'a Option<RequestParamsMeta>),
@@ -31,7 +30,7 @@ pub(crate) enum Source {
 impl<'a> Payload<'a> {
     /// Returns uri part value for type extraction
     #[inline]
-    pub(crate) fn expect_uri_part(self) -> Cow<'a, str> {
+    pub(crate) fn expect_uri_part(self) -> String {
         match self {
             Payload::UriPart(val) => val,
             _ => unreachable!("Expected UriPart variant"),
@@ -111,7 +110,7 @@ macro_rules! impl_resource_argument {
             #[inline]
             fn extract(payload: Payload<'_>) -> Result<Self, Self::Error> {
                 let part = payload.expect_uri_part();
-                    part.parse::<$type>()
+                part.parse::<$type>()
                     .map_err(|_| Error::new(ErrorCode::InvalidParams, "Unable to parse URI params"))
             }
         })*
@@ -180,10 +179,10 @@ impl ResourceArgument for Context {
 }
 
 #[inline]
-pub(crate) fn extract_arg<'a, T: ResourceArgument<Error = Error>>(
-    uri: &'a Uri,
+pub(crate) fn extract_arg<T: ResourceArgument<Error = Error>>(
+    uri: &Uri,
     meta: &Option<RequestParamsMeta>,
-    iter: &mut impl Iterator<Item = Cow<'a, str>>
+    iter: &mut impl Iterator<Item = String>
 ) -> Result<T, Error> {
     match T::source() {
         Source::Meta => T::extract(Payload::Meta(meta)),

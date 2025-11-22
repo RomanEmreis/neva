@@ -14,7 +14,6 @@ use crate::{
         Prompt, GetPromptRequestParams, GetPromptResult,
         RequestId, Request, Response, Uri,
         Message,
-        resource::Route,
         notification::Notification,
         root::{ListRootsRequestParams, ListRootsResult},
         resource::SubscribeRequestParams,
@@ -341,7 +340,7 @@ impl Context {
     pub(crate) async fn read_resource(self, params: ReadResourceRequestParams) -> Result<ReadResourceResult, Error> {
         let opt = self.options.clone();
         match opt.read_resource(&params.uri) {
-            Some((Route::Handler(handler), args)) => {
+            Some((handler, args)) => {
                 #[cfg(feature = "http-server")]
                 {
                     let template = opt.resources_templates

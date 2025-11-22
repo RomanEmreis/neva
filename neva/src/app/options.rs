@@ -1,7 +1,7 @@
 ﻿//! MCP server options
 
 use dashmap::{DashMap, DashSet};
-use std::{borrow::Cow, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use std::fmt::{Debug, Formatter};
 use tokio_util::sync::CancellationToken;
 use crate::transport::{StdIoServer, TransportProto};
@@ -14,10 +14,10 @@ use crate::middleware::{Middleware, Middlewares};
 use crate::PROTOCOL_VERSIONS;
 use crate::types::{
     RequestId,
-    Implementation, 
-    Tool, 
+    Implementation,
+    Tool,
     Resource, Uri, ReadResourceResult, ResourceTemplate,
-    resource::Route,
+    resource::{Route, route::ResourceHandler},
     Prompt,
     ResourcesCapability, ToolsCapability, PromptsCapability,
 };
@@ -299,11 +299,8 @@ impl McpOptions {
             .get_or_insert_default();
         
         let name = template.name.clone();
-        let uri_parts: Vec<Cow<'static, str>> = template
-            .uri_template
-            .as_vec();
         
-        self.resource_routes.insert(uri_parts.as_slice(), name.clone(), handler);
+        self.resource_routes.insert(&template.uri_template, name.clone(), handler);
         self.resources_templates
             .as_mut()
             .entry(name)
@@ -358,10 +355,8 @@ impl McpOptions {
 
     /// Reads a resource by its URI
     #[inline]
-    pub(crate) fn read_resource(&self, uri: &Uri) -> Option<(&Route, Box<[Cow<'static, str>]>)> {
-        let uri_parts = uri.as_vec();
-        self.resource_routes
-            .find(uri_parts.as_slice())
+    pub(crate) fn read_resource(&self, uri: &Uri) -> Option<(&ResourceHandler, Box<[String]>)> {
+        self.resource_routes.find(uri)
     }
 
     /// Returns a list of available resources
@@ -559,10 +554,7 @@ mod tests {
         };
         
         let res = options.read_resource(&req.uri).unwrap();
-        let res = match res { 
-            (Route::Handler(handler), _) => handler.call(req.into()).await.unwrap(),
-            _ => unreachable!()
-        };
+        let res = res.0.call(req.into()).await.unwrap();
         assert_eq!(res.contents.len(), 1);
     }
 
@@ -585,10 +577,7 @@ mod tests {
         };
 
         let res = options.read_resource(&req.uri).unwrap();
-        let res = match res {
-            (Route::Handler(handler), _)=> handler.call(req.into()).await,
-            _ => unreachable!()
-        };
+        let res = res.0.call(req.into()).await;
         assert!(res.is_err());
     }
 
