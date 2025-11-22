@@ -4,8 +4,6 @@ use serde::{Deserialize, Serialize};
 use crate::types::{Annotations, Cursor};
 use crate::types::request::RequestParamsMeta;
 #[cfg(feature = "server")]
-use std::borrow::Cow;
-#[cfg(feature = "server")]
 use crate::error::Error;
 #[cfg(feature = "server")]
 use crate::types::request::FromRequest;
@@ -132,7 +130,7 @@ pub struct ReadResourceRequestParams {
     /// Path arguments extracted from [`Uri`]
     #[serde(skip)]
     #[cfg(feature = "server")]
-    pub(crate) args: Option<Box<[Cow<'static, str>]>>
+    pub(crate) args: Option<Box<[String]>>
 }
 
 /// The server's response to a resources/list request from the client.
@@ -329,7 +327,7 @@ impl ReadResourceRequestParams {
     
     /// Includes path arguments extracted from [`Uri`] 
     #[cfg(feature = "server")]
-    pub(crate) fn with_args(mut self, args: Box<[Cow<'static, str>]>) -> Self {
+    pub(crate) fn with_args(mut self, args: Box<[String]>) -> Self {
         self.args = Some(args);
         self
     }

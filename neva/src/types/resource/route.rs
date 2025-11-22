@@ -2,24 +2,49 @@
 
 use super::ReadResourceResult;
 use crate::app::handler::RequestHandler;
-use std::{borrow::Cow, collections::HashMap};
 use std::ops::Deref;
 
-const END_OF_ROUTE: &str = "";
 const OPEN_BRACKET: char = '{';
 const CLOSE_BRACKET: char = '}';
+const PATH_SEPARATOR: char = '/';
 
-/// A data structure for easy insert and search handler by route template
-pub(crate) enum Route {
-    Static(HashMap<Cow<'static, str>, Route>),
-    Dynamic(HashMap<Cow<'static, str>, Route>),
-    Handler(ResourceHandler)
+/// Represents route path node
+pub(super) struct RouteNode {
+    path: Box<str>,
+    node: Box<Route>
 }
 
+/// A data structure for easy insert and search handler by route template
+pub(crate) struct Route {
+    static_routes: Vec<RouteNode>,
+    dynamic_route: Option<RouteNode>,
+    handler: Option<ResourceHandler>
+}
+
+/// A handler function for a resource route
 pub(crate) struct ResourceHandler {
     #[cfg(feature = "http-server")]
     pub(crate) template: String,
     handler: RequestHandler<ReadResourceResult>
+}
+
+impl RouteNode {
+    /// Creates a new [`RouteNode`]
+    #[inline]
+    fn new(path: &str) -> Self {
+        Self {
+            node: Box::new(Route::new()),
+            path: path.into()
+        }
+    }
+
+    /// Compares two route entries
+    #[inline(always)]
+    fn cmp(&self, path: &str) -> std::cmp::Ordering {
+        self.path
+            .as_ref()
+            .cmp(path)
+    }
 }
 
 impl Deref for ResourceHandler {
@@ -34,117 +59,103 @@ impl Deref for ResourceHandler {
 impl Default for Route {
     #[inline]
     fn default() -> Self {
-        Route::Static(HashMap::new())
+        Route::new()
     }
 }
 
 impl Route {
+    /// Create a new [`Route`]
+    #[inline]
+    pub(super) fn new() -> Self {
+        Self {
+            static_routes: Vec::new(),
+            handler: None,
+            dynamic_route: None,
+        }
+    }
+    
     /// Inserts a route handler
     pub(crate) fn insert(
         &mut self,
-        path_segments: &[Cow<'static, str>],
+        path: &str,
         _template: String,
         handler: RequestHandler<ReadResourceResult>
     ) {
         let mut current = self;
-        for (index, segment) in path_segments.iter().enumerate() {
-            let is_last = index == path_segments.len() - 1;
-            let is_dynamic = Self::is_dynamic_segment(segment);
+        let path_segments = split_path(path);
 
-            current = match current {
-                Route::Handler(_) => panic!("Attempt to insert a route under a handler"),
-                Route::Static(map) | 
-                Route::Dynamic(map) => {
-                    let entry = map.entry(segment.clone()).or_insert_with(|| {
-                        if is_dynamic {
-                            Route::Dynamic(HashMap::new())
-                        } else {
-                            Route::Static(HashMap::new())
-                        }
-                    });
-
-                    // Check if this segment is the last, and add the handler
-                    if is_last {
-                        // Assumes the inserted or existing route has HashMap as associated data
-                        match entry {
-                            Route::Dynamic(map) |
-                            Route::Static(map) => {
-                                map.insert(
-                                    END_OF_ROUTE.into(),
-                                    Route::Handler(ResourceHandler {
-                                        #[cfg(feature = "http-server")]
-                                        template: _template.clone(),
-                                        handler: handler.clone(),
-                                    })
-                                );
-                            },
-                            _ => ()
-                        }
-                    }
-
-                    entry // Continue traversing or inserting into this entry
-                },
-            };
+        for segment in path_segments {
+            if is_dynamic_segment(segment) {
+                current = current.insert_dynamic_node(segment);
+            } else {
+                current = current.insert_static_node(segment);
+            }
         }
+
+        current.handler = Some(ResourceHandler {
+            #[cfg(feature = "http-server")]
+            template: _template.clone(),
+            handler: handler.clone(),
+        });
     }
 
     /// Searches for a route handler
-    pub(crate) fn find(&self, path_segments: &[Cow<'static, str>]) -> Option<(&Route, Box<[Cow<'static, str>]>)> {
-        let mut current = Some(self);
-        let mut params = Vec::with_capacity(4);
-        for (index, segment) in path_segments.iter().enumerate() {
-            let is_last = index == path_segments.len() - 1;
+    pub(crate) fn find(&self, path: &str) -> Option<(&ResourceHandler, Box<[String]>)> {
+        let mut current = self;
+        let mut params = Vec::new();
+        let path_segments = split_path(path);
 
-            current = match current {
-                Some(Route::Static(map)) | 
-                Some(Route::Dynamic(map)) => {
-                    // Trying direct match first
-                    let direct_match = map.get(segment);
+        for segment in path_segments {
+            if let Ok(i) = current.static_routes.binary_search_by(|r| r.cmp(segment)) {
+                current = current.static_routes[i].node.as_ref();
+                continue;
+            }
 
-                    // If no direct match, try dynamic route resolution
-                    let resolved_route = direct_match.or_else(|| {
-                        map.iter()
-                            .filter(|(key, _)| Self::is_dynamic_segment(key))
-                            .map(|(key, route)| {
-                                if key
-                                    .strip_prefix(OPEN_BRACKET)
-                                    .and_then(|k| k.strip_suffix(CLOSE_BRACKET))
-                                    .is_some() {
-                                    params.push(segment.clone());
-                                }
-                                route
-                            })
-                            .next()
-                    });
+            if let Some(next) = &current.dynamic_route {
+                params.push(segment.into());
+                current = next.node.as_ref();
+                continue;
+            }
 
-                    // Retrieve handler or further route if this is the last segment
-                    if let Some(route) = resolved_route {
-                        if is_last {
-                            match route {
-                                Route::Dynamic(inner_map) | Route::Static(inner_map) => {
-                                    // Attempt to get handler directly if no further routing is possible
-                                    inner_map.get(END_OF_ROUTE).or(Some(route))
-                                },
-                                handler @ Route::Handler(_) => Some(handler), // Direct handler return
-                            }
-                        } else {
-                            Some(route) // Continue on non-terminal routes
-                        }
-                    } else {
-                        None // No route resolved
-                    }
-                },
-                _ => None,
-            };
+            return None;
         }
-        current.map(|route| (route, params.into_boxed_slice()))
+
+        current.handler
+            .as_ref()
+            .map(|h| (h, params.into_boxed_slice()))
     }
 
-    #[inline]
-    fn is_dynamic_segment(segment: &str) -> bool {
-        segment.starts_with(OPEN_BRACKET) && 
-        segment.ends_with(CLOSE_BRACKET)
+    #[inline(always)]
+    fn insert_static_node(&mut self, segment: &str) -> &mut Self {
+        match self.static_routes.binary_search_by(|r| r.cmp(segment)) {
+            Ok(i) => &mut self.static_routes[i].node,
+            Err(i) => {
+                self.static_routes.insert(i, RouteNode::new(segment));
+                &mut self.static_routes[i].node
+            }
+        }
     }
+
+    #[inline(always)]
+    fn insert_dynamic_node(&mut self, segment: &str) -> &mut Self {
+        self
+            .dynamic_route
+            .get_or_insert_with(|| RouteNode::new(segment))
+            .node
+            .as_mut()
+    }
+}
+
+#[inline(always)]
+fn split_path(path: &str) -> impl Iterator<Item = &str> {
+    path.trim_matches(PATH_SEPARATOR)
+        .split(PATH_SEPARATOR)
+}
+
+#[inline(always)]
+fn is_dynamic_segment(segment: &str) -> bool {
+    segment.starts_with(OPEN_BRACKET) &&
+        segment.ends_with(CLOSE_BRACKET)
 }
 
 #[cfg(test)]
@@ -170,13 +181,10 @@ mod tests {
         });
         
         let mut route = Route::default();
-        route.insert(uri1.as_vec().as_slice(), "templ_1".into(), handler1);
-        route.insert(uri2.as_vec().as_slice(), "templ_2".into(), handler2);
+        route.insert(&uri1, "templ_1".into(), handler1);
+        route.insert(&uri2, "templ_2".into(), handler2);
         
-        let (h1, _) = route.find(uri1.as_vec().as_slice()).unwrap();
-        let (h2, _) = route.find(uri2.as_vec().as_slice()).unwrap();
-        
-        matches!(h1, Route::Handler(_));
-        matches!(h2, Route::Handler(_));
+        assert!(route.find(&uri1).is_some());
+        assert!(route.find(&uri2).is_some());
     }
 }
