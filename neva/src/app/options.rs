@@ -713,7 +713,7 @@ mod tests {
         };
         
         options.add_resource_template(
-            ResourceTemplate::new("res", "test"), 
+            ResourceTemplate::new("res://test", "test"), 
             ResourceFunc::new(handler));
 
         let resources_capability = options.resources_capability().unwrap();

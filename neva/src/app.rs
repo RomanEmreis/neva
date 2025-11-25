@@ -1,8 +1,5 @@
 ﻿//! Represents an MCP application
 
-use std::collections::HashMap;
-use std::fmt::{Debug, Formatter};
-use std::future::Future;
 use tokio_util::sync::CancellationToken;
 use self::{context::{Context, ServerRuntime}, options::{McpOptions, RuntimeMcpOptions}};
 use crate::error::{Error, ErrorCode};
@@ -25,6 +22,11 @@ use crate::types::{
     ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt, 
     notification::{Notification, CancelledNotificationParams}, 
     cursor::Pagination, Uri
+};
+use std::{
+    fmt::{Debug, Formatter},
+    collections::HashMap,
+    future::Future
 };
 #[cfg(feature = "tracing")]
 use {

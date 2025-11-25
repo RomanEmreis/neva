@@ -20,10 +20,10 @@ pub use progress::ProgressNotification;
 #[cfg(feature = "tracing")]
 pub use formatter::NotificationFormatter;
 
-pub mod progress;
-pub mod log_message;
+mod progress;
+mod log_message;
 #[cfg(feature = "tracing")]
-pub mod formatter;
+mod formatter;
 #[cfg(feature = "tracing")]
 pub mod fmt;
 

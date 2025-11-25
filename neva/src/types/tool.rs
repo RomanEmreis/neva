@@ -45,7 +45,7 @@ pub use call_tool_response::CallToolResponse;
 
 #[cfg(feature = "server")]
 mod from_request;
-pub mod call_tool_response;
+mod call_tool_response;
 
 /// List of commands for Tools
 pub mod commands {

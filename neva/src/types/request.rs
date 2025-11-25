@@ -14,11 +14,13 @@ use {
     volga::headers::HeaderMap
 };
 
+#[cfg(feature = "server")]
 pub use from_request::FromRequest;
 pub use request_id::RequestId;
 
-pub mod from_request;
-pub mod request_id;
+#[cfg(feature = "server")]
+mod from_request;
+mod request_id;
 
 /// A request in the JSON-RPC protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]

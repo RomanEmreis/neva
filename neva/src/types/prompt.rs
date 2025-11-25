@@ -32,7 +32,7 @@ pub use get_prompt_result::{GetPromptResult, PromptMessage};
 
 #[cfg(feature = "server")]
 mod from_request;
-pub mod get_prompt_result;
+mod get_prompt_result;
 
 /// List of commands for Prompts
 pub mod commands {

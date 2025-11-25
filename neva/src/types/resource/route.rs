@@ -2,11 +2,11 @@
 
 use super::ReadResourceResult;
 use crate::app::handler::RequestHandler;
+use crate::types::Uri;
 use std::ops::Deref;
 
 const OPEN_BRACKET: char = '{';
 const CLOSE_BRACKET: char = '}';
-const PATH_SEPARATOR: char = '/';
 
 /// Represents route path node
 pub(super) struct RouteNode {
@@ -77,12 +77,13 @@ impl Route {
     /// Inserts a route handler
     pub(crate) fn insert(
         &mut self,
-        path: &str,
+        path: &Uri,
         _template: String,
         handler: RequestHandler<ReadResourceResult>
     ) {
         let mut current = self;
-        let path_segments = split_path(path);
+        let path_segments = path.parts()
+            .expect("URI parts should be present");
 
         for segment in path_segments {
             if is_dynamic_segment(segment) {
@@ -100,10 +101,10 @@ impl Route {
     }
 
     /// Searches for a route handler
-    pub(crate) fn find(&self, path: &str) -> Option<(&ResourceHandler, Box<[String]>)> {
+    pub(crate) fn find(&self, path: &Uri) -> Option<(&ResourceHandler, Box<[String]>)> {
         let mut current = self;
         let mut params = Vec::new();
-        let path_segments = split_path(path);
+        let path_segments = path.parts()?;
 
         for segment in path_segments {
             if let Ok(i) = current.static_routes.binary_search_by(|r| r.cmp(segment)) {
@@ -144,12 +145,6 @@ impl Route {
             .node
             .as_mut()
     }
-}
-
-#[inline(always)]
-fn split_path(path: &str) -> impl Iterator<Item = &str> {
-    path.trim_matches(PATH_SEPARATOR)
-        .split(PATH_SEPARATOR)
 }
 
 #[inline(always)]

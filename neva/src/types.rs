@@ -12,9 +12,11 @@ use crate::types::notification::Notification;
 use crate::{
     app::handler::{FromHandlerParams, HandlerParams},
     app::options::McpOptions,
-    types::request::FromRequest,
     error::Error,
 };
+
+#[cfg(feature = "server")]
+pub use request::FromRequest;
 
 #[cfg(feature = "http-server")]
 use {
@@ -23,8 +25,8 @@ use {
 };
 
 pub use helpers::{Json, Meta, PropertyType};
-pub use request::{RequestId, Request};
-pub use response::{IntoResponse, Response};
+pub use request::{RequestId, Request, RequestParamsMeta};
+pub use response::{IntoResponse, Response, ErrorDetails};
 pub use reference::Reference;
 pub use completion::{Completion, CompleteRequestParams, Argument, CompleteResult};
 pub use cursor::{Cursor, Page, Pagination};
@@ -110,22 +112,22 @@ pub use prompt::PromptHandler;
 pub use root::Root;
 pub use progress::ProgressToken;
 
-pub mod request;
-pub mod response;
-pub mod capabilities;
+mod request;
+mod response;
+mod capabilities;
+mod reference;
+mod content;
+mod progress;
+mod schema;
 pub mod tool;
 pub mod resource;
 pub mod prompt;
 pub mod completion;
-pub mod content;
-pub mod reference;
 pub mod notification;
 pub mod cursor;
 pub mod root;
 pub mod sampling;
-pub mod progress;
 pub mod elicitation;
-pub mod schema;
 pub(crate) mod helpers;
 
 pub(super) const JSONRPC_VERSION: &str = "2.0";
