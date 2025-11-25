@@ -1,14 +1,14 @@
 [package]
 name = "neva_macros"
-version = "0.2.2"
-edition = "2024"
-rust-version = "1.90.0"
-authors = ["Roman Emreis <roman.emreis@outlook.com>"]
-license = "MIT"
-repository = "https://github.com/RomanEmreis/neva"
+version = "0.2.3"
 description = "Macros for Neva"
-documentation = "https://docs.rs/neva"
 readme = "README.md"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation.workspace = true
 categories = ["web-programming::http-server", "web-programming::http-client", "network-programming", "asynchronous"]
 keywords = ["modelcontextprotocol", "mcp", "sdk", "ai", "framework"]
 

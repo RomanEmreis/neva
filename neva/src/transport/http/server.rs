@@ -7,7 +7,7 @@ use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
 use tokio_util::sync::CancellationToken;
 use super::{HttpRuntimeContext, ServiceUrl, MCP_SESSION_ID, get_mcp_session_id};
 use crate::{
-    shared::message_registry::MessageRegistry,
+    shared::MessageRegistry,
     types::{RequestId, Message},
     error::Error
 };

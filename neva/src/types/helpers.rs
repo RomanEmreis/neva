@@ -4,6 +4,7 @@ use crate::json::{JsonSchema, schemars::{schema_for, Schema}};
 use base64::{engine::general_purpose, Engine};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{
     fmt::{self, Display, Formatter},
     ops::{Deref, DerefMut},
@@ -34,6 +35,26 @@ where
     let decoded = general_purpose::STANDARD.decode(&s)
         .map_err(serde::de::Error::custom)?;
     Ok(Bytes::from(decoded))
+}
+
+#[inline]
+pub(crate) fn serialize_value_as_string<S>(value: &Value, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let json_str = serde_json::to_string(value)
+        .map_err(serde::ser::Error::custom)?;
+    serializer.serialize_str(&json_str)
+}
+
+
+#[inline]
+pub(crate) fn deserialize_value_from_string<'de, D>(deserializer: D) -> Result<Value, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    serde_json::from_str(&s).map_err(serde::de::Error::custom)
 }
 
 /// Represents a SchemaProperty type
@@ -205,6 +226,22 @@ impl<T: Display> Display for Meta<T> {
 #[cfg(feature = "server")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn it_serializes_serde_json_value_as_str() {
+        let v = Test2 { value: serde_json::json!({ "x": 5, "y": 10 }) };
+        let json = serde_json::to_string(&v).unwrap();
+
+        assert_eq!(json, r#"{"value":"{\"x\":5,\"y\":10}"}"#);
+    }
+    
+    #[test]
+    fn it_deserializes_serde_json_value_as_str() {
+        let s = r#"{"value":"{\"x\":5,\"y\":10}"}"#;
+        let v: Test2 = serde_json::from_str(s).unwrap();
+        
+        assert_eq!(v.value, serde_json::json!({ "x": 5, "y": 10 }));
+    }
     
     #[test]
     fn it_returns_category_for_string() {
@@ -292,4 +329,13 @@ mod tests {
     }
     
     struct Test;
+    
+    #[derive(Serialize, Deserialize)]
+    struct Test2 {
+        #[serde(
+            serialize_with = "serialize_value_as_string",
+            deserialize_with = "deserialize_value_from_string"
+        )]
+        value: Value
+    }
 }

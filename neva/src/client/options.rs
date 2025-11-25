@@ -7,10 +7,16 @@ use std::time::Duration;
 use crate::PROTOCOL_VERSIONS;
 use crate::transport::{StdIoClient, stdio::options::StdIoOptions, TransportProto};
 use crate::client::notification_handler::NotificationsHandler;
-use crate::types::capabilities::{RootsCapability, SamplingCapability, ElicitationCapability};
-use crate::types::{Root, Implementation, Uri};
 use crate::types::sampling::SamplingHandler;
 use crate::types::elicitation::ElicitationHandler;
+use crate::types::{
+    Root, 
+    Implementation, 
+    Uri, 
+    RootsCapability, 
+    SamplingCapability, 
+    ElicitationCapability
+};
 
 #[cfg(feature = "http-client")]
 use crate::transport::http::HttpClient;

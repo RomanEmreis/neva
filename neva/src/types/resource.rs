@@ -18,9 +18,11 @@ pub use read_resource_result::{
     ResourceContents, 
     TextResourceContents, 
     BlobResourceContents,
+    JsonResourceContents,
+    EmptyResourceContents
 };
 pub use template::{
-    ResourceTemplate, 
+    ResourceTemplate,
     ListResourceTemplatesResult, 
     ListResourceTemplatesRequestParams
 };
@@ -28,9 +30,9 @@ pub use template::{
 #[cfg(feature = "server")]
 pub(crate) use route::Route;
 
-pub mod read_resource_result;
-pub mod uri;
-pub mod template;
+mod read_resource_result;
+mod uri;
+pub(crate) mod template;
 #[cfg(feature = "server")]
 pub(crate) mod route;
 #[cfg(feature = "server")]

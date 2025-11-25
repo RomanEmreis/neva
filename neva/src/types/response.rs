@@ -12,8 +12,8 @@ use volga::headers::HeaderMap;
 pub use error_details::ErrorDetails;
 pub use into_response::IntoResponse;
 
-pub mod error_details;
-pub mod into_response;
+mod error_details;
+mod into_response;
 
 /// A response message in the JSON-RPC protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]

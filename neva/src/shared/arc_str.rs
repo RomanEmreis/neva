@@ -1,10 +1,11 @@
-﻿//! Serializable [`Arc<str>`]
+﻿//! Types and utilities for serializable [`Arc<str>`]
 
 use std::fmt;
 use std::sync::Arc;
 use std::ops::Deref;
 use serde::{Serialize, Deserialize};
 
+/// Represents a serializable [`Arc<str>`]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ArcStr(Arc<str>);
 

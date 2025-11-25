@@ -1,15 +1,22 @@
 ﻿//! A generic tracing/logging formatting layer for notifications
 
+use std::io::{self, Write};
 use once_cell::sync::Lazy;
 use tokio::sync::mpsc::{channel, Sender};
-use tracing::{Event, Id, Subscriber, field::Visit};
-use tracing::field::Field;
-use tracing::span::Attributes;
-use tracing_subscriber::{layer::Context, Layer};
-use tracing_subscriber::registry::LookupSpan;
-use std::io::{self, Write};
-use crate::shared::message_registry::MessageRegistry;
-use crate::types::notification::{Notification, formatter::build_notification};
+use crate::shared::MessageRegistry;
+use crate::types::notification::{
+    Notification, 
+    formatter::build_notification
+};
+use tracing::{
+    {Event, Id, Subscriber, field::Visit},
+    span::Attributes,
+    field::Field
+};
+use tracing_subscriber::{
+    {layer::Context, Layer},
+    registry::LookupSpan
+};
 
 const MCP_SESSION_ID: &str = "mcp_session_id";
 

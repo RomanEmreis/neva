@@ -3,7 +3,12 @@
 use serde::{Deserialize, Serialize};
 use bytes::Bytes;
 use crate::types::{Annotations, Uri};
-use crate::types::helpers::{deserialize_base64_as_bytes, serialize_bytes_as_base64};
+use crate::types::helpers::{
+    deserialize_base64_as_bytes,
+    serialize_bytes_as_base64,
+    deserialize_value_from_string,
+    serialize_value_as_string
+};
 #[cfg(feature = "server")]
 use {
     crate::{error::{Error, ErrorCode}, types::{IntoResponse, RequestId, Response}},
@@ -120,7 +125,11 @@ pub struct JsonResourceContents {
     pub uri: Uri,
 
     /// The JSON content of the resource.
-    #[serde(rename = "text")]
+    #[serde(
+        rename = "text",
+        serialize_with = "serialize_value_as_string",
+        deserialize_with = "deserialize_value_from_string"
+    )]
     pub value: serde_json::Value,
 
     /// Intended for UI and end-user contexts - optimized to be human-readable and easily understood,
@@ -278,6 +287,7 @@ impl<T> From<T> for ReadResourceResult
 where 
     T: Into<ResourceContents>
 {
+    #[inline]
     fn from(content: T) -> Self {
         Self { contents: vec![content.into()] }
     }
@@ -516,8 +526,8 @@ impl ResourceContents {
             Self::Empty(content) => Self::Text(TextResourceContents {
                 uri: content.uri,
                 mime: content.mime.or_else(|| Some("text/plain".into())),
-                title: None,
-                annotations: None,
+                title: content.title,
+                annotations: content.annotations,
                 meta: None,
                 text,
             })
@@ -556,8 +566,8 @@ impl ResourceContents {
             Self::Empty(content) => Self::Blob(BlobResourceContents {
                 uri: content.uri,
                 mime: None,
-                title: None,
-                annotations: None,
+                title: content.title,
+                annotations: content.annotations,
                 meta: None,
                 blob,
             })
@@ -597,8 +607,8 @@ impl ResourceContents {
             Self::Empty(content) => Self::Json(JsonResourceContents {
                 uri: content.uri,
                 mime: content.mime.or_else(|| Some("application/json".into())),
-                title: None,
-                annotations: None,
+                title: content.title,
+                annotations: content.annotations,
                 meta: None,
                 value,
             })
@@ -868,7 +878,7 @@ mod tests {
 
         let json = serde_json::to_string(&result).unwrap();
 
-        assert_eq!(json, r#"{"contents":[{"uri":"/res","text":{"age":33,"name":"John"},"mimeType":"application/json"}]}"#);
+        assert_eq!(json, r#"{"contents":[{"uri":"/res","text":"{\"age\":33,\"name\":\"John\"}","mimeType":"application/json"}]}"#);
     }
 
     #[test]

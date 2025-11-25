@@ -1,14 +1,14 @@
 [package]
 name = "neva"
-version = "0.2.2"
-edition = "2024"
-rust-version = "1.90.0"
-authors = ["Roman Emreis <roman.emreis@outlook.com>"]
-license = "MIT"
-repository = "https://github.com/RomanEmreis/neva"
+version = "0.2.3"
 description = "MCP SDK for Rust"
-documentation = "https://docs.rs/neva"
 readme = "../README.md"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation.workspace = true
 categories = ["web-programming::http-server", "network-programming", "asynchronous"]
 keywords = ["modelcontextprotocol", "mcp", "sdk", "ai", "framework"]
 
@@ -41,7 +41,7 @@ tracing-subscriber = { version = "0.3.20", features = ["fmt", "json"], optional 
 volga = { version = "0.7.1", features = ["di", "jwt-auth-full"], optional = true }
 
 # neva
-neva_macros = { path = "../neva_macros", version = "0.2.2", optional = true }
+neva_macros = { path = "../neva_macros", version = "0.2.3", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62.0", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_System_Diagnostics", "Win32_System_Diagnostics_ToolHelp"], optional = true }
@@ -56,18 +56,22 @@ tokio-stream = { version = "0.1.17" }
 [features]
 default = []
 full = ["server-full", "client-full"]
-server-full = ["server-macros", "tracing", "http-server", "server-tls"]
-client-full = ["client-macros", "tracing", "http-client", "client-tls"]
-http-server = ["server", "dep:volga", "dep:tokio-stream"]
-http-client = ["client", "dep:reqwest", "dep:sse-stream", "dep:tokio-stream", "dep:once_cell"]
 macros = ["dep:neva_macros", "dep:inventory"]
-client-macros = ["client", "macros", "neva_macros?/client"]
-server-macros = ["server", "macros", "neva_macros?/server"]
-client = ["dep:windows", "dep:nix", "dep:jsonschema", "tokio/process", "tokio/signal"]
-server = ["tokio/signal"]
-client-tls = ["reqwest?/rustls-tls"]
-server-tls = ["volga?/tls", "volga?/dev-cert"]
 tracing = ["dep:tracing", "dep:tracing-subscriber", "dep:once_cell", "volga?/tracing"]
+
+# server
+server-full = ["server-macros", "tracing", "http-server", "server-tls"]
+server-macros = ["server", "macros", "neva_macros?/server"]
+server-tls = ["volga?/tls", "volga?/dev-cert"]
+http-server = ["server", "dep:volga", "dep:tokio-stream"]
+server = ["tokio/signal"]
+
+# client
+client-full = ["client-macros", "tracing", "http-client", "client-tls"]
+client-macros = ["client", "macros", "neva_macros?/client"]
+client-tls = ["reqwest?/rustls-tls"]
+http-client = ["client", "dep:reqwest", "dep:sse-stream", "dep:tokio-stream", "dep:once_cell"]
+client = ["dep:windows", "dep:nix", "dep:jsonschema", "tokio/process", "tokio/signal"]
 
 [package.metadata.docs.rs]
 all-features = true

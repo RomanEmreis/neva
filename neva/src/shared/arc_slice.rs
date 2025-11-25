@@ -1,4 +1,4 @@
-﻿//! Serializable [`Arc<[T]>`]
+﻿//! Types and utilities for serializable [`Arc<[T]>`]
 
 use std::fmt;
 use std::fmt::Display;
@@ -6,6 +6,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
+/// Represents a serializable [`Arc<[T]>`]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ArcSlice<T>(Arc<[T]>);
 
