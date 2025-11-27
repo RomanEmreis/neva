@@ -27,6 +27,9 @@ pub use template::{
     ListResourceTemplatesRequestParams
 };
 
+#[cfg(all(feature = "server", feature = "di"))]
+pub(crate) use from_request::{ResourceArgument, Payload, Source};
+
 #[cfg(feature = "server")]
 pub(crate) use route::Route;
 

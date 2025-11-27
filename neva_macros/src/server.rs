@@ -61,6 +61,49 @@ pub(super) fn expand_handler(attr: &Punctuated<Meta, Comma>, function: &ItemFn) 
     Ok(expanded)
 }
 
+pub(super) fn expand_completion(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<TokenStream> {
+    let func_name = &function.sig.ident;
+    let mut middleware = None;
+
+    for meta in attr {
+        match &meta {
+            Meta::Path(_) => {},
+            Meta::List(_) => {},
+            Meta::NameValue(nv) => {
+                if let Some(ident) = nv.path.get_ident()
+                    && let "middleware" = ident.to_string().as_str() { 
+                    middleware = get_exprs_arr(&nv.value);
+                }
+            },
+        }
+    }
+    
+    let module_name = syn::Ident::new(&format!("map_{func_name}"), func_name.span());
+    let middleware_code = middleware.map(|mws| {
+        let mw_calls = mws.iter().map(|mw| {
+            quote! { .wrap_command(neva::types::completion::commands::COMPLETE, #mw) }
+        });
+        quote! { #(#mw_calls)* }
+    });
+
+    // Expand the function and apply the tool functionality
+    let expanded = quote! {
+        // Original function
+        #function
+        // Register a handler function
+        fn #module_name(app: &mut neva::App) {
+            app
+                #middleware_code
+                .map_completion(#func_name);
+        }
+        neva::macros::inventory::submit! {
+            neva::macros::server::ItemRegistrar(#module_name)
+        }
+    };
+
+    Ok(expanded)
+}
+
 #[inline]
 pub(super) fn get_arg_type(t: &Type) -> &str {
     match t {

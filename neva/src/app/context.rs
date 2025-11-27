@@ -22,17 +22,19 @@ use crate::{
     },
 };
 use std::{
+    fmt::{Debug, Formatter},
     collections::HashMap,
     time::Duration,
     sync::Arc
 };
-use std::fmt::{Debug, Formatter};
 #[cfg(feature = "http-server")]
 use {
     crate::transport::http::server::{validate_roles, validate_permissions},
     crate::auth::DefaultClaims,
     volga::headers::HeaderMap
 };
+#[cfg(feature = "di")]
+use volga_di::Container;
 
 type RequestHandlers = HashMap<String, RequestHandler<Response>>;
 
@@ -52,7 +54,11 @@ pub(crate) struct ServerRuntime {
     sender: TransportProtoSender,
     
     /// Global middlewares entrypoint
-    mw_start: Option<Next>
+    mw_start: Option<Next>,
+    
+    /// Represents a DI container
+    #[cfg(feature = "di")]
+    container: Container,
 }
 
 /// Represents MCP Request Context
@@ -80,6 +86,10 @@ pub struct Context {
     
     /// Represents a timeout for the current request
     timeout: Duration,
+
+    /// Represents a DI scope
+    #[cfg(feature = "di")]
+    scope: Container,
 }
 
 impl Debug for Context {
@@ -98,6 +108,8 @@ impl ServerRuntime {
         sender: TransportProtoSender, 
         mut options: McpOptions,
         handlers: RequestHandlers,
+        #[cfg(feature = "di")]
+        container: Container
     ) -> Self {
         let middlewares = options.middlewares.take();
         Self {
@@ -106,6 +118,8 @@ impl ServerRuntime {
             options: options.into_runtime(),
             mw_start: middlewares.and_then(|mw| mw.compose()),
             sender,
+            #[cfg(feature = "di")]
+            container,
         }
     }
     
@@ -133,6 +147,8 @@ impl ServerRuntime {
             sender: self.sender.clone(),
             options: self.options.clone(),
             timeout: self.options.request_timeout,
+            #[cfg(feature = "di")]
+            scope: self.container.create_scope(),
         }
     }
 
@@ -152,6 +168,8 @@ impl ServerRuntime {
             sender: self.sender.clone(),
             options: self.options.clone(),
             timeout: self.options.request_timeout,
+            #[cfg(feature = "di")]
+            scope: self.container.create_scope(),
         }
     }
     
@@ -479,6 +497,26 @@ impl Context {
         self.send_request(req)
             .await?
             .into_result()
+    }
+    
+    /// Resolves a service and returns a cloned instance. 
+    /// `T` must implement `Clone` otherwise 
+    /// use resolve_shared method that returns a shared pointer.
+    #[inline]
+    #[cfg(feature = "di")]
+    pub fn resolve<T: Send + Sync + Clone + 'static>(&self) -> Result<T, Error> {
+        self.scope
+            .resolve::<T>()
+            .map_err(Into::into)
+    }
+
+    /// Resolves a service and returns a shared pointer
+    #[inline]
+    #[cfg(feature = "di")]
+    pub fn resolve_shared<T: Send + Sync + 'static>(&self) -> Result<Arc<T>, Error> {
+        self.scope
+            .resolve_shared::<T>()
+            .map_err(Into::into)
     }
     
     #[inline]

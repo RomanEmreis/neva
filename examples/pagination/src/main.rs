@@ -1,7 +1,7 @@
 //! Run with:
 //!
 //! ```no_rust
-//! npx @modelcontextprotocol/inspector 
+//! npx @modelcontextprotocol/inspector
 //! 
 //! cargo run -p example-pagination
 //! ```
@@ -16,26 +16,20 @@ async fn validate_resource(ctx: Context, uri: Uri) -> Result<bool, Error> {
 }
 
 #[resource(uri = "res://{name}")]
-async fn get_resource(name: String) -> (String, String) {
-    (
-        format!("res://{name}"),
-        format!("Some details about resource: {name}")
-    )
+async fn get_resource(name: String, repo: Dc<ResourcesRepository>) -> (String, String) {
+    repo.get_resource(name).await
 }
 
-fn all_resources() -> Vec<Resource> {
-    let mut resources = vec![];
-    for i in 0..10000 {
-        resources.push(Resource::from(format!("res://test_{i}")));
-    }
-    resources
+#[resources]
+async fn list_resources(params: ListResourcesRequestParams, repo: Dc<ResourcesRepository>) -> ListResourcesResult {
+    repo.get_resources(params.cursor).await
 }
 
-async fn get_resources(resources: Arc<Vec<Resource>>, cursor: Option<Cursor>) -> ListResourcesResult {
-    resources.paginate(cursor, 10).into()
-}
-
-async fn filter_resources(resources: Arc<Vec<Resource>>, filter: String) -> Completion {
+#[completion]
+async fn filter_resources(params: CompleteRequestParams, repo: Dc<ResourcesRepository>) -> Completion {
+    let resources = &repo.resources;
+    let filter = params.arg.value;
+    
     let mut matched = Vec::new();
     let mut total = 0;
 
@@ -54,18 +48,34 @@ async fn filter_resources(resources: Arc<Vec<Resource>>, filter: String) -> Comp
 
 #[tokio::main]
 async fn main() {
-    let mut app = App::new()
+    App::new()
         .with_options(|opt| opt
-            .with_http(|http| http.bind("127.0.0.1:3000")));
+            .with_http(|http| http.bind("127.0.0.1:3000")))
+        .add_singleton(ResourcesRepository::new())
+        .run().await;
+}
 
-    // Some global resource list
-    let resources = Arc::new(all_resources());
+struct ResourcesRepository {
+    resources: Arc<Vec<Resource>>,
+}
 
-    let res = Arc::clone(&resources);
-    app.map_resources(move |params| get_resources(res.clone(), params.cursor));
+impl ResourcesRepository {
+    fn new() -> Self {
+        let mut resources = vec![];
+        for i in 0..10000 {
+            resources.push(Resource::from(format!("res://test_{i}")));
+        }
+        Self { resources: Arc::new(resources) }
+    }
+    
+    async fn get_resource(&self, name: String) -> (String, String) {
+        (
+            format!("res://{name}"),
+            format!("Some details about resource: {name}")
+        )
+    }
 
-    let res = Arc::clone(&resources);
-    app.map_completion(move |params| filter_resources(res.clone(), params.arg.value));
-
-    app.run().await;
+    async fn get_resources(&self, cursor: Option<Cursor>) -> ListResourcesResult {
+        self.resources.paginate(cursor, 10).into()
+    }
 }
