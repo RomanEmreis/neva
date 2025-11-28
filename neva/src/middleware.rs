@@ -8,6 +8,12 @@ use crate::{
     types::{Message, RequestId, Request, Response, notification::Notification}
 };
 
+#[cfg(feature = "di")]
+use {
+    volga_di::Container,
+    crate::error::Error
+};
+
 pub(super) mod make_fn;
 pub mod wrap;
 
@@ -19,7 +25,11 @@ pub struct MwContext {
     pub msg: Message,
     
     /// Server runtime reference
-    pub(super) runtime: ServerRuntime
+    pub(super) runtime: ServerRuntime,
+    
+    /// Dependency injection container scope.
+    #[cfg(feature = "di")]
+    pub(super) scope: Container,
 }
 
 impl Debug for MwContext {
@@ -55,7 +65,14 @@ impl MwContext {
     /// Creates a new middleware message context
     #[inline]
     pub(super) fn msg(msg: Message, runtime: ServerRuntime) -> Self {
-        Self { msg, runtime }
+        #[cfg(feature = "di")]
+        let scope = runtime.container.create_scope();
+        Self { 
+            msg, 
+            runtime,
+            #[cfg(feature = "di")]
+            scope
+        }
     }
 
     /// Returns current MCP [`Message`] ID
@@ -134,6 +151,26 @@ impl MwContext {
         } else {
             None
         }
+    }
+
+    /// Resolves a service and returns a cloned instance. 
+    /// `T` must implement `Clone` otherwise 
+    /// use resolve_shared method that returns a shared pointer.
+    #[inline]
+    #[cfg(feature = "di")]
+    pub fn resolve<T: Send + Sync + Clone + 'static>(&self) -> Result<T, Error> {
+        self.scope
+            .resolve::<T>()
+            .map_err(Into::into)
+    }
+
+    /// Resolves a service and returns a shared pointer
+    #[inline]
+    #[cfg(feature = "di")]
+    pub fn resolve_shared<T: Send + Sync + 'static>(&self) -> Result<Arc<T>, Error> {
+        self.scope
+            .resolve_shared::<T>()
+            .map_err(Into::into)
     }
 }
 

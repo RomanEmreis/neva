@@ -154,9 +154,12 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Maps the list of resources function
 #[proc_macro_attribute]
 #[cfg(feature = "server")]
-pub fn resources(_: TokenStream, item: TokenStream) -> TokenStream {
+pub fn resources(attr: TokenStream, item: TokenStream) -> TokenStream {
     let function = parse_macro_input!(item as syn::ItemFn);
-    server::resource::expand_resources(&function)
+    let attr = parse_macro_input!(
+        attr with Punctuated::<syn::Meta, Token![,]>::parse_terminated
+    );
+    server::resource::expand_resources(&attr, &function)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }
@@ -239,6 +242,19 @@ pub fn handler(attr: TokenStream, item: TokenStream) -> TokenStream {
         attr with Punctuated::<syn::Meta, Token![,]>::parse_terminated
     );
     server::expand_handler(&attr, &function)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Maps the completion function
+#[proc_macro_attribute]
+#[cfg(feature = "server")]
+pub fn completion(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let function = parse_macro_input!(item as syn::ItemFn);
+    let attr = parse_macro_input!(
+        attr with Punctuated::<syn::Meta, Token![,]>::parse_terminated
+    );
+    server::expand_completion(&attr, &function)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

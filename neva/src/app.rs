@@ -9,13 +9,15 @@ use crate::middleware::{MwContext, Next, make_fn::make_mw};
 use crate::app::handler::{
     FromHandlerParams,
     GenericHandler,
+    ListResourcesHandler,
+    CompletionHandler,
     HandlerParams,
     RequestFunc,
     RequestHandler
 };
 use crate::types::{
     InitializeResult, InitializeRequestParams, IntoResponse, Response, Request, RequestId, Message, 
-    CompleteResult, CompleteRequestParams, ListToolsRequestParams, CallToolRequestParams, ListToolsResult, CallToolResponse, Tool, ToolHandler, 
+    CompleteResult, ListToolsRequestParams, CallToolRequestParams, ListToolsResult, CallToolResponse, Tool, ToolHandler, 
     ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate, 
     ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, 
     SubscribeRequestParams, UnsubscribeRequestParams, Resource, resource::template::ResourceFunc, 
@@ -26,13 +28,15 @@ use crate::types::{
 use std::{
     fmt::{Debug, Formatter},
     collections::HashMap,
-    future::Future
 };
+
 #[cfg(feature = "tracing")]
 use {
     crate::types::notification::SetLevelRequestParams,
     tracing::Instrument
 };
+#[cfg(feature = "di")]
+use volga_di::{Container, ContainerBuilder};
 
 pub mod options;
 pub mod context;
@@ -46,7 +50,14 @@ type RequestHandlers = HashMap<String, RequestHandler<Response>>;
 /// Represents an MCP server application
 #[derive(Default)]
 pub struct App {
+    /// MCP server options
     pub(super) options: McpOptions,
+    
+    /// DI container
+    #[cfg(feature = "di")]
+    pub(super) container: ContainerBuilder,
+    
+    /// MCP server request handlers
     handlers: RequestHandlers,
 }
 
@@ -58,11 +69,13 @@ impl Debug for App {
 }
 
 impl App {
-    /// Initializes a new app
+    /// Initializes a new MCP app
     pub fn new() -> Self {
         let mut app = Self { 
             options: McpOptions::default(),
-            handlers: HashMap::new()
+            handlers: HashMap::new(),
+            #[cfg(feature = "di")]
+            container: ContainerBuilder::new(),
         };
 
         app.map_handler(crate::commands::INIT, Self::init);
@@ -119,7 +132,13 @@ impl App {
         self.wait_for_shutdown_signal(cancellation_token.clone());
         
         let (sender, mut receiver) = transport.split();
-        let runtime = ServerRuntime::new(sender, self.options, self.handlers);
+        let runtime = ServerRuntime::new(
+            sender, 
+            self.options, 
+            self.handlers,
+            #[cfg(feature = "di")]
+            self.container.build()
+        );
         loop {
             tokio::select! {
                 biased;
@@ -292,15 +311,15 @@ impl App {
     /// # app.run().await;
     /// # }
     /// ```
-    pub fn map_resources<F, R>(&mut self, handler: F) -> &mut Self
+    pub fn map_resources<F, Args, R>(&mut self, handler: F) -> &mut Self
     where
-        F: Fn(ListResourcesRequestParams) -> R + Clone + Send + Sync + 'static,
-        R: Future + Send,
-        R::Output: Into<ListResourcesResult>
+        F: ListResourcesHandler<Args, Output = R> + Clone + Send + Sync + 'static,
+        Args: FromHandlerParams + Send + Sync + 'static,
+        R: Into<ListResourcesResult>
     {
-        let handler = move |params| {
+        let handler = move |params, args| {
             let handler = handler.clone();
-            async move { handler(params).await.into() }
+            async move { handler.call(params, args).await.into() }
         };
         self.map_handler(crate::types::resource::commands::LIST, handler);
         self
@@ -323,15 +342,15 @@ impl App {
     /// # app.run().await;
     /// # }
     /// ```
-    pub fn map_completion<F, R>(&mut self, handler: F) -> &mut Self
+    pub fn map_completion<F, Args, R>(&mut self, handler: F) -> &mut Self
     where
-        F: Fn(CompleteRequestParams) -> R + Clone + Send + Sync + 'static,
-        R: Future + Send,
-        R::Output: Into<CompleteResult>
+        F: CompletionHandler<Args, Output = R> + Clone + Send + Sync + 'static,
+        Args: FromHandlerParams + Send + Sync + 'static,
+        R: Into<CompleteResult>
     {
-        let handler = move |params| {
+        let handler = move |params, args| {
             let handler = handler.clone();
-            async move { handler(params).await.into() }
+            async move { handler.call(params, args).await.into() }
         };
         self.map_handler(crate::types::completion::commands::COMPLETE, handler);
         self
@@ -469,11 +488,21 @@ impl App {
     }
 
     async fn message_middleware(ctx: MwContext, _: Next) -> Response {
-        let MwContext { msg, runtime } = ctx;
+        let MwContext { 
+            msg, 
+            runtime,
+            #[cfg(feature = "di")]
+            scope
+        } = ctx;
         let id = msg.id();
         let mut sender = runtime.sender();
         
-        let resp = Self::handle_message(msg, runtime).await;
+        let resp = Self::handle_message(
+            msg, 
+            runtime,
+            #[cfg(feature = "di")]
+            scope
+        ).await;
 
         if let Err(_err) = sender.send(resp.into()).await {
             #[cfg(feature = "tracing")]
@@ -486,15 +515,30 @@ impl App {
     }
     
     #[inline]
-    async fn handle_message(msg: Message, runtime: ServerRuntime) -> Response {
+    async fn handle_message(
+        msg: Message, 
+        runtime: ServerRuntime,
+        #[cfg(feature = "di")]
+        scope: Container
+    ) -> Response {
         match msg {
-            Message::Request(req) => Self::handle_request(req, runtime).await,
+            Message::Request(req) => Self::handle_request(
+                req, 
+                runtime, 
+                #[cfg(feature = "di")] 
+                scope
+            ).await,
             Message::Response(resp) => Self::handle_response(resp, runtime).await,
             Message::Notification(notification) => Self::handle_notification(notification).await
         }
     }
     
-    async fn handle_request(req: Request, runtime: ServerRuntime) -> Response {
+    async fn handle_request(
+        req: Request, 
+        runtime: ServerRuntime,
+        #[cfg(feature = "di")]
+        scope: Container
+    ) -> Response {
         #[cfg(feature = "http-server")]
         let mut req = req;
         let req_id = req.id();
@@ -512,6 +556,9 @@ impl App {
                 .map(|c| *c);
             runtime.context(session_id, headers, claims)
         };
+        
+        #[cfg(feature = "di")]
+        let context = context.with_scope(scope);
         
         let options = runtime.options();
         let handlers = runtime.request_handlers();

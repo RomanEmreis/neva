@@ -1,7 +1,7 @@
 //! Macros for MCP server resources
 
 use syn::{ItemFn, Meta, punctuated::Punctuated, token::Comma};
-use super::{get_str_param, get_params_arr};
+use super::{get_str_param, get_params_arr, get_exprs_arr};
 use proc_macro2::TokenStream;
 use quote::quote;
 
@@ -107,16 +107,40 @@ pub(crate) fn expand_resource(attr: &Punctuated<Meta, Comma>, function: &ItemFn)
     Ok(expanded)
 }
 
-pub(crate) fn expand_resources(function: &ItemFn) -> syn::Result<TokenStream> {
+pub(crate) fn expand_resources(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<TokenStream> {
     let func_name = &function.sig.ident;
+    let mut middleware = None;
+
+    for meta in attr {
+        match &meta {
+            Meta::Path(_) => {},
+            Meta::List(_) => {},
+            Meta::NameValue(nv) => {
+                if let Some(ident) = nv.path.get_ident()
+                    && let "middleware" = ident.to_string().as_str() {
+                    middleware = get_exprs_arr(&nv.value);
+                }
+            },
+        }
+    }
+    
     let module_name = syn::Ident::new(&format!("map_{func_name}"), func_name.span());
+    let middleware_code = middleware.map(|mws| {
+        let mw_calls = mws.iter().map(|mw| {
+            quote! { .wrap_list_resources(#mw) }
+        });
+        quote! { #(#mw_calls)* }
+    });
+    
     // Expand the function and apply the tool functionality
     let expanded = quote! {
         // Original function
         #function
         // Register a resource function
         fn #module_name(app: &mut neva::App) {
-            app.map_resources(#func_name);
+            app
+                #middleware_code
+                .map_resources(#func_name);
         }
         neva::macros::inventory::submit! {
             neva::macros::server::ItemRegistrar(#module_name)

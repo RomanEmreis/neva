@@ -7,6 +7,8 @@ use crate::error::{Error, ErrorCode};
 use crate::app::options::RuntimeMcpOptions;
 use crate::Context;
 use crate::types::{
+    ListResourcesRequestParams,
+    CompleteRequestParams,
     CallToolRequestParams, 
     ReadResourceRequestParams,
     GetPromptRequestParams, 
@@ -60,11 +62,36 @@ pub trait FromHandlerParams: Sized {
     fn from_params(params: &HandlerParams) -> Result<Self, Error>;
 }
 
+/// Represents a generic handler
 pub trait GenericHandler<Args>: Clone + Send + Sync + 'static  {
+    /// Output type
     type Output;
+    /// Output future
     type Future: Future<Output = Self::Output> + Send;
     
     fn call(&self, args: Args) -> Self::Future;
+}
+
+/// Represents a generic handler for list resources
+pub trait ListResourcesHandler<Args>: Clone + Send + Sync + 'static  {
+    /// Output type
+    type Output;
+    /// Output future
+    type Future: Future<Output = Self::Output> + Send;
+
+    /// Calls the list resources handler
+    fn call(&self, params: ListResourcesRequestParams, args: Args) -> Self::Future;
+}
+
+/// Represents a generic completion handler.
+pub trait CompletionHandler<Args>: Clone + Send + Sync + 'static  {
+    /// Output type
+    type Output;
+    /// Output future
+    type Future: Future<Output = Self::Output> + Send;
+
+    /// Calls the completion handler
+    fn call(&self, params: CompleteRequestParams, args: Args) -> Self::Future;
 }
 
 pub(crate) struct RequestFunc<F, R, Args>
@@ -184,6 +211,34 @@ macro_rules! impl_generic_handler ({ $($param:ident)* } => {
         #[allow(non_snake_case)]
         fn call(&self, ($($param,)*): ($($param,)*)) -> Self::Future {
             (self)($($param,)*)
+        }
+    }
+    impl<Func, Fut: Send, $($param,)*> ListResourcesHandler<($($param,)*)> for Func
+    where
+        Func: Fn(ListResourcesRequestParams, $($param),*) -> Fut + Send + Sync + Clone + 'static,
+        Fut: Future + 'static,
+    {
+        type Output = Fut::Output;
+        type Future = Fut;
+
+        #[inline]
+        #[allow(non_snake_case)]
+        fn call(&self, params: ListResourcesRequestParams, ($($param,)*): ($($param,)*)) -> Self::Future {
+            (self)(params, $($param,)*)
+        }
+    }
+    impl<Func, Fut: Send, $($param,)*> CompletionHandler<($($param,)*)> for Func
+    where
+        Func: Fn(CompleteRequestParams, $($param),*) -> Fut + Send + Sync + Clone + 'static,
+        Fut: Future + 'static,
+    {
+        type Output = Fut::Output;
+        type Future = Fut;
+
+        #[inline]
+        #[allow(non_snake_case)]
+        fn call(&self, params: CompleteRequestParams, ($($param,)*): ($($param,)*)) -> Self::Future {
+            (self)(params, $($param,)*)
         }
     }
 });

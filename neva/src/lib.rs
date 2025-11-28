@@ -70,9 +70,11 @@ pub mod macros;
 pub mod commands;
 #[cfg(feature = "server")]
 pub mod middleware;
+#[cfg(feature = "di")]
+pub mod di;
 
 #[cfg(feature = "server-macros")]
-pub use neva_macros::{tool, prompt, resource, resources, handler};
+pub use neva_macros::{tool, prompt, resource, resources, handler, completion};
 #[cfg(feature = "client-macros")]
 pub use neva_macros::{sampling, elicitation};
 #[cfg(feature = "macros")]
@@ -123,7 +125,7 @@ pub mod prelude {
     pub use crate::client::Client;
     
     #[cfg(feature = "server-macros")]
-    pub use crate::{tool, prompt, resource, resources, handler};
+    pub use crate::{tool, prompt, resource, resources, handler, completion};
     #[cfg(feature = "client-macros")]
     pub use crate::{sampling, elicitation};
     #[cfg(feature = "macros")]
@@ -131,4 +133,7 @@ pub mod prelude {
 
     #[cfg(feature = "http-server")]
     pub use crate::auth::*;
+    
+    #[cfg(feature = "di")]
+    pub use crate::di::Dc;
 }
