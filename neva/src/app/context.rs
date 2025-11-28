@@ -58,7 +58,7 @@ pub(crate) struct ServerRuntime {
     
     /// Represents a DI container
     #[cfg(feature = "di")]
-    container: Container,
+    pub(crate) container: Container,
 }
 
 /// Represents MCP Request Context
@@ -89,7 +89,7 @@ pub struct Context {
 
     /// Represents a DI scope
     #[cfg(feature = "di")]
-    scope: Container,
+    pub(crate) scope: Option<Container>,
 }
 
 impl Debug for Context {
@@ -148,7 +148,7 @@ impl ServerRuntime {
             options: self.options.clone(),
             timeout: self.options.request_timeout,
             #[cfg(feature = "di")]
-            scope: self.container.create_scope(),
+            scope: None,
         }
     }
 
@@ -169,7 +169,7 @@ impl ServerRuntime {
             options: self.options.clone(),
             timeout: self.options.request_timeout,
             #[cfg(feature = "di")]
-            scope: self.container.create_scope(),
+            scope: None,
         }
     }
     
@@ -498,6 +498,14 @@ impl Context {
             .await?
             .into_result()
     }
+
+    /// Applies earlier defined scopes to the current context.
+    #[inline]
+    #[cfg(feature = "di")]
+    pub fn with_scope(mut self, scope: Container) -> Self {
+        self.scope = Some(scope);
+        self
+    }
     
     /// Resolves a service and returns a cloned instance. 
     /// `T` must implement `Clone` otherwise 
@@ -506,6 +514,8 @@ impl Context {
     #[cfg(feature = "di")]
     pub fn resolve<T: Send + Sync + Clone + 'static>(&self) -> Result<T, Error> {
         self.scope
+            .as_ref()
+            .ok_or_else(|| Error::new(ErrorCode::InternalError, "DI scope is not set"))?
             .resolve::<T>()
             .map_err(Into::into)
     }
@@ -515,6 +525,8 @@ impl Context {
     #[cfg(feature = "di")]
     pub fn resolve_shared<T: Send + Sync + 'static>(&self) -> Result<Arc<T>, Error> {
         self.scope
+            .as_ref()
+            .ok_or_else(|| Error::new(ErrorCode::InternalError, "DI scope is not set"))?
             .resolve_shared::<T>()
             .map_err(Into::into)
     }

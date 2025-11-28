@@ -36,7 +36,7 @@ use {
     tracing::Instrument
 };
 #[cfg(feature = "di")]
-use volga_di::ContainerBuilder;
+use volga_di::{Container, ContainerBuilder};
 
 pub mod options;
 pub mod context;
@@ -488,11 +488,21 @@ impl App {
     }
 
     async fn message_middleware(ctx: MwContext, _: Next) -> Response {
-        let MwContext { msg, runtime } = ctx;
+        let MwContext { 
+            msg, 
+            runtime,
+            #[cfg(feature = "di")]
+            scope
+        } = ctx;
         let id = msg.id();
         let mut sender = runtime.sender();
         
-        let resp = Self::handle_message(msg, runtime).await;
+        let resp = Self::handle_message(
+            msg, 
+            runtime,
+            #[cfg(feature = "di")]
+            scope
+        ).await;
 
         if let Err(_err) = sender.send(resp.into()).await {
             #[cfg(feature = "tracing")]
@@ -505,15 +515,30 @@ impl App {
     }
     
     #[inline]
-    async fn handle_message(msg: Message, runtime: ServerRuntime) -> Response {
+    async fn handle_message(
+        msg: Message, 
+        runtime: ServerRuntime,
+        #[cfg(feature = "di")]
+        scope: Container
+    ) -> Response {
         match msg {
-            Message::Request(req) => Self::handle_request(req, runtime).await,
+            Message::Request(req) => Self::handle_request(
+                req, 
+                runtime, 
+                #[cfg(feature = "di")] 
+                scope
+            ).await,
             Message::Response(resp) => Self::handle_response(resp, runtime).await,
             Message::Notification(notification) => Self::handle_notification(notification).await
         }
     }
     
-    async fn handle_request(req: Request, runtime: ServerRuntime) -> Response {
+    async fn handle_request(
+        req: Request, 
+        runtime: ServerRuntime,
+        #[cfg(feature = "di")]
+        scope: Container
+    ) -> Response {
         #[cfg(feature = "http-server")]
         let mut req = req;
         let req_id = req.id();
@@ -531,6 +556,9 @@ impl App {
                 .map(|c| *c);
             runtime.context(session_id, headers, claims)
         };
+        
+        #[cfg(feature = "di")]
+        let context = context.with_scope(scope);
         
         let options = runtime.options();
         let handlers = runtime.request_handlers();

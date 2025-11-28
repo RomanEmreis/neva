@@ -1,21 +1,12 @@
 //! Extractors for Dependency Injection
 
-#[cfg(feature = "server")]
-use crate::types::{
-    helpers::extract::RequestArgument,
-    resource::ResourceArgument
-};
-#[cfg(feature = "server")]
-use crate::app::handler::FromHandlerParams;
-
+use crate::error::{Error, ErrorCode};
+use crate::app::handler::{HandlerParams, FromHandlerParams};
+use crate::types::{helpers::extract::RequestArgument, resource::ResourceArgument, RequestParamsMeta};
 use std::{
     ops::{Deref, DerefMut},
     sync::Arc
 };
-#[cfg(feature = "server")]
-use crate::app::handler::HandlerParams;
-#[cfg(feature = "server")]
-use crate::error::{Error, ErrorCode};
 
 /// `Dc` stands for Dependency Container.  
 /// This struct wraps an injectable type `T` that is **shared** between all handlers
@@ -62,18 +53,12 @@ impl<T: Send + Sync + Clone> Dc<T> {
     }
 }
 
-#[cfg(feature = "server")]
 impl<T: Send + Sync + 'static> ResourceArgument for Dc<T> {
     type Error = Error;
 
     #[inline]
     fn extract(payload: crate::types::resource::Payload<'_>) -> Result<Self, Self::Error> {
-        payload.expect_meta()
-            .as_ref()
-            .and_then(|meta| meta.context.as_ref())
-            .ok_or(Error::new(ErrorCode::InvalidParams, "Missing MCP context"))?
-            .resolve_shared()
-            .map(Dc)
+        make_dc(payload.expect_meta().as_ref())
     }
 
     #[inline]
@@ -82,18 +67,12 @@ impl<T: Send + Sync + 'static> ResourceArgument for Dc<T> {
     }
 }
 
-#[cfg(feature = "server")]
 impl<T: Send + Sync + 'static> RequestArgument for Dc<T> {
     type Error = Error;
 
     #[inline]
     fn extract(payload: crate::types::helpers::extract::Payload<'_>) -> Result<Self, Self::Error> {
-        payload.expect_meta()
-            .as_ref()
-            .and_then(|meta| meta.context.as_ref())
-            .ok_or(Error::new(ErrorCode::InvalidParams, "Missing MCP context"))?
-            .resolve_shared()
-            .map(Dc)
+        make_dc(payload.expect_meta().as_ref())
     }
 
     #[inline]
@@ -102,7 +81,6 @@ impl<T: Send + Sync + 'static> RequestArgument for Dc<T> {
     }
 }
 
-#[cfg(feature = "server")]
 impl<T: Send + Sync + 'static> FromHandlerParams for Dc<T> {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
@@ -111,4 +89,12 @@ impl<T: Send + Sync + 'static> FromHandlerParams for Dc<T> {
             _ => Err(Error::new(ErrorCode::InternalError, "invalid handler parameters"))
         }
     }
+}
+
+#[inline(always)]
+fn make_dc<T: Send + Sync + 'static>(meta: Option<&RequestParamsMeta>) -> Result<Dc<T>, Error> {
+    meta.and_then(|meta| meta.context.as_ref())
+        .ok_or(Error::new(ErrorCode::InvalidParams, "Missing MCP context"))?
+        .resolve_shared()
+        .map(Dc)
 }

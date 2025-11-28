@@ -9,8 +9,11 @@ pub use volga_di::{
 };
 
 pub use volga_di::error::Error as DiError;
+
+#[cfg(feature = "server")]
 pub use dc::Dc;
 
+#[cfg(feature = "server")]
 mod dc;
 
 impl From<DiError> for Error {
@@ -193,11 +196,6 @@ impl super::App {
         self.container.register_transient_default::<T>();
         self
     }
-}
-
-#[cfg(feature = "client")]
-impl super::Client {
-
 }
 
 #[cfg(feature = "server")]

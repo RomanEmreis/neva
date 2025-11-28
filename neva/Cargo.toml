@@ -31,7 +31,7 @@ uuid = { version = "1.18.1", features = ["v4", "serde"] }
 
 # optional
 inventory = { version = "0.3.21", optional = true }
-jsonschema = { version = "0.37.1", optional = true }
+jsonschema = { version = "0.37.2", optional = true }
 once_cell = { version = "1.21.3", features = ["std"], optional = true }
 reqwest = { version = "0.12.24", features = ["stream", "json"], optional = true }
 sse-stream = { version = "0.2.1", optional = true }
@@ -69,7 +69,7 @@ http-server = ["server", "dep:volga", "dep:tokio-stream"]
 server = ["tokio/signal"]
 
 # client
-client-full = ["client-macros", "tracing", "http-client", "client-tls", "di"]
+client-full = ["client-macros", "tracing", "http-client", "client-tls"]
 client-macros = ["client", "macros", "neva_macros?/client"]
 client-tls = ["reqwest?/rustls-tls"]
 http-client = ["client", "dep:reqwest", "dep:sse-stream", "dep:tokio-stream", "dep:once_cell"]
