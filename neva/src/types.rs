@@ -48,6 +48,8 @@ pub use capabilities::{
     CompletionsCapability,
     ElicitationCapability,
     SamplingCapability,
+    SamplingContextCapability,
+    SamplingToolsCapability,
     RootsCapability
 };
 pub use tool::{
@@ -92,6 +94,8 @@ pub use sampling::{
     CreateMessageRequestParams,
     CreateMessageResult,
     SamplingMessage,
+    ToolChoiceMode,
+    ToolChoice
 };
 pub use elicitation::{
     ElicitRequestParams,

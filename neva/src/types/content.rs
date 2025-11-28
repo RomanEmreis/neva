@@ -1,11 +1,22 @@
 ﻿//! Any Text, Image, Audio, Video content utilities
 
+use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
 use bytes::Bytes;
+use serde_json::Value;
+use crate::shared;
 use crate::error::{Error, ErrorCode};
-use crate::types::{Annotations, Resource, ResourceContents, Uri};
 use crate::types::helpers::{deserialize_base64_as_bytes, serialize_bytes_as_base64};
+use crate::types::{
+    CallToolResponse, 
+    CallToolRequestParams,
+    RequestParamsMeta,
+    Annotations, 
+    Resource, 
+    ResourceContents, 
+    Uri
+};
 
 const CHUNK_SIZE: usize = 8192;
 
@@ -34,6 +45,14 @@ pub enum Content {
     /// Embedded resource
     #[serde(rename = "resource")]
     Resource(EmbeddedResource),
+
+    /// Tool use content
+    #[serde(rename = "tool_use")]
+    ToolUse(ToolUse),
+
+    /// Tool result content
+    #[serde(rename = "tool_result")]
+    ToolResult(ToolResult),
     
     /// Empty content
     #[serde(rename = "empty")]
@@ -170,6 +189,62 @@ pub struct EmbeddedResource {
     /// Optional annotations for the client.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<Annotations>,
+
+    /// Metadata reserved by MCP for protocol-level metadata.
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
+}
+
+/// Represents a request from the assistant to call a tool.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema) for details
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ToolUse {
+    /// A unique identifier for this tool use.
+    /// 
+    /// This ID is used to match tool results to their corresponding tool uses.
+    pub id: String,
+
+    /// The name of the tool to call.
+    pub name: String,
+
+    /// The arguments to pass to the tool, conforming to the tool's input schema.
+    pub input: Option<HashMap<String, Value>>,
+
+    /// Metadata reserved by MCP for protocol-level metadata.
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<RequestParamsMeta>,
+}
+
+/// Represents the result of a tool use, provided by the user back to the assistant.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema) for details
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ToolResult {
+    /// The ID of the tool use this result corresponds to.
+    /// 
+    /// This **MUST** match the ID from a previous [`ToolUse`].
+    #[serde(rename = "toolUseId")]
+    pub tool_use_id: String,
+
+    /// The unstructured result content of the tool use.
+    /// 
+    /// This has the same format as [`CallToolResponse::content`] and can include text, images, audio, resource links, and embedded resources.
+    pub content: Vec<Content>,
+    
+    /// An optional JSON object that represents the structured result of the tool call.
+    /// 
+    /// If the tool defined an `outputSchema`, this **SHOULD** conform to that schema.
+    #[serde(rename = "structuredContent", skip_serializing_if = "Option::is_none")]
+    pub struct_content: Option<serde_json::Value>,
+
+    /// Whether the tool call was unsuccessful.
+    /// 
+    /// If true, the content typically describes the error that occurred.
+    /// 
+    /// Default: `false`
+    #[serde(default, rename = "isError")]
+    pub is_error: bool,
 
     /// Metadata reserved by MCP for protocol-level metadata.
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
@@ -327,6 +402,55 @@ impl TryFrom<Content> for EmbeddedResource {
     }
 }
 
+impl From<ToolUse> for Content {
+    #[inline]
+    fn from(value: ToolUse) -> Self {
+        Self::ToolUse(value)
+    }
+}
+
+impl From<ToolResult> for Content {
+    #[inline]
+    fn from(value: ToolResult) -> Self {
+        Self::ToolResult(value)
+    }
+}
+
+impl From<ToolUse> for CallToolRequestParams {
+    #[inline]
+    fn from(value: ToolUse) -> Self {
+        Self { 
+            name: value.name, 
+            args: value.input, 
+            meta: value.meta
+        }
+    }
+}
+
+impl TryFrom<Content> for ToolUse {
+    type Error = Error;
+
+    #[inline]
+    fn try_from(value: Content) -> Result<Self, Self::Error> {
+        match value { 
+            Content::ToolUse(tool_use) => Ok(tool_use),
+            _ => Err(Error::new(ErrorCode::InternalError, "Invalid content type")),
+        }
+    }
+}
+
+impl TryFrom<Content> for ToolResult {
+    type Error = Error;
+
+    #[inline]
+    fn try_from(value: Content) -> Result<Self, Self::Error> {
+        match value { 
+            Content::ToolResult(tool_result) => Ok(tool_result),
+            _ => Err(Error::new(ErrorCode::InternalError, "Invalid content type")),
+        }
+    }
+}
+
 impl Content {
     /// Creates a text [`Content`]
     #[inline]
@@ -365,6 +489,22 @@ impl Content {
         resource.into().into()
     }
 
+    /// Creates a tool result [`Content`]
+    #[inline]
+    pub fn tool_result(id: String, resp: CallToolResponse) -> Self {
+        Self::ToolResult(ToolResult::new(id, resp))
+    }
+
+    /// Creates a tool use [`Content`]
+    #[inline]
+    pub fn tool_use<N, Args>(name: N, args: Args) -> Self
+    where
+        N: Into<String>,
+        Args: shared::IntoArgs
+    {
+        Self::ToolUse(ToolUse::new(name, args))
+    }
+
     /// Creates an empty [`Content`]
     #[inline]
     pub fn empty() -> Self {
@@ -381,6 +521,8 @@ impl Content {
             Self::Text(_) => "text",
             Self::ResourceLink(_) => "resource_link",
             Self::Resource(_) => "resource",
+            Self::ToolUse(_) => "tool_use",
+            Self::ToolResult(_) => "tool_result"
         }
     }
     
@@ -564,6 +706,37 @@ impl EmbeddedResource {
         Self {
             resource: resource.into(),
             annotations: None,
+            meta: None
+        }
+    }
+}
+
+impl ToolUse {
+    /// Creates a new [`ToolUse`] content
+    #[inline]
+    pub fn new<N, Args>(name: N, args: Args) -> Self
+    where
+        N: Into<String>,
+        Args: shared::IntoArgs
+    {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.into(),
+            input: args.into_args(),
+            meta: None
+        }
+    }
+}
+
+impl ToolResult {
+    /// Creates a new [`ToolResult`] content
+    #[inline]
+    pub fn new(id: String, resp: CallToolResponse) -> Self {
+        Self {
+            tool_use_id: id,
+            content: resp.content,
+            struct_content: resp.struct_content,
+            is_error: resp.is_error,
             meta: None
         }
     }

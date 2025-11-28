@@ -1,7 +1,7 @@
 ﻿//! Utilities for Sampling
 
 use serde::{Serialize, Deserialize};
-use crate::types::{Content, Role, IntoResponse, RequestId, Response};
+use crate::types::{Tool, Content, Role, IntoResponse, RequestId, Response};
 #[cfg(feature = "client")]
 use std::{pin::Pin, sync::Arc, future::Future};
 
@@ -99,6 +99,46 @@ pub struct CreateMessageRequestParams {
     /// > like _"."_, or special delimiter sequences like _"###"_.
     #[serde(rename = "stopSequences", skip_serializing_if = "Option::is_none")]
     pub stop_sequences: Option<Vec<String>>,
+
+    /// Tools that the model may use during generation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<Tool>>,
+
+    /// Controls how the model uses tools.
+    /// 
+    /// Default is `{ mode: "auto" }`.
+    #[serde(rename = "toolChoice", skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ToolChoice>,
+}
+
+/// Controls tool selection behavior for sampling requests.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Default, Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ToolChoice {
+    /// Mode that controls which tools the model can call.
+    pub mode: ToolChoiceMode
+}
+
+/// Represents the mode that controls which tools the model can call.
+/// 
+/// - `auto` - Model decides whether to call tools (default).
+/// - `required` - Model must call at least one tool.
+/// - `none` - Model must not call any tools.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolChoiceMode {
+    /// The mode value `auto`.
+    #[default]
+    Auto,
+
+    /// The mode value `required`.
+    Required,
+
+    /// The mode value `none`.
+    None
 }
 
 /// Specifies the context inclusion options for a request in the Model Context Protocol (MCP).
@@ -219,7 +259,9 @@ impl Default for CreateMessageRequestParams {
             meta: None,
             model_pref: None,
             temp: None,
-            stop_sequences: None
+            stop_sequences: None,
+            tool_choice: None,
+            tools: None
         }
     }
 }
@@ -414,6 +456,24 @@ impl CreateMessageRequestParams {
         self
     }
     
+    /// Sets the list of tools that the model can use during generation
+    /// 
+    /// Default: `None`
+    pub fn with_tools<T: IntoIterator<Item = Tool>>(mut self, tools: T) -> Self {
+        self.tools = Some(tools
+            .into_iter()
+            .collect());
+        self.with_tool_choice(ToolChoiceMode::Auto)
+    }
+
+    /// Sets the control mode for tool selection behavior for sampling requests.
+    /// 
+    /// Default: `None`
+    pub fn with_tool_choice(mut self, mode: ToolChoiceMode) -> Self {
+        self.tool_choice = Some(ToolChoice { mode });
+        self
+    }
+
     /// Returns an iterator of text messages
     pub fn text(&self) -> impl Iterator<Item = &Content> {
         self.msg_iter("text")
@@ -503,3 +563,41 @@ pub(crate) type SamplingHandler = Arc<
     + Send 
     + Sync
 >;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn it_sets_auto_tool_choice_mode_by_default() {
+        let mode = ToolChoiceMode::default();
+
+        assert_eq!(mode, ToolChoiceMode::Auto);
+    }
+
+    #[test]
+    fn it_sets_auto_tool_choice_by_default() {
+        let tool_choice = ToolChoice::default();
+
+        assert_eq!(tool_choice.mode, ToolChoiceMode::Auto);
+    }
+
+    #[test]
+    fn it_sets_auto_tool_choice_when_tools_specified() {
+        let params = CreateMessageRequestParams::new()
+            .with_tools([
+                Tool::new("test 1", async || "test 1"),
+                Tool::new("test 2", async || "test 2")
+            ]);
+
+        assert_eq!(params.tool_choice.unwrap().mode, ToolChoiceMode::Auto);
+    }
+
+    #[test]
+    fn it_sets_tool_choice() {
+        let params = CreateMessageRequestParams::new()
+            .with_tool_choice(ToolChoiceMode::Required);
+
+        assert_eq!(params.tool_choice.unwrap().mode, ToolChoiceMode::Required);
+    }
+}
