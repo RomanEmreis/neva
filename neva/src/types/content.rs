@@ -11,7 +11,6 @@ use crate::types::helpers::{deserialize_base64_as_bytes, serialize_bytes_as_base
 use crate::types::{
     CallToolResponse, 
     CallToolRequestParams,
-    RequestParamsMeta,
     Annotations, 
     Resource, 
     ResourceContents, 
@@ -77,7 +76,7 @@ pub struct TextContent {
 
     /// Metadata reserved by MCP for protocol-level metadata.
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
-    pub meta: Option<serde_json::Value>,
+    pub meta: Option<Value>,
 }
 
 /// Audio provided to or from an LLM.
@@ -103,7 +102,7 @@ pub struct AudioContent {
 
     /// Metadata reserved by MCP for protocol-level metadata.
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
-    pub meta: Option<serde_json::Value>,
+    pub meta: Option<Value>,
 }
 
 /// An image provided to or from an LLM.
@@ -129,7 +128,7 @@ pub struct ImageContent {
 
     /// Metadata reserved by MCP for protocol-level metadata.
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
-    pub meta: Option<serde_json::Value>,
+    pub meta: Option<Value>,
 }
 
 /// A resource that the server is capable of reading, included in a prompt or tool call result.
@@ -172,7 +171,7 @@ pub struct ResourceLink {
 
     /// Metadata reserved by MCP for protocol-level metadata.
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
-    pub meta: Option<serde_json::Value>,
+    pub meta: Option<Value>,
 }
 
 /// The contents of a resource, embedded into a prompt or tool call result.
@@ -192,7 +191,7 @@ pub struct EmbeddedResource {
 
     /// Metadata reserved by MCP for protocol-level metadata.
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
-    pub meta: Option<serde_json::Value>,
+    pub meta: Option<Value>,
 }
 
 /// Represents a request from the assistant to call a tool.
@@ -213,7 +212,7 @@ pub struct ToolUse {
 
     /// Metadata reserved by MCP for protocol-level metadata.
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
-    pub meta: Option<RequestParamsMeta>,
+    pub meta: Option<Value>,
 }
 
 /// Represents the result of a tool use, provided by the user back to the assistant.
@@ -236,7 +235,7 @@ pub struct ToolResult {
     /// 
     /// If the tool defined an `outputSchema`, this **SHOULD** conform to that schema.
     #[serde(rename = "structuredContent", skip_serializing_if = "Option::is_none")]
-    pub struct_content: Option<serde_json::Value>,
+    pub struct_content: Option<Value>,
 
     /// Whether the tool call was unsuccessful.
     /// 
@@ -248,7 +247,7 @@ pub struct ToolResult {
 
     /// Metadata reserved by MCP for protocol-level metadata.
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
-    pub meta: Option<serde_json::Value>,
+    pub meta: Option<Value>,
 }
 
 impl From<&str> for Content {
@@ -288,9 +287,9 @@ impl From<Resource> for Content {
     }
 }
 
-impl From<serde_json::Value> for Content {
+impl From<Value> for Content {
     #[inline]
-    fn from(value: serde_json::Value) -> Self {
+    fn from(value: Value) -> Self {
         Self::Text(TextContent::new(value.to_string()))
     }
 }
@@ -422,7 +421,7 @@ impl From<ToolUse> for CallToolRequestParams {
         Self { 
             name: value.name, 
             args: value.input, 
-            meta: value.meta
+            meta: None
         }
     }
 }
@@ -737,6 +736,18 @@ impl ToolResult {
             content: resp.content,
             struct_content: resp.struct_content,
             is_error: resp.is_error,
+            meta: None
+        }
+    }
+
+    /// Creates the [`ToolResult`] with error
+    #[inline]
+    pub fn error(id: String, error: Error) -> Self {
+        Self {
+            tool_use_id: id,
+            content: vec![Content::text(error.to_string())],
+            struct_content: None,
+            is_error: true,
             meta: None
         }
     }

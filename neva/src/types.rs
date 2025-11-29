@@ -37,6 +37,8 @@ pub use content::{
     ImageContent,
     ResourceLink,
     EmbeddedResource,
+    ToolUse,
+    ToolResult
 };
 pub use capabilities::{
     ClientCapabilities, 

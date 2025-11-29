@@ -228,7 +228,7 @@ pub struct CreateMessageResult {
     pub role: Role,
     
     /// Content of the message.
-    pub content: Content,
+    pub content: Vec<Content>,
     
     /// Name of the model that generated the message.
     ///
@@ -520,7 +520,7 @@ impl CreateMessageResult {
         Self {
             stop_reason: None,
             model: String::new(),
-            content: Content::empty(),
+            content: Vec::new(),
             role,
         }
     }
@@ -549,7 +549,7 @@ impl CreateMessageResult {
     
     /// Sets the content
     pub fn with_content<T: Into<Content>>(mut self, content: T) -> Self {
-        self.content = content.into();
+        self.content.push(content.into());
         self
     }
 }

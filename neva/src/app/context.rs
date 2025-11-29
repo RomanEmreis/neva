@@ -5,11 +5,12 @@ use crate::error::{Error, ErrorCode};
 use crate::transport::Sender;
 use super::{options::{McpOptions, RuntimeMcpOptions}, handler::RequestHandler};
 use crate::{
-    shared::RequestQueue,
+    shared::{IntoArgs, RequestQueue},
     middleware::{MwContext, Next},
     transport::TransportProtoSender,
     types::{
         Tool, CallToolRequestParams, CallToolResponse,
+        ToolUse, ToolResult,
         Resource, ReadResourceRequestParams, ReadResourceResult,
         Prompt, GetPromptRequestParams, GetPromptResult,
         RequestId, Request, Response, Uri,
@@ -27,6 +28,7 @@ use std::{
     time::Duration,
     sync::Arc
 };
+
 #[cfg(feature = "http-server")]
 use {
     crate::transport::http::server::{validate_roles, validate_permissions},
@@ -188,20 +190,140 @@ impl ServerRuntime {
 }
 
 impl Context {
+    /// Returns a list of all available tools
+    pub async fn tools(&self) -> Vec<Tool> {
+        self.options.tools.values().await
+    }
+    
+    /// Finds a tool by `name`
+    pub async fn find_tool(&self, name: &str) -> Option<Tool> {
+        self.options.tools.get(name).await
+    }
+
+    /// Returns a list of tools by name.
+    /// If some of the tools requested in `names` are missing, they won't be in the result list.
+    pub async fn find_tools(&self, names: impl IntoIterator<Item = &str>) -> Vec<Tool>{
+        futures_util::future::join_all(
+            names.into_iter()
+                .map(|name| self.options.tools.get(name)))
+            .await
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+    
+    /// Initiates a tool call once a [`ToolUse`] request received from assistant 
+    /// withing a sampling window.
+    ///
+    /// For multiple [`ToolUse`] requests use the [`Context::use_tools`] method.
+    /// 
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(feature = "server-macros")] {
+    /// use neva::prelude::*;
+    ///
+    /// #[tool]
+    /// async fn analyze_weather(ctx: Context, city: String) -> Result<(), Error> {
+    ///     let prompt = ctx.prompt("get_weather", ("city", city)).await?;
+    ///     
+    ///     // do something with the prompt
+    ///
+    /// # Ok(())
+    /// }
+    ///
+    /// #[prompt]
+    /// async fn get_weather(city: String) -> PromptMessage {
+    ///     PromptMessage::user()
+    ///         .with(format!("What's the weather in {city}"))
+    /// }
+    /// # }
+    /// ```
+    pub async fn use_tool(&self, tool: ToolUse) -> ToolResult {
+        let id = tool.id.clone();
+        let res = self.clone()
+            .call_tool(tool.into())
+            .await;
+        match res {
+            Ok(res) => ToolResult::new(id, res),
+            Err(err) => ToolResult::error(id, err)
+        }
+    }
+    
+    /// Initiates a parallel tool calls for multiple [`ToolUse`] requests.
+    ///
+    /// For a single [`ToolUse`] use the [`Context::use_tool`] method.
+    pub async fn use_tools<I>(&self, tools: I) -> Vec<ToolResult>
+    where 
+        I : IntoIterator<Item = ToolUse>
+    {
+        futures_util::future::join_all(
+            tools.into_iter().map(|t| self.use_tool(t)))
+            .await
+    }
+    
+    /// Gets the prompt by name
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(feature = "server-macros")] {
+    /// use neva::prelude::*;
+    ///
+    /// #[tool]
+    /// async fn analyze_weather(ctx: Context, city: String) -> Result<(), Error> {
+    ///     let prompt = ctx.prompt("get_weather", ("city", city)).await?;
+    ///     
+    ///     // do something with the prompt
+    ///
+    /// # Ok(())
+    /// }
+    ///
+    /// #[prompt]
+    /// async fn get_weather(city: String) -> PromptMessage {
+    ///     PromptMessage::user()
+    ///         .with(format!("What's the weather in {city}"))
+    /// }
+    /// # }
+    /// ```
+    pub async fn prompt<N, Args>(
+        &self, 
+        name: N, 
+        args: Args
+    ) -> Result<GetPromptResult, Error>
+    where
+        N: Into<String>,
+        Args: IntoArgs,
+    {
+        let params = GetPromptRequestParams {
+            name: name.into(),
+            args: args.into_args(),
+            meta: None
+        };
+        self.clone()
+            .get_prompt(params)
+            .await
+    }
+    
     /// Reads a resource contents
     ///
     /// # Example
     /// ```no_run
     /// # #[cfg(feature = "server-macros")] {
-    /// use neva::{Context, error::Error, types::Uri, tool};
+    /// use neva::prelude::*;
     ///
     /// #[tool]
-    /// async fn summarize_document(mut ctx: Context, doc_uri: Uri) -> Result<(), Error> {
+    /// async fn summarize_document(ctx: Context, doc_uri: Uri) -> Result<(), Error> {
     ///     let doc = ctx.resource(doc_uri).await?;
     ///     
     ///     // do something with the doc
     ///
     /// # Ok(())
+    /// }
+    /// 
+    /// #[resource(uri = "file://{name}")]
+    /// async fn get_doc(name: String) -> TextResourceContents {
+    ///     // read the doc
+    /// 
+    /// # TextResourceContents::new("", "") 
     /// }
     /// # }
     /// ```

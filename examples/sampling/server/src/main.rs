@@ -2,13 +2,39 @@ use tracing_subscriber::prelude::*;
 use neva::prelude::*;
 
 #[tool]
-async fn generate_poem(mut ctx: Context, topic: String) -> Result<String, Error> {
+async fn generate_weather_report(mut ctx: Context, city: String) -> Result<String, Error> {
+    let prompt = ctx.prompt("weather", ("city", city)).await?;
+    let msg = prompt.messages.into_iter().next().unwrap();
+    
+    let Some(tool) = ctx.find_tool("get_weather").await else {
+        return Err(ErrorCode::MethodNotFound.into());
+    }; 
+    
     let params = CreateMessageRequestParams::new()
-        .with_message(format!("Write a short poem about {topic}"))
-        .with_sys_prompt("You are a talented poet who writes concise, evocative verses.");
+        .with_message(SamplingMessage::user().with(msg.content))
+        .with_sys_prompt("You are a helpful assistant.")
+        .with_tools([tool]);
     
     let result = ctx.sample(params).await?;
+    if result.stop_reason.is_some_and(|r| r == "toolUse") { 
+                
+    }
+    
     Ok(format!("{:?}", result.content))
+}
+
+#[tool]
+async fn get_weather(_city: String) -> Json<Weather> {
+    Json(Weather {
+        temperature: 15.0,
+        humidity: 60.0,
+    })
+}
+
+#[prompt]
+async fn weather(city: String) -> PromptMessage {
+    PromptMessage::user()
+        .with(format!("What is the weather in {city}?"))
 }
 
 #[tokio::main]
@@ -33,4 +59,10 @@ async fn main() {
         .with_options(|opt| opt.set_http(http))
         .run()
         .await;
+}
+
+#[json_schema(serde, debug)]
+struct Weather {
+    temperature: f32,
+    humidity: f32,
 }

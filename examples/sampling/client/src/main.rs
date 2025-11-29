@@ -18,7 +18,8 @@ async fn sampling_handler(params: CreateMessageRequestParams) -> CreateMessageRe
 
     CreateMessageResult::assistant()
         .with_model("o3-mini")
-        .with_content("Some response")
+        .with_content(ToolUse::new("get_weather", ("city", "London")))
+        .with_stop_reason("toolUse")
 }
 
 #[tokio::main]
@@ -37,9 +38,17 @@ async fn main() -> Result<(), Error> {
 
     client.connect().await?;
 
-    let args = ("topic", "winter snow");
-    let result = client.call_tool("generate_poem", args).await?;
+    let args = ("city", "London");
+    let result = client
+        .call_tool("generate_weather_report", args).await?;
+    
     tracing::info!("Received result: {:?}", result.content);
 
     client.disconnect().await
+}
+
+#[json_schema(de, debug)]
+struct Weather {
+    temperature: f32,
+    humidity: f32,
 }

@@ -3,8 +3,8 @@
 use neva::prelude::*;
 
 #[prompt(
-    title = "Code Analyzer",
-    descr = "Analyze code for potential improvements",
+    title = "Hello World generator",
+    descr = "Generates a user message requesting a hello world code generation.",
     args = r#"[
         {
             "name": "lang", 
@@ -13,9 +13,9 @@ use neva::prelude::*;
         }    
     ]"#
 )]
-async fn analyze_code(lang: String) -> PromptMessage {
+async fn hello_world_code(lang: String) -> PromptMessage {
     PromptMessage::user()
-        .with(format!("Language: {lang}"))
+        .with(format!("Write a hello-world function on {lang}"))
 }
 
 #[prompt(descr = "A prompt that return error")]
