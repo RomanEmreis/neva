@@ -49,7 +49,7 @@ pub struct RequestSchema {
 }
 
 /// Represents the client's response to an elicitation request.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ElicitResult {
     /// The user action in response to the elicitation.
     /// 

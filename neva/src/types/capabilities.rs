@@ -53,7 +53,7 @@ pub struct ClientCapabilities {
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct RootsCapability {
-    /// Gets or sets whether the client supports notifications for changes to the roots list.
+    /// Indicates whether the client supports notifications for changes to the roots list.
     ///
     /// > **Note:** When set to `true`, the client can notify servers when roots are added, 
     /// > removed, or modified, allowing servers to refresh their roots cache accordingly.
@@ -72,6 +72,28 @@ pub struct RootsCapability {
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct SamplingCapability {
+    /// Indicates whether the client supports context inclusion via `includeContext` parameter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<SamplingContextCapability>,
+
+    /// Indicates whether the client supports tool use via `tools` and `toolChoice` parameters.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<SamplingToolsCapability>
+}
+
+/// Represents the sampling context capability.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct SamplingContextCapability {
+    // Currently empty in the spec, but may be extended in the future
+}
+
+/// Represents the sampling tools capability.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct SamplingToolsCapability {
     // Currently empty in the spec, but may be extended in the future
 }
 
@@ -116,7 +138,7 @@ pub struct ServerCapabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completions: Option<CompletionsCapability>,
 
-    /// Gets or sets experimental, non-standard capabilities that the server supports.
+    /// Indicates experimental, non-standard capabilities that the server supports.
     ///
     /// > **Note:** The `experimental` map allows servers to advertise support for features that are not yet 
     /// > standardized in the Model Context Protocol specification. This extension mechanism enables 
@@ -134,7 +156,7 @@ pub struct ServerCapabilities {
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ToolsCapability {
-    /// Gets or sets whether this server supports notifications for changes to the tool list.
+    /// Indicates whether this server supports notifications for changes to the tool list.
     #[serde(default, rename = "listChanged")]
     pub list_changed: bool
 }
@@ -144,7 +166,7 @@ pub struct ToolsCapability {
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct PromptsCapability {
-    /// Whether this server supports notifications for changes to the prompt list.
+    /// Indicates whether this server supports notifications for changes to the prompt list.
     #[serde(default, rename = "listChanged")]
     pub list_changed: bool
 }
@@ -154,11 +176,11 @@ pub struct PromptsCapability {
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ResourcesCapability {
-    /// Whether this server supports notifications for changes to the resource list.
+    /// Indicates whether this server supports notifications for changes to the resource list.
     #[serde(default, rename = "listChanged")]
     pub list_changed: bool,
 
-    /// Whether this server supports subscribing to resource updates.
+    /// Indicates whether this server supports subscribing to resource updates.
     pub subscribe: bool
 }
 
@@ -222,6 +244,24 @@ impl RootsCapability {
     /// Default: _false_
     pub fn with_list_changed(mut self) -> Self {
         self.list_changed = true;
+        self
+    }
+}
+
+impl SamplingCapability {
+    /// Specifies whether this client supports context inclusion.
+    /// 
+    /// Default: `None`
+    pub fn with_context(mut self) -> Self {
+        self.context = Some(SamplingContextCapability {});
+        self
+    }
+
+    /// Specifies whether this client supports the tool use feature.
+    /// 
+    /// Default: `None`
+    pub fn with_tools(mut self) -> Self {
+        self.tools = Some(SamplingToolsCapability {});
         self
     }
 }

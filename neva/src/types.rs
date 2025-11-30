@@ -37,6 +37,8 @@ pub use content::{
     ImageContent,
     ResourceLink,
     EmbeddedResource,
+    ToolUse,
+    ToolResult
 };
 pub use capabilities::{
     ClientCapabilities, 
@@ -48,6 +50,8 @@ pub use capabilities::{
     CompletionsCapability,
     ElicitationCapability,
     SamplingCapability,
+    SamplingContextCapability,
+    SamplingToolsCapability,
     RootsCapability
 };
 pub use tool::{
@@ -92,6 +96,9 @@ pub use sampling::{
     CreateMessageRequestParams,
     CreateMessageResult,
     SamplingMessage,
+    StopReason,
+    ToolChoiceMode,
+    ToolChoice
 };
 pub use elicitation::{
     ElicitRequestParams,

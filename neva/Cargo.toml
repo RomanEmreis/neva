@@ -31,13 +31,13 @@ uuid = { version = "1.18.1", features = ["v4", "serde"] }
 
 # optional
 inventory = { version = "0.3.21", optional = true }
-jsonschema = { version = "0.37.2", optional = true }
+jsonschema = { version = "0.37.3", optional = true }
 once_cell = { version = "1.21.3", features = ["std"], optional = true }
 reqwest = { version = "0.12.24", features = ["stream", "json"], optional = true }
 sse-stream = { version = "0.2.1", optional = true }
 tokio-stream = { version = "0.1.17", optional = true }
-tracing = { version = "0.1.41", optional = true }
-tracing-subscriber = { version = "0.3.20", features = ["fmt", "json"], optional = true }
+tracing = { version = "0.1.43", optional = true }
+tracing-subscriber = { version = "0.3.22", features = ["fmt", "json"], optional = true }
 volga = { version = "0.7.2", features = ["di", "jwt-auth-full"], optional = true }
 volga-di = { version = "0.7.2", optional = true }
 
