@@ -96,6 +96,7 @@ pub use sampling::{
     CreateMessageRequestParams,
     CreateMessageResult,
     SamplingMessage,
+    StopReason,
     ToolChoiceMode,
     ToolChoice
 };

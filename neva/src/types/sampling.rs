@@ -1,7 +1,8 @@
 ﻿//! Utilities for Sampling
 
-use serde::{Serialize, Deserialize};
-use crate::types::{Tool, Content, Role, IntoResponse, RequestId, Response};
+use crate::shared::{OneOrMany, IntoArgs};
+use crate::types::{Tool, ToolUse, Content, PromptMessage, Role, IntoResponse, RequestId, Response};
+use serde::{Serialize, Deserialize, Serializer, Deserializer};
 #[cfg(feature = "client")]
 use std::{pin::Pin, sync::Arc, future::Future};
 
@@ -26,20 +27,20 @@ pub mod commands {
 /// > operations rather than the enhanced resource embedding capabilities provided by [`PromptMessage`].
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SamplingMessage {
     /// The role of the message sender, indicating whether it's from a _user_ or an _assistant_.
     pub role: Role,
     
     /// The content of the message.
-    pub content: Content
+    pub content: OneOrMany<Content>
 }
 
 /// Represents the parameters used with a _"sampling/createMessage"_ 
 /// request from a server to sample an LLM via the client.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateMessageRequestParams {
     /// The messages requested by the server to be included in the prompt.
     pub messages: Vec<SamplingMessage>,
@@ -144,7 +145,7 @@ pub enum ToolChoiceMode {
 /// Specifies the context inclusion options for a request in the Model Context Protocol (MCP).
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum ContextInclusion {
     /// Indicates that no context should be included.
     #[serde(rename = "none")]
@@ -172,7 +173,7 @@ pub enum ContextInclusion {
 /// > balance them against other considerations.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ModelPreferences {
     /// Represents how much to prioritize cost when selecting a model.
     /// 
@@ -208,7 +209,7 @@ pub struct ModelPreferences {
 /// > Clients should prioritize these hints over numeric priorities.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ModelHint {
     /// A hint for a model name.
     /// 
@@ -228,7 +229,7 @@ pub struct CreateMessageResult {
     pub role: Role,
     
     /// Content of the message.
-    pub content: Vec<Content>,
+    pub content: OneOrMany<Content>,
     
     /// Name of the model that generated the message.
     ///
@@ -241,11 +242,86 @@ pub struct CreateMessageResult {
     /// Reason why message generation (sampling) stopped, if known.
     /// 
     /// ### Common values include:
-    /// * `endTurn` The model naturally completed its response.
-    /// * `maxTokens` The response was truncated due to reaching token limits.
-    /// * `stopSequence` A specific stop sequence was encountered during generation.
+    /// * `endTurn` - The model naturally completed its response.
+    /// * `maxTokens` - The response was truncated due to reaching token limits.
+    /// * `stopSequence` - A specific stop sequence was encountered during generation.
+    /// * `toolUse` - The model wants to use one or more tools.
+    /// 
+    /// This field is an open string to allow for provider-specific stop reasons.
     #[serde(rename = "stopReason", skip_serializing_if = "Option::is_none")]
-    pub stop_reason: Option<String>,
+    pub stop_reason: Option<StopReason>,
+}
+
+/// Represents reasons why message generation (sampling) stopped, if known.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopReason {
+    /// The model naturally completed its response.
+    EndTurn,
+    
+    /// The response was truncated due to reaching token limits.
+    MaxTokens,
+    
+    /// A specific stop sequence was encountered during generation.
+    StopSequence,
+    
+    /// The model wants to use one or more tools.
+    ToolUse,
+    
+    /// Other stop reasons.
+    Other(String)
+}
+
+impl Serialize for StopReason {
+    #[inline]
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            StopReason::EndTurn => serializer.serialize_str("endTurn"),
+            StopReason::MaxTokens => serializer.serialize_str("maxTokens"),
+            StopReason::StopSequence => serializer.serialize_str("stopSequence"),
+            StopReason::ToolUse => serializer.serialize_str("toolUse"),
+            StopReason::Other(s) => serializer.serialize_str(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for StopReason {
+    #[inline]
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(StopReason::from(s))
+    }
+}
+
+impl From<String> for StopReason {
+    #[inline]
+    fn from(s: String) -> Self {
+        match s.as_str() {
+            "endTurn" => StopReason::EndTurn,
+            "maxTokens" => StopReason::MaxTokens,
+            "stopSequence" => StopReason::StopSequence,
+            "toolUse" => StopReason::ToolUse,
+            _ => StopReason::Other(s),
+        }
+    }
+}
+
+impl From<&str> for StopReason {
+    #[inline]
+    fn from(s: &str) -> Self {
+        match s {
+            "endTurn" => StopReason::EndTurn,
+            "maxTokens" => StopReason::MaxTokens,
+            "stopSequence" => StopReason::StopSequence,
+            "toolUse" => StopReason::ToolUse,
+            _ => StopReason::Other(s.to_string()),
+        }
+    }
 }
 
 impl Default for CreateMessageRequestParams {
@@ -287,6 +363,14 @@ impl From<String> for SamplingMessage {
     }
 }
 
+impl From<PromptMessage> for SamplingMessage {
+    #[inline]
+    fn from(msg: PromptMessage) -> Self {
+        Self::new(msg.role)
+            .with(msg.content)
+    }
+}
+
 impl From<&str> for ModelHint {
     #[inline]
     fn from(s: &str) -> Self {
@@ -305,7 +389,10 @@ impl SamplingMessage {
     /// Creates a new [`SamplingMessage`]
     #[inline]
     pub fn new(role: Role) -> Self {
-        Self { role, content: Content::empty() }
+        Self { 
+            content: OneOrMany::new(),
+            role
+        }
     }
     
     /// Creates a new [`SamplingMessage`] with a user role
@@ -320,7 +407,7 @@ impl SamplingMessage {
     
     /// Sets the content
     pub fn with<T: Into<Content>>(mut self, content: T) -> Self {
-        self.content = content.into();
+        self.content.push(content.into());
         self
     }
 }
@@ -498,14 +585,25 @@ impl CreateMessageRequestParams {
     pub fn resources(&self) -> impl Iterator<Item = &Content> {
         self.msg_iter("resource")
     }
+
+    /// Returns an iterator of tool use messages
+    pub fn tools(&self) -> impl Iterator<Item = &Content> {
+        self.msg_iter("tool_use")
+    }
+
+    /// Returns an iterator of tool execution result messages
+    pub fn results(&self) -> impl Iterator<Item = &Content> {
+        self.msg_iter("tool_result")
+    }
     
     #[inline]
     fn msg_iter(&self, t: &'static str) -> impl Iterator<Item = &Content> {
         self.messages
             .iter()
-            .filter_map(move |m| {
-                if m.content.get_type() == t {
-                    Some(&m.content)
+            .flat_map(|m| m.content.as_slice())
+            .filter_map(move |c| {
+                if c.get_type() == t {
+                    Some(c)
                 } else {
                     None
                 }
@@ -520,7 +618,7 @@ impl CreateMessageResult {
         Self {
             stop_reason: None,
             model: String::new(),
-            content: Vec::new(),
+            content: OneOrMany::new(),
             role,
         }
     }
@@ -536,7 +634,7 @@ impl CreateMessageResult {
     }
     
     /// Sets the stop reason
-    pub fn with_stop_reason(mut self, reason: impl Into<String>) -> Self {
+    pub fn with_stop_reason(mut self, reason: impl Into<StopReason>) -> Self {
         self.stop_reason = Some(reason.into());
         self
     }
@@ -551,6 +649,33 @@ impl CreateMessageResult {
     pub fn with_content<T: Into<Content>>(mut self, content: T) -> Self {
         self.content.push(content.into());
         self
+    }
+    
+    /// Marks that model completed the response
+    #[inline]
+    pub fn end_turn(self) -> Self {
+        self.with_stop_reason(StopReason::EndTurn)
+    }
+    
+    /// Requests a tool use and sets the stop reason to `toolUse`
+    pub fn use_tool<N, Args>(self, name: N, args: Args) -> Self
+    where 
+        N: Into<String>,
+        Args: IntoArgs
+    {
+        self.with_content(ToolUse::new(name, args))
+            .with_stop_reason(StopReason::ToolUse)
+    }
+
+    /// Requests to use a set of tools and sets the stop reason to `toolUse`
+    pub fn use_tools<N, Args>(self, tools: impl IntoIterator<Item = (N, Args)>) -> Self
+    where
+        N: Into<String>,
+        Args: IntoArgs
+    {
+        tools.into_iter()
+            .fold(self, |acc, (name, args)| acc.use_tool(name, args))
+            .with_stop_reason(StopReason::ToolUse)
     }
 }
 
@@ -583,6 +708,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "server")]
     fn it_sets_auto_tool_choice_when_tools_specified() {
         let params = CreateMessageRequestParams::new()
             .with_tools([
@@ -599,5 +725,69 @@ mod tests {
             .with_tool_choice(ToolChoiceMode::Required);
 
         assert_eq!(params.tool_choice.unwrap().mode, ToolChoiceMode::Required);
+    }
+    
+    #[test]
+    fn it_converts_stop_reason_from_str() {
+        let reasons = [
+            (StopReason::ToolUse, "toolUse"),
+            (StopReason::MaxTokens, "maxTokens"),
+            (StopReason::EndTurn, "endTurn"),
+            (StopReason::StopSequence, "stopSequence"),
+            (StopReason::Other("test".to_string()), "test")
+        ];
+
+        for (expected, reason_str) in reasons {
+            let reason = StopReason::from(reason_str);
+            assert_eq!(reason, expected);
+        }
+    }
+
+    #[test]
+    fn it_converts_stop_reason_from_string() {
+        let reasons = [
+            (StopReason::ToolUse, "toolUse"),
+            (StopReason::MaxTokens, "maxTokens"),
+            (StopReason::EndTurn, "endTurn"),
+            (StopReason::StopSequence, "stopSequence"),
+            (StopReason::Other("test".to_string()), "test")
+        ];
+
+        for (expected, reason_str) in reasons {
+            let reason = StopReason::from(reason_str.to_string());
+            assert_eq!(reason, expected);
+        }
+    }
+    
+    #[test]
+    fn it_serializes_stop_reason() {
+        let reasons = [
+            (StopReason::ToolUse, "\"toolUse\""),
+            (StopReason::MaxTokens, "\"maxTokens\""),
+            (StopReason::EndTurn, "\"endTurn\""),
+            (StopReason::StopSequence, "\"stopSequence\""),
+            (StopReason::Other("test".to_string()), "\"test\"")
+        ];
+
+        for (reason, expected) in reasons {
+            let json = serde_json::to_string(&reason).unwrap();
+            assert_eq!(json, expected);
+        }
+    }
+
+    #[test]
+    fn it_deserializes_stop_reason() {
+        let reasons = [
+            (StopReason::ToolUse, "\"toolUse\""),
+            (StopReason::MaxTokens, "\"maxTokens\""),
+            (StopReason::EndTurn, "\"endTurn\""),
+            (StopReason::StopSequence, "\"stopSequence\""),
+            (StopReason::Other("test".to_string()), "\"test\"")
+        ];
+
+        for (expected, reason_str) in reasons {
+            let reason: StopReason = serde_json::from_str(reason_str).unwrap();
+            assert_eq!(reason, expected);
+        }
     }
 }

@@ -22,7 +22,7 @@ const CHUNK_SIZE: usize = 8192;
 /// Represents the content of the response.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Content {
     /// Audio content
@@ -59,13 +59,13 @@ pub enum Content {
 }
 
 /// Represents an empty content object.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct EmptyContent;
 
 /// Text provided to or from an LLM.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema) for details
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextContent {
     /// The text content of the message.
     pub text: String,
@@ -82,7 +82,7 @@ pub struct TextContent {
 /// Audio provided to or from an LLM.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema) for details
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioContent {
     /// Raw audio data.
     ///
@@ -108,7 +108,7 @@ pub struct AudioContent {
 /// An image provided to or from an LLM.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema) for details
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageContent {
     /// Raw image data.
     /// 
@@ -136,7 +136,7 @@ pub struct ImageContent {
 /// **Note:** resource links returned by tools are not guaranteed to appear in the results of `resources/list` requests.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema) for details
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceLink {
     /// The URI of this resource.
     pub uri: Uri,
@@ -180,7 +180,7 @@ pub struct ResourceLink {
 /// of the LLM and/or the user.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema) for details
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddedResource {
     /// The resource content of the message.
     pub resource: ResourceContents,
@@ -197,7 +197,7 @@ pub struct EmbeddedResource {
 /// Represents a request from the assistant to call a tool.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema) for details
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolUse {
     /// A unique identifier for this tool use.
     /// 
@@ -218,7 +218,7 @@ pub struct ToolUse {
 /// Represents the result of a tool use, provided by the user back to the assistant.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema) for details
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
     /// The ID of the tool use this result corresponds to.
     /// 
@@ -575,6 +575,24 @@ impl Content {
     pub fn as_resource(&self) -> Option<&EmbeddedResource> {
         match self {
             Self::Resource(c) => Some(c),
+            _ => None
+        }
+    }
+
+    /// Returns the content as a tool use request.
+    #[inline]
+    pub fn as_tool(&self) -> Option<&ToolUse> {
+        match self {
+            Self::ToolUse(c) => Some(c),
+            _ => None
+        }
+    }
+
+    /// Returns the content as a tool execution result.
+    #[inline]
+    pub fn as_result(&self) -> Option<&ToolResult> {
+        match self {
+            Self::ToolResult(c) => Some(c),
             _ => None
         }
     }

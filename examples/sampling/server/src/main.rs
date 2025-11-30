@@ -2,39 +2,75 @@ use tracing_subscriber::prelude::*;
 use neva::prelude::*;
 
 #[tool]
-async fn generate_weather_report(mut ctx: Context, city: String) -> Result<String, Error> {
-    let prompt = ctx.prompt("weather", ("city", city)).await?;
-    let msg = prompt.messages.into_iter().next().unwrap();
-    
+async fn generate_weather_report(mut ctx: Context, city1: String, city2: String) -> Result<String, Error> {
     let Some(tool) = ctx.find_tool("get_weather").await else {
         return Err(ErrorCode::MethodNotFound.into());
-    }; 
+    };
+
+    let prompt = ctx.prompt("weather", [
+        ("city1", city1),
+        ("city2", city2)
+    ]).await?;
+    
+    let msg = prompt.messages
+        .into_iter()
+        .next()
+        .unwrap();
     
     let params = CreateMessageRequestParams::new()
-        .with_message(SamplingMessage::user().with(msg.content))
+        .with_message(SamplingMessage::from(msg))
         .with_sys_prompt("You are a helpful assistant.")
         .with_tools([tool]);
     
-    let result = ctx.sample(params).await?;
-    if result.stop_reason.is_some_and(|r| r == "toolUse") { 
-                
-    }
+    let result = ctx.sample(params.clone()).await?;
+    
+    let result = if result.stop_reason == Some(StopReason::ToolUse) { 
+        let tools = result.content.into_iter()
+            .map(|c| ToolUse::try_from(c).ok())
+            .flatten()
+            .collect::<Vec<_>>();
+
+        let assistant_msg = tools
+            .iter()
+            .fold(SamplingMessage::assistant(), |msg, tool| msg.with(tool.clone()));
+
+        let tool_results = ctx.use_tools(tools).await;
+
+        let user_msg = tool_results
+            .into_iter()
+            .fold(SamplingMessage::user(), |msg, result| msg.with(result));
+
+        ctx
+            .sample(params
+            .with_message(assistant_msg)
+            .with_message(user_msg))
+            .await?
+    } else { 
+        result
+    };
     
     Ok(format!("{:?}", result.content))
 }
 
 #[tool]
-async fn get_weather(_city: String) -> Json<Weather> {
-    Json(Weather {
-        temperature: 15.0,
-        humidity: 60.0,
-    })
+async fn get_weather(city: String) -> Json<Weather> {
+    if city == "London" {
+        Json(Weather {
+            temperature: 15.0,
+            humidity: 80.0,
+        })
+    } else {
+        Json(Weather {
+            temperature: 18.0,
+            humidity: 65.0,
+        })
+    }
 }
 
 #[prompt]
-async fn weather(city: String) -> PromptMessage {
+async fn weather(city1: String, city2: String) -> PromptMessage {
     PromptMessage::user()
-        .with(format!("What is the weather in {city}?"))
+        .with(format!("What's the weather like in {city1} and {city2}?"))
 }
 
 #[tokio::main]
