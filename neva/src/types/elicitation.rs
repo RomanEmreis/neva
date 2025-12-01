@@ -18,7 +18,9 @@ pub mod commands {
 }
 
 /// Represents a message issued from the server to elicit additional information from the user via the client.
-#[derive(Debug, Serialize, Deserialize)]
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ElicitRequestParams {
     /// The message to present to the user.
     pub message: String,

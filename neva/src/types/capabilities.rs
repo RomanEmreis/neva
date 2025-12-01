@@ -107,6 +107,28 @@ pub struct SamplingToolsCapability {
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ElicitationCapability {
+    /// Indicates whether the client supports `form` mode elicitation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub form: Option<ElicitationFormCapability>,
+
+    /// Indicates whether the client supports `url` mode elicitation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<ElicitationUrlCapability>
+}
+
+/// Represents elicitation form capability.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct ElicitationFormCapability {
+    // Currently empty in the spec, but may be extended in the future.
+}
+
+/// Represents elicitation URL capability
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct ElicitationUrlCapability {
     // Currently empty in the spec, but may be extended in the future.
 }
 
@@ -264,4 +286,8 @@ impl SamplingCapability {
         self.tools = Some(SamplingToolsCapability {});
         self
     }
+}
+
+impl ElicitationCapability {
+    
 }

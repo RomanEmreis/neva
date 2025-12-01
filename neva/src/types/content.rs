@@ -1087,4 +1087,15 @@ mod test {
         assert_eq!(audio.data, deserialized.data);
         assert_eq!(audio.mime, deserialized.mime);
     }
+
+    #[test]
+    fn it_tests_image_content_serialization() {
+        let audio = ImageContent::new("hello world");
+
+        let json = serde_json::to_string(&audio).expect("Should serialize");
+        let deserialized: ImageContent = serde_json::from_str(&json).expect("Should deserialize");
+
+        assert_eq!(audio.data, deserialized.data);
+        assert_eq!(audio.mime, deserialized.mime);
+    }
 }
