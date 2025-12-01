@@ -201,8 +201,8 @@ impl Context {
     }
 
     /// Returns a list of tools by name.
-    /// If some of the tools requested in `names` are missing, they won't be in the result list.
-    pub async fn find_tools(&self, names: impl IntoIterator<Item = &str>) -> Vec<Tool>{
+    /// If some tools requested in `names` are missing, they won't be in the result list.
+    pub async fn find_tools(&self, names: impl IntoIterator<Item = &str>) -> Vec<Tool> {
         futures_util::future::join_all(
             names.into_iter()
                 .map(|name| self.options.tools.get(name)))
@@ -215,7 +215,7 @@ impl Context {
     /// Initiates a tool call once a [`ToolUse`] request received from assistant 
     /// withing a sampling window.
     ///
-    /// For multiple [`ToolUse`] requests use the [`Context::use_tools`] method.
+    /// For multiple [`ToolUse`] requests, use the [`Context::use_tools`] method.
     /// 
     /// # Example
     /// ```no_run
@@ -224,17 +224,19 @@ impl Context {
     ///
     /// #[tool]
     /// async fn analyze_weather(ctx: Context, city: String) -> Result<(), Error> {
-    ///     let prompt = ctx.prompt("get_weather", ("city", city)).await?;
+    ///     let args = ("city", city);
+    ///     let weather = ctx.use_tool(ToolUse::new("get_weather", args)).await;
     ///     
-    ///     // do something with the prompt
+    ///     // do something with the weather result
     ///
     /// # Ok(())
     /// }
-    ///
-    /// #[prompt]
-    /// async fn get_weather(city: String) -> PromptMessage {
-    ///     PromptMessage::user()
-    ///         .with(format!("What's the weather in {city}"))
+    /// 
+    /// #[tool]
+    /// async fn get_weather(city: String) -> String {
+    ///     // ...
+    /// 
+    ///     format!("Sunny in {city}")
     /// }
     /// # }
     /// ```
@@ -252,6 +254,25 @@ impl Context {
     /// Initiates a parallel tool calls for multiple [`ToolUse`] requests.
     ///
     /// For a single [`ToolUse`] use the [`Context::use_tool`] method.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(feature = "server-macros")] {
+    /// use neva::prelude::*;
+    ///
+    /// #[tool]
+    /// async fn analyze_weather(ctx: Context) -> Result<(), Error> {
+    ///     let weather = ctx.use_tools([
+    ///         ToolUse::new("get_weather", ("city", "London")),
+    ///         ToolUse::new("get_weather", ("city", "Paris"))
+    ///     ]).await;
+    ///     
+    ///     // do something with the weather result
+    ///
+    /// # Ok(())
+    /// }
+    /// # }
+    /// ```
     pub async fn use_tools<I>(&self, tools: I) -> Vec<ToolResult>
     where 
         I : IntoIterator<Item = ToolUse>
@@ -610,9 +631,6 @@ impl Context {
     /// # }
     /// ```
     pub async fn elicit(&mut self, params: ElicitRequestParams) -> Result<ElicitResult, Error> {
-        
-        
-        
         let method = crate::types::elicitation::commands::CREATE;
         let req = Request::new(
             Some(RequestId::Uuid(uuid::Uuid::new_v4())),

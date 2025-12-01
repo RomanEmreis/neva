@@ -15,7 +15,7 @@ async fn generate_weather_report(mut ctx: Context, city1: String, city2: String)
     let msg = prompt.messages
         .into_iter()
         .next()
-        .unwrap();
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams, "No prompt message found in prompt response."))?;
     
     let mut params = CreateMessageRequestParams::new()
         .with_message(SamplingMessage::from(msg))
@@ -25,10 +25,9 @@ async fn generate_weather_report(mut ctx: Context, city1: String, city2: String)
     loop {
         let result = ctx.sample(params.clone()).await?;
         if result.stop_reason == Some(StopReason::ToolUse) {
-            let tools = result.content.into_iter()
-                .map(|c| ToolUse::try_from(c).ok())
-                .flatten()
-                .collect::<Vec<_>>();
+            let tools: Vec<ToolUse> = result.tools()
+                .cloned()
+                .collect();
 
             let assistant_msg = tools
                 .iter()

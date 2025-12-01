@@ -9,10 +9,7 @@ async fn sampling_handler(params: CreateMessageRequestParams) -> CreateMessageRe
     tracing::info!("Received sampling: {:?}", params);
     
     if params.tool_choice.is_some_and(|c| !c.is_none()) {
-        let prompts: Vec<String> = params.text()
-            .flat_map(|c| c.as_text().map(|t| t.text.clone()))
-            .collect();
-
+        let prompts: Vec<&TextContent> = params.text().collect();
         tracing::info!("Received prompts: {:?}", prompts);
 
         CreateMessageResult::assistant()
@@ -22,18 +19,13 @@ async fn sampling_handler(params: CreateMessageRequestParams) -> CreateMessageRe
                 ("get_weather", ("city2", "Paris"))
             ])
     } else {
-        let results: Vec<&ToolResult> = params.results()
-            .flat_map(|c| c.as_result())
-            .collect();
-        
+        let results: Vec<&ToolResult> = params.results().collect();
         tracing::info!("Received tool results: {results:?}");
 
         let response = 
             r#"Based on the current weather data:
-                
                - **Paris**: 18°C and partly cloudy - quite pleasant!
                - **London**: 15°C and rainy - you'll want an umbrella.
-               
                Paris has slightly warmer and drier conditions today."#;
         
         CreateMessageResult::assistant()

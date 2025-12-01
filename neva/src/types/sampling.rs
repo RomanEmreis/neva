@@ -1,8 +1,18 @@
 ﻿//! Utilities for Sampling
 
-use crate::shared::{OneOrMany, IntoArgs};
-use crate::types::{Tool, ToolUse, Content, PromptMessage, Role, IntoResponse, RequestId, Response};
 use serde::{Serialize, Deserialize, Serializer, Deserializer};
+use crate::shared::{OneOrMany, IntoArgs};
+use crate::types::{
+    Tool, ToolUse, ToolResult,
+    Content, TextContent, ImageContent, AudioContent,
+    ResourceLink, EmbeddedResource,
+    PromptMessage, 
+    Role, 
+    RequestId, 
+    Response, 
+    IntoResponse
+};
+
 #[cfg(feature = "client")]
 use std::{pin::Pin, sync::Arc, future::Future};
 
@@ -600,38 +610,45 @@ impl CreateMessageRequestParams {
     }
 
     /// Returns an iterator of text messages
-    pub fn text(&self) -> impl Iterator<Item = &Content> {
+    pub fn text(&self) -> impl Iterator<Item = &TextContent> {
         self.msg_iter("text")
+            .filter_map(|c| c.as_text())
     }
 
     /// Returns an iterator of audio messages
-    pub fn audio(&self) -> impl Iterator<Item = &Content> {
+    pub fn audio(&self) -> impl Iterator<Item = &AudioContent> {
         self.msg_iter("audio")
+            .filter_map(|c| c.as_audio())
     }
 
     /// Returns an iterator of image messages
-    pub fn images(&self) -> impl Iterator<Item = &Content> {
+    pub fn images(&self) -> impl Iterator<Item = &ImageContent> {
         self.msg_iter("image")
+            .filter_map(|c| c.as_image())
     }
 
     /// Returns an iterator of resource link messages
-    pub fn links(&self) -> impl Iterator<Item = &Content> {
+    pub fn links(&self) -> impl Iterator<Item = &ResourceLink> {
         self.msg_iter("resource_link")
+            .filter_map(|c| c.as_link())
     }
 
     /// Returns an iterator of embedded resource messages
-    pub fn resources(&self) -> impl Iterator<Item = &Content> {
+    pub fn resources(&self) -> impl Iterator<Item = &EmbeddedResource> {
         self.msg_iter("resource")
+            .filter_map(|c| c.as_resource())
     }
 
     /// Returns an iterator of tool use messages
-    pub fn tools(&self) -> impl Iterator<Item = &Content> {
+    pub fn tools(&self) -> impl Iterator<Item = &ToolUse> {
         self.msg_iter("tool_use")
+            .filter_map(|c| c.as_tool())
     }
 
     /// Returns an iterator of tool execution result messages
-    pub fn results(&self) -> impl Iterator<Item = &Content> {
+    pub fn results(&self) -> impl Iterator<Item = &ToolResult> {
         self.msg_iter("tool_result")
+            .filter_map(|c| c.as_result())
     }
     
     /// Returns a messages iterator of a given type
@@ -710,6 +727,56 @@ impl CreateMessageResult {
             .fold(self, |acc, (name, args)| acc.use_tool(name, args))
             .with_stop_reason(StopReason::ToolUse)
     }
+
+    /// Returns an iterator of text messages
+    pub fn text(&self) -> impl Iterator<Item = &TextContent> {
+        self.msg_iter("text")
+            .filter_map(|c| c.as_text())
+    }
+
+    /// Returns an iterator of audio content
+    pub fn audio(&self) -> impl Iterator<Item = &AudioContent> {
+        self.msg_iter("audio")
+            .filter_map(|c| c.as_audio())
+    }
+
+    /// Returns an iterator of image content
+    pub fn images(&self) -> impl Iterator<Item = &ImageContent> {
+        self.msg_iter("image")
+            .filter_map(|c| c.as_image())
+    }
+
+    /// Returns an iterator of resource link content
+    pub fn links(&self) -> impl Iterator<Item = &ResourceLink> {
+        self.msg_iter("resource_link")
+            .filter_map(|c| c.as_link())
+    }
+
+    /// Returns an iterator of embedded resource content
+    pub fn resources(&self) -> impl Iterator<Item = &EmbeddedResource> {
+        self.msg_iter("resource")
+            .filter_map(|c| c.as_resource())
+    }
+
+    /// Returns an iterator of tool use content
+    pub fn tools(&self) -> impl Iterator<Item = &ToolUse> {
+        self.msg_iter("tool_use")
+            .filter_map(|c| c.as_tool())
+    }
+
+    /// Returns an iterator of tool execution result content
+    pub fn results(&self) -> impl Iterator<Item = &ToolResult> {
+        self.msg_iter("tool_result")
+            .filter_map(|c| c.as_result())
+    }
+    
+    /// Returns a content iterator of a given type
+    #[inline]
+    fn msg_iter(&self, t: &'static str) -> impl Iterator<Item = &Content> {
+        self.content
+            .iter()
+            .filter(move |c| c.get_type() == t)
+    }
 }
 
 /// Represents a dynamic handler for handling sampling requests
@@ -758,6 +825,79 @@ mod tests {
             .with_tool_choice(ToolChoiceMode::Required);
 
         assert_eq!(params.tool_choice.unwrap().mode, ToolChoiceMode::Required);
+    }
+
+    #[test]
+    fn it_builds_sampling_message() {
+        let msg = SamplingMessage::user()
+            .with("Hello");
+
+        assert_eq!(msg.role, Role::User);
+        assert_eq!(msg.content.len(), 1);
+    }
+
+    #[test]
+    fn it_builds_create_message_request_params() {
+        let params = CreateMessageRequestParams::new()
+            .with_message("Hello")
+            .with_sys_prompt("System prompt")
+            .with_max_tokens(100)
+            .with_temp(0.7);
+
+        assert_eq!(params.messages.len(), 1);
+        assert_eq!(params.sys_prompt.as_deref(), Some("System prompt"));
+        assert_eq!(params.max_tokens, 100);
+        assert_eq!(params.temp, Some(0.7));
+    }
+
+    #[test]
+    fn it_sets_context_inclusion() {
+        let params = CreateMessageRequestParams::new()
+            .with_no_ctx();
+        assert!(matches!(params.include_context, Some(ContextInclusion::None)));
+
+        let params = CreateMessageRequestParams::new()
+            .with_this_server();
+        assert!(matches!(params.include_context, Some(ContextInclusion::ThisServer)));
+
+        let params = CreateMessageRequestParams::new()
+            .with_all_servers();
+        assert!(matches!(params.include_context, Some(ContextInclusion::AllServers)));
+    }
+
+    #[test]
+    fn it_builds_create_message_result() {
+        let result = CreateMessageResult::assistant()
+            .with_model("gpt-4")
+            .with_content("Hello world")
+            .end_turn();
+
+        assert_eq!(result.role, Role::Assistant);
+        assert_eq!(result.model, "gpt-4");
+        assert_eq!(result.content.len(), 1);
+        assert_eq!(result.stop_reason, Some(StopReason::EndTurn));
+    }
+
+    #[test]
+    fn it_handles_tool_use_in_result() {
+        let result = CreateMessageResult::assistant()
+            .use_tool("calculator", ());
+
+        assert_eq!(result.stop_reason, Some(StopReason::ToolUse));
+        assert_eq!(result.content.len(), 1);
+
+        let tool_use = result.tools().next().unwrap();
+        assert_eq!(tool_use.name, "calculator");
+    }
+
+    #[test]
+    fn it_adds_model_hints() {
+        let pref = ModelPreferences::new()
+            .with_hint("claude")
+            .with_hints(["gpt-4", "llama"]);
+
+        assert_eq!(pref.hints.as_ref().unwrap().len(), 3);
+        assert_eq!(pref.hints.as_ref().unwrap()[0].name.as_deref(), Some("claude"));
     }
     
     #[test]
@@ -822,5 +962,28 @@ mod tests {
             let reason: StopReason = serde_json::from_str(reason_str).unwrap();
             assert_eq!(reason, expected);
         }
+    }
+    
+    #[test]
+    fn it_serializes_model_preferences() {
+        let pref = ModelPreferences::new()
+            .with_cost_priority(0.5)
+            .with_speed_priority(0.75)
+            .with_intel_priority(0.25);
+        
+        let json = serde_json::to_string(&pref).unwrap();
+        
+        let expected = r#"{"costPriority":0.5,"speedPriority":0.75,"intelligencePriority":0.25}"#;
+        assert_eq!(json, expected);
+    }
+    
+    #[test]
+    fn it_deserializes_model_preferences() {
+        let json = r#"{"costPriority":0.5,"speedPriority":0.75,"intelligencePriority":0.25}"#;
+        let pref: ModelPreferences = serde_json::from_str(json).unwrap();
+        
+        assert_eq!(pref.cost_priority, Some(0.5));
+        assert_eq!(pref.speed_priority, Some(0.75));
+        assert_eq!(pref.intelligence_priority, Some(0.25));
     }
 }
