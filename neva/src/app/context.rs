@@ -610,6 +610,9 @@ impl Context {
     /// # }
     /// ```
     pub async fn elicit(&mut self, params: ElicitRequestParams) -> Result<ElicitResult, Error> {
+        
+        
+        
         let method = crate::types::elicitation::commands::CREATE;
         let req = Request::new(
             Some(RequestId::Uuid(uuid::Uuid::new_v4())),

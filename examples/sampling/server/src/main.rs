@@ -17,39 +17,37 @@ async fn generate_weather_report(mut ctx: Context, city1: String, city2: String)
         .next()
         .unwrap();
     
-    let params = CreateMessageRequestParams::new()
+    let mut params = CreateMessageRequestParams::new()
         .with_message(SamplingMessage::from(msg))
         .with_sys_prompt("You are a helpful assistant.")
         .with_tools([tool]);
     
-    let result = ctx.sample(params.clone()).await?;
-    
-    let result = if result.stop_reason == Some(StopReason::ToolUse) { 
-        let tools = result.content.into_iter()
-            .map(|c| ToolUse::try_from(c).ok())
-            .flatten()
-            .collect::<Vec<_>>();
+    loop {
+        let result = ctx.sample(params.clone()).await?;
+        if result.stop_reason == Some(StopReason::ToolUse) {
+            let tools = result.content.into_iter()
+                .map(|c| ToolUse::try_from(c).ok())
+                .flatten()
+                .collect::<Vec<_>>();
 
-        let assistant_msg = tools
-            .iter()
-            .fold(SamplingMessage::assistant(), |msg, tool| msg.with(tool.clone()));
+            let assistant_msg = tools
+                .iter()
+                .fold(SamplingMessage::assistant(), |msg, tool| msg.with(tool.clone()));
 
-        let tool_results = ctx.use_tools(tools).await;
+            let tool_results = ctx.use_tools(tools).await;
 
-        let user_msg = tool_results
-            .into_iter()
-            .fold(SamplingMessage::user(), |msg, result| msg.with(result));
+            let user_msg = tool_results
+                .into_iter()
+                .fold(SamplingMessage::user(), |msg, result| msg.with(result));
 
-        ctx
-            .sample(params
-            .with_message(assistant_msg)
-            .with_message(user_msg))
-            .await?
-    } else { 
-        result
-    };
-    
-    Ok(format!("{:?}", result.content))
+            params = params
+                .with_message(assistant_msg)
+                .with_message(user_msg)
+                .with_tool_choice(ToolChoiceMode::None);
+        } else {
+            return Ok(format!("{:?}", result.content));
+        };
+    }
 }
 
 #[tool]

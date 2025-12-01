@@ -466,6 +466,44 @@ impl ModelHint {
     }
 }
 
+impl ToolChoice {
+    /// Creates a new [`ToolChoice`] with [`ToolChoiceMode::Auto`]
+    #[inline]
+    pub fn auto() -> Self {
+        Self { mode: ToolChoiceMode::Auto }
+    }
+
+    /// Creates a new [`ToolChoice`] with [`ToolChoiceMode::None`]
+    #[inline]
+    pub fn none() -> Self {
+        Self { mode: ToolChoiceMode::None }
+    }
+
+    /// Creates a new [`ToolChoice`] with [`ToolChoiceMode::Required`]
+    #[inline]
+    pub fn required() -> Self {
+        Self { mode: ToolChoiceMode::Required }
+    }
+    
+    /// Returns `true` if the tool choice mode is [`ToolChoiceMode::Auto`]
+    #[inline]
+    pub fn is_auto(&self) -> bool {
+        self.mode == ToolChoiceMode::Auto
+    }
+
+    /// Returns `true` if the tool choice mode is [`ToolChoiceMode::None`]
+    #[inline]
+    pub fn is_none(&self) -> bool {
+        self.mode == ToolChoiceMode::None
+    }
+
+    /// Returns `true` if the tool choice mode is [`ToolChoiceMode::Required`]
+    #[inline]
+    pub fn is_required(&self) -> bool {
+        self.mode == ToolChoiceMode::Required
+    }
+}
+
 impl CreateMessageRequestParams {
     /// Creates a new empty params
     pub fn new() -> Self {
@@ -596,18 +634,13 @@ impl CreateMessageRequestParams {
         self.msg_iter("tool_result")
     }
     
+    /// Returns a messages iterator of a given type
     #[inline]
     fn msg_iter(&self, t: &'static str) -> impl Iterator<Item = &Content> {
         self.messages
             .iter()
             .flat_map(|m| m.content.as_slice())
-            .filter_map(move |c| {
-                if c.get_type() == t {
-                    Some(c)
-                } else {
-                    None
-                }
-            })
+            .filter(move |c| c.get_type() == t)
     }
 }
 

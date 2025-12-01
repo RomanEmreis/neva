@@ -8,7 +8,7 @@ const ACCESS_TOKEN: &str =
 async fn sampling_handler(params: CreateMessageRequestParams) -> CreateMessageResult {
     tracing::info!("Received sampling: {:?}", params);
     
-    if params.messages.len() == 1 {
+    if params.tool_choice.is_some_and(|c| !c.is_none()) {
         let prompts: Vec<String> = params.text()
             .flat_map(|c| c.as_text().map(|t| t.text.clone()))
             .collect();
@@ -51,12 +51,13 @@ async fn main() -> Result<(), Error> {
 
     let mut client = Client::new()
         .with_options(|opt| opt
+            .with_sampling(|s| s.with_tools())
             .with_http(|http| http
                 .bind("localhost:7878")
                 .with_tls(|tls| tls
                     .with_certs_verification(false))
                 .with_auth(ACCESS_TOKEN)));
-
+    
     client.connect().await?;
 
     let args = [
@@ -69,10 +70,4 @@ async fn main() -> Result<(), Error> {
     tracing::info!("Received result: {:?}", result.content);
 
     client.disconnect().await
-}
-
-#[json_schema(de, debug)]
-struct Weather {
-    temperature: f32,
-    humidity: f32,
 }
