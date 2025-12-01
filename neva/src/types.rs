@@ -49,6 +49,8 @@ pub use capabilities::{
     LoggingCapability,
     CompletionsCapability,
     ElicitationCapability,
+    ElicitationFormCapability,
+    ElicitationUrlCapability,
     SamplingCapability,
     SamplingContextCapability,
     SamplingToolsCapability,
@@ -104,6 +106,7 @@ pub use elicitation::{
     ElicitRequestParams,
     ElicitationAction,
     ElicitResult,
+    ElicitationMode
 };
 pub use schema::{
     Schema,

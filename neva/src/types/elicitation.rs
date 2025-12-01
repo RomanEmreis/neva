@@ -24,6 +24,9 @@ pub mod commands {
 pub struct ElicitRequestParams {
     /// The message to present to the user.
     pub message: String,
+
+    /// The elicitation mode
+    pub mode: Option<ElicitationMode>,
     
     /// The requested schema.
     /// 
@@ -31,6 +34,19 @@ pub struct ElicitRequestParams {
     /// > Only top-level properties are allowed, without nesting.
     #[serde(rename = "requestedSchema")]
     pub schema: RequestSchema,
+}
+
+/// Represents elicitation mode.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ElicitationMode {
+    /// `form` elicitation mode
+    Form,
+
+    /// `url` elicitation mode
+    Url
 }
 
 /// Represents a JSON Schema that can be used to validate the content of an elicitation request.
@@ -289,6 +305,7 @@ impl ElicitRequestParams {
         Self {
             message: message.into(),
             schema: RequestSchema::new(),
+            mode: None
         }
     }
 
@@ -530,6 +547,7 @@ mod tests {
     fn create_params_with_schema(schema: RequestSchema) -> ElicitRequestParams {
         ElicitRequestParams {
             message: "Test message".to_string(),
+            mode: None,
             schema,
         }
     }

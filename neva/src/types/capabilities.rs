@@ -289,5 +289,19 @@ impl SamplingCapability {
 }
 
 impl ElicitationCapability {
-    
+    /// Specifies whether this client supports `form` elicitation mode.
+    /// 
+    /// Default: `None`
+    pub fn with_form(mut self) -> Self {
+        self.form = Some(ElicitationFormCapability {});
+        self
+    }
+
+    /// Specifies whether this client supports `url` elicitation mode.
+    /// 
+    /// Default: `None`
+    pub fn with_url(mut self) -> Self {
+        self.url = Some(ElicitationUrlCapability {});
+        self
+    }
 }
