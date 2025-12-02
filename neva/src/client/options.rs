@@ -158,6 +158,15 @@ impl McpOptions {
         self
     }
 
+    /// Configures Elicitation capability
+    pub fn with_elicitation<T>(mut self, config: T) -> Self
+    where
+        T: FnOnce(ElicitationCapability) -> ElicitationCapability
+    {
+        self.elicitation_capability = Some(config(Default::default()));
+        self
+    }
+
     /// Specifies request timeout
     ///
     /// Default: 10 seconds

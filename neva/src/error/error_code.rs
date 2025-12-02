@@ -25,6 +25,9 @@ pub enum ErrorCode {
 
     /// The resource does not exist / is not available.
     ResourceNotFound = -32002,
+
+    /// The URL mode elicitation is required.
+    UrlElicitationRequiredError = -32042,
     
     /// [Internal code] The request has been canceled
     RequestCancelled = -99999,
@@ -42,6 +45,7 @@ impl From<ErrorCode> for i32 {
 impl TryFrom<i32> for ErrorCode {
     type Error = ();
 
+    #[inline]
     fn try_from(value: i32) -> Result<Self, Self::Error> {
         match value {
             -32700 => Ok(ErrorCode::ParseError),
@@ -50,6 +54,7 @@ impl TryFrom<i32> for ErrorCode {
             -32602 => Ok(ErrorCode::InvalidParams),
             -32603 => Ok(ErrorCode::InternalError),
             -32002 => Ok(ErrorCode::ResourceNotFound),
+            -32042 => Ok(ErrorCode::UrlElicitationRequiredError),
             -99999 => Ok(ErrorCode::RequestCancelled),
             -99998 => Ok(ErrorCode::Timeout),
             _ => Err(()),
@@ -82,6 +87,7 @@ impl<'de> Deserialize<'de> for ErrorCode {
 }
 
 impl Display for ErrorCode {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self { 
             ErrorCode::ParseError => write!(f, "Parse error"),
@@ -90,6 +96,7 @@ impl Display for ErrorCode {
             ErrorCode::InvalidParams  => write!(f, "Invalid parameters"),
             ErrorCode::InternalError => write!(f, "Internal error"),
             ErrorCode::ResourceNotFound => write!(f, "Resource not found"),
+            ErrorCode::UrlElicitationRequiredError => write!(f, "URL elicitation required error"),
             ErrorCode::RequestCancelled => write!(f, "Request cancelled"),
             ErrorCode::Timeout => write!(f, "Request timed out"),
         }
@@ -115,6 +122,7 @@ mod tests {
             (-32602, ErrorCode::InvalidParams),
             (-32603, ErrorCode::InternalError),
             (-32002, ErrorCode::ResourceNotFound),
+            (-32042, ErrorCode::UrlElicitationRequiredError),
             (-99999, ErrorCode::RequestCancelled),
             (-99998, ErrorCode::Timeout),
         ];
@@ -137,6 +145,7 @@ mod tests {
             ("-32602", ErrorCode::InvalidParams),
             ("-32603", ErrorCode::InternalError),
             ("-32002", ErrorCode::ResourceNotFound),
+            ("-32042", ErrorCode::UrlElicitationRequiredError),
             ("-99999", ErrorCode::RequestCancelled),
             ("-99998", ErrorCode::Timeout),
         ];

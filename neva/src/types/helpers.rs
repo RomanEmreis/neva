@@ -59,25 +59,29 @@ where
 
 /// Represents a SchemaProperty type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum PropertyType {
     /// Unknown type.
+    #[serde(rename = "none")]
     None,
     
     /// Array type
+    #[serde(rename = "array")]
     Array,
     
     /// String type
+    #[serde(rename = "string")]
     String,
     
     /// Number type
+    #[serde(rename = "number", alias = "integer")]
     Number,
     
     /// Boolean type
-    #[serde(alias = "boolean")]
+    #[serde(rename = "boolean")]
     Bool,
     
     /// Object type.
+    #[serde(rename = "object")]
     Object,
 }
 
@@ -94,9 +98,8 @@ impl From<&str> for PropertyType {
         match s { 
             "array" => PropertyType::Array,
             "string" => PropertyType::String,
-            "number" => PropertyType::Number,
-            "bool" => PropertyType::Bool,
-            "boolean" => PropertyType::Bool,
+            "number" | "integer" => PropertyType::Number,
+            "bool" | "boolean" => PropertyType::Bool,
             "object" => PropertyType::Object,
             "none" => PropertyType::None,
             _ => PropertyType::Object,

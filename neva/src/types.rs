@@ -104,6 +104,8 @@ pub use sampling::{
 };
 pub use elicitation::{
     ElicitRequestParams,
+    ElicitRequestFormParams,
+    ElicitRequestUrlParams,
     ElicitationAction,
     ElicitResult,
     ElicitationMode
@@ -111,9 +113,13 @@ pub use elicitation::{
 pub use schema::{
     Schema,
     StringSchema,
+    StringFormat,
     NumberSchema,
     BooleanSchema,
-    EnumSchema,
+    TitledMultiSelectEnumSchema,
+    TitledSingleSelectEnumSchema,
+    UntitledMultiSelectEnumSchema,
+    UntitledSingleSelectEnumSchema,
 };
 
 #[cfg(feature = "server")]
