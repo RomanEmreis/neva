@@ -9,6 +9,7 @@ use crate::types::{
     request::RequestParamsMeta,
     PropertyType,
     Cursor,
+    Icon
 };
 #[cfg(any(feature = "server", feature = "client"))]
 use crate::error::{Error, ErrorCode};
@@ -34,8 +35,7 @@ use {
         Page, 
         RequestId,
         Request,
-        Response,
-        Icon
+        Response
     }
 };
 

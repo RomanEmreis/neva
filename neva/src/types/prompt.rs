@@ -5,7 +5,7 @@ use std::fmt::{Debug, Formatter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use crate::shared;
-use crate::types::Cursor;
+use crate::types::{Cursor, Icon};
 use crate::types::request::RequestParamsMeta;
 #[cfg(feature = "server")]
 use std::sync::Arc;
@@ -20,7 +20,7 @@ use crate::error::{Error, ErrorCode};
 #[cfg(feature = "server")]
 use crate::types::FromRequest;
 #[cfg(feature = "server")]
-use crate::types::{IntoResponse, Icon, Page, PropertyType, Request, RequestId, Response};
+use crate::types::{IntoResponse, Page, PropertyType, Request, RequestId, Response};
 
 #[cfg(feature = "server")]
 use crate::app::{
