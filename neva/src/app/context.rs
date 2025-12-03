@@ -19,7 +19,7 @@ use crate::{
         root::{ListRootsRequestParams, ListRootsResult},
         resource::SubscribeRequestParams,
         sampling::{CreateMessageRequestParams, CreateMessageResult},
-        elicitation::{ElicitRequestParams, ElicitResult}
+        elicitation::{ElicitRequestParams, ElicitResult, ElicitationCompleteParams}
     },
 };
 use std::{
@@ -640,6 +640,15 @@ impl Context {
         self.send_request(req)
             .await?
             .into_result()
+    }
+    
+    /// Notifies the client that the elicitation with the `id` has been completed
+    pub async fn complete_elicitation(&mut self, id: impl Into<String>) -> Result<(), Error> {
+        let params = serde_json::to_value(ElicitationCompleteParams::new(id)).ok();
+        self.send_notification(
+            crate::types::elicitation::commands::COMPLETE, 
+            params)
+            .await
     }
 
     /// Applies earlier defined scopes to the current context.

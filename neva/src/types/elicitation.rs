@@ -7,7 +7,8 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use schemars::JsonSchema;
 use crate::{
-    types::{IntoResponse, PropertyType, RequestId, Response, Schema},
+    types::{IntoResponse, PropertyType, RequestId, Response, Schema, ErrorDetails},
+    types::notification::Notification,
     error::{Error, ErrorCode},
 };
 use crate::types::Uri;
@@ -16,6 +17,9 @@ use crate::types::Uri;
 pub mod commands {
     /// Command name for creating a new elicitation request
     pub const CREATE: &str = "elicitation/create";
+    
+    /// Notification name for indicates the completion of elicitation
+    pub const COMPLETE: &str = "notifications/elicitation/complete";
 }
 
 /// Represents a message issued from the server to elicit additional information from the user via the client.
@@ -138,6 +142,27 @@ pub enum ElicitationAction {
     
     /// User explicitly declined the action
     Decline
+}
+
+/// Represents an error response that indicates that the server requires the client
+/// to provide additional information via an elicitation request.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UrlElicitationRequiredError {
+    /// A list of required elicitations
+    pub elicitations: Vec<ElicitRequestUrlParams>
+}
+
+/// Represents an optional notification from the server to the client, informing it of a completion 
+/// of an out-of-band elicitation request.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ElicitationCompleteParams {
+    /// The ID of the elicitation that completed.
+    #[serde(rename = "elicitationId")]
+    pub id: String,
 }
 
 /// Represents a validator for elicitation content
@@ -503,6 +528,51 @@ impl ElicitResult {
         }
     }
 
+}
+
+impl UrlElicitationRequiredError {
+    /// Creates a new [`UrlElicitationRequiredError`]
+    #[inline]
+    pub fn new(elicitations: impl IntoIterator<Item = ElicitRequestUrlParams>) -> Self {
+        Self { elicitations: elicitations.into_iter().collect() }
+    }
+    
+    /// Converts into JSONRPC error response
+    #[inline] 
+    pub fn to_error(self, message: impl Into<String>) -> Error {
+        let err = match serde_json::to_value(self) {
+            Ok(data) => ErrorDetails {
+                code: ErrorCode::UrlElicitationRequiredError,
+                message: message.into(),
+                data: Some(data),
+            },
+            Err(err) => ErrorDetails {
+                code: ErrorCode::InternalError,
+                message: err.to_string(),
+                data: None,
+            }
+        };
+        err.into()
+    }
+}
+
+impl ElicitationCompleteParams {
+    /// Creates a new [`ElicitationCompleteParams`]
+    #[inline]
+    pub fn new(id: impl Into<String>) -> Self {
+        Self { id: id.into() }
+    }
+}
+
+impl TryFrom<Notification> for ElicitationCompleteParams {
+    type Error = Error;
+
+    #[inline]
+    fn try_from(value: Notification) -> Result<Self, Self::Error> {
+        let params = value.params
+            .ok_or_else(|| Error::new(ErrorCode::InvalidParams, "Missing params"))?;
+        serde_json::from_value(params).map_err(Error::from)
+    }
 }
 
 impl From<Result<Value, Error>> for ElicitResult {

@@ -7,13 +7,15 @@ use bytes::Bytes;
 use serde_json::Value;
 use crate::shared;
 use crate::error::{Error, ErrorCode};
+
 use crate::types::helpers::{deserialize_base64_as_bytes, serialize_bytes_as_base64};
 use crate::types::{
     CallToolResponse, 
     CallToolRequestParams,
     Annotations, 
     Resource, 
-    ResourceContents, 
+    ResourceContents,
+    Icon,
     Uri
 };
 
@@ -169,6 +171,18 @@ pub struct ResourceLink {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<Annotations>,
 
+    /// Optional set of sized icons that the client can display in a user interface.
+    ///
+    /// Clients that support rendering icons **MUST** support at least the following MIME types:
+    /// - `image/png` - PNG images (safe, universal compatibility)
+    /// - `image/jpeg` (and `image/jpg`) - JPEG images (safe, universal compatibility)
+    ///
+    /// Clients that support rendering icons **SHOULD** also support:
+    /// - `image/svg+xml` - SVG images (scalable but requires security precautions)
+    /// - `image/webp` - WebP images (modern, efficient format)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icons: Option<Vec<Icon>>,
+
     /// Metadata reserved by MCP for protocol-level metadata.
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<Value>,
@@ -276,6 +290,7 @@ impl From<Resource> for ResourceLink {
             descr: res.descr,
             annotations: res.annotations,
             meta: res.meta,
+            icons: res.icons,
         }
     }
 }
@@ -713,6 +728,12 @@ impl ResourceLink {
     /// Creates a new [`ResourceLink`] content
     pub fn new(resource: impl Into<Resource>) -> Self {
         Self::from(resource.into())
+    }
+
+    /// Sets the [`ResourceLink`] icons
+    pub fn with_icons(mut self, icons: impl IntoIterator<Item = Icon>) -> Self {
+        self.icons = Some(icons.into_iter().collect());
+        self
     }
 }
 

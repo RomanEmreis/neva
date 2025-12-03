@@ -34,7 +34,8 @@ use {
         Page, 
         RequestId,
         Request,
-        Response
+        Response,
+        Icon
     }
 };
 
@@ -97,6 +98,18 @@ pub struct Tool {
     /// Display name precedence order is: title, annotations.title, then name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<ToolAnnotations>,
+
+    /// Optional set of sized icons that the client can display in a user interface.
+    ///
+    /// Clients that support rendering icons **MUST** support at least the following MIME types:
+    /// - `image/png` - PNG images (safe, universal compatibility)
+    /// - `image/jpeg` (and `image/jpg`) - JPEG images (safe, universal compatibility)
+    ///
+    /// Clients that support rendering icons **SHOULD** also support:
+    /// - `image/svg+xml` - SVG images (scalable but requires security precautions)
+    /// - `image/webp` - WebP images (modern, efficient format)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icons: Option<Vec<Icon>>,
     
     /// Metadata reserved by MCP for protocol-level metadata.
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
@@ -580,6 +593,7 @@ impl Tool {
             meta: None,
             annotations: None,
             handler: Some(handler),
+            icons: None,
             #[cfg(feature = "http-server")]
             roles: None,
             #[cfg(feature = "http-server")]
@@ -655,6 +669,12 @@ impl Tool {
         F: FnOnce(ToolAnnotations) -> ToolAnnotations
     {
         self.annotations = Some(config(Default::default()));
+        self
+    }
+
+    /// Sets the [`Tool`] icons
+    pub fn with_icons(&mut self, icons: impl IntoIterator<Item = Icon>) -> &mut Self {
+        self.icons = Some(icons.into_iter().collect());
         self
     }
     

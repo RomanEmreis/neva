@@ -103,12 +103,14 @@ pub use sampling::{
     ToolChoice
 };
 pub use elicitation::{
+    UrlElicitationRequiredError,
+    ElicitationCompleteParams,
     ElicitRequestParams,
     ElicitRequestFormParams,
     ElicitRequestUrlParams,
     ElicitationAction,
-    ElicitResult,
-    ElicitationMode
+    ElicitationMode,
+    ElicitResult
 };
 pub use schema::{
     Schema,
@@ -120,6 +122,12 @@ pub use schema::{
     TitledSingleSelectEnumSchema,
     UntitledMultiSelectEnumSchema,
     UntitledSingleSelectEnumSchema,
+};
+
+pub use icon::{
+    Icon, 
+    IconSize, 
+    IconTheme,
 };
 
 #[cfg(feature = "server")]
@@ -145,6 +153,7 @@ pub mod root;
 pub mod sampling;
 pub mod elicitation;
 pub(crate) mod helpers;
+mod icon;
 
 pub(super) const JSONRPC_VERSION: &str = "2.0";
 
@@ -210,6 +219,18 @@ pub struct Implementation {
     
     /// Version of the implementation.
     pub version: String,
+    
+    /// Optional set of sized icons that the client can display in a user interface.
+    /// 
+    /// Clients that support rendering icons **MUST** support at least the following MIME types:
+    /// - `image/png` - PNG images (safe, universal compatibility)
+    /// - `image/jpeg` (and `image/jpg`) - JPEG images (safe, universal compatibility)
+    /// 
+    /// Clients that support rendering icons **SHOULD** also support:
+    /// - `image/svg+xml` - SVG images (scalable but requires security precautions)
+    /// - `image/webp` - WebP images (modern, efficient format)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icons: Option<Vec<Icon>>,
 }
 
 /// Represents the type of role in the conversation.
@@ -286,7 +307,8 @@ impl Default for Implementation {
     fn default() -> Self {
         Self {
             name: SDK_NAME.into(),
-            version: env!("CARGO_PKG_VERSION").into()
+            version: env!("CARGO_PKG_VERSION").into(),
+            icons: None,
         }
     }
 }
@@ -409,6 +431,15 @@ impl Annotations {
     /// Sets the moment the object was last modified
     pub fn with_last_modified(mut self, last_modified: DateTime<Utc>) -> Self {
         self.last_modified = Some(last_modified);
+        self
+    }
+}
+
+impl Implementation {
+    /// Specifies icons
+    #[inline]
+    pub fn with_icons(mut self, icons: impl IntoIterator<Item = Icon>) -> Self {
+        self.icons = Some(icons.into_iter().collect());
         self
     }
 }

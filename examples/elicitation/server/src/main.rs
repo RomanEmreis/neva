@@ -24,9 +24,13 @@ async fn pay_a_bill(mut ctx: Context) -> Result<String, Error> {
         "https://www.paypal.com/us/webapps/mpp/paypal-payment", 
         "Please pay your bill using PayPal.");
 
+    let elicitation_id = params.id.clone();
+    
     ctx
         .elicit(params.into())
         .await?;
+    
+    ctx.complete_elicitation(elicitation_id).await?;
     
     Ok("Payment successful".to_string())
 }
