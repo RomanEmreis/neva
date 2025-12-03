@@ -11,6 +11,7 @@ pub(crate) use arc_str::ArcStr;
 pub(crate) use arc_slice::ArcSlice;
 pub(crate) use memchr::MemChr;
 
+pub use one_or_many::OneOrMany;
 pub use into_args::IntoArgs;
 
 #[cfg(feature = "http-client")]
@@ -23,6 +24,7 @@ mod arc_str;
 mod arc_slice;
 mod into_args;
 mod memchr;
+mod one_or_many;
 
 #[inline]
 #[cfg(any(feature = "server", feature = "client"))]

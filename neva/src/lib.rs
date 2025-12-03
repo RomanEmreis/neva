@@ -82,10 +82,11 @@ pub use neva_macros::json_schema;
 
 pub(crate) const SDK_NAME: &str = "neva";
 #[cfg(any(feature = "server", feature = "client"))]
-pub(crate) const PROTOCOL_VERSIONS: [&str; 3] = [
+pub(crate) const PROTOCOL_VERSIONS: [&str; 4] = [
     "2024-11-05", 
     "2025-03-26",
-    "2025-06-18"
+    "2025-06-18",
+    "2025-11-25"
 ];
 
 #[cfg(feature = "http-server")]

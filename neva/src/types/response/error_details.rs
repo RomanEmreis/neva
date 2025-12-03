@@ -48,7 +48,7 @@ impl From<ErrorDetails> for Error {
 impl ErrorDetails {
     /// Creates a new [`ErrorDetails`]
     #[inline]
-    pub fn new(err: &str) -> Self {
+    pub fn new(err: impl Into<String>) -> Self {
         Self { 
             code: ErrorCode::InternalError, 
             message: err.into(), 

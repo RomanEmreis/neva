@@ -1,7 +1,18 @@
 ﻿//! Utilities for Sampling
 
-use serde::{Serialize, Deserialize};
-use crate::types::{Content, Role, IntoResponse, RequestId, Response};
+use serde::{Serialize, Deserialize, Serializer, Deserializer};
+use crate::shared::{OneOrMany, IntoArgs};
+use crate::types::{
+    Tool, ToolUse, ToolResult,
+    Content, TextContent, ImageContent, AudioContent,
+    ResourceLink, EmbeddedResource,
+    PromptMessage, 
+    Role, 
+    RequestId, 
+    Response, 
+    IntoResponse
+};
+
 #[cfg(feature = "client")]
 use std::{pin::Pin, sync::Arc, future::Future};
 
@@ -26,20 +37,20 @@ pub mod commands {
 /// > operations rather than the enhanced resource embedding capabilities provided by [`PromptMessage`].
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SamplingMessage {
     /// The role of the message sender, indicating whether it's from a _user_ or an _assistant_.
     pub role: Role,
     
     /// The content of the message.
-    pub content: Content
+    pub content: OneOrMany<Content>
 }
 
 /// Represents the parameters used with a _"sampling/createMessage"_ 
 /// request from a server to sample an LLM via the client.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateMessageRequestParams {
     /// The messages requested by the server to be included in the prompt.
     pub messages: Vec<SamplingMessage>,
@@ -99,12 +110,52 @@ pub struct CreateMessageRequestParams {
     /// > like _"."_, or special delimiter sequences like _"###"_.
     #[serde(rename = "stopSequences", skip_serializing_if = "Option::is_none")]
     pub stop_sequences: Option<Vec<String>>,
+
+    /// Tools that the model may use during generation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<Tool>>,
+
+    /// Controls how the model uses tools.
+    /// 
+    /// Default is `{ mode: "auto" }`.
+    #[serde(rename = "toolChoice", skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ToolChoice>,
+}
+
+/// Controls tool selection behavior for sampling requests.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Default, Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ToolChoice {
+    /// Mode that controls which tools the model can call.
+    pub mode: ToolChoiceMode
+}
+
+/// Represents the mode that controls which tools the model can call.
+/// 
+/// - `auto` - Model decides whether to call tools (default).
+/// - `required` - Model must call at least one tool.
+/// - `none` - Model must not call any tools.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolChoiceMode {
+    /// The mode value `auto`.
+    #[default]
+    Auto,
+
+    /// The mode value `required`.
+    Required,
+
+    /// The mode value `none`.
+    None
 }
 
 /// Specifies the context inclusion options for a request in the Model Context Protocol (MCP).
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum ContextInclusion {
     /// Indicates that no context should be included.
     #[serde(rename = "none")]
@@ -132,7 +183,7 @@ pub enum ContextInclusion {
 /// > balance them against other considerations.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ModelPreferences {
     /// Represents how much to prioritize cost when selecting a model.
     /// 
@@ -168,7 +219,7 @@ pub struct ModelPreferences {
 /// > Clients should prioritize these hints over numeric priorities.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ModelHint {
     /// A hint for a model name.
     /// 
@@ -188,7 +239,7 @@ pub struct CreateMessageResult {
     pub role: Role,
     
     /// Content of the message.
-    pub content: Content,
+    pub content: OneOrMany<Content>,
     
     /// Name of the model that generated the message.
     ///
@@ -201,11 +252,86 @@ pub struct CreateMessageResult {
     /// Reason why message generation (sampling) stopped, if known.
     /// 
     /// ### Common values include:
-    /// * `endTurn` The model naturally completed its response.
-    /// * `maxTokens` The response was truncated due to reaching token limits.
-    /// * `stopSequence` A specific stop sequence was encountered during generation.
+    /// * `endTurn` - The model naturally completed its response.
+    /// * `maxTokens` - The response was truncated due to reaching token limits.
+    /// * `stopSequence` - A specific stop sequence was encountered during generation.
+    /// * `toolUse` - The model wants to use one or more tools.
+    /// 
+    /// This field is an open string to allow for provider-specific stop reasons.
     #[serde(rename = "stopReason", skip_serializing_if = "Option::is_none")]
-    pub stop_reason: Option<String>,
+    pub stop_reason: Option<StopReason>,
+}
+
+/// Represents reasons why message generation (sampling) stopped, if known.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopReason {
+    /// The model naturally completed its response.
+    EndTurn,
+    
+    /// The response was truncated due to reaching token limits.
+    MaxTokens,
+    
+    /// A specific stop sequence was encountered during generation.
+    StopSequence,
+    
+    /// The model wants to use one or more tools.
+    ToolUse,
+    
+    /// Other stop reasons.
+    Other(String)
+}
+
+impl Serialize for StopReason {
+    #[inline]
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            StopReason::EndTurn => serializer.serialize_str("endTurn"),
+            StopReason::MaxTokens => serializer.serialize_str("maxTokens"),
+            StopReason::StopSequence => serializer.serialize_str("stopSequence"),
+            StopReason::ToolUse => serializer.serialize_str("toolUse"),
+            StopReason::Other(s) => serializer.serialize_str(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for StopReason {
+    #[inline]
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(StopReason::from(s))
+    }
+}
+
+impl From<String> for StopReason {
+    #[inline]
+    fn from(s: String) -> Self {
+        match s.as_str() {
+            "endTurn" => StopReason::EndTurn,
+            "maxTokens" => StopReason::MaxTokens,
+            "stopSequence" => StopReason::StopSequence,
+            "toolUse" => StopReason::ToolUse,
+            _ => StopReason::Other(s),
+        }
+    }
+}
+
+impl From<&str> for StopReason {
+    #[inline]
+    fn from(s: &str) -> Self {
+        match s {
+            "endTurn" => StopReason::EndTurn,
+            "maxTokens" => StopReason::MaxTokens,
+            "stopSequence" => StopReason::StopSequence,
+            "toolUse" => StopReason::ToolUse,
+            _ => StopReason::Other(s.to_string()),
+        }
+    }
 }
 
 impl Default for CreateMessageRequestParams {
@@ -219,7 +345,9 @@ impl Default for CreateMessageRequestParams {
             meta: None,
             model_pref: None,
             temp: None,
-            stop_sequences: None
+            stop_sequences: None,
+            tool_choice: None,
+            tools: None
         }
     }
 }
@@ -245,6 +373,14 @@ impl From<String> for SamplingMessage {
     }
 }
 
+impl From<PromptMessage> for SamplingMessage {
+    #[inline]
+    fn from(msg: PromptMessage) -> Self {
+        Self::new(msg.role)
+            .with(msg.content)
+    }
+}
+
 impl From<&str> for ModelHint {
     #[inline]
     fn from(s: &str) -> Self {
@@ -263,7 +399,10 @@ impl SamplingMessage {
     /// Creates a new [`SamplingMessage`]
     #[inline]
     pub fn new(role: Role) -> Self {
-        Self { role, content: Content::empty() }
+        Self { 
+            content: OneOrMany::new(),
+            role
+        }
     }
     
     /// Creates a new [`SamplingMessage`] with a user role
@@ -278,7 +417,7 @@ impl SamplingMessage {
     
     /// Sets the content
     pub fn with<T: Into<Content>>(mut self, content: T) -> Self {
-        self.content = content.into();
+        self.content.push(content.into());
         self
     }
 }
@@ -334,6 +473,44 @@ impl ModelHint {
     #[inline]
     pub fn new(name: impl Into<String>) -> Self {
         Self { name: Some(name.into()) }
+    }
+}
+
+impl ToolChoice {
+    /// Creates a new [`ToolChoice`] with [`ToolChoiceMode::Auto`]
+    #[inline]
+    pub fn auto() -> Self {
+        Self { mode: ToolChoiceMode::Auto }
+    }
+
+    /// Creates a new [`ToolChoice`] with [`ToolChoiceMode::None`]
+    #[inline]
+    pub fn none() -> Self {
+        Self { mode: ToolChoiceMode::None }
+    }
+
+    /// Creates a new [`ToolChoice`] with [`ToolChoiceMode::Required`]
+    #[inline]
+    pub fn required() -> Self {
+        Self { mode: ToolChoiceMode::Required }
+    }
+    
+    /// Returns `true` if the tool choice mode is [`ToolChoiceMode::Auto`]
+    #[inline]
+    pub fn is_auto(&self) -> bool {
+        self.mode == ToolChoiceMode::Auto
+    }
+
+    /// Returns `true` if the tool choice mode is [`ToolChoiceMode::None`]
+    #[inline]
+    pub fn is_none(&self) -> bool {
+        self.mode == ToolChoiceMode::None
+    }
+
+    /// Returns `true` if the tool choice mode is [`ToolChoiceMode::Required`]
+    #[inline]
+    pub fn is_required(&self) -> bool {
+        self.mode == ToolChoiceMode::Required
     }
 }
 
@@ -414,42 +591,73 @@ impl CreateMessageRequestParams {
         self
     }
     
+    /// Sets the list of tools that the model can use during generation
+    /// 
+    /// Default: `None`
+    pub fn with_tools<T: IntoIterator<Item = Tool>>(mut self, tools: T) -> Self {
+        self.tools = Some(tools
+            .into_iter()
+            .collect());
+        self.with_tool_choice(ToolChoiceMode::Auto)
+    }
+
+    /// Sets the control mode for tool selection behavior for sampling requests.
+    /// 
+    /// Default: `None`
+    pub fn with_tool_choice(mut self, mode: ToolChoiceMode) -> Self {
+        self.tool_choice = Some(ToolChoice { mode });
+        self
+    }
+
     /// Returns an iterator of text messages
-    pub fn text(&self) -> impl Iterator<Item = &Content> {
+    pub fn text(&self) -> impl Iterator<Item = &TextContent> {
         self.msg_iter("text")
+            .filter_map(|c| c.as_text())
     }
 
     /// Returns an iterator of audio messages
-    pub fn audio(&self) -> impl Iterator<Item = &Content> {
+    pub fn audio(&self) -> impl Iterator<Item = &AudioContent> {
         self.msg_iter("audio")
+            .filter_map(|c| c.as_audio())
     }
 
     /// Returns an iterator of image messages
-    pub fn images(&self) -> impl Iterator<Item = &Content> {
+    pub fn images(&self) -> impl Iterator<Item = &ImageContent> {
         self.msg_iter("image")
+            .filter_map(|c| c.as_image())
     }
 
     /// Returns an iterator of resource link messages
-    pub fn links(&self) -> impl Iterator<Item = &Content> {
+    pub fn links(&self) -> impl Iterator<Item = &ResourceLink> {
         self.msg_iter("resource_link")
+            .filter_map(|c| c.as_link())
     }
 
     /// Returns an iterator of embedded resource messages
-    pub fn resources(&self) -> impl Iterator<Item = &Content> {
+    pub fn resources(&self) -> impl Iterator<Item = &EmbeddedResource> {
         self.msg_iter("resource")
+            .filter_map(|c| c.as_resource())
+    }
+
+    /// Returns an iterator of tool use messages
+    pub fn tools(&self) -> impl Iterator<Item = &ToolUse> {
+        self.msg_iter("tool_use")
+            .filter_map(|c| c.as_tool())
+    }
+
+    /// Returns an iterator of tool execution result messages
+    pub fn results(&self) -> impl Iterator<Item = &ToolResult> {
+        self.msg_iter("tool_result")
+            .filter_map(|c| c.as_result())
     }
     
+    /// Returns a messages iterator of a given type
     #[inline]
     fn msg_iter(&self, t: &'static str) -> impl Iterator<Item = &Content> {
         self.messages
             .iter()
-            .filter_map(move |m| {
-                if m.content.get_type() == t {
-                    Some(&m.content)
-                } else {
-                    None
-                }
-            })
+            .flat_map(|m| m.content.as_slice())
+            .filter(move |c| c.get_type() == t)
     }
 }
 
@@ -460,7 +668,7 @@ impl CreateMessageResult {
         Self {
             stop_reason: None,
             model: String::new(),
-            content: Content::empty(),
+            content: OneOrMany::new(),
             role,
         }
     }
@@ -476,7 +684,7 @@ impl CreateMessageResult {
     }
     
     /// Sets the stop reason
-    pub fn with_stop_reason(mut self, reason: impl Into<String>) -> Self {
+    pub fn with_stop_reason(mut self, reason: impl Into<StopReason>) -> Self {
         self.stop_reason = Some(reason.into());
         self
     }
@@ -489,8 +697,85 @@ impl CreateMessageResult {
     
     /// Sets the content
     pub fn with_content<T: Into<Content>>(mut self, content: T) -> Self {
-        self.content = content.into();
+        self.content.push(content.into());
         self
+    }
+    
+    /// Marks that model completed the response
+    #[inline]
+    pub fn end_turn(self) -> Self {
+        self.with_stop_reason(StopReason::EndTurn)
+    }
+    
+    /// Requests a tool use and sets the stop reason to `toolUse`
+    pub fn use_tool<N, Args>(self, name: N, args: Args) -> Self
+    where 
+        N: Into<String>,
+        Args: IntoArgs
+    {
+        self.with_content(ToolUse::new(name, args))
+            .with_stop_reason(StopReason::ToolUse)
+    }
+
+    /// Requests to use a set of tools and sets the stop reason to `toolUse`
+    pub fn use_tools<N, Args>(self, tools: impl IntoIterator<Item = (N, Args)>) -> Self
+    where
+        N: Into<String>,
+        Args: IntoArgs
+    {
+        tools.into_iter()
+            .fold(self, |acc, (name, args)| acc.use_tool(name, args))
+            .with_stop_reason(StopReason::ToolUse)
+    }
+
+    /// Returns an iterator of text messages
+    pub fn text(&self) -> impl Iterator<Item = &TextContent> {
+        self.msg_iter("text")
+            .filter_map(|c| c.as_text())
+    }
+
+    /// Returns an iterator of audio content
+    pub fn audio(&self) -> impl Iterator<Item = &AudioContent> {
+        self.msg_iter("audio")
+            .filter_map(|c| c.as_audio())
+    }
+
+    /// Returns an iterator of image content
+    pub fn images(&self) -> impl Iterator<Item = &ImageContent> {
+        self.msg_iter("image")
+            .filter_map(|c| c.as_image())
+    }
+
+    /// Returns an iterator of resource link content
+    pub fn links(&self) -> impl Iterator<Item = &ResourceLink> {
+        self.msg_iter("resource_link")
+            .filter_map(|c| c.as_link())
+    }
+
+    /// Returns an iterator of embedded resource content
+    pub fn resources(&self) -> impl Iterator<Item = &EmbeddedResource> {
+        self.msg_iter("resource")
+            .filter_map(|c| c.as_resource())
+    }
+
+    /// Returns an iterator of tool use content
+    pub fn tools(&self) -> impl Iterator<Item = &ToolUse> {
+        self.msg_iter("tool_use")
+            .filter_map(|c| c.as_tool())
+    }
+
+    /// Returns an iterator of tool execution result content
+    pub fn results(&self) -> impl Iterator<Item = &ToolResult> {
+        self.msg_iter("tool_result")
+            .filter_map(|c| c.as_result())
+    }
+    
+    /// Returns a content iterator of a given type
+    #[inline]
+    fn msg_iter(&self, t: &'static str) -> impl Iterator<Item = &Content> {
+        self.content
+            .iter()
+            .filter(move |c| c.get_type() == t)
     }
 }
 
@@ -503,3 +788,202 @@ pub(crate) type SamplingHandler = Arc<
     + Send 
     + Sync
 >;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn it_sets_auto_tool_choice_mode_by_default() {
+        let mode = ToolChoiceMode::default();
+
+        assert_eq!(mode, ToolChoiceMode::Auto);
+    }
+
+    #[test]
+    fn it_sets_auto_tool_choice_by_default() {
+        let tool_choice = ToolChoice::default();
+
+        assert_eq!(tool_choice.mode, ToolChoiceMode::Auto);
+    }
+
+    #[test]
+    #[cfg(feature = "server")]
+    fn it_sets_auto_tool_choice_when_tools_specified() {
+        let params = CreateMessageRequestParams::new()
+            .with_tools([
+                Tool::new("test 1", async || "test 1"),
+                Tool::new("test 2", async || "test 2")
+            ]);
+
+        assert_eq!(params.tool_choice.unwrap().mode, ToolChoiceMode::Auto);
+    }
+
+    #[test]
+    fn it_sets_tool_choice() {
+        let params = CreateMessageRequestParams::new()
+            .with_tool_choice(ToolChoiceMode::Required);
+
+        assert_eq!(params.tool_choice.unwrap().mode, ToolChoiceMode::Required);
+    }
+
+    #[test]
+    fn it_builds_sampling_message() {
+        let msg = SamplingMessage::user()
+            .with("Hello");
+
+        assert_eq!(msg.role, Role::User);
+        assert_eq!(msg.content.len(), 1);
+    }
+
+    #[test]
+    fn it_builds_create_message_request_params() {
+        let params = CreateMessageRequestParams::new()
+            .with_message("Hello")
+            .with_sys_prompt("System prompt")
+            .with_max_tokens(100)
+            .with_temp(0.7);
+
+        assert_eq!(params.messages.len(), 1);
+        assert_eq!(params.sys_prompt.as_deref(), Some("System prompt"));
+        assert_eq!(params.max_tokens, 100);
+        assert_eq!(params.temp, Some(0.7));
+    }
+
+    #[test]
+    fn it_sets_context_inclusion() {
+        let params = CreateMessageRequestParams::new()
+            .with_no_ctx();
+        assert!(matches!(params.include_context, Some(ContextInclusion::None)));
+
+        let params = CreateMessageRequestParams::new()
+            .with_this_server();
+        assert!(matches!(params.include_context, Some(ContextInclusion::ThisServer)));
+
+        let params = CreateMessageRequestParams::new()
+            .with_all_servers();
+        assert!(matches!(params.include_context, Some(ContextInclusion::AllServers)));
+    }
+
+    #[test]
+    fn it_builds_create_message_result() {
+        let result = CreateMessageResult::assistant()
+            .with_model("gpt-4")
+            .with_content("Hello world")
+            .end_turn();
+
+        assert_eq!(result.role, Role::Assistant);
+        assert_eq!(result.model, "gpt-4");
+        assert_eq!(result.content.len(), 1);
+        assert_eq!(result.stop_reason, Some(StopReason::EndTurn));
+    }
+
+    #[test]
+    fn it_handles_tool_use_in_result() {
+        let result = CreateMessageResult::assistant()
+            .use_tool("calculator", ());
+
+        assert_eq!(result.stop_reason, Some(StopReason::ToolUse));
+        assert_eq!(result.content.len(), 1);
+
+        let tool_use = result.tools().next().unwrap();
+        assert_eq!(tool_use.name, "calculator");
+    }
+
+    #[test]
+    fn it_adds_model_hints() {
+        let pref = ModelPreferences::new()
+            .with_hint("claude")
+            .with_hints(["gpt-4", "llama"]);
+
+        assert_eq!(pref.hints.as_ref().unwrap().len(), 3);
+        assert_eq!(pref.hints.as_ref().unwrap()[0].name.as_deref(), Some("claude"));
+    }
+    
+    #[test]
+    fn it_converts_stop_reason_from_str() {
+        let reasons = [
+            (StopReason::ToolUse, "toolUse"),
+            (StopReason::MaxTokens, "maxTokens"),
+            (StopReason::EndTurn, "endTurn"),
+            (StopReason::StopSequence, "stopSequence"),
+            (StopReason::Other("test".to_string()), "test")
+        ];
+
+        for (expected, reason_str) in reasons {
+            let reason = StopReason::from(reason_str);
+            assert_eq!(reason, expected);
+        }
+    }
+
+    #[test]
+    fn it_converts_stop_reason_from_string() {
+        let reasons = [
+            (StopReason::ToolUse, "toolUse"),
+            (StopReason::MaxTokens, "maxTokens"),
+            (StopReason::EndTurn, "endTurn"),
+            (StopReason::StopSequence, "stopSequence"),
+            (StopReason::Other("test".to_string()), "test")
+        ];
+
+        for (expected, reason_str) in reasons {
+            let reason = StopReason::from(reason_str.to_string());
+            assert_eq!(reason, expected);
+        }
+    }
+    
+    #[test]
+    fn it_serializes_stop_reason() {
+        let reasons = [
+            (StopReason::ToolUse, "\"toolUse\""),
+            (StopReason::MaxTokens, "\"maxTokens\""),
+            (StopReason::EndTurn, "\"endTurn\""),
+            (StopReason::StopSequence, "\"stopSequence\""),
+            (StopReason::Other("test".to_string()), "\"test\"")
+        ];
+
+        for (reason, expected) in reasons {
+            let json = serde_json::to_string(&reason).unwrap();
+            assert_eq!(json, expected);
+        }
+    }
+
+    #[test]
+    fn it_deserializes_stop_reason() {
+        let reasons = [
+            (StopReason::ToolUse, "\"toolUse\""),
+            (StopReason::MaxTokens, "\"maxTokens\""),
+            (StopReason::EndTurn, "\"endTurn\""),
+            (StopReason::StopSequence, "\"stopSequence\""),
+            (StopReason::Other("test".to_string()), "\"test\"")
+        ];
+
+        for (expected, reason_str) in reasons {
+            let reason: StopReason = serde_json::from_str(reason_str).unwrap();
+            assert_eq!(reason, expected);
+        }
+    }
+    
+    #[test]
+    fn it_serializes_model_preferences() {
+        let pref = ModelPreferences::new()
+            .with_cost_priority(0.5)
+            .with_speed_priority(0.75)
+            .with_intel_priority(0.25);
+        
+        let json = serde_json::to_string(&pref).unwrap();
+        
+        let expected = r#"{"costPriority":0.5,"speedPriority":0.75,"intelligencePriority":0.25}"#;
+        assert_eq!(json, expected);
+    }
+    
+    #[test]
+    fn it_deserializes_model_preferences() {
+        let json = r#"{"costPriority":0.5,"speedPriority":0.75,"intelligencePriority":0.25}"#;
+        let pref: ModelPreferences = serde_json::from_str(json).unwrap();
+        
+        assert_eq!(pref.cost_priority, Some(0.5));
+        assert_eq!(pref.speed_priority, Some(0.75));
+        assert_eq!(pref.intelligence_priority, Some(0.25));
+    }
+}

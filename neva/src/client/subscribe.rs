@@ -72,4 +72,20 @@ impl Client {
             handler
         );
     }
+
+    /// Maps a `handler` to the `notifications/elicitation/completed` event
+    pub fn on_elicitation_completed<F, R>(&mut self, handler: F)
+    where
+        F: Fn(Notification) -> R + Clone + Send + Sync + 'static,
+        R: Future<Output = ()> + Send
+    {
+        assert!(
+            self.is_elicitation_supported(),
+            "Client does not support elicitation. You may configure it with `Client::with_options(|opt| opt.with_elicitation())` method."
+        );
+
+        self.subscribe(
+            crate::types::elicitation::commands::COMPLETE,
+            handler);
+    }
 }

@@ -7,28 +7,94 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use schemars::JsonSchema;
 use crate::{
-    types::{IntoResponse, PropertyType, RequestId, Response, Schema},
+    types::{IntoResponse, PropertyType, RequestId, Response, Schema, ErrorDetails},
+    types::notification::Notification,
     error::{Error, ErrorCode},
 };
+use crate::types::Uri;
 
 /// List of commands for Elicitation
 pub mod commands {
     /// Command name for creating a new elicitation request
     pub const CREATE: &str = "elicitation/create";
+    
+    /// Notification name for indicates the completion of elicitation
+    pub const COMPLETE: &str = "notifications/elicitation/complete";
 }
 
 /// Represents a message issued from the server to elicit additional information from the user via the client.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ElicitRequestParams {
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ElicitRequestParams {
+    /// Elicitation request parameters for a form
+    Form(ElicitRequestFormParams),
+    
+    /// Elicitation request parameters for a URL
+    Url(ElicitRequestUrlParams)
+}
+
+/// Represents the parameters for a request to elicit non-sensitive information from the user 
+/// via a form in the client.
+///
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ElicitRequestFormParams {
     /// The message to present to the user.
     pub message: String,
-    
+
+    /// The elicitation mode
+    pub mode: Option<ElicitationMode>,
+
     /// The requested schema.
-    /// 
+    ///
     /// > **Note:** A restricted subset of JSON Schema.
     /// > Only top-level properties are allowed, without nesting.
     #[serde(rename = "requestedSchema")]
     pub schema: RequestSchema,
+
+    /// Additional metadata to attach to the request.
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>
+}
+
+/// Represents the parameters for a request to elicit information from the user 
+/// via a URL in the client.
+///
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ElicitRequestUrlParams {
+    /// The ID of the elicitation, which must be unique within the context of the server.
+    /// 
+    /// The client **MUST** treat this ID as an opaque value.
+    #[serde(rename = "elicitationId")]
+    pub id: String,
+    
+    /// The message to present to the user.
+    pub message: String,
+
+    /// The elicitation mode
+    pub mode: ElicitationMode,
+    
+    /// The URL that the user should navigate to.
+    pub url: Uri,
+    
+    /// Additional metadata to attach to the request.
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>
+}
+
+/// Represents elicitation mode.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ElicitationMode {
+    /// `form` elicitation mode
+    Form,
+
+    /// `url` elicitation mode
+    Url
 }
 
 /// Represents a JSON Schema that can be used to validate the content of an elicitation request.
@@ -49,7 +115,7 @@ pub struct RequestSchema {
 }
 
 /// Represents the client's response to an elicitation request.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ElicitResult {
     /// The user action in response to the elicitation.
     /// 
@@ -78,10 +144,45 @@ pub enum ElicitationAction {
     Decline
 }
 
+/// Represents an error response that indicates that the server requires the client
+/// to provide additional information via an elicitation request.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UrlElicitationRequiredError {
+    /// A list of required elicitations
+    pub elicitations: Vec<ElicitRequestUrlParams>
+}
+
+/// Represents an optional notification from the server to the client, informing it of a completion 
+/// of an out-of-band elicitation request.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ElicitationCompleteParams {
+    /// The ID of the elicitation that completed.
+    #[serde(rename = "elicitationId")]
+    pub id: String,
+}
+
 /// Represents a validator for elicitation content
 #[derive(Debug)]
 pub struct Validator {
     schema: RequestSchema,
+}
+
+impl From<ElicitRequestFormParams> for ElicitRequestParams {
+    #[inline]
+    fn from(value: ElicitRequestFormParams) -> Self {
+        Self::Form(value)
+    }
+}
+
+impl From<ElicitRequestUrlParams> for ElicitRequestParams {
+    #[inline]
+    fn from(value: ElicitRequestUrlParams) -> Self {
+        Self::Url(value)
+    }
 }
 
 impl Default for RequestSchema {
@@ -98,7 +199,7 @@ impl Default for RequestSchema {
 impl Validator {
     /// Creates a new [`Validator`]
     #[inline] 
-    pub fn new(params: ElicitRequestParams) -> Self {
+    pub fn new(params: ElicitRequestFormParams) -> Self {
         Self {
             schema: params.schema,
         }
@@ -183,113 +284,87 @@ impl Validator {
     }
 
     /// Validates a single property value against its schema
+    #[inline]
     fn validate_property_value(&self, value: &Value, schema: &Schema) -> Result<(), Error> {
         match schema {
-            Schema::String(string_schema) => {
-                let str_value = value.as_str()
-                    .ok_or(Error::new(ErrorCode::InvalidParams, "Expected string value"))?;
-
-                if let Some(min_len) = string_schema.min_length
-                    && str_value.len() < min_len {
-                    return Err(Error::new(
-                        ErrorCode::InvalidParams, 
-                        format!("String too short: {} < {min_len}", str_value.len())));
-                }
-
-                if let Some(max_len) = string_schema.max_length
-                    && str_value.len() > max_len {
-                    return Err(Error::new(
-                        ErrorCode::InvalidParams, 
-                        format!("String too long: {} > {max_len}", str_value.len())));
-                    }
-
-                // Validate format if specified
-                if let Some(format) = &string_schema.format {
-                    self.validate_string_format(str_value, format)?;
-                }
-            },
-            Schema::Number(number_schema) => {
-                let num_value = value.as_f64()
-                    .ok_or(Error::new(ErrorCode::InvalidParams, "Expected number value"))?;
-
-                if let Some(min) = number_schema.min
-                    && num_value < min {
-                    return Err(Error::new(
-                        ErrorCode::InvalidParams, 
-                        format!("Number too small: {num_value} < {min}")));
-                }
-
-                if let Some(max) = number_schema.max
-                    && num_value > max {
-                    return Err(
-                        Error::new(
-                            ErrorCode::InvalidParams, 
-                            format!("Number too large: {num_value} > {max}")));
-                }
-            },
-            Schema::Boolean(_) => {
-                if !value.is_boolean() {
-                    return Err(Error::new(ErrorCode::InvalidParams, "Expected boolean value"));
-                }
-            },
-            Schema::Enum(enum_schema) => {
-                let str_value = value.as_str()
-                    .ok_or(Error::new(ErrorCode::InvalidParams, "Expected string value for enum"))?;
-
-                if !enum_schema.r#enum.contains(&str_value.to_string()) {
-                    return Err(Error::new(
-                        ErrorCode::InvalidParams, 
-                        format!("Invalid enum value: {str_value}")));
-                }
-            },
+            Schema::String(string_schema) => string_schema.validate(value),
+            Schema::Number(number_schema) => number_schema.validate(value),
+            Schema::Boolean(boolean_schema) => boolean_schema.validate(value),
+            Schema::SingleUntitledEnum(e) => e.validate(value),
+            Schema::SingleTitledEnum(e) => e.validate(value),
+            Schema::MultiUntitledEnum(e) => e.validate(value),
+            Schema::MultiTitledEnum(e) => e.validate(value),
+            Schema::LegacyEnum(e) => e.validate(value),
         }
-
-        Ok(())
-    }
-
-    /// Validates a string format (basic validation for common formats)
-    fn validate_string_format(&self, value: &str, format: &str) -> Result<(), Error> {
-        match format {
-            "email" => {
-                if !value.contains('@') || !value.contains('.') {
-                    return Err(Error::new(ErrorCode::InvalidParams, "Invalid email format"));
-                }
-            },
-            "uri" => {
-                let parts: Vec<&str> = value.splitn(2, "://").collect();
-                if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
-                    return Err(Error::new(ErrorCode::InvalidParams, "Invalid URI format"));
-                }
-            },
-            "date" => {
-                // Basic date format validation (YYYY-MM-DD)
-                if value.len() != 10 || value.chars().nth(4) != Some('-') || value.chars().nth(7) != Some('-') {
-                    return Err(Error::new(ErrorCode::InvalidParams, "Invalid date format (expected YYYY-MM-DD)"));
-                }
-            },
-            "date-time" => {
-                if !value.contains('T') {
-                    return Err(Error::new(ErrorCode::InvalidParams, "Invalid date format"));
-                }
-            },
-            _ => {
-                // Unknown format, skip validation
-            }
-        }
-        Ok(())
     }
 }
 
 impl ElicitRequestParams {
-    /// Creates a new [`ElicitRequestParams`]
+    /// Creates a new form [`ElicitRequestParams`]
     #[inline]
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
+    pub fn form(message: impl Into<String>) -> ElicitRequestFormParams {
+        ElicitRequestFormParams {
             message: message.into(),
             schema: RequestSchema::new(),
+            mode: None,
+            meta: None
         }
     }
 
+    /// Creates a new URL [`ElicitRequestParams`]
+    #[inline]
+    pub fn url(url: impl Into<Uri>, message: impl Into<String>) -> ElicitRequestUrlParams {
+        ElicitRequestUrlParams {
+            id: uuid::Uuid::new_v4().to_string(),
+            message: message.into(),
+            url: url.into(),
+            mode: ElicitationMode::Url,
+            meta: None
+        }
+    }
+
+    /// Returns a reference to the underlying [`ElicitRequestFormParams`] if the request is a form, 
+    /// otherwise returns `None`
+    #[inline]
+    pub fn as_form(&self) -> Option<&ElicitRequestFormParams> {
+        match self { 
+            Self::Form(params) => Some(params),
+            _ => None
+        }
+    }
+    
+    /// Returns a reference to the underlying [`ElicitRequestUrlParams`] if the request is a URL, 
+    /// otherwise returns `None`
+    #[inline]
+    pub fn as_url(&self) -> Option<&ElicitRequestUrlParams> {
+        match self { 
+            Self::Url(params) => Some(params),
+            _ => None
+        }   
+    }
+    
+    /// Converts the request into a form request. 
+    /// Returns an error if the request is not a form request.
+    #[inline]
+    pub fn into_form(self) -> Result<ElicitRequestFormParams, Error> {
+        match self {
+            Self::Form(params) => Ok(params),
+            _ => Err(Error::new(ErrorCode::InvalidRequest, "Request is not a form request"))
+        }
+    }
+
+    /// Converts the request into a URL request. 
+    /// Returns an error if the request is not a URL request.
+    #[inline]
+    pub fn into_url(self) -> Result<ElicitRequestUrlParams, Error> {
+        match self {
+            Self::Url(params) => Ok(params),
+            _ => Err(Error::new(ErrorCode::InvalidRequest, "Request is not a URL request"))
+        }
+    }
+}
+
+impl ElicitRequestFormParams {
     /// Adds a single optional property to the schema
     #[inline]
     pub fn with_prop(mut self, prop: &str, schema: impl Into<Schema>) -> Self {
@@ -297,7 +372,7 @@ impl ElicitRequestParams {
             .with_prop(prop, schema);
         self
     }
-    
+
     /// Adds a single required property to the schema
     #[inline]
     pub fn with_required(mut self, prop: &str, schema: impl Into<Schema>) -> Self {
@@ -455,6 +530,51 @@ impl ElicitResult {
 
 }
 
+impl UrlElicitationRequiredError {
+    /// Creates a new [`UrlElicitationRequiredError`]
+    #[inline]
+    pub fn new(elicitations: impl IntoIterator<Item = ElicitRequestUrlParams>) -> Self {
+        Self { elicitations: elicitations.into_iter().collect() }
+    }
+    
+    /// Converts into JSONRPC error response
+    #[inline] 
+    pub fn to_error(self, message: impl Into<String>) -> Error {
+        let err = match serde_json::to_value(self) {
+            Ok(data) => ErrorDetails {
+                code: ErrorCode::UrlElicitationRequiredError,
+                message: message.into(),
+                data: Some(data),
+            },
+            Err(err) => ErrorDetails {
+                code: ErrorCode::InternalError,
+                message: err.to_string(),
+                data: None,
+            }
+        };
+        err.into()
+    }
+}
+
+impl ElicitationCompleteParams {
+    /// Creates a new [`ElicitationCompleteParams`]
+    #[inline]
+    pub fn new(id: impl Into<String>) -> Self {
+        Self { id: id.into() }
+    }
+}
+
+impl TryFrom<Notification> for ElicitationCompleteParams {
+    type Error = Error;
+
+    #[inline]
+    fn try_from(value: Notification) -> Result<Self, Self::Error> {
+        let params = value.params
+            .ok_or_else(|| Error::new(ErrorCode::InvalidParams, "Missing params"))?;
+        serde_json::from_value(params).map_err(Error::from)
+    }
+}
+
 impl From<Result<Value, Error>> for ElicitResult {
     fn from(result: Result<Value, Error>) -> Self {
         match result {
@@ -484,7 +604,12 @@ pub(crate) type ElicitationHandler = Arc<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{StringSchema, NumberSchema, BooleanSchema, EnumSchema};
+    use crate::types::{
+        StringSchema, StringFormat, 
+        NumberSchema, 
+        BooleanSchema, 
+        UntitledSingleSelectEnumSchema
+    };
     use schemars::JsonSchema;
 
     #[derive(Serialize, JsonSchema)]
@@ -525,9 +650,11 @@ mod tests {
         schema
     }
 
-    fn create_params_with_schema(schema: RequestSchema) -> ElicitRequestParams {
-        ElicitRequestParams {
+    fn create_form_params_with_schema(schema: RequestSchema) -> ElicitRequestFormParams {
+        ElicitRequestFormParams {
             message: "Test message".to_string(),
+            mode: None,
+            meta: None,
             schema,
         }
     }
@@ -535,7 +662,7 @@ mod tests {
     #[test]
     fn it_creates_validator_for_params_with_schema() {
         let schema = create_test_schema();
-        let params = create_params_with_schema(schema.clone());
+        let params = create_form_params_with_schema(schema.clone());
         let validator = Validator::new(params);
 
         assert_eq!(validator.schema.properties.len(), schema.properties.len());
@@ -545,7 +672,7 @@ mod tests {
     #[test]
     fn it_validates_compatible_schema_success() {
         let schema = create_test_schema();
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content = TestStruct {
@@ -571,7 +698,7 @@ mod tests {
             Schema::String(StringSchema::default())
         );
 
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content = TestStruct {
@@ -593,7 +720,7 @@ mod tests {
         let mut schema = create_test_schema();
         schema.required = Some(vec!["name".to_string(), "age".to_string(), "missing_required".to_string()]);
 
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content = TestStruct {
@@ -613,7 +740,7 @@ mod tests {
     #[test]
     fn it_validates_content_constraints_missing_required() {
         let schema = create_test_schema();
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         // Create content missing the required field
@@ -633,7 +760,7 @@ mod tests {
     #[test]
     fn it_validates_content_constraints_not_object() {
         let schema = create_test_schema();
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content_json = serde_json::json!("not an object");
@@ -649,7 +776,7 @@ mod tests {
     #[test]
     fn it_validates_string_property_success() {
         let schema = create_test_schema();
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content_json = serde_json::json!({
@@ -665,7 +792,7 @@ mod tests {
     #[test]
     fn it_validates_string_property_too_short() {
         let schema = create_test_schema();
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content_json = serde_json::json!({
@@ -684,7 +811,7 @@ mod tests {
     #[test]
     fn it_validates_string_property_too_long() {
         let schema = create_test_schema();
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let long_name = "a".repeat(51); // Too long (max_length is 50)
@@ -704,7 +831,7 @@ mod tests {
     #[test]
     fn it_validates_string_property_invalid_type() {
         let schema = create_test_schema();
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content_json = serde_json::json!({
@@ -723,7 +850,7 @@ mod tests {
     #[test]
     fn it_validates_number_property_success() {
         let schema = create_test_schema();
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content_json = serde_json::json!({
@@ -739,7 +866,7 @@ mod tests {
     #[test]
     fn it_validates_number_property_too_small() {
         let schema = create_test_schema();
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content_json = serde_json::json!({
@@ -758,7 +885,7 @@ mod tests {
     #[test]
     fn it_validates_number_property_too_large() {
         let schema = create_test_schema();
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content_json = serde_json::json!({
@@ -777,7 +904,7 @@ mod tests {
     #[test]
     fn it_validatess_number_property_invalid_type() {
         let schema = create_test_schema();
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content_json = serde_json::json!({
@@ -796,7 +923,7 @@ mod tests {
     #[test]
     fn it_validates_boolean_property_success() {
         let schema = create_test_schema();
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content_json = serde_json::json!({
@@ -812,7 +939,7 @@ mod tests {
     #[test]
     fn it_validates_boolean_property_invalid_type() {
         let schema = create_test_schema();
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content_json = serde_json::json!({
@@ -833,17 +960,17 @@ mod tests {
         let mut schema = RequestSchema::new();
         schema.properties.insert(
             "status".to_string(),
-            Schema::Enum(EnumSchema {
+            Schema::SingleUntitledEnum(UntitledSingleSelectEnumSchema {
                 r#type: PropertyType::String,
                 title: None,
                 descr: None,
                 r#enum: vec!["active".to_string(), "inactive".to_string(), "pending".to_string()],
-                enum_names: None,
+                default: None,
             })
         );
         schema.required = Some(vec!["status".to_string()]);
 
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content_json = serde_json::json!({
@@ -859,17 +986,17 @@ mod tests {
         let mut schema = RequestSchema::new();
         schema.properties.insert(
             "status".to_string(),
-            Schema::Enum(EnumSchema {
+            Schema::SingleUntitledEnum(UntitledSingleSelectEnumSchema {
                 r#type: PropertyType::String,
                 title: None,
                 descr: None,
                 r#enum: vec!["active".to_string(), "inactive".to_string()],
-                enum_names: None,
+                default: None,
             })
         );
         schema.required = Some(vec!["status".to_string()]);
 
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content_json = serde_json::json!({
@@ -888,17 +1015,17 @@ mod tests {
         let mut schema = RequestSchema::new();
         schema.properties.insert(
             "status".to_string(),
-            Schema::Enum(EnumSchema {
+            Schema::SingleUntitledEnum(UntitledSingleSelectEnumSchema {
                 r#type: PropertyType::String,
                 title: None,
                 descr: None,
                 r#enum: vec!["active".to_string(), "inactive".to_string()],
-                enum_names: None,
+                default: None,
             })
         );
         schema.required = Some(vec!["status".to_string()]);
 
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content_json = serde_json::json!({
@@ -923,12 +1050,12 @@ mod tests {
                 descr: None,
                 min_length: None,
                 max_length: None,
-                format: Some("email".to_string()),
+                format: Some(StringFormat::Email),
             })
         );
         schema.required = Some(vec!["email".to_string()]);
 
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content_json = serde_json::json!({
@@ -950,12 +1077,12 @@ mod tests {
                 descr: None,
                 min_length: None,
                 max_length: None,
-                format: Some("email".to_string()),
+                format: Some(StringFormat::Email),
             })
         );
         schema.required = Some(vec!["email".to_string()]);
 
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content_json = serde_json::json!({
@@ -980,11 +1107,11 @@ mod tests {
                 descr: None,
                 min_length: None,
                 max_length: None,
-                format: Some("uri".to_string()),
+                format: Some(StringFormat::Uri),
             })
         );
 
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let test_cases = vec![
@@ -1015,11 +1142,11 @@ mod tests {
                 descr: None,
                 min_length: None,
                 max_length: None,
-                format: Some("uri".to_string()),
+                format: Some(StringFormat::Uri),
             })
         );
 
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content_json = serde_json::json!({
@@ -1044,11 +1171,11 @@ mod tests {
                 descr: None,
                 min_length: None,
                 max_length: None,
-                format: Some("date".to_string()),
+                format: Some(StringFormat::Date),
             })
         );
 
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content_json = serde_json::json!({
@@ -1070,11 +1197,11 @@ mod tests {
                 descr: None,
                 min_length: None,
                 max_length: None,
-                format: Some("date".to_string()),
+                format: Some(StringFormat::Date),
             })
         );
 
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let test_cases = vec![
@@ -1108,11 +1235,11 @@ mod tests {
                 descr: None,
                 min_length: None,
                 max_length: None,
-                format: Some("date-time".to_string()),
+                format: Some(StringFormat::DateTime),
             })
         );
 
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content_json = serde_json::json!({
@@ -1134,11 +1261,11 @@ mod tests {
                 descr: None,
                 min_length: None,
                 max_length: None,
-                format: Some("date-time".to_string()),
+                format: Some(StringFormat::DateTime),
             })
         );
 
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content_json = serde_json::json!({
@@ -1163,11 +1290,11 @@ mod tests {
                 descr: None,
                 min_length: None,
                 max_length: None,
-                format: Some("unknown-format".to_string()),
+                format: None,
             })
         );
 
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content_json = serde_json::json!({
@@ -1192,7 +1319,7 @@ mod tests {
         );
         schema.required = Some(vec!["required_field".to_string()]);
 
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         // Test with only the required field
@@ -1223,7 +1350,7 @@ mod tests {
         // No required fields
         schema.required = None;
 
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content_json = serde_json::json!({});
@@ -1235,7 +1362,7 @@ mod tests {
     #[test]
     fn it_validates_schema_compatibility_no_properties() {
         let schema = RequestSchema::new(); // Empty schema
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content = TestStruct {
@@ -1252,7 +1379,7 @@ mod tests {
     #[test]
     fn it_tests_serialize_error_handling() {
         let schema = create_test_schema();
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         // This would normally cause a serialization error if we had a type that can't serialize
@@ -1281,16 +1408,16 @@ mod tests {
         let mut schema = RequestSchema::new();
         schema.properties.insert(
             "status".to_string(),
-            Schema::Enum(EnumSchema {
+            Schema::SingleUntitledEnum(UntitledSingleSelectEnumSchema {
                 r#type: PropertyType::String,
                 title: None,
                 descr: None,
-                r#enum: vec![], // Empty enum
-                enum_names: None,
+                r#enum: vec![],
+                default: None,
             })
         );
 
-        let params = create_params_with_schema(schema);
+        let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let content_json = serde_json::json!({

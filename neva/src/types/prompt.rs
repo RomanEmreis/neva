@@ -5,7 +5,7 @@ use std::fmt::{Debug, Formatter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use crate::shared;
-use crate::types::Cursor;
+use crate::types::{Cursor, Icon};
 use crate::types::request::RequestParamsMeta;
 #[cfg(feature = "server")]
 use std::sync::Arc;
@@ -69,6 +69,18 @@ pub struct Prompt {
     /// where `annotations.title` should be given precedence over using `name`, if present).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+
+    /// Optional set of sized icons that the client can display in a user interface.
+    ///
+    /// Clients that support rendering icons **MUST** support at least the following MIME types:
+    /// - `image/png` - PNG images (safe, universal compatibility)
+    /// - `image/jpeg` (and `image/jpg`) - JPEG images (safe, universal compatibility)
+    ///
+    /// Clients that support rendering icons **SHOULD** also support:
+    /// - `image/svg+xml` - SVG images (scalable but requires security precautions)
+    /// - `image/webp` - WebP images (modern, efficient format)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icons: Option<Vec<Icon>>,
     
     /// Metadata reserved by MCP for protocol-level metadata.
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
@@ -401,6 +413,7 @@ impl Prompt {
             roles: None,
             #[cfg(feature = "http-server")]
             permissions: None,
+            icons: None
         }
     }
     
@@ -426,6 +439,12 @@ impl Prompt {
             .into_iter()
             .map(Into::into)
             .collect());
+        self
+    }
+    
+    /// Sets the [`Prompt`] icons
+    pub fn with_icons(&mut self, icons: impl IntoIterator<Item = Icon>) -> &mut Self {
+        self.icons = Some(icons.into_iter().collect());
         self
     }
 

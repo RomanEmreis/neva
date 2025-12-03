@@ -68,7 +68,7 @@ impl<T: Clone> Collection<T> {
         let value = match self {
             Self::Init(_) => return Err(Error::new(
                 ErrorCode::InternalError,
-                "Attempt to insert a value during runtime when collection is in the init state")),
+                "Attempt to remove a value during runtime when collection is in the init state")),
             Self::Runtime(lock) => {
                 lock.write()
                     .await

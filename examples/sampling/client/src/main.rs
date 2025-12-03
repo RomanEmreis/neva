@@ -6,19 +6,33 @@ const ACCESS_TOKEN: &str =
 
 #[sampling]
 async fn sampling_handler(params: CreateMessageRequestParams) -> CreateMessageResult {
-    let prompt: Vec<String> = params.text()
-        .flat_map(|c| c.as_text().map(|t| t.text.clone()))
-        .collect();
+    tracing::info!("Received sampling: {:?}", params);
     
-    let sys_prompt = params
-        .sys_prompt
-        .unwrap_or_else(|| "You are a helpful assistant.".into());
+    if params.tool_choice.is_some_and(|c| !c.is_none()) {
+        let prompts: Vec<&TextContent> = params.text().collect();
+        tracing::info!("Received prompts: {:?}", prompts);
 
-    tracing::info!("Received prompt: {:?}, sys prompt: {:?}", prompt, sys_prompt);
+        CreateMessageResult::assistant()
+            .with_model("o3-mini")
+            .use_tools([
+                ("get_weather", ("city1", "London")),
+                ("get_weather", ("city2", "Paris"))
+            ])
+    } else {
+        let results: Vec<&ToolResult> = params.results().collect();
+        tracing::info!("Received tool results: {results:?}");
 
-    CreateMessageResult::assistant()
-        .with_model("o3-mini")
-        .with_content("Some response")
+        let response = 
+            r#"Based on the current weather data:
+               - **Paris**: 18°C and partly cloudy - quite pleasant!
+               - **London**: 15°C and rainy - you'll want an umbrella.
+               Paris has slightly warmer and drier conditions today."#;
+        
+        CreateMessageResult::assistant()
+            .with_model("o3-mini")
+            .with_content(response)
+            .end_turn()
+    }
 }
 
 #[tokio::main]
@@ -29,16 +43,22 @@ async fn main() -> Result<(), Error> {
 
     let mut client = Client::new()
         .with_options(|opt| opt
+            .with_sampling(|s| s.with_tools())
             .with_http(|http| http
                 .bind("localhost:7878")
                 .with_tls(|tls| tls
                     .with_certs_verification(false))
                 .with_auth(ACCESS_TOKEN)));
-
+    
     client.connect().await?;
 
-    let args = ("topic", "winter snow");
-    let result = client.call_tool("generate_poem", args).await?;
+    let args = [
+        ("city1", "London"),
+        ("city2", "Paris"),
+    ];
+    let result = client
+        .call_tool("generate_weather_report", args).await?;
+    
     tracing::info!("Received result: {:?}", result.content);
 
     client.disconnect().await

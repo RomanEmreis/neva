@@ -677,6 +677,14 @@ impl Client {
             .is_some_and(|prompt| prompt.list_changed)
     }
 
+    /// Returns whether the client has elicitation capabilities
+    #[inline]
+    fn is_elicitation_supported(&self) -> bool {
+        self.options.elicitation_capability
+            .as_ref()
+            .is_some()
+    }
+
     /// Sends a request to the MCP server
     #[inline]
     async fn send_request(&mut self, req: Request) -> Result<Response, Error> {

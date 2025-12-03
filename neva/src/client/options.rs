@@ -49,10 +49,10 @@ pub struct McpOptions {
     /// Represents a hash map of notification handlers
     pub(super) notification_handler: Option<Arc<NotificationsHandler>>,
     
-    /// An MCP version that client supports
+    /// An MCP version that a client supports
     protocol_ver: Option<&'static str>,
 
-    /// Current transport protocol that server uses
+    /// Current transport protocol that the server uses
     proto: Option<TransportProto>,
     
     /// Represents a list of roots that the client supports
@@ -155,6 +155,15 @@ impl McpOptions {
         T: FnOnce(SamplingCapability) -> SamplingCapability
     {
         self.sampling_capability = Some(config(Default::default()));
+        self
+    }
+
+    /// Configures Elicitation capability
+    pub fn with_elicitation<T>(mut self, config: T) -> Self
+    where
+        T: FnOnce(ElicitationCapability) -> ElicitationCapability
+    {
+        self.elicitation_capability = Some(config(Default::default()));
         self
     }
 
