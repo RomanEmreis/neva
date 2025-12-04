@@ -11,7 +11,7 @@ use crate::types::{
     CompleteRequestParams,
     CallToolRequestParams, 
     ReadResourceRequestParams,
-    GetPromptRequestParams, 
+    GetPromptRequestParams,
     IntoResponse, Response,
     Request, RequestId
 };

@@ -54,7 +54,19 @@ pub use capabilities::{
     SamplingCapability,
     SamplingContextCapability,
     SamplingToolsCapability,
-    RootsCapability
+    RootsCapability,
+    ClientTasksCapability,
+    ServerTasksCapability,
+    TaskListCapability,
+    TaskCancellationCapability,
+    ClientTaskRequestsCapability,
+    ServerTaskRequestsCapability,
+    ToolsTaskCapability,
+    ToolsCallTaskCapability,
+    SamplingTaskCapability,
+    SamplingCreateMessageTaskCapability,
+    ElicitationTaskCapability,
+    ElicitationCreateTaskCapability
 };
 pub use tool::{
     ListToolsRequestParams,
@@ -130,6 +142,18 @@ pub use icon::{
     IconTheme,
 };
 
+pub use task::{
+    GetTaskPayloadRequestParams,
+    GetTaskRequestParams,
+    ListTasksRequestParams,
+    ListTasksResult,
+    CancelTaskRequestParams,
+    RelatedTaskMetadata,
+    TaskMetadata,
+    TaskStatus,
+    Task
+};
+
 #[cfg(feature = "server")]
 pub use prompt::PromptHandler;
 
@@ -152,8 +176,9 @@ pub mod cursor;
 pub mod root;
 pub mod sampling;
 pub mod elicitation;
-pub(crate) mod helpers;
 mod icon;
+pub(crate) mod task;
+pub(crate) mod helpers;
 
 pub(super) const JSONRPC_VERSION: &str = "2.0";
 
@@ -316,7 +341,10 @@ impl Default for Implementation {
 impl IntoResponse for InitializeResult {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
-        Response::success(req_id, serde_json::to_value(self).unwrap())
+        match serde_json::to_value(self) {
+            Ok(v) => Response::success(req_id, v),
+            Err(err) => Response::error(req_id, err.into())
+        }
     }
 }
 
@@ -455,6 +483,7 @@ impl InitializeResult {
                 prompts: options.prompts_capability(),
                 logging: Some(LoggingCapability::default()),
                 completions: Some(CompletionsCapability::default()),
+                tasks: options.tasks_capability(),
                 experimental: None
             },
             server_info: options.implementation.clone(),

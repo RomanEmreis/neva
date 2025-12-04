@@ -126,7 +126,10 @@ impl CompleteResult {
 impl IntoResponse for CompleteResult {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
-        Response::success(req_id, serde_json::to_value(self).unwrap())
+        match serde_json::to_value(self) {
+            Ok(v) => Response::success(req_id, v),
+            Err(err) => Response::error(req_id, err.into())
+        }
     }
 }
 

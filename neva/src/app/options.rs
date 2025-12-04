@@ -19,7 +19,7 @@ use crate::types::{
     Resource, Uri, ReadResourceResult, ResourceTemplate,
     resource::{Route, route::ResourceHandler},
     Prompt,
-    ResourcesCapability, ToolsCapability, PromptsCapability,
+    ResourcesCapability, ToolsCapability, PromptsCapability, ServerTasksCapability
 };
 
 #[cfg(feature = "tracing")]
@@ -74,6 +74,9 @@ pub struct McpOptions {
 
     /// Prompts capability options
     prompts_capability: Option<PromptsCapability>,
+
+    /// Server tasks capability options
+    tasks_capability: Option<ServerTasksCapability>,
     
     /// The last logging level set by the client
     #[cfg(feature = "tracing")]
@@ -101,6 +104,7 @@ impl Debug for McpOptions {
             .field("tools_capability", &self.tools_capability)
             .field("resources_capability", &self.resources_capability)
             .field("prompts_capability", &self.prompts_capability)
+            .field("server_tasks_capability", &self.tasks_capability)
             .field("protocol_ver", &self.protocol_ver)
             .finish()
     }
@@ -121,6 +125,7 @@ impl Default for McpOptions {
             tools_capability: Default::default(),
             resources_capability: Default::default(),
             prompts_capability: Default::default(),
+            tasks_capability: Default::default(),
             resource_routes: Default::default(),
             requests: Default::default(),
             resource_subscriptions: Default::default(),
@@ -207,6 +212,15 @@ impl McpOptions {
         F: FnOnce(PromptsCapability) -> PromptsCapability
     {
         self.prompts_capability = Some(config(Default::default()));
+        self
+    }
+
+    /// Configures tasks capability
+    pub fn with_tasks<F>(mut self, config: F) -> Self
+    where
+        F: FnOnce(ServerTasksCapability) -> ServerTasksCapability
+    {
+        self.tasks_capability = Some(config(Default::default()));
         self
     }
 
@@ -404,6 +418,13 @@ impl McpOptions {
         self.prompts_capability.clone()
     }
 
+    /// Returns [`ServerTasksCapability`] if configured.
+    /// 
+    /// Otherwise, returns `None`.
+    pub(crate) fn tasks_capability(&self) -> Option<ServerTasksCapability> {
+        self.tasks_capability.clone()
+    }
+
     /// Returns whether the server is configured to send the "notifications/resources/updated"
     #[inline]
     pub(crate) fn is_resource_subscription_supported(&self) -> bool {
@@ -434,6 +455,32 @@ impl McpOptions {
         self.prompts_capability
             .as_ref()
             .is_some_and(|prompt| prompt.list_changed)
+    }
+
+    /// Returns whether the server is configured to handle the "tasks/list" requests.
+    #[inline]
+    pub(crate) fn is_tasks_list_supported(&self) -> bool {
+        self.tasks_capability
+            .as_ref()
+            .is_some_and(|tasks| tasks.list.is_some())
+    }
+
+    /// Returns whether the server is configured to handle the "tasks/cancel" requests.
+    #[inline]
+    pub(crate) fn is_tasks_cancellation_supported(&self) -> bool {
+        self.tasks_capability
+            .as_ref()
+            .is_some_and(|tasks| tasks.cancel.is_some())
+    }
+
+    /// Returns whether the server is configured to handle the task-augmented "tools/call" requests.
+    #[inline]
+    pub(crate) fn is_task_augmented_tool_call_supported(&self) -> bool {
+        self.tasks_capability
+            .as_ref()
+            .and_then(|tasks| tasks.requests.as_ref())
+            .and_then(|req| req.tools.as_ref())
+            .is_some_and(|tools| tools.call.is_some())
     }
     
     /// Turns [`McpOptions`] into [`RuntimeMcpOptions`]

@@ -21,7 +21,9 @@ use crate::types::{
     ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate, 
     ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, 
     SubscribeRequestParams, UnsubscribeRequestParams, Resource, resource::template::ResourceFunc, 
-    ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt, 
+    ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt,
+    ListTasksRequestParams, ListTasksResult, CancelTaskRequestParams,
+    GetTaskRequestParams, GetTaskPayloadRequestParams, Task,
     notification::{Notification, CancelledNotificationParams}, 
     cursor::Pagination, Uri
 };
@@ -95,6 +97,11 @@ impl App {
         
         app.map_handler(crate::types::notification::commands::INITIALIZED, Self::notifications_init);
         app.map_handler(crate::types::notification::commands::CANCELLED, Self::notifications_cancel);
+        
+        app.map_handler(crate::types::task::commands::LIST, Self::tasks);
+        app.map_handler(crate::types::task::commands::GET, Self::task);
+        app.map_handler(crate::types::task::commands::CANCEL, Self::cancel_task);
+        app.map_handler(crate::types::task::commands::RESULT, Self::task_result);
         
         app.map_handler(crate::commands::PING, Self::ping);
 
@@ -457,6 +464,52 @@ impl App {
         params: UnsubscribeRequestParams
     ) {
         ctx.unsubscribe_from_resource(&params.uri);
+    }
+    
+    /// Tasks request handler
+    async fn tasks(
+        options: RuntimeMcpOptions,
+        _params: ListTasksRequestParams
+    ) -> Result<ListTasksResult, Error> {
+        if options.is_tasks_list_supported() { 
+            return Err(Error::new(
+                ErrorCode::InvalidRequest, 
+                "Server does not support support tasks/list requests."));
+        }
+        // TODO: impl
+        Ok(ListTasksResult::default())
+    }
+
+    /// A cancel task request handler
+    async fn cancel_task(
+        options: RuntimeMcpOptions,
+        _params: CancelTaskRequestParams
+    ) -> Result<Task, Error> {
+        if options.is_tasks_cancellation_supported() {
+            return Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "Server does not support support tasks/cancel requests."));
+        }
+        // TODO: impl
+        Ok(Task::default())
+    }
+
+    /// A task status retrieval request handler
+    async fn task(
+        _options: RuntimeMcpOptions,
+        _params: GetTaskRequestParams
+    ) -> Result<Task, Error> {
+        // TODO: impl
+        Ok(Task::default())
+    }
+
+    /// A task result retrieval request handler
+    async fn task_result(
+        _options: RuntimeMcpOptions,
+        _params: GetTaskPayloadRequestParams
+    ) -> Result<Task, Error> {
+        // TODO: impl
+        Ok(Task::default())
     }
     
     /// Sets the logging level

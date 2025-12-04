@@ -236,6 +236,7 @@ impl Client {
                 roots: self.options.roots_capability(),
                 sampling: self.options.sampling_capability(),
                 elicitation: self.options.elicitation_capability(),
+                tasks: self.options.tasks_capability(),
                 experimental: None,
             })
         };
