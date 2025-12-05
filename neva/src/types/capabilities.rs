@@ -29,6 +29,7 @@ pub struct ClientCapabilities {
     pub elicitation: Option<ElicitationCapability>,
 
     /// Present if the client supports task-augmented requests.
+    #[cfg(feature = "tasks")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tasks: Option<ClientTasksCapability>,
     
@@ -165,6 +166,7 @@ pub struct ServerCapabilities {
     pub completions: Option<CompletionsCapability>,
 
     /// Present if the server supports task-augmented requests.
+    #[cfg(feature = "tasks")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tasks: Option<ServerTasksCapability>,
 
@@ -233,6 +235,7 @@ pub struct CompletionsCapability {
 /// Represents task-augmented requests capability configuration for a server.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "tasks")]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ServerTasksCapability {
     /// Indicates whether this server supports `tasks/cancel`.
@@ -251,6 +254,7 @@ pub struct ServerTasksCapability {
 /// Represents task-augmented requests capability configuration for a client.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "tasks")]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ClientTasksCapability {
     /// Indicates whether this client supports `tasks/cancel`.
@@ -269,6 +273,7 @@ pub struct ClientTasksCapability {
 /// Represents task cancellation capability configuration.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "tasks")]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct TaskCancellationCapability {
     // Currently empty in the spec, but may be extended in the future
@@ -277,6 +282,7 @@ pub struct TaskCancellationCapability {
 /// Represents task list retrieval capability configuration.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "tasks")]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct TaskListCapability {
     // Currently empty in the spec, but may be extended in the future
@@ -285,6 +291,7 @@ pub struct TaskListCapability {
 /// Specifies which request types can be augmented with tasks.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "tasks")]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ServerTaskRequestsCapability {
     /// Specifies task support for tool-related requests.
@@ -295,6 +302,7 @@ pub struct ServerTaskRequestsCapability {
 /// Specifies which request types can be augmented with tasks.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "tasks")]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ClientTaskRequestsCapability {
     /// Specifies task support for elicitation-related requests.
@@ -309,6 +317,7 @@ pub struct ClientTaskRequestsCapability {
 /// Specifies task support for tool-related requests.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "tasks")]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ToolsTaskCapability {
     /// Indicates whether the server supports task-augmented `tools/call` requests.
@@ -319,6 +328,7 @@ pub struct ToolsTaskCapability {
 /// Specifies task support for elicitation-related requests.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "tasks")]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ElicitationTaskCapability {
     /// Indicates whether the client supports task-augmented `elicitation/create` requests.
@@ -329,6 +339,7 @@ pub struct ElicitationTaskCapability {
 /// Specifies task support for sampling-related requests.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "tasks")]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct SamplingTaskCapability {
     /// Indicates whether the client supports task-augmented `sampling/createMessage` requests.
@@ -339,6 +350,7 @@ pub struct SamplingTaskCapability {
 /// Represents task support configuration for `tools/call` requests.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "tasks")]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ToolsCallTaskCapability {
     // Currently empty in the spec, but may be extended in the future
@@ -347,6 +359,7 @@ pub struct ToolsCallTaskCapability {
 /// Represents task support configuration for `elicitation/create` requests.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "tasks")]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ElicitationCreateTaskCapability {
     // Currently empty in the spec, but may be extended in the future
@@ -355,6 +368,7 @@ pub struct ElicitationCreateTaskCapability {
 /// Represents task support configuration for `sampling/createMessage` requests.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "tasks")]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct SamplingCreateMessageTaskCapability {
     // Currently empty in the spec, but may be extended in the future
@@ -450,7 +464,7 @@ impl ElicitationCapability {
     }
 }
 
-#[cfg(feature = "server")]
+#[cfg(all(feature = "server", feature = "tasks"))]
 impl ServerTasksCapability {
     /// Specifies whether this server supports `tasks/cancel` requests
     pub fn with_cancel(mut self) -> Self {
@@ -486,7 +500,7 @@ impl ServerTasksCapability {
     }
 }
 
-#[cfg(feature = "client")]
+#[cfg(all(feature = "client", feature = "tasks"))]
 impl ClientTasksCapability {
     /// Specifies whether this client supports `tasks/cancel` requests
     pub fn with_cancel(mut self) -> Self {
@@ -528,7 +542,7 @@ impl ClientTasksCapability {
     }
 }
 
-#[cfg(feature = "server")]
+#[cfg(all(feature = "server", feature = "tasks"))]
 impl ServerTaskRequestsCapability {
     /// Specifies task support for tool-related requests.
     pub fn with_tools(mut self) -> Self {
@@ -539,7 +553,7 @@ impl ServerTaskRequestsCapability {
     }
 }
 
-#[cfg(feature = "client")]
+#[cfg(all(feature = "client", feature = "tasks"))]
 impl ClientTaskRequestsCapability {
     /// Specifies task support for elicitation-related requests.
     pub fn with_elicitation(mut self) -> Self {

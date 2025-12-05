@@ -54,9 +54,13 @@ pub use capabilities::{
     SamplingCapability,
     SamplingContextCapability,
     SamplingToolsCapability,
-    RootsCapability,
+    RootsCapability
+};
+
+#[cfg(feature = "tasks")]
+pub use capabilities::{
+    ServerTasksCapability, 
     ClientTasksCapability,
-    ServerTasksCapability,
     TaskListCapability,
     TaskCancellationCapability,
     ClientTaskRequestsCapability,
@@ -68,6 +72,7 @@ pub use capabilities::{
     ElicitationTaskCapability,
     ElicitationCreateTaskCapability
 };
+
 pub use tool::{
     ListToolsRequestParams,
     CallToolRequestParams,
@@ -142,14 +147,17 @@ pub use icon::{
     IconTheme,
 };
 
+#[cfg(feature = "tasks")]
 pub use task::{
     GetTaskPayloadRequestParams,
     GetTaskRequestParams,
     ListTasksRequestParams,
     ListTasksResult,
     CancelTaskRequestParams,
+    CreateTaskResult,
     RelatedTaskMetadata,
     TaskMetadata,
+    TaskPayload,
     TaskStatus,
     Task
 };
@@ -177,6 +185,7 @@ pub mod root;
 pub mod sampling;
 pub mod elicitation;
 mod icon;
+#[cfg(feature = "tasks")]
 pub(crate) mod task;
 pub(crate) mod helpers;
 
@@ -483,6 +492,7 @@ impl InitializeResult {
                 prompts: options.prompts_capability(),
                 logging: Some(LoggingCapability::default()),
                 completions: Some(CompletionsCapability::default()),
+                #[cfg(feature = "tasks")]
                 tasks: options.tasks_capability(),
                 experimental: None
             },

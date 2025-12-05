@@ -22,11 +22,16 @@ use crate::types::{
     ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, 
     SubscribeRequestParams, UnsubscribeRequestParams, Resource, resource::template::ResourceFunc, 
     ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt,
-    ListTasksRequestParams, ListTasksResult, CancelTaskRequestParams,
-    GetTaskRequestParams, GetTaskPayloadRequestParams, Task,
     notification::{Notification, CancelledNotificationParams}, 
     cursor::Pagination, Uri
 };
+
+#[cfg(feature = "tasks")]
+use crate::types::{
+    ListTasksRequestParams, ListTasksResult, CancelTaskRequestParams,
+    GetTaskRequestParams, GetTaskPayloadRequestParams, Task,
+};
+
 use std::{
     fmt::{Debug, Formatter},
     collections::HashMap,
@@ -97,11 +102,14 @@ impl App {
         
         app.map_handler(crate::types::notification::commands::INITIALIZED, Self::notifications_init);
         app.map_handler(crate::types::notification::commands::CANCELLED, Self::notifications_cancel);
-        
-        app.map_handler(crate::types::task::commands::LIST, Self::tasks);
-        app.map_handler(crate::types::task::commands::GET, Self::task);
-        app.map_handler(crate::types::task::commands::CANCEL, Self::cancel_task);
-        app.map_handler(crate::types::task::commands::RESULT, Self::task_result);
+
+        #[cfg(feature = "tasks")]
+        {
+            app.map_handler(crate::types::task::commands::LIST, Self::tasks);
+            app.map_handler(crate::types::task::commands::GET, Self::task);
+            app.map_handler(crate::types::task::commands::CANCEL, Self::cancel_task);
+            app.map_handler(crate::types::task::commands::RESULT, Self::task_result);
+        }
         
         app.map_handler(crate::commands::PING, Self::ping);
 
@@ -467,6 +475,7 @@ impl App {
     }
     
     /// Tasks request handler
+    #[cfg(feature = "tasks")]
     async fn tasks(
         options: RuntimeMcpOptions,
         _params: ListTasksRequestParams
@@ -481,29 +490,31 @@ impl App {
     }
 
     /// A cancel task request handler
+    #[cfg(feature = "tasks")]
     async fn cancel_task(
         options: RuntimeMcpOptions,
-        _params: CancelTaskRequestParams
+        params: CancelTaskRequestParams
     ) -> Result<Task, Error> {
         if options.is_tasks_cancellation_supported() {
-            return Err(Error::new(
+            options.cancel_task(&params.id)
+        } else {
+            Err(Error::new(
                 ErrorCode::InvalidRequest,
-                "Server does not support support tasks/cancel requests."));
+                "Server does not support support tasks/cancel requests."))
         }
-        // TODO: impl
-        Ok(Task::default())
     }
 
     /// A task status retrieval request handler
+    #[cfg(feature = "tasks")]
     async fn task(
-        _options: RuntimeMcpOptions,
-        _params: GetTaskRequestParams
+        options: RuntimeMcpOptions,
+        params: GetTaskRequestParams
     ) -> Result<Task, Error> {
-        // TODO: impl
-        Ok(Task::default())
+        options.get_task_status(&params.id)
     }
 
     /// A task result retrieval request handler
+    #[cfg(feature = "tasks")]
     async fn task_result(
         _options: RuntimeMcpOptions,
         _params: GetTaskPayloadRequestParams

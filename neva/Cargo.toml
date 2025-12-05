@@ -59,17 +59,18 @@ default = []
 full = ["server-full", "client-full"]
 di = ["dep:volga-di"]
 macros = ["dep:neva_macros", "dep:inventory"]
+tasks = []
 tracing = ["dep:tracing", "dep:tracing-subscriber", "dep:once_cell", "volga?/tracing"]
 
 # server
-server-full = ["server-macros", "tracing", "http-server", "server-tls", "di"]
+server-full = ["server-macros", "tracing", "http-server", "server-tls", "di", "tasks"]
 server-macros = ["server", "macros", "neva_macros?/server"]
 server-tls = ["volga?/tls", "volga?/dev-cert"]
 http-server = ["server", "dep:volga", "dep:tokio-stream"]
 server = ["tokio/signal"]
 
 # client
-client-full = ["client-macros", "tracing", "http-client", "client-tls"]
+client-full = ["client-macros", "tracing", "http-client", "client-tls", "tasks"]
 client-macros = ["client", "macros", "neva_macros?/client"]
 client-tls = ["reqwest?/rustls-tls"]
 http-client = ["client", "dep:reqwest", "dep:sse-stream", "dep:tokio-stream", "dep:once_cell"]

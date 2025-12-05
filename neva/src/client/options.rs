@@ -16,8 +16,10 @@ use crate::types::{
     RootsCapability, 
     SamplingCapability, 
     ElicitationCapability,
-    ClientTasksCapability
 };
+
+#[cfg(feature = "tasks")]
+use crate::types::ClientTasksCapability;
 
 #[cfg(feature = "http-client")]
 use crate::transport::http::HttpClient;
@@ -42,6 +44,7 @@ pub struct McpOptions {
     pub(super) elicitation_capability: Option<ElicitationCapability>,
 
     /// Client tasks capability options
+    #[cfg(feature = "tasks")]
     pub(super) tasks_capability: Option<ClientTasksCapability>,
 
     /// Represents a handler function that runs when received a "sampling/createMessage" request
@@ -87,6 +90,7 @@ impl Default for McpOptions {
             roots_capability: None,
             sampling_capability: None,
             elicitation_capability: None,
+            #[cfg(feature = "tasks")]
             tasks_capability: None,
             proto: None,
             protocol_ver: None,
@@ -173,6 +177,7 @@ impl McpOptions {
     }
 
     /// Configures tasks capability
+    #[cfg(feature = "tasks")]
     pub fn with_tasks<T>(mut self, config: T) -> Self
     where
         T: FnOnce(ClientTasksCapability) -> ClientTasksCapability
@@ -275,6 +280,7 @@ impl McpOptions {
     /// Returns [`ClientTasksCapability`] if configured.
     /// 
     /// Otherwise, returns `None`.
+    #[cfg(feature = "tasks")]
     pub(crate) fn tasks_capability(&self) -> Option<ClientTasksCapability> {
         self.tasks_capability.clone()
     }

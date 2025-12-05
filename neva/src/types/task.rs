@@ -1,18 +1,22 @@
 //! Types and utilities for task-augmented requests and responses
 
+use std::ops::{Deref, DerefMut};
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde_json::Value;
 use crate::error::Error;
-use crate::types::{Cursor, };
+use crate::types::{Cursor, IntoResponse};
 
 #[cfg(feature = "server")]
 use crate::{
     app::handler::{FromHandlerParams, HandlerParams},
     types::{
-        IntoResponse, Page, Request, RequestId, Response,
+        Page, Request, RequestId, Response,
         request::FromRequest
     }
 };
+
+const DEFAULT_TTL: usize = 30000;
 
 /// List of commands for Tasks
 pub mod commands {
@@ -91,6 +95,19 @@ pub struct GetTaskPayloadRequestParams {
     pub id: String
 }
 
+/// Represents a response to a task-augmented request.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct CreateTaskResult {
+    /// Newly created task information
+    pub task: Task,
+
+    /// Metadata reserved by MCP for protocol-level metadata.
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
 /// Represents a task. Tasks are durable state machines that carry information 
 /// about the underlying execution state of the request they wrap, and are intended for requestor 
 /// polling and deferred result retrieval. 
@@ -98,7 +115,7 @@ pub struct GetTaskPayloadRequestParams {
 /// Each task is uniquely identifiable by a receiver-generated **task ID**.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     /// The task identifier.
     #[serde(rename = "taskId")]
@@ -166,7 +183,7 @@ pub enum TaskStatus {
 pub struct TaskMetadata {
     /// Time To Live: requested duration in milliseconds to retain task from creation.
     #[serde(skip_serializing_if = "Option::is_none")]
-    ttl: Option<usize>,
+    pub ttl: Option<usize>,
 }
 
 /// Represents metadata for associating messages with a task.
@@ -180,8 +197,41 @@ pub struct RelatedTaskMetadata {
     pub id: String,
 }
 
+/// Represents the response to a `tasks/result` request.
+/// The inner `T` matches the result type of the original request.
+/// For example, a `tools/call` task would return the [`CallToolResponse`] structure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskPayload<T>(pub T);
+
+impl<T> Deref for TaskPayload<T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> DerefMut for TaskPayload<T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 #[cfg(feature = "server")]
 impl IntoResponse for Task {
+    #[inline]
+    fn into_response(self, req_id: RequestId) -> Response {
+        match serde_json::to_value(self) {
+            Ok(v) => Response::success(req_id, v),
+            Err(err) => Response::error(req_id, err.into())
+        }
+    }
+}
+
+#[cfg(feature = "server")]
+impl IntoResponse for CreateTaskResult {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
         match serde_json::to_value(self) {
@@ -271,11 +321,93 @@ impl FromHandlerParams for GetTaskPayloadRequestParams {
     }
 }
 
+impl Default for Task {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl From<TaskMetadata> for Task {
+    #[inline]
+    fn from(meta: TaskMetadata) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            created_at: Utc::now(),
+            last_updated_at: Utc::now(),
+            ttl: meta.ttl.unwrap_or(DEFAULT_TTL),
+            status: TaskStatus::Working,
+            status_msg: None,
+            poll_interval: None
+        }
+    }
+}
+
 #[cfg(feature = "server")]
 impl ListTasksResult {
     /// Creates a new [`ListTasksResult`]
     #[inline]
     pub fn new() -> Self {
         Default::default()
+    }
+}
+
+impl CreateTaskResult {
+    /// Creates a new [`CreateTaskResult`]
+    pub fn new(task: Task) -> Self {
+        Self { task, meta: None }
+    }
+}
+
+impl Task {
+    /// Creates a new [`Task`] in `working` status and with a default TTL of 30 seconds.
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            created_at: Utc::now(),
+            last_updated_at: Utc::now(),
+            ttl: DEFAULT_TTL,
+            status: TaskStatus::Working,
+            status_msg: None,
+            poll_interval: None
+        }
+    }
+    
+    /// Sets the status message of the task.
+    pub fn set_message(mut self, msg: impl Into<String>) -> Self {
+        self.status_msg = Some(msg.into());
+        self
+    }
+
+    /// Sets the `cancelled` status.
+    pub fn cancel(mut self) -> Self {
+        self.status = TaskStatus::Cancelled;
+        self
+    }
+
+    /// Sets the `completed` status.
+    pub fn complete(&mut self) {
+        self.status = TaskStatus::Completed;
+    }
+
+    /// Sets the `failed` status.
+    pub fn fail(mut self) -> Self {
+        self.status = TaskStatus::Failed;
+        self
+    }
+
+    /// Sets the `input_required` status.
+    pub fn require_input(mut self) -> Self {
+        self.status = TaskStatus::InputRequired;
+        self
+    }
+}
+
+impl<T> TaskPayload<T> {
+    /// Unwraps the inner `T`.
+    #[inline]
+    pub fn into_inner(self) -> T {
+        self.0
     }
 }

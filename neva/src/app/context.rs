@@ -37,6 +37,14 @@ use {
 };
 #[cfg(feature = "di")]
 use volga_di::Container;
+#[cfg(feature = "tasks")]
+use crate::{
+    types::{Task, CreateTaskResult, tool::TaskSupport},
+    shared::Either,
+};
+
+#[cfg(feature = "tasks")]
+type ToolOrTaskResponse = Either<CreateTaskResult, CallToolResponse>;
 
 type RequestHandlers = HashMap<String, RequestHandler<Response>>;
 
@@ -545,6 +553,46 @@ impl Context {
         }
     }
 
+    #[inline]
+    #[cfg(feature = "tasks")]
+    async fn call_tool_with_task(self, params: CallToolRequestParams) -> Result<ToolOrTaskResponse, Error> {
+        match self.options.get_tool(&params.name).await {
+            None => Err(Error::new(ErrorCode::InvalidParams, "Tool not found")),
+            Some(tool) => {
+                let task_support = tool.task_support();
+                if let Some(task_meta) = params.task {
+                    self.ensure_tool_augmentation_support(task_support)?;
+                    
+                    let task = Task::from(task_meta);
+                    let task_handle = self.options.track_task(task.clone());
+                    
+                    #[cfg(feature = "http-server")]
+                    self.validate_claims(tool.roles.as_deref(), tool.permissions.as_deref())?;
+                    
+                    let opt = self.options.clone();
+                    let task_id = task.id.clone();
+                    tokio::spawn(async move {
+                        tokio::select! {
+                            result = tool.call(params.with_context(self).into()) => {
+                                opt.complete_task(&task_id, result);
+                            },
+                            _ = task_handle.token.cancelled() => {}
+                        }
+                    });
+
+                    Ok(Either::Left(CreateTaskResult::new(task)))
+                } else if task_support.is_some_and(|ts| ts == TaskSupport::Required) {
+                    Err(Error::new(
+                        ErrorCode::MethodNotFound,
+                        "Tool required task augmented call"))
+                } else {
+                    tool.call(params.with_context(self).into()).await
+                        .map(Either::Right)
+                }
+            }
+        }
+    }
+
     /// Requests a list of available roots from a client
     /// 
     /// # Example
@@ -689,6 +737,30 @@ impl Context {
         let claims = self.claims.as_ref(); 
         validate_roles(claims, roles)?;
         validate_permissions(claims, permissions)?;
+        Ok(())
+    }
+
+    #[inline]
+    #[cfg(feature = "tasks")]
+    fn ensure_tool_augmentation_support(&self, task_support: Option<TaskSupport>) -> Result<(), Error> {
+        if !self.options.is_task_augmented_tool_call_supported() {
+            return Err(
+                Error::new(
+                    ErrorCode::MethodNotFound,
+                    "Server does not support task augmented tool calls"));
+        }
+        let Some(task_support) = task_support else {
+            return Err(
+                Error::new(
+                    ErrorCode::MethodNotFound,
+                    "Tool does not support task augmented calls"));
+        };
+        if task_support == TaskSupport::Forbidden {
+            return Err(
+                Error::new(
+                    ErrorCode::MethodNotFound,
+                    "Tool forbid task augmented calls"));
+        }
         Ok(())
     }
     

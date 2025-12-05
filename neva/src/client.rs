@@ -236,6 +236,7 @@ impl Client {
                 roots: self.options.roots_capability(),
                 sampling: self.options.sampling_capability(),
                 elicitation: self.options.elicitation_capability(),
+                #[cfg(feature = "tasks")]
                 tasks: self.options.tasks_capability(),
                 experimental: None,
             })
@@ -489,7 +490,9 @@ impl Client {
             Some(CallToolRequestParams {
                 name: name.into(),
                 meta: Some(RequestParamsMeta::new(&id)),
-                args: args.into_args()
+                args: args.into_args(),
+                #[cfg(feature = "tasks")]
+                task: None
             }));
         
         self.send_request(request)
@@ -682,6 +685,15 @@ impl Client {
     #[inline]
     fn is_elicitation_supported(&self) -> bool {
         self.options.elicitation_capability
+            .as_ref()
+            .is_some()
+    }
+
+    /// Returns whether the client has elicitation capabilities
+    #[inline]
+    #[cfg(feature = "tasks")]
+    fn is_tasks_supported(&self) -> bool {
+        self.options.tasks_capability
             .as_ref()
             .is_some()
     }
