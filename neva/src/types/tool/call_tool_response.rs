@@ -2,13 +2,11 @@
 
 use crate::types::{Content, IntoResponse, RequestId, Response};
 use serde::{Serialize, Deserialize};
+use serde_json::Value;
 #[cfg(feature = "server")]
 use crate::types::Json;
 #[cfg(any(feature = "server", feature = "client"))]
-use {
-    crate::error::Error,
-    serde_json::Value,
-};
+use crate::error::Error;
 #[cfg(feature = "client")]
 use {
     crate::error::ErrorCode,

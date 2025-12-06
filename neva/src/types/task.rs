@@ -6,14 +6,12 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use crate::error::Error;
 use crate::types::{Cursor, IntoResponse};
+use crate::types::{Page, Request, RequestId, Response};
 
 #[cfg(feature = "server")]
 use crate::{
     app::handler::{FromHandlerParams, HandlerParams},
-    types::{
-        Page, Request, RequestId, Response,
-        request::FromRequest
-    }
+    types::request::FromRequest
 };
 
 const DEFAULT_TTL: usize = 30000;
@@ -151,7 +149,7 @@ pub struct Task {
 /// Represents the status of a task.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Default, Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum TaskStatus {
     /// Task has been canceled.
     #[serde(rename = "cancelled")]
@@ -219,7 +217,6 @@ impl<T> DerefMut for TaskPayload<T> {
     }
 }
 
-#[cfg(feature = "server")]
 impl IntoResponse for Task {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
@@ -230,7 +227,13 @@ impl IntoResponse for Task {
     }
 }
 
-#[cfg(feature = "server")]
+impl<T: IntoResponse> IntoResponse for TaskPayload<T> {
+    #[inline]
+    fn into_response(self, req_id: RequestId) -> Response {
+        self.0.into_response(req_id)
+    }
+}
+
 impl IntoResponse for CreateTaskResult {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
@@ -241,7 +244,6 @@ impl IntoResponse for CreateTaskResult {
     }
 }
 
-#[cfg(feature = "server")]
 impl IntoResponse for ListTasksResult {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
@@ -252,7 +254,6 @@ impl IntoResponse for ListTasksResult {
     }
 }
 
-#[cfg(feature = "server")]
 impl<const N: usize> From<[Task; N]> for ListTasksResult {
     #[inline]
     fn from(tasks: [Task; N]) -> Self {
@@ -263,7 +264,6 @@ impl<const N: usize> From<[Task; N]> for ListTasksResult {
     }
 }
 
-#[cfg(feature = "server")]
 impl From<Vec<Task>> for ListTasksResult {
     #[inline]
     fn from(tasks: Vec<Task>) -> Self {
@@ -274,7 +274,6 @@ impl From<Vec<Task>> for ListTasksResult {
     }
 }
 
-#[cfg(feature = "server")]
 impl From<Page<'_, Task>> for ListTasksResult {
     #[inline]
     fn from(page: Page<'_, Task>) -> Self {
@@ -343,7 +342,6 @@ impl From<TaskMetadata> for Task {
     }
 }
 
-#[cfg(feature = "server")]
 impl ListTasksResult {
     /// Creates a new [`ListTasksResult`]
     #[inline]
@@ -377,29 +375,34 @@ impl Task {
     /// Sets the status message of the task.
     pub fn set_message(mut self, msg: impl Into<String>) -> Self {
         self.status_msg = Some(msg.into());
+        self.last_updated_at = Utc::now();
         self
     }
 
     /// Sets the `cancelled` status.
     pub fn cancel(mut self) -> Self {
         self.status = TaskStatus::Cancelled;
+        self.last_updated_at = Utc::now();
         self
     }
 
     /// Sets the `completed` status.
     pub fn complete(&mut self) {
         self.status = TaskStatus::Completed;
+        self.last_updated_at = Utc::now();
     }
 
     /// Sets the `failed` status.
     pub fn fail(mut self) -> Self {
         self.status = TaskStatus::Failed;
+        self.last_updated_at = Utc::now();
         self
     }
 
     /// Sets the `input_required` status.
     pub fn require_input(mut self) -> Self {
         self.status = TaskStatus::InputRequired;
+        self.last_updated_at = Utc::now();
         self
     }
 }

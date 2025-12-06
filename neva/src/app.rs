@@ -29,8 +29,10 @@ use crate::types::{
 #[cfg(feature = "tasks")]
 use crate::types::{
     ListTasksRequestParams, ListTasksResult, CancelTaskRequestParams,
-    GetTaskRequestParams, GetTaskPayloadRequestParams, Task,
+    GetTaskRequestParams, GetTaskPayloadRequestParams, Task, TaskPayload,
 };
+#[cfg(feature = "tasks")]
+use context::ToolOrTaskResponse;
 
 use std::{
     fmt::{Debug, Formatter},
@@ -117,6 +119,51 @@ impl App {
         app.map_handler(crate::types::notification::commands::SET_LOG_LEVEL, Self::set_log_level);
         
         app
+    }
+
+    /// Starts the [`App`] with its own Tokio runtime.
+    ///
+    /// This method is intended for simple use cases where you don't already have a Tokio runtime setup.
+    /// Internally, it creates and runs a multi-threaded Tokio runtime to execute the application.
+    ///
+    /// **Note:** This method **must not** be called from within an existing Tokio runtime
+    /// (e.g., inside an `#[tokio::main]` async function), or it will panic.
+    /// If you are already using Tokio in your application, use [`App::run`] instead.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::App;
+    ///
+    /// # fn main() {
+    /// let mut app = App::new();
+    ///
+    /// // configure tools, resources, prompts
+    ///
+    /// app.run_blocking()
+    /// # }
+    /// ```
+    pub fn run_blocking(self) {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            panic!("`App::run_blocking()` cannot be called inside an existing Tokio runtime. Use `run().await` instead.");
+        }
+
+        let runtime = match tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(err) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!("failed to start the runtime: {err:#}");
+                #[cfg(not(feature = "tracing"))]
+                eprintln!("failed to start the runtime: {err:#}");
+                return;
+            }
+        };
+
+        runtime.block_on(async {
+            self.run().await
+        });
     }
     
     /// Run the MCP server
@@ -430,8 +477,15 @@ impl App {
     }
     
     /// A tool call request handler
+    #[cfg(not(feature = "tasks"))]
     async fn tool(ctx: Context, params: CallToolRequestParams) -> Result<CallToolResponse, Error> {
         ctx.call_tool(params).await
+    }
+
+    /// A tool call request handler
+    #[cfg(feature = "tasks")]
+    async fn tool(ctx: Context, params: CallToolRequestParams) -> Result<ToolOrTaskResponse, Error> {
+        ctx.call_tool_with_task(params).await
     }
 
     /// A read resource request handler
@@ -478,15 +532,17 @@ impl App {
     #[cfg(feature = "tasks")]
     async fn tasks(
         options: RuntimeMcpOptions,
-        _params: ListTasksRequestParams
+        params: ListTasksRequestParams
     ) -> Result<ListTasksResult, Error> {
         if options.is_tasks_list_supported() { 
             return Err(Error::new(
                 ErrorCode::InvalidRequest, 
                 "Server does not support support tasks/list requests."));
         }
-        // TODO: impl
-        Ok(ListTasksResult::default())
+        Ok(options
+            .list_tasks()
+            .paginate(params.cursor, DEFAULT_PAGE_SIZE)
+            .into())
     }
 
     /// A cancel task request handler
@@ -516,11 +572,10 @@ impl App {
     /// A task result retrieval request handler
     #[cfg(feature = "tasks")]
     async fn task_result(
-        _options: RuntimeMcpOptions,
-        _params: GetTaskPayloadRequestParams
-    ) -> Result<Task, Error> {
-        // TODO: impl
-        Ok(Task::default())
+        options: RuntimeMcpOptions,
+        params: GetTaskPayloadRequestParams
+    ) -> Result<TaskPayload<CallToolResponse>, Error> {
+        options.get_task_result(&params.id).await
     }
     
     /// Sets the logging level

@@ -25,6 +25,8 @@ use crate::types::{
 #[cfg(feature = "tracing")]
 use crate::types::notification::LoggingLevel;
 #[cfg(feature = "tasks")]
+use crate::shared::{TaskTracker, TaskHandle};
+#[cfg(feature = "tasks")]
 use crate::types::{
     ServerTasksCapability,
     CallToolResponse,
@@ -40,7 +42,9 @@ use tracing_subscriber::{
 };
 
 #[cfg(any(feature = "tracing", feature = "tasks"))]
-use crate::error::{Error, ErrorCode};
+use crate::error::Error;
+#[cfg(feature = "tracing")]
+use crate::error::ErrorCode;
 
 /// Represents MCP server options that are available in runtime
 pub type RuntimeMcpOptions = Arc<McpOptions>;
@@ -102,21 +106,7 @@ pub struct McpOptions {
 
     /// Currently running tasks
     #[cfg(feature = "tasks")]
-    tasks: DashMap<String, TaskEntry>
-}
-
-/// Represents a task currently running on the server
-#[cfg(feature = "tasks")]
-pub(crate) struct TaskEntry {
-    task: Task,
-    token: CancellationToken,
-    result_tx: tokio::sync::watch::Sender<Option<TaskPayload<CallToolResponse>>>,
-}
-
-#[cfg(feature = "tasks")]
-pub(crate) struct TaskHandle {
-    pub(crate) token: CancellationToken,
-    pub(crate) result_tx: tokio::sync::watch::Sender<Option<TaskPayload<CallToolResponse>>>,
+    tasks: TaskTracker<CallToolResponse>
 }
 
 impl Debug for McpOptions {
@@ -165,7 +155,7 @@ impl Default for McpOptions {
             #[cfg(feature = "tracing")]
             log_level: Default::default(),
             #[cfg(feature = "tasks")]
-            tasks: Default::default(),
+            tasks: TaskTracker::new(),
         }
     }
 }
@@ -316,35 +306,22 @@ impl McpOptions {
             .remove(req_id);
     }
 
+    /// Returns a list of currently running tasks
+    #[cfg(feature = "tasks")]
+    pub(crate) fn list_tasks(&self) -> Vec<Task> {
+        self.tasks.tasks()
+    }
+    
     /// Tacks the task and returns the [`CancellationToken`] for this task
     #[cfg(feature = "tasks")]
-    pub(crate) fn track_task(&self, task: Task) -> TaskHandle {
-        let token = CancellationToken::new();
-        let (tx, _rx) = tokio::sync::watch::channel(None);
-        
-        self.tasks.insert(task.id.clone(), TaskEntry {
-            result_tx: tx.clone(),
-            token: token.clone(),
-            task,
-        });
-        
-        TaskHandle {
-            result_tx: tx,
-            token
-        }
+    pub(crate) fn track_task(&self, task: Task) -> TaskHandle<CallToolResponse> {
+        self.tasks.track(task)
     }
 
     /// Cancels the task
     #[cfg(feature = "tasks")]
     pub(crate) fn cancel_task(&self, task_id: &str) -> Result<Task, Error> {
-        if let Some((_, entry)) = self.tasks.remove(task_id) {
-            entry.token.cancel();
-            Ok(entry.task.cancel())
-        } else { 
-            Err(Error::new(
-                ErrorCode::InvalidParams, 
-                format!("Could not find task with id {task_id}")))
-        }
+        self.tasks.cancel(task_id)
     }
 
     /// Completes the task
@@ -354,63 +331,21 @@ impl McpOptions {
         task_id: &str, 
         result: Result<CallToolResponse, Error>
     ) {
-        if let Some(mut entry) = self.tasks.get_mut(task_id) {
-            let result = match result { 
-                Ok(result) => TaskPayload(result),
-                Err(err) => TaskPayload(CallToolResponse::error(err))
-            };
-            entry.task.complete();
-            let _ = entry.result_tx.send(Some(result));
-        }
+        let result = result
+            .unwrap_or_else(CallToolResponse::error);
+        self.tasks.complete(task_id, result)
     }
 
     /// Retrieves the task status 
     #[cfg(feature = "tasks")]
     pub(crate) fn get_task_status(&self, task_id: &str) -> Result<Task, Error> {
-        self.tasks
-            .get(task_id)
-            .map(|t| t.task.clone())
-            .ok_or_else(|| Error::new(
-                ErrorCode::InvalidParams, 
-                format!("Could not find task with id {task_id}")))
+        self.tasks.get_status(task_id)
     }
 
     /// Awaits the task result
     #[cfg(feature = "tasks")]
     pub(crate) async fn get_task_result(&self, task_id: &str) -> Result<TaskPayload<CallToolResponse>, Error> {
-        let (mut result_rx, token) = {
-            let entry = self.tasks
-                .get(task_id)
-                .ok_or_else(|| Error::new(
-                    ErrorCode::InvalidParams,
-                    format!("Could not find task with id {task_id}")))?;
-            
-            if let Some(ref result) = *entry.result_tx.borrow() {
-                return Ok(result.clone());
-            }
-
-            (
-                entry.result_tx.subscribe(),
-                entry.token.clone(),
-            )
-        };
-
-        loop {
-            tokio::select! {
-                changed = result_rx.changed() => {
-                    if changed.is_err() {
-                        return Err(Error::new(ErrorCode::InternalError, "Unable to get task result"));
-                    }
-
-                    if let Some(result) = result_rx.borrow_and_update().clone() {
-                        return Ok(result);
-                    }
-                }
-                _ = token.cancelled() => {
-                    return Err(Error::new(ErrorCode::InvalidRequest, "Task has been cancelled"));
-                }
-            }
-        }
+        self.tasks.get_result(task_id).await
     }
     
     /// Adds a tool

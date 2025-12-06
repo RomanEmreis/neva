@@ -44,7 +44,7 @@ use crate::{
 };
 
 #[cfg(feature = "tasks")]
-type ToolOrTaskResponse = Either<CreateTaskResult, CallToolResponse>;
+pub(crate) type ToolOrTaskResponse = Either<CreateTaskResult, CallToolResponse>;
 
 type RequestHandlers = HashMap<String, RequestHandler<Response>>;
 
@@ -555,7 +555,7 @@ impl Context {
 
     #[inline]
     #[cfg(feature = "tasks")]
-    async fn call_tool_with_task(self, params: CallToolRequestParams) -> Result<ToolOrTaskResponse, Error> {
+    pub(crate) async fn call_tool_with_task(self, params: CallToolRequestParams) -> Result<ToolOrTaskResponse, Error> {
         match self.options.get_tool(&params.name).await {
             None => Err(Error::new(ErrorCode::InvalidParams, "Tool not found")),
             Some(tool) => {

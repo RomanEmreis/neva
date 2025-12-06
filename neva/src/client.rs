@@ -24,6 +24,18 @@ use crate::types::{
     Root
 };
 
+#[cfg(feature = "tasks")]
+use crate::{
+    types::{
+        TaskMetadata, 
+        CreateTaskResult, 
+        GetTaskRequestParams, 
+        GetTaskPayloadRequestParams,
+        Task, TaskStatus, TaskPayload,
+    },
+    shared::Either
+};
+
 mod handler;
 mod notification_handler;
 pub mod options;
@@ -498,6 +510,116 @@ impl Client {
         self.send_request(request)
             .await?
             .into_result()
+    }
+
+    /// Calls a task-augmented tool that MCP server supports
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::client::Client;
+    /// use neva::error::Error;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let mut client = Client::new();
+    ///
+    ///     client.connect().await?;
+    ///
+    ///     let args = [("message", "Hello MCP!")]; // or let args = ("message", "Hello MCP!"); 
+    ///     let result = client.call_tool_with_task("echo", args, None).await?;
+    ///     // Do something with the result
+    ///
+    ///     client.disconnect().await
+    /// }
+    /// ```
+    ///
+    /// # Structured output
+    /// ```no_run
+    /// use neva::prelude::*;
+    ///
+    /// #[json_schema(de)]
+    /// struct Weather {
+    ///     conditions: String,
+    ///     temperature: f32,
+    ///     humidity: f32,
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let mut client = Client::new();
+    ///
+    ///     client.connect().await?;
+    ///
+    ///     let tools = client.list_tools(None).await?;
+    ///
+    ///     // Get the tool by name
+    ///     let tool: &Tool = tools.get("weather-forecast")
+    ///         .expect("Weather forecast tool not found");
+    ///
+    ///     let args = ("location", "London");
+    ///     let result = client.call_tool_with_task("weather-forecast", args, None).await?;
+    ///
+    ///     // Validate the output structure and deserialize the result
+    ///     let weather: Weather = tool
+    ///         .validate(&result)
+    ///         .and_then(|res| res.as_json())?;
+    ///     
+    ///     // Do something with the result
+    ///
+    ///     client.disconnect().await
+    /// }
+    /// ```
+    #[cfg(feature = "tasks")]
+    pub async fn call_tool_with_task<N, Args>(
+        &mut self,
+        name: N,
+        args: Args,
+        ttl: Option<usize>
+    ) -> Result<CallToolResponse, Error>
+    where
+        N: Into<String>,
+        Args: shared::IntoArgs
+    {
+        let id = self.generate_id()?;
+        let request = Request::new(
+            Some(id.clone()),
+            crate::types::tool::commands::CALL,
+            Some(CallToolRequestParams {
+                name: name.into(),
+                meta: Some(RequestParamsMeta::new(&id)),
+                args: args.into_args(),
+                task: Some(TaskMetadata { ttl })
+            }));
+
+        let result = self.send_request(request)
+            .await?
+            .into_result::<Either<CreateTaskResult, CallToolResponse>>()?;
+
+        let mut task = match result {
+            Either::Right(result) => return Ok(result),
+            Either::Left(task_result) => task_result.task,
+        };
+        
+        loop {
+            let params = GetTaskRequestParams { id: task.id };
+            task = self.command(crate::types::task::commands::GET, Some(params))
+                .await?
+                .into_result::<Task>()?;
+            
+            if task.status == TaskStatus::Completed {
+                let params = GetTaskPayloadRequestParams { id: task.id };
+                let result = self
+                    .command(crate::types::task::commands::RESULT, Some(params))
+                    .await?
+                    .into_result::<TaskPayload<CallToolResponse>>()?;
+                
+                return Ok(result.into_inner())
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(
+                task.poll_interval.unwrap_or(5000) as u64
+            )).await;
+        }
     }
 
     /// Requests resource contents from MCP server

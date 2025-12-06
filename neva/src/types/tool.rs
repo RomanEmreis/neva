@@ -161,9 +161,14 @@ pub struct ToolExecution {
 #[cfg(feature = "tasks")]
 #[serde(rename_all = "lowercase")]
 pub enum TaskSupport {
+    /// Tool does not support task-augmented execution.
     #[default]
     Forbidden,
+    
+    /// Tool may support task-augmented execution.
     Optional,
+    
+    /// Tool requires task-augmented execution.
     Required,
 }
 

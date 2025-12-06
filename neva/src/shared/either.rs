@@ -1,11 +1,12 @@
 //! Types and utilities for the "either" pattern
 
-use serde::{Serialize, Serializer};
+use serde::{Serialize, Deserialize, Serializer};
 #[cfg(feature = "server")]
 use crate::types::{IntoResponse, RequestId, Response};
 
 /// Represents a value of one of two types
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
 pub enum Either<L, R> {
     /// Left value
     Left(L),
