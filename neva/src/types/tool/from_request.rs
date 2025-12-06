@@ -51,7 +51,9 @@ mod tests {
                 ("arg".into(), json!({ "test": 1 }))
             ])),
             meta: None,
-            name: "tool".into()
+            name: "tool".into(),
+            #[cfg(feature = "tasks")]
+            task: None
         };
         
         let arg: (Value,) = params.try_into().unwrap();
@@ -67,7 +69,9 @@ mod tests {
                 ("arg".into(), json!(22))
             ])),
             meta: None,
-            name: "tool".into()
+            name: "tool".into(),
+            #[cfg(feature = "tasks")]
+            task: None,
         };
 
         let arg: CallToolRequestParams = params.try_into().unwrap();
@@ -87,6 +91,8 @@ mod tests {
                 context: None
             }),
             args: None,
+            #[cfg(feature = "tasks")]
+            task: None,
         };
 
         let arg: (Meta<RequestParamsMeta>,) = params.try_into().unwrap();
@@ -103,6 +109,8 @@ mod tests {
                 context: None
             }),
             args: None,
+            #[cfg(feature = "tasks")]
+            task: None,
         };
 
         let arg: (Meta<ProgressToken>,) = params.try_into().unwrap();

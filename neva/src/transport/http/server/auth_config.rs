@@ -243,8 +243,8 @@ impl<C: AuthClaims> AuthConfig<C> {
 /// Validates JWT claims against required permissions
 #[inline]
 pub(crate) fn validate_permissions<C: AuthClaims>(claims: Option<&C>, required: Option<&[String]>) -> Result<(), Error> {
-    let claims = claims.ok_or_else(claims_missing)?;
     required.map_or(Ok(()), |req| {
+        let claims = claims.ok_or_else(claims_missing)?;    
         contains_any(claims.permissions(), req)
             .then_some(())
             .ok_or_else(unauthorized)
@@ -254,8 +254,8 @@ pub(crate) fn validate_permissions<C: AuthClaims>(claims: Option<&C>, required: 
 /// Validates JWT claims against required roles
 #[inline]
 pub(crate) fn validate_roles<C: AuthClaims>(claims: Option<&C>, required: Option<&[String]>) -> Result<(), Error> {
-    let claims = claims.ok_or_else(claims_missing)?;
-    required.map_or(Ok(()), |req| { 
+    required.map_or(Ok(()), |req| {
+        let claims = claims.ok_or_else(claims_missing)?;
         (contains(claims.role(), req) || contains_any(claims.roles(), req))
             .then_some(())
             .ok_or_else(unauthorized)

@@ -27,6 +27,11 @@ pub struct ClientCapabilities {
     /// supports elicitation of additional information from the user on behalf of the server.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub elicitation: Option<ElicitationCapability>,
+
+    /// Present if the client supports task-augmented requests.
+    #[cfg(feature = "tasks")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tasks: Option<ClientTasksCapability>,
     
     /// Gets or sets experimental, non-standard capabilities that the client supports.
     ///
@@ -160,6 +165,11 @@ pub struct ServerCapabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completions: Option<CompletionsCapability>,
 
+    /// Present if the server supports task-augmented requests.
+    #[cfg(feature = "tasks")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tasks: Option<ServerTasksCapability>,
+
     /// Indicates experimental, non-standard capabilities that the server supports.
     ///
     /// > **Note:** The `experimental` map allows servers to advertise support for features that are not yet 
@@ -222,6 +232,149 @@ pub struct CompletionsCapability {
     // Currently empty in the spec, but may be extended in the future
 }
 
+/// Represents task-augmented requests capability configuration for a server.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "tasks")]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct ServerTasksCapability {
+    /// Indicates whether this server supports `tasks/cancel`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancel: Option<TaskCancellationCapability>,
+    
+    /// Indicates whether this server supports `tasks/list`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list: Option<TaskListCapability>,
+
+    /// Specifies which request types can be augmented with tasks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requests: Option<ServerTaskRequestsCapability>
+}
+
+/// Represents task-augmented requests capability configuration for a client.
+///
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "tasks")]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct ClientTasksCapability {
+    /// Indicates whether this client supports `tasks/cancel`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancel: Option<TaskCancellationCapability>,
+
+    /// Indicates whether this client supports `tasks/list`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list: Option<TaskListCapability>,
+
+    /// Specifies which request types can be augmented with tasks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requests: Option<ClientTaskRequestsCapability>
+}
+
+/// Represents task cancellation capability configuration.
+/// 
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "tasks")]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct TaskCancellationCapability {
+    // Currently empty in the spec, but may be extended in the future
+}
+
+/// Represents task list retrieval capability configuration.
+///
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "tasks")]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct TaskListCapability {
+    // Currently empty in the spec, but may be extended in the future
+}
+
+/// Specifies which request types can be augmented with tasks.
+///
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "tasks")]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct ServerTaskRequestsCapability {
+    /// Specifies task support for tool-related requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<ToolsTaskCapability>
+}
+
+/// Specifies which request types can be augmented with tasks.
+///
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "tasks")]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct ClientTaskRequestsCapability {
+    /// Specifies task support for elicitation-related requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elicitation: Option<ElicitationTaskCapability>,
+
+    /// Specifies task support for sampling-related requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sampling: Option<SamplingTaskCapability>
+}
+
+/// Specifies task support for tool-related requests.
+///
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "tasks")]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct ToolsTaskCapability {
+    /// Indicates whether the server supports task-augmented `tools/call` requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call: Option<ToolsCallTaskCapability>
+}
+
+/// Specifies task support for elicitation-related requests.
+///
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "tasks")]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct ElicitationTaskCapability {
+    /// Indicates whether the client supports task-augmented `elicitation/create` requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub create: Option<ElicitationCreateTaskCapability>
+}
+
+/// Specifies task support for sampling-related requests.
+///
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "tasks")]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct SamplingTaskCapability {
+    /// Indicates whether the client supports task-augmented `sampling/createMessage` requests.
+    #[serde(rename = "createMessage", skip_serializing_if = "Option::is_none")]
+    pub create: Option<SamplingCreateMessageTaskCapability>
+}
+
+/// Represents task support configuration for `tools/call` requests.
+///
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "tasks")]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct ToolsCallTaskCapability {
+    // Currently empty in the spec, but may be extended in the future
+}
+
+/// Represents task support configuration for `elicitation/create` requests.
+///
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "tasks")]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct ElicitationCreateTaskCapability {
+    // Currently empty in the spec, but may be extended in the future
+}
+
+/// Represents task support configuration for `sampling/createMessage` requests.
+///
+/// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "tasks")]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct SamplingCreateMessageTaskCapability {
+    // Currently empty in the spec, but may be extended in the future
+}
+
+#[cfg(feature = "server")]
 impl ToolsCapability {
     /// Specifies whether this server supports notifications for changes to the tools list.
     ///
@@ -232,6 +385,7 @@ impl ToolsCapability {
     }
 }
 
+#[cfg(feature = "server")]
 impl ResourcesCapability {
     /// Specifies whether this server supports notifications for changes to the resource list.
     ///
@@ -250,6 +404,7 @@ impl ResourcesCapability {
     }
 }
 
+#[cfg(feature = "server")]
 impl PromptsCapability {
     /// Specifies whether this server supports notifications for changes to the prompts list.
     ///
@@ -260,6 +415,7 @@ impl PromptsCapability {
     }
 }
 
+#[cfg(feature = "client")]
 impl RootsCapability {
     /// Specifies whether this client supports notifications for changes to the roots list.
     ///
@@ -270,6 +426,7 @@ impl RootsCapability {
     }
 }
 
+#[cfg(feature = "client")]
 impl SamplingCapability {
     /// Specifies whether this client supports context inclusion.
     /// 
@@ -288,6 +445,7 @@ impl SamplingCapability {
     }
 }
 
+#[cfg(feature = "client")]
 impl ElicitationCapability {
     /// Specifies whether this client supports `form` elicitation mode.
     /// 
@@ -302,6 +460,114 @@ impl ElicitationCapability {
     /// Default: `None`
     pub fn with_url(mut self) -> Self {
         self.url = Some(ElicitationUrlCapability {});
+        self
+    }
+}
+
+#[cfg(all(feature = "server", feature = "tasks"))]
+impl ServerTasksCapability {
+    /// Specifies whether this server supports `tasks/cancel` requests
+    pub fn with_cancel(mut self) -> Self {
+        self.cancel = Some(TaskCancellationCapability {});
+        self
+    }
+
+    /// Specifies whether this server supports `tasks/list` requests
+    pub fn with_list(mut self) -> Self {
+        self.list = Some(TaskListCapability {});
+        self
+    }
+
+    /// Specifies whether this server supports task-augmented requests
+    pub fn with_requests<F>(mut self, config: F) -> Self
+    where
+        F: FnOnce(ServerTaskRequestsCapability) -> ServerTaskRequestsCapability
+    {
+        self.requests = Some(config(Default::default()));
+        self
+    }
+
+    /// Specifies whether this server supports task-augmented tools-related requests
+    pub fn with_tools(self) -> Self {
+        self.with_requests(|req| req.with_tools())
+    }
+    
+    /// Specifies whether this server supports all task-augmented capabilities
+    pub fn with_all(self) -> Self {
+        self.with_cancel()
+            .with_list()
+            .with_tools()
+    }
+}
+
+#[cfg(all(feature = "client", feature = "tasks"))]
+impl ClientTasksCapability {
+    /// Specifies whether this client supports `tasks/cancel` requests
+    pub fn with_cancel(mut self) -> Self {
+        self.cancel = Some(TaskCancellationCapability {});
+        self
+    }
+
+    /// Specifies whether this client supports `tasks/list` requests
+    pub fn with_list(mut self) -> Self {
+        self.list = Some(TaskListCapability {});
+        self
+    }
+
+    /// Specifies whether this client supports task-augmented requests
+    pub fn with_requests<F>(mut self, config: F) -> Self
+    where
+        F: FnOnce(ClientTaskRequestsCapability) -> ClientTaskRequestsCapability
+    {
+        self.requests = Some(config(Default::default()));
+        self
+    }
+
+    /// Specifies whether this client supports task-augmented elicitation-related requests
+    pub fn with_elicitation(self) -> Self {
+        self.with_requests(|req| req.with_elicitation())
+    }
+
+    /// Specifies whether this client supports task-augmented sampling-related requests
+    pub fn with_sampling(self) -> Self {
+        self.with_requests(|req| req.with_sampling())
+    }
+
+    /// Specifies whether this client supports all task-augmented capabilities
+    pub fn with_all(self) -> Self {
+        self.with_cancel()
+            .with_list()
+            .with_elicitation()
+            .with_sampling()
+    }
+}
+
+#[cfg(all(feature = "server", feature = "tasks"))]
+impl ServerTaskRequestsCapability {
+    /// Specifies task support for tool-related requests.
+    pub fn with_tools(mut self) -> Self {
+        self.tools = Some(ToolsTaskCapability {
+            call: Some(ToolsCallTaskCapability {})
+        });
+        self
+    }
+}
+
+#[cfg(all(feature = "client", feature = "tasks"))]
+impl ClientTaskRequestsCapability {
+    /// Specifies task support for elicitation-related requests.
+    pub fn with_elicitation(mut self) -> Self {
+        self.elicitation = Some(ElicitationTaskCapability {
+            create: Some(ElicitationCreateTaskCapability {})
+        });
+        self
+    } 
+    
+    /// Specifies task support for sampling-related requests.
+    pub fn with_sampling(mut self) -> Self {
+        self.sampling = Some(SamplingTaskCapability {
+            create: Some(SamplingCreateMessageTaskCapability {})
+        });
         self
     }
 }

@@ -15,6 +15,7 @@ pub(crate) fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::
     let mut roles = None;
     let mut permissions = None;
     let mut middleware = None;
+    let mut task_support = None;
     let mut no_schema = false;
 
     for meta in attr {
@@ -50,6 +51,9 @@ pub(crate) fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::
                         }
                         "middleware" => {
                             middleware = get_exprs_arr(&nv.value);
+                        }
+                        "task_support" => {
+                            task_support = get_str_param(&nv.value);
                         }
                         "no_schema" => {
                             no_schema = get_bool_param(&nv.value);
@@ -174,6 +178,10 @@ pub(crate) fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::
         quote! { #(#mw_calls)* }
     });
 
+    let task_support_code = task_support.map(|ts| {
+        quote! { .with_task_support(#ts) }
+    });
+    
     let module_name = syn::Ident::new(&format!("map_{func_name}"), func_name.span());
 
     // Expand the function and apply the tool functionality
@@ -191,7 +199,8 @@ pub(crate) fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::
                 #output_schema_code
                 #annotations_code
                 #roles_code
-                #permission_code;
+                #permission_code
+                #task_support_code;
         }
         neva::macros::inventory::submit! {
             neva::macros::server::ItemRegistrar(#module_name)
