@@ -245,7 +245,7 @@ pub struct ModelHint {
 /// Represents a client's response to a _"sampling/createMessage"_ from the server.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateMessageResult {
     /// Role of the user who generated the message.
     pub role: Role,

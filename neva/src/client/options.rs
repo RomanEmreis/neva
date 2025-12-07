@@ -19,12 +19,25 @@ use crate::types::{
 };
 
 #[cfg(feature = "tasks")]
-use crate::types::ClientTasksCapability;
+use crate::types::{
+    ClientTasksCapability,
+    Task, TaskPayload
+};
+
+#[cfg(feature = "tasks")]
+use crate::{
+    types::{CreateMessageResult, ElicitResult},
+    shared::{TaskTracker, TaskHandle, Either},
+    error::Error
+};
 
 #[cfg(feature = "http-client")]
 use crate::transport::http::HttpClient;
 
 const DEFAULT_REQUEST_TIMEOUT: u64 = 10; // 10 seconds
+
+#[cfg(feature = "tasks")]
+type ClientTask = Either<CreateMessageResult, ElicitResult>;
 
 /// Represents MCP client configuration options
 pub struct McpOptions {
@@ -64,19 +77,28 @@ pub struct McpOptions {
     
     /// Represents a list of roots that the client supports
     roots: HashMap<Uri, Root>,
+
+    /// Task tracker for client sampling tasks.
+    #[cfg(feature = "tasks")]
+    pub(super) tasks: TaskTracker<ClientTask>,
 }
 
 impl Debug for McpOptions {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("McpOptions")
+        let mut binding = f.debug_struct("McpOptions");
+        let dbg = binding
             .field("implementation", &self.implementation)
             .field("timeout", &self.timeout)
             .field("roots_capability", &self.roots_capability)
             .field("elicitation_capability", &self.elicitation_capability)
             .field("sampling_capability", &self.sampling_capability)
             .field("protocol_ver", &self.protocol_ver)
-            .field("roots", &self.roots)
-            .finish()
+            .field("roots", &self.roots);
+
+        #[cfg(feature = "tasks")]
+        dbg.field("tasks_capability", &self.tasks_capability);
+        
+        dbg.finish()
     }
 }
 
@@ -96,7 +118,9 @@ impl Default for McpOptions {
             protocol_ver: None,
             sampling_handler: None,
             elicitation_handler: None,
-            notification_handler: None
+            notification_handler: None,
+            #[cfg(feature = "tasks")]
+            tasks: TaskTracker::new(),
         }
     }
 }
@@ -283,6 +307,36 @@ impl McpOptions {
     #[cfg(feature = "tasks")]
     pub(crate) fn tasks_capability(&self) -> Option<ClientTasksCapability> {
         self.tasks_capability.clone()
+    }
+
+    /// Returns a list of currently running tasks
+    #[cfg(feature = "tasks")]
+    pub(crate) fn list_tasks(&self) -> Vec<Task> {
+        self.tasks.tasks()
+    }
+
+    /// Tacks the task and returns the [`CancellationToken`] for this task
+    #[cfg(feature = "tasks")]
+    pub(crate) fn track_task(&self, task: Task) -> TaskHandle<ClientTask> {
+        self.tasks.track(task)
+    }
+
+    /// Cancels the task
+    #[cfg(feature = "tasks")]
+    pub(crate) fn cancel_task(&self, task_id: &str) -> Result<Task, Error> {
+        self.tasks.cancel(task_id)
+    }
+
+    /// Retrieves the task status 
+    #[cfg(feature = "tasks")]
+    pub(crate) fn get_task_status(&self, task_id: &str) -> Result<Task, Error> {
+        self.tasks.get_status(task_id)
+    }
+
+    /// Awaits the task result
+    #[cfg(feature = "tasks")]
+    pub(crate) async fn get_task_result(&self, task_id: &str) -> Result<TaskPayload<ClientTask>, Error> {
+        self.tasks.get_result(task_id).await
     }
 }
 

@@ -1,7 +1,7 @@
 //! Types and utilities for tracking tasks
 
-use tokio_util::sync::CancellationToken;
-use tokio::sync::watch::{channel, Sender};
+use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
+use tokio::sync::watch::{channel, Sender, Receiver};
 use crate::error::{Error, ErrorCode};
 use crate::types::{Task, TaskPayload};
 
@@ -17,13 +17,13 @@ pub(crate) type MaybePayload<T> = Option<TaskPayload<T>>;
 pub(crate) struct TaskEntry<T> {
     task: Task,
     token: CancellationToken,
-    result_tx: Sender<MaybePayload<T>>,
+    rx: Receiver<MaybePayload<T>>,
 }
 
-/// Represents a handle to a task that can be used to cancel or complete it
+/// Represents a handle to a task that can be used to cancel or get the result of the task.
 pub(crate) struct TaskHandle<T> {
-    pub(crate) token: CancellationToken,
-    result_tx: Sender<MaybePayload<T>>
+    token: CancellationToken,
+    tx: Sender<MaybePayload<T>>,
 }
 
 impl<T: Clone> TaskTracker<T> {
@@ -45,11 +45,16 @@ impl<T: Clone> TaskTracker<T> {
 
     /// Tacks the task and returns the [`TaskHandle`] for this task
     pub(crate) fn track(&self, task: Task) -> TaskHandle<T> {
-        let id = task.id.clone();
-        let entry = TaskEntry::new(task);
-        let handle = entry.get_handle();
-        self.tasks.insert(id, entry);
-        handle
+        let token = CancellationToken::new();
+        let (tx, rx) = channel(None);
+        
+        self.tasks.insert(task.id.clone(), TaskEntry {
+            token: token.clone(),
+            task,
+            rx,
+        });
+        
+        TaskHandle { token, tx }
     }
 
     /// Cancels the task
@@ -65,10 +70,16 @@ impl<T: Clone> TaskTracker<T> {
     }
 
     /// Completes the task
-    pub(crate) fn complete(&self, id: &str, result: T) {
+    pub(crate) fn complete(&self, id: &str) {
         if let Some(mut entry) = self.tasks.get_mut(id) {
             entry.task.complete();
-            let _ = entry.result_tx.send(Some(TaskPayload(result)));
+        }
+    }
+
+    /// Fails the task
+    pub(crate) fn fail(&self, id: &str) {
+        if let Some(mut entry) = self.tasks.get_mut(id) {
+            entry.task.fail();
         }
     }
 
@@ -92,15 +103,15 @@ impl<T: Clone> TaskTracker<T> {
                     ErrorCode::InvalidParams,
                     format!("Could not find task with id: {id}")))?;
 
-            if let Some(ref result) = *entry.result_tx.borrow() {
-                return Ok(result.clone());
-            }
-
             (
-                entry.result_tx.subscribe(),
+                entry.rx.clone(),
                 entry.token.clone(),
             )
         };
+
+        if let Some(ref result) = *result_rx.borrow_and_update() {
+            return Ok(result.clone());
+        }
 
         loop {
             tokio::select! {
@@ -121,25 +132,28 @@ impl<T: Clone> TaskTracker<T> {
     }
 }
 
-impl<T> TaskEntry<T> {
-    /// Creates a new [`TaskEntry`] for the given `task`
-    #[inline]
-    pub(crate) fn new(task: Task) -> Self {
-        let token = CancellationToken::new();
-        let (tx, _rx) = channel(None);
-        Self {
-            result_tx: tx,
-            token,
-            task,
-        }
+impl<T> TaskHandle<T> {
+    /// Completes the [`Task`] and sets the result.
+    pub(crate) fn complete(self, result: T) {
+        let _ = self.tx.send(Some(TaskPayload(result)));
     }
 
-    /// Creates a new [`TaskHandle`] for the given [`TaskEntry`]
+    /// Returns a [`Future`] that gets fulfilled when cancellation is requested.
+    ///
+    /// Equivalent to:
+    ///
+    /// ```ignore
+    /// async fn cancelled(&self);
+    /// ```
+    ///
+    /// The future will complete immediately if the token is already cancelled
+    /// when this method is called.
+    ///
+    /// # Cancellation safety
+    ///
+    /// This method is cancel safe.
     #[inline]
-    pub(crate) fn get_handle(&self) -> TaskHandle<T> {
-        TaskHandle {
-            result_tx: self.result_tx.clone(),
-            token: self.token.clone()
-        }
+    pub(crate) fn cancelled(&self) -> WaitForCancellationFuture<'_> {
+        self.token.cancelled()
     }
 }

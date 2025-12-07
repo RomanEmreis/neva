@@ -184,9 +184,9 @@ pub mod cursor;
 pub mod root;
 pub mod sampling;
 pub mod elicitation;
-mod icon;
 #[cfg(feature = "tasks")]
-pub(crate) mod task;
+pub mod task;
+mod icon;
 pub(crate) mod helpers;
 
 pub(super) const JSONRPC_VERSION: &str = "2.0";

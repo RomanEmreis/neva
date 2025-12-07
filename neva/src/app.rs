@@ -534,7 +534,7 @@ impl App {
         options: RuntimeMcpOptions,
         params: ListTasksRequestParams
     ) -> Result<ListTasksResult, Error> {
-        if options.is_tasks_list_supported() { 
+        if !options.is_tasks_list_supported() { 
             return Err(Error::new(
                 ErrorCode::InvalidRequest, 
                 "Server does not support support tasks/list requests."));

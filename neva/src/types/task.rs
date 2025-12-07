@@ -4,14 +4,13 @@ use std::ops::{Deref, DerefMut};
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use crate::error::Error;
-use crate::types::{Cursor, IntoResponse};
-use crate::types::{Page, Request, RequestId, Response};
+use crate::types::{Cursor, IntoResponse, Page, RequestId, Response};
 
 #[cfg(feature = "server")]
 use crate::{
+    error::Error,
     app::handler::{FromHandlerParams, HandlerParams},
-    types::request::FromRequest
+    types::request::{FromRequest, Request}
 };
 
 const DEFAULT_TTL: usize = 30000;
@@ -373,10 +372,9 @@ impl Task {
     }
     
     /// Sets the status message of the task.
-    pub fn set_message(mut self, msg: impl Into<String>) -> Self {
+    pub fn set_message(&mut self, msg: impl Into<String>) {
         self.status_msg = Some(msg.into());
         self.last_updated_at = Utc::now();
-        self
     }
 
     /// Sets the `cancelled` status.
@@ -393,10 +391,9 @@ impl Task {
     }
 
     /// Sets the `failed` status.
-    pub fn fail(mut self) -> Self {
+    pub fn fail(&mut self) {
         self.status = TaskStatus::Failed;
         self.last_updated_at = Utc::now();
-        self
     }
 
     /// Sets the `input_required` status.

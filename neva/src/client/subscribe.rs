@@ -96,11 +96,8 @@ impl Client {
         F: Fn(Notification) -> R + Clone + Send + Sync + 'static,
         R: Future<Output = ()> + Send
     {
-        assert!(
-            self.is_tasks_supported(),
-            "Client does not support task-augmented requests. You may configure it with `Client::with_options(|opt| opt.with_tasks(...))` method."
-        );
-
+        self.ensure_tasks_supported();
+        
         self.subscribe(
             crate::types::task::commands::STATUS,
             handler);

@@ -5,7 +5,7 @@ use serde::{Serialize, Deserialize, Serializer};
 use crate::types::{IntoResponse, RequestId, Response};
 
 /// Represents a value of one of two types
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum Either<L, R> {
     /// Left value

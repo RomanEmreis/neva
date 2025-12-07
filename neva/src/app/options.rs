@@ -106,7 +106,7 @@ pub struct McpOptions {
 
     /// Currently running tasks
     #[cfg(feature = "tasks")]
-    tasks: TaskTracker<CallToolResponse>
+    pub(super) tasks: TaskTracker<CallToolResponse>
 }
 
 impl Debug for McpOptions {
@@ -122,7 +122,7 @@ impl Debug for McpOptions {
             .field("protocol_ver", &self.protocol_ver);
         
         #[cfg(feature = "tasks")]
-        dbg.field("server_tasks_capability", &self.tasks_capability);
+        dbg.field("tasks_capability", &self.tasks_capability);
         
         #[cfg(feature = "tracing")]
         dbg.field("log_level", &self.log_level);
@@ -322,18 +322,6 @@ impl McpOptions {
     #[cfg(feature = "tasks")]
     pub(crate) fn cancel_task(&self, task_id: &str) -> Result<Task, Error> {
         self.tasks.cancel(task_id)
-    }
-
-    /// Completes the task
-    #[cfg(feature = "tasks")]
-    pub(crate) fn complete_task(
-        &self, 
-        task_id: &str, 
-        result: Result<CallToolResponse, Error>
-    ) {
-        let result = result
-            .unwrap_or_else(CallToolResponse::error);
-        self.tasks.complete(task_id, result)
     }
 
     /// Retrieves the task status 

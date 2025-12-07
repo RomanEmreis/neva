@@ -19,6 +19,7 @@ mod shared;
 /// * `annotations` - Arbitrary [metadata](https://docs.rs/neva/latest/neva/types/tool/struct.ToolAnnotations.html).
 /// * `roles` & `permissions` - Define which users can run the tool when using Streamable HTTP transport with OAuth.
 /// * `middleware` - Middleware list to apply to the tool.
+/// * `task_support` - Specifies task augmentation support for this tool.
 /// * `no_schema` - Explicitly disables input schema generation if it's not set in `input_schema`.
 /// 
 /// # Simple Example

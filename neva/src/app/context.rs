@@ -559,24 +559,34 @@ impl Context {
         match self.options.get_tool(&params.name).await {
             None => Err(Error::new(ErrorCode::InvalidParams, "Tool not found")),
             Some(tool) => {
+                #[cfg(feature = "http-server")]
+                self.validate_claims(tool.roles.as_deref(), tool.permissions.as_deref())?;
+                
                 let task_support = tool.task_support();
                 if let Some(task_meta) = params.task {
                     self.ensure_tool_augmentation_support(task_support)?;
-                    
+
                     let task = Task::from(task_meta);
-                    let task_handle = self.options.track_task(task.clone());
-                    
-                    #[cfg(feature = "http-server")]
-                    self.validate_claims(tool.roles.as_deref(), tool.permissions.as_deref())?;
+                    let handle = self.options.track_task(task.clone());
                     
                     let opt = self.options.clone();
                     let task_id = task.id.clone();
                     tokio::spawn(async move {
                         tokio::select! {
                             result = tool.call(params.with_context(self).into()) => {
-                                opt.complete_task(&task_id, result);
+                                let resp = match result {
+                                    Ok(result) => {
+                                        opt.tasks.complete(&task_id);
+                                        result
+                                    },
+                                    Err(err) => {
+                                        opt.tasks.fail(&task_id);
+                                        CallToolResponse::error(err)
+                                    }
+                                };
+                                handle.complete(resp);
                             },
-                            _ = task_handle.token.cancelled() => {}
+                            _ = handle.cancelled() => {}
                         }
                     });
 
@@ -586,7 +596,8 @@ impl Context {
                         ErrorCode::MethodNotFound,
                         "Tool required task augmented call"))
                 } else {
-                    tool.call(params.with_context(self).into()).await
+                    tool.call(params.with_context(self).into())
+                        .await
                         .map(Either::Right)
                 }
             }
