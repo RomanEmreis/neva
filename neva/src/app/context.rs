@@ -38,8 +38,14 @@ use {
 #[cfg(feature = "di")]
 use volga_di::Container;
 #[cfg(feature = "tasks")]
+use serde::de::DeserializeOwned;
+#[cfg(feature = "tasks")]
 use crate::{
-    types::{Task, CreateTaskResult, tool::TaskSupport},
+    types::{
+        Task, TaskPayload, CreateTaskResult, tool::TaskSupport,
+        ListTasksRequestParams,ListTasksResult, Cursor,
+        CancelTaskRequestParams, GetTaskPayloadRequestParams, GetTaskRequestParams,
+    },
     shared::Either,
 };
 
@@ -656,6 +662,7 @@ impl Context {
     /// }
     /// # }
     /// ```
+    #[cfg(not(feature = "tasks"))]
     pub async fn sample(&mut self, params: CreateMessageRequestParams) -> Result<CreateMessageResult, Error> {
         let method = crate::types::sampling::commands::CREATE;
         let req = Request::new(
@@ -666,6 +673,59 @@ impl Context {
         self.send_request(req)
             .await?
             .into_result()
+    }
+
+        /// Sends the sampling request to the client
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(feature = "server-macros")] {
+    /// use neva::{
+    ///     Context, 
+    ///     error::Error, 
+    ///     types::sampling::CreateMessageRequestParams, 
+    ///     tool
+    /// };
+    ///
+    /// #[tool]
+    /// async fn generate_poem(mut ctx: Context, topic: String) -> Result<String, Error> {
+    ///     let params = CreateMessageRequestParams::new()
+    ///         .with_message(format!("Write a short poem about {topic}"))
+    ///         .with_sys_prompt("You are a talented poet who writes concise, evocative verses.");
+    /// 
+    ///     let result = ctx.sample(params).await?;
+    ///     Ok(format!("{:?}", result.content))
+    /// }
+    /// # }
+    /// ```
+    #[cfg(feature = "tasks")]
+    pub async fn sample(&mut self, params: CreateMessageRequestParams) -> Result<CreateMessageResult, Error> {
+        let method = crate::types::sampling::commands::CREATE;
+        let is_task_aug = params.task.is_some();
+        let req = Request::new(
+                Some(RequestId::Uuid(uuid::Uuid::new_v4())),
+                method,
+                Some(params));
+
+        if is_task_aug {
+            let result = self.send_request(req)
+                .await?
+                .into_result::<Either<CreateTaskResult, CreateMessageResult>>()?;
+
+            let task = match result {
+                Either::Right(result) => return Ok(result),
+                Either::Left(task_result) => task_result.task,
+            };
+
+            let result = self
+                .get_task_result::<CreateMessageResult>(&task.id)
+                .await?;
+            Ok(result.into_inner())
+        } else {
+            self.send_request(req)
+                .await?
+                .into_result()
+        }
     }
 
     /// Sends the elicitation request to the client
@@ -708,6 +768,82 @@ impl Context {
             crate::types::elicitation::commands::COMPLETE, 
             params)
             .await
+    }
+
+    /// Retrieves task result from the client. If the task is not completed yet, waits until it completes or cancels.
+    #[cfg(feature = "tasks")]
+    pub async fn get_task_result<T>(&mut self, id: impl Into<String>) -> Result<TaskPayload<T>, Error>
+    where 
+        T: DeserializeOwned
+    {
+        let params = GetTaskPayloadRequestParams { id: id.into() };
+        let method = crate::types::task::commands::RESULT;
+        let req = Request::new(
+            Some(RequestId::Uuid(uuid::Uuid::new_v4())),
+            method,
+            Some(params));
+
+        self.send_request(req)
+            .await?
+            .into_result()
+    }
+
+    /// Retrieve task status from the client
+    #[cfg(feature = "tasks")]
+    pub async fn get_task(&mut self, id: impl Into<String>) -> Result<Task, Error> {
+        let params = GetTaskRequestParams { id: id.into() };
+        let method = crate::types::task::commands::GET;
+        let req = Request::new(
+            Some(RequestId::Uuid(uuid::Uuid::new_v4())),
+            method,
+            Some(params));
+        
+        self.send_request(req)
+            .await?
+            .into_result()
+    }
+    
+    /// Cancels a task that is currently running on the client
+    #[cfg(feature = "tasks")]
+    pub async fn cancel_task(&mut self, id: impl Into<String>) -> Result<Task, Error> {       
+        if !self.options.is_tasks_cancellation_supported() {
+            return Err(Error::new(
+                ErrorCode::InvalidRequest, 
+                "Server does not support cancelling tasks."));
+        }
+
+        let params = CancelTaskRequestParams { id: id.into() };
+        let method = crate::types::task::commands::CANCEL;
+        let req = Request::new(
+            Some(RequestId::Uuid(uuid::Uuid::new_v4())),
+            method,
+            Some(params));
+        
+        self.send_request(req)
+            .await?
+            .into_result()
+    }
+
+    /// Retrieves a list of tasks from the client
+    #[cfg(feature = "tasks")]
+    pub async fn list_tasks(&mut self, cursor: Option<Cursor>) -> Result<ListTasksResult, Error> {
+
+        if !self.options.is_tasks_list_supported() {
+            return Err(Error::new(
+                ErrorCode::InvalidRequest, 
+                "Server does not support retrieving a task list."));
+        }
+
+        let params = ListTasksRequestParams { cursor };
+        let method = crate::types::task::commands::LIST;
+        let req = Request::new(
+            Some(RequestId::Uuid(uuid::Uuid::new_v4())),
+            method,
+            Some(params));
+        
+        self.send_request(req)
+            .await?
+            .into_result()
     }
 
     /// Applies earlier defined scopes to the current context.

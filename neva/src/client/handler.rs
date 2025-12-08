@@ -22,6 +22,24 @@ use crate::{
     }
 };
 
+#[cfg(feature = "tasks")]
+use crate::{
+    shared::{TaskTracker, Either},
+    types::{
+        Pagination,
+        CreateMessageResult, ElicitResult, 
+        ListTasksRequestParams, ListTasksResult,
+        CancelTaskRequestParams,
+        GetTaskPayloadRequestParams, GetTaskRequestParams
+    },
+};
+
+#[cfg(feature = "tasks")]
+type ClientTask = Either<CreateMessageResult, ElicitResult>;
+
+#[cfg(feature = "tasks")]
+const DEFAULT_PAGE_SIZE: usize = 10;
+
 struct Roots {
     /// Cached list of [`Root`]
     inner: Arc<RwLock<Vec<Root>>>,
@@ -54,6 +72,10 @@ pub(super) struct RequestHandler {
 
     /// Represents a hash map of notification handlers
     notification_handler: Option<Arc<NotificationsHandler>>,
+
+    /// Task tracker for client sampling tasks.
+    #[cfg(feature = "tasks")]
+    tasks: Arc<TaskTracker<ClientTask>>
 }
 
 impl Roots {
@@ -114,6 +136,8 @@ impl RequestHandler {
             sampling_handler: options.sampling_handler.clone(),
             elicitation_handler: options.elicitation_handler.clone(),
             notification_handler: options.notification_handler.clone(),
+            #[cfg(feature = "tasks")]
+            tasks: Arc::new(TaskTracker::new())
         };
         
         handler.start(rx)
@@ -160,6 +184,7 @@ impl RequestHandler {
         let pending = self.pending.clone();
         let mut sender = self.sender.clone();
         let roots = self.roots.inner.clone();
+        let tasks = self.tasks.clone();
         let sampling_handler = self.sampling_handler.clone();
         let elicitation_handler = self.elicitation_handler.clone();
         let notification_handler = self.notification_handler.clone();
@@ -198,6 +223,46 @@ impl RequestHandler {
                                     Response::error(
                                         id,
                                         Error::new(ErrorCode::MethodNotFound, "Client does not support elicitation requests"))
+                                };
+                                sender.send(resp.into()).await.unwrap();
+                            },
+                            crate::types::task::commands::LIST => {
+                                let params: Option<ListTasksRequestParams> = serde_json::from_value(req.params.clone().unwrap()).ok();
+                                let tasks = ListTasksResult::from(tasks
+                                    .tasks()
+                                    .paginate(params.and_then(|p| p.cursor), DEFAULT_PAGE_SIZE));
+                                sender.send(tasks.into_response(req.id()).into()).await.unwrap(); 
+                            },
+                            crate::types::task::commands::CANCEL => {
+                                let id = req.id();
+                                let params: CancelTaskRequestParams = serde_json::from_value(req.params.clone().unwrap()).unwrap();
+                                let resp = match tasks.cancel(&params.id) {
+                                    Ok(task) => task.into_response(id),
+                                    Err(err) => Response::error(
+                                        id,
+                                        Error::new(ErrorCode::InvalidParams, err.to_string()))
+                                };
+                                sender.send(resp.into()).await.unwrap();
+                            },
+                            crate::types::task::commands::GET => {
+                                let id = req.id();
+                                let params: GetTaskRequestParams = serde_json::from_value(req.params.clone().unwrap()).unwrap();
+                                let resp = match tasks.get_status(&params.id) {
+                                    Ok(task) => task.into_response(id),
+                                    Err(err) => Response::error(
+                                        id,
+                                        Error::new(ErrorCode::InvalidParams, err.to_string()))
+                                };
+                                sender.send(resp.into()).await.unwrap();
+                            },
+                            crate::types::task::commands::RESULT => {
+                                let id = req.id();
+                                let params: GetTaskPayloadRequestParams = serde_json::from_value(req.params.clone().unwrap()).unwrap();
+                                let resp = match tasks.get_result(&params.id).await {
+                                    Ok(task) => task.into_response(id),
+                                    Err(err) => Response::error(
+                                        id,
+                                        Error::new(ErrorCode::InvalidParams, err.to_string()))
                                 };
                                 sender.send(resp.into()).await.unwrap();
                             },
