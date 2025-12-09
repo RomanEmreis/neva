@@ -184,10 +184,12 @@ impl RequestHandler {
         let pending = self.pending.clone();
         let mut sender = self.sender.clone();
         let roots = self.roots.inner.clone();
-        let tasks = self.tasks.clone();
         let sampling_handler = self.sampling_handler.clone();
         let elicitation_handler = self.elicitation_handler.clone();
         let notification_handler = self.notification_handler.clone();
+
+        #[cfg(feature = "tasks")]
+        let tasks = self.tasks.clone();
         
         tokio::task::spawn(async move {
             while let Ok(msg) = rx.recv().await {
@@ -226,6 +228,7 @@ impl RequestHandler {
                                 };
                                 sender.send(resp.into()).await.unwrap();
                             },
+                            #[cfg(feature = "tasks")]
                             crate::types::task::commands::LIST => {
                                 let params: Option<ListTasksRequestParams> = serde_json::from_value(req.params.clone().unwrap()).ok();
                                 let tasks = ListTasksResult::from(tasks
@@ -233,6 +236,7 @@ impl RequestHandler {
                                     .paginate(params.and_then(|p| p.cursor), DEFAULT_PAGE_SIZE));
                                 sender.send(tasks.into_response(req.id()).into()).await.unwrap(); 
                             },
+                            #[cfg(feature = "tasks")]
                             crate::types::task::commands::CANCEL => {
                                 let id = req.id();
                                 let params: CancelTaskRequestParams = serde_json::from_value(req.params.clone().unwrap()).unwrap();
@@ -244,6 +248,7 @@ impl RequestHandler {
                                 };
                                 sender.send(resp.into()).await.unwrap();
                             },
+                            #[cfg(feature = "tasks")]
                             crate::types::task::commands::GET => {
                                 let id = req.id();
                                 let params: GetTaskRequestParams = serde_json::from_value(req.params.clone().unwrap()).unwrap();
@@ -255,6 +260,7 @@ impl RequestHandler {
                                 };
                                 sender.send(resp.into()).await.unwrap();
                             },
+                            #[cfg(feature = "tasks")]
                             crate::types::task::commands::RESULT => {
                                 let id = req.id();
                                 let params: GetTaskPayloadRequestParams = serde_json::from_value(req.params.clone().unwrap()).unwrap();

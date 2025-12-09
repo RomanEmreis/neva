@@ -1,7 +1,6 @@
 //! Types and utilities for the "either" pattern
 
 use serde::{Serialize, Deserialize, Serializer};
-#[cfg(feature = "server")]
 use crate::types::{IntoResponse, RequestId, Response};
 
 /// Represents a value of one of two types
@@ -32,7 +31,6 @@ where
     }   
 }
 
-#[cfg(feature = "server")]
 impl<L, R> IntoResponse for Either<L, R>
 where
     L: IntoResponse,

@@ -28,26 +28,20 @@ use crate::types::{
 use serde::de::DeserializeOwned;
 
 #[cfg(feature = "tasks")]
-use crate::{
-    types::{
-        Task, TaskStatus, TaskPayload,
-        ListTasksRequestParams, ListTasksResult,
-        GetTaskPayloadRequestParams,
-        CancelTaskRequestParams,
-        GetTaskRequestParams,
-        CreateTaskResult,
-        TaskMetadata, 
-    },
-    shared::Either
+use crate::types::{
+    task::{TaskApi, wait_to_completion},
+    Task, TaskPayload,
+    ListTasksRequestParams, ListTasksResult,
+    GetTaskPayloadRequestParams,
+    CancelTaskRequestParams,
+    GetTaskRequestParams,
+    TaskMetadata,
 };
 
 mod handler;
 mod notification_handler;
 pub mod options;
 pub mod subscribe;
-
-#[cfg(feature = "tasks")]
-const DEFAULT_POLL_INTERVAL: usize = 5000; // 5 seconds
 
 /// Represents an MCP client app 
 pub struct Client {
@@ -608,44 +602,9 @@ impl Client {
 
         let result = self.send_request(request)
             .await?
-            .into_result::<Either<CreateTaskResult, CallToolResponse>>()?;
+            .into_result()?;
 
-        let mut task = match result {
-            Either::Right(result) => return Ok(result),
-            Either::Left(task_result) => task_result.task,
-        };
-        
-        let mut elapsed = 0;
-        
-        loop {
-            if ttl.is_some_and(|ttl| ttl <= elapsed) {
-                #[cfg(feature = "tracing")]
-                tracing::debug!(logger = "neva", "Task TTL expired. Cancelling task.");
-                
-                let _ = self.cancel_task(&task.id).await?;
-                return Err(Error::new(ErrorCode::InvalidRequest, "Task was cancelled: TTL expired"));
-            }
-            
-            task = self.get_task(&task.id).await?;
-            
-            if task.status == TaskStatus::Completed {
-                let result: TaskPayload<CallToolResponse> = self
-                    .get_task_result(&task.id)
-                    .await?;
-                return Ok(result.into_inner());
-            } else {
-                let poll_interval = task
-                    .poll_interval
-                    .unwrap_or(DEFAULT_POLL_INTERVAL);
-                
-                elapsed += poll_interval;
-                
-                #[cfg(feature = "tracing")]
-                tracing::debug!(logger = "neva", "Waiting for task to complete. Elapsed: {elapsed}ms");
-                
-                tokio::time::sleep(std::time::Duration::from_millis(poll_interval as u64)).await;   
-            }
-        }
+        wait_to_completion(self, result).await
     }
 
     /// Requests resource contents from MCP server
@@ -791,71 +750,6 @@ impl Client {
         if let Some(notification_handler) = &self.options.notification_handler {
             notification_handler.unsubscribe(event);
         } 
-    }
-
-    /// Retrieves task result. If the task is not completed yet, waits until it completes or cancels.
-    #[cfg(feature = "tasks")]
-    pub async fn get_task_result<T>(&mut self, id: impl Into<String>) -> Result<TaskPayload<T>, Error>
-    where 
-        T: DeserializeOwned
-    {
-        let params = GetTaskPayloadRequestParams { id: id.into() };
-        self.command(crate::types::task::commands::RESULT, Some(params))
-            .await?
-            .into_result()
-    }
-
-    /// Retrieve task status 
-    #[cfg(feature = "tasks")]
-    pub async fn get_task(&mut self, id: impl Into<String>) -> Result<Task, Error> {
-        let params = GetTaskRequestParams { id: id.into() };
-        self.command(crate::types::task::commands::GET, Some(params))
-            .await?
-            .into_result()
-    }
-    
-    /// Cancels a task that is currently running
-    /// 
-    /// # Panics
-    /// If the client or server does not support cancelling tasks
-    #[cfg(feature = "tasks")]
-    pub async fn cancel_task(&mut self, id: impl Into<String>) -> Result<Task, Error> {
-        assert!(
-            self.is_client_support_cancelling_tasks(), 
-            "Client does not support cancelling tasks.  You may configure it with `Client::with_options(|opt| opt.with_tasks(...))` method."
-        );
-        
-        assert!(
-            self.is_server_support_cancelling_tasks(), 
-            "Server does not support cancelling tasks."
-        );
-        
-        let params = CancelTaskRequestParams { id: id.into() };
-        self.command(crate::types::task::commands::CANCEL, Some(params))
-            .await?
-            .into_result()
-    }
-
-    /// Retrieves a list of tasks
-    /// 
-    /// # Panics
-    /// If the client or server does not support retrieving a task list
-    #[cfg(feature = "tasks")]
-    pub async fn list_tasks(&mut self, cursor: Option<Cursor>) -> Result<ListTasksResult, Error> {
-        assert!(
-            self.is_client_support_task_list(), 
-            "Client does not support retrieving a task list.  You may configure it with `Client::with_options(|opt| opt.with_tasks(...))` method."
-        );
-        
-        assert!(
-            self.is_server_support_task_list(), 
-            "Server does not support retrieving a task list."
-        );
-        
-        let params = ListTasksRequestParams { cursor };
-        self.command(crate::types::task::commands::LIST, Some(params))
-            .await?
-            .into_result()
     }
 
     /// Returns whether the server is configured to send the "notifications/resources/updated"
@@ -1034,6 +928,70 @@ impl Client {
             self.is_server_supports_tasks(),
             "Client does not support task-augmented requests."
         );
+    }
+}
+
+#[cfg(feature = "tasks")]
+impl TaskApi for Client {
+    /// Retrieves task result. If the task is not completed yet, waits until it completes or cancels.
+    async fn get_task_result<T>(&mut self, id: impl Into<String>) -> Result<TaskPayload<T>, Error>
+    where 
+        T: DeserializeOwned
+    {
+        let params = GetTaskPayloadRequestParams { id: id.into() };
+        self.command(crate::types::task::commands::RESULT, Some(params))
+            .await?
+            .into_result()
+    }
+
+    /// Retrieve task status 
+    async fn get_task(&mut self, id: impl Into<String>) -> Result<Task, Error> {
+        let params = GetTaskRequestParams { id: id.into() };
+        self.command(crate::types::task::commands::GET, Some(params))
+            .await?
+            .into_result()
+    }
+    
+    /// Cancels a task that is currently running
+    /// 
+    /// # Panics
+    /// If the client or server does not support cancelling tasks
+    async fn cancel_task(&mut self, id: impl Into<String>) -> Result<Task, Error> {
+        assert!(
+            self.is_client_support_cancelling_tasks(), 
+            "Client does not support cancelling tasks.  You may configure it with `Client::with_options(|opt| opt.with_tasks(...))` method."
+        );
+        
+        assert!(
+            self.is_server_support_cancelling_tasks(), 
+            "Server does not support cancelling tasks."
+        );
+        
+        let params = CancelTaskRequestParams { id: id.into() };
+        self.command(crate::types::task::commands::CANCEL, Some(params))
+            .await?
+            .into_result()
+    }
+
+    /// Retrieves a list of tasks
+    /// 
+    /// # Panics
+    /// If the client or server does not support retrieving a task list
+    async fn list_tasks(&mut self, cursor: Option<Cursor>) -> Result<ListTasksResult, Error> {
+        assert!(
+            self.is_client_support_task_list(), 
+            "Client does not support retrieving a task list.  You may configure it with `Client::with_options(|opt| opt.with_tasks(...))` method."
+        );
+        
+        assert!(
+            self.is_server_support_task_list(), 
+            "Server does not support retrieving a task list."
+        );
+        
+        let params = ListTasksRequestParams { cursor };
+        self.command(crate::types::task::commands::LIST, Some(params))
+            .await?
+            .into_result()
     }
 }
 

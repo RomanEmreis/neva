@@ -9,7 +9,7 @@ async fn main() -> Result<(), Error> {
     
     let mut client = Client::new()
         .with_options(|opt| opt
-            .with_timeout(std::time::Duration::from_secs(15))
+            .with_timeout(std::time::Duration::from_secs(60))
             .with_tasks(|t| t.with_all())
             .with_stdio(
                 "cargo",

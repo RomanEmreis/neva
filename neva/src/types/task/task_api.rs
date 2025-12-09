@@ -1,0 +1,72 @@
+//! Utilities and types for handling tasks
+
+use super::{Task, TaskPayload, TaskStatus, CreateTaskResult, ListTasksResult};
+use crate::types::Cursor;
+use crate::shared::Either;
+use crate::error::{Error, ErrorCode};
+use serde::de::DeserializeOwned;
+
+const DEFAULT_POLL_INTERVAL: usize = 5000; // 5 seconds
+
+/// A trait for requestor types
+pub trait TaskApi {
+    /// Retrieves task result from the client. If the task is not completed yet, waits until it completes or cancels.
+    fn get_task_result<T: DeserializeOwned>(&mut self, id: impl Into<String>) -> impl Future<Output = Result<TaskPayload<T>, Error>>;
+
+    /// Retrieve task status from the client
+    fn get_task(&mut self, id: impl Into<String>) -> impl Future<Output = Result<Task, Error>>;
+    
+    /// Cancels a task that is currently running on the client
+    fn cancel_task(&mut self, id: impl Into<String>) -> impl Future<Output = Result<Task, Error>>;
+
+    /// Retrieves a list of tasks from the client
+    fn list_tasks(&mut self, cursor: Option<Cursor>) -> impl Future<Output = Result<ListTasksResult, Error>>;
+}
+
+/// Polls receiver with `tasks/get` until it completed, failed, cancelled or expired.
+/// Call `tasks/result` if it completed or failed and `tasks/cancel` if expired.
+pub async fn wait_to_completion<A, T>(
+    api: &mut A, 
+    result: Either<CreateTaskResult, T>
+) -> Result<T, Error>
+where 
+    A: TaskApi,
+    T: DeserializeOwned
+{
+    let mut task = match result {
+        Either::Right(result) => return Ok(result),
+        Either::Left(task_result) => task_result.task,
+    };
+
+    let mut elapsed = 0;
+        
+    loop {
+        if task.ttl <= elapsed {
+            #[cfg(feature = "tracing")]
+            tracing::debug!(logger = "neva", "Task TTL expired. Cancelling task.");
+            
+            let _ = api.cancel_task(&task.id).await?;
+            return Err(Error::new(ErrorCode::InvalidRequest, "Task was cancelled: TTL expired"));
+        }
+            
+        task = api.get_task(&task.id).await?;
+        
+        if task.status == TaskStatus::Completed {
+            let result: TaskPayload<T> = api
+                .get_task_result(&task.id)
+                .await?;
+
+            return Ok(result.into_inner());
+        } else {
+            let poll_interval = task
+                .poll_interval
+                .unwrap_or(DEFAULT_POLL_INTERVAL);
+
+            elapsed += poll_interval;
+
+            #[cfg(feature = "tracing")]
+            tracing::debug!(logger = "neva", "Waiting for task to complete. Elapsed: {elapsed}ms");
+            tokio::time::sleep(std::time::Duration::from_millis(poll_interval as u64)).await;   
+        }
+    }
+}
