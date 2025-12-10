@@ -8,7 +8,9 @@ pub(crate) use requests_queue::RequestQueue;
 #[cfg(any(feature = "http-server", feature = "tracing"))]
 pub(crate) use message_registry::MessageRegistry;
 #[cfg(feature = "tasks")]
-pub(crate) use task_tracker::{TaskTracker, TaskHandle};
+pub(crate) use task_tracker::TaskTracker;
+#[cfg(all(feature = "tasks", feature = "server"))]
+pub(crate) use task_tracker::TaskHandle;
 
 pub(crate) use arc_str::ArcStr;
 pub(crate) use arc_slice::ArcSlice;

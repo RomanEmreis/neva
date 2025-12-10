@@ -417,6 +417,17 @@ impl ElicitRequestFormParams {
     }
 }
 
+#[cfg(feature = "tasks")]
+impl ElicitRequestUrlParams {
+    /// Makes the request task-augmented with TTL.
+    /// 
+    /// Default: `None`
+    pub fn with_task(mut self, ttl: Option<usize>) -> Self {
+        self.task = Some(TaskMetadata { ttl });
+        self
+    }
+}
+
 impl RequestSchema {
     /// Creates a new [`RequestSchema`] without properties
     #[inline]

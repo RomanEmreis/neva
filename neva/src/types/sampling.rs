@@ -626,6 +626,15 @@ impl CreateMessageRequestParams {
         self
     }
 
+    /// Makes the request task-augmented with TTL.
+    /// 
+    /// Default: `None`
+    #[cfg(feature = "tasks")]
+    pub fn with_task(mut self, ttl: Option<usize>) -> Self {
+        self.task = Some(TaskMetadata { ttl });
+        self
+    }
+
     /// Returns an iterator of text messages
     pub fn text(&self) -> impl Iterator<Item = &TextContent> {
         self.msg_iter("text")

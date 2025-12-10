@@ -77,6 +77,7 @@ impl<T: Clone> TaskTracker<T> {
     }
 
     /// Fails the task
+    #[cfg(feature = "server")]
     pub(crate) fn fail(&self, id: &str) {
         if let Some(mut entry) = self.tasks.get_mut(id) {
             entry.task.fail();
@@ -110,6 +111,7 @@ impl<T: Clone> TaskTracker<T> {
         };
 
         if let Some(ref result) = *result_rx.borrow_and_update() {
+            self.tasks.remove(id);
             return Ok(result.clone());
         }
 
@@ -121,6 +123,7 @@ impl<T: Clone> TaskTracker<T> {
                     }
 
                     if let Some(result) = result_rx.borrow_and_update().clone() {
+                        self.tasks.remove(id);
                         return Ok(result);
                     }
                 }

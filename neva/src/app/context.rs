@@ -41,13 +41,13 @@ use volga_di::Container;
 use serde::de::DeserializeOwned;
 #[cfg(feature = "tasks")]
 use crate::{
+    shared::Either,
     types::{
         Task, TaskPayload, CreateTaskResult, tool::TaskSupport,
         ListTasksRequestParams,ListTasksResult, Cursor,
         CancelTaskRequestParams, GetTaskPayloadRequestParams, GetTaskRequestParams,
         task::{TaskApi, wait_to_completion}
     },
-    shared::Either,
 };
 
 #[cfg(feature = "tasks")]
@@ -676,7 +676,7 @@ impl Context {
             .into_result()
     }
 
-        /// Sends the sampling request to the client
+    /// Sends the sampling request to the client
     ///
     /// # Example
     /// ```no_run
@@ -742,6 +742,7 @@ impl Context {
     /// }
     /// # }
     /// ```
+    #[cfg(not(feature = "tasks"))]
     pub async fn elicit(&mut self, params: ElicitRequestParams) -> Result<ElicitResult, Error> {
         let method = crate::types::elicitation::commands::CREATE;
         let req = Request::new(
@@ -752,6 +753,51 @@ impl Context {
         self.send_request(req)
             .await?
             .into_result()
+    }
+
+        /// Sends the elicitation request to the client
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(feature = "serve-macros")] {
+    /// use neva::{
+    ///     Context, 
+    ///     error::Error, 
+    ///     types::elicitation::ElicitRequestParams, 
+    ///     tool
+    /// };
+    ///
+    /// #[tool]
+    /// async fn generate_poem(mut ctx: Context, _topic: String) -> Result<String, Error> {
+    ///     let params = ElicitRequestParams::new("What is the poem mood you'd like?")
+    ///         .with_required("mood", "string");
+    ///     let result = ctx.elicit(params).await?;
+    ///     Ok(format!("{:?}", result.content))
+    /// }
+    /// # }
+    /// ```
+    #[cfg(feature = "tasks")]
+    pub async fn elicit(&mut self, params: ElicitRequestParams) -> Result<ElicitResult, Error> {
+        let method = crate::types::elicitation::commands::CREATE;
+        let is_task_aug = params
+            .as_url()
+            .is_some_and(|p| p.task.is_some());
+        let req = Request::new(
+            Some(RequestId::Uuid(uuid::Uuid::new_v4())),
+            method,
+            Some(params));
+
+        if is_task_aug {
+            let result = self.send_request(req)
+                .await?
+                .into_result()?;
+
+            wait_to_completion(self, result).await
+        } else {
+            self.send_request(req)
+                .await?
+                .into_result()
+        }
     }
     
     /// Notifies the client that the elicitation with the `id` has been completed

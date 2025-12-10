@@ -1,6 +1,24 @@
 use tracing_subscriber::prelude::*;
 use neva::prelude::*;
 
+#[sampling]
+async fn sampling_handler(params: CreateMessageRequestParams) -> CreateMessageResult {
+    tracing::info!("Received sampling: {:?}", params);
+    
+    CreateMessageResult::assistant()
+        .with_model("o3-mini")
+        .with_content("Some result")
+        .end_turn()
+}
+
+#[elicitation]
+async fn elicitation_handler(params: ElicitRequestParams) -> ElicitResult {
+    match params {
+        ElicitRequestParams::Url(_url) => ElicitResult::accept(),
+        ElicitRequestParams::Form(_form) => ElicitResult::decline()
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     tracing_subscriber::registry()
@@ -16,6 +34,12 @@ async fn main() -> Result<(), Error> {
                 ["run", "--manifest-path", "examples/tasks/server/Cargo.toml"]));
     
     client.connect().await?;
+
+    let result = client.call_tool_with_task("tool_with_sampling", (), None).await;
+    tracing::info!("Received result: {:?}", result);
+
+    let result = client.call_tool_with_task("tool_with_elicitation", (), None).await;
+    tracing::info!("Received result: {:?}", result);
 
     let ttl = 10000; // 10 seconds
     let result = client.call_tool_with_task("endless_tool", (), Some(ttl)).await;
