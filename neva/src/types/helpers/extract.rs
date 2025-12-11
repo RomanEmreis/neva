@@ -7,6 +7,9 @@ use crate::error::{Error, ErrorCode};
 use crate::types::{Meta, ProgressToken};
 use crate::types::request::RequestParamsMeta;
 
+#[cfg(feature = "tasks")]
+use crate::types::RelatedTaskMetadata;
+
 /// Represents a payload that needs the type to be extracted from
 pub(crate) enum Payload<'a> {
     /// Tool or Prompt argument
@@ -93,6 +96,25 @@ impl RequestArgument for Meta<ProgressToken> {
         let meta = payload.expect_meta();
         meta.as_ref()
             .and_then(|meta| meta.progress_token.clone())
+            .ok_or(Error::new(ErrorCode::InvalidParams, "Missing progress token"))
+            .map(Meta)
+    }
+
+    #[inline]
+    fn source() -> Source {
+        Source::Meta
+    }
+}
+
+#[cfg(feature = "tasks")]
+impl RequestArgument for Meta<RelatedTaskMetadata> {
+    type Error = Error;
+
+    #[inline]
+    fn extract(payload: Payload<'_>) -> Result<Self, Self::Error> {
+        let meta = payload.expect_meta();
+        meta.as_ref()
+            .and_then(|meta| meta.task.clone())
             .ok_or(Error::new(ErrorCode::InvalidParams, "Missing progress token"))
             .map(Meta)
     }

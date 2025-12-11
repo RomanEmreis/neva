@@ -580,7 +580,9 @@ impl Context {
                     let task_id = task.id.clone();
                     tokio::spawn(async move {
                         tokio::select! {
-                            result = tool.call(params.with_context(self).into()) => {
+                            result = tool.call(params
+                                .with_task(&task_id)
+                                .with_context(self).into()) => {
                                 let resp = match result {
                                     Ok(result) => {
                                         opt.tasks.complete(&task_id);
@@ -805,6 +807,29 @@ impl Context {
         let params = serde_json::to_value(ElicitationCompleteParams::new(id)).ok();
         self.send_notification(
             crate::types::elicitation::commands::COMPLETE, 
+            params)
+            .await
+    }
+
+    /// Sets the `input_required` status for the task
+    #[cfg(feature = "tasks")]
+    pub async fn require_input(&mut self, id: &str) {
+        self.options.tasks.require_input(id);
+    }
+
+    /// Sets the `failed` status for the task
+    #[cfg(feature = "tasks")]
+    pub async fn fail_task(&mut self, id: &str) {
+        self.options.tasks.fail(id);
+    }
+
+    /// Sends notification that task with `id` was changed.
+    #[cfg(feature = "tasks")]
+    pub async fn task_changed(&mut self, id: &str) -> Result<(), Error> {
+        let task = self.options.tasks.get_status(id)?;
+        let params = serde_json::to_value(task).ok();
+        self.send_notification(
+            crate::types::task::commands::STATUS, 
             params)
             .await
     }

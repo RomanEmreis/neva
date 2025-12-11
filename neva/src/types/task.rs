@@ -401,10 +401,9 @@ impl Task {
     }
 
     /// Sets the `input_required` status.
-    pub fn require_input(mut self) -> Self {
+    pub fn require_input(&mut self) {
         self.status = TaskStatus::InputRequired;
         self.last_updated_at = Utc::now();
-        self
     }
 }
 

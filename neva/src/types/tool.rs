@@ -41,6 +41,8 @@ use {
 
 #[cfg(feature = "tasks")]
 use crate::types::TaskMetadata;
+#[cfg(all(feature = "server", feature = "tasks"))]
+use crate::types::RelatedTaskMetadata;
 
 #[cfg(feature = "client")]
 use jsonschema::validator_for;
@@ -631,6 +633,15 @@ impl CallToolRequestParams {
     /// Includes [`Context`] into request metadata. If metadata is `None` it creates a new.
     pub(crate) fn with_context(mut self, ctx: Context) -> Self {
         self.meta.get_or_insert_default().context = Some(ctx);
+        self
+    }
+
+    /// Associates [`CallToolRequestParams`] with the appropriated task
+    #[cfg(feature = "tasks")]
+    pub(crate) fn with_task(mut self, task_id: impl Into<String>) -> Self {
+        self.meta.get_or_insert_default().task = Some(RelatedTaskMetadata {
+            id: task_id.into()
+        });
         self
     }
 }

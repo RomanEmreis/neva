@@ -84,6 +84,14 @@ impl<T: Clone> TaskTracker<T> {
         }
     }
 
+    /// Sets the task into `input_required` status
+    #[cfg(feature = "server")]
+    pub(crate) fn require_input(&self, id: &str) {
+        if let Some(mut entry) = self.tasks.get_mut(id) {
+            entry.task.require_input();
+        }
+    }
+
     /// Retrieves the task status 
     pub(crate) fn get_status(&self, id: &str) -> Result<Task, Error> {
         self.tasks
