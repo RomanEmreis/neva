@@ -1,17 +1,21 @@
 //! Types and utilities for task-augmented requests and responses
 
 use std::ops::{Deref, DerefMut};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use crate::types::{Cursor, IntoResponse, Page, RequestId, Response};
+use crate::{
+    types::{Cursor, IntoResponse, Page, RequestId, Response},
+    error::Error
+};
 
 #[cfg(feature = "server")]
 use crate::{
-    error::Error,
     app::handler::{FromHandlerParams, HandlerParams},
     types::request::{FromRequest, Request}
 };
+
+pub(crate) const RELATED_TASK_KEY: &str = "io.modelcontextprotocol/related-task";
 
 const DEFAULT_TTL: usize = 30000;
 
@@ -195,13 +199,13 @@ pub struct RelatedTaskMetadata {
 }
 
 /// Represents the response to a `tasks/result` request.
-/// The inner `T` matches the result type of the original request.
+/// The inner `Value` matches the result type of the original request.
 /// For example, a `tools/call` task would return the [`CallToolResponse`] structure.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskPayload<T>(pub T);
+pub struct TaskPayload(pub Value);
 
-impl<T> Deref for TaskPayload<T> {
-    type Target = T;
+impl Deref for TaskPayload {
+    type Target = Value;
 
     #[inline]
     fn deref(&self) -> &Self::Target {
@@ -209,7 +213,7 @@ impl<T> Deref for TaskPayload<T> {
     }
 }
 
-impl<T> DerefMut for TaskPayload<T> {
+impl DerefMut for TaskPayload {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
@@ -226,7 +230,7 @@ impl IntoResponse for Task {
     }
 }
 
-impl<T: IntoResponse> IntoResponse for TaskPayload<T> {
+impl IntoResponse for TaskPayload {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
         self.0.into_response(req_id)
@@ -280,6 +284,13 @@ impl From<Page<'_, Task>> for ListTasksResult {
             next_cursor: page.next_cursor,
             tasks: page.items.to_vec()
         }
+    }
+}
+
+impl<T: Into<String>> From<T> for RelatedTaskMetadata {
+    #[inline]
+    fn from(value: T) -> Self {
+        Self { id: value.into() }
     }
 }
 
@@ -377,6 +388,12 @@ impl Task {
         self.last_updated_at = Utc::now();
     }
 
+    /// Sets the `working` status.
+    pub fn reset(&mut self) {
+        self.status = TaskStatus::Working;
+        self.last_updated_at = Utc::now();
+    }
+
     /// Sets the `cancelled` status.
     pub fn cancel(mut self) -> Self {
         self.status = TaskStatus::Cancelled;
@@ -403,10 +420,17 @@ impl Task {
     }
 }
 
-impl<T> TaskPayload<T> {
-    /// Unwraps the inner `T`.
+impl TaskPayload {
+    /// Unwraps the inner `Value`.
     #[inline]
-    pub fn into_inner(self) -> T {
+    pub fn into_inner(self) -> Value {
         self.0
+    }
+
+    /// Unwraps the inner `T`
+    #[inline]
+    pub fn to<T: DeserializeOwned>(self) -> Result<T, Error> {
+        serde_json::from_value::<T>(self.0)
+            .map_err(Error::from)
     }
 }

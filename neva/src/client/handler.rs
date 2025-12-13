@@ -24,19 +24,16 @@ use crate::{
 
 #[cfg(feature = "tasks")]
 use crate::{
-    shared::{TaskTracker, Either},
+    shared::TaskTracker,
     types::{
         Task, Pagination, CreateTaskResult,
-        CreateMessageRequestParams, CreateMessageResult, 
-        ElicitRequestParams, ElicitResult, 
+        CreateMessageRequestParams, 
+        ElicitRequestParams, 
         ListTasksRequestParams, ListTasksResult,
         CancelTaskRequestParams,
         GetTaskPayloadRequestParams, GetTaskRequestParams
     },
 };
-
-#[cfg(feature = "tasks")]
-type ClientTask = Either<CreateMessageResult, ElicitResult>;
 
 #[cfg(feature = "tasks")]
 const DEFAULT_PAGE_SIZE: usize = 10;
@@ -76,7 +73,7 @@ pub(super) struct RequestHandler {
 
     /// Task tracker for client sampling tasks.
     #[cfg(feature = "tasks")]
-    tasks: Arc<TaskTracker<ClientTask>>
+    tasks: Arc<TaskTracker>
 }
 
 impl Roots {
@@ -167,6 +164,12 @@ impl RequestHandler {
             }
         }
     }
+
+    /// Sends the response to MCP server
+    #[inline]
+    pub(super) async fn send_response(&mut self, resp: Response) {
+        send_response_impl(&mut self.sender, resp).await;
+    }
     
     /// Sends a notification to MCP server
     #[inline]
@@ -225,7 +228,7 @@ impl RequestHandler {
                                 return;
                             }
                         };
-                        send_response(&mut sender, resp).await;
+                        send_response_impl(&mut sender, resp).await;
                     },
                     Message::Notification(notification) => {
                         match &notification_handler { 
@@ -244,7 +247,7 @@ impl RequestHandler {
 }
 
 #[inline]
-async fn send_response(sender: &mut TransportProtoSender, resp: Response) {
+async fn send_response_impl(sender: &mut TransportProtoSender, resp: Response) {
     if let Err(_err) = sender.send(resp.into()).await {
         #[cfg(feature = "tracing")]
         tracing::error!("Error sending response: {_err:?}");
@@ -287,7 +290,7 @@ async fn handle_sampling(req: Request, handler: &Option<SamplingHandler>) -> Res
 async fn handle_sampling(
     req: Request, 
     handler: &Option<SamplingHandler>,
-    tasks: &Arc<TaskTracker<Either<CreateMessageResult, ElicitResult>>>
+    tasks: &Arc<TaskTracker>
 ) -> Response {
     let id = req.id();
     if let Some(handler) = &handler  {
@@ -308,7 +311,7 @@ async fn handle_sampling(
                 tokio::select! {
                     result = handler(params) => {
                         tasks.complete(&task_id);
-                        handle.complete(Either::Left(result));
+                        handle.set_result(result);
                     },
                     _ = handle.cancelled() => {}
                 }
@@ -350,7 +353,7 @@ async fn handle_elicitation(req: Request, handler: &Option<ElicitationHandler>) 
 async fn handle_elicitation(
     req: Request, 
     handler: &Option<ElicitationHandler>,
-    tasks: &Arc<TaskTracker<Either<CreateMessageResult, ElicitResult>>>
+    tasks: &Arc<TaskTracker>
 ) -> Response {
     let id = req.id();
     if let Some(handler) = &handler  {
@@ -372,7 +375,7 @@ async fn handle_elicitation(
                 tokio::select! {
                     result = handler(params) => {
                         tasks.complete(&task_id);
-                        handle.complete(Either::Right(result));
+                        handle.set_result(result);
                     },
                     _ = handle.cancelled() => {}
                 }
@@ -394,7 +397,7 @@ async fn handle_elicitation(
 #[cfg(feature = "tasks")]
 fn handle_list_tasks(
     req: Request, 
-    tasks: &Arc<TaskTracker<Either<CreateMessageResult, ElicitResult>>>
+    tasks: &Arc<TaskTracker>
 ) -> Response {
     let id = req.id();
     let Some(params) = req.params else {
@@ -413,7 +416,7 @@ fn handle_list_tasks(
 #[cfg(feature = "tasks")]
 fn cancel_task(
     req: Request, 
-    tasks: &Arc<TaskTracker<Either<CreateMessageResult, ElicitResult>>>
+    tasks: &Arc<TaskTracker>
 ) -> Response {
     let id = req.id();
     let Some(params) = req.params else {
@@ -434,7 +437,7 @@ fn cancel_task(
 #[cfg(feature = "tasks")]
 fn get_task(
     req: Request, 
-    tasks: &Arc<TaskTracker<Either<CreateMessageResult, ElicitResult>>>
+    tasks: &Arc<TaskTracker>
 ) -> Response {
     let id = req.id();
     let Some(params) = req.params else {
@@ -455,7 +458,7 @@ fn get_task(
 #[cfg(feature = "tasks")]
 async fn get_task_result(
     req: Request, 
-    tasks: &Arc<TaskTracker<Either<CreateMessageResult, ElicitResult>>>
+    tasks: &Arc<TaskTracker>
 ) -> Response {
     let id = req.id();
     let Some(params) = req.params else {

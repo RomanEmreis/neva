@@ -29,8 +29,7 @@ use serde::de::DeserializeOwned;
 
 #[cfg(feature = "tasks")]
 use crate::types::{
-    Task, TaskPayload,
-    ListTasksRequestParams, ListTasksResult,
+    Task, TaskPayload, ListTasksRequestParams, ListTasksResult,
     GetTaskPayloadRequestParams,
     CancelTaskRequestParams,
     GetTaskRequestParams,
@@ -871,6 +870,16 @@ impl Client {
             .send_request(req)
             .await
     }
+
+    /// Sends a request to the MCP server
+    #[inline]
+    async fn send_response(&mut self, req: Response) -> Result<(), Error> {
+        self.handler.as_mut()
+            .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?
+            .send_response(req)
+            .await;
+        Ok(())
+    }
     
     /// Sends a notification to the MCP server
     #[inline]
@@ -933,7 +942,7 @@ impl Client {
 #[cfg(feature = "tasks")]
 impl shared::TaskApi for Client {
     /// Retrieves task result. If the task is not completed yet, waits until it completes or cancels.
-    async fn get_task_result<T>(&mut self, id: impl Into<String>) -> Result<TaskPayload<T>, Error>
+    async fn get_task_result<T>(&mut self, id: impl Into<String>) -> Result<T, Error>
     where 
         T: DeserializeOwned
     {
@@ -991,6 +1000,19 @@ impl shared::TaskApi for Client {
         self.command(crate::types::task::commands::LIST, Some(params))
             .await?
             .into_result()
+    }
+
+    async fn handle_input(&mut self, id: &str, params: TaskPayload) -> Result<(), Error> {
+        let params = params.to::<ElicitRequestParams>()?;
+        if let Some(handler) = &self.options.elicitation_handler {
+            use crate::types::IntoResponse;
+            use std::str::FromStr;
+
+            let result = handler(params).await;
+            let id = RequestId::from_str(id).unwrap();
+            self.send_response(result.into_response(id)).await?;
+        }
+        Ok(())
     }
 }
 

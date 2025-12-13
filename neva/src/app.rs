@@ -574,7 +574,7 @@ impl App {
     async fn task_result(
         options: RuntimeMcpOptions,
         params: GetTaskPayloadRequestParams
-    ) -> Result<TaskPayload<CallToolResponse>, Error> {
+    ) -> Result<TaskPayload, Error> {
         options.get_task_result(&params.id).await
     }
     
