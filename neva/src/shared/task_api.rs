@@ -58,11 +58,12 @@ where
 
             return Ok(result.into_inner());
         } else if task.status == TaskStatus::InputRequired {
-            let result: TaskPayload<T> = api
-                .get_task_result(&task.id)
-                .await?;
+            unimplemented!("This feature is not yet implemented.")
+            //let result: TaskPayload<T> = api
+            //    .get_task_result(&task.id)
+            //    .await?;
 
-            return Ok(result.into_inner());
+            //return Ok(result.into_inner());
         } else if task.status == TaskStatus::Cancelled {
             return Err(Error::new(ErrorCode::InvalidRequest, "Task was cancelled"));
         } else {
