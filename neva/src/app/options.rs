@@ -29,7 +29,6 @@ use crate::shared::{TaskTracker, TaskHandle};
 #[cfg(feature = "tasks")]
 use crate::types::{
     ServerTasksCapability,
-    CallToolResponse,
     TaskPayload,
     Task,
 };
@@ -106,7 +105,7 @@ pub struct McpOptions {
 
     /// Currently running tasks
     #[cfg(feature = "tasks")]
-    pub(super) tasks: TaskTracker<CallToolResponse>
+    pub(super) tasks: TaskTracker
 }
 
 impl Debug for McpOptions {
@@ -314,7 +313,7 @@ impl McpOptions {
     
     /// Tacks the task and returns the [`CancellationToken`] for this task
     #[cfg(feature = "tasks")]
-    pub(crate) fn track_task(&self, task: Task) -> TaskHandle<CallToolResponse> {
+    pub(crate) fn track_task(&self, task: Task) -> TaskHandle {
         self.tasks.track(task)
     }
 
@@ -332,7 +331,7 @@ impl McpOptions {
 
     /// Awaits the task result
     #[cfg(feature = "tasks")]
-    pub(crate) async fn get_task_result(&self, task_id: &str) -> Result<TaskPayload<CallToolResponse>, Error> {
+    pub(crate) async fn get_task_result(&self, task_id: &str) -> Result<TaskPayload, Error> {
         self.tasks.get_result(task_id).await
     }
     

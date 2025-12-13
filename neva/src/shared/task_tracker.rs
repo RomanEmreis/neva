@@ -1,32 +1,35 @@
 //! Types and utilities for tracking tasks
 
+use serde::Serialize;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
 use tokio::sync::watch::{channel, Sender, Receiver};
 use crate::error::{Error, ErrorCode};
-use crate::types::{Task, TaskPayload};
+use crate::types::{Task, TaskPayload, TaskStatus};
 
 #[derive(Default)]
-pub(crate) struct TaskTracker<T> {
-    tasks: dashmap::DashMap<String, TaskEntry<T>>
+pub(crate) struct TaskTracker {
+    tasks: dashmap::DashMap<String, TaskEntry>
 }
 
-/// Alias for [`Option<TaskPayload<T>>`]
-pub(crate) type MaybePayload<T> = Option<TaskPayload<T>>;
+/// Alias for [`Option<TaskPayload>`]
+pub(crate) type MaybePayload = Option<TaskPayload>;
 
 /// Represents a task currently running on the server
-pub(crate) struct TaskEntry<T> {
+pub(crate) struct TaskEntry {
     task: Task,
     token: CancellationToken,
-    rx: Receiver<MaybePayload<T>>,
+    #[cfg(feature = "server")]
+    tx: Sender<MaybePayload>,
+    rx: Receiver<MaybePayload>,
 }
 
 /// Represents a handle to a task that can be used to cancel or get the result of the task.
-pub(crate) struct TaskHandle<T> {
+pub(crate) struct TaskHandle {
     token: CancellationToken,
-    tx: Sender<MaybePayload<T>>,
+    tx: Sender<MaybePayload>,
 }
 
-impl<T: Clone> TaskTracker<T> {
+impl TaskTracker {
     /// Creates a new [`TaskTracker`]
     #[inline]
     pub(crate) fn new() -> Self {
@@ -44,12 +47,14 @@ impl<T: Clone> TaskTracker<T> {
     }
 
     /// Tacks the task and returns the [`TaskHandle`] for this task
-    pub(crate) fn track(&self, task: Task) -> TaskHandle<T> {
+    pub(crate) fn track(&self, task: Task) -> TaskHandle {
         let token = CancellationToken::new();
         let (tx, rx) = channel(None);
         
         self.tasks.insert(task.id.clone(), TaskEntry {
             token: token.clone(),
+            #[cfg(feature = "server")]
+            tx: tx.clone(),
             task,
             rx,
         });
@@ -86,10 +91,37 @@ impl<T: Clone> TaskTracker<T> {
 
     /// Sets the task into `input_required` status
     #[cfg(feature = "server")]
-    #[allow(unused)]
     pub(crate) fn require_input(&self, id: &str) {
         if let Some(mut entry) = self.tasks.get_mut(id) {
             entry.task.require_input();
+        }
+    }
+
+    /// Sets the task into `working` status
+    #[cfg(feature = "server")]
+    pub(crate) fn reset(&self, id: &str) {
+        if let Some(mut entry) = self.tasks.get_mut(id) {
+            entry.task.reset();
+        }
+    }
+
+    /// Sets the result of the [`Task`].
+    #[cfg(feature = "server")]
+    pub(crate) fn set_result<T: Serialize>(&self, id: &str, result: T) {
+        if let Some(entry) = self.tasks.get(id) {
+            let result = match serde_json::to_value(result) {
+                Ok(result) => result,
+                Err(_err) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::error!(
+                        logger = "neva",
+                        "Unable to serialize task result: {_err:?}");
+                    return;
+                }
+            };
+            let _ = entry
+                .tx
+                .send(Some(TaskPayload(result)));
         }
     }
 
@@ -105,8 +137,8 @@ impl<T: Clone> TaskTracker<T> {
 
     /// Returns the task result if it is present, 
     /// otherwise waits until the result is available or the task will be canceled.
-    pub(crate) async fn get_result(&self, id: &str) -> Result<TaskPayload<T>, Error> {
-        let (mut result_rx, token) = {
+    pub(crate) async fn get_result(&self, id: &str) -> Result<TaskPayload, Error> {
+        let (status, mut result_rx, token) = {
             let entry = self.tasks
                 .get(id)
                 .ok_or_else(|| Error::new(
@@ -114,13 +146,16 @@ impl<T: Clone> TaskTracker<T> {
                     format!("Could not find task with id: {id}")))?;
 
             (
+                entry.task.status,
                 entry.rx.clone(),
                 entry.token.clone(),
             )
         };
 
         if let Some(ref result) = *result_rx.borrow_and_update() {
-            self.tasks.remove(id);
+            if status != TaskStatus::InputRequired {
+                self.tasks.remove(id);
+            }
             return Ok(result.clone());
         }
 
@@ -132,7 +167,10 @@ impl<T: Clone> TaskTracker<T> {
                     }
 
                     if let Some(result) = result_rx.borrow_and_update().clone() {
-                        self.tasks.remove(id);
+                        let task = self.get_status(id)?;
+                        if task.status != TaskStatus::InputRequired {
+                            self.tasks.remove(id);
+                        }
                         return Ok(result);
                     }
                 }
@@ -144,9 +182,19 @@ impl<T: Clone> TaskTracker<T> {
     }
 }
 
-impl<T> TaskHandle<T> {
+impl TaskHandle {
     /// Completes the [`Task`] and sets the result.
-    pub(crate) fn complete(self, result: T) {
+    pub(crate) fn set_result<T: Serialize>(self, result: T) {
+        let result = match serde_json::to_value(result) {
+            Ok(result) => result,
+            Err(_err) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(
+                    logger = "neva",
+                    "Unable to serialize task result: {_err:?}");
+                return;
+            }
+        };
         let _ = self.tx.send(Some(TaskPayload(result)));
     }
 
@@ -175,17 +223,20 @@ impl<T> TaskHandle<T> {
 mod tests {
     use std::sync::Arc;
     use super::*;
-    use crate::types::{TaskStatus, CallToolResponse};
+    use crate::types::TaskStatus;
+
+    #[cfg(feature = "server")]
+    use crate::types::CallToolResponse;
 
     #[test]
     fn it_can_create_new_tracker() {
-        let tracker = TaskTracker::<String>::new();
+        let tracker = TaskTracker::new();
         assert_eq!(tracker.tasks().len(), 0);
     }
 
     #[test]
     fn it_can_track_task() {
-        let tracker = TaskTracker::<String>::new();
+        let tracker = TaskTracker::new();
         let task = Task::new();
         let task_id = task.id.clone();
 
@@ -198,7 +249,7 @@ mod tests {
 
     #[test]
     fn it_can_return_list_of_tasks() {
-        let tracker = TaskTracker::<String>::new();
+        let tracker = TaskTracker::new();
         let task1 = Task::new();
         let task2 = Task::new();
 
@@ -211,7 +262,7 @@ mod tests {
 
     #[test]
     fn it_can_cancel_task() {
-        let tracker = TaskTracker::<String>::new();
+        let tracker = TaskTracker::new();
         let task = Task::new();
         let task_id = task.id.clone();
 
@@ -224,7 +275,7 @@ mod tests {
 
     #[test]
     fn it_does_return_error_when_cancelling_nonexistent_task() {
-        let tracker = TaskTracker::<String>::new();
+        let tracker = TaskTracker::new();
 
         let result = tracker.cancel("nonexistent");
         assert!(result.is_err());
@@ -233,7 +284,7 @@ mod tests {
 
     #[test]
     fn it_can_complete_task() {
-        let tracker = TaskTracker::<String>::new();
+        let tracker = TaskTracker::new();
         let task = Task::new();
         let task_id = task.id.clone();
 
@@ -247,7 +298,7 @@ mod tests {
 
     #[test]
     fn it_does_nothing_when_completing_nonexistent_task() {
-        let tracker = TaskTracker::<String>::new();
+        let tracker = TaskTracker::new();
         tracker.complete("nonexistent");
         // Should not panic
     }
@@ -255,7 +306,7 @@ mod tests {
     #[cfg(feature = "server")]
     #[test]
     fn it_can_fail_task() {
-        let tracker = TaskTracker::<String>::new();
+        let tracker = TaskTracker::new();
         let task = Task::new();
         let task_id = task.id.clone();
 
@@ -270,7 +321,7 @@ mod tests {
     #[cfg(feature = "server")]
     #[test]
     fn it_does_nothing_when_failing_nonexistent_task() {
-        let tracker = TaskTracker::<String>::new();
+        let tracker = TaskTracker::new();
         tracker.fail("nonexistent");
         // Should not panic
     }
@@ -278,7 +329,7 @@ mod tests {
     #[cfg(feature = "server")]
     #[test]
     fn it_can_require_input() {
-        let tracker = TaskTracker::<String>::new();
+        let tracker = TaskTracker::new();
         let task = Task::new();
         let task_id = task.id.clone();
 
@@ -293,14 +344,14 @@ mod tests {
     #[cfg(feature = "server")]
     #[test]
     fn it_does_nothing_when_requiring_input_for_nonexistent_task() {
-        let tracker = TaskTracker::<String>::new();
+        let tracker = TaskTracker::new();
         tracker.require_input("nonexistent");
         // Should not panic
     }
 
     #[test]
     fn it_can_get_task_status() {
-        let tracker = TaskTracker::<String>::new();
+        let tracker = TaskTracker::new();
         let task = Task::new();
         let task_id = task.id.clone();
 
@@ -313,7 +364,7 @@ mod tests {
 
     #[test]
     fn it_does_return_error_when_getting_status_of_nonexistent_task() {
-        let tracker = TaskTracker::<String>::new();
+        let tracker = TaskTracker::new();
 
         let result = tracker.get_status("nonexistent");
         assert!(result.is_err());
@@ -322,7 +373,7 @@ mod tests {
 
     #[tokio::test]
     async fn it_can_get_task_result_when_completed() {
-        let tracker = TaskTracker::<String>::new();
+        let tracker = TaskTracker::new();
         let task = Task::new();
         let task_id = task.id.clone();
 
@@ -330,7 +381,7 @@ mod tests {
 
         tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-            handle.complete("test_result".to_string());
+            handle.set_result("test_result".to_string());
         });
 
         let result = tracker.get_result(&task_id).await.unwrap();
@@ -339,12 +390,12 @@ mod tests {
 
     #[tokio::test]
     async fn it_does_return_result_immediately_when_already_available() {
-        let tracker = TaskTracker::<String>::new();
+        let tracker = TaskTracker::new();
         let task = Task::new();
         let task_id = task.id.clone();
 
         let handle = tracker.track(task.clone());
-        handle.complete("immediate_result".to_string());
+        handle.set_result("immediate_result".to_string());
 
         let result = tracker.get_result(&task_id).await.unwrap();
         assert_eq!(result.0, "immediate_result");
@@ -352,7 +403,7 @@ mod tests {
 
     #[tokio::test]
     async fn it_does_return_error_when_getting_result_of_nonexistent_task() {
-        let tracker = TaskTracker::<String>::new();
+        let tracker = TaskTracker::new();
 
         let result = tracker.get_result("nonexistent").await;
         assert!(result.is_err());
@@ -361,7 +412,7 @@ mod tests {
 
     #[tokio::test]
     async fn it_does_return_error_when_task_is_cancelled() {
-        let tracker = TaskTracker::<String>::new();
+        let tracker = TaskTracker::new();
         let task = Task::new();
         let task_id = task.id.clone();
 
@@ -385,7 +436,7 @@ mod tests {
 
     #[tokio::test]
     async fn it_can_wait_for_result_with_multiple_updates() {
-        let tracker = TaskTracker::<String>::new();
+        let tracker = TaskTracker::new();
         let task = Task::new();
         let task_id = task.id.clone();
 
@@ -393,7 +444,7 @@ mod tests {
 
         tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            handle.complete("final_result".to_string());
+            handle.set_result("final_result".to_string());
         });
 
         let result = tracker.get_result(&task_id).await.unwrap();
@@ -403,12 +454,12 @@ mod tests {
 
     #[tokio::test]
     async fn it_does_remove_task_after_getting_result() {
-        let tracker = TaskTracker::<String>::new();
+        let tracker = TaskTracker::new();
         let task = Task::new();
         let task_id = task.id.clone();
 
         let handle = tracker.track(task.clone());
-        handle.complete("result".to_string());
+        handle.set_result("result".to_string());
 
         let _ = tracker.get_result(&task_id).await.unwrap();
 
@@ -417,7 +468,7 @@ mod tests {
 
     #[tokio::test]
     async fn it_can_create_task_handle() {
-        let tracker = TaskTracker::<CallToolResponse>::new();
+        let tracker = TaskTracker::new();
         let task = Task::new();
 
         let handle = tracker.track(task);
@@ -432,7 +483,7 @@ mod tests {
 
     #[tokio::test]
     async fn it_can_cancel_via_handle() {
-        let tracker = TaskTracker::<String>::new();
+        let tracker = TaskTracker::new();
         let task = Task::new();
         let task_id = task.id.clone();
 
@@ -462,7 +513,7 @@ mod tests {
     #[test]
     #[cfg(feature = "server")]
     fn it_can_handle_complex_payload_types() {
-        let tracker = TaskTracker::<CallToolResponse>::new();
+        let tracker = TaskTracker::new();
         let task = Task::new();
         let task_id = task.id.clone();
 
@@ -470,7 +521,7 @@ mod tests {
 
         let response = CallToolResponse::new("test");
         tracker.complete(&task_id);
-        handle.complete(response.clone());
+        handle.set_result(response.clone());
 
         let status = tracker.get_status(&task_id).unwrap();
         assert_eq!(status.status, TaskStatus::Completed);
@@ -478,7 +529,7 @@ mod tests {
 
     #[tokio::test]
     async fn it_can_track_multiple_concurrent_tasks() {
-        let tracker = TaskTracker::<String>::new();
+        let tracker = TaskTracker::new();
         let tasks: Vec<_> = (0..5).map(|_| Task::new()).collect();
         let task_ids: Vec<_> = tasks.iter().map(|t| t.id.clone()).collect();
 
@@ -486,7 +537,7 @@ mod tests {
 
         for (i, handle) in handles.into_iter().enumerate() {
             let result = format!("result_{}", i);
-            handle.complete(result);
+            handle.set_result(result);
         }
 
         for (i, task_id) in task_ids.iter().enumerate() {
@@ -499,7 +550,7 @@ mod tests {
 
     #[test]
     fn it_does_maintain_task_state_transitions() {
-        let tracker = TaskTracker::<String>::new();
+        let tracker = TaskTracker::new();
         let task = Task::new();
         let task_id = task.id.clone();
 

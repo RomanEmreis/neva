@@ -592,7 +592,7 @@ impl Context {
                                         CallToolResponse::error(err)
                                     }
                                 };
-                                handle.complete(resp);
+                                handle.set_result(resp);
                             },
                             _ = handle.cancelled() => {}
                         }
@@ -779,15 +779,44 @@ impl Context {
     /// ```
     #[cfg(feature = "tasks")]
     pub async fn elicit(&mut self, params: ElicitRequestParams) -> Result<ElicitResult, Error> {
+        let related_task = params.related_task();
+
+        if let Some(related_task) = related_task {
+            use std::str::FromStr;
+
+            let task_id = related_task.id;
+
+            let id = RequestId::from_str(&task_id).unwrap();
+            let receiver = self.pending.push(&id);
+
+            self.options.tasks.set_result(&task_id, params);
+            self.options.tasks.require_input(&task_id);
+
+            let resp = match timeout(self.timeout, receiver).await {
+                Ok(Ok(resp)) => resp,
+                Ok(Err(_)) => {
+                    self.options.tasks.fail(&task_id);
+                    return Err(Error::new(ErrorCode::InternalError, "Response channel closed"))
+                },
+                Err(_) => {
+                    _ = self.pending.pop(&id);
+                    self.options.tasks.fail(&task_id);
+                    return Err(Error::new(ErrorCode::Timeout, "Request timed out"));
+                }
+            };
+            
+            self.options.tasks.reset(&task_id);
+
+            return resp.into_result();
+        }
+
         let method = crate::types::elicitation::commands::CREATE;
-        let is_task_aug = params
-            .as_url()
-            .is_some_and(|p| p.task.is_some());
+        let is_task_aug = params.is_task_augmented();
         let req = Request::new(
             Some(RequestId::Uuid(uuid::Uuid::new_v4())),
             method,
             Some(params));
-
+        
         if is_task_aug {
             let result = self.send_request(req)
                 .await?
@@ -925,7 +954,7 @@ impl Context {
 #[cfg(feature = "tasks")]
 impl crate::shared::TaskApi for Context {
     /// Retrieve task result from the client. If the task is not completed yet, waits until it completes or cancels.
-    async fn get_task_result<T>(&mut self, id: impl Into<String>) -> Result<TaskPayload<T>, Error>
+    async fn get_task_result<T>(&mut self, id: impl Into<String>) -> Result<T, Error>
     where 
         T: DeserializeOwned
     {
@@ -994,5 +1023,11 @@ impl crate::shared::TaskApi for Context {
         self.send_request(req)
             .await?
             .into_result()
+    }
+
+    async fn handle_input(&mut self, _id: &str, _params: TaskPayload) -> Result<(), Error> {
+        // Reserved, there are no cases so far, for the server 
+        // to handle input requests from client.
+        Ok(())
     }
 }
