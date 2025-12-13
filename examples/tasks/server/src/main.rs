@@ -22,7 +22,9 @@ async fn tool_with_sampling(mut ctx: Context) -> String {
 
 #[tool(task_support = "required")]
 async fn tool_with_elicitation(mut ctx: Context) -> String {
-    let params = ElicitRequestParams::url("https://www.example.com/auth", "Some message")
+    let params = ElicitRequestParams::url(
+        "https://www.example.com/auth", 
+        "Some message")
         .with_task(Some(5000));
 
     let res = ctx.elicit(params.into()).await;
@@ -33,7 +35,7 @@ async fn tool_with_elicitation(mut ctx: Context) -> String {
 fn main() {
     App::new()
         .with_options(|opt| opt
-            .with_stdio()
+            .with_default_http()
             .with_tasks(|t| t.with_all()))
         .run_blocking();
 }

@@ -19,6 +19,8 @@ pub(crate) use memchr::MemChr;
 pub use one_or_many::OneOrMany;
 pub use either::Either;
 pub use into_args::IntoArgs;
+#[cfg(feature = "tasks")]
+pub use task_api::{TaskApi, wait_to_completion};
 
 #[cfg(feature = "http-client")]
 pub mod mt;
@@ -34,6 +36,8 @@ mod one_or_many;
 mod either;
 #[cfg(feature = "tasks")]
 mod task_tracker;
+#[cfg(feature = "tasks")]
+mod task_api;
 
 #[inline]
 #[cfg(any(feature = "server", feature = "client"))]

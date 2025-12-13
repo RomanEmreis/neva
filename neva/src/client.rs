@@ -29,7 +29,6 @@ use serde::de::DeserializeOwned;
 
 #[cfg(feature = "tasks")]
 use crate::types::{
-    task::{TaskApi, wait_to_completion},
     Task, TaskPayload,
     ListTasksRequestParams, ListTasksResult,
     GetTaskPayloadRequestParams,
@@ -575,7 +574,7 @@ impl Client {
     /// }
     /// ```
     #[cfg(feature = "tasks")]
-    pub async fn call_tool_with_task<N, Args>(
+    pub async fn call_tool_as_task<N, Args>(
         &mut self,
         name: N,
         args: Args,
@@ -604,7 +603,7 @@ impl Client {
             .await?
             .into_result()?;
 
-        wait_to_completion(self, result).await
+        shared::wait_to_completion(self, result).await
     }
 
     /// Requests resource contents from MCP server
@@ -932,7 +931,7 @@ impl Client {
 }
 
 #[cfg(feature = "tasks")]
-impl TaskApi for Client {
+impl shared::TaskApi for Client {
     /// Retrieves task result. If the task is not completed yet, waits until it completes or cancels.
     async fn get_task_result<T>(&mut self, id: impl Into<String>) -> Result<TaskPayload<T>, Error>
     where 

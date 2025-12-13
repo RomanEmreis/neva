@@ -13,6 +13,8 @@ async fn sampling_handler(params: CreateMessageRequestParams) -> CreateMessageRe
 
 #[elicitation]
 async fn elicitation_handler(params: ElicitRequestParams) -> ElicitResult {
+    tracing::info!("Received elicitation: {:?}", params);
+    
     match params {
         ElicitRequestParams::Url(_url) => ElicitResult::accept(),
         ElicitRequestParams::Form(_form) => ElicitResult::decline()
@@ -29,20 +31,18 @@ async fn main() -> Result<(), Error> {
         .with_options(|opt| opt
             .with_timeout(std::time::Duration::from_secs(60))
             .with_tasks(|t| t.with_all())
-            .with_stdio(
-                "cargo",
-                ["run", "--manifest-path", "examples/tasks/server/Cargo.toml"]));
+            .with_default_http());
     
     client.connect().await?;
 
-    let result = client.call_tool_with_task("tool_with_sampling", (), None).await;
+    let result = client.call_tool_as_task("tool_with_sampling", (), None).await;
     tracing::info!("Received result: {:?}", result);
 
-    let result = client.call_tool_with_task("tool_with_elicitation", (), None).await;
+    let result = client.call_tool_as_task("tool_with_elicitation", (), None).await;
     tracing::info!("Received result: {:?}", result);
 
     let ttl = 10000; // 10 seconds
-    let result = client.call_tool_with_task("endless_tool", (), Some(ttl)).await;
+    let result = client.call_tool_as_task("endless_tool", (), Some(ttl)).await;
     tracing::info!("Received result: {:?}", result);
     
     let result = client.list_tasks(None).await?;

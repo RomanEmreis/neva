@@ -5,9 +5,9 @@ use crate::error::{Error, ErrorCode};
 use crate::transport::Sender;
 use super::{options::{McpOptions, RuntimeMcpOptions}, handler::RequestHandler};
 use crate::{
-    shared::{IntoArgs, RequestQueue},
-    middleware::{MwContext, Next},
-    transport::TransportProtoSender,
+    shared::{IntoArgs, RequestQueue}, 
+    middleware::{MwContext, Next}, 
+    transport::TransportProtoSender, 
     types::{
         Tool, CallToolRequestParams, CallToolResponse,
         ToolUse, ToolResult,
@@ -20,7 +20,7 @@ use crate::{
         resource::SubscribeRequestParams,
         sampling::{CreateMessageRequestParams, CreateMessageResult},
         elicitation::{ElicitRequestParams, ElicitResult, ElicitationCompleteParams}
-    },
+    }
 };
 use std::{
     fmt::{Debug, Formatter},
@@ -46,7 +46,6 @@ use crate::{
         Task, TaskPayload, CreateTaskResult, tool::TaskSupport,
         ListTasksRequestParams,ListTasksResult, Cursor,
         CancelTaskRequestParams, GetTaskPayloadRequestParams, GetTaskRequestParams,
-        task::{TaskApi, wait_to_completion}
     },
 };
 
@@ -715,7 +714,7 @@ impl Context {
                 .await?
                 .into_result()?;
 
-            wait_to_completion(self, result).await
+            crate::shared::wait_to_completion(self, result).await
         } else {
             self.send_request(req)
                 .await?
@@ -757,7 +756,7 @@ impl Context {
             .into_result()
     }
 
-        /// Sends the elicitation request to the client
+    /// Sends the elicitation request to the client
     ///
     /// # Example
     /// ```no_run
@@ -794,7 +793,7 @@ impl Context {
                 .await?
                 .into_result()?;
 
-            wait_to_completion(self, result).await
+            crate::shared::wait_to_completion(self, result).await
         } else {
             self.send_request(req)
                 .await?
@@ -811,19 +810,7 @@ impl Context {
             .await
     }
 
-    /// Sets the `input_required` status for the task
-    #[cfg(feature = "tasks")]
-    pub async fn require_input(&mut self, id: &str) {
-        self.options.tasks.require_input(id);
-    }
-
-    /// Sets the `failed` status for the task
-    #[cfg(feature = "tasks")]
-    pub async fn fail_task(&mut self, id: &str) {
-        self.options.tasks.fail(id);
-    }
-
-    /// Sends notification that task with `id` was changed.
+    /// Sends notification that a task with `id` was changed.
     #[cfg(feature = "tasks")]
     pub async fn task_changed(&mut self, id: &str) -> Result<(), Error> {
         let task = self.options.tasks.get_status(id)?;
@@ -936,8 +923,8 @@ impl Context {
 }
 
 #[cfg(feature = "tasks")]
-impl TaskApi for Context {
-    /// Retrieves task result from the client. If the task is not completed yet, waits until it completes or cancels.
+impl crate::shared::TaskApi for Context {
+    /// Retrieve task result from the client. If the task is not completed yet, waits until it completes or cancels.
     async fn get_task_result<T>(&mut self, id: impl Into<String>) -> Result<TaskPayload<T>, Error>
     where 
         T: DeserializeOwned

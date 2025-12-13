@@ -1,16 +1,16 @@
 //! Utilities and types for handling tasks
 
-use super::{Task, TaskPayload, TaskStatus, CreateTaskResult, ListTasksResult};
-use crate::types::Cursor;
-use crate::shared::Either;
+use crate::types::{Task, TaskPayload, TaskStatus, CreateTaskResult, ListTasksResult, Cursor};
 use crate::error::{Error, ErrorCode};
+use super::Either;
 use serde::de::DeserializeOwned;
+use std::time::Duration;
 
 const DEFAULT_POLL_INTERVAL: usize = 5000; // 5 seconds
 
 /// A trait for requestor types
 pub trait TaskApi {
-    /// Retrieves task result from the client. If the task is not completed yet, waits until it completes or cancels.
+    /// Retrieve task result from the client. If the task is not completed yet, waits until it completes or cancels.
     fn get_task_result<T: DeserializeOwned>(&mut self, id: impl Into<String>) -> impl Future<Output = Result<TaskPayload<T>, Error>>;
 
     /// Retrieve task status from the client
@@ -51,12 +51,20 @@ where
             
         task = api.get_task(&task.id).await?;
         
-        if task.status == TaskStatus::Completed {
+        if task.status == TaskStatus::Completed || task.status == TaskStatus::Failed {
             let result: TaskPayload<T> = api
                 .get_task_result(&task.id)
                 .await?;
 
             return Ok(result.into_inner());
+        } else if task.status == TaskStatus::InputRequired {
+            let result: TaskPayload<T> = api
+                .get_task_result(&task.id)
+                .await?;
+
+            return Ok(result.into_inner());
+        } else if task.status == TaskStatus::Cancelled {
+            return Err(Error::new(ErrorCode::InvalidRequest, "Task was cancelled"));
         } else {
             let poll_interval = task
                 .poll_interval
@@ -66,7 +74,7 @@ where
 
             #[cfg(feature = "tracing")]
             tracing::debug!(logger = "neva", "Waiting for task to complete. Elapsed: {elapsed}ms");
-            tokio::time::sleep(std::time::Duration::from_millis(poll_interval as u64)).await;   
+            tokio::time::sleep(Duration::from_millis(poll_interval as u64)).await;   
         }
     }
 }

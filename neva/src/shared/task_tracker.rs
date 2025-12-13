@@ -86,6 +86,7 @@ impl<T: Clone> TaskTracker<T> {
 
     /// Sets the task into `input_required` status
     #[cfg(feature = "server")]
+    #[allow(unused)]
     pub(crate) fn require_input(&self, id: &str) {
         if let Some(mut entry) = self.tasks.get_mut(id) {
             entry.task.require_input();
@@ -157,7 +158,7 @@ impl<T> TaskHandle<T> {
     /// async fn cancelled(&self);
     /// ```
     ///
-    /// The future will complete immediately if the token is already cancelled
+    /// The future will complete immediately if the token is already canceled
     /// when this method is called.
     ///
     /// # Cancellation safety
@@ -166,5 +167,349 @@ impl<T> TaskHandle<T> {
     #[inline]
     pub(crate) fn cancelled(&self) -> WaitForCancellationFuture<'_> {
         self.token.cancelled()
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use super::*;
+    use crate::types::{TaskStatus, CallToolResponse};
+
+    #[test]
+    fn it_can_create_new_tracker() {
+        let tracker = TaskTracker::<String>::new();
+        assert_eq!(tracker.tasks().len(), 0);
+    }
+
+    #[test]
+    fn it_can_track_task() {
+        let tracker = TaskTracker::<String>::new();
+        let task = Task::new();
+        let task_id = task.id.clone();
+
+        let _handle = tracker.track(task);
+
+        let tasks = tracker.tasks();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, task_id);
+    }
+
+    #[test]
+    fn it_can_return_list_of_tasks() {
+        let tracker = TaskTracker::<String>::new();
+        let task1 = Task::new();
+        let task2 = Task::new();
+
+        let _handle1 = tracker.track(task1.clone());
+        let _handle2 = tracker.track(task2.clone());
+
+        let tasks = tracker.tasks();
+        assert_eq!(tasks.len(), 2);
+    }
+
+    #[test]
+    fn it_can_cancel_task() {
+        let tracker = TaskTracker::<String>::new();
+        let task = Task::new();
+        let task_id = task.id.clone();
+
+        let _handle = tracker.track(task);
+
+        let result = tracker.cancel(&task_id).unwrap();
+        assert_eq!(result.status, TaskStatus::Cancelled);
+        assert_eq!(tracker.tasks().len(), 0);
+    }
+
+    #[test]
+    fn it_does_return_error_when_cancelling_nonexistent_task() {
+        let tracker = TaskTracker::<String>::new();
+
+        let result = tracker.cancel("nonexistent");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, ErrorCode::InvalidParams);
+    }
+
+    #[test]
+    fn it_can_complete_task() {
+        let tracker = TaskTracker::<String>::new();
+        let task = Task::new();
+        let task_id = task.id.clone();
+
+        let _handle = tracker.track(task);
+
+        tracker.complete(&task_id);
+
+        let status = tracker.get_status(&task_id).unwrap();
+        assert_eq!(status.status, TaskStatus::Completed);
+    }
+
+    #[test]
+    fn it_does_nothing_when_completing_nonexistent_task() {
+        let tracker = TaskTracker::<String>::new();
+        tracker.complete("nonexistent");
+        // Should not panic
+    }
+
+    #[cfg(feature = "server")]
+    #[test]
+    fn it_can_fail_task() {
+        let tracker = TaskTracker::<String>::new();
+        let task = Task::new();
+        let task_id = task.id.clone();
+
+        let _handle = tracker.track(task);
+
+        tracker.fail(&task_id);
+
+        let status = tracker.get_status(&task_id).unwrap();
+        assert_eq!(status.status, TaskStatus::Failed);
+    }
+
+    #[cfg(feature = "server")]
+    #[test]
+    fn it_does_nothing_when_failing_nonexistent_task() {
+        let tracker = TaskTracker::<String>::new();
+        tracker.fail("nonexistent");
+        // Should not panic
+    }
+
+    #[cfg(feature = "server")]
+    #[test]
+    fn it_can_require_input() {
+        let tracker = TaskTracker::<String>::new();
+        let task = Task::new();
+        let task_id = task.id.clone();
+
+        let _handle = tracker.track(task);
+
+        tracker.require_input(&task_id);
+
+        let status = tracker.get_status(&task_id).unwrap();
+        assert_eq!(status.status, TaskStatus::InputRequired);
+    }
+
+    #[cfg(feature = "server")]
+    #[test]
+    fn it_does_nothing_when_requiring_input_for_nonexistent_task() {
+        let tracker = TaskTracker::<String>::new();
+        tracker.require_input("nonexistent");
+        // Should not panic
+    }
+
+    #[test]
+    fn it_can_get_task_status() {
+        let tracker = TaskTracker::<String>::new();
+        let task = Task::new();
+        let task_id = task.id.clone();
+
+        let _handle = tracker.track(task.clone());
+
+        let status = tracker.get_status(&task_id).unwrap();
+        assert_eq!(status.id, task.id);
+        assert_eq!(status.status, TaskStatus::Working);
+    }
+
+    #[test]
+    fn it_does_return_error_when_getting_status_of_nonexistent_task() {
+        let tracker = TaskTracker::<String>::new();
+
+        let result = tracker.get_status("nonexistent");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, ErrorCode::InvalidParams);
+    }
+
+    #[tokio::test]
+    async fn it_can_get_task_result_when_completed() {
+        let tracker = TaskTracker::<String>::new();
+        let task = Task::new();
+        let task_id = task.id.clone();
+
+        let handle = tracker.track(task.clone());
+
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            handle.complete("test_result".to_string());
+        });
+
+        let result = tracker.get_result(&task_id).await.unwrap();
+        assert_eq!(result.0, "test_result");
+    }
+
+    #[tokio::test]
+    async fn it_does_return_result_immediately_when_already_available() {
+        let tracker = TaskTracker::<String>::new();
+        let task = Task::new();
+        let task_id = task.id.clone();
+
+        let handle = tracker.track(task.clone());
+        handle.complete("immediate_result".to_string());
+
+        let result = tracker.get_result(&task_id).await.unwrap();
+        assert_eq!(result.0, "immediate_result");
+    }
+
+    #[tokio::test]
+    async fn it_does_return_error_when_getting_result_of_nonexistent_task() {
+        let tracker = TaskTracker::<String>::new();
+
+        let result = tracker.get_result("nonexistent").await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, ErrorCode::InvalidParams);
+    }
+
+    #[tokio::test]
+    async fn it_does_return_error_when_task_is_cancelled() {
+        let tracker = TaskTracker::<String>::new();
+        let task = Task::new();
+        let task_id = task.id.clone();
+
+        let _handle = tracker.track(task.clone());
+        
+        let tracker = Arc::new(tracker);
+
+        tokio::spawn({
+            let tracker = tracker.clone();
+            let task_id = task_id.clone();
+            async move {
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                let _ = tracker.cancel(&task_id);
+            }
+        });
+
+        let result = tracker.get_result(&task_id).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, ErrorCode::InvalidRequest);
+    }
+
+    #[tokio::test]
+    async fn it_can_wait_for_result_with_multiple_updates() {
+        let tracker = TaskTracker::<String>::new();
+        let task = Task::new();
+        let task_id = task.id.clone();
+
+        let handle = tracker.track(task.clone());
+
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            handle.complete("final_result".to_string());
+        });
+
+        let result = tracker.get_result(&task_id).await.unwrap();
+        assert_eq!(result.0, "final_result");
+        assert_eq!(tracker.tasks().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn it_does_remove_task_after_getting_result() {
+        let tracker = TaskTracker::<String>::new();
+        let task = Task::new();
+        let task_id = task.id.clone();
+
+        let handle = tracker.track(task.clone());
+        handle.complete("result".to_string());
+
+        let _ = tracker.get_result(&task_id).await.unwrap();
+
+        assert_eq!(tracker.tasks().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn it_can_create_task_handle() {
+        let tracker = TaskTracker::<CallToolResponse>::new();
+        let task = Task::new();
+
+        let handle = tracker.track(task);
+
+        // Just ensure the handle can be created and used
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = handle.cancelled() => {}
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn it_can_cancel_via_handle() {
+        let tracker = TaskTracker::<String>::new();
+        let task = Task::new();
+        let task_id = task.id.clone();
+
+        let handle = tracker.track(task.clone());
+
+        let tracker = Arc::new(tracker);
+        
+        tokio::spawn({
+            let tracker = tracker.clone();
+            let task_id = task_id.clone();
+            async move {
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                let _ = tracker.cancel(&task_id);
+            }
+        });
+
+        tokio::select! {
+            _ = handle.cancelled() => {
+                // Successfully cancelled
+            }
+            _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {
+                panic!("Task was not cancelled");
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "server")]
+    fn it_can_handle_complex_payload_types() {
+        let tracker = TaskTracker::<CallToolResponse>::new();
+        let task = Task::new();
+        let task_id = task.id.clone();
+
+        let handle = tracker.track(task.clone());
+
+        let response = CallToolResponse::new("test");
+        tracker.complete(&task_id);
+        handle.complete(response.clone());
+
+        let status = tracker.get_status(&task_id).unwrap();
+        assert_eq!(status.status, TaskStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn it_can_track_multiple_concurrent_tasks() {
+        let tracker = TaskTracker::<String>::new();
+        let tasks: Vec<_> = (0..5).map(|_| Task::new()).collect();
+        let task_ids: Vec<_> = tasks.iter().map(|t| t.id.clone()).collect();
+
+        let handles: Vec<_> = tasks.into_iter().map(|t| tracker.track(t)).collect();
+
+        for (i, handle) in handles.into_iter().enumerate() {
+            let result = format!("result_{}", i);
+            handle.complete(result);
+        }
+
+        for (i, task_id) in task_ids.iter().enumerate() {
+            let result = tracker.get_result(task_id).await.unwrap();
+            assert_eq!(result.0, format!("result_{}", i));
+        }
+
+        assert_eq!(tracker.tasks().len(), 0);
+    }
+
+    #[test]
+    fn it_does_maintain_task_state_transitions() {
+        let tracker = TaskTracker::<String>::new();
+        let task = Task::new();
+        let task_id = task.id.clone();
+
+        let _handle = tracker.track(task.clone());
+
+        let status = tracker.get_status(&task_id).unwrap();
+        assert_eq!(status.status, TaskStatus::Working);
+
+        tracker.complete(&task_id);
+        let status = tracker.get_status(&task_id).unwrap();
+        assert_eq!(status.status, TaskStatus::Completed);
     }
 }

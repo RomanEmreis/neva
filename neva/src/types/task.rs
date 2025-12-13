@@ -13,10 +13,6 @@ use crate::{
     types::request::{FromRequest, Request}
 };
 
-pub use task_api::{TaskApi, wait_to_completion};
-
-mod task_api;
-
 const DEFAULT_TTL: usize = 30000;
 
 /// List of commands for Tasks

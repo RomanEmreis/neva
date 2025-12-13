@@ -139,5 +139,5 @@ pub mod prelude {
     pub use crate::di::Dc;
 
     #[cfg(feature = "tasks")]
-    pub use crate::types::task::TaskApi;
+    pub use crate::shared::TaskApi;
 }
