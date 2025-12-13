@@ -530,7 +530,7 @@ impl Client {
     ///     client.connect().await?;
     ///
     ///     let args = [("message", "Hello MCP!")]; // or let args = ("message", "Hello MCP!"); 
-    ///     let result = client.call_tool_with_task("echo", args, None).await?;
+    ///     let result = client.call_tool_as_task("echo", args, None).await?;
     ///     // Do something with the result
     ///
     ///     client.disconnect().await
@@ -561,7 +561,7 @@ impl Client {
     ///         .expect("Weather forecast tool not found");
     ///
     ///     let args = ("location", "London");
-    ///     let result = client.call_tool_with_task("weather-forecast", args, None).await?;
+    ///     let result = client.call_tool_as_task("weather-forecast", args, None).await?;
     ///
     ///     // Validate the output structure and deserialize the result
     ///     let weather: Weather = tool
