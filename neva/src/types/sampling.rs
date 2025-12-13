@@ -15,6 +15,8 @@ use crate::types::{
 
 #[cfg(feature = "client")]
 use std::{pin::Pin, sync::Arc, future::Future};
+#[cfg(feature = "tasks")]
+use crate::types::TaskMetadata;
 
 const DEFAULT_MESSAGE_MAX_TOKENS: i32 = 512;
 
@@ -120,6 +122,16 @@ pub struct CreateMessageRequestParams {
     /// Default is `{ mode: "auto" }`.
     #[serde(rename = "toolChoice", skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoice>,
+
+    /// If specified, the caller is requesting task-augmented execution for this request.
+    /// The request will return a [`CreateTaskResult`] immediately, and the actual result can be
+    /// retrieved later via `tasks/result`.
+    ///
+    /// **Note:** Task augmentation is subject to capability negotiation - receivers **MUST** declare support
+    /// for task augmentation of specific request types in their capabilities.
+    #[cfg(feature = "tasks")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<TaskMetadata>,
 }
 
 /// Controls tool selection behavior for sampling requests.
@@ -233,7 +245,7 @@ pub struct ModelHint {
 /// Represents a client's response to a _"sampling/createMessage"_ from the server.
 /// 
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateMessageResult {
     /// Role of the user who generated the message.
     pub role: Role,
@@ -347,7 +359,9 @@ impl Default for CreateMessageRequestParams {
             temp: None,
             stop_sequences: None,
             tool_choice: None,
-            tools: None
+            tools: None,
+            #[cfg(feature = "tasks")]
+            task: None,
         }
     }
 }
@@ -355,7 +369,10 @@ impl Default for CreateMessageRequestParams {
 impl IntoResponse for CreateMessageResult {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
-        Response::success(req_id, serde_json::to_value(self).unwrap())
+        match serde_json::to_value(self) {
+            Ok(v) => Response::success(req_id, v),
+            Err(err) => Response::error(req_id, err.into())
+        }
     }
 }
 
@@ -606,6 +623,15 @@ impl CreateMessageRequestParams {
     /// Default: `None`
     pub fn with_tool_choice(mut self, mode: ToolChoiceMode) -> Self {
         self.tool_choice = Some(ToolChoice { mode });
+        self
+    }
+
+    /// Makes the request task-augmented with TTL.
+    /// 
+    /// Default: `None`
+    #[cfg(feature = "tasks")]
+    pub fn with_task(mut self, ttl: Option<usize>) -> Self {
+        self.task = Some(TaskMetadata { ttl });
         self
     }
 

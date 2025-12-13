@@ -14,6 +14,9 @@ use {
     volga::headers::HeaderMap
 };
 
+#[cfg(feature = "tasks")]
+use crate::types::RelatedTaskMetadata;
+
 #[cfg(feature = "server")]
 pub use from_request::FromRequest;
 pub use request_id::RequestId;
@@ -67,6 +70,13 @@ pub struct RequestParamsMeta {
     #[serde(rename = "progressToken", skip_serializing_if = "Option::is_none")]
     pub progress_token: Option<ProgressToken>,
     
+    /// Represents metadata for associating messages with a task.
+    /// 
+    /// > **Note:** Include this in the _meta field under the key `io.modelcontextprotocol/related-task`.
+    #[serde(rename = "io.modelcontextprotocol/related-task", skip_serializing_if = "Option::is_none")]
+    #[cfg(feature = "tasks")]
+    pub(crate) task: Option<RelatedTaskMetadata>,
+
     /// MCP request context
     #[serde(skip)]
     #[cfg(feature = "server")]
@@ -94,6 +104,8 @@ impl RequestParamsMeta {
     pub fn new(id: &RequestId) -> Self {
         Self {
             progress_token: Some(ProgressToken::from(id)),
+            #[cfg(feature = "tasks")]
+            task: None,
             #[cfg(feature = "server")]
             context: None
         }

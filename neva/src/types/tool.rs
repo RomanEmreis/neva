@@ -39,6 +39,11 @@ use {
     }
 };
 
+#[cfg(feature = "tasks")]
+use crate::types::TaskMetadata;
+#[cfg(all(feature = "server", feature = "tasks"))]
+use crate::types::RelatedTaskMetadata;
+
 #[cfg(feature = "client")]
 use jsonschema::validator_for;
 
@@ -111,6 +116,11 @@ pub struct Tool {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icons: Option<Vec<Icon>>,
     
+    /// Execution-related properties for this tool.
+    #[cfg(feature = "tasks")]
+    #[serde(rename = "execution", skip_serializing_if = "Option::is_none")]
+    pub exec: Option<ToolExecution>,
+    
     /// Metadata reserved by MCP for protocol-level metadata.
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<Value>,
@@ -129,6 +139,39 @@ pub struct Tool {
     #[serde(skip)]
     #[cfg(feature = "server")]
     handler: Option<RequestHandler<CallToolResponse>>,
+}
+
+/// Execution-related properties for a tool.
+#[derive(Default, Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg(feature = "tasks")]
+pub struct ToolExecution {
+    /// Indicates whether this tool supports task-augmented execution.
+    /// This allows clients to handle long-running operations through polling
+    /// the task system.
+    #[serde(rename = "taskSupport", skip_serializing_if = "Option::is_none")]
+    pub task_support: Option<TaskSupport>
+}
+
+/// Represents task-augmentation support options for a tool.
+///
+/// - `forbidden` - Tool does not support task-augmented execution (default when absent)
+/// - `optional` - Tool may support task-augmented execution
+/// - `required` - Tool requires task-augmented execution
+///
+/// Default: `forbidden`
+#[derive(Default, Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg(feature = "tasks")]
+#[serde(rename_all = "lowercase")]
+pub enum TaskSupport {
+    /// Tool does not support task-augmented execution.
+    #[default]
+    Forbidden,
+    
+    /// Tool may support task-augmented execution.
+    Optional,
+    
+    /// Tool requires task-augmented execution.
+    Required,
 }
 
 /// Sent from the client to request a list of tools the server has.
@@ -172,6 +215,16 @@ pub struct CallToolRequestParams {
     #[serde(rename = "arguments")]
     pub args: Option<HashMap<String, Value>>,
 
+    /// If specified, the caller is requesting task-augmented execution for this request.
+    /// The request will return a [`CreateTaskResult`] immediately, and the actual result can be
+    /// retrieved later via `tasks/result`.
+    /// 
+    /// **Note:** Task augmentation is subject to capability negotiation - receivers **MUST** declare support
+    /// for task augmentation of specific request types in their capabilities.
+    #[cfg(feature = "tasks")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<TaskMetadata>,
+    
     /// Metadata related to the request that provides additional protocol-level information.
     /// 
     /// > **Note:** This can include progress tracking tokens and other protocol-specific properties
@@ -262,7 +315,10 @@ pub struct ToolAnnotations {
 impl IntoResponse for ListToolsResult {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
-        Response::success(req_id, serde_json::to_value(self).unwrap())
+        match serde_json::to_value(self) {
+            Ok(v) => Response::success(req_id, v),
+            Err(err) => Response::error(req_id, err.into())
+        }
     }
 }
 
@@ -338,6 +394,27 @@ impl Default for ToolAnnotations {
             open_world: Some(true),
             readonly: Some(false),
         }
+    }
+}
+
+#[cfg(feature = "tasks")]
+impl From<&str> for TaskSupport {
+    #[inline]
+    fn from(value: &str) -> Self {
+        match value { 
+            "forbidden" => Self::Forbidden,
+            "required" => Self::Required,
+            "optional" => Self::Optional,
+            _ => unreachable!()
+        }
+    }
+}
+
+#[cfg(feature = "tasks")]
+impl From<String> for TaskSupport {
+    #[inline]
+    fn from(value: String) -> Self {
+        Self::from(value.as_str())
     }
 }
 
@@ -538,7 +615,9 @@ impl CallToolRequestParams {
         Self {
             name: name.into(),
             args: None,
-            meta: None
+            meta: None,
+            #[cfg(feature = "tasks")]
+            task: None
         }
     }
 
@@ -554,6 +633,15 @@ impl CallToolRequestParams {
     /// Includes [`Context`] into request metadata. If metadata is `None` it creates a new.
     pub(crate) fn with_context(mut self, ctx: Context) -> Self {
         self.meta.get_or_insert_default().context = Some(ctx);
+        self
+    }
+
+    /// Associates [`CallToolRequestParams`] with the appropriated task
+    #[cfg(feature = "tasks")]
+    pub(crate) fn with_task(mut self, task_id: impl Into<String>) -> Self {
+        self.meta.get_or_insert_default().task = Some(RelatedTaskMetadata {
+            id: task_id.into()
+        });
         self
     }
 }
@@ -598,6 +686,8 @@ impl Tool {
             roles: None,
             #[cfg(feature = "http-server")]
             permissions: None,
+            #[cfg(feature = "tasks")]
+            exec: None
         }
     }
     
@@ -677,6 +767,13 @@ impl Tool {
         self.icons = Some(icons.into_iter().collect());
         self
     }
+
+    /// Sets the [`Tool`] icons
+    #[cfg(feature = "tasks")]
+    pub fn with_task_support(&mut self, support: impl Into<TaskSupport>) -> &mut Self {
+        self.exec = Some(ToolExecution::new(support.into()));
+        self
+    }
     
     /// Invoke a tool
     #[inline]
@@ -706,6 +803,17 @@ impl Tool {
             .validate(content)
             .map(|_| resp)
             .map_err(|err| Error::new(ErrorCode::ParseError, err.to_string()))
+    }
+}
+
+#[cfg(feature = "tasks")]
+impl Tool {
+    /// Returns a task support for the tool if specified.
+    #[inline]
+    pub fn task_support(&self) -> Option<TaskSupport> {
+        self.exec
+            .as_ref()
+            .and_then(|e| e.task_support)
     }
 }
 
@@ -760,6 +868,15 @@ impl ToolAnnotations {
     }
 }
 
+#[cfg(all(feature = "server", feature = "tasks"))]
+impl ToolExecution {
+    /// Creates a new [`ToolExecution`] with a task support
+    #[inline]
+    pub fn new(support: TaskSupport) -> Self {
+        Self { task_support: Some(support) }
+    }
+}
+
 macro_rules! impl_generic_tool_handler ({ $($param:ident)* } => {
     #[cfg(feature = "server")]
     impl<Func, Fut: Send, $($param: TypeCategory,)*> ToolHandler<($($param,)*)> for Func
@@ -810,6 +927,8 @@ mod tests {
         let params = CallToolRequestParams {
             name: "sum".into(),
             meta: None,
+            #[cfg(feature = "tasks")]
+            task: None,
             args: Some(HashMap::from([
                 ("a".into(), serde_json::to_value(5).unwrap()),
                 ("b".into(), serde_json::to_value(2).unwrap()),

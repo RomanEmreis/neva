@@ -24,6 +24,19 @@ use crate::types::{
     Root
 };
 
+#[cfg(feature = "tasks")]
+use serde::de::DeserializeOwned;
+
+#[cfg(feature = "tasks")]
+use crate::types::{
+    Task, TaskPayload,
+    ListTasksRequestParams, ListTasksResult,
+    GetTaskPayloadRequestParams,
+    CancelTaskRequestParams,
+    GetTaskRequestParams,
+    TaskMetadata,
+};
+
 mod handler;
 mod notification_handler;
 pub mod options;
@@ -236,6 +249,8 @@ impl Client {
                 roots: self.options.roots_capability(),
                 sampling: self.options.sampling_capability(),
                 elicitation: self.options.elicitation_capability(),
+                #[cfg(feature = "tasks")]
+                tasks: self.options.tasks_capability(),
                 experimental: None,
             })
         };
@@ -488,12 +503,107 @@ impl Client {
             Some(CallToolRequestParams {
                 name: name.into(),
                 meta: Some(RequestParamsMeta::new(&id)),
-                args: args.into_args()
+                args: args.into_args(),
+                #[cfg(feature = "tasks")]
+                task: None
             }));
         
         self.send_request(request)
             .await?
             .into_result()
+    }
+
+    /// Calls a task-augmented tool that MCP server supports
+    ///
+    /// # Panics
+    /// If the server does not support task-augmented tool calls
+    /// 
+    /// # Example
+    /// ```no_run
+    /// use neva::client::Client;
+    /// use neva::error::Error;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let mut client = Client::new();
+    ///
+    ///     client.connect().await?;
+    ///
+    ///     let args = [("message", "Hello MCP!")]; // or let args = ("message", "Hello MCP!"); 
+    ///     let result = client.call_tool_as_task("echo", args, None).await?;
+    ///     // Do something with the result
+    ///
+    ///     client.disconnect().await
+    /// }
+    /// ```
+    ///
+    /// # Structured output
+    /// ```no_run
+    /// use neva::prelude::*;
+    ///
+    /// #[json_schema(de)]
+    /// struct Weather {
+    ///     conditions: String,
+    ///     temperature: f32,
+    ///     humidity: f32,
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let mut client = Client::new();
+    ///
+    ///     client.connect().await?;
+    ///
+    ///     let tools = client.list_tools(None).await?;
+    ///
+    ///     // Get the tool by name
+    ///     let tool: &Tool = tools.get("weather-forecast")
+    ///         .expect("Weather forecast tool not found");
+    ///
+    ///     let args = ("location", "London");
+    ///     let result = client.call_tool_as_task("weather-forecast", args, None).await?;
+    ///
+    ///     // Validate the output structure and deserialize the result
+    ///     let weather: Weather = tool
+    ///         .validate(&result)
+    ///         .and_then(|res| res.as_json())?;
+    ///     
+    ///     // Do something with the result
+    ///
+    ///     client.disconnect().await
+    /// }
+    /// ```
+    #[cfg(feature = "tasks")]
+    pub async fn call_tool_as_task<N, Args>(
+        &mut self,
+        name: N,
+        args: Args,
+        ttl: Option<usize>
+    ) -> Result<CallToolResponse, Error>
+    where
+        N: Into<String>,
+        Args: shared::IntoArgs
+    {
+        assert!(
+            self.is_server_support_call_tool_with_tasks(), 
+            "Server does not support call tool with tasks.");
+        
+        let id = self.generate_id()?;
+        let request = Request::new(
+            Some(id.clone()),
+            crate::types::tool::commands::CALL,
+            Some(CallToolRequestParams {
+                name: name.into(),
+                meta: Some(RequestParamsMeta::new(&id)),
+                args: args.into_args(),
+                task: Some(TaskMetadata { ttl })
+            }));
+
+        let result = self.send_request(request)
+            .await?
+            .into_result()?;
+
+        shared::wait_to_completion(self, result).await
     }
 
     /// Requests resource contents from MCP server
@@ -685,6 +795,74 @@ impl Client {
             .is_some()
     }
 
+    /// Returns whether the client has task augmentation capabilities
+    #[inline]
+    #[cfg(feature = "tasks")]
+    fn is_client_supports_tasks(&self) -> bool {
+        self.options.tasks_capability
+            .as_ref()
+            .is_some()
+    }
+
+    /// Returns whether the server has task augmentation capabilities
+    #[inline]
+    #[cfg(feature = "tasks")]
+    fn is_server_supports_tasks(&self) -> bool {
+        self.server_capabilities
+            .as_ref()
+            .is_some_and(|c| c.tasks.is_some())
+    }
+
+    /// Returns whether the client supports cancelling tasks
+    #[inline]
+    #[cfg(feature = "tasks")]
+    fn is_client_support_cancelling_tasks(&self) -> bool {
+        self.options.tasks_capability
+            .as_ref()
+            .is_some_and(|c| c.cancel.is_some())
+    }
+
+    /// Returns whether the server supports cancelling tasks
+    #[inline]
+    #[cfg(feature = "tasks")]
+    fn is_server_support_cancelling_tasks(&self) -> bool {
+        self.server_capabilities
+            .as_ref()
+            .and_then(|c| c.tasks.as_ref())
+            .is_some_and(|c| c.cancel.is_some())
+    }
+
+    /// Returns whether the server supports retrieving a task list
+    #[inline]
+    #[cfg(feature = "tasks")]
+    fn is_server_support_task_list(&self) -> bool {
+        self.server_capabilities
+            .as_ref()
+            .and_then(|c| c.tasks.as_ref())
+            .is_some_and(|c| c.list.is_some())
+    }
+
+    /// Returns whether the client supports retrieving a task list
+    #[inline]
+    #[cfg(feature = "tasks")]
+    fn is_client_support_task_list(&self) -> bool {
+        self.options.tasks_capability
+            .as_ref()
+            .is_some_and(|c| c.list.is_some())
+    }
+
+    /// Returns whether the server supports task-augmented tools
+    #[inline]
+    #[cfg(feature = "tasks")]
+    fn is_server_support_call_tool_with_tasks(&self) -> bool {
+        self.server_capabilities
+            .as_ref()
+            .and_then(|c| c.tasks.as_ref())
+            .and_then(|c| c.requests.as_ref())
+            .and_then(|r| r.tools.as_ref())
+            .is_some_and(|t| t.call.is_some())
+    }
+
     /// Sends a request to the MCP server
     #[inline]
     async fn send_request(&mut self, req: Request) -> Result<Response, Error> {
@@ -735,6 +913,84 @@ impl Client {
         if let Some(token) = self.cancellation_token.clone() {
             shared::wait_for_shutdown_signal(token);
         };
+    }
+    
+    #[inline(always)]
+    #[cfg(feature = "tasks")]
+    fn ensure_tasks_supported(&self) {
+        assert!(
+            self.is_client_supports_tasks(),
+            "Client does not support task-augmented requests. You may configure it with `Client::with_options(|opt| opt.with_tasks(...))` method."
+        );
+
+        assert!(
+            self.is_server_supports_tasks(),
+            "Client does not support task-augmented requests."
+        );
+    }
+}
+
+#[cfg(feature = "tasks")]
+impl shared::TaskApi for Client {
+    /// Retrieves task result. If the task is not completed yet, waits until it completes or cancels.
+    async fn get_task_result<T>(&mut self, id: impl Into<String>) -> Result<TaskPayload<T>, Error>
+    where 
+        T: DeserializeOwned
+    {
+        let params = GetTaskPayloadRequestParams { id: id.into() };
+        self.command(crate::types::task::commands::RESULT, Some(params))
+            .await?
+            .into_result()
+    }
+
+    /// Retrieve task status 
+    async fn get_task(&mut self, id: impl Into<String>) -> Result<Task, Error> {
+        let params = GetTaskRequestParams { id: id.into() };
+        self.command(crate::types::task::commands::GET, Some(params))
+            .await?
+            .into_result()
+    }
+    
+    /// Cancels a task that is currently running
+    /// 
+    /// # Panics
+    /// If the client or server does not support cancelling tasks
+    async fn cancel_task(&mut self, id: impl Into<String>) -> Result<Task, Error> {
+        assert!(
+            self.is_client_support_cancelling_tasks(), 
+            "Client does not support cancelling tasks.  You may configure it with `Client::with_options(|opt| opt.with_tasks(...))` method."
+        );
+        
+        assert!(
+            self.is_server_support_cancelling_tasks(), 
+            "Server does not support cancelling tasks."
+        );
+        
+        let params = CancelTaskRequestParams { id: id.into() };
+        self.command(crate::types::task::commands::CANCEL, Some(params))
+            .await?
+            .into_result()
+    }
+
+    /// Retrieves a list of tasks
+    /// 
+    /// # Panics
+    /// If the client or server does not support retrieving a task list
+    async fn list_tasks(&mut self, cursor: Option<Cursor>) -> Result<ListTasksResult, Error> {
+        assert!(
+            self.is_client_support_task_list(), 
+            "Client does not support retrieving a task list.  You may configure it with `Client::with_options(|opt| opt.with_tasks(...))` method."
+        );
+        
+        assert!(
+            self.is_server_support_task_list(), 
+            "Server does not support retrieving a task list."
+        );
+        
+        let params = ListTasksRequestParams { cursor };
+        self.command(crate::types::task::commands::LIST, Some(params))
+            .await?
+            .into_result()
     }
 }
 

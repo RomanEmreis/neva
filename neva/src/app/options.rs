@@ -19,13 +19,20 @@ use crate::types::{
     Resource, Uri, ReadResourceResult, ResourceTemplate,
     resource::{Route, route::ResourceHandler},
     Prompt,
-    ResourcesCapability, ToolsCapability, PromptsCapability,
+    ResourcesCapability, ToolsCapability, PromptsCapability
 };
 
 #[cfg(feature = "tracing")]
-use crate::error::Error;
-#[cfg(feature = "tracing")]
 use crate::types::notification::LoggingLevel;
+#[cfg(feature = "tasks")]
+use crate::shared::{TaskTracker, TaskHandle};
+#[cfg(feature = "tasks")]
+use crate::types::{
+    ServerTasksCapability,
+    CallToolResponse,
+    TaskPayload,
+    Task,
+};
 
 #[cfg(feature = "tracing")]
 use tracing_subscriber::{
@@ -34,6 +41,8 @@ use tracing_subscriber::{
     Registry
 };
 
+#[cfg(any(feature = "tracing", feature = "tasks"))]
+use crate::error::Error;
 #[cfg(feature = "tracing")]
 use crate::error::ErrorCode;
 
@@ -74,6 +83,10 @@ pub struct McpOptions {
 
     /// Prompts capability options
     prompts_capability: Option<PromptsCapability>,
+
+    /// Server tasks capability options
+    #[cfg(feature = "tasks")]
+    tasks_capability: Option<ServerTasksCapability>,
     
     /// The last logging level set by the client
     #[cfg(feature = "tracing")]
@@ -90,19 +103,31 @@ pub struct McpOptions {
     
     /// Currently running requests
     requests: DashMap<RequestId, CancellationToken>,
+
+    /// Currently running tasks
+    #[cfg(feature = "tasks")]
+    pub(super) tasks: TaskTracker<CallToolResponse>
 }
 
 impl Debug for McpOptions {
     #[inline]
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("McpOptions")
+        let mut binding = f.debug_struct("McpOptions");
+        let dbg = binding
             .field("implementation", &self.implementation)
             .field("request_timeout", &self.request_timeout)
             .field("tools_capability", &self.tools_capability)
             .field("resources_capability", &self.resources_capability)
             .field("prompts_capability", &self.prompts_capability)
-            .field("protocol_ver", &self.protocol_ver)
-            .finish()
+            .field("protocol_ver", &self.protocol_ver);
+        
+        #[cfg(feature = "tasks")]
+        dbg.field("tasks_capability", &self.tasks_capability);
+        
+        #[cfg(feature = "tracing")]
+        dbg.field("log_level", &self.log_level);
+        
+        dbg.finish()
     }
 }
 
@@ -121,12 +146,16 @@ impl Default for McpOptions {
             tools_capability: Default::default(),
             resources_capability: Default::default(),
             prompts_capability: Default::default(),
+            #[cfg(feature = "tasks")]
+            tasks_capability: Default::default(),
             resource_routes: Default::default(),
             requests: Default::default(),
             resource_subscriptions: Default::default(),
             middlewares: None,
             #[cfg(feature = "tracing")]
             log_level: Default::default(),
+            #[cfg(feature = "tasks")]
+            tasks: TaskTracker::new(),
         }
     }
 }
@@ -210,6 +239,16 @@ impl McpOptions {
         self
     }
 
+    /// Configures tasks capability
+    #[cfg(feature = "tasks")]
+    pub fn with_tasks<F>(mut self, config: F) -> Self
+    where
+        F: FnOnce(ServerTasksCapability) -> ServerTasksCapability
+    {
+        self.tasks_capability = Some(config(Default::default()));
+        self
+    }
+
     /// Specifies request timeout
     ///
     /// Default: 10 seconds
@@ -265,6 +304,36 @@ impl McpOptions {
     pub(crate) fn complete_request(&self, req_id: &RequestId) {
         self.requests
             .remove(req_id);
+    }
+
+    /// Returns a list of currently running tasks
+    #[cfg(feature = "tasks")]
+    pub(crate) fn list_tasks(&self) -> Vec<Task> {
+        self.tasks.tasks()
+    }
+    
+    /// Tacks the task and returns the [`CancellationToken`] for this task
+    #[cfg(feature = "tasks")]
+    pub(crate) fn track_task(&self, task: Task) -> TaskHandle<CallToolResponse> {
+        self.tasks.track(task)
+    }
+
+    /// Cancels the task
+    #[cfg(feature = "tasks")]
+    pub(crate) fn cancel_task(&self, task_id: &str) -> Result<Task, Error> {
+        self.tasks.cancel(task_id)
+    }
+
+    /// Retrieves the task status 
+    #[cfg(feature = "tasks")]
+    pub(crate) fn get_task_status(&self, task_id: &str) -> Result<Task, Error> {
+        self.tasks.get_status(task_id)
+    }
+
+    /// Awaits the task result
+    #[cfg(feature = "tasks")]
+    pub(crate) async fn get_task_result(&self, task_id: &str) -> Result<TaskPayload<CallToolResponse>, Error> {
+        self.tasks.get_result(task_id).await
     }
     
     /// Adds a tool
@@ -404,6 +473,14 @@ impl McpOptions {
         self.prompts_capability.clone()
     }
 
+    /// Returns [`ServerTasksCapability`] if configured.
+    /// 
+    /// Otherwise, returns `None`.
+    #[cfg(feature = "tasks")]
+    pub(crate) fn tasks_capability(&self) -> Option<ServerTasksCapability> {
+        self.tasks_capability.clone()
+    }
+
     /// Returns whether the server is configured to send the "notifications/resources/updated"
     #[inline]
     pub(crate) fn is_resource_subscription_supported(&self) -> bool {
@@ -434,6 +511,35 @@ impl McpOptions {
         self.prompts_capability
             .as_ref()
             .is_some_and(|prompt| prompt.list_changed)
+    }
+
+    /// Returns whether the server is configured to handle the "tasks/list" requests.
+    #[inline]
+    #[cfg(feature = "tasks")]
+    pub(crate) fn is_tasks_list_supported(&self) -> bool {
+        self.tasks_capability
+            .as_ref()
+            .is_some_and(|tasks| tasks.list.is_some())
+    }
+
+    /// Returns whether the server is configured to handle the "tasks/cancel" requests.
+    #[inline]
+    #[cfg(feature = "tasks")]
+    pub(crate) fn is_tasks_cancellation_supported(&self) -> bool {
+        self.tasks_capability
+            .as_ref()
+            .is_some_and(|tasks| tasks.cancel.is_some())
+    }
+
+    /// Returns whether the server is configured to handle the task-augmented "tools/call" requests.
+    #[inline]
+    #[cfg(feature = "tasks")]
+    pub(crate) fn is_task_augmented_tool_call_supported(&self) -> bool {
+        self.tasks_capability
+            .as_ref()
+            .and_then(|tasks| tasks.requests.as_ref())
+            .and_then(|req| req.tools.as_ref())
+            .is_some_and(|tools| tools.call.is_some())
     }
     
     /// Turns [`McpOptions`] into [`RuntimeMcpOptions`]

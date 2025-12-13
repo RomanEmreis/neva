@@ -15,8 +15,11 @@ use crate::types::{
     Uri, 
     RootsCapability, 
     SamplingCapability, 
-    ElicitationCapability
+    ElicitationCapability,
 };
+
+#[cfg(feature = "tasks")]
+use crate::types::ClientTasksCapability;
 
 #[cfg(feature = "http-client")]
 use crate::transport::http::HttpClient;
@@ -40,6 +43,10 @@ pub struct McpOptions {
     /// Elicitation capability options
     pub(super) elicitation_capability: Option<ElicitationCapability>,
 
+    /// Client tasks capability options
+    #[cfg(feature = "tasks")]
+    pub(super) tasks_capability: Option<ClientTasksCapability>,
+
     /// Represents a handler function that runs when received a "sampling/createMessage" request
     pub(super) sampling_handler: Option<SamplingHandler>,
 
@@ -61,15 +68,20 @@ pub struct McpOptions {
 
 impl Debug for McpOptions {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("McpOptions")
+        let mut binding = f.debug_struct("McpOptions");
+        let dbg = binding
             .field("implementation", &self.implementation)
             .field("timeout", &self.timeout)
             .field("roots_capability", &self.roots_capability)
             .field("elicitation_capability", &self.elicitation_capability)
             .field("sampling_capability", &self.sampling_capability)
             .field("protocol_ver", &self.protocol_ver)
-            .field("roots", &self.roots)
-            .finish()
+            .field("roots", &self.roots);
+
+        #[cfg(feature = "tasks")]
+        dbg.field("tasks_capability", &self.tasks_capability);
+        
+        dbg.finish()
     }
 }
 
@@ -83,11 +95,13 @@ impl Default for McpOptions {
             roots_capability: None,
             sampling_capability: None,
             elicitation_capability: None,
+            #[cfg(feature = "tasks")]
+            tasks_capability: None,
             proto: None,
             protocol_ver: None,
             sampling_handler: None,
             elicitation_handler: None,
-            notification_handler: None
+            notification_handler: None,
         }
     }
 }
@@ -164,6 +178,16 @@ impl McpOptions {
         T: FnOnce(ElicitationCapability) -> ElicitationCapability
     {
         self.elicitation_capability = Some(config(Default::default()));
+        self
+    }
+
+    /// Configures tasks capability
+    #[cfg(feature = "tasks")]
+    pub fn with_tasks<T>(mut self, config: T) -> Self
+    where
+        T: FnOnce(ClientTasksCapability) -> ClientTasksCapability
+    {
+        self.tasks_capability = Some(config(Default::default()));
         self
     }
 
@@ -257,7 +281,12 @@ impl McpOptions {
             .clone()
             .or_else(|| self.elicitation_handler.is_none().then(Default::default))
     }
+
+    /// Returns [`ClientTasksCapability`] if configured.
+    /// 
+    /// Otherwise, returns `None`.
+    #[cfg(feature = "tasks")]
+    pub(crate) fn tasks_capability(&self) -> Option<ClientTasksCapability> {
+        self.tasks_capability.clone()
+    }
 }
-
-
-

@@ -11,7 +11,11 @@ use crate::{
     types::notification::Notification,
     error::{Error, ErrorCode},
 };
+
 use crate::types::Uri;
+
+#[cfg(feature = "tasks")]
+use crate::types::TaskMetadata;
 
 /// List of commands for Elicitation
 pub mod commands {
@@ -53,6 +57,16 @@ pub struct ElicitRequestFormParams {
     #[serde(rename = "requestedSchema")]
     pub schema: RequestSchema,
 
+    /// If specified, the caller is requesting task-augmented execution for this request.
+    /// The request will return a [`CreateTaskResult`] immediately, and the actual result can be
+    /// retrieved later via `tasks/result`.
+    ///
+    /// **Note:** Task augmentation is subject to capability negotiation - receivers **MUST** declare support
+    /// for task augmentation of specific request types in their capabilities.
+    #[cfg(feature = "tasks")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<TaskMetadata>,
+
     /// Additional metadata to attach to the request.
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<Value>
@@ -78,6 +92,16 @@ pub struct ElicitRequestUrlParams {
     
     /// The URL that the user should navigate to.
     pub url: Uri,
+
+    /// If specified, the caller is requesting task-augmented execution for this request.
+    /// The request will return a [`CreateTaskResult`] immediately, and the actual result can be
+    /// retrieved later via `tasks/result`.
+    ///
+    /// **Note:** Task augmentation is subject to capability negotiation - receivers **MUST** declare support
+    /// for task augmentation of specific request types in their capabilities.
+    #[cfg(feature = "tasks")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<TaskMetadata>,
     
     /// Additional metadata to attach to the request.
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
@@ -307,7 +331,9 @@ impl ElicitRequestParams {
             message: message.into(),
             schema: RequestSchema::new(),
             mode: None,
-            meta: None
+            meta: None,
+            #[cfg(feature = "tasks")]
+            task: None
         }
     }
 
@@ -319,7 +345,9 @@ impl ElicitRequestParams {
             message: message.into(),
             url: url.into(),
             mode: ElicitationMode::Url,
-            meta: None
+            meta: None,
+            #[cfg(feature = "tasks")]
+            task: None
         }
     }
 
@@ -385,6 +413,17 @@ impl ElicitRequestFormParams {
     #[inline]
     pub fn with_schema<T: JsonSchema>(mut self) -> Self {
         self.schema = RequestSchema::of::<T>();
+        self
+    }
+}
+
+#[cfg(feature = "tasks")]
+impl ElicitRequestUrlParams {
+    /// Makes the request task-augmented with TTL.
+    /// 
+    /// Default: `None`
+    pub fn with_task(mut self, ttl: Option<usize>) -> Self {
+        self.task = Some(TaskMetadata { ttl });
         self
     }
 }
@@ -587,7 +626,10 @@ impl From<Result<Value, Error>> for ElicitResult {
 impl IntoResponse for ElicitResult {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
-        Response::success(req_id, serde_json::to_value(self).unwrap())
+        match serde_json::to_value(self) {
+            Ok(v) => Response::success(req_id, v),
+            Err(err) => Response::error(req_id, err.into())
+        }
     }
 }
 
@@ -655,6 +697,8 @@ mod tests {
             message: "Test message".to_string(),
             mode: None,
             meta: None,
+            #[cfg(feature = "tasks")]
+            task: None,
             schema,
         }
     }

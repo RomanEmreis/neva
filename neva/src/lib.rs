@@ -137,4 +137,7 @@ pub mod prelude {
     
     #[cfg(feature = "di")]
     pub use crate::di::Dc;
+
+    #[cfg(feature = "tasks")]
+    pub use crate::shared::TaskApi;
 }

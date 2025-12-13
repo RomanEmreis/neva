@@ -7,12 +7,20 @@ use tokio_util::sync::CancellationToken;
 pub(crate) use requests_queue::RequestQueue;
 #[cfg(any(feature = "http-server", feature = "tracing"))]
 pub(crate) use message_registry::MessageRegistry;
+#[cfg(feature = "tasks")]
+pub(crate) use task_tracker::TaskTracker;
+#[cfg(all(feature = "tasks", feature = "server"))]
+pub(crate) use task_tracker::TaskHandle;
+
 pub(crate) use arc_str::ArcStr;
 pub(crate) use arc_slice::ArcSlice;
 pub(crate) use memchr::MemChr;
 
 pub use one_or_many::OneOrMany;
+pub use either::Either;
 pub use into_args::IntoArgs;
+#[cfg(feature = "tasks")]
+pub use task_api::{TaskApi, wait_to_completion};
 
 #[cfg(feature = "http-client")]
 pub mod mt;
@@ -25,6 +33,11 @@ mod arc_slice;
 mod into_args;
 mod memchr;
 mod one_or_many;
+mod either;
+#[cfg(feature = "tasks")]
+mod task_tracker;
+#[cfg(feature = "tasks")]
+mod task_api;
 
 #[inline]
 #[cfg(any(feature = "server", feature = "client"))]

@@ -56,6 +56,23 @@ pub use capabilities::{
     SamplingToolsCapability,
     RootsCapability
 };
+
+#[cfg(feature = "tasks")]
+pub use capabilities::{
+    ServerTasksCapability, 
+    ClientTasksCapability,
+    TaskListCapability,
+    TaskCancellationCapability,
+    ClientTaskRequestsCapability,
+    ServerTaskRequestsCapability,
+    ToolsTaskCapability,
+    ToolsCallTaskCapability,
+    SamplingTaskCapability,
+    SamplingCreateMessageTaskCapability,
+    ElicitationTaskCapability,
+    ElicitationCreateTaskCapability
+};
+
 pub use tool::{
     ListToolsRequestParams,
     CallToolRequestParams,
@@ -130,6 +147,21 @@ pub use icon::{
     IconTheme,
 };
 
+#[cfg(feature = "tasks")]
+pub use task::{
+    GetTaskPayloadRequestParams,
+    GetTaskRequestParams,
+    ListTasksRequestParams,
+    ListTasksResult,
+    CancelTaskRequestParams,
+    CreateTaskResult,
+    RelatedTaskMetadata,
+    TaskMetadata,
+    TaskPayload,
+    TaskStatus,
+    Task
+};
+
 #[cfg(feature = "server")]
 pub use prompt::PromptHandler;
 
@@ -152,8 +184,10 @@ pub mod cursor;
 pub mod root;
 pub mod sampling;
 pub mod elicitation;
-pub(crate) mod helpers;
+#[cfg(feature = "tasks")]
+pub mod task;
 mod icon;
+pub(crate) mod helpers;
 
 pub(super) const JSONRPC_VERSION: &str = "2.0";
 
@@ -316,7 +350,10 @@ impl Default for Implementation {
 impl IntoResponse for InitializeResult {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
-        Response::success(req_id, serde_json::to_value(self).unwrap())
+        match serde_json::to_value(self) {
+            Ok(v) => Response::success(req_id, v),
+            Err(err) => Response::error(req_id, err.into())
+        }
     }
 }
 
@@ -455,6 +492,8 @@ impl InitializeResult {
                 prompts: options.prompts_capability(),
                 logging: Some(LoggingCapability::default()),
                 completions: Some(CompletionsCapability::default()),
+                #[cfg(feature = "tasks")]
+                tasks: options.tasks_capability(),
                 experimental: None
             },
             server_info: options.implementation.clone(),

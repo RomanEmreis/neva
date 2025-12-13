@@ -88,4 +88,18 @@ impl Client {
             crate::types::elicitation::commands::COMPLETE,
             handler);
     }
+
+    /// Maps a `handler` to the `notifications/tasks/status` event
+    #[cfg(feature = "tasks")]
+    pub fn on_task_status<F, R>(&mut self, handler: F)
+    where
+        F: Fn(Notification) -> R + Clone + Send + Sync + 'static,
+        R: Future<Output = ()> + Send
+    {
+        self.ensure_tasks_supported();
+        
+        self.subscribe(
+            crate::types::task::commands::STATUS,
+            handler);
+    }
 }

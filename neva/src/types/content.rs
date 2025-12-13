@@ -436,7 +436,9 @@ impl From<ToolUse> for CallToolRequestParams {
         Self { 
             name: value.name, 
             args: value.input, 
-            meta: None
+            meta: None,
+            #[cfg(feature = "tasks")]
+            task: None,
         }
     }
 }

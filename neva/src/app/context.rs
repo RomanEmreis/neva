@@ -5,9 +5,9 @@ use crate::error::{Error, ErrorCode};
 use crate::transport::Sender;
 use super::{options::{McpOptions, RuntimeMcpOptions}, handler::RequestHandler};
 use crate::{
-    shared::{IntoArgs, RequestQueue},
-    middleware::{MwContext, Next},
-    transport::TransportProtoSender,
+    shared::{IntoArgs, RequestQueue}, 
+    middleware::{MwContext, Next}, 
+    transport::TransportProtoSender, 
     types::{
         Tool, CallToolRequestParams, CallToolResponse,
         ToolUse, ToolResult,
@@ -20,7 +20,7 @@ use crate::{
         resource::SubscribeRequestParams,
         sampling::{CreateMessageRequestParams, CreateMessageResult},
         elicitation::{ElicitRequestParams, ElicitResult, ElicitationCompleteParams}
-    },
+    }
 };
 use std::{
     fmt::{Debug, Formatter},
@@ -37,6 +37,20 @@ use {
 };
 #[cfg(feature = "di")]
 use volga_di::Container;
+#[cfg(feature = "tasks")]
+use serde::de::DeserializeOwned;
+#[cfg(feature = "tasks")]
+use crate::{
+    shared::Either,
+    types::{
+        Task, TaskPayload, CreateTaskResult, tool::TaskSupport,
+        ListTasksRequestParams,ListTasksResult, Cursor,
+        CancelTaskRequestParams, GetTaskPayloadRequestParams, GetTaskRequestParams,
+    },
+};
+
+#[cfg(feature = "tasks")]
+pub(crate) type ToolOrTaskResponse = Either<CreateTaskResult, CallToolResponse>;
 
 type RequestHandlers = HashMap<String, RequestHandler<Response>>;
 
@@ -545,6 +559,59 @@ impl Context {
         }
     }
 
+    #[inline]
+    #[cfg(feature = "tasks")]
+    pub(crate) async fn call_tool_with_task(self, params: CallToolRequestParams) -> Result<ToolOrTaskResponse, Error> {
+        match self.options.get_tool(&params.name).await {
+            None => Err(Error::new(ErrorCode::InvalidParams, "Tool not found")),
+            Some(tool) => {
+                #[cfg(feature = "http-server")]
+                self.validate_claims(tool.roles.as_deref(), tool.permissions.as_deref())?;
+                
+                let task_support = tool.task_support();
+                if let Some(task_meta) = params.task {
+                    self.ensure_tool_augmentation_support(task_support)?;
+
+                    let task = Task::from(task_meta);
+                    let handle = self.options.track_task(task.clone());
+                    
+                    let opt = self.options.clone();
+                    let task_id = task.id.clone();
+                    tokio::spawn(async move {
+                        tokio::select! {
+                            result = tool.call(params
+                                .with_task(&task_id)
+                                .with_context(self).into()) => {
+                                let resp = match result {
+                                    Ok(result) => {
+                                        opt.tasks.complete(&task_id);
+                                        result
+                                    },
+                                    Err(err) => {
+                                        opt.tasks.fail(&task_id);
+                                        CallToolResponse::error(err)
+                                    }
+                                };
+                                handle.complete(resp);
+                            },
+                            _ = handle.cancelled() => {}
+                        }
+                    });
+
+                    Ok(Either::Left(CreateTaskResult::new(task)))
+                } else if task_support.is_some_and(|ts| ts == TaskSupport::Required) {
+                    Err(Error::new(
+                        ErrorCode::MethodNotFound,
+                        "Tool required task augmented call"))
+                } else {
+                    tool.call(params.with_context(self).into())
+                        .await
+                        .map(Either::Right)
+                }
+            }
+        }
+    }
+
     /// Requests a list of available roots from a client
     /// 
     /// # Example
@@ -597,8 +664,88 @@ impl Context {
     /// }
     /// # }
     /// ```
+    #[cfg(not(feature = "tasks"))]
     pub async fn sample(&mut self, params: CreateMessageRequestParams) -> Result<CreateMessageResult, Error> {
         let method = crate::types::sampling::commands::CREATE;
+        let req = Request::new(
+            Some(RequestId::Uuid(uuid::Uuid::new_v4())),
+            method,
+            Some(params));
+
+        self.send_request(req)
+            .await?
+            .into_result()
+    }
+
+    /// Sends the sampling request to the client
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(feature = "server-macros")] {
+    /// use neva::{
+    ///     Context, 
+    ///     error::Error, 
+    ///     types::sampling::CreateMessageRequestParams, 
+    ///     tool
+    /// };
+    ///
+    /// #[tool]
+    /// async fn generate_poem(mut ctx: Context, topic: String) -> Result<String, Error> {
+    ///     let params = CreateMessageRequestParams::new()
+    ///         .with_message(format!("Write a short poem about {topic}"))
+    ///         .with_sys_prompt("You are a talented poet who writes concise, evocative verses.");
+    /// 
+    ///     let result = ctx.sample(params).await?;
+    ///     Ok(format!("{:?}", result.content))
+    /// }
+    /// # }
+    /// ```
+    #[cfg(feature = "tasks")]
+    pub async fn sample(&mut self, params: CreateMessageRequestParams) -> Result<CreateMessageResult, Error> {
+        let method = crate::types::sampling::commands::CREATE;
+        let is_task_aug = params.task.is_some();
+        let req = Request::new(
+                Some(RequestId::Uuid(uuid::Uuid::new_v4())),
+                method,
+                Some(params));
+
+        if is_task_aug {
+            let result = self.send_request(req)
+                .await?
+                .into_result()?;
+
+            crate::shared::wait_to_completion(self, result).await
+        } else {
+            self.send_request(req)
+                .await?
+                .into_result()
+        }
+    }
+
+    /// Sends the elicitation request to the client
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(feature = "serve-macros")] {
+    /// use neva::{
+    ///     Context, 
+    ///     error::Error, 
+    ///     types::elicitation::ElicitRequestParams, 
+    ///     tool
+    /// };
+    ///
+    /// #[tool]
+    /// async fn generate_poem(mut ctx: Context, _topic: String) -> Result<String, Error> {
+    ///     let params = ElicitRequestParams::new("What is the poem mood you'd like?")
+    ///         .with_required("mood", "string");
+    ///     let result = ctx.elicit(params).await?;
+    ///     Ok(format!("{:?}", result.content))
+    /// }
+    /// # }
+    /// ```
+    #[cfg(not(feature = "tasks"))]
+    pub async fn elicit(&mut self, params: ElicitRequestParams) -> Result<ElicitResult, Error> {
+        let method = crate::types::elicitation::commands::CREATE;
         let req = Request::new(
             Some(RequestId::Uuid(uuid::Uuid::new_v4())),
             method,
@@ -630,16 +777,28 @@ impl Context {
     /// }
     /// # }
     /// ```
+    #[cfg(feature = "tasks")]
     pub async fn elicit(&mut self, params: ElicitRequestParams) -> Result<ElicitResult, Error> {
         let method = crate::types::elicitation::commands::CREATE;
+        let is_task_aug = params
+            .as_url()
+            .is_some_and(|p| p.task.is_some());
         let req = Request::new(
             Some(RequestId::Uuid(uuid::Uuid::new_v4())),
             method,
             Some(params));
 
-        self.send_request(req)
-            .await?
-            .into_result()
+        if is_task_aug {
+            let result = self.send_request(req)
+                .await?
+                .into_result()?;
+
+            crate::shared::wait_to_completion(self, result).await
+        } else {
+            self.send_request(req)
+                .await?
+                .into_result()
+        }
     }
     
     /// Notifies the client that the elicitation with the `id` has been completed
@@ -647,6 +806,17 @@ impl Context {
         let params = serde_json::to_value(ElicitationCompleteParams::new(id)).ok();
         self.send_notification(
             crate::types::elicitation::commands::COMPLETE, 
+            params)
+            .await
+    }
+
+    /// Sends notification that a task with `id` was changed.
+    #[cfg(feature = "tasks")]
+    pub async fn task_changed(&mut self, id: &str) -> Result<(), Error> {
+        let task = self.options.tasks.get_status(id)?;
+        let params = serde_json::to_value(task).ok();
+        self.send_notification(
+            crate::types::task::commands::STATUS, 
             params)
             .await
     }
@@ -691,6 +861,30 @@ impl Context {
         validate_permissions(claims, permissions)?;
         Ok(())
     }
+
+    #[inline]
+    #[cfg(feature = "tasks")]
+    fn ensure_tool_augmentation_support(&self, task_support: Option<TaskSupport>) -> Result<(), Error> {
+        if !self.options.is_task_augmented_tool_call_supported() {
+            return Err(
+                Error::new(
+                    ErrorCode::MethodNotFound,
+                    "Server does not support task augmented tool calls"));
+        }
+        let Some(task_support) = task_support else {
+            return Err(
+                Error::new(
+                    ErrorCode::MethodNotFound,
+                    "Tool does not support task augmented calls"));
+        };
+        if task_support == TaskSupport::Forbidden {
+            return Err(
+                Error::new(
+                    ErrorCode::MethodNotFound,
+                    "Tool forbid task augmented calls"));
+        }
+        Ok(())
+    }
     
     /// Sends a [`Request`] to a client
     #[inline]
@@ -725,5 +919,80 @@ impl Context {
             notification.session_id = Some(session_id);
         }
         self.sender.send(notification.into()).await
+    }
+}
+
+#[cfg(feature = "tasks")]
+impl crate::shared::TaskApi for Context {
+    /// Retrieve task result from the client. If the task is not completed yet, waits until it completes or cancels.
+    async fn get_task_result<T>(&mut self, id: impl Into<String>) -> Result<TaskPayload<T>, Error>
+    where 
+        T: DeserializeOwned
+    {
+        let params = GetTaskPayloadRequestParams { id: id.into() };
+        let method = crate::types::task::commands::RESULT;
+        let req = Request::new(
+            Some(RequestId::Uuid(uuid::Uuid::new_v4())),
+            method,
+            Some(params));
+
+        self.send_request(req)
+            .await?
+            .into_result()
+    }
+
+    /// Retrieve task status from the client
+    async fn get_task(&mut self, id: impl Into<String>) -> Result<Task, Error> {
+        let params = GetTaskRequestParams { id: id.into() };
+        let method = crate::types::task::commands::GET;
+        let req = Request::new(
+            Some(RequestId::Uuid(uuid::Uuid::new_v4())),
+            method,
+            Some(params));
+        
+        self.send_request(req)
+            .await?
+            .into_result()
+    }
+    
+    /// Cancels a task that is currently running on the client
+    async fn cancel_task(&mut self, id: impl Into<String>) -> Result<Task, Error> {       
+        if !self.options.is_tasks_cancellation_supported() {
+            return Err(Error::new(
+                ErrorCode::InvalidRequest, 
+                "Server does not support cancelling tasks."));
+        }
+
+        let params = CancelTaskRequestParams { id: id.into() };
+        let method = crate::types::task::commands::CANCEL;
+        let req = Request::new(
+            Some(RequestId::Uuid(uuid::Uuid::new_v4())),
+            method,
+            Some(params));
+        
+        self.send_request(req)
+            .await?
+            .into_result()
+    }
+
+    /// Retrieves a list of tasks from the client
+    async fn list_tasks(&mut self, cursor: Option<Cursor>) -> Result<ListTasksResult, Error> {
+
+        if !self.options.is_tasks_list_supported() {
+            return Err(Error::new(
+                ErrorCode::InvalidRequest, 
+                "Server does not support retrieving a task list."));
+        }
+
+        let params = ListTasksRequestParams { cursor };
+        let method = crate::types::task::commands::LIST;
+        let req = Request::new(
+            Some(RequestId::Uuid(uuid::Uuid::new_v4())),
+            method,
+            Some(params));
+        
+        self.send_request(req)
+            .await?
+            .into_result()
     }
 }

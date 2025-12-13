@@ -21,10 +21,19 @@ use crate::types::{
     ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate, 
     ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, 
     SubscribeRequestParams, UnsubscribeRequestParams, Resource, resource::template::ResourceFunc, 
-    ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt, 
+    ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt,
     notification::{Notification, CancelledNotificationParams}, 
     cursor::Pagination, Uri
 };
+
+#[cfg(feature = "tasks")]
+use crate::types::{
+    ListTasksRequestParams, ListTasksResult, CancelTaskRequestParams,
+    GetTaskRequestParams, GetTaskPayloadRequestParams, Task, TaskPayload,
+};
+#[cfg(feature = "tasks")]
+use context::ToolOrTaskResponse;
+
 use std::{
     fmt::{Debug, Formatter},
     collections::HashMap,
@@ -95,6 +104,14 @@ impl App {
         
         app.map_handler(crate::types::notification::commands::INITIALIZED, Self::notifications_init);
         app.map_handler(crate::types::notification::commands::CANCELLED, Self::notifications_cancel);
+
+        #[cfg(feature = "tasks")]
+        {
+            app.map_handler(crate::types::task::commands::LIST, Self::tasks);
+            app.map_handler(crate::types::task::commands::GET, Self::task);
+            app.map_handler(crate::types::task::commands::CANCEL, Self::cancel_task);
+            app.map_handler(crate::types::task::commands::RESULT, Self::task_result);
+        }
         
         app.map_handler(crate::commands::PING, Self::ping);
 
@@ -102,6 +119,51 @@ impl App {
         app.map_handler(crate::types::notification::commands::SET_LOG_LEVEL, Self::set_log_level);
         
         app
+    }
+
+    /// Starts the [`App`] with its own Tokio runtime.
+    ///
+    /// This method is intended for simple use cases where you don't already have a Tokio runtime setup.
+    /// Internally, it creates and runs a multi-threaded Tokio runtime to execute the application.
+    ///
+    /// **Note:** This method **must not** be called from within an existing Tokio runtime
+    /// (e.g., inside an `#[tokio::main]` async function), or it will panic.
+    /// If you are already using Tokio in your application, use [`App::run`] instead.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::App;
+    ///
+    /// # fn main() {
+    /// let mut app = App::new();
+    ///
+    /// // configure tools, resources, prompts
+    ///
+    /// app.run_blocking()
+    /// # }
+    /// ```
+    pub fn run_blocking(self) {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            panic!("`App::run_blocking()` cannot be called inside an existing Tokio runtime. Use `run().await` instead.");
+        }
+
+        let runtime = match tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(err) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!("failed to start the runtime: {err:#}");
+                #[cfg(not(feature = "tracing"))]
+                eprintln!("failed to start the runtime: {err:#}");
+                return;
+            }
+        };
+
+        runtime.block_on(async {
+            self.run().await
+        });
     }
     
     /// Run the MCP server
@@ -415,8 +477,15 @@ impl App {
     }
     
     /// A tool call request handler
+    #[cfg(not(feature = "tasks"))]
     async fn tool(ctx: Context, params: CallToolRequestParams) -> Result<CallToolResponse, Error> {
         ctx.call_tool(params).await
+    }
+
+    /// A tool call request handler
+    #[cfg(feature = "tasks")]
+    async fn tool(ctx: Context, params: CallToolRequestParams) -> Result<ToolOrTaskResponse, Error> {
+        ctx.call_tool_with_task(params).await
     }
 
     /// A read resource request handler
@@ -457,6 +526,56 @@ impl App {
         params: UnsubscribeRequestParams
     ) {
         ctx.unsubscribe_from_resource(&params.uri);
+    }
+    
+    /// Tasks request handler
+    #[cfg(feature = "tasks")]
+    async fn tasks(
+        options: RuntimeMcpOptions,
+        params: ListTasksRequestParams
+    ) -> Result<ListTasksResult, Error> {
+        if !options.is_tasks_list_supported() { 
+            return Err(Error::new(
+                ErrorCode::InvalidRequest, 
+                "Server does not support support tasks/list requests."));
+        }
+        Ok(options
+            .list_tasks()
+            .paginate(params.cursor, DEFAULT_PAGE_SIZE)
+            .into())
+    }
+
+    /// A cancel task request handler
+    #[cfg(feature = "tasks")]
+    async fn cancel_task(
+        options: RuntimeMcpOptions,
+        params: CancelTaskRequestParams
+    ) -> Result<Task, Error> {
+        if options.is_tasks_cancellation_supported() {
+            options.cancel_task(&params.id)
+        } else {
+            Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "Server does not support support tasks/cancel requests."))
+        }
+    }
+
+    /// A task status retrieval request handler
+    #[cfg(feature = "tasks")]
+    async fn task(
+        options: RuntimeMcpOptions,
+        params: GetTaskRequestParams
+    ) -> Result<Task, Error> {
+        options.get_task_status(&params.id)
+    }
+
+    /// A task result retrieval request handler
+    #[cfg(feature = "tasks")]
+    async fn task_result(
+        options: RuntimeMcpOptions,
+        params: GetTaskPayloadRequestParams
+    ) -> Result<TaskPayload<CallToolResponse>, Error> {
+        options.get_task_result(&params.id).await
     }
     
     /// Sets the logging level
