@@ -102,6 +102,9 @@ impl TaskTracker {
     pub(crate) fn reset(&self, id: &str) {
         if let Some(mut entry) = self.tasks.get_mut(id) {
             entry.task.reset();
+            let _ = entry
+                .tx
+                .send(None);
         }
     }
 

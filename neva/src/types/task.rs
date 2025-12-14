@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use crate::{
-    types::{Cursor, IntoResponse, Page, RequestId, Response},
+    types::{Meta, Cursor, IntoResponse, Page, RequestId, Response},
     error::Error
 };
 
@@ -291,6 +291,13 @@ impl<T: Into<String>> From<T> for RelatedTaskMetadata {
     #[inline]
     fn from(value: T) -> Self {
         Self { id: value.into() }
+    }
+}
+
+impl From<Meta<RelatedTaskMetadata>> for RelatedTaskMetadata {
+    #[inline]
+    fn from(meta: Meta<RelatedTaskMetadata>) -> Self {
+        meta.into_inner()
     }
 }
 

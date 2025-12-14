@@ -709,17 +709,7 @@ impl Context {
                 method,
                 Some(params));
 
-        if is_task_aug {
-            let result = self.send_request(req)
-                .await?
-                .into_result()?;
-
-            crate::shared::wait_to_completion(self, result).await
-        } else {
-            self.send_request(req)
-                .await?
-                .into_result()
-        }
+        self.send_maybe_task_augmented_request(req, is_task_aug).await
     }
 
     /// Sends the elicitation request to the client
@@ -780,15 +770,18 @@ impl Context {
     #[cfg(feature = "tasks")]
     pub async fn elicit(&mut self, params: ElicitRequestParams) -> Result<ElicitResult, Error> {
         let related_task = params.related_task();
-
+        
         if let Some(related_task) = related_task {
-            use std::str::FromStr;
-
             let task_id = related_task.id;
-
-            let id = RequestId::from_str(&task_id).unwrap();
+            let mut id = task_id.as_str().parse::<RequestId>()
+                .expect("Invalid task id");
+            
+            if let Some(session_id) = self.session_id { 
+                id = id.concat(session_id.into());
+            } 
+            
             let receiver = self.pending.push(&id);
-
+            
             self.options.tasks.set_result(&task_id, params);
             self.options.tasks.require_input(&task_id);
 
@@ -806,7 +799,7 @@ impl Context {
             };
             
             self.options.tasks.reset(&task_id);
-
+            
             return resp.into_result();
         }
 
@@ -816,18 +809,8 @@ impl Context {
             Some(RequestId::Uuid(uuid::Uuid::new_v4())),
             method,
             Some(params));
-        
-        if is_task_aug {
-            let result = self.send_request(req)
-                .await?
-                .into_result()?;
 
-            crate::shared::wait_to_completion(self, result).await
-        } else {
-            self.send_request(req)
-                .await?
-                .into_result()
-        }
+        self.send_maybe_task_augmented_request(req, is_task_aug).await
     }
     
     /// Notifies the client that the elicitation with the `id` has been completed
@@ -913,6 +896,26 @@ impl Context {
                     "Tool forbid task augmented calls"));
         }
         Ok(())
+    }
+
+    #[inline]
+    #[cfg(feature = "tasks")]
+    async fn send_maybe_task_augmented_request<T: DeserializeOwned>(
+        &mut self,
+        req: Request,
+        is_task_aug: bool
+    ) -> Result<T, Error> {
+        if is_task_aug {
+            let result = self.send_request(req)
+                .await?
+                .into_result()?;
+
+            crate::shared::wait_to_completion(self, result).await
+        } else {
+            self.send_request(req)
+                .await?
+                .into_result()
+        }
     }
     
     /// Sends a [`Request`] to a client

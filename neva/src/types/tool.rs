@@ -626,6 +626,20 @@ impl CallToolRequestParams {
         self.args = args.into_args();
         self
     }
+    
+    /// Sets the metadata for the request
+    pub fn with_meta(mut self, meta: RequestParamsMeta) -> Self {
+        self.meta = Some(meta);
+        self
+    }
+    
+    /// Sets the TTL for the [`CallToolRequestParams`],
+    /// which will be used if the tool is support tasks.
+    #[cfg(feature = "tasks")]
+    pub fn with_ttl(mut self, ttl: Option<usize>) -> Self {
+        self.task = Some(TaskMetadata { ttl });
+        self
+    }
 }
 
 #[cfg(feature = "server")]

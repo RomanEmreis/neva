@@ -46,7 +46,7 @@ where
     loop {
         if task.ttl <= elapsed {
             #[cfg(feature = "tracing")]
-            tracing::debug!(logger = "neva", "Task TTL expired. Cancelling task.");
+            tracing::trace!(logger = "neva", "Task TTL expired. Cancelling task.");
             
             let _ = api.cancel_task(&task.id).await?;
             return Err(Error::new(ErrorCode::InvalidRequest, "Task was cancelled: TTL expired"));
@@ -54,27 +54,36 @@ where
             
         task = api.get_task(&task.id).await?;
         
-        if task.status == TaskStatus::Completed || task.status == TaskStatus::Failed {
-            return api
+        match task.status {
+            TaskStatus::Completed | TaskStatus::Failed => return api
                 .get_task_result(&task.id)
-                .await;
-        } else if task.status == TaskStatus::InputRequired {
-            let params: TaskPayload = api
-                .get_task_result(&task.id)
-                .await?;
-            api.handle_input(&task.id, params).await?;
-        } else if task.status == TaskStatus::Cancelled {
-            return Err(Error::new(ErrorCode::InvalidRequest, "Task was cancelled"));
-        } else {
-            let poll_interval = task
-                .poll_interval
-                .unwrap_or(DEFAULT_POLL_INTERVAL);
+                .await,
+            TaskStatus::Cancelled => return Err(
+                Error::new(ErrorCode::InvalidRequest, "Task was cancelled")
+            ),
+            TaskStatus::InputRequired => {
+                #[cfg(feature = "tracing")]
+                tracing::trace!(logger = "neva", "Task input required. Providing input.");
+                
+                let params: TaskPayload = api
+                    .get_task_result(&task.id)
+                    .await?;
+                api.handle_input(&task.id, params).await?;
+            },
+            _ => {
+                let poll_interval = task
+                    .poll_interval
+                    .unwrap_or(DEFAULT_POLL_INTERVAL);
 
-            elapsed += poll_interval;
+                elapsed += poll_interval;
 
-            #[cfg(feature = "tracing")]
-            tracing::debug!(logger = "neva", "Waiting for task to complete. Elapsed: {elapsed}ms");
-            tokio::time::sleep(Duration::from_millis(poll_interval as u64)).await;   
+                #[cfg(feature = "tracing")]
+                tracing::trace!(
+                    logger = "neva", 
+                    "Waiting for task to complete. Elapsed: {elapsed}ms");
+                
+                tokio::time::sleep(Duration::from_millis(poll_interval as u64)).await;
+            }
         }
     }
 }

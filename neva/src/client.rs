@@ -495,19 +495,15 @@ impl Client {
         N: Into<String>,
         Args: shared::IntoArgs
     {
-        let id = self.generate_id()?;
-        let request = Request::new(
-            Some(id.clone()),
-            crate::types::tool::commands::CALL,
-            Some(CallToolRequestParams {
-                name: name.into(),
-                meta: Some(RequestParamsMeta::new(&id)),
-                args: args.into_args(),
-                #[cfg(feature = "tasks")]
-                task: None
-            }));
+        let params = CallToolRequestParams {
+            name: name.into(),
+            meta: None,
+            args: args.into_args(),
+            #[cfg(feature = "tasks")]
+            task: None
+        };
         
-        self.send_request(request)
+        self.call_tool_raw(params)
             .await?
             .into_result()
     }
@@ -587,22 +583,35 @@ impl Client {
             self.is_server_support_call_tool_with_tasks(), 
             "Server does not support call tool with tasks.");
         
-        let id = self.generate_id()?;
-        let request = Request::new(
-            Some(id.clone()),
-            crate::types::tool::commands::CALL,
-            Some(CallToolRequestParams {
-                name: name.into(),
-                meta: Some(RequestParamsMeta::new(&id)),
-                args: args.into_args(),
-                task: Some(TaskMetadata { ttl })
-            }));
+        let params = CallToolRequestParams {
+            name: name.into(),
+            meta: None,
+            args: args.into_args(),
+            task: Some(TaskMetadata { ttl })
+        };
 
-        let result = self.send_request(request)
+        let result = self
+            .call_tool_raw(params)
             .await?
             .into_result()?;
 
         shared::wait_to_completion(self, result).await
+    }
+    
+    /// Calls a tool
+    #[inline]
+    pub async fn call_tool_raw(
+        &mut self, 
+        params: CallToolRequestParams
+    ) -> Result<Response, Error> {
+        let id = self.generate_id()?;
+        
+        let request = Request::new(
+            Some(id.clone()),
+            crate::types::tool::commands::CALL,
+            Some(params.with_meta(RequestParamsMeta::new(&id))));
+
+        self.send_request(request).await
     }
 
     /// Requests resource contents from MCP server
@@ -873,6 +882,7 @@ impl Client {
 
     /// Sends a request to the MCP server
     #[inline]
+    #[cfg(feature = "tasks")]
     async fn send_response(&mut self, req: Response) -> Result<(), Error> {
         self.handler.as_mut()
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?
@@ -1006,10 +1016,14 @@ impl shared::TaskApi for Client {
         let params = params.to::<ElicitRequestParams>()?;
         if let Some(handler) = &self.options.elicitation_handler {
             use crate::types::IntoResponse;
-            use std::str::FromStr;
 
-            let result = handler(params).await;
-            let id = RequestId::from_str(id).unwrap();
+            let result = handler(params)
+                .await
+                .with_related_task(id);
+            
+            let id = id.parse::<RequestId>()
+                .expect("Invalid Request Id");
+            
             self.send_response(result.into_response(id)).await?;
         }
         Ok(())

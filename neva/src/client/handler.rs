@@ -167,6 +167,7 @@ impl RequestHandler {
 
     /// Sends the response to MCP server
     #[inline]
+    #[cfg(feature = "tasks")]
     pub(super) async fn send_response(&mut self, resp: Response) {
         send_response_impl(&mut self.sender, resp).await;
     }

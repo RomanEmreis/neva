@@ -152,6 +152,10 @@ pub struct ElicitResult {
     /// 
     /// > **Note:** This is typically omitted if the action is "cancel" or "decline".
     pub content: Option<Value>,
+
+    /// Additional metadata to attach to the result.
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>
 }
 
 /// Represents the user's action in response to an elicitation request.
@@ -476,7 +480,7 @@ impl ElicitRequestUrlParams {
     /// Makes the request task-augmented with TTL.
     /// 
     /// Default: `None`
-    pub fn with_task(mut self, ttl: Option<usize>) -> Self {
+    pub fn with_ttl(mut self, ttl: Option<usize>) -> Self {
         self.task = Some(TaskMetadata { ttl });
         self
     }
@@ -564,6 +568,7 @@ impl ElicitResult {
         Self {
             action: ElicitationAction::Accept,
             content: None,
+            meta: None,
         }
     }
 
@@ -573,6 +578,7 @@ impl ElicitResult {
         Self {
             action: ElicitationAction::Decline,
             content: None,
+            meta: None,
         }
     }
     
@@ -582,6 +588,7 @@ impl ElicitResult {
         Self {
             action: ElicitationAction::Cancel,
             content: None,
+            meta: None,
         }
     }
     
@@ -646,6 +653,30 @@ impl ElicitResult {
         }
     }
 
+    /// Sets the related task metadata
+    #[inline]
+    #[cfg(feature = "tasks")]
+    pub fn with_related_task(mut self, task: impl Into<RelatedTaskMetadata>) -> Self {
+        let meta: RelatedTaskMetadata = task.into();
+        let meta = serde_json::to_value(meta).unwrap();
+
+        self.meta.get_or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .unwrap()
+            .insert(crate::types::task::RELATED_TASK_KEY.into(), meta);
+        self
+    }
+
+    /// Returns the [`RelatedTaskMetadata`] if it's specified
+    #[inline]
+    #[cfg(feature = "tasks")]
+    pub fn related_task(&self) -> Option<RelatedTaskMetadata> {
+        self.meta
+            .as_ref()
+            .and_then(|m| m.as_object())
+            .and_then(|m| m.get(crate::types::task::RELATED_TASK_KEY))
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
 }
 
 impl UrlElicitationRequiredError {

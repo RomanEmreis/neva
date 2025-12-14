@@ -159,7 +159,7 @@ pub use task::{
     TaskMetadata,
     TaskPayload,
     TaskStatus,
-    Task
+    Task,
 };
 
 #[cfg(feature = "server")]
