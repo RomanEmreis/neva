@@ -11,7 +11,7 @@ const DEFAULT_POLL_INTERVAL: usize = 5000; // 5 seconds
 /// A trait for requestor types
 pub trait TaskApi {
     /// Retrieve task result from the client. If the task is not completed yet, waits until it completes or cancels.
-    fn get_task_result<T: DeserializeOwned>(&mut self, id: impl Into<String>) -> impl Future<Output = Result<TaskPayload<T>, Error>>;
+    fn get_task_result<T: DeserializeOwned>(&mut self, id: impl Into<String>) -> impl Future<Output = Result<T, Error>>;
 
     /// Retrieve task status from the client
     fn get_task(&mut self, id: impl Into<String>) -> impl Future<Output = Result<Task, Error>>;
@@ -21,6 +21,9 @@ pub trait TaskApi {
 
     /// Retrieves a list of tasks from the client
     fn list_tasks(&mut self, cursor: Option<Cursor>) -> impl Future<Output = Result<ListTasksResult, Error>>;
+
+    /// Input callback
+    fn handle_input(&mut self, id: &str, params: TaskPayload) -> impl Future<Output = Result<(), Error>>;
 }
 
 /// Polls receiver with `tasks/get` until it completed, failed, cancelled or expired.
@@ -43,7 +46,7 @@ where
     loop {
         if task.ttl <= elapsed {
             #[cfg(feature = "tracing")]
-            tracing::debug!(logger = "neva", "Task TTL expired. Cancelling task.");
+            tracing::trace!(logger = "neva", "Task TTL expired. Cancelling task.");
             
             let _ = api.cancel_task(&task.id).await?;
             return Err(Error::new(ErrorCode::InvalidRequest, "Task was cancelled: TTL expired"));
@@ -51,31 +54,36 @@ where
             
         task = api.get_task(&task.id).await?;
         
-        if task.status == TaskStatus::Completed || task.status == TaskStatus::Failed {
-            let result: TaskPayload<T> = api
+        match task.status {
+            TaskStatus::Completed | TaskStatus::Failed => return api
                 .get_task_result(&task.id)
-                .await?;
+                .await,
+            TaskStatus::Cancelled => return Err(
+                Error::new(ErrorCode::InvalidRequest, "Task was cancelled")
+            ),
+            TaskStatus::InputRequired => {
+                #[cfg(feature = "tracing")]
+                tracing::trace!(logger = "neva", "Task input required. Providing input.");
+                
+                let params: TaskPayload = api
+                    .get_task_result(&task.id)
+                    .await?;
+                api.handle_input(&task.id, params).await?;
+            },
+            _ => {
+                let poll_interval = task
+                    .poll_interval
+                    .unwrap_or(DEFAULT_POLL_INTERVAL);
 
-            return Ok(result.into_inner());
-        } else if task.status == TaskStatus::InputRequired {
-            unimplemented!("This feature is not yet implemented.")
-            //let result: TaskPayload<T> = api
-            //    .get_task_result(&task.id)
-            //    .await?;
+                elapsed += poll_interval;
 
-            //return Ok(result.into_inner());
-        } else if task.status == TaskStatus::Cancelled {
-            return Err(Error::new(ErrorCode::InvalidRequest, "Task was cancelled"));
-        } else {
-            let poll_interval = task
-                .poll_interval
-                .unwrap_or(DEFAULT_POLL_INTERVAL);
-
-            elapsed += poll_interval;
-
-            #[cfg(feature = "tracing")]
-            tracing::debug!(logger = "neva", "Waiting for task to complete. Elapsed: {elapsed}ms");
-            tokio::time::sleep(Duration::from_millis(poll_interval as u64)).await;   
+                #[cfg(feature = "tracing")]
+                tracing::trace!(
+                    logger = "neva", 
+                    "Waiting for task to complete. Elapsed: {elapsed}ms");
+                
+                tokio::time::sleep(Duration::from_millis(poll_interval as u64)).await;
+            }
         }
     }
 }

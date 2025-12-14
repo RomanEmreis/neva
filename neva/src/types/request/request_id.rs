@@ -1,11 +1,13 @@
 ﻿//! Generic identity data structure for requests.
 
-use std::fmt;
-use std::fmt::{Display, Formatter};
-use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::shared::{ArcSlice, ArcStr, MemChr};
 use crate::types::ProgressToken;
+use std::{
+    convert::Infallible, 
+    fmt::{self, Display, Formatter}, 
+    str::FromStr
+};
 
 const SEPARATOR: u8 = b'/';
 
@@ -56,8 +58,36 @@ impl Display for RequestId {
     }
 }
 
+impl From<i64> for RequestId {
+    #[inline]
+    fn from(num: i64) -> Self {
+        RequestId::Number(num)
+    }
+}
+
+impl From<String> for RequestId {
+    #[inline]
+    fn from(str: String) -> Self {
+        RequestId::String(ArcStr::from(str))
+    }
+}
+
+impl From<&str> for RequestId {
+    #[inline]
+    fn from(str: &str) -> Self {
+        RequestId::String(ArcStr::from(str))
+    }
+}
+
+impl From<uuid::Uuid> for RequestId {
+    #[inline]
+    fn from(uuid: uuid::Uuid) -> Self {
+        RequestId::Uuid(uuid)
+    }
+}
+
 impl FromStr for RequestId {
-    type Err = String;
+    type Err = Infallible;
 
     #[inline]
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -66,7 +96,7 @@ impl FromStr for RequestId {
         } else if let Ok(n) = s.parse::<i64>() {
             Ok(RequestId::Number(n))
         } else {
-            Ok(RequestId::String(ArcStr::from(s)))
+            Ok(RequestId::from(s))
         }
     }
 }

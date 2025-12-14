@@ -630,7 +630,7 @@ impl CreateMessageRequestParams {
     /// 
     /// Default: `None`
     #[cfg(feature = "tasks")]
-    pub fn with_task(mut self, ttl: Option<usize>) -> Self {
+    pub fn with_ttl(mut self, ttl: Option<usize>) -> Self {
         self.task = Some(TaskMetadata { ttl });
         self
     }

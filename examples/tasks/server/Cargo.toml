@@ -8,3 +8,4 @@ publish = false
 [dependencies]
 neva = { path = "../../../neva", features = ["server-full"] }
 tokio = "1.48.0"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }

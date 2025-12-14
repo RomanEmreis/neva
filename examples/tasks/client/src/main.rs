@@ -1,3 +1,4 @@
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 use neva::prelude::*;
 
@@ -6,8 +7,11 @@ async fn sampling_handler(params: CreateMessageRequestParams) -> CreateMessageRe
     tracing::info!("Received sampling: {:?}", params);
     
     CreateMessageResult::assistant()
-        .with_model("o3-mini")
-        .with_content("Some result")
+        .with_model("gpt-5")
+        .with_content(
+            r#"Winter night whispers,
+Warm lights breathe through frosted glass—
+Time pauses, snow listens."#)
         .end_turn()
 }
 
@@ -24,6 +28,7 @@ async fn elicitation_handler(params: ElicitRequestParams) -> ElicitResult {
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     tracing_subscriber::registry()
+        .with(EnvFilter::new("info"))
         .with(tracing_subscriber::fmt::layer())
         .init();
     
@@ -35,12 +40,15 @@ async fn main() -> Result<(), Error> {
     
     client.connect().await?;
 
+    tracing::info!("Calling tool with sampling as task...");
     let result = client.call_tool_as_task("tool_with_sampling", (), None).await;
     tracing::info!("Received result: {:?}", result);
 
+    tracing::info!("Calling tool with elicitation as task...");
     let result = client.call_tool_as_task("tool_with_elicitation", (), None).await;
     tracing::info!("Received result: {:?}", result);
 
+    tracing::info!("Calling an infinite tool as task...");
     let ttl = 10000; // 10 seconds
     let result = client.call_tool_as_task("endless_tool", (), Some(ttl)).await;
     tracing::info!("Received result: {:?}", result);
