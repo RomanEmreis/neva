@@ -12,10 +12,10 @@ use crate::{
     error::Error
 };
 use volga::{
-    App, Json, HttpResult, di::Dc, status, ok,
+    App, Json, HttpResult, HttpRequest, di::Dc, status, ok,
     auth::{BearerTokenService, Bearer},
     http::sse::Message as SseMessage, sse,
-    headers::{HttpHeaders, AUTHORIZATION}
+    headers::{HeaderMap, AUTHORIZATION}
 };
 #[cfg(feature = "server-tls")]
 use volga::tls::TlsConfig;
@@ -108,16 +108,16 @@ async fn handle(
     #[cfg(feature = "server-tls")]
     if let Some(tls) = tls {
         server = server.set_tls(tls);
-        server.use_hsts();
     }
     
     server
         .add_singleton(manager)
         .map_err(handle_http_error)
-        .map_group(service_url.endpoint)
-        .map_get(root, handle_connection)
-        .map_post(root, handle_message)
-        .map_delete(root, handle_session_end);
+        .group(service_url.endpoint, |mcp| { 
+            mcp.map_get(root, handle_connection);
+            mcp.map_post(root, handle_message);
+            mcp.map_delete(root, handle_session_end); 
+        });
     
     if let Err(_e) = server.run().await {
         #[cfg(feature = "tracing")]
@@ -126,8 +126,8 @@ async fn handle(
     }
 }
 
-async fn handle_session_end(manager: Dc<RequestManager>, headers: HttpHeaders) -> HttpResult {
-    let Some(id) = get_mcp_session_id(&headers) else {
+async fn handle_session_end(req: HttpRequest, manager: Dc<RequestManager>) -> HttpResult {
+    let Some(id) = get_mcp_session_id(req.headers()) else {
         return status!(405);
     };
     
@@ -138,8 +138,8 @@ async fn handle_session_end(manager: Dc<RequestManager>, headers: HttpHeaders) -
     ok!([(MCP_SESSION_ID, id.to_string())])
 }
 
-async fn handle_connection(headers: HttpHeaders, manager: Dc<RequestManager>) -> HttpResult {
-    let Some(id) = get_mcp_session_id(&headers) else { 
+async fn handle_connection(req: HttpRequest, manager: Dc<RequestManager>) -> HttpResult {
+    let Some(id) = get_mcp_session_id(req.headers()) else { 
         return status!(405);
     };
 
@@ -154,17 +154,18 @@ async fn handle_connection(headers: HttpHeaders, manager: Dc<RequestManager>) ->
         UnboundedReceiverStream::new(log_rx), 
         UnboundedReceiverStream::new(msg_rx));
     
-    sse!(stream.map(handle_sse_message), [
+    sse!(stream.map(handle_sse_message); [
         (MCP_SESSION_ID, id.to_string())
     ])
 }
 
 async fn handle_message(
-    mut headers: HttpHeaders,
+    req: HttpRequest,
     manager: Dc<RequestManager>,
     bts: Option<BearerTokenService>,
     Json(msg): Json<Message>
 ) -> HttpResult {
+    let mut headers = req.headers().clone();
     let id = get_or_create_mcp_session(&headers);
     if let Message::Notification(_) = msg {
         return status!(202, [
@@ -179,13 +180,13 @@ async fn handle_message(
                 .and_then(|bearer| bts.decode::<DefaultClaims>(bearer).ok())
         })
         .unwrap_or_default();
-
+    
     headers.remove(AUTHORIZATION);
     
     let msg = msg
         .set_session_id(id)
         .set_claims(claims)
-        .set_headers(headers.into_inner());
+        .set_headers(headers);
     
     let (resp_tx, resp_rx) = oneshot::channel::<Message>();
     manager.pending.insert(msg.full_id(), resp_tx);
@@ -196,7 +197,7 @@ async fn handle_message(
         .await
         .map_err(receiver_error)?;
     
-    ok!(resp, [
+    ok!(resp; [
         (MCP_SESSION_ID, id.to_string())
     ])
 }
@@ -222,6 +223,6 @@ fn handle_sse_message(msg: Message) -> Result<SseMessage, volga::error::Error> {
 
 /// Fetches the [`MCP_SESSION_ID`] header value or created the new [`uuid::Uuid`] if `None`
 #[inline]
-fn get_or_create_mcp_session(headers: &HttpHeaders) -> uuid::Uuid {
+fn get_or_create_mcp_session(headers: &HeaderMap) -> uuid::Uuid {
     get_mcp_session_id(headers).unwrap_or_else(uuid::Uuid::new_v4)
 }
