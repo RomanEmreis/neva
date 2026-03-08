@@ -254,6 +254,20 @@ pub struct MessageBatch {
     /// [`Notification`].
     pub(crate) session_id: Option<uuid::Uuid>,
 
+    /// HTTP headers from the originating request. Never sent over the wire.
+    ///
+    /// Copied onto each inner [`Request`] in `execute_batch` so that
+    /// middleware (e.g. auth checks) sees the original headers.
+    #[cfg(feature = "http-server")]
+    pub(crate) headers: HeaderMap,
+
+    /// JWT claims decoded from the originating request. Never sent over the wire.
+    ///
+    /// Copied onto each inner [`Request`] in `execute_batch` so that
+    /// role/permission guards work correctly for batched HTTP calls.
+    #[cfg(feature = "http-server")]
+    pub(crate) claims: Option<Box<DefaultClaims>>,
+
     items: Vec<MessageEnvelope>,
 }
 
@@ -272,6 +286,10 @@ impl MessageBatch {
         Ok(Self {
             id: RequestId::Uuid(uuid::Uuid::new_v4()),
             session_id: None,
+            #[cfg(feature = "http-server")]
+            headers: HeaderMap::with_capacity(8),
+            #[cfg(feature = "http-server")]
+            claims: None,
             items,
         })
     }
@@ -307,6 +325,16 @@ impl MessageBatch {
     pub fn iter(&self) -> impl Iterator<Item = &MessageEnvelope> {
         self.items.iter()
     }
+
+    /// Returns `true` if the batch contains at least one [`MessageEnvelope::Request`].
+    ///
+    /// Used by the HTTP transport to decide whether a pending response slot
+    /// must be allocated: a notification-only batch produces no response.
+    #[inline]
+    #[cfg(feature = "http-server")]
+    pub(crate) fn has_requests(&self) -> bool {
+        self.items.iter().any(|e| matches!(e, MessageEnvelope::Request(_)))
+    }
 }
 
 impl IntoIterator for MessageBatch {
@@ -334,6 +362,10 @@ impl<'de> Deserialize<'de> for MessageBatch {
         Ok(Self {
             id: RequestId::Uuid(uuid::Uuid::new_v4()),
             session_id: None,
+            #[cfg(feature = "http-server")]
+            headers: HeaderMap::with_capacity(8),
+            #[cfg(feature = "http-server")]
+            claims: None,
             items,
         })
     }
@@ -577,22 +609,25 @@ impl Message {
         self
     }
     
-    /// Sets HTTP headers for [`Request`] or [`Response`] message
+    /// Sets HTTP headers for [`Request`], [`Response`], or [`MessageBatch`] message
     #[cfg(feature = "http-server")]
     pub fn set_headers(mut self, headers: HeaderMap) -> Self {
-        match self { 
+        match self {
             Message::Request(ref mut req) => req.headers = headers,
             Message::Response(resp) => self = Message::Response(resp.set_headers(headers)),
+            Message::Batch(ref mut batch) => batch.headers = headers,
             _ => ()
         }
         self
     }
 
-    /// Sets Authentication and Authorization claims for [`Request`] message
+    /// Sets Authentication and Authorization claims for [`Request`] or [`MessageBatch`] message
     #[cfg(feature = "http-server")]
     pub(crate) fn set_claims(mut self, claims: DefaultClaims) -> Self {
-        if let Message::Request(ref mut req) = self {
-            req.claims = Some(Box::new(claims));
+        match self {
+            Message::Request(ref mut req) => req.claims = Some(Box::new(claims)),
+            Message::Batch(ref mut batch) => batch.claims = Some(Box::new(claims)),
+            _ => ()
         }
         self
     }

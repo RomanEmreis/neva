@@ -172,7 +172,17 @@ async fn handle_message(req: HttpRequest) -> HttpResult {
     
     let id = get_or_create_mcp_session(&headers);
     if let Message::Notification(_) = msg {
-        return status!(202, [
+        return status!(202; [
+            (MCP_SESSION_ID, id.to_string())
+        ]);
+    }
+
+    // A batch whose items are all notifications/responses produces no reply
+    // per JSON-RPC 2.0 §6. Return 202 immediately without allocating a
+    // pending entry — otherwise the oneshot receiver would hang forever.
+    if let Message::Batch(ref batch) = msg && !batch.has_requests() {
+        manager.sender.send(Ok(msg)).await.map_err(sender_error)?;
+        return status!(202; [
             (MCP_SESSION_ID, id.to_string())
         ]);
     }

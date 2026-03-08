@@ -617,11 +617,17 @@ impl App {
         use tokio::sync::mpsc;
         use crate::transport::TransportProtoSender;
 
-        // Capture the incoming batch's correlation fields so the response batch
-        // carries the same id+session_id — required for the HTTP transport to
-        // route the response back to the correct waiting HTTP handler.
+        // Capture the incoming batch's correlation and HTTP-context fields.
+        // `id` + `session_id` are needed so the response batch can be routed
+        // back to the correct waiting HTTP handler.  `headers` and `claims`
+        // are copied onto every inner Request so that middleware (auth checks,
+        // role/permission guards, SSE routing) sees the original HTTP context.
         let batch_id = batch.id.clone();
         let batch_session_id = batch.session_id;
+        #[cfg(feature = "http-server")]
+        let batch_headers = batch.headers.clone();
+        #[cfg(feature = "http-server")]
+        let batch_claims = batch.claims.clone();
 
         // Intercept all messages that middleware sends through the runtime sender.
         // We separate batch request responses (to collect into the reply batch)
@@ -645,7 +651,7 @@ impl App {
                             let _ = collect_tx.send(MessageEnvelope::Response(resp));
                         }
                         other => {
-                            // Server-initiated request or notification — forward
+                            // Server-initiated request or notification - forward
                             // to the real transport so the client receives it.
                             let _ = real_sender.send(other).await;
                         }
@@ -658,9 +664,25 @@ impl App {
         let futures = batch.into_iter().map(|envelope| {
             let runtime = runtime.clone();
             let tx = intercept_tx.clone();
+            // Clone per-iteration so each async move block owns its own copy.
+            #[cfg(feature = "http-server")]
+            let batch_headers = batch_headers.clone();
+            #[cfg(feature = "http-server")]
+            let batch_claims = batch_claims.clone();
             async move {
                 match envelope {
-                    MessageEnvelope::Request(req) => {
+                    MessageEnvelope::Request(mut req) => {
+                        // Copy the batch's HTTP metadata onto the inner request
+                        // so that session/auth context is preserved: without
+                        // this, role/permission checks can fail with a valid
+                        // token and server-initiated follow-up calls (sampling,
+                        // elicitation) cannot be routed back over SSE.
+                        req.session_id = batch_session_id;
+                        #[cfg(feature = "http-server")]
+                        {
+                            req.headers = batch_headers;
+                            req.claims = batch_claims;
+                        }
                         // Route through the full middleware chain with the
                         // intercepted sender so registered middlewares apply.
                         runtime
@@ -691,7 +713,7 @@ impl App {
         }
 
         if envelopes.is_empty() {
-            return; // all items were notifications/responses — no reply needed
+            return; // all items were notifications/responses - no reply needed
         }
 
         let mut resp_batch = match MessageBatch::new(envelopes) {
