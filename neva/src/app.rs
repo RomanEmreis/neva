@@ -693,7 +693,20 @@ impl App {
                     MessageEnvelope::Notification(notification) => {
                         Self::handle_notification(notification).await;
                     }
-                    MessageEnvelope::Response(resp) => {
+                    MessageEnvelope::Response(mut resp) => {
+                        // Apply the batch's session context so that
+                        // `resp.full_id()` (= session_id + resp_id) matches
+                        // the key used when the server registered the pending
+                        // request via `send_request`. Without this the lookup
+                        // in `RequestQueue::complete` misses and the pending
+                        // handler leaks.
+                        if let Some(session_id) = batch_session_id {
+                            resp = resp.set_session_id(session_id);
+                        }
+                        #[cfg(feature = "http-server")]
+                        {
+                            resp = resp.set_headers(batch_headers);
+                        }
                         Self::handle_response(resp, runtime).await;
                     }
                 }
