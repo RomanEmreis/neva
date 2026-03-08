@@ -10,12 +10,16 @@ exclude = [
 ]
 
 [workspace.package]
+version = "0.2.7"
 license = "MIT"
 edition = "2024"
 rust-version = "1.90.0"
 authors = ["Roman Emreis <roman.emreis@outlook.com>"]
 repository = "https://github.com/RomanEmreis/neva"
 documentation = "https://docs.rs/neva"
+
+[workspace.dependencies]
+neva_macros = { path = "neva_macros", version = "0.2.7" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
