@@ -331,7 +331,7 @@ impl MessageBatch {
     /// Used by the HTTP transport to decide whether a pending response slot
     /// must be allocated: a notification-only batch produces no response.
     #[inline]
-    #[cfg(feature = "http-server")]
+    #[cfg(any(feature = "http-server", feature = "http-client"))]
     pub(crate) fn has_requests(&self) -> bool {
         self.items.iter().any(|e| matches!(e, MessageEnvelope::Request(_)))
     }

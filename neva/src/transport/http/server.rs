@@ -221,7 +221,8 @@ async fn read_message(req: HttpRequest) -> Result<Message, volga::error::Error> 
     let mut body_data_stream = req.into_body().into_data_stream();
     let mut buf = bytes::BytesMut::new();
 
-    while let Some(Ok(chunk)) = body_data_stream.next().await {
+    while let Some(chunk) = body_data_stream.next().await {
+        let chunk = chunk?;
         buf.extend_from_slice(&chunk);
     }
 
