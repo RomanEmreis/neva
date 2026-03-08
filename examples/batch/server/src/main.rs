@@ -7,8 +7,18 @@
 
 use neva::prelude::*;
 
+async fn logging(ctx: MwContext, next: Next) -> Response {
+    let id = ctx.id();
+    tracing::info!("Request start: {id:?}");
+
+    let resp = next(ctx).await;
+
+    tracing::info!("Request end: {id:?}");
+    resp
+}
+
 /// Adds two integers and returns the sum.
-#[tool(descr = "Add two integers")]
+#[tool(descr = "Add two integers", middleware = [logging])]
 async fn add(a: i32, b: i32) -> i32 {
     a + b
 }
@@ -16,7 +26,8 @@ async fn add(a: i32, b: i32) -> i32 {
 /// Returns a friendly greeting message for the given name.
 #[prompt(
     descr = "Generate a greeting message",
-    args = r#"[{"name": "name", "description": "Name to greet", "required": true}]"#
+    args = r#"[{"name": "name", "description": "Name to greet", "required": true}]"#, 
+    middleware = [logging]
 )]
 async fn greeting(name: String) -> PromptMessage {
     PromptMessage::user().with(format!("Hello, {name}! Welcome to Neva."))

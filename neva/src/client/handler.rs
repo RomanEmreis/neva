@@ -280,12 +280,11 @@ impl RequestHandler {
                         send_response_impl(&mut sender, resp).await;
                     },
                     Message::Notification(notification) => {
-                        match &notification_handler {
-                            Some(handler) => handler.notify(notification).await,
-                            None => {
-                                #[cfg(feature = "tracing")]
-                                notification.write();
-                            }
+                        if let Some(handler) = &notification_handler { 
+                            handler.notify(notification).await
+                        } else {
+                            #[cfg(feature = "tracing")]
+                            notification.write();
                         }
                     },
                     Message::Batch(batch) => {

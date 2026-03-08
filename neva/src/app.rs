@@ -614,59 +614,104 @@ impl App {
 
     async fn execute_batch(batch: MessageBatch, runtime: ServerRuntime) {
         use futures_util::future::join_all;
+        use tokio::sync::mpsc;
+        use crate::transport::TransportProtoSender;
+
+        // Capture the incoming batch's correlation fields so the response batch
+        // carries the same id+session_id — required for the HTTP transport to
+        // route the response back to the correct waiting HTTP handler.
+        let batch_id = batch.id.clone();
+        let batch_session_id = batch.session_id;
+
+        // Intercept all messages that middleware sends through the runtime sender.
+        // We separate batch request responses (to collect into the reply batch)
+        // from server-initiated requests/notifications (which must be forwarded
+        // to the real transport immediately so the client can respond to them).
+        //
+        // Without forwarding, a handler that calls ctx.elicit() or ctx.sample()
+        // would deadlock: it sends the request into the intercept channel and
+        // then blocks waiting for a client response that can never arrive.
+        let real_sender = runtime.sender();
+        let (intercept_tx, intercept_rx) = mpsc::unbounded_channel::<Message>();
+        let (collect_tx, mut collect_rx) = mpsc::unbounded_channel::<MessageEnvelope>();
+
+        let router = tokio::spawn({
+            let mut real_sender = real_sender.clone();
+            async move {
+                let mut intercept_rx = intercept_rx;
+                while let Some(msg) = intercept_rx.recv().await {
+                    match msg {
+                        Message::Response(resp) => {
+                            let _ = collect_tx.send(MessageEnvelope::Response(resp));
+                        }
+                        other => {
+                            // Server-initiated request or notification — forward
+                            // to the real transport so the client receives it.
+                            let _ = real_sender.send(other).await;
+                        }
+                    }
+                }
+                // collect_tx is dropped here, closing collect_rx.
+            }
+        });
 
         let futures = batch.into_iter().map(|envelope| {
             let runtime = runtime.clone();
+            let tx = intercept_tx.clone();
             async move {
                 match envelope {
                     MessageEnvelope::Request(req) => {
-                        #[cfg(not(feature = "di"))]
-                        let resp = Self::handle_request(req, runtime).await;
-                        #[cfg(feature = "di")]
-                        let resp = {
-                            let scope = runtime.container.create_scope();
-                            Self::handle_request(req, runtime, scope).await
-                        };
-                        Some(MessageEnvelope::Response(resp))
+                        // Route through the full middleware chain with the
+                        // intercepted sender so registered middlewares apply.
+                        runtime
+                            .with_sender(TransportProtoSender::Channel(tx))
+                            .execute(Message::Request(req))
+                            .await;
                     }
                     MessageEnvelope::Notification(notification) => {
                         Self::handle_notification(notification).await;
-                        None
                     }
                     MessageEnvelope::Response(resp) => {
                         Self::handle_response(resp, runtime).await;
-                        None
                     }
                 }
             }
         });
 
-        let envelopes: Vec<MessageEnvelope> = join_all(futures)
-            .await
-            .into_iter()
-            .flatten()
-            .collect();
+        join_all(futures).await;
+        // Closing the last intercept sender signals the router to exit.
+        drop(intercept_tx);
+        // Wait for the router to flush all in-flight forwarded messages before
+        // we read from collect_rx (collect_tx is dropped inside the router).
+        let _ = router.await;
+
+        let mut envelopes = Vec::new();
+        while let Some(envelope) = collect_rx.recv().await {
+            envelopes.push(envelope);
+        }
 
         if envelopes.is_empty() {
             return; // all items were notifications/responses — no reply needed
         }
 
-        match MessageBatch::new(envelopes) {
-            Ok(batch) => {
-                let mut sender = runtime.sender();
-                if let Err(_err) = sender.send(Message::Batch(batch)).await {
-                    #[cfg(feature = "tracing")]
-                    tracing::error!(logger = "neva", "Error sending batch response: {:?}", _err);
-                }
-            }
+        let mut resp_batch = match MessageBatch::new(envelopes) {
+            Ok(b) => b,
             Err(_err) => {
-                // This branch is unreachable in practice: we already verified the
-                // envelope list is non-empty above. Logged defensively.
+                // Unreachable in practice: envelopes are non-empty above.
                 #[cfg(feature = "tracing")]
-                tracing::error!(logger = "neva", "Failed to construct batch response (this is a bug): {:?}", _err);
-                #[cfg(not(feature = "tracing"))]
-                let _ = _err;
+                tracing::error!(logger = "neva", "Failed to construct batch response: {:?}", _err);
+                return;
             }
+        };
+        // Restore the correlation id+session so the HTTP transport can match
+        // this response batch to the waiting HTTP handler.
+        resp_batch.id = batch_id;
+        resp_batch.session_id = batch_session_id;
+
+        let mut sender = real_sender;
+        if let Err(_err) = sender.send(Message::Batch(resp_batch)).await {
+            #[cfg(feature = "tracing")]
+            tracing::error!(logger = "neva", "Error sending batch response: {:?}", _err);
         }
     }
 

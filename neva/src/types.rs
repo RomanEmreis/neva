@@ -239,10 +239,26 @@ pub enum MessageEnvelope {
 /// A batch must contain at least one item. Constructing or deserializing
 /// an empty batch returns an error.
 #[derive(Debug, Clone)]
-pub struct MessageBatch(Vec<MessageEnvelope>);
+pub struct MessageBatch {
+    /// Per-batch correlation identifier. Never sent over the wire.
+    ///
+    /// Auto-generated as a UUID on construction or deserialization.
+    /// Combined with `session_id` in [`MessageBatch::full_id`] to give the
+    /// HTTP transport a unique key for routing the response back to the
+    /// correct waiting HTTP handler.
+    pub(crate) id: RequestId,
+
+    /// MCP session this batch belongs to. Never sent over the wire.
+    ///
+    /// Set by the HTTP transport layer, same as for [`Request`] and
+    /// [`Notification`].
+    pub(crate) session_id: Option<uuid::Uuid>,
+
+    items: Vec<MessageEnvelope>,
+}
 
 impl MessageBatch {
-    /// Constructs a new [`MessageBatch`].
+    /// Constructs a new [`MessageBatch`] with a freshly generated correlation ID.
     ///
     /// # Errors
     /// Returns [`crate::error::Error`] if `items` is empty.
@@ -253,13 +269,28 @@ impl MessageBatch {
                 "batch must not be empty",
             ));
         }
-        Ok(Self(items))
+        Ok(Self {
+            id: RequestId::Uuid(uuid::Uuid::new_v4()),
+            session_id: None,
+            items,
+        })
+    }
+
+    /// Returns the full correlation key `(session_id/)id`, matching the
+    /// pattern used by [`Request`] and [`Notification`].
+    pub(crate) fn full_id(&self) -> RequestId {
+        let id = self.id.clone();
+        if let Some(session_id) = self.session_id {
+            id.concat(RequestId::Uuid(session_id))
+        } else {
+            id
+        }
     }
 
     /// Returns the number of items in the batch.
     #[inline]
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.items.len()
     }
 
     /// Returns `true` if the batch has no items.
@@ -268,13 +299,13 @@ impl MessageBatch {
     /// but this method is provided for API completeness.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.items.is_empty()
     }
 
     /// Returns an iterator over the batch items.
     #[inline]
     pub fn iter(&self) -> impl Iterator<Item = &MessageEnvelope> {
-        self.0.iter()
+        self.items.iter()
     }
 }
 
@@ -283,13 +314,14 @@ impl IntoIterator for MessageBatch {
     type IntoIter = std::vec::IntoIter<MessageEnvelope>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
+        self.items.into_iter()
     }
 }
 
 impl Serialize for MessageBatch {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.0.serialize(serializer)
+        // `id` and `session_id` are internal — only the items are sent over the wire.
+        self.items.serialize(serializer)
     }
 }
 
@@ -299,7 +331,11 @@ impl<'de> Deserialize<'de> for MessageBatch {
         if items.is_empty() {
             return Err(serde::de::Error::custom("JSON-RPC batch array must not be empty"));
         }
-        Ok(Self(items))
+        Ok(Self {
+            id: RequestId::Uuid(uuid::Uuid::new_v4()),
+            session_id: None,
+            items,
+        })
     }
 }
 
@@ -515,7 +551,7 @@ impl Message {
             Message::Request(req) => req.full_id(),
             Message::Response(resp) => resp.full_id(),
             Message::Notification(notification) => notification.full_id(),
-            Message::Batch(_) => RequestId::default(),
+            Message::Batch(batch) => batch.full_id(),
         }
     }
 
@@ -526,7 +562,7 @@ impl Message {
             Message::Request(req) => req.session_id.as_ref(),
             Message::Response(resp) => resp.session_id(),
             Message::Notification(notification) => notification.session_id.as_ref(),
-            Message::Batch(_) => None,
+            Message::Batch(batch) => batch.session_id.as_ref(),
         }
     }
 
@@ -536,7 +572,7 @@ impl Message {
             Message::Request(ref mut req) => req.session_id = Some(id),
             Message::Notification(ref mut notification) => notification.session_id = Some(id),
             Message::Response(resp) => self = Message::Response(resp.set_session_id(id)),
-            Message::Batch(_) => (),
+            Message::Batch(ref mut batch) => batch.session_id = Some(id),
         }
         self
     }

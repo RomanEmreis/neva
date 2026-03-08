@@ -63,7 +63,11 @@ pub(crate) enum TransportProtoSender {
     None,
     Stdio(stdio::StdIoSender),
     #[cfg(any(feature = "http-server", feature = "http-client"))]
-    Http(http::HttpSender)
+    Http(http::HttpSender),
+    /// Batch-scoped sender that captures individual responses into an in-memory
+    /// channel so `execute_batch` can collect them and send a single batch reply.
+    #[cfg(feature = "server")]
+    Channel(tokio::sync::mpsc::UnboundedSender<Message>),
 }
 
 pub(crate) enum TransportProtoReceiver {
@@ -91,6 +95,10 @@ impl Sender for TransportProtoSender {
                 ErrorCode::InternalError,
                 "Transport protocol must be specified"
             )),
+            #[cfg(feature = "server")]
+            TransportProtoSender::Channel(tx) => tx
+                .send(resp)
+                .map_err(|_| Error::new(ErrorCode::InternalError, "Batch response channel closed")),
         }
     }
 }
