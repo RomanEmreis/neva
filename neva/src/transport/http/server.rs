@@ -12,7 +12,7 @@ use crate::{
     error::Error
 };
 use volga::{
-    App, Json, HttpResult, HttpRequest, di::Dc, status, ok,
+    App, HttpResult, HttpRequest, di::Dc, status, ok,
     auth::{BearerTokenService, Bearer},
     http::sse::Message as SseMessage, sse,
     headers::{HeaderMap, AUTHORIZATION}
@@ -126,10 +126,12 @@ async fn handle(
     }
 }
 
-async fn handle_session_end(req: HttpRequest, manager: Dc<RequestManager>) -> HttpResult {
+async fn handle_session_end(req: HttpRequest) -> HttpResult {
     let Some(id) = get_mcp_session_id(req.headers()) else {
-        return status!(405);
+        return status!(400);
     };
+
+    let manager: Dc<RequestManager> = req.extract()?;
     
     #[cfg(feature = "tracing")]
     LOG_REGISTRY.unregister(&id);
@@ -138,11 +140,13 @@ async fn handle_session_end(req: HttpRequest, manager: Dc<RequestManager>) -> Ht
     ok!([(MCP_SESSION_ID, id.to_string())])
 }
 
-async fn handle_connection(req: HttpRequest, manager: Dc<RequestManager>) -> HttpResult {
+async fn handle_connection(req: HttpRequest) -> HttpResult {
     let Some(id) = get_mcp_session_id(req.headers()) else { 
-        return status!(405);
+        return status!(400);
     };
 
+    let manager: Dc<RequestManager> = req.extract()?;
+    
     let (_log_tx, log_rx) = mpsc::unbounded_channel::<Message>();
     let (msg_tx, msg_rx) = mpsc::unbounded_channel::<Message>();
     
@@ -159,13 +163,13 @@ async fn handle_connection(req: HttpRequest, manager: Dc<RequestManager>) -> Htt
     ])
 }
 
-async fn handle_message(
-    req: HttpRequest,
-    manager: Dc<RequestManager>,
-    bts: Option<BearerTokenService>,
-    Json(msg): Json<Message>
-) -> HttpResult {
+async fn handle_message(req: HttpRequest) -> HttpResult {
+    let bts: Option<BearerTokenService> = req.extract()?;
+    let manager: Dc<RequestManager> = req.extract()?;
+    
     let mut headers = req.headers().clone();
+    let msg = read_message(req).await?;
+    
     let id = get_or_create_mcp_session(&headers);
     if let Message::Notification(_) = msg {
         return status!(202, [
@@ -200,6 +204,20 @@ async fn handle_message(
     ok!(resp; [
         (MCP_SESSION_ID, id.to_string())
     ])
+}
+
+#[inline]
+async fn read_message(req: HttpRequest) -> Result<Message, volga::error::Error> {
+    let mut body_data_stream = req.into_body().into_data_stream();
+    let mut buf = bytes::BytesMut::new();
+
+    while let Some(Ok(chunk)) = body_data_stream.next().await {
+        buf.extend_from_slice(&chunk);
+    }
+
+    let msg: Message = serde_json::from_slice(&buf)?;
+    
+    Ok(msg)
 }
 
 async fn handle_http_error(_err: volga::error::Error) {

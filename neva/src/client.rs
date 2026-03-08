@@ -12,13 +12,13 @@ use crate::transport::Transport;
 use crate::types::{
     ListToolsRequestParams, ListToolsResult, CallToolRequestParams, CallToolResponse,
     ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult,
-    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, Uri, 
+    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, Uri,
     ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult,
-    ServerCapabilities, ClientCapabilities, Implementation, InitializeRequestParams, InitializeResult, 
-    Request, RequestId, Response, RequestParamsMeta, 
+    ServerCapabilities, ClientCapabilities, Implementation, InitializeRequestParams, InitializeResult,
+    Request, RequestId, Response, RequestParamsMeta, MessageEnvelope,
     cursor::Cursor,
-    notification::Notification, 
-    resource::{SubscribeRequestParams, UnsubscribeRequestParams}, 
+    notification::Notification,
+    resource::{SubscribeRequestParams, UnsubscribeRequestParams},
     sampling::{CreateMessageRequestParams, CreateMessageResult, SamplingHandler},
     elicitation::{ElicitRequestParams, ElicitResult, ElicitationHandler},
     Root
@@ -39,7 +39,10 @@ use crate::types::{
 mod handler;
 mod notification_handler;
 pub mod options;
+pub mod batch;
 pub mod subscribe;
+
+pub use batch::BatchBuilder;
 
 /// Represents an MCP client app 
 pub struct Client {
@@ -893,6 +896,79 @@ impl Client {
             .await
     }
 
+    /// Creates a [`BatchBuilder`] for sending multiple requests in a single batch.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::client::Client;
+    /// use neva::error::Error;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let mut client = Client::new();
+    ///     client.connect().await?;
+    ///
+    ///     let responses = client
+    ///         .batch()
+    ///         .list_tools()
+    ///         .ping()
+    ///         .send()
+    ///         .await?;
+    ///
+    ///     client.disconnect().await
+    /// }
+    /// ```
+    pub fn batch(&mut self) -> BatchBuilder<'_> {
+        BatchBuilder {
+            client: self,
+            items: Vec::new(),
+        }
+    }
+
+    /// Sends a batch of messages to the MCP server and awaits all responses.
+    ///
+    /// Items that are [`MessageEnvelope::Request`] each get a response slot in
+    /// the returned `Vec`, in the same order they appear in `items`.
+    /// [`MessageEnvelope::Notification`] items are sent fire-and-forget and
+    /// produce no slot.
+    ///
+    /// All in-flight requests are awaited concurrently; a failure in one
+    /// does not cancel the others.
+    ///
+    /// # Errors
+    /// Returns [`Error`] if the client is not connected, the batch is empty,
+    /// or any response channel is closed or times out.
+    pub async fn call_batch(
+        &mut self,
+        items: Vec<MessageEnvelope>,
+    ) -> Result<Vec<Response>, Error> {
+        use futures_util::future::try_join_all;
+
+        let handler = self.handler
+            .as_mut()
+            .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
+
+        let request_timeout = handler.timeout();
+        let pending = handler.pending().clone();
+        let receivers = handler.send_batch(items).await?;
+
+        let futures = receivers.into_iter().map(|(id, rx)| {
+            let pending = pending.clone();
+            async move {
+                match tokio::time::timeout(request_timeout, rx).await {
+                    Ok(Ok(resp)) => Ok(resp),
+                    Ok(Err(_)) => Err(Error::new(ErrorCode::InternalError, "Response channel closed")),
+                    Err(_) => {
+                        let _ = pending.pop(&id);
+                        Err(Error::new(ErrorCode::Timeout, "Batch request timed out"))
+                    }
+                }
+            }
+        });
+
+        try_join_all(futures).await
+    }
+
     /// Sends a request to the MCP server
     #[inline]
     #[cfg(feature = "tasks")]
@@ -1063,3 +1139,15 @@ type Handler<P, O> = Arc<
     + Send
     + Sync
 >;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn call_batch_requires_connected_client() {
+        let mut client = Client::new();
+        let result = client.call_batch(vec![]).await;
+        assert!(result.is_err(), "disconnected client should return an error");
+    }
+}

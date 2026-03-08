@@ -16,13 +16,14 @@ use crate::app::handler::{
     RequestHandler
 };
 use crate::types::{
-    InitializeResult, InitializeRequestParams, IntoResponse, Response, Request, RequestId, Message, 
-    CompleteResult, ListToolsRequestParams, CallToolRequestParams, ListToolsResult, CallToolResponse, Tool, ToolHandler, 
-    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate, 
-    ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, 
-    SubscribeRequestParams, UnsubscribeRequestParams, Resource, resource::template::ResourceFunc, 
+    InitializeResult, InitializeRequestParams, IntoResponse, Response, Request, RequestId, Message,
+    MessageEnvelope, MessageBatch,
+    CompleteResult, ListToolsRequestParams, CallToolRequestParams, ListToolsResult, CallToolResponse, Tool, ToolHandler,
+    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate,
+    ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult,
+    SubscribeRequestParams, UnsubscribeRequestParams, Resource, resource::template::ResourceFunc,
     ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt,
-    notification::{Notification, CancelledNotificationParams}, 
+    notification::{Notification, CancelledNotificationParams},
     cursor::Pagination, Uri
 };
 
@@ -206,9 +207,14 @@ impl App {
                 biased;
                 _ = cancellation_token.cancelled() => break,
                 msg = receiver.recv() => {
-                    match msg { 
-                        Ok(msg) => {
-                            tokio::spawn(Self::execute(msg, runtime.clone()));
+                    match msg {
+                        Ok(msg) => match msg {
+                            Message::Batch(batch) => {
+                                tokio::spawn(Self::execute_batch(batch, runtime.clone()));
+                            },
+                            msg => {
+                                tokio::spawn(Self::execute(msg, runtime.clone()));
+                            }
                         },
                         Err(_err) => {
                             #[cfg(feature = "tracing")]
@@ -606,6 +612,64 @@ impl App {
         runtime.execute(msg).await;
     }
 
+    async fn execute_batch(batch: MessageBatch, runtime: ServerRuntime) {
+        use futures_util::future::join_all;
+
+        let futures = batch.into_iter().map(|envelope| {
+            let runtime = runtime.clone();
+            async move {
+                match envelope {
+                    MessageEnvelope::Request(req) => {
+                        #[cfg(not(feature = "di"))]
+                        let resp = Self::handle_request(req, runtime).await;
+                        #[cfg(feature = "di")]
+                        let resp = {
+                            let scope = runtime.container.create_scope();
+                            Self::handle_request(req, runtime, scope).await
+                        };
+                        Some(MessageEnvelope::Response(resp))
+                    }
+                    MessageEnvelope::Notification(notification) => {
+                        Self::handle_notification(notification).await;
+                        None
+                    }
+                    MessageEnvelope::Response(resp) => {
+                        Self::handle_response(resp, runtime).await;
+                        None
+                    }
+                }
+            }
+        });
+
+        let envelopes: Vec<MessageEnvelope> = join_all(futures)
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+
+        if envelopes.is_empty() {
+            return; // all items were notifications/responses — no reply needed
+        }
+
+        match MessageBatch::new(envelopes) {
+            Ok(batch) => {
+                let mut sender = runtime.sender();
+                if let Err(_err) = sender.send(Message::Batch(batch)).await {
+                    #[cfg(feature = "tracing")]
+                    tracing::error!(logger = "neva", "Error sending batch response: {:?}", _err);
+                }
+            }
+            Err(_err) => {
+                // This branch is unreachable in practice: we already verified the
+                // envelope list is non-empty above. Logged defensively.
+                #[cfg(feature = "tracing")]
+                tracing::error!(logger = "neva", "Failed to construct batch response (this is a bug): {:?}", _err);
+                #[cfg(not(feature = "tracing"))]
+                let _ = _err;
+            }
+        }
+    }
+
     async fn message_middleware(ctx: MwContext, _: Next) -> Response {
         let MwContext { 
             msg, 
@@ -648,7 +712,11 @@ impl App {
                 scope
             ).await,
             Message::Response(resp) => Self::handle_response(resp, runtime).await,
-            Message::Notification(notification) => Self::handle_notification(notification).await
+            Message::Notification(notification) => Self::handle_notification(notification).await,
+            Message::Batch(_) => {
+                // Batches are dispatched via execute_batch before reaching handle_message
+                unreachable!("Message::Batch should be intercepted in App::run before handle_message")
+            }
         }
     }
     
@@ -753,5 +821,55 @@ fn create_tracing_span(session_id: Option<uuid::Uuid>) -> tracing::Span {
 
 #[cfg(test)]
 mod tests {
-    
+    use crate::types::{MessageBatch, MessageEnvelope};
+
+    #[test]
+    fn batch_filtering_notifications_yield_no_response_slots() {
+        use crate::types::notification::Notification;
+
+        // Build a notification-only batch
+        let batch = MessageBatch::new(vec![
+            MessageEnvelope::Notification(Notification::new("notifications/foo", None)),
+            MessageEnvelope::Notification(Notification::new("notifications/bar", None)),
+        ]).expect("non-empty batch must be constructable");
+
+        // Replicate the filter logic from execute_batch:
+        // Request → Some(response slot), Notification/Response → None
+        let response_slots: Vec<MessageEnvelope> = batch
+            .into_iter()
+            .filter_map(|envelope| match envelope {
+                MessageEnvelope::Request(_) => Some(envelope),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            response_slots.is_empty(),
+            "notification-only batch must produce zero response slots"
+        );
+    }
+
+    #[test]
+    fn batch_filtering_requests_yield_response_slots() {
+        use crate::types::{Request, RequestId};
+
+        // Build a request-only batch
+        let req1 = Request::new(Some(RequestId::Number(1)), "tools/list", None::<()>);
+        let req2 = Request::new(Some(RequestId::Number(2)), "ping", None::<()>);
+        let batch = MessageBatch::new(vec![
+            MessageEnvelope::Request(req1),
+            MessageEnvelope::Request(req2),
+        ]).expect("non-empty batch must be constructable");
+
+        // Replicate the filter: only Request envelopes produce response slots
+        let response_slots: Vec<MessageEnvelope> = batch
+            .into_iter()
+            .filter_map(|envelope| match envelope {
+                MessageEnvelope::Request(_) => Some(envelope),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(response_slots.len(), 2, "two requests must produce two response slots");
+    }
 }

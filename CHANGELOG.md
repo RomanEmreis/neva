@@ -8,5 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## 0.2.7
 
 ### Added
+* JSON-RPC Batch Support for client and server
 
-## Changed
+## Fixed
+* Fixed broken Streamable HTTP server implementation

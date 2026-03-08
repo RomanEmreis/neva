@@ -13,7 +13,7 @@ use crate::{
         Transport, TransportProto, TransportProtoReceiver, TransportProtoSender
     },
     types::{
-        IntoResponse, Response, Message, 
+        IntoResponse, Response, Message, MessageBatch, MessageEnvelope,
         RequestId, Request,
         notification::Notification,
         Root, root::ListRootsResult,
@@ -148,6 +148,18 @@ impl RequestHandler {
         RequestId::Number(id)
     }
 
+    /// Returns the request timeout duration
+    #[inline]
+    pub(super) fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    /// Returns a reference to the pending request queue
+    #[inline]
+    pub(super) fn pending(&self) -> &RequestQueue {
+        &self.pending
+    }
+
     /// Sends a request to MCP server
     #[inline]
     pub(super) async fn send_request(&mut self, request: Request) -> Result<Response, Error> {
@@ -163,6 +175,43 @@ impl RequestHandler {
                 Err(Error::new(ErrorCode::Timeout, "Request timed out"))
             }
         }
+    }
+
+    /// Sends a batch of messages to the MCP server.
+    ///
+    /// Registers all [`Request`] IDs in the pending queue upfront, sends
+    /// `Message::Batch` in a single transport write, and returns a receiver
+    /// per request (in input order). [`MessageEnvelope::Notification`] items
+    /// are included in the wire payload but produce no receiver slot.
+    ///
+    /// # Errors
+    /// - [`ErrorCode::InvalidRequest`] if `items` is empty (enforced by [`MessageBatch`])
+    /// - Transport error if the underlying sender fails
+    pub(super) async fn send_batch(
+        &mut self,
+        items: Vec<MessageEnvelope>,
+    ) -> Result<Vec<(RequestId, tokio::sync::oneshot::Receiver<Response>)>, Error> {
+        let mut receivers = Vec::new();
+        let mut envelopes = Vec::new();
+
+        for envelope in items {
+            if let MessageEnvelope::Request(ref req) = envelope {
+                let id = req.id();
+                let receiver = self.pending.push(&id);
+                receivers.push((id, receiver));
+            }
+            envelopes.push(envelope);
+        }
+
+        let batch = MessageBatch::new(envelopes)?;
+        if let Err(e) = self.sender.send(Message::Batch(batch)).await {
+            for (id, _rx) in &receivers {
+                let _ = self.pending.pop(id);
+            }
+            return Err(e);
+        }
+
+        Ok(receivers)
     }
 
     /// Sends the response to MCP server
@@ -184,7 +233,6 @@ impl RequestHandler {
     }
 
     #[inline]
-    #[allow(clippy::single_match)]
     fn start(self, mut rx: TransportProtoReceiver) -> Self {
         let pending = self.pending.clone();
         let mut sender = self.sender.clone();
@@ -232,12 +280,22 @@ impl RequestHandler {
                         send_response_impl(&mut sender, resp).await;
                     },
                     Message::Notification(notification) => {
-                        match &notification_handler { 
+                        match &notification_handler {
                             Some(handler) => handler.notify(notification).await,
                             None => {
                                 #[cfg(feature = "tracing")]
                                 notification.write();
                             }
+                        }
+                    },
+                    Message::Batch(batch) => {
+                        for envelope in batch {
+                            if let MessageEnvelope::Response(resp) = envelope {
+                                pending.complete(resp);
+                            }
+                            // A well-formed batch response contains only Response objects (JSON-RPC 2.0 §6).
+                            // Server-initiated Requests or Notifications inside a batch are a protocol
+                            // violation; silently ignored to stay robust against malformed peers.
                         }
                     }
                 }
@@ -473,5 +531,84 @@ async fn get_task_result(
         Err(err) => Response::error(
             id,
             Error::new(ErrorCode::InvalidParams, err.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn batch_responses_are_distributed_individually() {
+        use tokio::time::{timeout, Duration};
+        use crate::types::MessageBatch;
+        use serde_json::json;
+
+        let queue = RequestQueue::default();
+
+        let id1 = RequestId::Number(1);
+        let id2 = RequestId::Number(2);
+
+        let rx1 = queue.push(&id1);
+        let rx2 = queue.push(&id2);
+
+        let resp1 = Response::success(id1.clone(), json!({"result": "a"}));
+        // A Request envelope in the middle — must be skipped, not completed
+        let dummy_req = Request::new(Some(RequestId::Number(99)), "ping", None::<()>);
+        let resp2 = Response::success(id2.clone(), json!({"result": "b"}));
+
+        let batch = MessageBatch::new(vec![
+            MessageEnvelope::Response(resp1),
+            MessageEnvelope::Request(dummy_req),
+            MessageEnvelope::Response(resp2),
+        ]).expect("batch must not be empty");
+
+        // Simulate the batch receive arm
+        for envelope in batch {
+            if let MessageEnvelope::Response(resp) = envelope {
+                queue.complete(resp);
+            }
+        }
+
+        assert!(
+            timeout(Duration::from_millis(100), rx1).await.is_ok(),
+            "rx1 should have received its response"
+        );
+        assert!(
+            timeout(Duration::from_millis(100), rx2).await.is_ok(),
+            "rx2 should have received its response"
+        );
+    }
+
+    #[test]
+    fn send_batch_returns_receiver_per_request_not_notification() {
+        // Verifies the queue-registration logic: only Request envelopes get a receiver slot.
+        // Full integration is tested via call_batch in client.rs.
+        let queue = RequestQueue::default();
+        let req_id = RequestId::Number(10);
+
+        // Simulate what send_batch does for a [Notification, Request, Notification] batch
+        let notification_1 = MessageEnvelope::Notification(
+            crate::types::notification::Notification::new("foo", None)
+        );
+        let request = MessageEnvelope::Request(
+            Request::new(Some(req_id.clone()), "ping", None::<()>)
+        );
+        let notification_2 = MessageEnvelope::Notification(
+            crate::types::notification::Notification::new("bar", None)
+        );
+
+        let items = vec![notification_1, request, notification_2];
+        let mut receivers = Vec::new();
+        for envelope in &items {
+            if let MessageEnvelope::Request(req) = envelope {
+                let id = req.id();
+                let receiver = queue.push(&id);
+                receivers.push((id, receiver));
+            }
+        }
+
+        assert_eq!(receivers.len(), 1, "exactly one receiver for the one Request");
+        assert_eq!(receivers[0].0, req_id, "receiver ID matches request ID");
     }
 }

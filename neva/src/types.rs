@@ -191,7 +191,7 @@ pub(crate) mod helpers;
 
 pub(super) const JSONRPC_VERSION: &str = "2.0";
 
-/// Represents a JSON RPC message that could be either [`Request`] or [`Response`] or [`Notification`]
+/// Represents a JSON RPC message that could be either [`Request`] or [`Response`] or [`Notification`] or a [`MessageBatch`]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Message {
@@ -203,6 +203,104 @@ pub enum Message {
 
     /// See [`Notification`]
     Notification(Notification),
+
+    /// See [`MessageBatch`]
+    ///
+    /// # Note
+    /// This variant **must remain last**. `#[serde(untagged)]` tries variants in
+    /// declaration order. A JSON array will always fail to deserialize as the
+    /// object-shaped `Request`, `Response`, and `Notification` variants above,
+    /// so placing `Batch` last is both safe and correct.
+    Batch(MessageBatch),
+}
+
+/// Represents a single JSON-RPC message inside a batch.
+/// Batches cannot be nested, so [`Message::Batch`] is excluded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MessageEnvelope {
+    /// See [`Request`]
+    Request(Request),
+
+    /// See [`Response`]
+    Response(Response),
+
+    /// See [`Notification`]
+    Notification(Notification),
+}
+
+/// Represents a non-empty JSON-RPC 2.0 batch.
+///
+/// A batch is a JSON array of [`MessageEnvelope`] items sent in a single
+/// transport write. The server processes all requests in parallel and
+/// replies with a single batch response array.
+///
+/// # Invariant
+/// A batch must contain at least one item. Constructing or deserializing
+/// an empty batch returns an error.
+#[derive(Debug, Clone)]
+pub struct MessageBatch(Vec<MessageEnvelope>);
+
+impl MessageBatch {
+    /// Constructs a new [`MessageBatch`].
+    ///
+    /// # Errors
+    /// Returns [`crate::error::Error`] if `items` is empty.
+    pub fn new(items: Vec<MessageEnvelope>) -> Result<Self, crate::error::Error> {
+        if items.is_empty() {
+            return Err(crate::error::Error::new(
+                crate::error::ErrorCode::InvalidRequest,
+                "batch must not be empty",
+            ));
+        }
+        Ok(Self(items))
+    }
+
+    /// Returns the number of items in the batch.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Returns `true` if the batch has no items.
+    ///
+    /// Note: a [`MessageBatch`] can never be empty after successful construction,
+    /// but this method is provided for API completeness.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Returns an iterator over the batch items.
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = &MessageEnvelope> {
+        self.0.iter()
+    }
+}
+
+impl IntoIterator for MessageBatch {
+    type Item = MessageEnvelope;
+    type IntoIter = std::vec::IntoIter<MessageEnvelope>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl Serialize for MessageBatch {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for MessageBatch {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let items = Vec::<MessageEnvelope>::deserialize(deserializer)?;
+        if items.is_empty() {
+            return Err(serde::de::Error::custom("JSON-RPC batch array must not be empty"));
+        }
+        Ok(Self(items))
+    }
 }
 
 /// Parameters for an initialization request sent to the server.
@@ -366,6 +464,16 @@ impl FromHandlerParams for InitializeRequestParams {
     }
 }
 
+impl From<MessageEnvelope> for Message {
+    fn from(envelope: MessageEnvelope) -> Self {
+        match envelope {
+            MessageEnvelope::Request(r) => Message::Request(r),
+            MessageEnvelope::Response(r) => Message::Response(r),
+            MessageEnvelope::Notification(n) => Message::Notification(n),
+        }
+    }
+}
+
 impl Message {
     /// Returns `true` is the current message is [`Request`]
     #[inline]
@@ -384,15 +492,21 @@ impl Message {
     pub fn is_notification(&self) -> bool {
         matches!(self, Message::Notification(_))
     }
+
+    /// Returns `true` if this message is a [`MessageBatch`]
+    #[inline]
+    pub fn is_batch(&self) -> bool {
+        matches!(self, Message::Batch(_))
+    }
     
     /// Returns [`Message`] ID
     #[inline]
     pub fn id(&self) -> RequestId {
-        match self { 
+        match self {
             Message::Request(req) => req.id(),
             Message::Response(resp) => resp.id().clone(),
-            Message::Notification(_) => RequestId::default()
-        }    
+            Message::Notification(_) | Message::Batch(_) => RequestId::default()
+        }
     }
 
     /// Returns the full id (session_id?/message_id)
@@ -400,26 +514,29 @@ impl Message {
         match self {
             Message::Request(req) => req.full_id(),
             Message::Response(resp) => resp.full_id(),
-            Message::Notification(notification) => notification.full_id()
+            Message::Notification(notification) => notification.full_id(),
+            Message::Batch(_) => RequestId::default(),
         }
     }
-    
+
     /// Returns MCP Session ID
     #[inline]
     pub fn session_id(&self) -> Option<&uuid::Uuid> {
-        match self { 
+        match self {
             Message::Request(req) => req.session_id.as_ref(),
             Message::Response(resp) => resp.session_id(),
-            Message::Notification(notification) => notification.session_id.as_ref()
+            Message::Notification(notification) => notification.session_id.as_ref(),
+            Message::Batch(_) => None,
         }
     }
-    
+
     /// Sets MCP Session ID
     pub fn set_session_id(mut self, id: uuid::Uuid) -> Self {
-        match self { 
+        match self {
             Message::Request(ref mut req) => req.session_id = Some(id),
             Message::Notification(ref mut notification) => notification.session_id = Some(id),
             Message::Response(resp) => self = Message::Response(resp.set_session_id(id)),
+            Message::Batch(_) => (),
         }
         self
     }
@@ -499,5 +616,43 @@ impl InitializeResult {
             server_info: options.implementation.clone(),
             instructions: None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn message_envelope_deserializes_request() {
+        let json = r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":null}"#;
+        let envelope: MessageEnvelope = serde_json::from_str(json).unwrap();
+        assert!(matches!(envelope, MessageEnvelope::Request(_)));
+    }
+
+    #[test]
+    fn message_batch_rejects_empty_vec() {
+        let err = MessageBatch::new(vec![]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn message_batch_rejects_empty_json_array() {
+        let err: Result<MessageBatch, _> = serde_json::from_str("[]");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn message_batch_accepts_non_empty() {
+        let json = r#"[{"jsonrpc":"2.0","id":1,"method":"ping","params":null}]"#;
+        let batch: MessageBatch = serde_json::from_str(json).unwrap();
+        assert_eq!(batch.len(), 1);
+    }
+
+    #[test]
+    fn message_deserializes_batch() {
+        let json = r#"[{"jsonrpc":"2.0","id":1,"method":"ping","params":null}]"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert!(matches!(msg, Message::Batch(_)));
     }
 }
