@@ -263,10 +263,23 @@ impl Client {
 
         let init_result = resp.into_result::<InitializeResult>()?;
 
-        assert_eq!(
-            init_result.protocol_ver,
-            self.options.protocol_ver(),
-            "Server protocol version mismatch.");
+        let server_ver = init_result.protocol_ver.as_str();
+        if !crate::PROTOCOL_VERSIONS.contains(&server_ver) {
+            return Err(Error::new(
+                ErrorCode::InvalidRequest,
+                format!("Unsupported server protocol version: {}", init_result.protocol_ver),
+            ));
+        }
+        if server_ver != self.options.protocol_ver() {
+            return Err(Error::new(
+                ErrorCode::InvalidRequest,
+                format!(
+                    "Server protocol version mismatch: expected {}, got {}",
+                    self.options.protocol_ver(),
+                    init_result.protocol_ver
+                ),
+            ));
+        }
         
         self.server_capabilities = Some(init_result.capabilities);
         self.server_info = Some(init_result.server_info);
