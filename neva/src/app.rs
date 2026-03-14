@@ -645,6 +645,12 @@ impl App {
             responses: Arc::clone(&responses),
         };
 
+        // Capture before consuming the batch so we know whether to send an ack
+        // when all Response envelopes were consumed by pending.complete (§ below).
+        let has_error_responses = batch
+            .iter()
+            .any(|e| matches!(e, MessageEnvelope::Response(Response::Err(_))));
+
         let futures = batch.into_iter().map(|envelope| {
             let runtime = runtime.clone();
             let mut sender = batch_sender.clone();
@@ -717,7 +723,21 @@ impl App {
             .unwrap_or_default();
 
         if envelopes.is_empty() {
-            return; // all items were notifications/responses - no reply needed
+            if has_error_responses {
+                // All Response::Err items were legitimate peer error responses
+                // consumed by pending.complete above. If the HTTP transport
+                // created a pending slot for this batch (because
+                // `has_error_responses()` was true), we must close it;
+                // otherwise the HTTP handler will block forever waiting for a
+                // reply that never comes.
+                let mut ack = Response::empty(batch_id);
+                if let Some(session_id) = batch_session_id {
+                    ack = ack.set_session_id(session_id);
+                }
+                let mut sender = real_sender;
+                let _ = sender.send(Message::Response(ack)).await;
+            }
+            return;
         }
 
         let mut resp_batch = match MessageBatch::new(envelopes) {

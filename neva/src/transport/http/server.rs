@@ -182,7 +182,7 @@ async fn handle_message(req: HttpRequest) -> HttpResult {
     // pending entry — otherwise the oneshot receiver would hang forever.
     // session_id must still be set so Response envelopes inside the batch
     // resolve pending entries by the full session_id/request_id key.
-    if let Message::Batch(ref batch) = msg && !batch.has_requests() {
+    if let Message::Batch(ref batch) = msg && !batch.has_requests() && !batch.has_error_responses() {
         let msg = msg.set_session_id(id);
         manager.sender.send(Ok(msg)).await.map_err(sender_error)?;
         return status!(202; [

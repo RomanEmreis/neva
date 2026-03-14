@@ -16,15 +16,22 @@ const SEPARATOR: u8 = b'/';
 pub enum RequestId {
     /// A numeric identifier
     Number(i64),
-    
+
     /// A UUID identifier
     Uuid(uuid::Uuid),
-    
+
     /// A string identifier
     String(ArcStr),
-    
+
     /// A slash-separated path of identifiers
-    Slice(ArcSlice<RequestId>)
+    Slice(ArcSlice<RequestId>),
+
+    /// A null identifier.
+    ///
+    /// Used in error responses when the id cannot be extracted from a
+    /// malformed request (JSON-RPC 2.0 §5.1 requires `"id": null` in that
+    /// case). Serializes as JSON `null`.
+    Null,
 }
 
 impl Clone for RequestId {
@@ -34,7 +41,8 @@ impl Clone for RequestId {
             RequestId::Number(num) => RequestId::Number(*num),
             RequestId::Uuid(uuid) => RequestId::Uuid(*uuid),
             RequestId::String(str) => RequestId::String(str.clone()),
-            RequestId::Slice(slice) => RequestId::Slice(slice.clone())
+            RequestId::Slice(slice) => RequestId::Slice(slice.clone()),
+            RequestId::Null => RequestId::Null,
         }
     }
 }
@@ -53,7 +61,8 @@ impl Display for RequestId {
             RequestId::Number(num) => write!(f, "{num}"),
             RequestId::Uuid(uuid) => write!(f, "{uuid}"),
             RequestId::String(str) => write!(f, "{str}"),
-            RequestId::Slice(slice) => write!(f, "{slice}")
+            RequestId::Slice(slice) => write!(f, "{slice}"),
+            RequestId::Null => write!(f, "null"),
         }
     }
 }
@@ -108,6 +117,9 @@ impl From<&RequestId> for ProgressToken {
             RequestId::Number(num) => ProgressToken::Number(*num),
             RequestId::Uuid(uuid) => ProgressToken::Uuid(*uuid),
             RequestId::String(str) => ProgressToken::String(str.clone()),
+            // Null ids only appear in error responses; they are never used
+            // as progress tokens in practice.
+            RequestId::Null => ProgressToken::String("null".into()),
             RequestId::Slice(slice) => ProgressToken::Slice(slice
                 .iter()
                 .map(Into::into)
@@ -125,6 +137,7 @@ impl Serialize for RequestId {
             RequestId::Uuid(u) => u.serialize(serializer),
             RequestId::String(s) => s.serialize(serializer),
             RequestId::Slice(p) => p.serialize(serializer),
+            RequestId::Null => serializer.serialize_none(),
         }
     }
 }
@@ -142,7 +155,12 @@ impl serde::de::Visitor<'_> for RequestIdVisitor {
     type Value = RequestId;
 
     fn expecting(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a number, UUID, string, or slash-separated path")
+        formatter.write_str("null, a number, UUID, string, or slash-separated path")
+    }
+
+    #[inline]
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(RequestId::Null)
     }
 
     #[inline]
