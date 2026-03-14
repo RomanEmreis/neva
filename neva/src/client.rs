@@ -942,7 +942,7 @@ impl Client {
         &mut self,
         items: Vec<MessageEnvelope>,
     ) -> Result<Vec<Response>, Error> {
-        use futures_util::future::try_join_all;
+        use futures_util::future::join_all;
 
         let handler = self.handler
             .as_mut()
@@ -966,7 +966,12 @@ impl Client {
             }
         });
 
-        try_join_all(futures).await
+        // join_all (not try_join_all) ensures every future runs to completion.
+        // This guarantees the timeout cleanup branch (pending.pop) executes for
+        // any request that times out, even when another request in the same
+        // batch has already failed.
+        let results = join_all(futures).await;
+        results.into_iter().collect()
     }
 
     /// Sends a request to the MCP server

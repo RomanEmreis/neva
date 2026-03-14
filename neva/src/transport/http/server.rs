@@ -178,9 +178,12 @@ async fn handle_message(req: HttpRequest) -> HttpResult {
     }
 
     // A batch whose items are all notifications/responses produces no reply
-    // per JSON-RPC 2.0 §6. Return 202 immediately without allocating a
+    // per JSON-RPC 2.0 #6. Return 202 immediately without allocating a
     // pending entry — otherwise the oneshot receiver would hang forever.
+    // session_id must still be set so Response envelopes inside the batch
+    // resolve pending entries by the full session_id/request_id key.
     if let Message::Batch(ref batch) = msg && !batch.has_requests() {
+        let msg = msg.set_session_id(id);
         manager.sender.send(Ok(msg)).await.map_err(sender_error)?;
         return status!(202; [
             (MCP_SESSION_ID, id.to_string())
