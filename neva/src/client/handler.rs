@@ -249,40 +249,49 @@ impl RequestHandler {
                 match msg {
                     Message::Response(resp) => pending.complete(resp),
                     Message::Request(req) => {
-                        let Some(resp) = dispatch_request(
+                        let resp = dispatch_request(
                             req,
                             &roots,
                             &sampling_handler,
                             &elicitation_handler,
                             #[cfg(feature = "tasks")]
                             &tasks,
-                        ).await else {
-                            return;
-                        };
+                        ).await;
                         send_response_impl(&mut sender, resp).await;
                     },
                     Message::Notification(notification) => {
                         dispatch_notification(notification, &notification_handler).await;
                     },
                     Message::Batch(batch) => {
-                        // JSON-RPC 2.0 §6 allows either peer to send a batch
+                        // JSON-RPC 2.0 #6 allows either peer to send a batch
                         // containing any mix of Requests, Notifications, and
-                        // Responses. Handle each envelope the same way as the
-                        // equivalent single-message path above.
+                        // Responses.
+                        //
+                        // Drain all Response envelopes first so that waiting
+                        // futures aren't gated behind potentially long-running
+                        // request handlers (e.g. sampling/elicitation awaiting
+                        // user input), which would cause unrelated in-flight
+                        // calls to time out even though their responses arrived.
+                        let mut deferred = Vec::new();
                         for envelope in batch {
                             match envelope {
                                 MessageEnvelope::Response(resp) => pending.complete(resp),
+                                other => deferred.push(other),
+                            }
+                        }
+                        for envelope in deferred {
+                            match envelope {
+                                MessageEnvelope::Response(_) => unreachable!(),
                                 MessageEnvelope::Request(req) => {
-                                    if let Some(resp) = dispatch_request(
+                                    let resp = dispatch_request(
                                         req,
                                         &roots,
                                         &sampling_handler,
                                         &elicitation_handler,
                                         #[cfg(feature = "tasks")]
                                         &tasks,
-                                    ).await {
-                                        send_response_impl(&mut sender, resp).await;
-                                    }
+                                    ).await;
+                                    send_response_impl(&mut sender, resp).await;
                                 },
                                 MessageEnvelope::Notification(notification) => {
                                     dispatch_notification(notification, &notification_handler).await;
@@ -306,7 +315,9 @@ async fn send_response_impl(sender: &mut TransportProtoSender, resp: Response) {
 }
 
 /// Dispatches a server-initiated [`Request`] to the appropriate handler and
-/// returns the [`Response`] to send back, or `None` for unknown methods.
+/// returns the [`Response`] to send back. Unknown methods produce a
+/// [`ErrorCode::MethodNotFound`] error response so the peer is never left
+/// waiting for a reply that will never arrive.
 #[inline]
 async fn dispatch_request(
     req: Request,
@@ -315,8 +326,9 @@ async fn dispatch_request(
     elicitation_handler: &Option<ElicitationHandler>,
     #[cfg(feature = "tasks")]
     tasks: &Arc<TaskTracker>,
-) -> Option<Response> {
-    let resp = match req.method.as_str() {
+) -> Response {
+    let req_id = req.id();
+    match req.method.as_str() {
         crate::types::sampling::commands::CREATE => handle_sampling(
             req,
             sampling_handler,
@@ -338,9 +350,8 @@ async fn dispatch_request(
         crate::types::task::commands::CANCEL => cancel_task(req, tasks),
         #[cfg(feature = "tasks")]
         crate::types::task::commands::GET => get_task(req, tasks),
-        _ => return None,
-    };
-    Some(resp)
+        _ => ErrorCode::MethodNotFound.into_response(req_id),
+    }
 }
 
 /// Forwards a [`Notification`] to the registered handler, or traces it when
