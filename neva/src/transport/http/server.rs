@@ -170,16 +170,13 @@ async fn handle_message(req: HttpRequest) -> HttpResult {
     let mut headers = req.headers().clone();
     let id = get_or_create_mcp_session(&headers);
 
-    // JSON-RPC 2.0 §6: an empty batch ([]) or any body that can't be parsed
-    // must be answered with a single Invalid Request error object, not a
-    // transport-level error.
+    // JSON-RPC 2.0 §5.1 / §6: decoding failures must be returned as a JSON-RPC
+    // error object, not as a transport-level error. read_message distinguishes
+    // the two cases required by the spec.
     let msg = match read_message(req).await {
         Ok(msg) => msg,
-        Err(_) => {
-            let resp = Response::error(
-                RequestId::Null,
-                Error::new(ErrorCode::InvalidRequest, "Invalid Request"),
-            );
+        Err(code) => {
+            let resp = Response::error(RequestId::Null, Error::from(code));
             return ok!(resp; [(MCP_SESSION_ID, id.to_string())]);
         }
     };
@@ -231,19 +228,32 @@ async fn handle_message(req: HttpRequest) -> HttpResult {
     ])
 }
 
+/// Reads and decodes a JSON-RPC [`Message`] from the HTTP request body.
+///
+/// Returns [`ErrorCode`] on failure so the caller can build a spec-compliant
+/// error response without promoting the failure to an HTTP-level error:
+/// - [`ErrorCode::ParseError`] (`-32700`) — body is not syntactically valid JSON,
+///   or the underlying transport stream fails mid-read.
+/// - [`ErrorCode::InvalidRequest`] (`-32600`) — body is valid JSON but not a
+///   valid JSON-RPC message (e.g. an empty batch `[]` or an unrecognised shape).
 #[inline]
-async fn read_message(req: HttpRequest) -> Result<Message, volga::error::Error> {
+async fn read_message(req: HttpRequest) -> Result<Message, ErrorCode> {
     let mut body_data_stream = req.into_body().into_data_stream();
     let mut buf = bytes::BytesMut::new();
 
     while let Some(chunk) = body_data_stream.next().await {
-        let chunk = chunk?;
+        let chunk = chunk.map_err(|_| ErrorCode::ParseError)?;
         buf.extend_from_slice(&chunk);
     }
 
-    let msg: Message = serde_json::from_slice(&buf)?;
-    
-    Ok(msg)
+    // Two-step decode per JSON-RPC 2.0 §5.1:
+    //   1. Validate JSON syntax → ParseError on failure.
+    //   2. Validate message shape → InvalidRequest on failure.
+    let value: serde_json::Value = serde_json::from_slice(&buf)
+        .map_err(|_| ErrorCode::ParseError)?;
+
+    serde_json::from_value::<Message>(value)
+        .map_err(|_| ErrorCode::InvalidRequest)
 }
 
 async fn handle_http_error(_err: volga::error::Error) {

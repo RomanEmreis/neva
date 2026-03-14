@@ -309,11 +309,11 @@ impl RequestHandler {
                         // MessageBatch::new returns Err for an empty vec (all
                         // items were notifications), in which case no reply is
                         // sent — correct per JSON-RPC 2.0 §6.
-                        if let Ok(batch) = MessageBatch::new(responses) {
-                            if let Err(_err) = sender.send(Message::Batch(batch)).await {
-                                #[cfg(feature = "tracing")]
-                                tracing::error!("Error sending batch response: {_err:?}");
-                            }
+                        if let Ok(batch) = MessageBatch::new(responses)
+                            && let Err(_err) = sender.send(Message::Batch(batch)).await 
+                        {
+                            #[cfg(feature = "tracing")]
+                            tracing::error!("Error sending batch response: {_err:?}");
                         }
                     }
                 }
@@ -371,7 +371,7 @@ async fn dispatch_request(
     }
 }
 
-/// Forwards a [`Notification`] to the registered handler, or traces it when
+/// Forwards a [`Notification`] to the registered handler or traces it when
 /// no handler is configured.
 #[inline]
 async fn dispatch_notification(
