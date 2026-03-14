@@ -249,52 +249,45 @@ impl RequestHandler {
                 match msg {
                     Message::Response(resp) => pending.complete(resp),
                     Message::Request(req) => {
-                        let resp = match req.method.as_str() { 
-                            crate::types::sampling::commands::CREATE => handle_sampling(
-                                req, 
-                                &sampling_handler, 
-                                #[cfg(feature = "tasks")] 
-                                &tasks
-                            ).await,
-                            crate::types::elicitation::commands::CREATE => handle_elicitation(
-                                req, 
-                                &elicitation_handler, 
-                                #[cfg(feature = "tasks")]
-                                &tasks
-                            ).await,
-                            crate::types::root::commands::LIST => handle_roots(req, &roots).await,
+                        let Some(resp) = dispatch_request(
+                            req,
+                            &roots,
+                            &sampling_handler,
+                            &elicitation_handler,
                             #[cfg(feature = "tasks")]
-                            crate::types::task::commands::RESULT => get_task_result(req, &tasks).await,
-                            #[cfg(feature = "tasks")]
-                            crate::types::task::commands::LIST => handle_list_tasks(req, &tasks),
-                            #[cfg(feature = "tasks")]
-                            crate::types::task::commands::CANCEL => cancel_task(req, &tasks),
-                            #[cfg(feature = "tasks")]
-                            crate::types::task::commands::GET => get_task(req, &tasks),
-                            _ => {
-                                #[cfg(feature = "tracing")]
-                                tracing::debug!("Received notification method: {:?}", req.method);
-                                return;
-                            }
+                            &tasks,
+                        ).await else {
+                            return;
                         };
                         send_response_impl(&mut sender, resp).await;
                     },
                     Message::Notification(notification) => {
-                        if let Some(handler) = &notification_handler { 
-                            handler.notify(notification).await
-                        } else {
-                            #[cfg(feature = "tracing")]
-                            notification.write();
-                        }
+                        dispatch_notification(notification, &notification_handler).await;
                     },
                     Message::Batch(batch) => {
+                        // JSON-RPC 2.0 §6 allows either peer to send a batch
+                        // containing any mix of Requests, Notifications, and
+                        // Responses. Handle each envelope the same way as the
+                        // equivalent single-message path above.
                         for envelope in batch {
-                            if let MessageEnvelope::Response(resp) = envelope {
-                                pending.complete(resp);
+                            match envelope {
+                                MessageEnvelope::Response(resp) => pending.complete(resp),
+                                MessageEnvelope::Request(req) => {
+                                    if let Some(resp) = dispatch_request(
+                                        req,
+                                        &roots,
+                                        &sampling_handler,
+                                        &elicitation_handler,
+                                        #[cfg(feature = "tasks")]
+                                        &tasks,
+                                    ).await {
+                                        send_response_impl(&mut sender, resp).await;
+                                    }
+                                },
+                                MessageEnvelope::Notification(notification) => {
+                                    dispatch_notification(notification, &notification_handler).await;
+                                },
                             }
-                            // A well-formed batch response contains only Response objects (JSON-RPC 2.0 §6).
-                            // Server-initiated Requests or Notifications inside a batch are a protocol
-                            // violation; silently ignored to stay robust against malformed peers.
                         }
                     }
                 }
@@ -309,7 +302,60 @@ async fn send_response_impl(sender: &mut TransportProtoSender, resp: Response) {
     if let Err(_err) = sender.send(resp.into()).await {
         #[cfg(feature = "tracing")]
         tracing::error!("Error sending response: {_err:?}");
-    }  
+    }
+}
+
+/// Dispatches a server-initiated [`Request`] to the appropriate handler and
+/// returns the [`Response`] to send back, or `None` for unknown methods.
+#[inline]
+async fn dispatch_request(
+    req: Request,
+    roots: &Arc<RwLock<Vec<Root>>>,
+    sampling_handler: &Option<SamplingHandler>,
+    elicitation_handler: &Option<ElicitationHandler>,
+    #[cfg(feature = "tasks")]
+    tasks: &Arc<TaskTracker>,
+) -> Option<Response> {
+    let resp = match req.method.as_str() {
+        crate::types::sampling::commands::CREATE => handle_sampling(
+            req,
+            sampling_handler,
+            #[cfg(feature = "tasks")]
+            tasks,
+        ).await,
+        crate::types::elicitation::commands::CREATE => handle_elicitation(
+            req,
+            elicitation_handler,
+            #[cfg(feature = "tasks")]
+            tasks,
+        ).await,
+        crate::types::root::commands::LIST => handle_roots(req, roots).await,
+        #[cfg(feature = "tasks")]
+        crate::types::task::commands::RESULT => get_task_result(req, tasks).await,
+        #[cfg(feature = "tasks")]
+        crate::types::task::commands::LIST => handle_list_tasks(req, tasks),
+        #[cfg(feature = "tasks")]
+        crate::types::task::commands::CANCEL => cancel_task(req, tasks),
+        #[cfg(feature = "tasks")]
+        crate::types::task::commands::GET => get_task(req, tasks),
+        _ => return None,
+    };
+    Some(resp)
+}
+
+/// Forwards a [`Notification`] to the registered handler, or traces it when
+/// no handler is configured.
+#[inline]
+async fn dispatch_notification(
+    notification: Notification,
+    handler: &Option<Arc<NotificationsHandler>>,
+) {
+    if let Some(h) = handler {
+        h.notify(notification).await
+    } else {
+        #[cfg(feature = "tracing")]
+        notification.write();
+    }
 }
 
 #[inline]

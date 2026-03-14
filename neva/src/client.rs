@@ -268,12 +268,14 @@ impl Client {
 
         let server_ver = init_result.protocol_ver.as_str();
         if !crate::PROTOCOL_VERSIONS.contains(&server_ver) {
+            self.cancel_transport();
             return Err(Error::new(
                 ErrorCode::InvalidRequest,
                 format!("Unsupported server protocol version: {}", init_result.protocol_ver),
             ));
         }
         if server_ver != self.options.protocol_ver() {
+            self.cancel_transport();
             return Err(Error::new(
                 ErrorCode::InvalidRequest,
                 format!(
@@ -1021,6 +1023,17 @@ impl Client {
             .map(|h| h.next_id())
     }
     
+    /// Cancels the transport and clears connection state without sending a
+    /// notification. Used when initialization fails after the transport has
+    /// already been started (e.g. protocol version mismatch in `init()`).
+    #[inline]
+    fn cancel_transport(&mut self) {
+        if let Some(token) = self.cancellation_token.take() {
+            token.cancel();
+        }
+        self.handler = None;
+    }
+
     #[inline]
     fn wait_for_shutdown_signal(&mut self) {
         if let Some(token) = self.cancellation_token.clone() {
