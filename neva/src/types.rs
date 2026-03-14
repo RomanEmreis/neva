@@ -355,7 +355,40 @@ impl Serialize for MessageBatch {
 
 impl<'de> Deserialize<'de> for MessageBatch {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let items = Vec::<MessageEnvelope>::deserialize(deserializer)?;
+        // Parse as raw JSON values first so that a single malformed element
+        // does not discard the entire batch (JSON-RPC §6 requires per-item
+        // Invalid Request responses, not a top-level failure).
+        let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
+        if raw.is_empty() {
+            return Err(serde::de::Error::custom("JSON-RPC batch array must not be empty"));
+        }
+
+        let items: Vec<MessageEnvelope> = raw
+            .into_iter()
+            .filter_map(|value| {
+                // Extract the id first (while we still own `value`) so that
+                // parse failures can produce a typed Invalid Request response.
+                let id = value
+                    .get("id")
+                    .and_then(|v| serde_json::from_value::<RequestId>(v.clone()).ok());
+                match serde_json::from_value::<MessageEnvelope>(value) {
+                    Ok(envelope) => Some(envelope),
+                    Err(_) => id.map(|req_id| {
+                        // Per spec: malformed items with an identifiable id
+                        // MUST receive an Invalid Request error response.
+                        MessageEnvelope::Response(Response::error(
+                            req_id,
+                            crate::error::Error::new(
+                                crate::error::ErrorCode::InvalidRequest,
+                                "Invalid Request",
+                            ),
+                        ))
+                    }),
+                    // Items without an id and unparseable are silently skipped.
+                }
+            })
+            .collect();
+
         if items.is_empty() {
             return Err(serde::de::Error::custom("JSON-RPC batch array must not be empty"));
         }
@@ -725,5 +758,44 @@ mod tests {
         let json = r#"[{"jsonrpc":"2.0","id":1,"method":"ping","params":null}]"#;
         let msg: Message = serde_json::from_str(json).unwrap();
         assert!(matches!(msg, Message::Batch(_)));
+    }
+
+    #[test]
+    fn message_batch_skips_malformed_item_without_id() {
+        // A malformed item with no "id" field is silently dropped.
+        let json = r#"[
+            {"jsonrpc":"2.0","id":1,"method":"ping","params":null},
+            {"not":"valid json-rpc"}
+        ]"#;
+        let batch: MessageBatch = serde_json::from_str(json).unwrap();
+        assert_eq!(batch.len(), 1);
+        assert!(matches!(batch.iter().next(), Some(MessageEnvelope::Request(_))));
+    }
+
+    #[test]
+    fn message_batch_produces_error_response_for_malformed_item_with_id() {
+        // A malformed item that carries an "id" yields an Invalid Request response.
+        let json = r#"[
+            {"jsonrpc":"2.0","id":1,"method":"ping","params":null},
+            {"jsonrpc":"2.0","id":2,"params":"not-an-object-and-no-method"}
+        ]"#;
+        let batch: MessageBatch = serde_json::from_str(json).unwrap();
+        assert_eq!(batch.len(), 2);
+        let mut iter = batch.iter();
+        assert!(matches!(iter.next(), Some(MessageEnvelope::Request(_))));
+        let second = iter.next().expect("second item should be present");
+        let MessageEnvelope::Response(resp) = second else {
+            panic!("expected error response for malformed item, got {second:?}");
+        };
+        assert!(matches!(resp, Response::Err(_)), "expected error response");
+    }
+
+    #[test]
+    fn message_batch_rejects_all_malformed_items_without_ids() {
+        // If every item is malformed AND none carry an "id", the batch itself
+        // fails to deserialize (nothing valid to process).
+        let json = r#"[{"not":"valid"},{"also":"not valid"}]"#;
+        let err: Result<MessageBatch, _> = serde_json::from_str(json);
+        assert!(err.is_err());
     }
 }

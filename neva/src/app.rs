@@ -38,6 +38,7 @@ use context::ToolOrTaskResponse;
 use std::{
     fmt::{Debug, Formatter},
     collections::HashMap,
+    sync::Arc,
 };
 
 #[cfg(feature = "tracing")]
@@ -614,7 +615,6 @@ impl App {
 
     async fn execute_batch(batch: MessageBatch, runtime: ServerRuntime) {
         use futures_util::future::join_all;
-        use tokio::sync::mpsc;
         use crate::transport::TransportProtoSender;
 
         // Capture the incoming batch's correlation and HTTP-context fields.
@@ -629,41 +629,25 @@ impl App {
         #[cfg(feature = "http-server")]
         let batch_claims = batch.claims.clone();
 
-        // Intercept all messages that middleware sends through the runtime sender.
-        // We separate batch request responses (to collect into the reply batch)
-        // from server-initiated requests/notifications (which must be forwarded
-        // to the real transport immediately so the client can respond to them).
-        //
-        // Without forwarding, a handler that calls ctx.elicit() or ctx.sample()
-        // would deadlock: it sends the request into the intercept channel and
-        // then blocks waiting for a client response that can never arrive.
         let real_sender = runtime.sender();
-        let (intercept_tx, intercept_rx) = mpsc::unbounded_channel::<Message>();
-        let (collect_tx, mut collect_rx) = mpsc::unbounded_channel::<MessageEnvelope>();
 
-        let router = tokio::spawn({
-            let mut real_sender = real_sender.clone();
-            async move {
-                let mut intercept_rx = intercept_rx;
-                while let Some(msg) = intercept_rx.recv().await {
-                    match msg {
-                        Message::Response(resp) => {
-                            let _ = collect_tx.send(MessageEnvelope::Response(resp));
-                        }
-                        other => {
-                            // Server-initiated request or notification - forward
-                            // to the real transport so the client receives it.
-                            let _ = real_sender.send(other).await;
-                        }
-                    }
-                }
-                // collect_tx is dropped here, closing collect_rx.
-            }
-        });
+        // Collect responses produced by batch request handlers in-memory.
+        // Server-initiated messages (sampling, elicitation, notifications) go
+        // straight to the real transport inside BatchCollect::send, so handlers
+        // that call ctx.elicit()/ctx.sample() never deadlock.
+        //
+        // Crucially, background tasks that capture a BatchCollect sender clone
+        // do NOT block the batch response: we only wait for the join_all futures,
+        // then snapshot whatever responses have been collected so far.
+        let responses: Arc<std::sync::Mutex<Vec<MessageEnvelope>>> = Arc::default();
+        let batch_sender = TransportProtoSender::BatchCollect {
+            real_sender: Arc::new(tokio::sync::Mutex::new(real_sender.clone())),
+            responses: Arc::clone(&responses),
+        };
 
         let futures = batch.into_iter().map(|envelope| {
             let runtime = runtime.clone();
-            let tx = intercept_tx.clone();
+            let sender = batch_sender.clone();
             // Clone per-iteration so each async move block owns its own copy.
             #[cfg(feature = "http-server")]
             let batch_headers = batch_headers.clone();
@@ -684,9 +668,9 @@ impl App {
                             req.claims = batch_claims;
                         }
                         // Route through the full middleware chain with the
-                        // intercepted sender so registered middlewares apply.
+                        // batch-collect sender so registered middlewares apply.
                         runtime
-                            .with_sender(TransportProtoSender::Channel(tx))
+                            .with_sender(sender)
                             .execute(Message::Request(req))
                             .await;
                     }
@@ -714,16 +698,14 @@ impl App {
         });
 
         join_all(futures).await;
-        // Closing the last intercept sender signals the router to exit.
-        drop(intercept_tx);
-        // Wait for the router to flush all in-flight forwarded messages before
-        // we read from collect_rx (collect_tx is dropped inside the router).
-        let _ = router.await;
 
-        let mut envelopes = Vec::new();
-        while let Some(envelope) = collect_rx.recv().await {
-            envelopes.push(envelope);
-        }
+        // Snapshot collected responses. Any response that a background task
+        // produces after this point is silently discarded — it arrived too
+        // late to be included in the batch reply.
+        let envelopes = responses
+            .lock()
+            .map(|mut guard| std::mem::take(&mut *guard))
+            .unwrap_or_default();
 
         if envelopes.is_empty() {
             return; // all items were notifications/responses - no reply needed
