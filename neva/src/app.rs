@@ -698,13 +698,16 @@ impl App {
                         }
                         // If a pending server-initiated request matches this id,
                         // complete it (the client is responding to a server request
-                        // inside the batch). Otherwise this is a synthetic
-                        // InvalidRequest error injected by the deserializer for a
-                        // malformed batch item — route it through the collector so
-                        // it appears in the batch reply to the caller.
+                        // inside the batch). Otherwise, if the response carries an
+                        // error, it is a synthetic InvalidRequest injected by the
+                        // deserializer for a malformed batch item — route it through
+                        // the collector so it appears in the batch reply.
+                        // Unmatched Ok responses are unsolicited or stale and are
+                        // dropped silently, consistent with the single-message
+                        // handle_response path.
                         if let Some(handle) = runtime.pending_requests().pop(&resp.full_id()) {
                             handle.send(resp);
-                        } else {
+                        } else if matches!(resp, Response::Err(_)) {
                             let _ = sender.send(Message::Response(resp)).await;
                         }
                     }

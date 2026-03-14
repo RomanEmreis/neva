@@ -186,11 +186,14 @@ impl RequestHandler {
     ///
     /// # Errors
     /// - [`ErrorCode::InvalidRequest`] if `items` is empty (enforced by [`MessageBatch`])
+    /// - [`ErrorCode::InvalidRequest`] if `items` contains duplicate request IDs
     /// - Transport error if the underlying sender fails
     pub(super) async fn send_batch(
         &mut self,
         items: Vec<MessageEnvelope>,
     ) -> Result<Vec<(RequestId, tokio::sync::oneshot::Receiver<Response>)>, Error> {
+        validate_batch_ids(&items)?;
+
         let mut receivers = Vec::new();
         let mut envelopes = Vec::new();
 
@@ -590,6 +593,28 @@ async fn get_task_result(
     }
 }
 
+/// Validates that no two [`Request`] envelopes in a batch share the same ID.
+///
+/// JSON-RPC 2.0 §6 does not explicitly forbid duplicate IDs in a batch, but
+/// duplicate IDs make response-to-request correlation ambiguous on the client
+/// side — [`crate::shared::RequestQueue::push`] would silently overwrite the
+/// earlier waiter, causing it to time out even when a response arrives.
+///
+/// This is a client-side defensive check, not a spec requirement.
+#[inline]
+fn validate_batch_ids(items: &[MessageEnvelope]) -> Result<(), Error> {
+    let mut seen = std::collections::HashSet::new();
+    for envelope in items {
+        if let MessageEnvelope::Request(req) = envelope && !seen.insert(req.id()) {
+            return Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "batch contains duplicate request IDs",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -634,6 +659,32 @@ mod tests {
             timeout(Duration::from_millis(100), rx2).await.is_ok(),
             "rx2 should have received its response"
         );
+    }
+
+    #[test]
+    fn validate_batch_ids_rejects_duplicate_request_ids() {
+        let req = |id: i64| MessageEnvelope::Request(
+            Request::new(Some(RequestId::Number(id)), "ping", None::<()>)
+        );
+
+        // Unique IDs — should pass
+        assert!(validate_batch_ids(&[req(1), req(2), req(3)]).is_ok());
+
+        // Duplicate ID — should fail
+        let err = validate_batch_ids(&[req(1), req(2), req(1)]).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn validate_batch_ids_ignores_notifications() {
+        let notif = MessageEnvelope::Notification(
+            crate::types::notification::Notification::new("foo", None)
+        );
+        let req = MessageEnvelope::Request(
+            Request::new(Some(RequestId::Number(1)), "ping", None::<()>)
+        );
+        // Two notifications with no ID fields — should not trigger duplicate check
+        assert!(validate_batch_ids(&[notif.clone(), req, notif]).is_ok());
     }
 
     #[test]
