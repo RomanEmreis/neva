@@ -148,6 +148,15 @@ impl ServerRuntime {
     pub(crate) fn sender(&self) ->  TransportProtoSender {
         self.sender.clone()
     }
+
+    /// Returns a clone of this runtime with its sender replaced by `sender`.
+    ///
+    /// Used by `execute_batch` to give each batch request an intercepted sender
+    /// so responses are captured into a channel instead of sent to the transport.
+    pub(crate) fn with_sender(mut self, sender: TransportProtoSender) -> Self {
+        self.sender = sender;
+        self
+    }
     
     /// Provides a hash map of registered request handlers
     pub(crate) fn request_handlers(&self) ->  Arc<RequestHandlers> {

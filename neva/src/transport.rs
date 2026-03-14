@@ -63,7 +63,25 @@ pub(crate) enum TransportProtoSender {
     None,
     Stdio(stdio::StdIoSender),
     #[cfg(any(feature = "http-server", feature = "http-client"))]
-    Http(http::HttpSender)
+    Http(http::HttpSender),
+    /// Batch-scoped sender that routes `Message::Response` items into an in-memory
+    /// collection and forwards everything else (server-initiated requests,
+    /// notifications) straight to the real transport.
+    #[cfg(feature = "server")]
+    BatchCollect {
+        /// The underlying transport sender for non-response messages.
+        ///
+        /// `Arc` makes cloning this sender cheap. `tokio::sync::Mutex`
+        /// is required because `Sender::send` takes `&mut self` and the call
+        /// crosses an `.await` point.
+        real_sender: std::sync::Arc<tokio::sync::Mutex<TransportProtoSender>>,
+        /// Accumulated response envelopes to be bundled into the batch reply.
+        ///
+        /// `std::sync::Mutex` is intentional: the lock is never held across an
+        /// `.await` (lock → push → unlock, then `Ok(())`), so the lighter
+        /// synchronous mutex is the right tool here.
+        responses: std::sync::Arc<std::sync::Mutex<Vec<crate::types::MessageEnvelope>>>,
+    },
 }
 
 pub(crate) enum TransportProtoReceiver {
@@ -91,6 +109,21 @@ impl Sender for TransportProtoSender {
                 ErrorCode::InternalError,
                 "Transport protocol must be specified"
             )),
+            #[cfg(feature = "server")]
+            TransportProtoSender::BatchCollect { real_sender, responses } => {
+                match resp {
+                    Message::Response(response) => {
+                        if let Ok(mut guard) = responses.lock() {
+                            guard.push(crate::types::MessageEnvelope::Response(response));
+                        }
+                        Ok(())
+                    }
+                    other => {
+                        let mut guard = real_sender.lock().await;
+                        Box::pin(guard.send(other)).await
+                    }
+                }
+            }
         }
     }
 }

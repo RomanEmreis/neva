@@ -1,8 +1,8 @@
 [package]
 name = "neva"
-version = "0.2.6"
 description = "MCP SDK for Rust"
 readme = "../README.md"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -18,31 +18,31 @@ workspace = true
 [dependencies]
 base64 = "0.22.1"
 bytes = "1.11.1"
-chrono = { version = "0.4.43", features = ["serde"] }
+chrono = { version = "0.4.44", features = ["serde"] }
 dashmap = "6.1.0"
 futures-util = { version = "0.3.32", default-features = false, features = ["alloc"] }
 memchr = "2.8.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.146"
 schemars = { version = "1.2.1" }
-tokio = { version = "1.49.0", features = ["sync", "io-std", "io-util", "rt", "time", "macros"] }
+tokio = { version = "1.50.0", features = ["sync", "io-std", "io-util", "rt", "time", "macros"] }
 tokio-util = "0.7.18"
-uuid = { version = "1.21.0", features = ["v4", "serde"] }
+uuid = { version = "1.22.0", features = ["v4", "serde"] }
 
 # optional
 inventory = { version = "0.3.22", optional = true }
-jsonschema = { version = "0.42.1", optional = true }
+jsonschema = { version = "0.44.1", optional = true }
 once_cell = { version = "1.21.3", features = ["std"], optional = true }
 reqwest = { version = "0.13.2", features = ["stream", "json"], optional = true }
 sse-stream = { version = "0.2.1", optional = true }
 tokio-stream = { version = "0.1.18", optional = true }
 tracing = { version = "0.1.44", optional = true }
 tracing-subscriber = { version = "0.3.22", features = ["fmt", "json"], optional = true }
-volga = { version = "0.8.3", features = ["di", "jwt-auth-full"], optional = true }
-volga-di = { version = "0.8.3", optional = true }
+volga = { version = "0.8.6", features = ["di", "jwt-auth-full"], optional = true }
+volga-di = { version = "0.8.6", optional = true }
 
 # neva
-neva_macros = { path = "../neva_macros", version = "0.2.6", optional = true }
+neva_macros = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62.0", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_System_Diagnostics", "Win32_System_Diagnostics_ToolHelp"], optional = true }
@@ -51,7 +51,7 @@ windows = { version = "0.62.0", features = ["Win32_Foundation", "Win32_System_Jo
 nix = { version = "0.31.1", features = ["signal"], optional = true }
 
 [dev-dependencies]
-tokio = { version = "1.49.0", features = ["rt", "rt-multi-thread", "macros"] }
+tokio = { version = "1.50.0", features = ["rt", "rt-multi-thread", "macros"] }
 tokio-stream = { version = "0.1.18" }
 
 [features]

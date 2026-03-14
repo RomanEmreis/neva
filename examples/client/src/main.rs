@@ -27,7 +27,7 @@ async fn main() -> Result<(), Error> {
             .with_stdio("npx", ["-y", "@modelcontextprotocol/server-everything"])
             .with_roots(|roots| roots.with_list_changed())
             .with_timeout(Duration::from_secs(5))
-            .with_mcp_version("2024-11-05"));
+            .with_mcp_version("2025-11-25"));
     
     client.connect().await?;
     
@@ -51,8 +51,8 @@ async fn main() -> Result<(), Error> {
 
     // Structured content
     tracing::info!("--- STRUCTURED CONTENT ---");
-    let tool = tools.get("structuredContent").unwrap();
-    let args = ("location", "London");
+    let tool = tools.get("get-structured-content").unwrap();
+    let args = ("location", "New York");
     let result = client.call_tool(&tool.name, args).await?;
     let weather: Weather = tool
         .validate(&result)
@@ -83,23 +83,23 @@ async fn main() -> Result<(), Error> {
 
     // Read resource
     tracing::info!("--- READ RESOURCE ---");
-    let resource = client.read_resource("test://static/resource/1").await?;
+    let resource = client.read_resource("demo://resource/static/document/architecture.md").await?;
     tracing::info!("{:?}", resource.contents);
     
     // List prompts
     tracing::info!("--- LIST PROMPTS ---");
     let prompts = client.list_prompts(None).await?;
     for prompt in prompts.prompts {
-        tracing::info!("- {}", prompt.name);
+        tracing::info!("- {}, {:?}", prompt.name, prompt.args);
     }
     
     // Get prompt
     tracing::info!("--- GET PROMPT ---");
     let args = [
-        ("temperature", "50"),
-        ("style", "anything")
+        ("city", "New York"),
+        ("state", "NY")
     ];
-    let prompt = client.get_prompt("complex_prompt", args).await?;
+    let prompt = client.get_prompt("args-prompt", args).await?;
     tracing::info!("{:?}: {:?}", prompt.descr, prompt.messages);
     
     // This can be uncommented to check the log notifications from MCP server

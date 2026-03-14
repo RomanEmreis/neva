@@ -125,6 +125,13 @@ async fn send_request(
     if let Message::Notification(_) = &req {
         return;
     }
+
+    // A notification-only batch also produces no server response (HTTP 202,
+    // empty body). Attempting resp.json() on an empty body would be a parse
+    // error that gets pushed into recv_tx and breaks the receive loop.
+    if let Message::Batch(ref batch) = req && !batch.has_requests() {
+        return;
+    }
     
     if !session.has_session_id()
         && let Some(session_id) = get_mcp_session_id(resp.headers()) { 

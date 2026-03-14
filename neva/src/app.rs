@@ -16,13 +16,14 @@ use crate::app::handler::{
     RequestHandler
 };
 use crate::types::{
-    InitializeResult, InitializeRequestParams, IntoResponse, Response, Request, RequestId, Message, 
-    CompleteResult, ListToolsRequestParams, CallToolRequestParams, ListToolsResult, CallToolResponse, Tool, ToolHandler, 
-    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate, 
-    ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult, 
-    SubscribeRequestParams, UnsubscribeRequestParams, Resource, resource::template::ResourceFunc, 
+    InitializeResult, InitializeRequestParams, IntoResponse, Response, Request, RequestId, Message,
+    MessageEnvelope, MessageBatch,
+    CompleteResult, ListToolsRequestParams, CallToolRequestParams, ListToolsResult, CallToolResponse, Tool, ToolHandler,
+    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate,
+    ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult,
+    SubscribeRequestParams, UnsubscribeRequestParams, Resource, resource::template::ResourceFunc,
     ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt,
-    notification::{Notification, CancelledNotificationParams}, 
+    notification::{Notification, CancelledNotificationParams},
     cursor::Pagination, Uri
 };
 
@@ -37,6 +38,7 @@ use context::ToolOrTaskResponse;
 use std::{
     fmt::{Debug, Formatter},
     collections::HashMap,
+    sync::Arc,
 };
 
 #[cfg(feature = "tracing")]
@@ -206,9 +208,14 @@ impl App {
                 biased;
                 _ = cancellation_token.cancelled() => break,
                 msg = receiver.recv() => {
-                    match msg { 
-                        Ok(msg) => {
-                            tokio::spawn(Self::execute(msg, runtime.clone()));
+                    match msg {
+                        Ok(msg) => match msg {
+                            Message::Batch(batch) => {
+                                tokio::spawn(Self::execute_batch(batch, runtime.clone()));
+                            },
+                            msg => {
+                                tokio::spawn(Self::execute(msg, runtime.clone()));
+                            }
                         },
                         Err(_err) => {
                             #[cfg(feature = "tracing")]
@@ -606,6 +613,157 @@ impl App {
         runtime.execute(msg).await;
     }
 
+    async fn execute_batch(batch: MessageBatch, runtime: ServerRuntime) {
+        use futures_util::future::join_all;
+        use crate::transport::TransportProtoSender;
+
+        // Capture the incoming batch's correlation and HTTP-context fields.
+        // `id` + `session_id` are needed so the response batch can be routed
+        // back to the correct waiting HTTP handler.  `headers` and `claims`
+        // are copied onto every inner Request so that middleware (auth checks,
+        // role/permission guards, SSE routing) sees the original HTTP context.
+        let batch_id = batch.id.clone();
+        let batch_session_id = batch.session_id;
+        #[cfg(feature = "http-server")]
+        let batch_headers = batch.headers.clone();
+        #[cfg(feature = "http-server")]
+        let batch_claims = batch.claims.clone();
+
+        let real_sender = runtime.sender();
+
+        // Collect responses produced by batch request handlers in-memory.
+        // Server-initiated messages (sampling, elicitation, notifications) go
+        // straight to the real transport inside BatchCollect::send, so handlers
+        // that call ctx.elicit()/ctx.sample() never deadlock.
+        //
+        // Crucially, background tasks that capture a BatchCollect sender clone
+        // do NOT block the batch response: we only wait for the join_all futures,
+        // then snapshot whatever responses have been collected so far.
+        let responses: Arc<std::sync::Mutex<Vec<MessageEnvelope>>> = Arc::default();
+        let batch_sender = TransportProtoSender::BatchCollect {
+            real_sender: Arc::new(tokio::sync::Mutex::new(real_sender.clone())),
+            responses: Arc::clone(&responses),
+        };
+
+        // Capture before consuming the batch so we know whether to send an ack
+        // when all Response envelopes were consumed by pending.complete (§ below).
+        let has_error_responses = batch
+            .iter()
+            .any(|e| matches!(e, MessageEnvelope::Response(Response::Err(_))));
+
+        let futures = batch.into_iter().map(|envelope| {
+            let runtime = runtime.clone();
+            let mut sender = batch_sender.clone();
+            // Clone per-iteration so each async move block owns its own copy.
+            #[cfg(feature = "http-server")]
+            let batch_headers = batch_headers.clone();
+            #[cfg(feature = "http-server")]
+            let batch_claims = batch_claims.clone();
+            async move {
+                match envelope {
+                    MessageEnvelope::Request(mut req) => {
+                        // Copy the batch's HTTP metadata onto the inner request
+                        // so that session/auth context is preserved: without
+                        // this, role/permission checks can fail with a valid
+                        // token and server-initiated follow-up calls (sampling,
+                        // elicitation) cannot be routed back over SSE.
+                        req.session_id = batch_session_id;
+                        #[cfg(feature = "http-server")]
+                        {
+                            req.headers = batch_headers;
+                            req.claims = batch_claims;
+                        }
+                        // Route through the full middleware chain with the
+                        // batch-collect sender so registered middlewares apply.
+                        runtime
+                            .with_sender(sender)
+                            .execute(Message::Request(req))
+                            .await;
+                    }
+                    MessageEnvelope::Notification(notification) => {
+                        Self::handle_notification(notification).await;
+                    }
+                    MessageEnvelope::Response(mut resp) => {
+                        // Apply the batch's session context so that
+                        // `resp.full_id()` (= session_id + resp_id) matches
+                        // the key used when the server registered the pending
+                        // request via `send_request`. Without this the lookup
+                        // in the pending queue misses and the pending handler leaks.
+                        if let Some(session_id) = batch_session_id {
+                            resp = resp.set_session_id(session_id);
+                        }
+                        #[cfg(feature = "http-server")]
+                        {
+                            resp = resp.set_headers(batch_headers);
+                        }
+                        // If a pending server-initiated request matches this id,
+                        // complete it (the client is responding to a server request
+                        // inside the batch). Otherwise, if the response carries an
+                        // error, it is a synthetic InvalidRequest injected by the
+                        // deserializer for a malformed batch item — route it through
+                        // the collector so it appears in the batch reply.
+                        // Unmatched Ok responses are unsolicited or stale and are
+                        // dropped silently, consistent with the single-message
+                        // handle_response path.
+                        if let Some(handle) = runtime.pending_requests().pop(&resp.full_id()) {
+                            handle.send(resp);
+                        } else if matches!(resp, Response::Err(_)) {
+                            let _ = sender.send(Message::Response(resp)).await;
+                        }
+                    }
+                }
+            }
+        });
+
+        join_all(futures).await;
+
+        // Snapshot collected responses. Any response that a background task
+        // produces after this point is silently discarded — it arrived too
+        // late to be included in the batch reply.
+        let envelopes = responses
+            .lock()
+            .map(|mut guard| std::mem::take(&mut *guard))
+            .unwrap_or_default();
+
+        if envelopes.is_empty() {
+            if has_error_responses {
+                // All Response::Err items were legitimate peer error responses
+                // consumed by pending.complete above. If the HTTP transport
+                // created a pending slot for this batch (because
+                // `has_error_responses()` was true), we must close it;
+                // otherwise the HTTP handler will block forever waiting for a
+                // reply that never comes.
+                let mut ack = Response::empty(batch_id);
+                if let Some(session_id) = batch_session_id {
+                    ack = ack.set_session_id(session_id);
+                }
+                let mut sender = real_sender;
+                let _ = sender.send(Message::Response(ack)).await;
+            }
+            return;
+        }
+
+        let mut resp_batch = match MessageBatch::new(envelopes) {
+            Ok(b) => b,
+            Err(_err) => {
+                // Unreachable in practice: envelopes are non-empty above.
+                #[cfg(feature = "tracing")]
+                tracing::error!(logger = "neva", "Failed to construct batch response: {:?}", _err);
+                return;
+            }
+        };
+        // Restore the correlation id+session so the HTTP transport can match
+        // this response batch to the waiting HTTP handler.
+        resp_batch.id = batch_id;
+        resp_batch.session_id = batch_session_id;
+
+        let mut sender = real_sender;
+        if let Err(_err) = sender.send(Message::Batch(resp_batch)).await {
+            #[cfg(feature = "tracing")]
+            tracing::error!(logger = "neva", "Error sending batch response: {:?}", _err);
+        }
+    }
+
     async fn message_middleware(ctx: MwContext, _: Next) -> Response {
         let MwContext { 
             msg, 
@@ -648,7 +806,11 @@ impl App {
                 scope
             ).await,
             Message::Response(resp) => Self::handle_response(resp, runtime).await,
-            Message::Notification(notification) => Self::handle_notification(notification).await
+            Message::Notification(notification) => Self::handle_notification(notification).await,
+            Message::Batch(_) => {
+                // Batches are dispatched via execute_batch before reaching handle_message
+                unreachable!("Message::Batch should be intercepted in App::run before handle_message")
+            }
         }
     }
     
@@ -753,5 +915,55 @@ fn create_tracing_span(session_id: Option<uuid::Uuid>) -> tracing::Span {
 
 #[cfg(test)]
 mod tests {
-    
+    use crate::types::{MessageBatch, MessageEnvelope};
+
+    #[test]
+    fn batch_filtering_notifications_yield_no_response_slots() {
+        use crate::types::notification::Notification;
+
+        // Build a notification-only batch
+        let batch = MessageBatch::new(vec![
+            MessageEnvelope::Notification(Notification::new("notifications/foo", None)),
+            MessageEnvelope::Notification(Notification::new("notifications/bar", None)),
+        ]).expect("non-empty batch must be constructable");
+
+        // Replicate the filter logic from execute_batch:
+        // Request → Some(response slot), Notification/Response → None
+        let response_slots: Vec<MessageEnvelope> = batch
+            .into_iter()
+            .filter_map(|envelope| match envelope {
+                MessageEnvelope::Request(_) => Some(envelope),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            response_slots.is_empty(),
+            "notification-only batch must produce zero response slots"
+        );
+    }
+
+    #[test]
+    fn batch_filtering_requests_yield_response_slots() {
+        use crate::types::{Request, RequestId};
+
+        // Build a request-only batch
+        let req1 = Request::new(Some(RequestId::Number(1)), "tools/list", None::<()>);
+        let req2 = Request::new(Some(RequestId::Number(2)), "ping", None::<()>);
+        let batch = MessageBatch::new(vec![
+            MessageEnvelope::Request(req1),
+            MessageEnvelope::Request(req2),
+        ]).expect("non-empty batch must be constructable");
+
+        // Replicate the filter: only Request envelopes produce response slots
+        let response_slots: Vec<MessageEnvelope> = batch
+            .into_iter()
+            .filter_map(|envelope| match envelope {
+                MessageEnvelope::Request(_) => Some(envelope),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(response_slots.len(), 2, "two requests must produce two response slots");
+    }
 }

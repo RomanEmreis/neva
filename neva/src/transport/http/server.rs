@@ -8,11 +8,11 @@ use tokio_util::sync::CancellationToken;
 use super::{HttpRuntimeContext, ServiceUrl, MCP_SESSION_ID, get_mcp_session_id};
 use crate::{
     shared::MessageRegistry,
-    types::{RequestId, Message},
-    error::Error
+    types::{RequestId, Message, Response},
+    error::{Error, ErrorCode}
 };
 use volga::{
-    App, Json, HttpResult, HttpRequest, di::Dc, status, ok,
+    App, HttpResult, HttpRequest, di::Dc, status, ok,
     auth::{BearerTokenService, Bearer},
     http::sse::Message as SseMessage, sse,
     headers::{HeaderMap, AUTHORIZATION}
@@ -126,10 +126,12 @@ async fn handle(
     }
 }
 
-async fn handle_session_end(req: HttpRequest, manager: Dc<RequestManager>) -> HttpResult {
+async fn handle_session_end(req: HttpRequest) -> HttpResult {
     let Some(id) = get_mcp_session_id(req.headers()) else {
-        return status!(405);
+        return status!(400);
     };
+
+    let manager: Dc<RequestManager> = req.extract()?;
     
     #[cfg(feature = "tracing")]
     LOG_REGISTRY.unregister(&id);
@@ -138,11 +140,13 @@ async fn handle_session_end(req: HttpRequest, manager: Dc<RequestManager>) -> Ht
     ok!([(MCP_SESSION_ID, id.to_string())])
 }
 
-async fn handle_connection(req: HttpRequest, manager: Dc<RequestManager>) -> HttpResult {
+async fn handle_connection(req: HttpRequest) -> HttpResult {
     let Some(id) = get_mcp_session_id(req.headers()) else { 
-        return status!(405);
+        return status!(400);
     };
 
+    let manager: Dc<RequestManager> = req.extract()?;
+    
     let (_log_tx, log_rx) = mpsc::unbounded_channel::<Message>();
     let (msg_tx, msg_rx) = mpsc::unbounded_channel::<Message>();
     
@@ -159,16 +163,38 @@ async fn handle_connection(req: HttpRequest, manager: Dc<RequestManager>) -> Htt
     ])
 }
 
-async fn handle_message(
-    req: HttpRequest,
-    manager: Dc<RequestManager>,
-    bts: Option<BearerTokenService>,
-    Json(msg): Json<Message>
-) -> HttpResult {
+async fn handle_message(req: HttpRequest) -> HttpResult {
+    let bts: Option<BearerTokenService> = req.extract()?;
+    let manager: Dc<RequestManager> = req.extract()?;
+
     let mut headers = req.headers().clone();
     let id = get_or_create_mcp_session(&headers);
+
+    // JSON-RPC 2.0 §5.1 / §6: decoding failures must be returned as a JSON-RPC
+    // error object, not as a transport-level error. read_message distinguishes
+    // the two cases required by the spec.
+    let msg = match read_message(req).await {
+        Ok(msg) => msg,
+        Err(code) => {
+            let resp = Response::error(RequestId::Null, Error::from(code));
+            return ok!(resp; [(MCP_SESSION_ID, id.to_string())]);
+        }
+    };
     if let Message::Notification(_) = msg {
-        return status!(202, [
+        return status!(202; [
+            (MCP_SESSION_ID, id.to_string())
+        ]);
+    }
+
+    // A batch whose items are all notifications/responses produces no reply
+    // per JSON-RPC 2.0 #6. Return 202 immediately without allocating a
+    // pending entry — otherwise the oneshot receiver would hang forever.
+    // session_id must still be set so Response envelopes inside the batch
+    // resolve pending entries by the full session_id/request_id key.
+    if let Message::Batch(ref batch) = msg && !batch.has_requests() && !batch.has_error_responses() {
+        let msg = msg.set_session_id(id);
+        manager.sender.send(Ok(msg)).await.map_err(sender_error)?;
+        return status!(202; [
             (MCP_SESSION_ID, id.to_string())
         ]);
     }
@@ -200,6 +226,34 @@ async fn handle_message(
     ok!(resp; [
         (MCP_SESSION_ID, id.to_string())
     ])
+}
+
+/// Reads and decodes a JSON-RPC [`Message`] from the HTTP request body.
+///
+/// Returns [`ErrorCode`] on failure so the caller can build a spec-compliant
+/// error response without promoting the failure to an HTTP-level error:
+/// - [`ErrorCode::ParseError`] (`-32700`) — body is not syntactically valid JSON,
+///   or the underlying transport stream fails mid-read.
+/// - [`ErrorCode::InvalidRequest`] (`-32600`) — body is valid JSON but not a
+///   valid JSON-RPC message (e.g. an empty batch `[]` or an unrecognised shape).
+#[inline]
+async fn read_message(req: HttpRequest) -> Result<Message, ErrorCode> {
+    let mut body_data_stream = req.into_body().into_data_stream();
+    let mut buf = bytes::BytesMut::new();
+
+    while let Some(chunk) = body_data_stream.next().await {
+        let chunk = chunk.map_err(|_| ErrorCode::ParseError)?;
+        buf.extend_from_slice(&chunk);
+    }
+
+    // Two-step decode per JSON-RPC 2.0 §5.1:
+    //   1. Validate JSON syntax → ParseError on failure.
+    //   2. Validate message shape → InvalidRequest on failure.
+    let value: serde_json::Value = serde_json::from_slice(&buf)
+        .map_err(|_| ErrorCode::ParseError)?;
+
+    serde_json::from_value::<Message>(value)
+        .map_err(|_| ErrorCode::InvalidRequest)
 }
 
 async fn handle_http_error(_err: volga::error::Error) {
