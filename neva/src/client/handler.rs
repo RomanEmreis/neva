@@ -266,7 +266,7 @@ impl RequestHandler {
                         dispatch_notification(notification, &notification_handler).await;
                     },
                     Message::Batch(batch) => {
-                        // JSON-RPC 2.0 #6 allows either peer to send a batch
+                        // JSON-RPC 2.0 §6 allows either peer to send a batch
                         // containing any mix of Requests, Notifications, and
                         // Responses.
                         //
@@ -282,6 +282,11 @@ impl RequestHandler {
                                 other => deferred.push(other),
                             }
                         }
+                        // JSON-RPC 2.0 §6: the response to a batch MUST be an
+                        // array — collect all per-request responses and send
+                        // them back as one Message::Batch rather than as
+                        // individual messages.
+                        let mut responses = Vec::new();
                         for envelope in deferred {
                             match envelope {
                                 MessageEnvelope::Response(_) => unreachable!(),
@@ -294,11 +299,20 @@ impl RequestHandler {
                                         #[cfg(feature = "tasks")]
                                         &tasks,
                                     ).await;
-                                    send_response_impl(&mut sender, resp).await;
+                                    responses.push(MessageEnvelope::Response(resp));
                                 },
                                 MessageEnvelope::Notification(notification) => {
                                     dispatch_notification(notification, &notification_handler).await;
                                 },
+                            }
+                        }
+                        // MessageBatch::new returns Err for an empty vec (all
+                        // items were notifications), in which case no reply is
+                        // sent — correct per JSON-RPC 2.0 §6.
+                        if let Ok(batch) = MessageBatch::new(responses) {
+                            if let Err(_err) = sender.send(Message::Batch(batch)).await {
+                                #[cfg(feature = "tracing")]
+                                tracing::error!("Error sending batch response: {_err:?}");
                             }
                         }
                     }

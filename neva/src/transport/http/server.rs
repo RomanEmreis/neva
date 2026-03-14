@@ -8,8 +8,8 @@ use tokio_util::sync::CancellationToken;
 use super::{HttpRuntimeContext, ServiceUrl, MCP_SESSION_ID, get_mcp_session_id};
 use crate::{
     shared::MessageRegistry,
-    types::{RequestId, Message},
-    error::Error
+    types::{RequestId, Message, Response},
+    error::{Error, ErrorCode}
 };
 use volga::{
     App, HttpResult, HttpRequest, di::Dc, status, ok,
@@ -166,11 +166,23 @@ async fn handle_connection(req: HttpRequest) -> HttpResult {
 async fn handle_message(req: HttpRequest) -> HttpResult {
     let bts: Option<BearerTokenService> = req.extract()?;
     let manager: Dc<RequestManager> = req.extract()?;
-    
+
     let mut headers = req.headers().clone();
-    let msg = read_message(req).await?;
-    
     let id = get_or_create_mcp_session(&headers);
+
+    // JSON-RPC 2.0 §6: an empty batch ([]) or any body that can't be parsed
+    // must be answered with a single Invalid Request error object, not a
+    // transport-level error.
+    let msg = match read_message(req).await {
+        Ok(msg) => msg,
+        Err(_) => {
+            let resp = Response::error(
+                RequestId::Null,
+                Error::new(ErrorCode::InvalidRequest, "Invalid Request"),
+            );
+            return ok!(resp; [(MCP_SESSION_ID, id.to_string())]);
+        }
+    };
     if let Message::Notification(_) = msg {
         return status!(202; [
             (MCP_SESSION_ID, id.to_string())
