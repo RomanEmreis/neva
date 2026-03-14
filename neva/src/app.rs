@@ -647,7 +647,7 @@ impl App {
 
         let futures = batch.into_iter().map(|envelope| {
             let runtime = runtime.clone();
-            let sender = batch_sender.clone();
+            let mut sender = batch_sender.clone();
             // Clone per-iteration so each async move block owns its own copy.
             #[cfg(feature = "http-server")]
             let batch_headers = batch_headers.clone();
@@ -682,8 +682,7 @@ impl App {
                         // `resp.full_id()` (= session_id + resp_id) matches
                         // the key used when the server registered the pending
                         // request via `send_request`. Without this the lookup
-                        // in `RequestQueue::complete` misses and the pending
-                        // handler leaks.
+                        // in the pending queue misses and the pending handler leaks.
                         if let Some(session_id) = batch_session_id {
                             resp = resp.set_session_id(session_id);
                         }
@@ -691,7 +690,17 @@ impl App {
                         {
                             resp = resp.set_headers(batch_headers);
                         }
-                        Self::handle_response(resp, runtime).await;
+                        // If a pending server-initiated request matches this id,
+                        // complete it (the client is responding to a server request
+                        // inside the batch). Otherwise this is a synthetic
+                        // InvalidRequest error injected by the deserializer for a
+                        // malformed batch item — route it through the collector so
+                        // it appears in the batch reply to the caller.
+                        if let Some(handle) = runtime.pending_requests().pop(&resp.full_id()) {
+                            handle.send(resp);
+                        } else {
+                            let _ = sender.send(Message::Response(resp)).await;
+                        }
                     }
                 }
             }
