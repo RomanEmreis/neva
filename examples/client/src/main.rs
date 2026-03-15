@@ -4,8 +4,8 @@
 //! cargo run -p example-client
 //! ```
 
-use std::time::Duration;
 use neva::prelude::*;
+use std::time::Duration;
 use tracing_subscriber::prelude::*;
 
 #[allow(dead_code)]
@@ -21,28 +21,28 @@ async fn main() -> Result<(), Error> {
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
         .init();
-    
-    let mut client = Client::new()
-        .with_options(|opt| opt
-            .with_stdio("npx", ["-y", "@modelcontextprotocol/server-everything"])
+
+    let mut client = Client::new().with_options(|opt| {
+        opt.with_stdio("npx", ["-y", "@modelcontextprotocol/server-everything"])
             .with_roots(|roots| roots.with_list_changed())
             .with_timeout(Duration::from_secs(5))
-            .with_mcp_version("2025-11-25"));
-    
+            .with_mcp_version("2025-11-25")
+    });
+
     client.connect().await?;
-    
+
     // Ping command
     tracing::info!("--- PING ---");
     let resp = client.ping().await?;
     tracing::info!("{:?}", resp);
-    
+
     // List tools
     tracing::info!("--- LIST TOOLS ---");
     let tools = client.list_tools(None).await?;
     for tool in tools.tools.iter() {
         tracing::info!("- {}", tool.name);
     }
-    
+
     // Call a tool
     tracing::info!("--- CALL TOOL ---");
     let args = ("message", "Hello MCP!");
@@ -54,11 +54,9 @@ async fn main() -> Result<(), Error> {
     let tool = tools.get("get-structured-content").unwrap();
     let args = ("location", "New York");
     let result = client.call_tool(&tool.name, args).await?;
-    let weather: Weather = tool
-        .validate(&result)
-        .and_then(|res| res.as_json())?;
+    let weather: Weather = tool.validate(&result).and_then(|res| res.as_json())?;
     tracing::info!("{:?}", weather);
-    
+
     // List resources
     tracing::info!("--- LIST RESOURCES ---");
     let resources = client.list_resources(None).await?;
@@ -73,7 +71,7 @@ async fn main() -> Result<(), Error> {
     for res in resources.resources {
         tracing::info!("- {}: {:?}", res.name, res.uri);
     }
-    
+
     // List templates
     tracing::info!("--- LIST RESOURCE TEMPLATES ---");
     let templates = client.list_resource_templates(None).await?;
@@ -83,27 +81,26 @@ async fn main() -> Result<(), Error> {
 
     // Read resource
     tracing::info!("--- READ RESOURCE ---");
-    let resource = client.read_resource("demo://resource/static/document/architecture.md").await?;
+    let resource = client
+        .read_resource("demo://resource/static/document/architecture.md")
+        .await?;
     tracing::info!("{:?}", resource.contents);
-    
+
     // List prompts
     tracing::info!("--- LIST PROMPTS ---");
     let prompts = client.list_prompts(None).await?;
     for prompt in prompts.prompts {
         tracing::info!("- {}, {:?}", prompt.name, prompt.args);
     }
-    
+
     // Get prompt
     tracing::info!("--- GET PROMPT ---");
-    let args = [
-        ("city", "New York"),
-        ("state", "NY")
-    ];
+    let args = [("city", "New York"), ("state", "NY")];
     let prompt = client.get_prompt("args-prompt", args).await?;
     tracing::info!("{:?}: {:?}", prompt.descr, prompt.messages);
-    
+
     // This can be uncommented to check the log notifications from MCP server
     //tokio::time::sleep(Duration::from_secs(60)).await;
-    
+
     client.disconnect().await
 }

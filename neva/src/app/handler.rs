@@ -1,34 +1,25 @@
-﻿//! Handler utilities for resources, tools and prompts
+//! Handler utilities for resources, tools and prompts
 
+use crate::Context;
+use crate::app::options::RuntimeMcpOptions;
+use crate::error::{Error, ErrorCode};
+use crate::types::{
+    CallToolRequestParams, CompleteRequestParams, GetPromptRequestParams, IntoResponse,
+    ListResourcesRequestParams, ReadResourceRequestParams, Request, RequestId, Response,
+};
+use futures_util::future::BoxFuture;
 use std::future::Future;
 use std::sync::Arc;
-use futures_util::future::BoxFuture;
-use crate::error::{Error, ErrorCode};
-use crate::app::options::RuntimeMcpOptions;
-use crate::Context;
-use crate::types::{
-    ListResourcesRequestParams,
-    CompleteRequestParams,
-    CallToolRequestParams, 
-    ReadResourceRequestParams,
-    GetPromptRequestParams,
-    IntoResponse, Response,
-    Request, RequestId
-};
 
 /// Represents a specific registered handler
-pub(crate) type RequestHandler<T> = Arc<
-    dyn Handler<T>
-    + Send
-    + Sync
->;
+pub(crate) type RequestHandler<T> = Arc<dyn Handler<T> + Send + Sync>;
 
 #[derive(Debug)]
 pub enum HandlerParams {
     Request(Context, Request),
     Tool(CallToolRequestParams),
     Resource(ReadResourceRequestParams),
-    Prompt(GetPromptRequestParams)
+    Prompt(GetPromptRequestParams),
 }
 
 impl From<CallToolRequestParams> for HandlerParams {
@@ -63,17 +54,17 @@ pub trait FromHandlerParams: Sized {
 }
 
 /// Represents a generic handler
-pub trait GenericHandler<Args>: Clone + Send + Sync + 'static  {
+pub trait GenericHandler<Args>: Clone + Send + Sync + 'static {
     /// Output type
     type Output;
     /// Output future
     type Future: Future<Output = Self::Output> + Send;
-    
+
     fn call(&self, args: Args) -> Self::Future;
 }
 
 /// Represents a generic handler for list resources
-pub trait ListResourcesHandler<Args>: Clone + Send + Sync + 'static  {
+pub trait ListResourcesHandler<Args>: Clone + Send + Sync + 'static {
     /// Output type
     type Output;
     /// Output future
@@ -84,7 +75,7 @@ pub trait ListResourcesHandler<Args>: Clone + Send + Sync + 'static  {
 }
 
 /// Represents a generic completion handler.
-pub trait CompletionHandler<Args>: Clone + Send + Sync + 'static  {
+pub trait CompletionHandler<Args>: Clone + Send + Sync + 'static {
     /// Output type
     type Output;
     /// Output future
@@ -95,23 +86,26 @@ pub trait CompletionHandler<Args>: Clone + Send + Sync + 'static  {
 }
 
 pub(crate) struct RequestFunc<F, R, Args>
-where 
+where
     F: GenericHandler<Args, Output = R>,
     R: IntoResponse,
     Args: FromHandlerParams,
 {
     func: F,
-    _marker: std::marker::PhantomData<Args>,    
+    _marker: std::marker::PhantomData<Args>,
 }
 
 impl<F, R, Args> RequestFunc<F, R, Args>
 where
     F: GenericHandler<Args, Output = R>,
     R: IntoResponse,
-    Args: FromHandlerParams
+    Args: FromHandlerParams,
 {
     pub(crate) fn new(func: F) -> Arc<Self> {
-        let func = Self { func, _marker: std::marker::PhantomData };
+        let func = Self {
+            func,
+            _marker: std::marker::PhantomData,
+        };
         Arc::new(func)
     }
 }
@@ -120,17 +114,14 @@ impl<F, R, Args> Handler<Response> for RequestFunc<F, R, Args>
 where
     F: GenericHandler<Args, Output = R>,
     R: IntoResponse,
-    Args: FromHandlerParams + Send + Sync
+    Args: FromHandlerParams + Send + Sync,
 {
     #[inline]
     fn call(&self, params: HandlerParams) -> BoxFuture<'_, Result<Response, Error>> {
         Box::pin(async move {
             let id = RequestId::from_params(&params)?;
             let args = Args::from_params(&params)?;
-            Ok(self.func
-                .call(args)
-                .await
-                .into_response(id))
+            Ok(self.func.call(args).await.into_response(id))
         })
     }
 }
@@ -153,7 +144,10 @@ impl FromHandlerParams for Context {
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
         match params {
             HandlerParams::Request(context, _) => Ok(context.clone()),
-            _ => Err(Error::new(ErrorCode::InternalError, "invalid handler parameters"))
+            _ => Err(Error::new(
+                ErrorCode::InternalError,
+                "invalid handler parameters",
+            )),
         }
     }
 }
@@ -163,7 +157,10 @@ impl FromHandlerParams for RuntimeMcpOptions {
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
         match params {
             HandlerParams::Request(ctx, _) => Ok(ctx.options.clone()),
-            _ => Err(Error::new(ErrorCode::InternalError, "invalid handler parameters"))
+            _ => Err(Error::new(
+                ErrorCode::InternalError,
+                "invalid handler parameters",
+            )),
         }
     }
 }
@@ -173,7 +170,10 @@ impl FromHandlerParams for Request {
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
         match params {
             HandlerParams::Request(_, req) => Ok(req.clone()),
-            _ => Err(Error::new(ErrorCode::InternalError, "invalid handler parameters"))
+            _ => Err(Error::new(
+                ErrorCode::InternalError,
+                "invalid handler parameters",
+            )),
         }
     }
 }
@@ -251,6 +251,4 @@ impl_generic_handler! { T1 T2 T3 T4 }
 impl_generic_handler! { T1 T2 T3 T4 T5 }
 
 #[cfg(test)]
-mod tests {
-    
-}
+mod tests {}

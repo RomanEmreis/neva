@@ -1,26 +1,28 @@
 //! HTTP server implementation
 
-use std::sync::Arc;
+use super::{HttpRuntimeContext, MCP_SESSION_ID, ServiceUrl, get_mcp_session_id};
+#[cfg(feature = "tracing")]
+use crate::types::notification::fmt::LOG_REGISTRY;
+use crate::{
+    error::{Error, ErrorCode},
+    shared::MessageRegistry,
+    types::{Message, RequestId, Response},
+};
 use dashmap::DashMap;
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
 use tokio_util::sync::CancellationToken;
-use super::{HttpRuntimeContext, ServiceUrl, MCP_SESSION_ID, get_mcp_session_id};
-use crate::{
-    shared::MessageRegistry,
-    types::{RequestId, Message, Response},
-    error::{Error, ErrorCode}
-};
-use volga::{
-    App, HttpResult, HttpRequest, di::Dc, status, ok,
-    auth::{BearerTokenService, Bearer},
-    http::sse::Message as SseMessage, sse,
-    headers::{HeaderMap, AUTHORIZATION}
-};
 #[cfg(feature = "server-tls")]
 use volga::tls::TlsConfig;
-#[cfg(feature = "tracing")]
-use crate::types::notification::fmt::LOG_REGISTRY;
+use volga::{
+    App, HttpRequest, HttpResult,
+    auth::{Bearer, BearerTokenService},
+    di::Dc,
+    headers::{AUTHORIZATION, HeaderMap},
+    http::sse::Message as SseMessage,
+    ok, sse, status,
+};
 
 pub use auth_config::{AuthConfig, DefaultClaims};
 pub(crate) use auth_config::{validate_permissions, validate_roles};
@@ -36,10 +38,7 @@ struct RequestManager {
     sender: mpsc::Sender<Result<Message, Error>>,
 }
 
-pub(super) async fn serve(
-    rt: HttpRuntimeContext,
-    token: CancellationToken
-) {
+pub(super) async fn serve(rt: HttpRuntimeContext, token: CancellationToken) {
     let pending = Arc::new(DashMap::new());
     let registry = Arc::new(MessageRegistry::new());
     let manager = RequestManager {
@@ -50,12 +49,13 @@ pub(super) async fn serve(
     tokio::join!(
         dispatch(pending.clone(), registry.clone(), rt.rx, token.clone()),
         handle(
-            rt.url, 
+            rt.url,
             rt.auth,
             #[cfg(feature = "server-tls")]
-            rt.tls_config, 
-            manager, 
-            token.clone())
+            rt.tls_config,
+            manager,
+            token.clone()
+        )
     );
 }
 
@@ -63,7 +63,7 @@ async fn dispatch(
     pending: RequestMap,
     msg_registry: Arc<MessageRegistry>,
     mut sender_rx: mpsc::Receiver<Message>,
-    token: CancellationToken
+    token: CancellationToken,
 ) {
     loop {
         tokio::select! {
@@ -88,17 +88,16 @@ async fn dispatch(
 async fn handle(
     service_url: ServiceUrl,
     auth: Option<AuthConfig>,
-    #[cfg(feature = "server-tls")]
-    tls: Option<TlsConfig>,
+    #[cfg(feature = "server-tls")] tls: Option<TlsConfig>,
     manager: RequestManager,
-    token: CancellationToken
+    token: CancellationToken,
 ) {
     let root = "/";
     let mut server = App::new()
         .bind(service_url.addr)
         .with_no_delay()
         .without_greeter();
-    
+
     if let Some(auth) = auth {
         let (auth, rules) = auth.into_parts();
         server = server.with_bearer_auth(|_| auth);
@@ -109,16 +108,16 @@ async fn handle(
     if let Some(tls) = tls {
         server = server.set_tls(tls);
     }
-    
+
     server
         .add_singleton(manager)
         .map_err(handle_http_error)
-        .group(service_url.endpoint, |mcp| { 
+        .group(service_url.endpoint, |mcp| {
             mcp.map_get(root, handle_connection);
             mcp.map_post(root, handle_message);
-            mcp.map_delete(root, handle_session_end); 
+            mcp.map_delete(root, handle_session_end);
         });
-    
+
     if let Err(_e) = server.run().await {
         #[cfg(feature = "tracing")]
         tracing::error!(logger = "neva", "HTTP Server was shutdown: {:?}", _e);
@@ -132,32 +131,33 @@ async fn handle_session_end(req: HttpRequest) -> HttpResult {
     };
 
     let manager: Dc<RequestManager> = req.extract()?;
-    
+
     #[cfg(feature = "tracing")]
     LOG_REGISTRY.unregister(&id);
     manager.msg_registry.unregister(&id);
-    
+
     ok!([(MCP_SESSION_ID, id.to_string())])
 }
 
 async fn handle_connection(req: HttpRequest) -> HttpResult {
-    let Some(id) = get_mcp_session_id(req.headers()) else { 
+    let Some(id) = get_mcp_session_id(req.headers()) else {
         return status!(400);
     };
 
     let manager: Dc<RequestManager> = req.extract()?;
-    
+
     let (_log_tx, log_rx) = mpsc::unbounded_channel::<Message>();
     let (msg_tx, msg_rx) = mpsc::unbounded_channel::<Message>();
-    
+
     #[cfg(feature = "tracing")]
     LOG_REGISTRY.register(id, _log_tx);
     manager.msg_registry.register(id, msg_tx);
-    
+
     let stream = futures_util::stream::select(
-        UnboundedReceiverStream::new(log_rx), 
-        UnboundedReceiverStream::new(msg_rx));
-    
+        UnboundedReceiverStream::new(log_rx),
+        UnboundedReceiverStream::new(msg_rx),
+    );
+
     sse!(stream.map(handle_sse_message); [
         (MCP_SESSION_ID, id.to_string())
     ])
@@ -180,7 +180,12 @@ async fn handle_message(req: HttpRequest) -> HttpResult {
             return ok!(resp; [(MCP_SESSION_ID, id.to_string())]);
         }
     };
-    if let Message::Notification(_) = msg {
+    if matches!(msg, Message::Notification(_)) {
+        // JSON-RPC 2.0 §4 / MCP Streamable HTTP: respond 202 immediately,
+        // but still forward the notification to the app so it can act on it
+        // (e.g. cancel a pending request on notifications/cancelled).
+        let msg = msg.set_session_id(id);
+        let _ = manager.sender.send(Ok(msg)).await;
         return status!(202; [
             (MCP_SESSION_ID, id.to_string())
         ]);
@@ -191,7 +196,10 @@ async fn handle_message(req: HttpRequest) -> HttpResult {
     // pending entry — otherwise the oneshot receiver would hang forever.
     // session_id must still be set so Response envelopes inside the batch
     // resolve pending entries by the full session_id/request_id key.
-    if let Message::Batch(ref batch) = msg && !batch.has_requests() && !batch.has_error_responses() {
+    if let Message::Batch(ref batch) = msg
+        && !batch.has_requests()
+        && !batch.has_error_responses()
+    {
         let msg = msg.set_session_id(id);
         manager.sender.send(Ok(msg)).await.map_err(sender_error)?;
         return status!(202; [
@@ -201,28 +209,25 @@ async fn handle_message(req: HttpRequest) -> HttpResult {
 
     let claims = bts
         .and_then(|bts| {
-            headers.get(AUTHORIZATION)
+            headers
+                .get(AUTHORIZATION)
                 .and_then(|bearer| Bearer::try_from(bearer).ok())
                 .and_then(|bearer| bts.decode::<DefaultClaims>(bearer).ok())
         })
         .unwrap_or_default();
-    
+
     headers.remove(AUTHORIZATION);
-    
+
     let msg = msg
         .set_session_id(id)
         .set_claims(claims)
         .set_headers(headers);
-    
+
     let (resp_tx, resp_rx) = oneshot::channel::<Message>();
     manager.pending.insert(msg.full_id(), resp_tx);
-    manager.sender.send(Ok(msg))
-        .await
-        .map_err(sender_error)?;
-    let resp = resp_rx
-        .await
-        .map_err(receiver_error)?;
-    
+    manager.sender.send(Ok(msg)).await.map_err(sender_error)?;
+    let resp = resp_rx.await.map_err(receiver_error)?;
+
     ok!(resp; [
         (MCP_SESSION_ID, id.to_string())
     ])
@@ -249,11 +254,10 @@ async fn read_message(req: HttpRequest) -> Result<Message, ErrorCode> {
     // Two-step decode per JSON-RPC 2.0 §5.1:
     //   1. Validate JSON syntax → ParseError on failure.
     //   2. Validate message shape → InvalidRequest on failure.
-    let value: serde_json::Value = serde_json::from_slice(&buf)
-        .map_err(|_| ErrorCode::ParseError)?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&buf).map_err(|_| ErrorCode::ParseError)?;
 
-    serde_json::from_value::<Message>(value)
-        .map_err(|_| ErrorCode::InvalidRequest)
+    serde_json::from_value::<Message>(value).map_err(|_| ErrorCode::InvalidRequest)
 }
 
 async fn handle_http_error(_err: volga::error::Error) {

@@ -1,31 +1,31 @@
-﻿//! Represents an MCP prompt
+//! Represents an MCP prompt
 
-use std::collections::HashMap;
-use std::fmt::{Debug, Formatter};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use crate::shared;
-use crate::types::{Cursor, Icon};
-use crate::types::request::RequestParamsMeta;
-#[cfg(feature = "server")]
-use std::sync::Arc;
-#[cfg(feature = "server")]
-use std::future::Future;
-#[cfg(feature = "server")]
-use futures_util::future::BoxFuture;
 #[cfg(feature = "server")]
 use super::helpers::TypeCategory;
 #[cfg(feature = "server")]
 use crate::error::{Error, ErrorCode};
+use crate::shared;
 #[cfg(feature = "server")]
 use crate::types::FromRequest;
+use crate::types::request::RequestParamsMeta;
+use crate::types::{Cursor, Icon};
 #[cfg(feature = "server")]
 use crate::types::{IntoResponse, Page, PropertyType, Request, RequestId, Response};
+#[cfg(feature = "server")]
+use futures_util::future::BoxFuture;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
+use std::fmt::{Debug, Formatter};
+#[cfg(feature = "server")]
+use std::future::Future;
+#[cfg(feature = "server")]
+use std::sync::Arc;
 
 #[cfg(feature = "server")]
 use crate::app::{
     context::Context,
-    handler::{FromHandlerParams, HandlerParams, GenericHandler, Handler, RequestHandler}
+    handler::{FromHandlerParams, GenericHandler, Handler, HandlerParams, RequestHandler},
 };
 
 pub use get_prompt_result::{GetPromptResult, PromptMessage};
@@ -38,16 +38,16 @@ mod get_prompt_result;
 pub mod commands {
     /// Command name that returns a list of prompts the server has.
     pub const LIST: &str = "prompts/list";
-    
+
     /// Notification name that indicates that the list of prompts has changed.
     pub const LIST_CHANGED: &str = "notifications/prompts/list_changed";
-    
+
     /// Command name that returns a prompt provided by the server.
     pub const GET: &str = "prompts/get";
 }
 
 /// A prompt or prompt template that the server offers.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Prompt {
@@ -81,11 +81,11 @@ pub struct Prompt {
     /// - `image/webp` - WebP images (modern, efficient format)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icons: Option<Vec<Icon>>,
-    
+
     /// Metadata reserved by MCP for protocol-level metadata.
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<Value>,
-    
+
     /// A get prompt handler
     #[serde(skip)]
     #[cfg(feature = "server")]
@@ -103,7 +103,7 @@ pub struct Prompt {
 }
 
 /// Describes an argument that a prompt can accept.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptArgument {
@@ -131,13 +131,13 @@ pub struct ListPromptsRequestParams {
 }
 
 /// Used by the client to get a prompt provided by the server.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GetPromptRequestParams {
     /// The name of the prompt or prompt template.
     pub name: String,
-    
+
     /// Arguments to use for templating the prompt.
     #[serde(rename = "arguments", skip_serializing_if = "Option::is_none")]
     pub args: Option<HashMap<String, Value>>,
@@ -151,7 +151,7 @@ pub struct GetPromptRequestParams {
 }
 
 /// The server's response to a prompts/list request from the client.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ListPromptsResult {
@@ -174,7 +174,7 @@ impl IntoResponse for ListPromptsResult {
     fn into_response(self, req_id: RequestId) -> Response {
         match serde_json::to_value(self) {
             Ok(v) => Response::success(req_id, v),
-            Err(err) => Response::error(req_id, err.into())
+            Err(err) => Response::error(req_id, err.into()),
         }
     }
 }
@@ -185,7 +185,7 @@ impl From<Vec<Prompt>> for ListPromptsResult {
     fn from(prompts: Vec<Prompt>) -> Self {
         Self {
             next_cursor: None,
-            prompts
+            prompts,
         }
     }
 }
@@ -196,7 +196,7 @@ impl From<Page<'_, Prompt>> for ListPromptsResult {
     fn from(page: Page<'_, Prompt>) -> Self {
         Self {
             next_cursor: page.next_cursor,
-            prompts: page.items.to_vec()
+            prompts: page.items.to_vec(),
         }
     }
 }
@@ -233,9 +233,9 @@ impl From<&str> for PromptArgument {
     #[inline]
     fn from(name: &str) -> Self {
         Self {
-            name: name.into(), 
+            name: name.into(),
             descr: None,
-            required: Some(true)
+            required: Some(true),
         }
     }
 }
@@ -247,7 +247,7 @@ impl From<Box<str>> for PromptArgument {
         Self {
             name: name.into(),
             descr: None,
-            required: Some(true)
+            required: Some(true),
         }
     }
 }
@@ -256,8 +256,7 @@ impl From<Box<str>> for PromptArgument {
 impl From<Value> for PromptArgument {
     #[inline]
     fn from(json: Value) -> Self {
-        serde_json::from_value(json)
-            .expect("A correct PromptArgument value must be provided")
+        serde_json::from_value(json).expect("A correct PromptArgument value must be provided")
     }
 }
 
@@ -321,11 +320,14 @@ where
     F: PromptHandler<Args, Output = R>,
     R: TryInto<GetPromptResult>,
     R::Error: Into<Error>,
-    Args: TryFrom<GetPromptRequestParams, Error = Error>
+    Args: TryFrom<GetPromptRequestParams, Error = Error>,
 {
     /// Creates a new [`PromptFunc`] wrapped into [`Arc`]
     pub(crate) fn new(func: F) -> Arc<Self> {
-        let func = Self { func, _marker: std::marker::PhantomData };
+        let func = Self {
+            func,
+            _marker: std::marker::PhantomData,
+        };
         Arc::new(func)
     }
 }
@@ -336,7 +338,7 @@ where
     F: PromptHandler<Args, Output = R>,
     R: TryInto<GetPromptResult>,
     R::Error: Into<Error>,
-    Args: TryFrom<GetPromptRequestParams, Error = Error> + Send + Sync
+    Args: TryFrom<GetPromptRequestParams, Error = Error> + Send + Sync,
 {
     #[inline]
     fn call(&self, params: HandlerParams) -> BoxFuture<'_, Result<GetPromptResult, Error>> {
@@ -345,11 +347,7 @@ where
         };
         Box::pin(async move {
             let args = Args::try_from(params)?;
-            self.func
-                .call(args)
-                .await
-                .try_into()
-                .map_err(Into::into)
+            self.func.call(args).await.try_into().map_err(Into::into)
         })
     }
 }
@@ -360,7 +358,7 @@ impl GetPromptRequestParams {
         Self {
             name: name.into(),
             args: None,
-            meta: None
+            meta: None,
         }
     }
 
@@ -401,12 +399,12 @@ impl Prompt {
         F: PromptHandler<Args, Output = R>,
         R: TryInto<GetPromptResult> + Send + 'static,
         R::Error: Into<Error>,
-        Args: TryFrom<GetPromptRequestParams, Error = Error>  + Send + Sync + 'static,
+        Args: TryFrom<GetPromptRequestParams, Error = Error> + Send + Sync + 'static,
     {
         let handler = PromptFunc::new(handler);
         let args = F::args();
-        Self { 
-            name: name.into(), 
+        Self {
+            name: name.into(),
             title: None,
             descr: None,
             meta: None,
@@ -416,35 +414,32 @@ impl Prompt {
             roles: None,
             #[cfg(feature = "http-server")]
             permissions: None,
-            icons: None
+            icons: None,
         }
     }
-    
+
     /// Sets a [`Prompt`] title
     pub fn with_title(&mut self, title: impl Into<String>) -> &mut Self {
         self.title = Some(title.into());
         self
     }
-    
+
     /// Sets a [`Prompt`] description
     pub fn with_description(&mut self, descr: impl Into<String>) -> &mut Self {
         self.descr = Some(descr.into());
         self
     }
-    
+
     /// Sets arguments for the [`Prompt`]
     pub fn with_args<T, A>(&mut self, args: T) -> &mut Self
     where
         T: IntoIterator<Item = A>,
         A: Into<PromptArgument>,
     {
-        self.args = Some(args
-            .into_iter()
-            .map(Into::into)
-            .collect());
+        self.args = Some(args.into_iter().map(Into::into).collect());
         self
     }
-    
+
     /// Sets the [`Prompt`] icons
     pub fn with_icons(&mut self, icons: impl IntoIterator<Item = Icon>) -> &mut Self {
         self.icons = Some(icons.into_iter().collect());
@@ -456,12 +451,9 @@ impl Prompt {
     pub fn with_roles<T, I>(&mut self, roles: T) -> &mut Self
     where
         T: IntoIterator<Item = I>,
-        I: Into<String>
+        I: Into<String>,
     {
-        self.roles = Some(roles
-            .into_iter()
-            .map(Into::into)
-            .collect());
+        self.roles = Some(roles.into_iter().map(Into::into).collect());
         self
     }
 
@@ -470,12 +462,9 @@ impl Prompt {
     pub fn with_permissions<T, I>(&mut self, permissions: T) -> &mut Self
     where
         T: IntoIterator<Item = I>,
-        I: Into<String>
+        I: Into<String>,
     {
-        self.permissions = Some(permissions
-            .into_iter()
-            .map(Into::into)
-            .collect());
+        self.permissions = Some(permissions.into_iter().map(Into::into).collect());
         self
     }
 
@@ -484,7 +473,10 @@ impl Prompt {
     pub(crate) async fn call(&self, params: HandlerParams) -> Result<GetPromptResult, Error> {
         match self.handler {
             Some(ref handler) => handler.call(params).await,
-            None => Err(Error::new(ErrorCode::InternalError, "Prompt handler not specified"))
+            None => Err(Error::new(
+                ErrorCode::InternalError,
+                "Prompt handler not specified",
+            )),
         }
     }
 }
@@ -499,14 +491,13 @@ impl PromptArguments {
     /// Deserializes a [`Vec`] of [`PromptArgument`] from a JSON string
     #[inline]
     pub fn from_json_str(json: &str) -> Vec<Value> {
-        serde_json::from_str(json)
-            .expect("PromptArgument: Incorrect JSON string provided")
+        serde_json::from_str(json).expect("PromptArgument: Incorrect JSON string provided")
     }
 }
 
 #[cfg(feature = "server")]
 impl PromptArgument {
-    /// Creates a new [`PromptArgument`] 
+    /// Creates a new [`PromptArgument`]
     pub(crate) fn new<T>() -> Self {
         Self {
             name: std::any::type_name::<T>().into(),
@@ -514,7 +505,7 @@ impl PromptArgument {
             required: Some(true),
         }
     }
-    
+
     /// Creates a new required [`PromptArgument`]
     pub fn required<T: Into<String>>(name: T, descr: T) -> Self {
         Self {
@@ -547,12 +538,12 @@ macro_rules! impl_generic_prompt_handler ({ $($param:ident)* } => {
             let mut args = Vec::new();
             $(
             {
-                if $param::category() != PropertyType::None { 
+                if $param::category() != PropertyType::None {
                     args.push(PromptArgument::new::<$param>());
-                } 
+                }
             }
             )*
-            if args.len() == 0 { 
+            if args.len() == 0 {
                 None
             } else {
                 Some(args)

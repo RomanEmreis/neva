@@ -1,9 +1,9 @@
-﻿//! Types and utilities for serializable [`Arc<str>`]
+//! Types and utilities for serializable [`Arc<str>`]
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::sync::Arc;
 use std::ops::Deref;
-use serde::{Serialize, Deserialize};
+use std::sync::Arc;
 
 /// Represents a serializable [`Arc<str>`]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -18,7 +18,7 @@ impl fmt::Display for ArcStr {
 
 impl Deref for ArcStr {
     type Target = str;
-    
+
     #[inline]
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -49,8 +49,8 @@ impl From<Arc<str>> for ArcStr {
 impl Serialize for ArcStr {
     #[inline]
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where 
-        S: serde::Serializer
+    where
+        S: serde::Serializer,
     {
         serializer.serialize_str(self)
     }
@@ -60,7 +60,7 @@ impl<'de> Deserialize<'de> for ArcStr {
     #[inline]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: serde::Deserializer<'de> 
+        D: serde::Deserializer<'de>,
     {
         let s: &str = Deserialize::deserialize(deserializer)?;
         Ok(ArcStr::from(s))
@@ -79,7 +79,9 @@ mod tests {
 
     #[test]
     fn serialize_arcstr() {
-        let w = Wrapper { id: ArcStr::from("hello") };
+        let w = Wrapper {
+            id: ArcStr::from("hello"),
+        };
         let json = serde_json::to_string(&w).unwrap();
         assert_eq!(json, r#"{"id":"hello"}"#);
     }

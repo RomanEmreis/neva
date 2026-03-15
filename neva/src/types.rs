@@ -1,12 +1,12 @@
-﻿//! Types used by the MCP protocol
-//! 
+//! Types used by the MCP protocol
+//!
 //! See the [specification](https://github.com/modelcontextprotocol/specification) for details
 
-use std::fmt::Display;
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use crate::SDK_NAME;
 use crate::types::notification::Notification;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::fmt::Display;
 
 #[cfg(feature = "server")]
 use crate::{
@@ -19,175 +19,99 @@ use crate::{
 pub use request::FromRequest;
 
 #[cfg(feature = "http-server")]
-use {
-    crate::auth::DefaultClaims,
-    volga::headers::HeaderMap
-};
+use {crate::auth::DefaultClaims, volga::headers::HeaderMap};
 
-pub use helpers::{Json, Meta, PropertyType};
-pub use request::{RequestId, Request, RequestParamsMeta};
-pub use response::{IntoResponse, Response, ErrorDetails};
-pub use reference::Reference;
-pub use completion::{Completion, CompleteRequestParams, Argument, CompleteResult};
-pub use cursor::{Cursor, Page, Pagination};
-pub use content::{
-    Content, 
-    TextContent, 
-    AudioContent, 
-    ImageContent,
-    ResourceLink,
-    EmbeddedResource,
-    ToolUse,
-    ToolResult
-};
 pub use capabilities::{
-    ClientCapabilities, 
-    ServerCapabilities, 
-    ToolsCapability, 
-    ResourcesCapability,
-    PromptsCapability,
-    LoggingCapability,
-    CompletionsCapability,
-    ElicitationCapability,
-    ElicitationFormCapability,
-    ElicitationUrlCapability,
-    SamplingCapability,
-    SamplingContextCapability,
-    SamplingToolsCapability,
-    RootsCapability
+    ClientCapabilities, CompletionsCapability, ElicitationCapability, ElicitationFormCapability,
+    ElicitationUrlCapability, LoggingCapability, PromptsCapability, ResourcesCapability,
+    RootsCapability, SamplingCapability, SamplingContextCapability, SamplingToolsCapability,
+    ServerCapabilities, ToolsCapability,
 };
+pub use completion::{Argument, CompleteRequestParams, CompleteResult, Completion};
+pub use content::{
+    AudioContent, Content, EmbeddedResource, ImageContent, ResourceLink, TextContent, ToolResult,
+    ToolUse,
+};
+pub use cursor::{Cursor, Page, Pagination};
+pub use helpers::{Json, Meta, PropertyType};
+pub use reference::Reference;
+pub use request::{Request, RequestId, RequestParamsMeta};
+pub use response::{ErrorDetails, IntoResponse, Response};
 
 #[cfg(feature = "tasks")]
 pub use capabilities::{
-    ServerTasksCapability, 
-    ClientTasksCapability,
-    TaskListCapability,
-    TaskCancellationCapability,
-    ClientTaskRequestsCapability,
-    ServerTaskRequestsCapability,
-    ToolsTaskCapability,
-    ToolsCallTaskCapability,
-    SamplingTaskCapability,
-    SamplingCreateMessageTaskCapability,
-    ElicitationTaskCapability,
-    ElicitationCreateTaskCapability
+    ClientTaskRequestsCapability, ClientTasksCapability, ElicitationCreateTaskCapability,
+    ElicitationTaskCapability, SamplingCreateMessageTaskCapability, SamplingTaskCapability,
+    ServerTaskRequestsCapability, ServerTasksCapability, TaskCancellationCapability,
+    TaskListCapability, ToolsCallTaskCapability, ToolsTaskCapability,
 };
 
 pub use tool::{
-    ListToolsRequestParams,
-    CallToolRequestParams,
-    CallToolResponse,
-    Tool,
-    ToolSchema,
-    ToolAnnotations,
-    ListToolsResult
+    CallToolRequestParams, CallToolResponse, ListToolsRequestParams, ListToolsResult, Tool,
+    ToolAnnotations, ToolSchema,
 };
 
 #[cfg(feature = "server")]
 pub use tool::ToolHandler;
 
-pub use resource::{
-    Uri,
-    ListResourcesRequestParams,
-    ListResourceTemplatesRequestParams,
-    ListResourcesResult,
-    ListResourceTemplatesResult,
-    Resource,
-    ResourceTemplate,
-    ResourceContents,
-    TextResourceContents,
-    BlobResourceContents,
-    ReadResourceResult, 
-    ReadResourceRequestParams,
-    SubscribeRequestParams,
-    UnsubscribeRequestParams,
+pub use elicitation::{
+    ElicitRequestFormParams, ElicitRequestParams, ElicitRequestUrlParams, ElicitResult,
+    ElicitationAction, ElicitationCompleteParams, ElicitationMode, UrlElicitationRequiredError,
 };
 pub use prompt::{
-    ListPromptsRequestParams,
-    ListPromptsResult,
-    Prompt,
-    GetPromptRequestParams,
-    GetPromptResult,
-    PromptArgument,
-    PromptMessage,
+    GetPromptRequestParams, GetPromptResult, ListPromptsRequestParams, ListPromptsResult, Prompt,
+    PromptArgument, PromptMessage,
+};
+pub use resource::{
+    BlobResourceContents, ListResourceTemplatesRequestParams, ListResourceTemplatesResult,
+    ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult,
+    Resource, ResourceContents, ResourceTemplate, SubscribeRequestParams, TextResourceContents,
+    UnsubscribeRequestParams, Uri,
 };
 pub use sampling::{
-    CreateMessageRequestParams,
-    CreateMessageResult,
-    SamplingMessage,
-    StopReason,
+    CreateMessageRequestParams, CreateMessageResult, SamplingMessage, StopReason, ToolChoice,
     ToolChoiceMode,
-    ToolChoice
-};
-pub use elicitation::{
-    UrlElicitationRequiredError,
-    ElicitationCompleteParams,
-    ElicitRequestParams,
-    ElicitRequestFormParams,
-    ElicitRequestUrlParams,
-    ElicitationAction,
-    ElicitationMode,
-    ElicitResult
 };
 pub use schema::{
-    Schema,
-    StringSchema,
-    StringFormat,
-    NumberSchema,
-    BooleanSchema,
-    TitledMultiSelectEnumSchema,
-    TitledSingleSelectEnumSchema,
-    UntitledMultiSelectEnumSchema,
-    UntitledSingleSelectEnumSchema,
+    BooleanSchema, NumberSchema, Schema, StringFormat, StringSchema, TitledMultiSelectEnumSchema,
+    TitledSingleSelectEnumSchema, UntitledMultiSelectEnumSchema, UntitledSingleSelectEnumSchema,
 };
 
-pub use icon::{
-    Icon, 
-    IconSize, 
-    IconTheme,
-};
+pub use icon::{Icon, IconSize, IconTheme};
 
 #[cfg(feature = "tasks")]
 pub use task::{
-    GetTaskPayloadRequestParams,
-    GetTaskRequestParams,
-    ListTasksRequestParams,
-    ListTasksResult,
-    CancelTaskRequestParams,
-    CreateTaskResult,
-    RelatedTaskMetadata,
-    TaskMetadata,
-    TaskPayload,
+    CancelTaskRequestParams, CreateTaskResult, GetTaskPayloadRequestParams, GetTaskRequestParams,
+    ListTasksRequestParams, ListTasksResult, RelatedTaskMetadata, Task, TaskMetadata, TaskPayload,
     TaskStatus,
-    Task,
 };
 
 #[cfg(feature = "server")]
 pub use prompt::PromptHandler;
 
-pub use root::Root;
 pub use progress::ProgressToken;
+pub use root::Root;
 
-mod request;
-mod response;
 mod capabilities;
-mod reference;
-mod content;
-mod progress;
-mod schema;
-pub mod tool;
-pub mod resource;
-pub mod prompt;
 pub mod completion;
-pub mod notification;
+mod content;
 pub mod cursor;
+pub mod elicitation;
+pub(crate) mod helpers;
+mod icon;
+pub mod notification;
+mod progress;
+pub mod prompt;
+mod reference;
+mod request;
+pub mod resource;
+mod response;
 pub mod root;
 pub mod sampling;
-pub mod elicitation;
+mod schema;
 #[cfg(feature = "tasks")]
 pub mod task;
-mod icon;
-pub(crate) mod helpers;
+pub mod tool;
 
 pub(super) const JSONRPC_VERSION: &str = "2.0";
 
@@ -333,7 +257,9 @@ impl MessageBatch {
     #[inline]
     #[cfg(any(feature = "http-server", feature = "http-client"))]
     pub(crate) fn has_requests(&self) -> bool {
-        self.items.iter().any(|e| matches!(e, MessageEnvelope::Request(_)))
+        self.items
+            .iter()
+            .any(|e| matches!(e, MessageEnvelope::Request(_)))
     }
 
     /// Returns `true` if the batch contains at least one [`MessageEnvelope::Response`]
@@ -347,7 +273,9 @@ impl MessageBatch {
     #[inline]
     #[cfg(feature = "http-server")]
     pub(crate) fn has_error_responses(&self) -> bool {
-        self.items.iter().any(|e| matches!(e, MessageEnvelope::Response(Response::Err(_))))
+        self.items
+            .iter()
+            .any(|e| matches!(e, MessageEnvelope::Response(Response::Err(_))))
     }
 }
 
@@ -374,7 +302,9 @@ impl<'de> Deserialize<'de> for MessageBatch {
         // Invalid Request responses, not a top-level failure).
         let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
         if raw.is_empty() {
-            return Err(serde::de::Error::custom("JSON-RPC batch array must not be empty"));
+            return Err(serde::de::Error::custom(
+                "JSON-RPC batch array must not be empty",
+            ));
         }
 
         // Every item either deserializes cleanly or produces an error response.
@@ -415,60 +345,60 @@ impl<'de> Deserialize<'de> for MessageBatch {
 }
 
 /// Parameters for an initialization request sent to the server.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitializeRequestParams {
     /// The version of the Model Context Protocol that the client is to use.
     #[serde(rename = "protocolVersion")]
     pub protocol_ver: String,
-    
+
     /// The client's capabilities.
     pub capabilities: Option<ClientCapabilities>,
-    
+
     /// Information about the client implementation.
     #[serde(rename = "clientInfo")]
     pub client_info: Option<Implementation>,
 }
 
 /// Result of the initialization request sent to the server.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitializeResult {
     /// The version of the Model Context Protocol that the server is to use.
     #[serde(rename = "protocolVersion")]
     pub protocol_ver: String,
-    
+
     /// The server's capabilities.
     pub capabilities: ServerCapabilities,
-    
+
     /// Information about the server implementation.
     #[serde(rename = "serverInfo")]
-    pub server_info : Implementation,
-    
+    pub server_info: Implementation,
+
     /// Optional instructions for using the server and its features.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub instructions: Option<String>
+    pub instructions: Option<String>,
 }
 
 /// Describes the name and version of an MCP implementation.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Implementation {
     /// Name of the implementation.
     pub name: String,
-    
+
     /// Version of the implementation.
     pub version: String,
-    
+
     /// Optional set of sized icons that the client can display in a user interface.
-    /// 
+    ///
     /// Clients that support rendering icons **MUST** support at least the following MIME types:
     /// - `image/png` - PNG images (safe, universal compatibility)
     /// - `image/jpeg` (and `image/jpg`) - JPEG images (safe, universal compatibility)
-    /// 
+    ///
     /// Clients that support rendering icons **SHOULD** also support:
     /// - `image/svg+xml` - SVG images (scalable but requires security precautions)
     /// - `image/webp` - WebP images (modern, efficient format)
@@ -485,39 +415,39 @@ pub enum Role {
     /// Corresponds to the user in the conversation.
     User,
     /// Corresponds to the AI in the conversation.
-    Assistant
+    Assistant,
 }
 
 /// Represents annotations that can be attached to content.
 /// The client can use annotations to inform how objects are used or displayed
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Annotations {
     /// Describes who the intended customer of this object or data is.
     audience: Vec<Role>,
-    
+
     /// The moment the resource was last modified, as an ISO 8601 formatted string.
-    /// 
+    ///
     /// Should be an ISO 8601 formatted string (e.g., **"2025-01-12T15:00:58Z"**).
-    /// 
+    ///
     /// **Examples:** last activity timestamp in an open file, timestamp when the resource
     /// was attached, etc.
     #[serde(rename = "lastModified", skip_serializing_if = "Option::is_none")]
     last_modified: Option<DateTime<Utc>>,
-    
+
     /// Describes how important this data is for operating the server (0 to 1).
-    /// 
+    ///
     /// A value of 1 means **most important** and indicates that the data is
     /// effectively required, while 0 means **least important** and indicates that
     /// the data is entirely optional.
-    priority: f32
+    priority: f32,
 }
 
 impl Display for Role {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self { 
+        match self {
             Role::User => write!(f, "user"),
             Role::Assistant => write!(f, "assistant"),
         }
@@ -527,10 +457,10 @@ impl Display for Role {
 impl From<&str> for Role {
     #[inline]
     fn from(role: &str) -> Self {
-        match role { 
+        match role {
             "user" => Self::User,
             "assistant" => Self::Assistant,
-            _ => Self::User
+            _ => Self::User,
         }
     }
 }
@@ -541,7 +471,7 @@ impl From<String> for Role {
         match role.as_str() {
             "user" => Self::User,
             "assistant" => Self::Assistant,
-            _ => Self::User
+            _ => Self::User,
         }
     }
 }
@@ -561,7 +491,7 @@ impl IntoResponse for InitializeResult {
     fn into_response(self, req_id: RequestId) -> Response {
         match serde_json::to_value(self) {
             Ok(v) => Response::success(req_id, v),
-            Err(err) => Response::error(req_id, err.into())
+            Err(err) => Response::error(req_id, err.into()),
         }
     }
 }
@@ -609,14 +539,14 @@ impl Message {
     pub fn is_batch(&self) -> bool {
         matches!(self, Message::Batch(_))
     }
-    
+
     /// Returns [`Message`] ID
     #[inline]
     pub fn id(&self) -> RequestId {
         match self {
             Message::Request(req) => req.id(),
             Message::Response(resp) => resp.id().clone(),
-            Message::Notification(_) | Message::Batch(_) => RequestId::default()
+            Message::Notification(_) | Message::Batch(_) => RequestId::default(),
         }
     }
 
@@ -651,7 +581,7 @@ impl Message {
         }
         self
     }
-    
+
     /// Sets HTTP headers for [`Request`], [`Response`], or [`MessageBatch`] message
     #[cfg(feature = "http-server")]
     pub fn set_headers(mut self, headers: HeaderMap) -> Self {
@@ -659,7 +589,7 @@ impl Message {
             Message::Request(ref mut req) => req.headers = headers,
             Message::Response(resp) => self = Message::Response(resp.set_headers(headers)),
             Message::Batch(ref mut batch) => batch.headers = headers,
-            _ => ()
+            _ => (),
         }
         self
     }
@@ -670,7 +600,7 @@ impl Message {
         match self {
             Message::Request(ref mut req) => req.claims = Some(Box::new(claims)),
             Message::Batch(ref mut batch) => batch.claims = Some(Box::new(claims)),
-            _ => ()
+            _ => (),
         }
         self
     }
@@ -680,22 +610,21 @@ impl Annotations {
     /// Deserializes a new [`Annotations`] from a JSON string
     #[inline]
     pub fn from_json_str(json: &str) -> Self {
-        serde_json::from_str(json)
-            .expect("Annotations: Incorrect JSON string provided")
+        serde_json::from_str(json).expect("Annotations: Incorrect JSON string provided")
     }
-    
+
     /// Adds audience
     pub fn with_audience<T: Into<Role>>(mut self, role: T) -> Self {
         self.audience.push(role.into());
         self
     }
-    
+
     /// Sets the priority
     pub fn with_priority(mut self, priority: f32) -> Self {
         self.priority = priority;
         self
     }
-    
+
     /// Sets the moment the object was last modified
     pub fn with_last_modified(mut self, last_modified: DateTime<Utc>) -> Self {
         self.last_modified = Some(last_modified);
@@ -725,10 +654,10 @@ impl InitializeResult {
                 completions: Some(CompletionsCapability::default()),
                 #[cfg(feature = "tasks")]
                 tasks: options.tasks_capability(),
-                experimental: None
+                experimental: None,
             },
             server_info: options.implementation.clone(),
-            instructions: None
+            instructions: None,
         }
     }
 }
@@ -789,7 +718,10 @@ mod tests {
         assert!(matches!(resp, Response::Err(_)));
         // The id must serialize as JSON null.
         let serialized = serde_json::to_string(resp).unwrap();
-        assert!(serialized.contains(r#""id":null"#), "expected null id, got: {serialized}");
+        assert!(
+            serialized.contains(r#""id":null"#),
+            "expected null id, got: {serialized}"
+        );
     }
 
     #[test]
@@ -810,7 +742,10 @@ mod tests {
         };
         assert!(matches!(resp, Response::Err(_)));
         let serialized = serde_json::to_string(resp).unwrap();
-        assert!(serialized.contains(r#""id":2"#), "expected id 2, got: {serialized}");
+        assert!(
+            serialized.contains(r#""id":2"#),
+            "expected id 2, got: {serialized}"
+        );
     }
 
     #[test]
@@ -827,7 +762,10 @@ mod tests {
             };
             assert!(matches!(resp, Response::Err(_)));
             let serialized = serde_json::to_string(resp).unwrap();
-            assert!(serialized.contains(r#""id":null"#), "expected null id, got: {serialized}");
+            assert!(
+                serialized.contains(r#""id":null"#),
+                "expected null id, got: {serialized}"
+            );
         }
     }
 }

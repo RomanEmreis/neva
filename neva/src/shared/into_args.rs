@@ -1,9 +1,9 @@
 //! Utilities for conversion various types into tool or prompt arguments
 
 use crate::types::Json;
-use std::collections::HashMap;
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashMap;
 
 /// A trait describes arguments for tools and prompts
 pub trait IntoArgs {
@@ -32,9 +32,10 @@ where
 {
     #[inline]
     fn into_args(self) -> Option<HashMap<String, Value>> {
-        Some(HashMap::from([
-            (self.0.into(), serde_json::to_value(self.1).unwrap())
-        ]))
+        Some(HashMap::from([(
+            self.0.into(),
+            serde_json::to_value(self.1).unwrap(),
+        )]))
     }
 }
 
@@ -75,9 +76,7 @@ impl IntoArgs for Value {
     #[inline]
     fn into_args(self) -> Option<HashMap<String, Value>> {
         match self {
-            Value::Object(map) => Some(map
-                .into_iter()
-                .collect()),
+            Value::Object(map) => Some(map.into_iter().collect()),
             _ => None,
         }
     }
@@ -86,11 +85,9 @@ impl IntoArgs for Value {
 impl<T: Serialize> IntoArgs for Json<T> {
     #[inline]
     fn into_args(self) -> Option<HashMap<String, Value>> {
-        serde_json::to_value(self.0)
-            .ok()
-            .into_args()
+        serde_json::to_value(self.0).ok().into_args()
     }
-} 
+}
 
 /// Creates arguments for tools and prompts from iterator
 #[inline]
@@ -100,9 +97,10 @@ where
     K: Into<String>,
     T: Serialize,
 {
-    HashMap::from_iter(args
-        .into_iter()
-        .map(|(k, v)| (k.into(), serde_json::to_value(v).unwrap())))
+    HashMap::from_iter(
+        args.into_iter()
+            .map(|(k, v)| (k.into(), serde_json::to_value(v).unwrap())),
+    )
 }
 
 #[cfg(test)]
@@ -131,27 +129,21 @@ mod tests {
 
     #[test]
     fn it_converts_tuple_into_single_key_value_pair() {
-        let args = ("answer", 42)
-            .into_args()
-            .unwrap();
+        let args = ("answer", 42).into_args().unwrap();
         assert_eq!(args.len(), 1);
         assert_eq!(args.get("answer"), Some(&json!(42)));
     }
 
     #[test]
     fn it_converts_array_of_pairs_into_hashmap() {
-        let args = [("a", 1), ("b", 2)]
-            .into_args()
-            .unwrap();
+        let args = [("a", 1), ("b", 2)].into_args().unwrap();
         assert_eq!(args.get("a"), Some(&json!(1)));
         assert_eq!(args.get("b"), Some(&json!(2)));
     }
 
     #[test]
     fn it_converts_vec_of_pairs_into_hashmap() {
-        let args = vec![("x", true), ("y", false)]
-            .into_args()
-            .unwrap();
+        let args = vec![("x", true), ("y", false)].into_args().unwrap();
         assert_eq!(args.get("x"), Some(&json!(true)));
         assert_eq!(args.get("y"), Some(&json!(false)));
     }
@@ -178,47 +170,42 @@ mod tests {
 
     #[test]
     fn it_overwrites_duplicate_keys_in_later_entries() {
-        let args = vec![("k", 1), ("k", 2)]
-            .into_args()
-            .unwrap();
+        let args = vec![("k", 1), ("k", 2)].into_args().unwrap();
         assert_eq!(args.get("k"), Some(&json!(2)));
     }
 
     #[test]
     fn it_supports_keys_that_are_not_str_directly() {
-        let args = vec![(String::from("id"), 99)]
-            .into_args()
-            .unwrap();
+        let args = vec![(String::from("id"), 99)].into_args().unwrap();
         assert_eq!(args.get("id"), Some(&json!(99)));
     }
 
     #[test]
     fn it_creates_empty_hashmap_for_empty_vec() {
         let args: Vec<(String, i32)> = vec![];
-        let result = args
-            .into_args()
-            .unwrap();
+        let result = args.into_args().unwrap();
         assert!(result.is_empty());
     }
 
     #[test]
     fn it_handles_serde_value() {
-        let args = json!({ "name": "Alice", "age": 30  })
-            .into_args()
-            .unwrap();
+        let args = json!({ "name": "Alice", "age": 30  }).into_args().unwrap();
         assert_eq!(args.get("name"), Some(&json!("Alice")));
         assert_eq!(args.get("age"), Some(&json!(30)));
     }
 
     #[test]
     fn it_handles_json_value() {
-        let args = Json(User { name: "Alice".into(), age: 30 })
-            .into_args()
-            .unwrap();
+        let args = Json(User {
+            name: "Alice".into(),
+            age: 30,
+        })
+        .into_args()
+        .unwrap();
         assert_eq!(args.get("name"), Some(&json!("Alice")));
         assert_eq!(args.get("age"), Some(&json!(30)));
     }
-    
+
     #[derive(Serialize)]
     struct User {
         name: String,

@@ -1,7 +1,7 @@
 //! Macros for server
 
-use crate::App;
 use super::inventory;
+use crate::App;
 
 /// Registrar unit for tools, resources, templates and prompts
 #[derive(Debug)]

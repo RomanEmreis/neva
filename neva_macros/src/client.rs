@@ -1,8 +1,8 @@
 //! Macros for MCP clients
 
-use syn::ItemFn;
 use proc_macro2::TokenStream;
 use quote::quote;
+use syn::ItemFn;
 
 pub(super) fn expand_elicitation(function: &ItemFn) -> syn::Result<TokenStream> {
     let func_name = &function.sig.ident;

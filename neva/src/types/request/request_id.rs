@@ -1,12 +1,12 @@
-﻿//! Generic identity data structure for requests.
+//! Generic identity data structure for requests.
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::shared::{ArcSlice, ArcStr, MemChr};
 use crate::types::ProgressToken;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{
-    convert::Infallible, 
-    fmt::{self, Display, Formatter}, 
-    str::FromStr
+    convert::Infallible,
+    fmt::{self, Display, Formatter},
+    str::FromStr,
 };
 
 const SEPARATOR: u8 = b'/';
@@ -120,11 +120,13 @@ impl From<&RequestId> for ProgressToken {
             // Null ids only appear in error responses; they are never used
             // as progress tokens in practice.
             RequestId::Null => ProgressToken::String("null".into()),
-            RequestId::Slice(slice) => ProgressToken::Slice(slice
-                .iter()
-                .map(Into::into)
-                .collect::<Vec<ProgressToken>>()
-                .into())
+            RequestId::Slice(slice) => ProgressToken::Slice(
+                slice
+                    .iter()
+                    .map(Into::into)
+                    .collect::<Vec<ProgressToken>>()
+                    .into(),
+            ),
         }
     }
 }
@@ -199,7 +201,7 @@ impl serde::de::Visitor<'_> for RequestIdVisitor {
 }
 
 impl RequestId {
-    /// Consumes the current [`RequestId`], concatenates it with another one 
+    /// Consumes the current [`RequestId`], concatenates it with another one
     /// and returns a new [`RequestId::Slice`]
     pub fn concat(self, request_id: RequestId) -> RequestId {
         let slice = [self, request_id];
@@ -235,16 +237,19 @@ mod tests {
 
     #[test]
     fn it_converts_slice_request_id_to_progress_token() {
-        let id = RequestId::Slice([
-            RequestId::String("user".into()),
-            RequestId::Number(1)
-        ].into());
+        let id = RequestId::Slice([RequestId::String("user".into()), RequestId::Number(1)].into());
         let token = ProgressToken::from(&id);
 
-        assert_eq!(token, ProgressToken::Slice([
-            ProgressToken::String("user".into()),
-            ProgressToken::Number(1)
-        ].into()));
+        assert_eq!(
+            token,
+            ProgressToken::Slice(
+                [
+                    ProgressToken::String("user".into()),
+                    ProgressToken::Number(1)
+                ]
+                .into()
+            )
+        );
     }
 
     #[test]
@@ -259,10 +264,8 @@ mod tests {
 
     #[test]
     fn it_serializes_and_deserializes_slice_through_str_request_id() {
-        let expected_id = RequestId::Slice([
-            RequestId::String("user".into()),
-            RequestId::Number(1)
-        ].into());
+        let expected_id =
+            RequestId::Slice([RequestId::String("user".into()), RequestId::Number(1)].into());
 
         let json = serde_json::to_string(&expected_id).unwrap();
         let new_id: RequestId = serde_json::from_str(&json).unwrap();
@@ -272,10 +275,8 @@ mod tests {
 
     #[test]
     fn it_serializes_and_deserializes_slice_through_value_request_id() {
-        let expected_id = RequestId::Slice([
-            RequestId::String("user".into()),
-            RequestId::Number(1)
-        ].into());
+        let expected_id =
+            RequestId::Slice([RequestId::String("user".into()), RequestId::Number(1)].into());
 
         let json = serde_json::to_value(&expected_id).unwrap();
         let new_id: RequestId = serde_json::from_value(json).unwrap();

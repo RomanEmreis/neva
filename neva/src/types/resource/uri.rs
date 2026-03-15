@@ -1,9 +1,9 @@
-﻿//! URI helpers and utilities
+//! URI helpers and utilities
 
-use serde::{Serialize, Deserialize};
-use std::ops::{Deref, DerefMut};
-use std::fmt::{Display, Formatter};
 use crate::shared::MemChr;
+use serde::{Deserialize, Serialize};
+use std::fmt::{Display, Formatter};
+use std::ops::{Deref, DerefMut};
 
 const PATH_SEPARATOR: char = '/';
 const SCHEME_SEPARATOR: [u8; 3] = [b':', b'/', b'/'];
@@ -55,13 +55,13 @@ impl Uri {
     pub fn into_inner(self) -> String {
         self.0
     }
-    
+
     /// Splits the URI into scheme and path parts
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// use neva::types::Uri;
-    /// 
+    ///
     /// let uri = Uri::from("res://test1/test2");
     ///         
     /// assert_eq!(uri.parts().unwrap().collect::<Vec<_>>(), ["res", "test1", "test2"]);
@@ -73,27 +73,29 @@ impl Uri {
 
         rest = rest.trim_start_matches(PATH_SEPARATOR);
 
-        Some(std::iter::once(scheme)
-            .chain(MemChr::split(rest, PATH_SEPARATOR as u8)))
+        Some(std::iter::once(scheme).chain(MemChr::split(rest, PATH_SEPARATOR as u8)))
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    
+
     #[test]
     fn it_converts_from_str() {
         let uri = Uri::from("res://test1");
-        
+
         assert_eq!(uri.to_string(), "res://test1");
     }
 
     #[test]
     fn it_splits_scheme_and_path() {
         let uri = Uri::from("res://test1/test2");
-        
-        assert_eq!(uri.parts().unwrap().collect::<Vec<_>>(), ["res", "test1", "test2"]);
+
+        assert_eq!(
+            uri.parts().unwrap().collect::<Vec<_>>(),
+            ["res", "test1", "test2"]
+        );
     }
 
     #[test]
@@ -107,20 +109,29 @@ mod test {
     fn it_splits_scheme_and_path_with_double_slash() {
         let uri = Uri::from("res://test1//test2");
 
-        assert_eq!(uri.parts().unwrap().collect::<Vec<_>>(), ["res", "test1", "test2"]);
+        assert_eq!(
+            uri.parts().unwrap().collect::<Vec<_>>(),
+            ["res", "test1", "test2"]
+        );
     }
 
     #[test]
     fn it_splits_scheme_and_path_with_trailing_slash() {
         let uri = Uri::from("res://test1/test2/");
 
-        assert_eq!(uri.parts().unwrap().collect::<Vec<_>>(), ["res", "test1", "test2"]);
+        assert_eq!(
+            uri.parts().unwrap().collect::<Vec<_>>(),
+            ["res", "test1", "test2"]
+        );
     }
 
     #[test]
     fn it_splits_scheme_and_path_with_leading_slash() {
         let uri = Uri::from("res:///test1/test2");
 
-        assert_eq!(uri.parts().unwrap().collect::<Vec<_>>(), ["res", "test1", "test2"]);
+        assert_eq!(
+            uri.parts().unwrap().collect::<Vec<_>>(),
+            ["res", "test1", "test2"]
+        );
     }
 }

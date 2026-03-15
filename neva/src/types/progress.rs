@@ -1,11 +1,11 @@
-﻿//! Utilities for tracking operation's progress
+//! Utilities for tracking operation's progress
 
+use crate::shared::{ArcSlice, ArcStr, MemChr};
+use crate::types::notification::ProgressNotification;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::fmt::Display;
 use std::str::FromStr;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use crate::shared::{ArcSlice, ArcStr, MemChr};
-use crate::types::notification::ProgressNotification;
 
 const SEPARATOR: u8 = b'/';
 
@@ -14,15 +14,15 @@ const SEPARATOR: u8 = b'/';
 pub enum ProgressToken {
     /// Represents a numeric progress token.
     Number(i64),
-    
+
     /// Represents a UUID progress token.
     Uuid(uuid::Uuid),
-    
+
     /// Represents a string progress token.
     String(ArcStr),
-    
+
     /// Represents a slash-separated progress token.
-    Slice(ArcSlice<ProgressToken>)
+    Slice(ArcSlice<ProgressToken>),
 }
 
 impl Display for ProgressToken {
@@ -32,7 +32,7 @@ impl Display for ProgressToken {
             ProgressToken::Number(n) => write!(f, "{n}"),
             ProgressToken::Uuid(u) => write!(f, "{u}"),
             ProgressToken::String(s) => write!(f, "{s}"),
-            ProgressToken::Slice(s) => write!(f, "{s}")
+            ProgressToken::Slice(s) => write!(f, "{s}"),
         }
     }
 }
@@ -121,7 +121,7 @@ impl ProgressToken {
         ProgressNotification {
             progress_token: self.clone(),
             progress,
-            total
+            total,
         }
     }
 }
@@ -132,10 +132,13 @@ mod tests {
 
     #[test]
     fn it_serializes_and_deserializes_slice_through_str_request_id() {
-        let expected_id = ProgressToken::Slice([
-            ProgressToken::String("user".into()),
-            ProgressToken::Number(1)
-        ].into());
+        let expected_id = ProgressToken::Slice(
+            [
+                ProgressToken::String("user".into()),
+                ProgressToken::Number(1),
+            ]
+            .into(),
+        );
 
         let json = serde_json::to_string(&expected_id).unwrap();
         let new_id: ProgressToken = serde_json::from_str(&json).unwrap();
@@ -145,10 +148,13 @@ mod tests {
 
     #[test]
     fn it_serializes_and_deserializes_slice_through_value_request_id() {
-        let expected_id = ProgressToken::Slice([
-            ProgressToken::String("user".into()),
-            ProgressToken::Number(1)
-        ].into());
+        let expected_id = ProgressToken::Slice(
+            [
+                ProgressToken::String("user".into()),
+                ProgressToken::Number(1),
+            ]
+            .into(),
+        );
 
         let json = serde_json::to_value(&expected_id).unwrap();
         let new_id: ProgressToken = serde_json::from_value(json).unwrap();

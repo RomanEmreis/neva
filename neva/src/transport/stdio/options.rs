@@ -1,4 +1,4 @@
-﻿//! stdio transport options
+//! stdio transport options
 
 /// Represents stdio transport options
 pub(crate) struct StdIoOptions {
@@ -9,12 +9,12 @@ pub(crate) struct StdIoOptions {
 impl StdIoOptions {
     /// Creates new stdio options
     pub(crate) fn new<T>(command: &'static str, args: T) -> Self
-    where 
-        T: IntoIterator<Item=&'static str>
+    where
+        T: IntoIterator<Item = &'static str>,
     {
         Self {
             args: args.into_iter().collect(),
-            command
+            command,
         }
     }
 }

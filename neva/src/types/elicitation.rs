@@ -1,44 +1,44 @@
 //! Utilities for Elicitation
 
+use crate::{
+    error::{Error, ErrorCode},
+    types::notification::Notification,
+    types::{ErrorDetails, IntoResponse, PropertyType, RequestId, Response, Schema},
+};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::Value;
+use std::collections::HashMap;
 #[cfg(feature = "client")]
 use std::{future::Future, pin::Pin, sync::Arc};
-use std::collections::HashMap;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use serde_json::Value;
-use schemars::JsonSchema;
-use crate::{
-    types::{IntoResponse, PropertyType, RequestId, Response, Schema, ErrorDetails},
-    types::notification::Notification,
-    error::{Error, ErrorCode},
-};
 
 use crate::types::Uri;
 
 #[cfg(feature = "tasks")]
-use crate::types::{TaskMetadata, RelatedTaskMetadata};
+use crate::types::{RelatedTaskMetadata, TaskMetadata};
 
 /// List of commands for Elicitation
 pub mod commands {
     /// Command name for creating a new elicitation request
     pub const CREATE: &str = "elicitation/create";
-    
+
     /// Notification name for indicates the completion of elicitation
     pub const COMPLETE: &str = "notifications/elicitation/complete";
 }
 
 /// Represents a message issued from the server to elicit additional information from the user via the client.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ElicitRequestParams {
     /// Elicitation request parameters for a form
     Form(ElicitRequestFormParams),
-    
+
     /// Elicitation request parameters for a URL
-    Url(ElicitRequestUrlParams)
+    Url(ElicitRequestUrlParams),
 }
 
-/// Represents the parameters for a request to elicit non-sensitive information from the user 
+/// Represents the parameters for a request to elicit non-sensitive information from the user
 /// via a form in the client.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
@@ -69,27 +69,27 @@ pub struct ElicitRequestFormParams {
 
     /// Additional metadata to attach to the request.
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
-    pub meta: Option<Value>
+    pub meta: Option<Value>,
 }
 
-/// Represents the parameters for a request to elicit information from the user 
+/// Represents the parameters for a request to elicit information from the user
 /// via a URL in the client.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ElicitRequestUrlParams {
     /// The ID of the elicitation, which must be unique within the context of the server.
-    /// 
+    ///
     /// The client **MUST** treat this ID as an opaque value.
     #[serde(rename = "elicitationId")]
     pub id: String,
-    
+
     /// The message to present to the user.
     pub message: String,
 
     /// The elicitation mode
     pub mode: ElicitationMode,
-    
+
     /// The URL that the user should navigate to.
     pub url: Uri,
 
@@ -102,14 +102,14 @@ pub struct ElicitRequestUrlParams {
     #[cfg(feature = "tasks")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task: Option<TaskMetadata>,
-    
+
     /// Additional metadata to attach to the request.
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
-    pub meta: Option<Value>
+    pub meta: Option<Value>,
 }
 
 /// Represents elicitation mode.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -118,18 +118,18 @@ pub enum ElicitationMode {
     Form,
 
     /// `url` elicitation mode
-    Url
+    Url,
 }
 
 /// Represents a JSON Schema that can be used to validate the content of an elicitation request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestSchema {
     /// The type of the schema.
-    /// 
+    ///
     /// > **Note:** always "object".
     #[serde(rename = "type", default)]
     pub r#type: PropertyType,
-    
+
     /// The properties of the schema.
     pub properties: HashMap<String, Schema>,
 
@@ -142,20 +142,20 @@ pub struct RequestSchema {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ElicitResult {
     /// The user action in response to the elicitation.
-    /// 
+    ///
     /// * "accept" - User submitted the form/confirmed the action.
     /// * "cancel" - User dismissed without making an explicit choice.
     /// * "decline" - User explicitly declined the action.
     pub action: ElicitationAction,
-    
+
     /// The submitted form data.
-    /// 
+    ///
     /// > **Note:** This is typically omitted if the action is "cancel" or "decline".
     pub content: Option<Value>,
 
     /// Additional metadata to attach to the result.
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
-    pub meta: Option<Value>
+    pub meta: Option<Value>,
 }
 
 /// Represents the user's action in response to an elicitation request.
@@ -164,27 +164,27 @@ pub struct ElicitResult {
 pub enum ElicitationAction {
     /// User submitted the form/confirmed the action
     Accept,
-    
+
     /// User dismissed without making an explicit choice
     Cancel,
-    
+
     /// User explicitly declined the action
-    Decline
+    Decline,
 }
 
 /// Represents an error response that indicates that the server requires the client
 /// to provide additional information via an elicitation request.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UrlElicitationRequiredError {
     /// A list of required elicitations
-    pub elicitations: Vec<ElicitRequestUrlParams>
+    pub elicitations: Vec<ElicitRequestUrlParams>,
 }
 
-/// Represents an optional notification from the server to the client, informing it of a completion 
+/// Represents an optional notification from the server to the client, informing it of a completion
 /// of an out-of-band elicitation request.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ElicitationCompleteParams {
@@ -226,13 +226,13 @@ impl Default for RequestSchema {
 
 impl Validator {
     /// Creates a new [`Validator`]
-    #[inline] 
+    #[inline]
     pub fn new(params: ElicitRequestFormParams) -> Self {
         Self {
             schema: params.schema,
         }
     }
-    
+
     /// Validates the elicitation content against the schema
     #[inline]
     pub fn validate<T: Serialize + JsonSchema>(&self, content: T) -> Result<Value, Error> {
@@ -247,12 +247,15 @@ impl Validator {
     fn validate_schema_compatibility(&self, source: &schemars::Schema) -> Result<(), Error> {
         const PROP: &str = "properties";
         const REQ: &str = "required";
-        
+
         let target = &self.schema;
         let source_props = source
             .get(PROP)
             .and_then(|v| v.as_object())
-            .ok_or(Error::new(ErrorCode::InvalidParams, "Source schema missing properties"))?;
+            .ok_or(Error::new(
+                ErrorCode::InvalidParams,
+                "Source schema missing properties",
+            ))?;
 
         let source_required = source
             .get(REQ)
@@ -264,8 +267,9 @@ impl Validator {
         for prop_name in target.properties.keys() {
             if !source_props.contains_key(prop_name) {
                 return Err(Error::new(
-                    ErrorCode::InvalidParams, 
-                    format!("Missing property: {prop_name}")));
+                    ErrorCode::InvalidParams,
+                    format!("Missing property: {prop_name}"),
+                ));
             }
         }
 
@@ -274,8 +278,9 @@ impl Validator {
             for required_prop in target_required {
                 if !source_required.contains(&required_prop.as_str()) {
                     return Err(Error::new(
-                        ErrorCode::InvalidParams, 
-                        format!("Required property not marked as required: {required_prop}")));
+                        ErrorCode::InvalidParams,
+                        format!("Required property not marked as required: {required_prop}"),
+                    ));
                 }
             }
         }
@@ -286,17 +291,19 @@ impl Validator {
     /// Validates content against schema constraints
     fn validate_content_constraints(&self, content: &Value) -> Result<(), Error> {
         let schema = &self.schema;
-        let content_obj = content
-            .as_object()
-            .ok_or(Error::new(ErrorCode::InvalidParams, "Content is not an object"))?;
+        let content_obj = content.as_object().ok_or(Error::new(
+            ErrorCode::InvalidParams,
+            "Content is not an object",
+        ))?;
 
         // Check required properties
         if let Some(required) = &schema.required {
             for required_prop in required {
                 if !content_obj.contains_key(required_prop) {
                     return Err(Error::new(
-                        ErrorCode::InvalidParams, 
-                        format!("Missing required property: {required_prop}")));
+                        ErrorCode::InvalidParams,
+                        format!("Missing required property: {required_prop}"),
+                    ));
                 }
             }
         }
@@ -337,7 +344,7 @@ impl ElicitRequestParams {
             mode: None,
             meta: None,
             #[cfg(feature = "tasks")]
-            task: None
+            task: None,
         }
     }
 
@@ -351,47 +358,53 @@ impl ElicitRequestParams {
             mode: ElicitationMode::Url,
             meta: None,
             #[cfg(feature = "tasks")]
-            task: None
+            task: None,
         }
     }
 
-    /// Returns a reference to the underlying [`ElicitRequestFormParams`] if the request is a form, 
+    /// Returns a reference to the underlying [`ElicitRequestFormParams`] if the request is a form,
     /// otherwise returns `None`
     #[inline]
     pub fn as_form(&self) -> Option<&ElicitRequestFormParams> {
-        match self { 
+        match self {
             Self::Form(params) => Some(params),
-            _ => None
+            _ => None,
         }
     }
-    
-    /// Returns a reference to the underlying [`ElicitRequestUrlParams`] if the request is a URL, 
+
+    /// Returns a reference to the underlying [`ElicitRequestUrlParams`] if the request is a URL,
     /// otherwise returns `None`
     #[inline]
     pub fn as_url(&self) -> Option<&ElicitRequestUrlParams> {
-        match self { 
+        match self {
             Self::Url(params) => Some(params),
-            _ => None
-        }   
+            _ => None,
+        }
     }
-    
-    /// Converts the request into a form request. 
+
+    /// Converts the request into a form request.
     /// Returns an error if the request is not a form request.
     #[inline]
     pub fn into_form(self) -> Result<ElicitRequestFormParams, Error> {
         match self {
             Self::Form(params) => Ok(params),
-            _ => Err(Error::new(ErrorCode::InvalidRequest, "Request is not a form request"))
+            _ => Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "Request is not a form request",
+            )),
         }
     }
 
-    /// Converts the request into a URL request. 
+    /// Converts the request into a URL request.
     /// Returns an error if the request is not a URL request.
     #[inline]
     pub fn into_url(self) -> Result<ElicitRequestUrlParams, Error> {
         match self {
             Self::Url(params) => Ok(params),
-            _ => Err(Error::new(ErrorCode::InvalidRequest, "Request is not a URL request"))
+            _ => Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "Request is not a URL request",
+            )),
         }
     }
 
@@ -401,7 +414,7 @@ impl ElicitRequestParams {
     pub fn with_related_task(self, task_id: impl Into<String>) -> Self {
         match self {
             Self::Form(form) => form.with_related_task(task_id).into(),
-            Self::Url(url) => url.with_related_task(task_id).into()
+            Self::Url(url) => url.with_related_task(task_id).into(),
         }
     }
 
@@ -410,8 +423,7 @@ impl ElicitRequestParams {
     #[inline]
     #[cfg(feature = "tasks")]
     pub fn is_task_augmented(&self) -> bool {
-        self.as_url()
-            .is_some_and(|p| p.task.is_some())
+        self.as_url().is_some_and(|p| p.task.is_some())
     }
 
     /// Returns the [`RelatedTaskMetadata`] if it's specified
@@ -420,7 +432,7 @@ impl ElicitRequestParams {
     pub fn related_task(&self) -> Option<RelatedTaskMetadata> {
         match self {
             Self::Form(form) => form.related_task(),
-            Self::Url(url) => url.related_task()
+            Self::Url(url) => url.related_task(),
         }
     }
 }
@@ -429,16 +441,14 @@ impl ElicitRequestFormParams {
     /// Adds a single optional property to the schema
     #[inline]
     pub fn with_prop(mut self, prop: &str, schema: impl Into<Schema>) -> Self {
-        self.schema = self.schema
-            .with_prop(prop, schema);
+        self.schema = self.schema.with_prop(prop, schema);
         self
     }
 
     /// Adds a single required property to the schema
     #[inline]
     pub fn with_required(mut self, prop: &str, schema: impl Into<Schema>) -> Self {
-        self.schema = self.schema
-            .with_required(prop, schema);
+        self.schema = self.schema.with_required(prop, schema);
         self
     }
 
@@ -456,7 +466,8 @@ impl ElicitRequestFormParams {
         let meta: RelatedTaskMetadata = task.into();
         let meta = serde_json::to_value(meta).unwrap();
 
-        self.meta.get_or_insert_with(|| serde_json::json!({}))
+        self.meta
+            .get_or_insert_with(|| serde_json::json!({}))
             .as_object_mut()
             .unwrap()
             .insert(crate::types::task::RELATED_TASK_KEY.into(), meta);
@@ -478,7 +489,7 @@ impl ElicitRequestFormParams {
 #[cfg(feature = "tasks")]
 impl ElicitRequestUrlParams {
     /// Makes the request task-augmented with TTL.
-    /// 
+    ///
     /// Default: `None`
     pub fn with_ttl(mut self, ttl: Option<usize>) -> Self {
         self.task = Some(TaskMetadata { ttl });
@@ -492,7 +503,8 @@ impl ElicitRequestUrlParams {
         let meta: RelatedTaskMetadata = task.into();
         let meta = serde_json::to_value(meta).unwrap();
 
-        self.meta.get_or_insert_with(|| serde_json::json!({}))
+        self.meta
+            .get_or_insert_with(|| serde_json::json!({}))
             .as_object_mut()
             .unwrap()
             .insert(crate::types::task::RELATED_TASK_KEY.into(), meta);
@@ -515,20 +527,16 @@ impl RequestSchema {
     /// Creates a new [`RequestSchema`] without properties
     #[inline]
     pub fn new() -> Self {
-        Self::default()   
+        Self::default()
     }
-    
+
     /// Creates a new [`RequestSchema`] from a type that implements [`Default`] and [`Serialize`]
-    #[inline]   
+    #[inline]
     pub fn of<T: JsonSchema>() -> Self {
         let mut schema = Self::default();
         let json_schema = schemars::schema_for!(T);
-        let required = json_schema
-            .get("required")
-            .and_then(|v| v.as_array());
-        if let Some(props) = json_schema
-            .get("properties")
-            .and_then(|v| v.as_object()) {
+        let required = json_schema.get("required").and_then(|v| v.as_array());
+        if let Some(props) = json_schema.get("properties").and_then(|v| v.as_object()) {
             for (field, def) in props {
                 let req = required
                     .map(|arr| !arr.iter().any(|v| v == field))
@@ -549,14 +557,12 @@ impl RequestSchema {
         self.properties.insert(prop.into(), schema.into());
         self
     }
-    
+
     /// Creates a new [`RequestSchema`] with a single required property
     #[inline]
     pub fn with_required(mut self, prop: &str, schema: impl Into<Schema>) -> Self {
         self = self.with_prop(prop, schema);
-        self.required
-            .get_or_insert_with(Vec::new)
-            .push(prop.into());
+        self.required.get_or_insert_with(Vec::new).push(prop.into());
         self
     }
 }
@@ -581,7 +587,7 @@ impl ElicitResult {
             meta: None,
         }
     }
-    
+
     /// Creates a new canceled [`ElicitResult`]
     #[inline]
     pub fn cancel() -> Self {
@@ -591,32 +597,32 @@ impl ElicitResult {
             meta: None,
         }
     }
-    
+
     /// Sets the content of the [`ElicitResult`]
-    #[inline]   
+    #[inline]
     pub fn with_content<T: Serialize>(mut self, content: T) -> Self {
         self.content = Some(serde_json::to_value(&content).unwrap());
         self
     }
-    
+
     /// Deserializes the content of the [`ElicitResult`]
-    #[inline]  
+    #[inline]
     pub fn content<T: DeserializeOwned>(&self) -> Option<T> {
         self.content
             .as_ref()
             .and_then(|content| serde_json::from_value(content.clone()).ok())
     }
-    
+
     /// Returns _true_ if the [`ElicitResult`] is accepted
     pub fn is_accepted(&self) -> bool {
         self.action == ElicitationAction::Accept
     }
-    
+
     /// Returns _true_ if the [`ElicitResult`] is canceled
     pub fn is_canceled(&self) -> bool {
         self.action == ElicitationAction::Cancel
     }
-    
+
     /// Returns _true_ if the [`ElicitResult`] is declined
     pub fn is_declined(&self) -> bool {
         self.action == ElicitationAction::Decline
@@ -634,7 +640,10 @@ impl ElicitResult {
                 .ok_or_else(|| Error::new(ErrorCode::ParseError, "Failed to parse content"))
                 .map(f)
         } else {
-            Err(Error::new(ErrorCode::InvalidRequest, "User rejected the request"))
+            Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "User rejected the request",
+            ))
         }
     }
 
@@ -660,7 +669,8 @@ impl ElicitResult {
         let meta: RelatedTaskMetadata = task.into();
         let meta = serde_json::to_value(meta).unwrap();
 
-        self.meta.get_or_insert_with(|| serde_json::json!({}))
+        self.meta
+            .get_or_insert_with(|| serde_json::json!({}))
             .as_object_mut()
             .unwrap()
             .insert(crate::types::task::RELATED_TASK_KEY.into(), meta);
@@ -683,11 +693,13 @@ impl UrlElicitationRequiredError {
     /// Creates a new [`UrlElicitationRequiredError`]
     #[inline]
     pub fn new(elicitations: impl IntoIterator<Item = ElicitRequestUrlParams>) -> Self {
-        Self { elicitations: elicitations.into_iter().collect() }
+        Self {
+            elicitations: elicitations.into_iter().collect(),
+        }
     }
-    
+
     /// Converts into JSONRPC error response
-    #[inline] 
+    #[inline]
     pub fn to_error(self, message: impl Into<String>) -> Error {
         let err = match serde_json::to_value(self) {
             Ok(data) => ErrorDetails {
@@ -699,7 +711,7 @@ impl UrlElicitationRequiredError {
                 code: ErrorCode::InternalError,
                 message: err.to_string(),
                 data: None,
-            }
+            },
         };
         err.into()
     }
@@ -718,7 +730,8 @@ impl TryFrom<Notification> for ElicitationCompleteParams {
 
     #[inline]
     fn try_from(value: Notification) -> Result<Self, Self::Error> {
-        let params = value.params
+        let params = value
+            .params
             .ok_or_else(|| Error::new(ErrorCode::InvalidParams, "Missing params"))?;
         serde_json::from_value(params).map_err(Error::from)
     }
@@ -738,7 +751,7 @@ impl IntoResponse for ElicitResult {
     fn into_response(self, req_id: RequestId) -> Response {
         match serde_json::to_value(self) {
             Ok(v) => Response::success(req_id, v),
-            Err(err) => Response::error(req_id, err.into())
+            Err(err) => Response::error(req_id, err.into()),
         }
     }
 }
@@ -746,21 +759,16 @@ impl IntoResponse for ElicitResult {
 /// Represents a dynamic handler for handling sampling requests
 #[cfg(feature = "client")]
 pub(crate) type ElicitationHandler = Arc<
-    dyn Fn(ElicitRequestParams) -> Pin<
-        Box<dyn Future<Output = ElicitResult> + Send + 'static>
-    >
-    + Send
-    + Sync
+    dyn Fn(ElicitRequestParams) -> Pin<Box<dyn Future<Output = ElicitResult> + Send + 'static>>
+        + Send
+        + Sync,
 >;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::{
-        StringSchema, StringFormat, 
-        NumberSchema, 
-        BooleanSchema, 
-        UntitledSingleSelectEnumSchema
+        BooleanSchema, NumberSchema, StringFormat, StringSchema, UntitledSingleSelectEnumSchema,
     };
     use schemars::JsonSchema;
 
@@ -782,7 +790,7 @@ mod tests {
                 min_length: Some(2),
                 max_length: Some(50),
                 format: None,
-            })
+            }),
         );
         schema.properties.insert(
             "age".to_string(),
@@ -792,11 +800,11 @@ mod tests {
                 descr: None,
                 min: Some(0.0),
                 max: Some(120.0),
-            })
+            }),
         );
         schema.properties.insert(
             "active".to_string(),
-            Schema::Boolean(BooleanSchema::default())
+            Schema::Boolean(BooleanSchema::default()),
         );
         schema.required = Some(vec!["name".to_string(), "age".to_string()]);
         schema
@@ -849,7 +857,7 @@ mod tests {
         let mut schema = create_test_schema();
         schema.properties.insert(
             "missing_prop".to_string(),
-            Schema::String(StringSchema::default())
+            Schema::String(StringSchema::default()),
         );
 
         let params = create_form_params_with_schema(schema);
@@ -872,7 +880,11 @@ mod tests {
     #[test]
     fn it_validates_missing_required_property() {
         let mut schema = create_test_schema();
-        schema.required = Some(vec!["name".to_string(), "age".to_string(), "missing_required".to_string()]);
+        schema.required = Some(vec![
+            "name".to_string(),
+            "age".to_string(),
+            "missing_required".to_string(),
+        ]);
 
         let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
@@ -888,7 +900,11 @@ mod tests {
 
         let error = result.unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidParams);
-        assert!(error.to_string().contains("Required property not marked as required"));
+        assert!(
+            error
+                .to_string()
+                .contains("Required property not marked as required")
+        );
     }
 
     #[test]
@@ -1118,9 +1134,13 @@ mod tests {
                 r#type: PropertyType::String,
                 title: None,
                 descr: None,
-                r#enum: vec!["active".to_string(), "inactive".to_string(), "pending".to_string()],
+                r#enum: vec![
+                    "active".to_string(),
+                    "inactive".to_string(),
+                    "pending".to_string(),
+                ],
                 default: None,
-            })
+            }),
         );
         schema.required = Some(vec!["status".to_string()]);
 
@@ -1146,7 +1166,7 @@ mod tests {
                 descr: None,
                 r#enum: vec!["active".to_string(), "inactive".to_string()],
                 default: None,
-            })
+            }),
         );
         schema.required = Some(vec!["status".to_string()]);
 
@@ -1161,7 +1181,11 @@ mod tests {
         assert!(result.is_err());
 
         let error = result.unwrap_err();
-        assert!(error.to_string().contains("Invalid enum value: invalid_status"));
+        assert!(
+            error
+                .to_string()
+                .contains("Invalid enum value: invalid_status")
+        );
     }
 
     #[test]
@@ -1175,7 +1199,7 @@ mod tests {
                 descr: None,
                 r#enum: vec!["active".to_string(), "inactive".to_string()],
                 default: None,
-            })
+            }),
         );
         schema.required = Some(vec!["status".to_string()]);
 
@@ -1205,7 +1229,7 @@ mod tests {
                 min_length: None,
                 max_length: None,
                 format: Some(StringFormat::Email),
-            })
+            }),
         );
         schema.required = Some(vec!["email".to_string()]);
 
@@ -1232,7 +1256,7 @@ mod tests {
                 min_length: None,
                 max_length: None,
                 format: Some(StringFormat::Email),
-            })
+            }),
         );
         schema.required = Some(vec!["email".to_string()]);
 
@@ -1262,7 +1286,7 @@ mod tests {
                 min_length: None,
                 max_length: None,
                 format: Some(StringFormat::Uri),
-            })
+            }),
         );
 
         let params = create_form_params_with_schema(schema);
@@ -1272,7 +1296,7 @@ mod tests {
             "http://example.com",
             "https://example.com",
             "file://path/to/file",
-            "res://resource_1"
+            "res://resource_1",
         ];
 
         for uri in test_cases {
@@ -1297,7 +1321,7 @@ mod tests {
                 min_length: None,
                 max_length: None,
                 format: Some(StringFormat::Uri),
-            })
+            }),
         );
 
         let params = create_form_params_with_schema(schema);
@@ -1326,7 +1350,7 @@ mod tests {
                 min_length: None,
                 max_length: None,
                 format: Some(StringFormat::Date),
-            })
+            }),
         );
 
         let params = create_form_params_with_schema(schema);
@@ -1352,17 +1376,17 @@ mod tests {
                 min_length: None,
                 max_length: None,
                 format: Some(StringFormat::Date),
-            })
+            }),
         );
 
         let params = create_form_params_with_schema(schema);
         let validator = Validator::new(params);
 
         let test_cases = vec![
-            "1990/05/15",     // Wrong separators
-            "90-05-15",       // Wrong year format
-            "1990-5-15",      // Missing zero padding
-            "not-a-date",     // Invalid format
+            "1990/05/15", // Wrong separators
+            "90-05-15",   // Wrong year format
+            "1990-5-15",  // Missing zero padding
+            "not-a-date", // Invalid format
         ];
 
         for invalid_date in test_cases {
@@ -1371,7 +1395,11 @@ mod tests {
             });
 
             let result = validator.validate_content_constraints(&content_json);
-            assert!(result.is_err(), "Should fail for invalid date: {}", invalid_date);
+            assert!(
+                result.is_err(),
+                "Should fail for invalid date: {}",
+                invalid_date
+            );
 
             let error = result.unwrap_err();
             assert!(error.to_string().contains("Invalid date format"));
@@ -1390,7 +1418,7 @@ mod tests {
                 min_length: None,
                 max_length: None,
                 format: Some(StringFormat::DateTime),
-            })
+            }),
         );
 
         let params = create_form_params_with_schema(schema);
@@ -1416,7 +1444,7 @@ mod tests {
                 min_length: None,
                 max_length: None,
                 format: Some(StringFormat::DateTime),
-            })
+            }),
         );
 
         let params = create_form_params_with_schema(schema);
@@ -1445,7 +1473,7 @@ mod tests {
                 min_length: None,
                 max_length: None,
                 format: None,
-            })
+            }),
         );
 
         let params = create_form_params_with_schema(schema);
@@ -1465,11 +1493,11 @@ mod tests {
         let mut schema = RequestSchema::new();
         schema.properties.insert(
             "required_field".to_string(),
-            Schema::String(StringSchema::default())
+            Schema::String(StringSchema::default()),
         );
         schema.properties.insert(
             "optional_field".to_string(),
-            Schema::String(StringSchema::default())
+            Schema::String(StringSchema::default()),
         );
         schema.required = Some(vec!["required_field".to_string()]);
 
@@ -1499,7 +1527,7 @@ mod tests {
         let mut schema = RequestSchema::new();
         schema.properties.insert(
             "optional_field".to_string(),
-            Schema::String(StringSchema::default())
+            Schema::String(StringSchema::default()),
         );
         // No required fields
         schema.required = None;
@@ -1568,7 +1596,7 @@ mod tests {
                 descr: None,
                 r#enum: vec![],
                 default: None,
-            })
+            }),
         );
 
         let params = create_form_params_with_schema(schema);

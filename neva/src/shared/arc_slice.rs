@@ -1,10 +1,10 @@
-﻿//! Types and utilities for serializable [`Arc<[T]>`]
+//! Types and utilities for serializable [`Arc<[T]>`]
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fmt::Display;
 use std::ops::Deref;
 use std::sync::Arc;
-use serde::{Deserialize, Serialize};
 
 /// Represents a serializable [`Arc<[T]>`]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -16,7 +16,7 @@ impl<T: Display> Display for ArcSlice<T> {
         for (i, seg) in self.iter().enumerate() {
             if i > 0 {
                 write!(f, "/{seg}")?;
-            } else { 
+            } else {
                 write!(f, "{seg}")?;
             }
         }
@@ -47,21 +47,21 @@ impl<const N: usize, T> From<[T; N]> for ArcSlice<T> {
     }
 }
 
-impl<T> From<Arc<[T]>> for ArcSlice<T>  {
+impl<T> From<Arc<[T]>> for ArcSlice<T> {
     #[inline]
     fn from(arc: Arc<[T]>) -> Self {
-        Self(arc)   
+        Self(arc)
     }
 }
 
 impl<T> Serialize for ArcSlice<T>
-where 
-    T: Display
+where
+    T: Display,
 {
     #[inline]
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        S: serde::Serializer
+        S: serde::Serializer,
     {
         serializer.serialize_str(&self.to_string())
     }
@@ -75,7 +75,7 @@ where
     #[inline]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: serde::Deserializer<'de>
+        D: serde::Deserializer<'de>,
     {
         let s: &str = Deserialize::deserialize(deserializer)?;
         let parsed = s
@@ -88,10 +88,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use uuid::Uuid;
     use super::*;
     use crate::{shared::ArcStr, types::RequestId};
+    use std::sync::Arc;
+    use uuid::Uuid;
 
     #[test]
     fn it_tests_display() {
@@ -111,10 +111,7 @@ mod tests {
         ]));
 
         let json = serde_json::to_string(&slice).unwrap();
-        assert_eq!(
-            json,
-            "\"b9d3c680-bb27-4d7d-9e76-111111111111/1/abc\""
-        );
+        assert_eq!(json, "\"b9d3c680-bb27-4d7d-9e76-111111111111/1/abc\"");
     }
 
     #[test]

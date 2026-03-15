@@ -1,7 +1,7 @@
 //! Macros for a client
 
-use crate::Client;
 use super::inventory;
+use crate::Client;
 
 /// Registrar unit for tools, resources, templates and prompts
 #[derive(Debug)]

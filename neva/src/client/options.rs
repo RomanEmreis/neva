@@ -1,22 +1,17 @@
-﻿//! MCP client options
+//! MCP client options
 
+use crate::PROTOCOL_VERSIONS;
+use crate::client::notification_handler::NotificationsHandler;
+use crate::transport::{StdIoClient, TransportProto, stdio::options::StdIoOptions};
+use crate::types::elicitation::ElicitationHandler;
+use crate::types::sampling::SamplingHandler;
+use crate::types::{
+    ElicitationCapability, Implementation, Root, RootsCapability, SamplingCapability, Uri,
+};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use std::time::Duration;
-use crate::PROTOCOL_VERSIONS;
-use crate::transport::{StdIoClient, stdio::options::StdIoOptions, TransportProto};
-use crate::client::notification_handler::NotificationsHandler;
-use crate::types::sampling::SamplingHandler;
-use crate::types::elicitation::ElicitationHandler;
-use crate::types::{
-    Root, 
-    Implementation, 
-    Uri, 
-    RootsCapability, 
-    SamplingCapability, 
-    ElicitationCapability,
-};
 
 #[cfg(feature = "tasks")]
 use crate::types::ClientTasksCapability;
@@ -30,13 +25,13 @@ const DEFAULT_REQUEST_TIMEOUT: u64 = 10; // 10 seconds
 pub struct McpOptions {
     /// Information of current client's implementation
     pub(crate) implementation: Implementation,
-    
+
     /// Request timeout
     pub(super) timeout: Duration,
-    
+
     /// Roots capability options
     pub(super) roots_capability: Option<RootsCapability>,
-    
+
     /// Sampling capability options
     pub(super) sampling_capability: Option<SamplingCapability>,
 
@@ -52,16 +47,16 @@ pub struct McpOptions {
 
     /// Represents a handler function that runs when received a "elicitation/create" request
     pub(super) elicitation_handler: Option<ElicitationHandler>,
-    
+
     /// Represents a hash map of notification handlers
     pub(super) notification_handler: Option<Arc<NotificationsHandler>>,
-    
+
     /// An MCP version that a client supports
     protocol_ver: Option<&'static str>,
 
     /// Current transport protocol that the server uses
     proto: Option<TransportProto>,
-    
+
     /// Represents a list of roots that the client supports
     roots: HashMap<Uri, Root>,
 }
@@ -80,7 +75,7 @@ impl Debug for McpOptions {
 
         #[cfg(feature = "tasks")]
         dbg.field("tasks_capability", &self.tasks_capability);
-        
+
         dbg.finish()
     }
 }
@@ -110,9 +105,11 @@ impl McpOptions {
     /// Sets stdio as a transport protocol
     pub fn with_stdio<T>(mut self, command: &'static str, args: T) -> Self
     where
-        T: IntoIterator<Item=&'static str>
+        T: IntoIterator<Item = &'static str>,
     {
-        self.proto = Some(TransportProto::StdioClient(StdIoClient::new(StdIoOptions::new(command, args))));
+        self.proto = Some(TransportProto::StdioClient(StdIoClient::new(
+            StdIoOptions::new(command, args),
+        )));
         self
     }
 
@@ -153,11 +150,11 @@ impl McpOptions {
         self.protocol_ver = Some(ver);
         self
     }
-    
+
     /// Configures Roots capability
     pub fn with_roots<T>(mut self, config: T) -> Self
-    where 
-        T: FnOnce(RootsCapability) -> RootsCapability
+    where
+        T: FnOnce(RootsCapability) -> RootsCapability,
     {
         self.roots_capability = Some(config(Default::default()));
         self
@@ -166,7 +163,7 @@ impl McpOptions {
     /// Configures Sampling capability
     pub fn with_sampling<T>(mut self, config: T) -> Self
     where
-        T: FnOnce(SamplingCapability) -> SamplingCapability
+        T: FnOnce(SamplingCapability) -> SamplingCapability,
     {
         self.sampling_capability = Some(config(Default::default()));
         self
@@ -175,7 +172,7 @@ impl McpOptions {
     /// Configures Elicitation capability
     pub fn with_elicitation<T>(mut self, config: T) -> Self
     where
-        T: FnOnce(ElicitationCapability) -> ElicitationCapability
+        T: FnOnce(ElicitationCapability) -> ElicitationCapability,
     {
         self.elicitation_capability = Some(config(Default::default()));
         self
@@ -185,7 +182,7 @@ impl McpOptions {
     #[cfg(feature = "tasks")]
     pub fn with_tasks<T>(mut self, config: T) -> Self
     where
-        T: FnOnce(ClientTasksCapability) -> ClientTasksCapability
+        T: FnOnce(ClientTasksCapability) -> ClientTasksCapability,
     {
         self.tasks_capability = Some(config(Default::default()));
         self
@@ -204,7 +201,7 @@ impl McpOptions {
     pub(crate) fn protocol_ver(&self) -> &'static str {
         match self.protocol_ver {
             Some(ver) => ver,
-            None => PROTOCOL_VERSIONS.last().unwrap()
+            None => PROTOCOL_VERSIONS.last().unwrap(),
         }
     }
 
@@ -213,38 +210,31 @@ impl McpOptions {
         let transport = self.proto.take();
         transport.unwrap_or_default()
     }
-    
+
     /// Adds a root
     pub fn add_root(&mut self, root: Root) -> &mut Root {
-        self.roots
-            .entry(root.uri.clone())
-            .or_insert(root)
+        self.roots.entry(root.uri.clone()).or_insert(root)
     }
 
     /// Adds multiple roots
     pub fn add_roots<T, I>(&mut self, roots: I) -> &mut Self
     where
         T: Into<Root>,
-        I: IntoIterator<Item = T>
+        I: IntoIterator<Item = T>,
     {
-        let roots = roots
-            .into_iter()
-            .map(|item| {
-                let root: Root = item.into();
-                (root.uri.clone(), root)
-            });
+        let roots = roots.into_iter().map(|item| {
+            let root: Root = item.into();
+            (root.uri.clone(), root)
+        });
         self.roots.extend(roots);
-        self    
+        self
     }
-    
+
     /// Returns a list of defined Roots
     pub fn roots(&self) -> Vec<Root> {
-        self.roots
-            .values()
-            .cloned()
-            .collect()
+        self.roots.values().cloned().collect()
     }
-    
+
     /// Registers a handler for sampling requests
     pub(crate) fn add_sampling_handler(&mut self, handler: SamplingHandler) {
         self.sampling_handler = Some(handler);
@@ -283,7 +273,7 @@ impl McpOptions {
     }
 
     /// Returns [`ClientTasksCapability`] if configured.
-    /// 
+    ///
     /// Otherwise, returns `None`.
     #[cfg(feature = "tasks")]
     pub(crate) fn tasks_capability(&self) -> Option<ClientTasksCapability> {

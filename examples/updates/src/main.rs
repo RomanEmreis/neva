@@ -31,13 +31,11 @@ async fn get_resource(uri: Uri) -> ResourceContents {
 
 #[tokio::main]
 async fn main() {
-    let mut app = App::new()
-        .with_options(|opt| opt
-            .with_stdio()
-            .with_resources(|res| res
-                .with_subscribe()
-                .with_list_changed())
-            .with_mcp_version("2024-11-05"));
+    let mut app = App::new().with_options(|opt| {
+        opt.with_stdio()
+            .with_resources(|res| res.with_subscribe().with_list_changed())
+            .with_mcp_version("2024-11-05")
+    });
 
     for i in 0..10 {
         app.add_resource(format!("res://test_{i}"), format!("test_{i}"));

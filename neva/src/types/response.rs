@@ -1,10 +1,10 @@
-﻿//! Represents a response that MCP server provides
+//! Represents a response that MCP server provides
 
 use crate::error::Error;
-use serde::{Deserialize, Serialize};
+use crate::types::{JSONRPC_VERSION, Message, RequestId};
 use serde::de::DeserializeOwned;
-use serde_json::{json, Value};
-use crate::types::{RequestId, Message, JSONRPC_VERSION};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 #[cfg(feature = "http-server")]
 use volga::headers::HeaderMap;
@@ -21,23 +21,23 @@ mod into_response;
 pub enum Response {
     /// A successful response.
     Ok(OkResponse),
-    
+
     /// A response that indicates an error occurred.
-    Err(ErrorResponse)
+    Err(ErrorResponse),
 }
 
 /// A successful response message in the JSON-RPC protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OkResponse {
-    /// JSON-RPC protocol version. 
-    /// 
+    /// JSON-RPC protocol version.
+    ///
     /// > Note: always 2.0.
     pub jsonrpc: String,
-    
+
     /// Request identifier matching the original request.
     #[serde(default)]
     pub id: RequestId,
-    
+
     /// The result of the method invocation.
     pub result: Value,
 
@@ -48,13 +48,13 @@ pub struct OkResponse {
     /// HTTP headers
     #[serde(skip)]
     #[cfg(feature = "http-server")]
-    pub headers: HeaderMap
+    pub headers: HeaderMap,
 }
 
 /// A response to a request that indicates an error occurred.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {
-    /// JSON-RPC protocol version. 
+    /// JSON-RPC protocol version.
     ///
     /// > Note: always 2.0.
     pub jsonrpc: String,
@@ -73,8 +73,8 @@ pub struct ErrorResponse {
     /// HTTP headers
     #[serde(skip)]
     #[cfg(feature = "http-server")]
-    pub headers: HeaderMap
-} 
+    pub headers: HeaderMap,
+}
 
 impl From<Response> for Message {
     #[inline]
@@ -92,7 +92,7 @@ impl Response {
             #[cfg(feature = "http-server")]
             headers: HeaderMap::with_capacity(8),
             id,
-            result
+            result,
         })
     }
 
@@ -104,7 +104,7 @@ impl Response {
             #[cfg(feature = "http-server")]
             headers: HeaderMap::new(),
             id,
-            result: json!({})
+            result: json!({}),
         })
     }
 
@@ -119,15 +119,15 @@ impl Response {
             error: error.into(),
         })
     }
-    
+
     /// Returns [`Response`] ID
     pub fn id(&self) -> &RequestId {
         match &self {
             Response::Ok(ok) => &ok.id,
-            Response::Err(err) => &err.id
+            Response::Err(err) => &err.id,
         }
     }
-    
+
     /// Returns the full id (session_id?/response_id)
     pub fn full_id(&self) -> RequestId {
         let id = self.id().clone();
@@ -137,12 +137,12 @@ impl Response {
             id
         }
     }
-    
+
     /// Set the `id` for the response
     pub fn set_id(mut self, id: RequestId) -> Self {
         match &mut self {
             Response::Ok(ok) => ok.id = id,
-            Response::Err(err) => err.id = id
+            Response::Err(err) => err.id = id,
         }
         self
     }
@@ -160,7 +160,7 @@ impl Response {
     pub fn set_session_id(mut self, id: uuid::Uuid) -> Self {
         match &mut self {
             Response::Ok(ok) => ok.session_id = Some(id),
-            Response::Err(err) => err.session_id = Some(id)
+            Response::Err(err) => err.session_id = Some(id),
         }
         self
     }
@@ -170,33 +170,31 @@ impl Response {
     pub fn set_headers(mut self, headers: HeaderMap) -> Self {
         match &mut self {
             Response::Ok(ok) => ok.headers = headers,
-            Response::Err(err) => err.headers = headers
+            Response::Err(err) => err.headers = headers,
         }
         self
     }
-    
+
     /// Unwraps the [`Response`] into either result of `T` or [`Error`]
     pub fn into_result<T: DeserializeOwned>(self) -> Result<T, Error> {
         match self {
             Response::Ok(ok) => serde_json::from_value::<T>(ok.result).map_err(Into::into),
-            Response::Err(err) => Err(err.error.into())
+            Response::Err(err) => Err(err.error.into()),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{error::Error, types::RequestId};
     use super::Response;
+    use crate::{error::Error, types::RequestId};
 
     #[test]
     fn it_deserializes_successful_response_with_int_id_to_json() {
-        let resp = Response::success(
-            RequestId::Number(42),
-            serde_json::json!({ "key": "test" }));
-        
+        let resp = Response::success(RequestId::Number(42), serde_json::json!({ "key": "test" }));
+
         let json = serde_json::to_string(&resp).unwrap();
-        
+
         assert_eq!(json, r#"{"jsonrpc":"2.0","id":42,"result":{"key":"test"}}"#);
     }
 
@@ -204,10 +202,14 @@ mod tests {
     fn it_deserializes_error_response_with_string_id_to_json() {
         let resp = Response::error(
             RequestId::String("id".into()),
-            Error::new(-32603, "some error message"));
+            Error::new(-32603, "some error message"),
+        );
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"id","error":{"code":-32603,"message":"some error message","data":null}}"#);
+        assert_eq!(
+            json,
+            r#"{"jsonrpc":"2.0","id":"id","error":{"code":-32603,"message":"some error message","data":null}}"#
+        );
     }
 }

@@ -14,8 +14,7 @@ use neva::prelude::*;
     ]"#
 )]
 async fn hello_world_code(lang: String) -> PromptMessage {
-    PromptMessage::user()
-        .with(format!("Write a hello-world function on {lang}"))
+    PromptMessage::user().with(format!("Write a hello-world function on {lang}"))
 }
 
 #[prompt(descr = "A prompt that return error")]

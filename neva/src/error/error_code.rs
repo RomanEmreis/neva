@@ -1,8 +1,8 @@
 //! Represents error code tools
 
-use std::fmt::Display;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::error::Error;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::fmt::Display;
 
 /// Standard JSON-RPC error codes as defined in the MCP specification.
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
@@ -28,7 +28,7 @@ pub enum ErrorCode {
 
     /// The URL mode elicitation is required.
     UrlElicitationRequiredError = -32042,
-    
+
     /// [Internal code] The request has been canceled
     RequestCancelled = -99999,
 
@@ -80,20 +80,19 @@ impl<'de> Deserialize<'de> for ErrorCode {
         D: Deserializer<'de>,
     {
         let value = i32::deserialize(deserializer)?;
-        ErrorCode::try_from(value).map_err(|_| {
-            serde::de::Error::custom(format!("Invalid error code: {value}"))
-        })
+        ErrorCode::try_from(value)
+            .map_err(|_| serde::de::Error::custom(format!("Invalid error code: {value}")))
     }
 }
 
 impl Display for ErrorCode {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self { 
+        match self {
             ErrorCode::ParseError => write!(f, "Parse error"),
             ErrorCode::InvalidRequest => write!(f, "Invalid request"),
             ErrorCode::MethodNotFound => write!(f, "Method not found"),
-            ErrorCode::InvalidParams  => write!(f, "Invalid parameters"),
+            ErrorCode::InvalidParams => write!(f, "Invalid parameters"),
             ErrorCode::InternalError => write!(f, "Internal error"),
             ErrorCode::ResourceNotFound => write!(f, "Resource not found"),
             ErrorCode::UrlElicitationRequiredError => write!(f, "URL elicitation required error"),
@@ -116,7 +115,7 @@ mod tests {
     #[test]
     fn it_converts_to_i32() {
         let codes = [
-            (-32700, ErrorCode::ParseError), 
+            (-32700, ErrorCode::ParseError),
             (-32600, ErrorCode::InvalidRequest),
             (-32601, ErrorCode::MethodNotFound),
             (-32602, ErrorCode::InvalidParams),
@@ -139,7 +138,7 @@ mod tests {
     #[test]
     fn it_serializes_error_codes() {
         let codes = [
-            ("-32700", ErrorCode::ParseError), 
+            ("-32700", ErrorCode::ParseError),
             ("-32600", ErrorCode::InvalidRequest),
             ("-32601", ErrorCode::MethodNotFound),
             ("-32602", ErrorCode::InvalidParams),

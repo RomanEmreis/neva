@@ -1,12 +1,8 @@
-﻿//! Tools for converting any type into MCP server response
+//! Tools for converting any type into MCP server response
 
-use serde::Serialize;
 use crate::error::{Error, ErrorCode};
-use crate::types::{
-    RequestId, 
-    Response,
-    Json
-};
+use crate::types::{Json, RequestId, Response};
+use serde::Serialize;
 
 /// A trait for converting any return type into MCP response
 pub trait IntoResponse {
@@ -48,7 +44,7 @@ impl<T: Serialize> IntoResponse for Json<T> {
     fn into_response(self, req_id: RequestId) -> Response {
         match serde_json::to_value(self) {
             Ok(v) => Response::success(req_id, v),
-            Err(err) => Response::error(req_id, err.into())
+            Err(err) => Response::error(req_id, err.into()),
         }
     }
 }
@@ -68,13 +64,13 @@ impl IntoResponse for () {
 }
 
 impl<T, E> IntoResponse for Result<T, E>
-where 
+where
     T: IntoResponse,
-    E: IntoResponse
+    E: IntoResponse,
 {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
-        match self { 
+        match self {
             Ok(value) => value.into_response(req_id),
             Err(err) => err.into_response(req_id),
         }
@@ -103,14 +99,17 @@ impl_into_response! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn it_converts_str_into_response() {
         let resp = "test".into_response(RequestId::default());
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":"test"}}"#);
+        assert_eq!(
+            json,
+            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":"test"}}"#
+        );
     }
 
     #[test]
@@ -119,7 +118,10 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":"test"}}"#);
+        assert_eq!(
+            json,
+            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":"test"}}"#
+        );
     }
 
     #[test]
@@ -128,7 +130,10 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#);
+        assert_eq!(
+            json,
+            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#
+        );
     }
     #[test]
     fn it_converts_i16_into_response() {
@@ -136,7 +141,10 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#);
+        assert_eq!(
+            json,
+            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#
+        );
     }
 
     #[test]
@@ -145,7 +153,10 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#);
+        assert_eq!(
+            json,
+            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#
+        );
     }
 
     #[test]
@@ -154,7 +165,10 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#);
+        assert_eq!(
+            json,
+            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#
+        );
     }
 
     #[test]
@@ -163,7 +177,10 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#);
+        assert_eq!(
+            json,
+            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#
+        );
     }
 
     #[test]
@@ -172,7 +189,10 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#);
+        assert_eq!(
+            json,
+            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#
+        );
     }
 
     #[test]
@@ -181,7 +201,10 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#);
+        assert_eq!(
+            json,
+            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#
+        );
     }
 
     #[test]
@@ -190,7 +213,10 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#);
+        assert_eq!(
+            json,
+            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#
+        );
     }
 
     #[test]
@@ -199,7 +225,10 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#);
+        assert_eq!(
+            json,
+            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#
+        );
     }
 
     #[test]
@@ -208,7 +237,10 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#);
+        assert_eq!(
+            json,
+            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#
+        );
     }
 
     #[test]
@@ -217,7 +249,10 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#);
+        assert_eq!(
+            json,
+            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#
+        );
     }
 
     #[test]
@@ -226,7 +261,10 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#);
+        assert_eq!(
+            json,
+            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#
+        );
     }
 
     #[test]
@@ -235,7 +273,10 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1.5}}"#);
+        assert_eq!(
+            json,
+            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1.5}}"#
+        );
     }
 
     #[test]
@@ -244,26 +285,37 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1.5}}"#);
+        assert_eq!(
+            json,
+            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1.5}}"#
+        );
     }
-    
+
     #[test]
     fn it_converts_bool_into_response() {
         let resp = true.into_response(RequestId::default());
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":true}}"#);
+        assert_eq!(
+            json,
+            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":true}}"#
+        );
     }
 
     #[test]
     fn it_converts_json_into_response() {
-        let json = Json::from(Test { name: "test".into() });
+        let json = Json::from(Test {
+            name: "test".into(),
+        });
         let resp = json.into_response(RequestId::default());
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"(no id)","result":{"name":"test"}}"#);
+        assert_eq!(
+            json,
+            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"name":"test"}}"#
+        );
     }
 
     #[test]
@@ -273,11 +325,14 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"(no id)","result":{"some":"prop"}}"#);
+        assert_eq!(
+            json,
+            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"some":"prop"}}"#
+        );
     }
-    
+
     #[derive(Serialize)]
     struct Test {
-        name: String
+        name: String,
     }
 }

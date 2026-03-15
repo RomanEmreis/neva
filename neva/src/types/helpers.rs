@@ -1,7 +1,10 @@
-﻿//! A set of helpers for types
+//! A set of helpers for types
 
-use crate::json::{JsonSchema, schemars::{schema_for, Schema}};
-use base64::{engine::general_purpose, Engine};
+use crate::json::{
+    JsonSchema,
+    schemars::{Schema, schema_for},
+};
+use base64::{Engine, engine::general_purpose};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,15 +14,15 @@ use std::{
 };
 
 #[cfg(feature = "server")]
-pub(crate) mod macros;
-#[cfg(feature = "server")]
 pub(crate) mod extract;
+#[cfg(feature = "server")]
+pub(crate) mod macros;
 
-/// Serializes bytes as base64 string 
+/// Serializes bytes as base64 string
 #[inline]
 pub(crate) fn serialize_bytes_as_base64<S>(bytes: &Bytes, serializer: S) -> Result<S::Ok, S::Error>
 where
-    S: serde::Serializer
+    S: serde::Serializer,
 {
     let encoded = general_purpose::STANDARD.encode(bytes);
     serializer.serialize_str(&encoded)
@@ -29,10 +32,11 @@ where
 #[inline]
 pub(crate) fn deserialize_base64_as_bytes<'de, D>(deserializer: D) -> Result<Bytes, D::Error>
 where
-    D: serde::Deserializer<'de>
+    D: serde::Deserializer<'de>,
 {
     let s = String::deserialize(deserializer)?;
-    let decoded = general_purpose::STANDARD.decode(&s)
+    let decoded = general_purpose::STANDARD
+        .decode(&s)
         .map_err(serde::de::Error::custom)?;
     Ok(Bytes::from(decoded))
 }
@@ -42,11 +46,9 @@ pub(crate) fn serialize_value_as_string<S>(value: &Value, serializer: S) -> Resu
 where
     S: serde::Serializer,
 {
-    let json_str = serde_json::to_string(value)
-        .map_err(serde::ser::Error::custom)?;
+    let json_str = serde_json::to_string(value).map_err(serde::ser::Error::custom)?;
     serializer.serialize_str(&json_str)
 }
-
 
 #[inline]
 pub(crate) fn deserialize_value_from_string<'de, D>(deserializer: D) -> Result<Value, D::Error>
@@ -63,23 +65,23 @@ pub enum PropertyType {
     /// Unknown type.
     #[serde(rename = "none")]
     None,
-    
+
     /// Array type
     #[serde(rename = "array")]
     Array,
-    
+
     /// String type
     #[serde(rename = "string")]
     String,
-    
+
     /// Number type
     #[serde(rename = "number", alias = "integer")]
     Number,
-    
+
     /// Boolean type
     #[serde(rename = "boolean")]
     Bool,
-    
+
     /// Object type.
     #[serde(rename = "object")]
     Object,
@@ -95,7 +97,7 @@ impl Default for PropertyType {
 impl From<&str> for PropertyType {
     #[inline]
     fn from(s: &str) -> Self {
-        match s { 
+        match s {
             "array" => PropertyType::Array,
             "string" => PropertyType::String,
             "number" | "integer" => PropertyType::Number,
@@ -117,7 +119,7 @@ impl From<String> for PropertyType {
 impl Display for PropertyType {
     #[inline]
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self { 
+        match self {
             PropertyType::Array => write!(f, "array"),
             PropertyType::String => write!(f, "string"),
             PropertyType::Number => write!(f, "number"),
@@ -232,20 +234,22 @@ mod tests {
 
     #[test]
     fn it_serializes_serde_json_value_as_str() {
-        let v = Test2 { value: serde_json::json!({ "x": 5, "y": 10 }) };
+        let v = Test2 {
+            value: serde_json::json!({ "x": 5, "y": 10 }),
+        };
         let json = serde_json::to_string(&v).unwrap();
 
         assert_eq!(json, r#"{"value":"{\"x\":5,\"y\":10}"}"#);
     }
-    
+
     #[test]
     fn it_deserializes_serde_json_value_as_str() {
         let s = r#"{"value":"{\"x\":5,\"y\":10}"}"#;
         let v: Test2 = serde_json::from_str(s).unwrap();
-        
+
         assert_eq!(v.value, serde_json::json!({ "x": 5, "y": 10 }));
     }
-    
+
     #[test]
     fn it_returns_category_for_string() {
         assert_eq!(String::category(), PropertyType::String);
@@ -325,20 +329,20 @@ mod tests {
     fn it_returns_category_for_f64() {
         assert_eq!(f64::category(), PropertyType::Number);
     }
-    
+
     #[test]
     fn it_returns_category_for_json() {
         assert_eq!(Json::<Test>::category(), PropertyType::Object);
     }
-    
+
     struct Test;
-    
+
     #[derive(Serialize, Deserialize)]
     struct Test2 {
         #[serde(
             serialize_with = "serialize_value_as_string",
             deserialize_with = "deserialize_value_from_string"
         )]
-        value: Value
+        value: Value,
     }
 }

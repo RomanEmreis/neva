@@ -1,11 +1,14 @@
 //! Macros for MCP server resources
 
-use syn::{ItemFn, Meta, punctuated::Punctuated, token::Comma};
-use super::{get_str_param, get_params_arr, get_exprs_arr};
+use super::{get_exprs_arr, get_params_arr, get_str_param};
 use proc_macro2::TokenStream;
 use quote::quote;
+use syn::{ItemFn, Meta, punctuated::Punctuated, token::Comma};
 
-pub(crate) fn expand_resource(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<TokenStream> {
+pub(crate) fn expand_resource(
+    attr: &Punctuated<Meta, Comma>,
+    function: &ItemFn,
+) -> syn::Result<TokenStream> {
     let func_name = &function.sig.ident;
     let mut uri = None;
     let mut title = None;
@@ -17,8 +20,8 @@ pub(crate) fn expand_resource(attr: &Punctuated<Meta, Comma>, function: &ItemFn)
 
     for meta in attr {
         match &meta {
-            Meta::Path(_) => {},
-            Meta::List(_) => {},
+            Meta::Path(_) => {}
+            Meta::List(_) => {}
             Meta::NameValue(nv) => {
                 if let Some(ident) = nv.path.get_ident() {
                     match ident.to_string().as_str() {
@@ -46,7 +49,7 @@ pub(crate) fn expand_resource(attr: &Punctuated<Meta, Comma>, function: &ItemFn)
                         _ => {}
                     }
                 }
-            },
+            }
         }
     }
 
@@ -66,10 +69,10 @@ pub(crate) fn expand_resource(attr: &Punctuated<Meta, Comma>, function: &ItemFn)
     });
 
     let annotations_code = annotations.map(|annotations_json| {
-        quote! { 
+        quote! {
             .with_annotations(|_| {
                 neva::types::Annotations::from_json_str(#annotations_json)
-            }) 
+            })
         }
     });
 
@@ -107,23 +110,27 @@ pub(crate) fn expand_resource(attr: &Punctuated<Meta, Comma>, function: &ItemFn)
     Ok(expanded)
 }
 
-pub(crate) fn expand_resources(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<TokenStream> {
+pub(crate) fn expand_resources(
+    attr: &Punctuated<Meta, Comma>,
+    function: &ItemFn,
+) -> syn::Result<TokenStream> {
     let func_name = &function.sig.ident;
     let mut middleware = None;
 
     for meta in attr {
         match &meta {
-            Meta::Path(_) => {},
-            Meta::List(_) => {},
+            Meta::Path(_) => {}
+            Meta::List(_) => {}
             Meta::NameValue(nv) => {
                 if let Some(ident) = nv.path.get_ident()
-                    && let "middleware" = ident.to_string().as_str() {
+                    && let "middleware" = ident.to_string().as_str()
+                {
                     middleware = get_exprs_arr(&nv.value);
                 }
-            },
+            }
         }
     }
-    
+
     let module_name = syn::Ident::new(&format!("map_{func_name}"), func_name.span());
     let middleware_code = middleware.map(|mws| {
         let mw_calls = mws.iter().map(|mw| {
@@ -131,7 +138,7 @@ pub(crate) fn expand_resources(attr: &Punctuated<Meta, Comma>, function: &ItemFn
         });
         quote! { #(#mw_calls)* }
     });
-    
+
     // Expand the function and apply the tool functionality
     let expanded = quote! {
         // Original function

@@ -5,7 +5,7 @@
 //! ```
 
 use neva::prelude::*;
-use tracing_subscriber::{filter, reload, prelude::*};
+use tracing_subscriber::{filter, prelude::*, reload};
 
 #[tool]
 async fn trace_tool() {
@@ -18,19 +18,19 @@ async fn trace_tool() {
 async fn main() {
     // Configure logging filter
     let (filter, handle) = reload::Layer::new(filter::LevelFilter::DEBUG);
-    
+
     // Configure logging
     tracing_subscriber::registry()
-        .with(filter)                                           // Specify the default logging level
-        .with(tracing_subscriber::fmt::layer()
-            .event_format(notification::NotificationFormatter)) // Specify the MCP notification formatter
+        .with(filter) // Specify the default logging level
+        .with(tracing_subscriber::fmt::layer().event_format(notification::NotificationFormatter)) // Specify the MCP notification formatter
         .init();
-    
+
     App::new()
-        .with_options(|opt| opt
-            .with_stdio()
-            .with_mcp_version("2024-11-05")
-            .with_logging(handle))
+        .with_options(|opt| {
+            opt.with_stdio()
+                .with_mcp_version("2024-11-05")
+                .with_logging(handle)
+        })
         .run()
         .await;
 }

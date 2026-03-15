@@ -1,8 +1,8 @@
 //! Cursor-based pagination utilities
 
+use base64::{Engine as _, engine::general_purpose};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::ops::{Deref, DerefMut};
-use serde::{Serialize, Serializer, Deserialize, Deserializer};
-use base64::{engine::general_purpose, Engine as _};
 
 /// An opaque token representing the pagination position after the last returned result.
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -31,17 +31,16 @@ impl<'de> Deserialize<'de> for Cursor {
         let decoded = general_purpose::STANDARD
             .decode(&encoded)
             .map_err(serde::de::Error::custom)?;
-        
-        let index: usize =
-            serde_json::from_slice(&decoded).map_err(serde::de::Error::custom)?;
-        
+
+        let index: usize = serde_json::from_slice(&decoded).map_err(serde::de::Error::custom)?;
+
         Ok(Cursor(index))
     }
 }
 
 impl Deref for Cursor {
     type Target = usize;
-    
+
     #[inline]
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -158,7 +157,9 @@ mod tests {
             let page = data.paginate(cursor, 2);
             collected.extend_from_slice(page.items);
             cursor = page.next_cursor;
-            if cursor.is_none() { break; }
+            if cursor.is_none() {
+                break;
+            }
         }
 
         assert_eq!(collected, data);

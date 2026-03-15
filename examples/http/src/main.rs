@@ -1,12 +1,12 @@
 //! Run with:
-//! 
+//!
 //! ```no_rust
 //! npx @modelcontextprotocol/inspector
-//! 
+//!
 //! cargo run -p example-http
 //! ```
 use neva::prelude::*;
-use tracing_subscriber::{filter, reload, prelude::*};
+use tracing_subscriber::{filter, prelude::*, reload};
 
 #[tool]
 async fn remote_tool(name: String, mut ctx: Context) {
@@ -22,13 +22,12 @@ async fn main() {
         .with(filter)
         .with(notification::fmt::layer())
         .init();
-    
+
     App::new()
-        .with_options(|opt| opt
-            .with_http(|http| http
-                .bind("127.0.0.1:3000")
-                .with_endpoint("/mcp"))
-            .with_logging(handle))
+        .with_options(|opt| {
+            opt.with_http(|http| http.bind("127.0.0.1:3000").with_endpoint("/mcp"))
+                .with_logging(handle)
+        })
         .run()
         .await;
 }

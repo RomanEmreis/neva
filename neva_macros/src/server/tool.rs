@@ -1,11 +1,17 @@
 //! Macros for MCP server tools
 
-use syn::{ItemFn, FnArg, Pat, Meta, ReturnType, punctuated::Punctuated, token::Comma};
-use super::{get_str_param, get_params_arr, get_exprs_arr, get_bool_param, get_arg_type, get_inner_type_from_generic};
+use super::{
+    get_arg_type, get_bool_param, get_exprs_arr, get_inner_type_from_generic, get_params_arr,
+    get_str_param,
+};
 use proc_macro2::TokenStream;
 use quote::quote;
+use syn::{FnArg, ItemFn, Meta, Pat, ReturnType, punctuated::Punctuated, token::Comma};
 
-pub(crate) fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::Result<TokenStream> {
+pub(crate) fn expand(
+    attr: &Punctuated<Meta, Comma>,
+    function: &ItemFn,
+) -> syn::Result<TokenStream> {
     let func_name = &function.sig.ident;
     let mut description = None;
     let mut input_schema = None;
@@ -24,7 +30,7 @@ pub(crate) fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::
                 if path.is_ident("no_schema") {
                     no_schema = true;
                 }
-            },
+            }
             Meta::NameValue(nv) => {
                 if let Some(ident) = nv.path.get_ident() {
                     match ident.to_string().as_str() {
@@ -61,7 +67,7 @@ pub(crate) fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::
                         _ => {}
                     }
                 }
-            },
+            }
             Meta::List(_) => {}
         }
     }
@@ -87,7 +93,8 @@ pub(crate) fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::
 
         for arg in &function.sig.inputs {
             if let FnArg::Typed(pat_type) = arg
-                && let Pat::Ident(pat_ident) = &*pat_type.pat {
+                && let Pat::Ident(pat_ident) = &*pat_type.pat
+            {
                 let arg_name = pat_ident.ident.to_string();
                 let arg_type = get_arg_type(&pat_type.ty);
                 if !arg_type.eq("none") {
@@ -124,7 +131,7 @@ pub(crate) fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::
             ReturnType::Default => {
                 // Function returns () - no schema needed
                 quote! {}
-            },
+            }
             ReturnType::Type(_, return_type) => {
                 let type_str = get_arg_type(return_type);
                 if type_str == "object" {
@@ -138,7 +145,7 @@ pub(crate) fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::
                             .with_output_schema(|schema| {
                                 schema.with_schema::<#return_type>()
                             })
-                        }
+                        },
                     }
                 } else if type_str == "array" {
                     // For array types
@@ -149,15 +156,15 @@ pub(crate) fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::
                 }
             }
         }
-    } else { 
+    } else {
         quote! {}
     };
 
     let annotations_code = annotations.map(|annotations_json| {
-        quote! { 
+        quote! {
             .with_annotations(|_| {
                 neva::types::ToolAnnotations::from_json_str(#annotations_json)
-            }) 
+            })
         }
     });
 
@@ -181,7 +188,7 @@ pub(crate) fn expand(attr: &Punctuated<Meta, Comma>, function: &ItemFn) -> syn::
     let task_support_code = task_support.map(|ts| {
         quote! { .with_task_support(#ts) }
     });
-    
+
     let module_name = syn::Ident::new(&format!("map_{func_name}"), func_name.span());
 
     // Expand the function and apply the tool functionality

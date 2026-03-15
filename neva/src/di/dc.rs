@@ -1,11 +1,13 @@
 //! Extractors for Dependency Injection
 
+use crate::app::handler::{FromHandlerParams, HandlerParams};
 use crate::error::{Error, ErrorCode};
-use crate::app::handler::{HandlerParams, FromHandlerParams};
-use crate::types::{helpers::extract::RequestArgument, resource::ResourceArgument, RequestParamsMeta};
+use crate::types::{
+    RequestParamsMeta, helpers::extract::RequestArgument, resource::ResourceArgument,
+};
 use std::{
     ops::{Deref, DerefMut},
-    sync::Arc
+    sync::Arc,
 };
 
 /// `Dc` stands for Dependency Container.  
@@ -14,7 +16,7 @@ use std::{
 ///
 /// # Example
 /// ```no_run
-/// 
+///
 /// ```
 #[derive(Debug, Clone)]
 pub struct Dc<T: Send + Sync>(Arc<T>);
@@ -86,7 +88,10 @@ impl<T: Send + Sync + 'static> FromHandlerParams for Dc<T> {
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
         match params {
             HandlerParams::Request(context, _) => context.resolve_shared().map(Dc),
-            _ => Err(Error::new(ErrorCode::InternalError, "invalid handler parameters"))
+            _ => Err(Error::new(
+                ErrorCode::InternalError,
+                "invalid handler parameters",
+            )),
         }
     }
 }

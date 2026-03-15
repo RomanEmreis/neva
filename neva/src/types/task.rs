@@ -1,18 +1,18 @@
 //! Types and utilities for task-augmented requests and responses
 
-use std::ops::{Deref, DerefMut};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use chrono::{DateTime, Utc};
-use serde_json::Value;
 use crate::{
-    types::{Meta, Cursor, IntoResponse, Page, RequestId, Response},
-    error::Error
+    error::Error,
+    types::{Cursor, IntoResponse, Meta, Page, RequestId, Response},
 };
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::Value;
+use std::ops::{Deref, DerefMut};
 
 #[cfg(feature = "server")]
 use crate::{
     app::handler::{FromHandlerParams, HandlerParams},
-    types::request::{FromRequest, Request}
+    types::request::{FromRequest, Request},
 };
 
 pub(crate) const RELATED_TASK_KEY: &str = "io.modelcontextprotocol/related-task";
@@ -23,22 +23,22 @@ const DEFAULT_TTL: usize = 30000;
 pub mod commands {
     /// Command name that returns a list of tasks that are currently running on the server.
     pub const LIST: &str = "tasks/list";
-    
+
     /// Command name that cancels a task on the server.
     pub const CANCEL: &str = "tasks/cancel";
-    
+
     /// Command name that returns the result of a task.
     pub const RESULT: &str = "tasks/result";
-    
+
     /// Command name that returns the status of a task.
     pub const GET: &str = "tasks/get";
-    
+
     /// Notification name that notifies the client about the status of a task.
     pub const STATUS: &str = "notifications/tasks/status";
 }
 
 /// Represents a request to retrieve a list of tasks.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ListTasksRequestParams {
@@ -49,13 +49,13 @@ pub struct ListTasksRequestParams {
 }
 
 /// Represents the response to a `tasks/list` request.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ListTasksResult {
     /// A list of tasks that the server currently runs.
     pub tasks: Vec<Task>,
-    
+
     /// An opaque token representing the pagination position after the last returned result.
     ///
     /// When a paginated result has more data available, the `next_cursor`
@@ -67,37 +67,37 @@ pub struct ListTasksResult {
 }
 
 /// Represents a request to cancel a task.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct CancelTaskRequestParams {
     /// The task identifier to cancel.
     #[serde(rename = "taskId")]
-    pub id: String
+    pub id: String,
 }
 
 /// Represents a request to retrieve the state of a task.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct GetTaskRequestParams {
     /// The task identifier to retrieve the state for.
     #[serde(rename = "taskId")]
-    pub id: String
+    pub id: String,
 }
 
 /// Represents a request to retrieve the result of a completed task.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct GetTaskPayloadRequestParams {
     /// The task identifier to retrieve the result for.
     #[serde(rename = "taskId")]
-    pub id: String
+    pub id: String,
 }
 
 /// Represents a response to a task-augmented request.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct CreateTaskResult {
@@ -109,33 +109,33 @@ pub struct CreateTaskResult {
     pub meta: Option<Value>,
 }
 
-/// Represents a task. Tasks are durable state machines that carry information 
-/// about the underlying execution state of the request they wrap, and are intended for requestor 
-/// polling and deferred result retrieval. 
-/// 
+/// Represents a task. Tasks are durable state machines that carry information
+/// about the underlying execution state of the request they wrap, and are intended for requestor
+/// polling and deferred result retrieval.
+///
 /// Each task is uniquely identifiable by a receiver-generated **task ID**.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     /// The task identifier.
     #[serde(rename = "taskId")]
     pub id: String,
-    
+
     /// ISO 8601 timestamp when the task was created.
     #[serde(rename = "createdAt")]
     pub created_at: DateTime<Utc>,
-    
+
     /// ISO 8601 timestamp when the task was last updated.
     #[serde(rename = "lastUpdatedAt")]
     pub last_updated_at: DateTime<Utc>,
-    
+
     /// Time To Live: Actual retention duration from creation in milliseconds, null for unlimited.
     pub ttl: usize,
-    
+
     /// Current task state.
     pub status: TaskStatus,
-    
+
     /// Optional human-readable message describing the current task state.
     /// This can provide context for any status, including
     /// - Reasons for `cancelled` status
@@ -143,37 +143,37 @@ pub struct Task {
     /// - Diagnostic information for `failed` status (e.g., error details, what went wrong)
     #[serde(rename = "statusMessage", skip_serializing_if = "Option::is_none")]
     pub status_msg: Option<String>,
-    
+
     /// Suggested polling interval in milliseconds.
     #[serde(rename = "pollInterval", skip_serializing_if = "Option::is_none")]
     pub poll_interval: Option<usize>,
 }
 
 /// Represents the status of a task.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Default, Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum TaskStatus {
     /// Task has been canceled.
     #[serde(rename = "cancelled")]
     Cancelled,
-    
+
     /// Task has completed successfully.
     #[serde(rename = "completed")]
     Completed,
-    
+
     /// Task has failed.
     #[serde(rename = "failed")]
     Failed,
-    
+
     /// Task is currently running.
     #[default]
     #[serde(rename = "working")]
     Working,
-    
+
     /// Task requires an input to proceed.
     #[serde(rename = "input_required")]
-    InputRequired
+    InputRequired,
 }
 
 /// Represents metadata for augmenting a request with a task execution.
@@ -189,7 +189,7 @@ pub struct TaskMetadata {
 
 /// Represents metadata for associating messages with a task.
 /// Include this in the `_meta` field under the key `io.modelcontextprotocol/related-task`.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct RelatedTaskMetadata {
@@ -225,7 +225,7 @@ impl IntoResponse for Task {
     fn into_response(self, req_id: RequestId) -> Response {
         match serde_json::to_value(self) {
             Ok(v) => Response::success(req_id, v),
-            Err(err) => Response::error(req_id, err.into())
+            Err(err) => Response::error(req_id, err.into()),
         }
     }
 }
@@ -242,7 +242,7 @@ impl IntoResponse for CreateTaskResult {
     fn into_response(self, req_id: RequestId) -> Response {
         match serde_json::to_value(self) {
             Ok(v) => Response::success(req_id, v),
-            Err(err) => Response::error(req_id, err.into())
+            Err(err) => Response::error(req_id, err.into()),
         }
     }
 }
@@ -252,7 +252,7 @@ impl IntoResponse for ListTasksResult {
     fn into_response(self, req_id: RequestId) -> Response {
         match serde_json::to_value(self) {
             Ok(v) => Response::success(req_id, v),
-            Err(err) => Response::error(req_id, err.into())
+            Err(err) => Response::error(req_id, err.into()),
         }
     }
 }
@@ -262,7 +262,7 @@ impl<const N: usize> From<[Task; N]> for ListTasksResult {
     fn from(tasks: [Task; N]) -> Self {
         Self {
             next_cursor: None,
-            tasks: tasks.to_vec()
+            tasks: tasks.to_vec(),
         }
     }
 }
@@ -272,7 +272,7 @@ impl From<Vec<Task>> for ListTasksResult {
     fn from(tasks: Vec<Task>) -> Self {
         Self {
             next_cursor: None,
-            tasks
+            tasks,
         }
     }
 }
@@ -282,7 +282,7 @@ impl From<Page<'_, Task>> for ListTasksResult {
     fn from(page: Page<'_, Task>) -> Self {
         Self {
             next_cursor: page.next_cursor,
-            tasks: page.items.to_vec()
+            tasks: page.items.to_vec(),
         }
     }
 }
@@ -354,7 +354,7 @@ impl From<TaskMetadata> for Task {
             ttl: meta.ttl.unwrap_or(DEFAULT_TTL),
             status: TaskStatus::Working,
             status_msg: None,
-            poll_interval: None
+            poll_interval: None,
         }
     }
 }
@@ -385,10 +385,10 @@ impl Task {
             ttl: DEFAULT_TTL,
             status: TaskStatus::Working,
             status_msg: None,
-            poll_interval: None
+            poll_interval: None,
         }
     }
-    
+
     /// Sets the status message of the task.
     pub fn set_message(&mut self, msg: impl Into<String>) {
         self.status_msg = Some(msg.into());
@@ -437,7 +437,6 @@ impl TaskPayload {
     /// Unwraps the inner `T`
     #[inline]
     pub fn to<T: DeserializeOwned>(self) -> Result<T, Error> {
-        serde_json::from_value::<T>(self.0)
-            .map_err(Error::from)
+        serde_json::from_value::<T>(self.0).map_err(Error::from)
     }
 }

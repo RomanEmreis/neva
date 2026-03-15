@@ -27,7 +27,8 @@ async fn list_resources(_params: ListResourcesRequestParams) -> impl Into<ListRe
 async fn get_res(name: String) -> TextResourceContents {
     TextResourceContents::new(
         format!("res://{name}"),
-        format!("Some details about resource: {name}"))
+        format!("Some details about resource: {name}"),
+    )
 }
 
 #[resource(uri = "res://err/{uri}")]

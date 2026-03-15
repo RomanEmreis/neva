@@ -1,40 +1,33 @@
-﻿//! Utilities for Resource templates
+//! Utilities for Resource templates
 
-use std::fmt::Debug;
-use serde::{Deserialize, Serialize};
 #[cfg(feature = "server")]
-use std::sync::Arc;
-#[cfg(feature = "server")]
-use futures_util::future::BoxFuture;
-use serde_json::Value;
+use crate::app::handler::{FromHandlerParams, GenericHandler, Handler, HandlerParams};
 #[cfg(feature = "server")]
 use crate::error::Error;
 #[cfg(feature = "server")]
-use crate::app::handler::{
-    FromHandlerParams, 
-    GenericHandler, 
-    Handler, 
-    HandlerParams
-};
+use futures_util::future::BoxFuture;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::fmt::Debug;
+#[cfg(feature = "server")]
+use std::sync::Arc;
 
 use crate::types::{
-    resource::Uri, Annotations, IntoResponse, 
-    RequestId, Response, 
-    Cursor, Page, Icon
+    Annotations, Cursor, Icon, IntoResponse, Page, RequestId, Response, resource::Uri,
 };
 
 #[cfg(feature = "server")]
 use crate::types::{FromRequest, ReadResourceRequestParams, ReadResourceResult, Request};
 
 /// Represents a known resource template that the server is capable of reading.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ResourceTemplate {
     /// The URI template that identifies this resource template.
     #[serde(rename = "uriTemplate")]
     pub uri_template: Uri,
-    
+
     /// A human-readable name for this resource template.
     pub name: String,
 
@@ -72,7 +65,7 @@ pub struct ResourceTemplate {
     /// Metadata reserved by MCP for protocol-level metadata.
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<Value>,
-    
+
     /// A list of roles that are allowed to read the resource
     #[serde(skip)]
     #[cfg(feature = "http-server")]
@@ -96,7 +89,7 @@ pub struct ListResourceTemplatesRequestParams {
 }
 
 /// The server's response to a resources/templates/list request from the client.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ListResourceTemplatesResult {
@@ -119,7 +112,7 @@ impl IntoResponse for ListResourceTemplatesResult {
     fn into_response(self, req_id: RequestId) -> Response {
         match serde_json::to_value(self) {
             Ok(v) => Response::success(req_id, v),
-            Err(err) => Response::error(req_id, err.into())
+            Err(err) => Response::error(req_id, err.into()),
         }
     }
 }
@@ -127,9 +120,9 @@ impl IntoResponse for ListResourceTemplatesResult {
 impl From<Vec<ResourceTemplate>> for ListResourceTemplatesResult {
     #[inline]
     fn from(templates: Vec<ResourceTemplate>) -> Self {
-        Self { 
+        Self {
             next_cursor: None,
-            templates
+            templates,
         }
     }
 }
@@ -139,7 +132,7 @@ impl From<Page<'_, ResourceTemplate>> for ListResourceTemplatesResult {
     fn from(page: Page<'_, ResourceTemplate>) -> Self {
         Self {
             next_cursor: page.next_cursor,
-            templates: page.items.to_vec()
+            templates: page.items.to_vec(),
         }
     }
 }
@@ -167,28 +160,31 @@ pub(crate) struct ResourceFunc<F, R, Args>
 where
     F: GenericHandler<Args, Output = R>,
     R: TryInto<ReadResourceResult>,
-    Args: TryFrom<ReadResourceRequestParams, Error = Error>
+    Args: TryFrom<ReadResourceRequestParams, Error = Error>,
 {
     func: F,
     _marker: std::marker::PhantomData<Args>,
 }
 
 #[cfg(feature = "server")]
-impl<F, R ,Args> ResourceFunc<F, R, Args>
+impl<F, R, Args> ResourceFunc<F, R, Args>
 where
     F: GenericHandler<Args, Output = R>,
     R: TryInto<ReadResourceResult>,
-    Args: TryFrom<ReadResourceRequestParams, Error = Error>
+    Args: TryFrom<ReadResourceRequestParams, Error = Error>,
 {
     /// Creates a new [`ResourceFunc`] wrapped into [`Arc`]
     pub(crate) fn new(func: F) -> Arc<Self> {
-        let func = Self { func, _marker: std::marker::PhantomData };
+        let func = Self {
+            func,
+            _marker: std::marker::PhantomData,
+        };
         Arc::new(func)
     }
 }
 
 #[cfg(feature = "server")]
-impl<F, R ,Args> Handler<ReadResourceResult> for ResourceFunc<F, R, Args>
+impl<F, R, Args> Handler<ReadResourceResult> for ResourceFunc<F, R, Args>
 where
     F: GenericHandler<Args, Output = R>,
     R: TryInto<ReadResourceResult>,
@@ -203,11 +199,7 @@ where
         Box::pin(async move {
             //let mut iter = params.args.into_iter().flatten().next();
             let args = Args::try_from(params)?;
-            self.func
-                .call(args)
-                .await
-                .try_into()
-                .map_err(Into::into)
+            self.func.call(args).await.try_into().map_err(Into::into)
         })
     }
 }
@@ -247,7 +239,7 @@ impl ResourceTemplate {
             permissions: None,
         }
     }
-    
+
     /// Sets a title for a resource template
     pub fn with_title(&mut self, title: impl Into<String>) -> &mut Self {
         self.title = Some(title.into());
@@ -265,11 +257,11 @@ impl ResourceTemplate {
         self.mime = Some(mime.into());
         self
     }
-    
+
     /// Sets annotations for the resource template
     pub fn with_annotations<F>(&mut self, config: F) -> &mut Self
     where
-        F: FnOnce(Annotations) -> Annotations 
+        F: FnOnce(Annotations) -> Annotations,
     {
         self.annotations = Some(config(Default::default()));
         self
@@ -280,12 +272,9 @@ impl ResourceTemplate {
     pub fn with_roles<T, I>(&mut self, roles: T) -> &mut Self
     where
         T: IntoIterator<Item = I>,
-        I: Into<String>
+        I: Into<String>,
     {
-        self.roles = Some(roles
-            .into_iter()
-            .map(Into::into)
-            .collect());
+        self.roles = Some(roles.into_iter().map(Into::into).collect());
         self
     }
 
@@ -294,12 +283,9 @@ impl ResourceTemplate {
     pub fn with_permissions<T, I>(&mut self, permissions: T) -> &mut Self
     where
         T: IntoIterator<Item = I>,
-        I: Into<String>
+        I: Into<String>,
     {
-        self.permissions = Some(permissions
-            .into_iter()
-            .map(Into::into)
-            .collect());
+        self.permissions = Some(permissions.into_iter().map(Into::into).collect());
         self
     }
 
@@ -311,6 +297,4 @@ impl ResourceTemplate {
 }
 
 #[cfg(test)]
-mod tests {
-    
-}
+mod tests {}

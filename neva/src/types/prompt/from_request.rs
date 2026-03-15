@@ -1,5 +1,5 @@
-﻿use crate::error::Error;
 use super::GetPromptRequestParams;
+use crate::error::Error;
 use crate::types::helpers::extract::{RequestArgument, extract_arg};
 
 impl TryFrom<GetPromptRequestParams> for () {
@@ -15,7 +15,7 @@ macro_rules! impl_from_get_prompt_params {
     ($($T: ident),*) => {
         impl<$($T: RequestArgument<Error = Error>),+> TryFrom<GetPromptRequestParams> for ($($T,)+) {
             type Error = Error;
-            
+
             #[inline]
             fn try_from(params: GetPromptRequestParams) -> Result<Self, Self::Error> {
                 let args = params.args.unwrap_or_default();

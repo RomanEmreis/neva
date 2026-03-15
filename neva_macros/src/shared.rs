@@ -1,10 +1,13 @@
 //! Shared macros for MCP clients and servers
 
-use syn::{Path, punctuated::Punctuated, token::Comma};
 use proc_macro2::TokenStream;
 use quote::quote;
+use syn::{Path, punctuated::Punctuated, token::Comma};
 
-pub(super) fn expand_json_schema(attr: &Punctuated<Path, Comma>, input: &syn::DeriveInput) -> syn::Result<TokenStream>  {
+pub(super) fn expand_json_schema(
+    attr: &Punctuated<Path, Comma>,
+    input: &syn::DeriveInput,
+) -> syn::Result<TokenStream> {
     let mut include_ser = false;
     let mut include_de = false;
     let mut include_debug = false;

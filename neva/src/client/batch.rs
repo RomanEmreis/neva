@@ -6,8 +6,7 @@ use crate::{
     shared::IntoArgs,
     types::{
         MessageEnvelope, Request, RequestId, RequestParamsMeta, Response,
-        notification::Notification,
-        resource::Uri,
+        notification::Notification, resource::Uri,
     },
 };
 
@@ -68,7 +67,10 @@ impl<'a> BatchBuilder<'a> {
     /// Enqueues a `tools/list` request (first page; cursor is always `None`).
     pub fn list_tools(mut self) -> Self {
         use crate::types::{ListToolsRequestParams, tool::commands};
-        self.push_request(commands::LIST, Some(ListToolsRequestParams { cursor: None }));
+        self.push_request(
+            commands::LIST,
+            Some(ListToolsRequestParams { cursor: None }),
+        );
         self
     }
 
@@ -91,7 +93,10 @@ impl<'a> BatchBuilder<'a> {
     /// Enqueues a `resources/list` request (first page; cursor is always `None`).
     pub fn list_resources(mut self) -> Self {
         use crate::types::{ListResourcesRequestParams, resource::commands};
-        self.push_request(commands::LIST, Some(ListResourcesRequestParams { cursor: None }));
+        self.push_request(
+            commands::LIST,
+            Some(ListResourcesRequestParams { cursor: None }),
+        );
         self
     }
 
@@ -113,14 +118,20 @@ impl<'a> BatchBuilder<'a> {
     /// Enqueues a `resources/templates/list` request.
     pub fn list_resource_templates(mut self) -> Self {
         use crate::types::{ListResourceTemplatesRequestParams, resource::commands};
-        self.push_request(commands::TEMPLATES_LIST, Some(ListResourceTemplatesRequestParams { cursor: None }));
+        self.push_request(
+            commands::TEMPLATES_LIST,
+            Some(ListResourceTemplatesRequestParams { cursor: None }),
+        );
         self
     }
 
     /// Enqueues a `prompts/list` request (first page; cursor is always `None`).
     pub fn list_prompts(mut self) -> Self {
         use crate::types::{ListPromptsRequestParams, prompt::commands};
-        self.push_request(commands::LIST, Some(ListPromptsRequestParams { cursor: None }));
+        self.push_request(
+            commands::LIST,
+            Some(ListPromptsRequestParams { cursor: None }),
+        );
         self
     }
 
@@ -171,7 +182,9 @@ impl<'a> BatchBuilder<'a> {
     /// or a local sequential fallback if the client is not connected.
     /// (A disconnected client will fail on [`send`](Self::send) anyway.)
     fn next_id(&self) -> RequestId {
-        self.client.generate_id().unwrap_or(RequestId::Number(self.items.len() as i64))
+        self.client
+            .generate_id()
+            .unwrap_or(RequestId::Number(self.items.len() as i64))
     }
 
     /// Enqueues a generic request with the given method and params.

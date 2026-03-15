@@ -1,19 +1,15 @@
-﻿//! Represents an error
+//! Represents an error
 
 use std::convert::Infallible;
-use std::fmt;
 use std::error::Error as StdError;
+use std::fmt;
 use std::io::Error as IoError;
 
 pub use error_code::ErrorCode;
 
 pub mod error_code;
 
-type BoxError = Box<
-    dyn StdError
-    + Send
-    + Sync
->;
+type BoxError = Box<dyn StdError + Send + Sync>;
 
 /// Represents MCP server error
 #[derive(Debug)]
@@ -36,18 +32,18 @@ impl StdError for Error {
 
 impl From<serde_json::Error> for Error {
     fn from(err: serde_json::Error) -> Error {
-        Self { 
+        Self {
             inner: err.into(),
-            code: ErrorCode::ParseError
-         }
+            code: ErrorCode::ParseError,
+        }
     }
 }
 
 impl From<IoError> for Error {
     fn from(err: IoError) -> Error {
-        Self { 
+        Self {
             inner: err.into(),
-            code: ErrorCode::InternalError
+            code: ErrorCode::InternalError,
         }
     }
 }
@@ -62,17 +58,12 @@ impl Error {
     /// Creates a new [`Error`]
     #[inline]
     pub fn new(code: impl TryInto<ErrorCode>, err: impl Into<BoxError>) -> Self {
-        Self { 
+        Self {
             inner: err.into(),
-            code: code
-                .try_into()
-                .unwrap_or_default()
+            code: code.try_into().unwrap_or_default(),
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    
-}
-
+mod tests {}

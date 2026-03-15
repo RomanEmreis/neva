@@ -12,23 +12,23 @@ async fn main() -> Result<(), Error> {
     tracing_subscriber::registry()
         .with(notification::fmt::layer())
         .init();
-    
-    let mut client = Client::new()
-        .with_options(|opt| opt
-            .with_stdio("cargo", ["run", "-p", "example-updates"])
-            .with_mcp_version("2024-11-05"));
-    
+
+    let mut client = Client::new().with_options(|opt| {
+        opt.with_stdio("cargo", ["run", "-p", "example-updates"])
+            .with_mcp_version("2024-11-05")
+    });
+
     client.connect().await?;
 
     client.on_resources_changed(|_| async move {
         tracing::info!("Resources has been updated");
     });
-    
+
     client.on_resource_changed(|n| async move {
         let params = n.params::<SubscribeRequestParams>().unwrap();
-        tracing::info!("Resource: {} has been updated", params.uri); 
+        tracing::info!("Resource: {} has been updated", params.uri);
     });
-    
+
     let uri = "res://test_999";
     let params = ("uri", uri);
     let _ = client.call_tool("add_resource", params).await?;

@@ -1,44 +1,32 @@
-﻿//! MCP server options
+//! MCP server options
 
-use dashmap::{DashMap, DashSet};
-use std::{sync::Arc, time::Duration};
-use std::fmt::{Debug, Formatter};
-use tokio_util::sync::CancellationToken;
-use crate::transport::{StdIoServer, TransportProto};
+use crate::app::{collection::Collection, handler::RequestHandler};
 #[cfg(feature = "http-server")]
 use crate::transport::HttpServer;
-use crate::app::{handler::RequestHandler, collection::Collection};
+use crate::transport::{StdIoServer, TransportProto};
+use dashmap::{DashMap, DashSet};
+use std::fmt::{Debug, Formatter};
+use std::{sync::Arc, time::Duration};
+use tokio_util::sync::CancellationToken;
 
 use crate::middleware::{Middleware, Middlewares};
 
 use crate::PROTOCOL_VERSIONS;
 use crate::types::{
-    RequestId,
-    Implementation,
-    Tool,
-    Resource, Uri, ReadResourceResult, ResourceTemplate,
+    Implementation, Prompt, PromptsCapability, ReadResourceResult, RequestId, Resource,
+    ResourceTemplate, ResourcesCapability, Tool, ToolsCapability, Uri,
     resource::{Route, route::ResourceHandler},
-    Prompt,
-    ResourcesCapability, ToolsCapability, PromptsCapability
 };
 
+#[cfg(feature = "tasks")]
+use crate::shared::{TaskHandle, TaskTracker};
 #[cfg(feature = "tracing")]
 use crate::types::notification::LoggingLevel;
 #[cfg(feature = "tasks")]
-use crate::shared::{TaskTracker, TaskHandle};
-#[cfg(feature = "tasks")]
-use crate::types::{
-    ServerTasksCapability,
-    TaskPayload,
-    Task,
-};
+use crate::types::{ServerTasksCapability, Task, TaskPayload};
 
 #[cfg(feature = "tracing")]
-use tracing_subscriber::{
-    filter::LevelFilter, 
-    reload::Handle, 
-    Registry
-};
+use tracing_subscriber::{Registry, filter::LevelFilter, reload::Handle};
 
 #[cfg(any(feature = "tracing", feature = "tasks"))]
 use crate::error::Error;
@@ -52,7 +40,7 @@ pub type RuntimeMcpOptions = Arc<McpOptions>;
 pub struct McpOptions {
     /// Information of current server's implementation
     pub(crate) implementation: Implementation,
-    
+
     /// Timeout for the requests from server to a client
     pub(crate) request_timeout: Duration,
 
@@ -70,7 +58,7 @@ pub struct McpOptions {
 
     /// Holds current subscriptions to resource changes
     pub(super) resource_subscriptions: DashSet<Uri>,
-    
+
     /// An ordered list of middlewares
     pub(super) middlewares: Option<Middlewares>,
 
@@ -86,26 +74,26 @@ pub struct McpOptions {
     /// Server tasks capability options
     #[cfg(feature = "tasks")]
     tasks_capability: Option<ServerTasksCapability>,
-    
+
     /// The last logging level set by the client
     #[cfg(feature = "tracing")]
     log_level: Option<Handle<LevelFilter, Registry>>,
 
     /// An MCP version that server supports
     protocol_ver: Option<&'static str>,
-    
+
     /// Current transport protocol that this server uses
     proto: Option<TransportProto>,
 
     /// A resource template routing data structure
     resource_routes: Route,
-    
+
     /// Currently running requests
     requests: DashMap<RequestId, CancellationToken>,
 
     /// Currently running tasks
     #[cfg(feature = "tasks")]
-    pub(super) tasks: TaskTracker
+    pub(super) tasks: TaskTracker,
 }
 
 impl Debug for McpOptions {
@@ -119,13 +107,13 @@ impl Debug for McpOptions {
             .field("resources_capability", &self.resources_capability)
             .field("prompts_capability", &self.prompts_capability)
             .field("protocol_ver", &self.protocol_ver);
-        
+
         #[cfg(feature = "tasks")]
         dbg.field("tasks_capability", &self.tasks_capability);
-        
+
         #[cfg(feature = "tracing")]
         dbg.field("log_level", &self.log_level);
-        
+
         dbg.finish()
     }
 }
@@ -172,16 +160,18 @@ impl McpOptions {
         self.proto = Some(TransportProto::HttpServer(Box::new(http)));
         self
     }
-    
+
     /// Sets Streamable HTTP as a transport protocol
     #[cfg(feature = "http-server")]
     pub fn with_http<F: FnOnce(HttpServer) -> HttpServer>(mut self, config: F) -> Self {
-        self.proto = Some(TransportProto::HttpServer(Box::new(config(HttpServer::default()))));
+        self.proto = Some(TransportProto::HttpServer(Box::new(config(
+            HttpServer::default(),
+        ))));
         self
     }
 
     /// Sets Streamable HTTP as a transport protocol with default configuration
-    /// 
+    ///
     /// Default:
     /// * __IP__: 127.0.0.1
     /// * __PORT__: 3000
@@ -190,7 +180,7 @@ impl McpOptions {
     pub fn with_default_http(self) -> Self {
         self.with_http(|http| http)
     }
-    
+
     /// Specifies MCP server name
     pub fn with_name(mut self, name: &str) -> Self {
         self.implementation.name = name.into();
@@ -204,7 +194,7 @@ impl McpOptions {
     }
 
     /// Specifies Model Context Protocol version
-    /// 
+    ///
     /// Default: last available protocol version
     pub fn with_mcp_version(mut self, ver: &'static str) -> Self {
         self.protocol_ver = Some(ver);
@@ -212,9 +202,9 @@ impl McpOptions {
     }
 
     /// Configures tools capability
-    pub fn with_tools<F>(mut self, config: F) -> Self 
-    where 
-        F: FnOnce(ToolsCapability) -> ToolsCapability
+    pub fn with_tools<F>(mut self, config: F) -> Self
+    where
+        F: FnOnce(ToolsCapability) -> ToolsCapability,
     {
         self.tools_capability = Some(config(Default::default()));
         self
@@ -223,7 +213,7 @@ impl McpOptions {
     /// Configures resources capability
     pub fn with_resources<F>(mut self, config: F) -> Self
     where
-        F: FnOnce(ResourcesCapability) -> ResourcesCapability
+        F: FnOnce(ResourcesCapability) -> ResourcesCapability,
     {
         self.resources_capability = Some(config(Default::default()));
         self
@@ -232,7 +222,7 @@ impl McpOptions {
     /// Configures prompts capability
     pub fn with_prompts<F>(mut self, config: F) -> Self
     where
-        F: FnOnce(PromptsCapability) -> PromptsCapability
+        F: FnOnce(PromptsCapability) -> PromptsCapability,
     {
         self.prompts_capability = Some(config(Default::default()));
         self
@@ -242,7 +232,7 @@ impl McpOptions {
     #[cfg(feature = "tasks")]
     pub fn with_tasks<F>(mut self, config: F) -> Self
     where
-        F: FnOnce(ServerTasksCapability) -> ServerTasksCapability
+        F: FnOnce(ServerTasksCapability) -> ServerTasksCapability,
     {
         self.tasks_capability = Some(config(Default::default()));
         self
@@ -255,14 +245,14 @@ impl McpOptions {
         self.request_timeout = timeout;
         self
     }
-    
+
     /// Configures [`LogLevelHandle`] that allow to change the [`LoggingLevel`] in runtime
     #[cfg(feature = "tracing")]
     pub fn with_logging(mut self, log_handle: Handle<LevelFilter, Registry>) -> Self {
         self.log_level = Some(log_handle);
         self
     }
-    
+
     /// Sets the [`LoggingLevel`]
     #[cfg(feature = "tracing")]
     pub fn set_log_level(&self, level: LoggingLevel) -> Result<(), Error> {
@@ -277,21 +267,19 @@ impl McpOptions {
     /// Returns current log level
     #[cfg(feature = "tracing")]
     pub(crate) fn log_level(&self) -> Option<LoggingLevel> {
-        match &self.log_level { 
+        match &self.log_level {
             None => None,
-            Some(handle) => handle
-                .clone_current()
-                .map(|x| x.into()),
+            Some(handle) => handle.clone_current().map(|x| x.into()),
         }
     }
-    
+
     /// Tracks the request with `req_id` and returns the [`CancellationToken`] for this request
     pub(crate) fn track_request(&self, req_id: &RequestId) -> CancellationToken {
         let token = CancellationToken::new();
         self.requests.insert(req_id.clone(), token.clone());
         token
     }
-    
+
     /// Cancels the request with `req_id` if it is present
     pub(crate) fn cancel_request(&self, req_id: &RequestId) {
         if let Some((_, token)) = self.requests.remove(req_id) {
@@ -301,8 +289,7 @@ impl McpOptions {
 
     /// Completes the request with `req_id` if it is present
     pub(crate) fn complete_request(&self, req_id: &RequestId) {
-        self.requests
-            .remove(req_id);
+        self.requests.remove(req_id);
     }
 
     /// Returns a list of currently running tasks
@@ -310,7 +297,7 @@ impl McpOptions {
     pub(crate) fn list_tasks(&self) -> Vec<Task> {
         self.tasks.tasks()
     }
-    
+
     /// Tacks the task and returns the [`CancellationToken`] for this task
     #[cfg(feature = "tasks")]
     pub(crate) fn track_task(&self, task: Task) -> TaskHandle {
@@ -323,7 +310,7 @@ impl McpOptions {
         self.tasks.cancel(task_id)
     }
 
-    /// Retrieves the task status 
+    /// Retrieves the task status
     #[cfg(feature = "tasks")]
     pub(crate) fn get_task_status(&self, task_id: &str) -> Result<Task, Error> {
         self.tasks.get_status(task_id)
@@ -334,23 +321,18 @@ impl McpOptions {
     pub(crate) async fn get_task_result(&self, task_id: &str) -> Result<TaskPayload, Error> {
         self.tasks.get_result(task_id).await
     }
-    
+
     /// Adds a tool
     pub(crate) fn add_tool(&mut self, tool: Tool) -> &mut Tool {
-        self.tools_capability
-            .get_or_insert_default();
+        self.tools_capability.get_or_insert_default();
 
-        self.tools
-            .as_mut()
-            .entry(tool.name.clone())
-            .or_insert(tool)
+        self.tools.as_mut().entry(tool.name.clone()).or_insert(tool)
     }
 
     /// Adds a resource
     pub(crate) fn add_resource(&mut self, resource: Resource) -> &mut Resource {
-        self.resources_capability
-            .get_or_insert_default();
-        
+        self.resources_capability.get_or_insert_default();
+
         self.resources
             .as_mut()
             .entry(resource.uri.to_string())
@@ -359,16 +341,16 @@ impl McpOptions {
 
     /// Adds a resource template
     pub(crate) fn add_resource_template(
-        &mut self, 
-        template: ResourceTemplate, 
-        handler: RequestHandler<ReadResourceResult>
+        &mut self,
+        template: ResourceTemplate,
+        handler: RequestHandler<ReadResourceResult>,
     ) -> &mut ResourceTemplate {
-        self.resources_capability
-            .get_or_insert_default();
-        
+        self.resources_capability.get_or_insert_default();
+
         let name = template.name.clone();
-        
-        self.resource_routes.insert(&template.uri_template, name.clone(), handler);
+
+        self.resource_routes
+            .insert(&template.uri_template, name.clone(), handler);
         self.resources_templates
             .as_mut()
             .entry(name)
@@ -377,15 +359,14 @@ impl McpOptions {
 
     /// Adds a prompt
     pub(crate) fn add_prompt(&mut self, prompt: Prompt) -> &mut Prompt {
-        self.prompts_capability
-            .get_or_insert_default();
-        
+        self.prompts_capability.get_or_insert_default();
+
         self.prompts
             .as_mut()
             .entry(prompt.name.clone())
             .or_insert(prompt)
     }
-    
+
     /// Registers a middleware
     #[inline]
     pub(crate) fn add_middleware(&mut self, middleware: Middleware) {
@@ -393,28 +374,28 @@ impl McpOptions {
             .get_or_insert_with(Middlewares::new)
             .add(middleware);
     }
-    
+
     /// Returns a Model Context Protocol version that this server supports
     #[inline]
     pub(crate) fn protocol_ver(&self) -> &'static str {
-        match self.protocol_ver { 
+        match self.protocol_ver {
             Some(ver) => ver,
-            None => PROTOCOL_VERSIONS.last().unwrap()
+            None => PROTOCOL_VERSIONS.last().unwrap(),
         }
     }
-    
+
     /// Returns current transport protocol
     pub(crate) fn transport(&mut self) -> TransportProto {
         let transport = self.proto.take();
         transport.unwrap_or_default()
     }
-    
+
     /// Returns a tool by its name
     #[inline]
     pub(crate) async fn get_tool(&self, name: &str) -> Option<Tool> {
         self.tools.get(name).await
     }
-    
+
     /// Returns a list of available tools
     #[inline]
     pub(crate) async fn list_tools(&self) -> Vec<Tool> {
@@ -473,7 +454,7 @@ impl McpOptions {
     }
 
     /// Returns [`ServerTasksCapability`] if configured.
-    /// 
+    ///
     /// Otherwise, returns `None`.
     #[cfg(feature = "tasks")]
     pub(crate) fn tasks_capability(&self) -> Option<ServerTasksCapability> {
@@ -540,7 +521,7 @@ impl McpOptions {
             .and_then(|req| req.tools.as_ref())
             .is_some_and(|tools| tools.call.is_some())
     }
-    
+
     /// Turns [`McpOptions`] into [`RuntimeMcpOptions`]
     pub(crate) fn into_runtime(mut self) -> RuntimeMcpOptions {
         self.tools = self.tools.into_runtime();
@@ -553,17 +534,19 @@ impl McpOptions {
 
 #[cfg(test)]
 mod tests {
-    use crate::error::{Error, ErrorCode};
-    use crate::SDK_NAME;
-    use crate::types::resource::template::ResourceFunc;
-    use crate::types::resource::Uri;
-    use crate::types::{GetPromptRequestParams, PromptMessage, ReadResourceRequestParams, ResourceContents, Role};
     use super::*;
-    
+    use crate::SDK_NAME;
+    use crate::error::{Error, ErrorCode};
+    use crate::types::resource::Uri;
+    use crate::types::resource::template::ResourceFunc;
+    use crate::types::{
+        GetPromptRequestParams, PromptMessage, ReadResourceRequestParams, ResourceContents, Role,
+    };
+
     #[test]
     fn it_creates_default_options() {
         let options = McpOptions::default();
-        
+
         assert_eq!(options.implementation.name, SDK_NAME);
         assert_eq!(options.implementation.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(options.tools.as_ref().len(), 0);
@@ -576,44 +559,41 @@ mod tests {
     #[test]
     fn it_takes_none_transport_by_default() {
         let mut options = McpOptions::default();
-        
+
         let transport = options.transport();
-        
+
         assert!(matches!(transport, TransportProto::None));
     }
-    
+
     #[test]
     fn it_sets_and_takes_stdio_transport() {
-        let mut options = McpOptions::default()
-            .with_stdio();
-        
+        let mut options = McpOptions::default().with_stdio();
+
         let transport = options.transport();
 
         assert!(matches!(transport, TransportProto::StdIoServer(_)));
     }
-    
+
     #[test]
     fn it_sets_server_name() {
-        let options = McpOptions::default()
-            .with_name("name");
-        
+        let options = McpOptions::default().with_name("name");
+
         assert_eq!(options.implementation.name, "name");
     }
 
     #[test]
     fn it_sets_server_version() {
-        let options = McpOptions::default()
-            .with_version("1");
+        let options = McpOptions::default().with_version("1");
 
         assert_eq!(options.implementation.version, "1");
     }
-    
+
     #[tokio::test]
     async fn it_adds_and_gets_tool() {
         let mut options = McpOptions::default();
-        
+
         options.add_tool(Tool::new("tool", || async { "test" }));
-        
+
         let tool = options.get_tool("tool").await.unwrap();
         assert_eq!(tool.name, "tool");
     }
@@ -647,17 +627,18 @@ mod tests {
                 .with_mime("text/plain")
                 .with_text("some text")
         };
-        
+
         options.add_resource_template(
             ResourceTemplate::new("res://res", "test"),
-            ResourceFunc::new(handler));
+            ResourceFunc::new(handler),
+        );
 
         let req = ReadResourceRequestParams {
             uri: "res://res".into(),
             meta: None,
-            args: None
+            args: None,
         };
-        
+
         let res = options.read_resource(&req.uri).unwrap();
         let res = res.0.call(req.into()).await.unwrap();
         assert_eq!(res.contents.len(), 1);
@@ -673,12 +654,13 @@ mod tests {
 
         options.add_resource_template(
             ResourceTemplate::new("res://res", "test"),
-            ResourceFunc::new(handler));
+            ResourceFunc::new(handler),
+        );
 
         let req = ReadResourceRequestParams {
             uri: "res://res".into(),
             meta: None,
-            args: None
+            args: None,
         };
 
         let res = options.read_resource(&req.uri).unwrap();
@@ -698,7 +680,8 @@ mod tests {
 
         options.add_resource_template(
             ResourceTemplate::new("res://res", "test"),
-            ResourceFunc::new(handler));
+            ResourceFunc::new(handler),
+        );
 
         let resources = options.list_resource_templates().await;
         assert_eq!(resources.len(), 1);
@@ -708,9 +691,7 @@ mod tests {
     async fn it_adds_and_gets_prompt() {
         let mut options = McpOptions::default();
 
-        options.add_prompt(Prompt::new("test", || async { 
-            [("test", Role::User)]
-        }));
+        options.add_prompt(Prompt::new("test", || async { [("test", Role::User)] }));
 
         let prompt = options.get_prompt("test").await.unwrap();
         assert_eq!(prompt.name, "test");
@@ -732,7 +713,7 @@ mod tests {
     async fn it_adds_and_gets_prompt_with_error() {
         let mut options = McpOptions::default();
 
-        options.add_prompt(Prompt::new("test", || async { 
+        options.add_prompt(Prompt::new("test", || async {
             Err::<PromptMessage, _>(Error::from(ErrorCode::InternalError))
         }));
 
@@ -754,21 +735,18 @@ mod tests {
     async fn it_returns_prompts() {
         let mut options = McpOptions::default();
 
-        options.add_prompt(Prompt::new("test", || async {
-            [("test", Role::User)]
-        }));
+        options.add_prompt(Prompt::new("test", || async { [("test", Role::User)] }));
 
         let prompts = options.list_prompts().await;
         assert_eq!(prompts.len(), 1);
     }
-    
+
     #[test]
     fn it_returns_some_tool_capabilities_if_configured() {
-        let options = McpOptions::default()
-            .with_tools(|tools| tools.with_list_changed());
-        
+        let options = McpOptions::default().with_tools(|tools| tools.with_list_changed());
+
         let tools_capability = options.tools_capability().unwrap();
-        
+
         assert!(tools_capability.list_changed);
     }
 
@@ -776,7 +754,7 @@ mod tests {
     fn it_returns_some_tool_capabilities_if_there_are_tools() {
         let mut options = McpOptions::default();
         options.add_tool(Tool::new("tool", || async { "test" }));
-        
+
         let tools_capability = options.tools_capability().unwrap();
 
         assert!(!tools_capability.list_changed);
@@ -791,8 +769,7 @@ mod tests {
 
     #[test]
     fn it_returns_some_resource_capabilities_if_configured() {
-        let options = McpOptions::default()
-            .with_resources(|res| res.with_list_changed());
+        let options = McpOptions::default().with_resources(|res| res.with_list_changed());
 
         let resources_capability = options.resources_capability().unwrap();
 
@@ -816,10 +793,11 @@ mod tests {
         let handler = |_: Uri| async move {
             Err::<ResourceContents, _>(Error::from(ErrorCode::ResourceNotFound))
         };
-        
+
         options.add_resource_template(
-            ResourceTemplate::new("res://test", "test"), 
-            ResourceFunc::new(handler));
+            ResourceTemplate::new("res://test", "test"),
+            ResourceFunc::new(handler),
+        );
 
         let resources_capability = options.resources_capability().unwrap();
 
@@ -835,8 +813,7 @@ mod tests {
 
     #[test]
     fn it_returns_some_prompts_capability_if_configured() {
-        let options = McpOptions::default()
-            .with_prompts(|prompts| prompts.with_list_changed());
+        let options = McpOptions::default().with_prompts(|prompts| prompts.with_list_changed());
 
         let prompts_capability = options.prompts_capability().unwrap();
 

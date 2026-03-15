@@ -1,12 +1,7 @@
 //! Types and utilities for dependency injection
 
 use super::error::{Error, ErrorCode};
-pub use volga_di::{
-    ContainerBuilder, 
-    Container, 
-    GenericFactory, 
-    Inject
-};
+pub use volga_di::{Container, ContainerBuilder, GenericFactory, Inject};
 
 pub use volga_di::error::Error as DiError;
 
@@ -68,7 +63,7 @@ impl super::App {
 
     /// Registers scoped service that required to be resolved via factory
     ///
-    /// > **Note:** Provided factory function will be called once per scope 
+    /// > **Note:** Provided factory function will be called once per scope
     /// > and the result will be available and reused per this scope lifetime.
     ///
     /// # Example
@@ -91,7 +86,7 @@ impl super::App {
     where
         T: Send + Sync + 'static,
         F: GenericFactory<Args, Output = T>,
-        Args: Inject
+        Args: Inject,
     {
         self.container.register_scoped_factory(factory);
         self
@@ -99,7 +94,7 @@ impl super::App {
 
     /// Registers scoped service that required to be resolved as [`Default`]
     ///
-    /// > **Note:** the [`Default::default`] method will be called once per scope 
+    /// > **Note:** the [`Default::default`] method will be called once per scope
     /// > and the result will be available and reused per this scope lifetime.
     ///
     /// # Example
@@ -145,7 +140,7 @@ impl super::App {
 
     /// Registers transient service that required to be resolved via factory
     ///
-    /// > **Note:** Provided factory function will be called 
+    /// > **Note:** Provided factory function will be called
     /// > every time once this service is requested.
     ///
     /// # Example
@@ -168,7 +163,7 @@ impl super::App {
     where
         T: Send + Sync + 'static,
         F: GenericFactory<Args, Output = T>,
-        Args: Inject
+        Args: Inject,
     {
         self.container.register_transient_factory(factory);
         self
@@ -176,7 +171,7 @@ impl super::App {
 
     /// Registers transient service that required to be resolved as [`Default`]
     ///
-    /// > **Note:** the [`Default::default`] method will be called 
+    /// > **Note:** the [`Default::default`] method will be called
     /// > every time once this service is requested.
     ///
     /// # Example
@@ -201,8 +196,8 @@ impl super::App {
 #[cfg(feature = "server")]
 #[cfg(test)]
 mod tests {
-    use volga_di::{Container, Inject};
     use super::super::App;
+    use volga_di::{Container, Inject};
 
     #[derive(Default)]
     struct TestDependency;

@@ -1,15 +1,15 @@
-﻿//! Tools for binding message channels with MCP Sessions
+//! Tools for binding message channels with MCP Sessions
 
+use crate::error::{Error, ErrorCode};
+use crate::types::Message;
 use dashmap::DashMap;
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
-use crate::error::{Error, ErrorCode};
-use crate::types::Message;
 
 /// A concurrent message registry that bounds the MCP session ID and related message channel
 #[derive(Default)]
 pub(crate) struct MessageRegistry {
-    inner: DashMap<Uuid, UnboundedSender<Message>>
+    inner: DashMap<Uuid, UnboundedSender<Message>>,
 }
 
 #[allow(dead_code)]
@@ -17,9 +17,11 @@ impl MessageRegistry {
     /// Creates a new [`MessageRegistry`]
     #[inline]
     pub(crate) fn new() -> Self {
-        Self { inner: DashMap::new() }
+        Self {
+            inner: DashMap::new(),
+        }
     }
-    
+
     /// Registers MCP session channel
     #[inline]
     pub(crate) fn register(&self, key: Uuid, sender: UnboundedSender<Message>) {
@@ -35,10 +37,8 @@ impl MessageRegistry {
     /// Sends a message into an appropriate channel
     #[inline]
     pub(crate) fn send(&self, message: Message) -> Result<(), Error> {
-        let session_id = message
-            .session_id()
-            .ok_or(ErrorCode::InvalidParams)?;
-        
+        let session_id = message.session_id().ok_or(ErrorCode::InvalidParams)?;
+
         if let Some(sender) = self.inner.get(session_id) {
             sender
                 .send(message)
@@ -52,9 +52,9 @@ impl MessageRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::mpsc;
     use crate::types::Message;
     use crate::types::notification::Notification;
+    use tokio::sync::mpsc;
 
     #[test]
     fn it_creates_new_registry() {
@@ -92,8 +92,8 @@ mod tests {
         registry.register(session_id, tx);
 
         // Create a test message
-        let test_message = Message::Notification(Notification::new("test", None))
-            .set_session_id(session_id);
+        let test_message =
+            Message::Notification(Notification::new("test", None)).set_session_id(session_id);
 
         // Send the message
         let send_result = registry.send(test_message);
@@ -111,8 +111,8 @@ mod tests {
         let session_id = Uuid::new_v4();
 
         // Create a test message for a non-existent session
-        let test_message = Message::Notification(Notification::new("test", None))
-            .set_session_id(session_id);
+        let test_message =
+            Message::Notification(Notification::new("test", None)).set_session_id(session_id);
 
         // Attempt to send a message
         let send_result = registry.send(test_message);

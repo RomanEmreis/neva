@@ -1,25 +1,25 @@
-﻿//! Transport protocols and utilities for communicating between server and client
+//! Transport protocols and utilities for communicating between server and client
 
-use std::future::Future;
-use tokio_util::sync::CancellationToken;
 use crate::error::{Error, ErrorCode};
 use crate::types::Message;
+use std::future::Future;
+use tokio_util::sync::CancellationToken;
 
-#[cfg(feature = "server")]
-pub(crate) use stdio::StdIoServer;
 #[cfg(feature = "http-server")]
 pub use http::HttpServer;
+#[cfg(feature = "server")]
+pub(crate) use stdio::StdIoServer;
 
-#[cfg(feature = "client")]
-pub(crate) use stdio::StdIoClient;
 #[cfg(feature = "http-client")]
 pub(crate) use http::HttpClient;
+#[cfg(feature = "client")]
+pub(crate) use stdio::StdIoClient;
 
-pub(crate) mod stdio;
 #[cfg(any(feature = "http-server", feature = "http-client"))]
 pub(crate) mod http;
+pub(crate) mod stdio;
 
-/// Describes a sender that can send messages to a client 
+/// Describes a sender that can send messages to a client
 pub(crate) trait Sender {
     /// Sends messages to a client
     fn send(&mut self, resp: Message) -> impl Future<Output = Result<(), Error>>;
@@ -35,10 +35,10 @@ pub(crate) trait Receiver {
 pub(crate) trait Transport {
     type Sender: Sender;
     type Receiver: Receiver;
-    
+
     /// Starts the server with the current transport protocol
     fn start(&mut self) -> CancellationToken;
-    
+
     /// Splits transport into [`Sender`] and [`Receiver`] that can be used in a different threads
     fn split(self) -> (Self::Sender, Self::Receiver);
 }
@@ -88,7 +88,7 @@ pub(crate) enum TransportProtoReceiver {
     None,
     Stdio(stdio::StdIoReceiver),
     #[cfg(any(feature = "http-server", feature = "http-client"))]
-    Http(http::HttpReceiver)
+    Http(http::HttpReceiver),
 }
 
 impl Default for TransportProto {
@@ -107,23 +107,24 @@ impl Sender for TransportProtoSender {
             TransportProtoSender::Http(http) => http.send(resp).await,
             TransportProtoSender::None => Err(Error::new(
                 ErrorCode::InternalError,
-                "Transport protocol must be specified"
+                "Transport protocol must be specified",
             )),
             #[cfg(feature = "server")]
-            TransportProtoSender::BatchCollect { real_sender, responses } => {
-                match resp {
-                    Message::Response(response) => {
-                        if let Ok(mut guard) = responses.lock() {
-                            guard.push(crate::types::MessageEnvelope::Response(response));
-                        }
-                        Ok(())
+            TransportProtoSender::BatchCollect {
+                real_sender,
+                responses,
+            } => match resp {
+                Message::Response(response) => {
+                    if let Ok(mut guard) = responses.lock() {
+                        guard.push(crate::types::MessageEnvelope::Response(response));
                     }
-                    other => {
-                        let mut guard = real_sender.lock().await;
-                        Box::pin(guard.send(other)).await
-                    }
+                    Ok(())
                 }
-            }
+                other => {
+                    let mut guard = real_sender.lock().await;
+                    Box::pin(guard.send(other)).await
+                }
+            },
         }
     }
 }
@@ -137,7 +138,7 @@ impl Receiver for TransportProtoReceiver {
             TransportProtoReceiver::Http(http) => http.recv().await,
             TransportProtoReceiver::None => Err(Error::new(
                 ErrorCode::InternalError,
-                "Transport protocol must be specified"
+                "Transport protocol must be specified",
             )),
         }
     }
@@ -146,7 +147,7 @@ impl Receiver for TransportProtoReceiver {
 impl Transport for TransportProto {
     type Sender = TransportProtoSender;
     type Receiver = TransportProtoReceiver;
-    
+
     #[inline]
     fn start(&mut self) -> CancellationToken {
         match self {
@@ -161,29 +162,41 @@ impl Transport for TransportProto {
             TransportProto::None => CancellationToken::new(),
         }
     }
-    
+
     fn split(self) -> (Self::Sender, Self::Receiver) {
         match self {
             #[cfg(feature = "server")]
             TransportProto::StdIoServer(stdio) => {
                 let (tx, rx) = stdio.split();
-                (TransportProtoSender::Stdio(tx), TransportProtoReceiver::Stdio(rx))
-            },
+                (
+                    TransportProtoSender::Stdio(tx),
+                    TransportProtoReceiver::Stdio(rx),
+                )
+            }
             #[cfg(feature = "http-server")]
             TransportProto::HttpServer(http) => {
                 let (tx, rx) = http.split();
-                (TransportProtoSender::Http(tx), TransportProtoReceiver::Http(rx))
-            },
+                (
+                    TransportProtoSender::Http(tx),
+                    TransportProtoReceiver::Http(rx),
+                )
+            }
             #[cfg(feature = "client")]
             TransportProto::StdioClient(stdio) => {
                 let (tx, rx) = stdio.split();
-                (TransportProtoSender::Stdio(tx), TransportProtoReceiver::Stdio(rx))
-            },
+                (
+                    TransportProtoSender::Stdio(tx),
+                    TransportProtoReceiver::Stdio(rx),
+                )
+            }
             #[cfg(feature = "http-client")]
             TransportProto::HttpClient(http) => {
                 let (tx, rx) = http.split();
-                (TransportProtoSender::Http(tx), TransportProtoReceiver::Http(rx))
-            },
+                (
+                    TransportProtoSender::Http(tx),
+                    TransportProtoReceiver::Http(rx),
+                )
+            }
             TransportProto::None => (TransportProtoSender::None, TransportProtoReceiver::None),
         }
     }

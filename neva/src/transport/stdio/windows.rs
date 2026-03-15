@@ -1,27 +1,26 @@
-﻿//! Windows-specific implementation details
+//! Windows-specific implementation details
 
-use tokio::process::{Command, Child};
+use tokio::process::{Child, Command};
 use windows::{
-    core::{Result, Error},
     Win32::{
         Foundation::{CloseHandle, HANDLE},
         System::{
-            Threading::{
-                OpenThread, OpenProcess, ResumeThread, 
-                PROCESS_ALL_ACCESS, THREAD_SUSPEND_RESUME, CREATE_SUSPENDED
-            },
             Diagnostics::ToolHelp::{
-                CreateToolhelp32Snapshot, Thread32First, Thread32Next, 
-                TH32CS_SNAPTHREAD,
-                THREADENTRY32,
+                CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First,
+                Thread32Next,
             },
             JobObjects::{
-                AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
-                JobObjectExtendedLimitInformation, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-                JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+                SetInformationJobObject,
+            },
+            Threading::{
+                CREATE_SUSPENDED, OpenProcess, OpenThread, PROCESS_ALL_ACCESS, ResumeThread,
+                THREAD_SUSPEND_RESUME,
             },
         },
     },
+    core::{Error, Result},
 };
 
 const CMD: &str = "cmd";
@@ -47,8 +46,8 @@ impl Job {
             (CMD, win_args)
         } else {
             (command, args.clone())
-        }; 
-        
+        };
+
         let (job_handle, child) = create_job_object_with_kill_on_close(command, args)?;
         let job = Self(job_handle);
         Ok((job, child))
@@ -63,7 +62,9 @@ impl Drop for Job {
         // - The handle is owned by this `Job` wrapper, and not aliased elsewhere.
         // - This is the only place where the handle is closed (via `Drop`), ensuring it is closed exactly once.
         // - `CloseHandle` is safe to call on a valid handle, and we ignore the result to prevent panicking during drop.
-        unsafe { _ = CloseHandle(self.0); }
+        unsafe {
+            _ = CloseHandle(self.0);
+        }
     }
 }
 
@@ -123,7 +124,7 @@ fn create_job_object_with_kill_on_close(command: &str, args: Vec<&str>) -> Resul
 
         CloseHandle(thread_handle)?;
         CloseHandle(process_handle)?;
-        
+
         match result {
             Ok(_) => Ok((job, child)),
             Err(_) => Err(Error::from_thread()),
@@ -172,16 +173,18 @@ unsafe fn get_main_thread_id(process_id: u32) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use tokio::process::Command;
+    use crate::transport::stdio::windows::{
+        create_job_object_with_kill_on_close, get_main_thread_id,
+    };
     use std::time::Duration;
+    use tokio::process::Command;
     use windows::Win32::System::Threading::CREATE_SUSPENDED;
-    use crate::transport::stdio::windows::{create_job_object_with_kill_on_close, get_main_thread_id};
 
     #[tokio::test]
     async fn it_tests_job_object_kills_children() -> Result<(), Box<dyn std::error::Error>> {
         let (_job, mut child) = create_job_object_with_kill_on_close(
             "cmd.exe",
-            vec!["/c", "ping", "127.0.0.1", "-n", "5", "-w", "1000"]
+            vec!["/c", "ping", "127.0.0.1", "-n", "5", "-w", "1000"],
         )?;
 
         tokio::time::sleep(Duration::from_secs(1)).await;

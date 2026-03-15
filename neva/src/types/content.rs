@@ -1,28 +1,22 @@
-﻿//! Any Text, Image, Audio, Video content utilities
+//! Any Text, Image, Audio, Video content utilities
 
-use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
-use serde::de::DeserializeOwned;
-use bytes::Bytes;
-use serde_json::Value;
-use crate::shared;
 use crate::error::{Error, ErrorCode};
+use crate::shared;
+use bytes::Bytes;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
 
 use crate::types::helpers::{deserialize_base64_as_bytes, serialize_bytes_as_base64};
 use crate::types::{
-    CallToolResponse, 
-    CallToolRequestParams,
-    Annotations, 
-    Resource, 
-    ResourceContents,
-    Icon,
-    Uri
+    Annotations, CallToolRequestParams, CallToolResponse, Icon, Resource, ResourceContents, Uri,
 };
 
 const CHUNK_SIZE: usize = 8192;
 
 /// Represents the content of the response.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -30,19 +24,19 @@ pub enum Content {
     /// Audio content
     #[serde(rename = "audio")]
     Audio(AudioContent),
-    
+
     /// Image content
     #[serde(rename = "image")]
     Image(ImageContent),
-    
+
     /// Text content
     #[serde(rename = "text")]
     Text(TextContent),
-    
+
     /// Resource link
     #[serde(rename = "resource_link")]
     ResourceLink(ResourceLink),
-    
+
     /// Embedded resource
     #[serde(rename = "resource")]
     Resource(EmbeddedResource),
@@ -54,7 +48,7 @@ pub enum Content {
     /// Tool result content
     #[serde(rename = "tool_result")]
     ToolResult(ToolResult),
-    
+
     /// Empty content
     #[serde(rename = "empty")]
     Empty(EmptyContent),
@@ -65,13 +59,13 @@ pub enum Content {
 pub struct EmptyContent;
 
 /// Text provided to or from an LLM.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema) for details
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextContent {
     /// The text content of the message.
     pub text: String,
-    
+
     /// Optional annotations for the client.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<Annotations>,
@@ -82,7 +76,7 @@ pub struct TextContent {
 }
 
 /// Audio provided to or from an LLM.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema) for details
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioContent {
@@ -91,13 +85,14 @@ pub struct AudioContent {
     /// **Note:** will be serialized as a base64-encoded string
     #[serde(
         serialize_with = "serialize_bytes_as_base64",
-        deserialize_with = "deserialize_base64_as_bytes")]
+        deserialize_with = "deserialize_base64_as_bytes"
+    )]
     pub data: Bytes,
 
     /// The MIME type of the audio content, e.g. "audio/mpeg" or "audio/wav".
     #[serde(rename = "mimeType")]
     pub mime: String,
-    
+
     /// Optional annotations for the client.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<Annotations>,
@@ -108,16 +103,17 @@ pub struct AudioContent {
 }
 
 /// An image provided to or from an LLM.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema) for details
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageContent {
     /// Raw image data.
-    /// 
+    ///
     /// **Note:** will be serialized as a base64-encoded string
     #[serde(
-        serialize_with = "serialize_bytes_as_base64", 
-        deserialize_with = "deserialize_base64_as_bytes")]
+        serialize_with = "serialize_bytes_as_base64",
+        deserialize_with = "deserialize_base64_as_bytes"
+    )]
     pub data: Bytes,
 
     /// The MIME type of the audio content, e.g. "image/jpg" or "image/png".
@@ -134,15 +130,15 @@ pub struct ImageContent {
 }
 
 /// A resource that the server is capable of reading, included in a prompt or tool call result.
-/// 
+///
 /// **Note:** resource links returned by tools are not guaranteed to appear in the results of `resources/list` requests.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema) for details
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceLink {
     /// The URI of this resource.
     pub uri: Uri,
-    
+
     /// Intended for programmatic or logical use  
     /// but used as a display name in past specs or fallback (if a title isn't present).
     pub name: String,
@@ -154,10 +150,10 @@ pub struct ResourceLink {
     /// The MIME type of the resource. If known.
     #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
     pub mime: Option<String>,
-    
+
     /// Intended for UI and end-user contexts - optimized to be human-readable and easily understood,
     /// even by those unfamiliar with domain-specific terminology.
-    /// 
+    ///
     /// If not provided, the name should be used for display (except for Tool,
     /// where `annotations.title` should be given precedence over using `name`, if present).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -166,7 +162,7 @@ pub struct ResourceLink {
     /// A description of what this resource represents.
     #[serde(rename = "description", skip_serializing_if = "Option::is_none")]
     pub descr: Option<String>,
-    
+
     /// Optional annotations for the client.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<Annotations>,
@@ -189,16 +185,16 @@ pub struct ResourceLink {
 }
 
 /// The contents of a resource, embedded into a prompt or tool call result.
-/// 
+///
 /// It is up to the client how best to render embedded resources for the benefit
 /// of the LLM and/or the user.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema) for details
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddedResource {
     /// The resource content of the message.
     pub resource: ResourceContents,
-    
+
     /// Optional annotations for the client.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<Annotations>,
@@ -209,12 +205,12 @@ pub struct EmbeddedResource {
 }
 
 /// Represents a request from the assistant to call a tool.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema) for details
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolUse {
     /// A unique identifier for this tool use.
-    /// 
+    ///
     /// This ID is used to match tool results to their corresponding tool uses.
     pub id: String,
 
@@ -230,31 +226,31 @@ pub struct ToolUse {
 }
 
 /// Represents the result of a tool use, provided by the user back to the assistant.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema) for details
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
     /// The ID of the tool use this result corresponds to.
-    /// 
+    ///
     /// This **MUST** match the ID from a previous [`ToolUse`].
     #[serde(rename = "toolUseId")]
     pub tool_use_id: String,
 
     /// The unstructured result content of the tool use.
-    /// 
+    ///
     /// This has the same format as [`CallToolResponse::content`] and can include text, images, audio, resource links, and embedded resources.
     pub content: Vec<Content>,
-    
+
     /// An optional JSON object that represents the structured result of the tool call.
-    /// 
+    ///
     /// If the tool defined an `outputSchema`, this **SHOULD** conform to that schema.
     #[serde(rename = "structuredContent", skip_serializing_if = "Option::is_none")]
     pub struct_content: Option<Value>,
 
     /// Whether the tool call was unsuccessful.
-    /// 
+    ///
     /// If true, the content typically describes the error that occurred.
-    /// 
+    ///
     /// Default: `false`
     #[serde(default, rename = "isError")]
     pub is_error: bool,
@@ -409,7 +405,7 @@ impl TryFrom<Content> for EmbeddedResource {
 
     #[inline]
     fn try_from(value: Content) -> Result<Self, Self::Error> {
-        match value { 
+        match value {
             Content::Resource(res) => Ok(res),
             _ => Err(Error::new(ErrorCode::InternalError, "Invalid content type")),
         }
@@ -433,9 +429,9 @@ impl From<ToolResult> for Content {
 impl From<ToolUse> for CallToolRequestParams {
     #[inline]
     fn from(value: ToolUse) -> Self {
-        Self { 
-            name: value.name, 
-            args: value.input, 
+        Self {
+            name: value.name,
+            args: value.input,
             meta: None,
             #[cfg(feature = "tasks")]
             task: None,
@@ -448,7 +444,7 @@ impl TryFrom<Content> for ToolUse {
 
     #[inline]
     fn try_from(value: Content) -> Result<Self, Self::Error> {
-        match value { 
+        match value {
             Content::ToolUse(tool_use) => Ok(tool_use),
             _ => Err(Error::new(ErrorCode::InternalError, "Invalid content type")),
         }
@@ -460,7 +456,7 @@ impl TryFrom<Content> for ToolResult {
 
     #[inline]
     fn try_from(value: Content) -> Result<Self, Self::Error> {
-        match value { 
+        match value {
             Content::ToolResult(tool_result) => Ok(tool_result),
             _ => Err(Error::new(ErrorCode::InternalError, "Invalid content type")),
         }
@@ -480,7 +476,7 @@ impl Content {
         let json = serde_json::to_value(json).unwrap();
         Self::from(json)
     }
-    
+
     /// Creates an image [`Content`]
     #[inline]
     pub fn image(data: impl Into<Bytes>) -> Self {
@@ -492,13 +488,13 @@ impl Content {
     pub fn audio(data: impl Into<Bytes>) -> Self {
         Self::Audio(AudioContent::new(data))
     }
-    
+
     /// Creates an embedded resource [`Content`]
     #[inline]
     pub fn resource(resource: impl Into<ResourceContents>) -> Self {
         Self::Resource(EmbeddedResource::new(resource))
     }
-    
+
     /// Creates a resource link [`Content`]
     #[inline]
     pub fn link(resource: impl Into<Resource>) -> Self {
@@ -516,7 +512,7 @@ impl Content {
     pub fn tool_use<N, Args>(name: N, args: Args) -> Self
     where
         N: Into<String>,
-        Args: shared::IntoArgs
+        Args: shared::IntoArgs,
     {
         Self::ToolUse(ToolUse::new(name, args))
     }
@@ -526,11 +522,11 @@ impl Content {
     pub fn empty() -> Self {
         Self::Empty(EmptyContent)
     }
-    
+
     /// Returns the type of the content.
     #[inline]
     pub fn get_type(&self) -> &str {
-        match self { 
+        match self {
             Self::Empty(_) => "empty",
             Self::Audio(_) => "audio",
             Self::Image(_) => "image",
@@ -538,25 +534,25 @@ impl Content {
             Self::ResourceLink(_) => "resource_link",
             Self::Resource(_) => "resource",
             Self::ToolUse(_) => "tool_use",
-            Self::ToolResult(_) => "tool_result"
+            Self::ToolResult(_) => "tool_result",
         }
     }
-    
+
     /// Returns the content as a text content.
     #[inline]
     pub fn as_text(&self) -> Option<&TextContent> {
         match self {
             Self::Text(c) => Some(c),
-            _ => None
+            _ => None,
         }
     }
-    
+
     /// Returns the content as a deserialized struct
     #[inline]
     pub fn as_json<T: DeserializeOwned>(&self) -> Option<T> {
-        match self { 
+        match self {
             Self::Text(c) => serde_json::from_str(&c.text).ok(),
-            _ => None
+            _ => None,
         }
     }
 
@@ -565,7 +561,7 @@ impl Content {
     pub fn as_audio(&self) -> Option<&AudioContent> {
         match self {
             Self::Audio(c) => Some(c),
-            _ => None
+            _ => None,
         }
     }
 
@@ -574,7 +570,7 @@ impl Content {
     pub fn as_image(&self) -> Option<&ImageContent> {
         match self {
             Self::Image(c) => Some(c),
-            _ => None
+            _ => None,
         }
     }
 
@@ -583,7 +579,7 @@ impl Content {
     pub fn as_link(&self) -> Option<&ResourceLink> {
         match self {
             Self::ResourceLink(c) => Some(c),
-            _ => None
+            _ => None,
         }
     }
 
@@ -592,7 +588,7 @@ impl Content {
     pub fn as_resource(&self) -> Option<&EmbeddedResource> {
         match self {
             Self::Resource(c) => Some(c),
-            _ => None
+            _ => None,
         }
     }
 
@@ -601,7 +597,7 @@ impl Content {
     pub fn as_tool(&self) -> Option<&ToolUse> {
         match self {
             Self::ToolUse(c) => Some(c),
-            _ => None
+            _ => None,
         }
     }
 
@@ -610,7 +606,7 @@ impl Content {
     pub fn as_result(&self) -> Option<&ToolResult> {
         match self {
             Self::ToolResult(c) => Some(c),
-            _ => None
+            _ => None,
         }
     }
 }
@@ -622,14 +618,14 @@ impl TextContent {
         Self {
             text: text.into(),
             annotations: None,
-            meta: None
+            meta: None,
         }
     }
 
     /// Sets annotations for the client
     pub fn with_annotations<F>(mut self, config: F) -> Self
     where
-        F: FnOnce(Annotations) -> Annotations
+        F: FnOnce(Annotations) -> Annotations,
     {
         self.annotations = Some(config(Default::default()));
         self
@@ -644,7 +640,7 @@ impl AudioContent {
             data: data.into(),
             mime: "audio/wav".into(),
             annotations: None,
-            meta: None
+            meta: None,
         }
     }
 
@@ -657,12 +653,12 @@ impl AudioContent {
     /// Sets annotations for the client
     pub fn with_annotations<F>(mut self, config: F) -> Self
     where
-        F: FnOnce(Annotations) -> Annotations
+        F: FnOnce(Annotations) -> Annotations,
     {
         self.annotations = Some(config(Default::default()));
         self
     }
-    
+
     /// Returns audio data as a slice of bytes
     pub fn as_slice(&self) -> &[u8] {
         &self.data
@@ -689,7 +685,7 @@ impl ImageContent {
             data: data.into(),
             mime: "image/jpg".into(),
             annotations: None,
-            meta: None
+            meta: None,
         }
     }
 
@@ -702,7 +698,7 @@ impl ImageContent {
     /// Sets annotations for the client
     pub fn with_annotations<F>(mut self, config: F) -> Self
     where
-        F: FnOnce(Annotations) -> Annotations
+        F: FnOnce(Annotations) -> Annotations,
     {
         self.annotations = Some(config(Default::default()));
         self
@@ -746,7 +742,7 @@ impl EmbeddedResource {
         Self {
             resource: resource.into(),
             annotations: None,
-            meta: None
+            meta: None,
         }
     }
 }
@@ -757,13 +753,13 @@ impl ToolUse {
     pub fn new<N, Args>(name: N, args: Args) -> Self
     where
         N: Into<String>,
-        Args: shared::IntoArgs
+        Args: shared::IntoArgs,
     {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             name: name.into(),
             input: args.into_args(),
-            meta: None
+            meta: None,
         }
     }
 }
@@ -777,7 +773,7 @@ impl ToolResult {
             content: resp.content,
             struct_content: resp.struct_content,
             is_error: resp.is_error,
-            meta: None
+            meta: None,
         }
     }
 
@@ -789,7 +785,7 @@ impl ToolResult {
             content: vec![Content::text(error.to_string())],
             struct_content: None,
             is_error: true,
-            meta: None
+            meta: None,
         }
     }
 }
@@ -798,26 +794,25 @@ impl ToolResult {
 mod test {
     use super::*;
     use futures_util::StreamExt;
-    
+
     #[derive(Deserialize)]
     struct Test {
         name: String,
-        age: u32
+        age: u32,
     }
-    
+
     #[test]
     fn it_serializes_text_content_to_json() {
         let content = Content::text("hello world");
         let json = serde_json::to_string(&content).unwrap();
-        
+
         assert_eq!(json, r#"{"type":"text","text":"hello world"}"#);
     }
 
     #[test]
     fn it_deserializes_text_content_to_json() {
         let json = r#"{"type":"text","text":"hello world"}"#;
-        let content = serde_json::from_str::<Content>(json)
-            .unwrap();
+        let content = serde_json::from_str::<Content>(json).unwrap();
 
         assert_eq!(content.as_text().unwrap().text, "hello world");
     }
@@ -825,11 +820,10 @@ mod test {
     #[test]
     fn it_deserializes_structures_text_content_to_json() {
         let json = r#"{"type":"text","text":"{\"name\":\"John\",\"age\":30}"}"#;
-        let content = serde_json::from_str::<Content>(json)
-            .unwrap();
+        let content = serde_json::from_str::<Content>(json).unwrap();
 
         let user: Test = content.as_json().unwrap();
-        
+
         assert_eq!(user.name, "John");
         assert_eq!(user.age, 30);
     }
@@ -839,16 +833,21 @@ mod test {
         let content = Content::audio("hello world");
         let json = serde_json::to_string(&content).unwrap();
 
-        assert_eq!(json, r#"{"type":"audio","data":"aGVsbG8gd29ybGQ=","mimeType":"audio/wav"}"#);
+        assert_eq!(
+            json,
+            r#"{"type":"audio","data":"aGVsbG8gd29ybGQ=","mimeType":"audio/wav"}"#
+        );
     }
 
     #[test]
     fn it_deserializes_audio_content_to_json() {
         let json = r#"{"type":"audio","data":"aGVsbG8gd29ybGQ=","mimeType":"audio/wav"}"#;
-        let content = serde_json::from_str::<Content>(json)
-            .unwrap();
+        let content = serde_json::from_str::<Content>(json).unwrap();
 
-        assert_eq!(String::from_utf8_lossy(content.as_audio().unwrap().as_slice()), "hello world");
+        assert_eq!(
+            String::from_utf8_lossy(content.as_audio().unwrap().as_slice()),
+            "hello world"
+        );
         assert_eq!(content.as_audio().unwrap().mime, "audio/wav");
     }
 
@@ -857,45 +856,52 @@ mod test {
         let content = Content::image("hello world");
         let json = serde_json::to_string(&content).unwrap();
 
-        assert_eq!(json, r#"{"type":"image","data":"aGVsbG8gd29ybGQ=","mimeType":"image/jpg"}"#);
+        assert_eq!(
+            json,
+            r#"{"type":"image","data":"aGVsbG8gd29ybGQ=","mimeType":"image/jpg"}"#
+        );
     }
 
     #[test]
     fn it_deserializes_image_content_to_json() {
         let json = r#"{"type":"image","data":"aGVsbG8gd29ybGQ=","mimeType":"image/jpg"}"#;
-        let content = serde_json::from_str::<Content>(json)
-            .unwrap();
+        let content = serde_json::from_str::<Content>(json).unwrap();
 
-        assert_eq!(String::from_utf8_lossy(content.as_image().unwrap().as_slice()), "hello world");
+        assert_eq!(
+            String::from_utf8_lossy(content.as_image().unwrap().as_slice()),
+            "hello world"
+        );
         assert_eq!(content.as_image().unwrap().mime, "image/jpg");
     }
 
     #[test]
     #[cfg(feature = "server")]
     fn it_serializes_resource_content_to_json() {
-        let content = Content::resource(ResourceContents::new("res://resource")
-            .with_text("hello world")
-            .with_title("some resource")
-            .with_annotations(|a| a
-                .with_audience("user")
-                .with_priority(1.0)));
-        
+        let content = Content::resource(
+            ResourceContents::new("res://resource")
+                .with_text("hello world")
+                .with_title("some resource")
+                .with_annotations(|a| a.with_audience("user").with_priority(1.0)),
+        );
+
         let json = serde_json::to_string(&content).unwrap();
 
-        assert_eq!(json, r#"{"type":"resource","resource":{"uri":"res://resource","text":"hello world","title":"some resource","mimeType":"text/plain","annotations":{"audience":["user"],"priority":1.0}}}"#);
+        assert_eq!(
+            json,
+            r#"{"type":"resource","resource":{"uri":"res://resource","text":"hello world","title":"some resource","mimeType":"text/plain","annotations":{"audience":["user"],"priority":1.0}}}"#
+        );
     }
 
     #[test]
     #[cfg(feature = "server")]
     fn it_deserializes_resource_content_to_json() {
         use crate::types::Role;
-        
+
         let json = r#"{"type":"resource","resource":{"uri":"res://resource","text":"hello world","title":"some resource","mimeType":"text/plain","annotations":{"audience":["user"],"priority":1.0}}}"#;
-        let content = serde_json::from_str::<Content>(json)
-            .unwrap();
+        let content = serde_json::from_str::<Content>(json).unwrap();
 
         let res = &content.as_resource().unwrap().resource;
-        
+
         assert_eq!(res.uri().to_string(), "res://resource");
         assert_eq!(res.mime().unwrap(), "text/plain");
         assert_eq!(res.text().unwrap(), "hello world");
@@ -907,27 +913,29 @@ mod test {
     #[test]
     #[cfg(feature = "server")]
     fn it_serializes_resource_link_content_to_json() {
-        let content = Content::link(Resource::new("res://resource", "some resource")
-            .with_title("some resource")
-            .with_descr("some resource")
-            .with_size(2)
-            .with_annotations(|a| a
-                .with_audience("user")
-                .with_priority(1.0)));
+        let content = Content::link(
+            Resource::new("res://resource", "some resource")
+                .with_title("some resource")
+                .with_descr("some resource")
+                .with_size(2)
+                .with_annotations(|a| a.with_audience("user").with_priority(1.0)),
+        );
 
         let json = serde_json::to_string(&content).unwrap();
 
-        assert_eq!(json, r#"{"type":"resource_link","uri":"res://resource","name":"some resource","size":2,"title":"some resource","description":"some resource","annotations":{"audience":["user"],"priority":1.0}}"#);
+        assert_eq!(
+            json,
+            r#"{"type":"resource_link","uri":"res://resource","name":"some resource","size":2,"title":"some resource","description":"some resource","annotations":{"audience":["user"],"priority":1.0}}"#
+        );
     }
 
     #[test]
     #[cfg(feature = "server")]
     fn it_deserializes_resource_link_content_to_json() {
         use crate::types::Role;
-        
+
         let json = r#"{"type":"resource_link","uri":"res://resource","name":"some resource","size":2,"title":"some resource","description":"some resource","annotations":{"audience":["user"],"priority":1.0}}"#;
-        let content = serde_json::from_str::<Content>(json)
-            .unwrap();
+        let content = serde_json::from_str::<Content>(json).unwrap();
 
         let res = content.as_link().unwrap();
 
@@ -975,7 +983,10 @@ mod test {
 
         let result_string = String::from_utf8(collected_data).expect("Should be valid UTF-8");
         assert_eq!(result_string, test_data);
-        assert!(chunk_count > 1, "Should have multiple chunks for large data");
+        assert!(
+            chunk_count > 1,
+            "Should have multiple chunks for large data"
+        );
     }
 
     #[tokio::test]
@@ -1007,7 +1018,10 @@ mod test {
 
         let result_string = String::from_utf8(collected_data).expect("Should be valid UTF-8");
         assert_eq!(result_string, test_data);
-        assert_eq!(chunk_count, 1, "Exactly CHUNK_SIZE data should produce one chunk");
+        assert_eq!(
+            chunk_count, 1,
+            "Exactly CHUNK_SIZE data should produce one chunk"
+        );
     }
 
     #[tokio::test]
@@ -1044,7 +1058,10 @@ mod test {
 
         let result_string = String::from_utf8(collected_data).expect("Should be valid UTF-8");
         assert_eq!(result_string, test_data);
-        assert!(chunk_count > 1, "Should have multiple chunks for large data");
+        assert!(
+            chunk_count > 1,
+            "Should have multiple chunks for large data"
+        );
     }
 
     #[tokio::test]
@@ -1063,7 +1080,10 @@ mod test {
             max_chunk_size = max_chunk_size.max(chunk_size);
 
             // Each chunk should not exceed CHUNK_SIZE
-            assert!(chunk_size <= CHUNK_SIZE, "Chunk size should not exceed CHUNK_SIZE");
+            assert!(
+                chunk_size <= CHUNK_SIZE,
+                "Chunk size should not exceed CHUNK_SIZE"
+            );
         }
 
         assert_eq!(total_size, test_data.len());
