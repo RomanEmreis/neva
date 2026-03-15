@@ -1,5 +1,5 @@
-﻿use crate::error::Error;
 use super::CallToolRequestParams;
+use crate::error::Error;
 use crate::types::helpers::extract::{RequestArgument, extract_arg};
 
 impl TryFrom<CallToolRequestParams> for () {
@@ -15,7 +15,7 @@ macro_rules! impl_from_call_tool_params {
     ($($T: ident),*) => {
         impl<$($T: RequestArgument<Error = Error>),+> TryFrom<CallToolRequestParams> for ($($T,)+) {
             type Error = Error;
-            
+
             #[inline]
             fn try_from(params: CallToolRequestParams) -> Result<Self, Self::Error> {
                 let args = params.args.unwrap_or_default();
@@ -39,25 +39,23 @@ impl_from_call_tool_params! { T1, T2, T3, T4, T5 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use serde_json::{json, Value};
-    use crate::types::{Meta, ProgressToken, request::RequestParamsMeta};
     use super::*;
-    
+    use crate::types::{Meta, ProgressToken, request::RequestParamsMeta};
+    use serde_json::{Value, json};
+    use std::collections::HashMap;
+
     #[test]
     fn it_extracts_args() {
         let params = CallToolRequestParams {
-            args: Some(HashMap::from([
-                ("arg".into(), json!({ "test": 1 }))
-            ])),
+            args: Some(HashMap::from([("arg".into(), json!({ "test": 1 }))])),
             meta: None,
             name: "tool".into(),
             #[cfg(feature = "tasks")]
-            task: None
+            task: None,
         };
-        
+
         let arg: (Value,) = params.try_into().unwrap();
-        
+
         assert_eq!(arg.0, json!({ "test": 1 }));
     }
 
@@ -65,9 +63,7 @@ mod tests {
     #[allow(clippy::useless_conversion)]
     fn it_extracts_params() {
         let params = CallToolRequestParams {
-            args: Some(HashMap::from([
-                ("arg".into(), json!(22))
-            ])),
+            args: Some(HashMap::from([("arg".into(), json!(22))])),
             meta: None,
             name: "tool".into(),
             #[cfg(feature = "tasks")]
@@ -77,9 +73,7 @@ mod tests {
         let arg: CallToolRequestParams = params.try_into().unwrap();
 
         assert_eq!(arg.name, "tool");
-        assert_eq!(arg.args, Some(HashMap::from([
-            ("arg".into(), json!(22))
-        ])));
+        assert_eq!(arg.args, Some(HashMap::from([("arg".into(), json!(22))])));
     }
 
     #[test]
@@ -90,7 +84,7 @@ mod tests {
                 progress_token: None,
                 context: None,
                 #[cfg(feature = "tasks")]
-                task: None
+                task: None,
             }),
             args: None,
             #[cfg(feature = "tasks")]
@@ -110,7 +104,7 @@ mod tests {
                 progress_token: Some(ProgressToken::Number(5)),
                 context: None,
                 #[cfg(feature = "tasks")]
-                task: None
+                task: None,
             }),
             args: None,
             #[cfg(feature = "tasks")]

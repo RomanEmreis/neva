@@ -54,7 +54,9 @@ async fn say_hello_to(name: String) -> String {
     }"#
 )]
 async fn say_json(arg: Json<Payload>) -> Json<Results> {
-    let result = Results { message: format!("{}, {}!", arg.say, arg.name) };
+    let result = Results {
+        message: format!("{}, {}!", arg.say, arg.name),
+    };
     result.into()
 }
 
@@ -70,7 +72,9 @@ async fn say_json(arg: Json<Payload>) -> Json<Results> {
     }"#
 )]
 async fn say_out_json(say: String, name: String) -> Json<Results> {
-    let result = Results { message: format!("{say}, {name}!") };
+    let result = Results {
+        message: format!("{say}, {name}!"),
+    };
     result.into()
 }
 
@@ -91,7 +95,8 @@ async fn tool_error() -> Result<String, Error> {
 #[tool(descr = "Resource metadata")]
 async fn read_resource(ctx: Context, res: Uri) -> Result<Content, Error> {
     let result = ctx.resource(res).await?;
-    let resource = result.contents
+    let resource = result
+        .contents
         .into_iter()
         .next()
         .expect("No resource contents");

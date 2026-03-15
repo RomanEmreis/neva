@@ -1,13 +1,10 @@
-﻿//! Helper Macros
+//! Helper Macros
 
 use super::{PropertyType, TypeCategory};
-use serde_json::Value;
 use crate::types::{
-    Json, Meta, Uri,
-    CallToolRequestParams,
-    ReadResourceRequestParams,
-    GetPromptRequestParams
+    CallToolRequestParams, GetPromptRequestParams, Json, Meta, ReadResourceRequestParams, Uri,
 };
+use serde_json::Value;
 
 macro_rules! impl_type_category {
     ($t:ty, $cat:expr) => {

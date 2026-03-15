@@ -46,7 +46,10 @@ mod tests {
 
     #[test]
     fn it_splits_on_char1() {
-        assert_eq!(MemChr::split("res://a/b", b'/').collect::<Vec<_>>(), ["res:", "a", "b"]);
+        assert_eq!(
+            MemChr::split("res://a/b", b'/').collect::<Vec<_>>(),
+            ["res:", "a", "b"]
+        );
     }
 
     #[test]
@@ -66,6 +69,9 @@ mod tests {
 
     #[test]
     fn it_splits_on_empty() {
-        assert_eq!(MemChr::split("", b'/').collect::<Vec<_>>(), Vec::<&str>::new());
+        assert_eq!(
+            MemChr::split("", b'/').collect::<Vec<_>>(),
+            Vec::<&str>::new()
+        );
     }
 }

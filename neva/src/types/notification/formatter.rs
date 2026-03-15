@@ -1,25 +1,16 @@
-﻿//! A tracing/logging formatter for notifications
+//! A tracing/logging formatter for notifications
 
 use std::collections::BTreeMap;
-use tracing::{Event, Subscriber, Level};
 use tracing::level_filters::LevelFilter;
+use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::{
-    fmt::{
-        format::FormatFields, 
-        FormatEvent, 
-        FmtContext, 
-        format::Writer
-    },
     field::Visit,
+    fmt::{FmtContext, FormatEvent, format::FormatFields, format::Writer},
     registry::LookupSpan,
 };
 
-use crate::types::notification::{
-    LogMessage, 
-    LoggingLevel, 
-    Notification
-};
 use crate::types::ProgressToken;
+use crate::types::notification::{LogMessage, LoggingLevel, Notification};
 
 /// A formatter that formats tracing events into MCP notification logs
 #[allow(missing_debug_implementations)]
@@ -28,12 +19,12 @@ pub struct NotificationFormatter;
 impl From<&Level> for LoggingLevel {
     #[inline]
     fn from(level: &Level) -> Self {
-        match *level { 
+        match *level {
             Level::ERROR => LoggingLevel::Error,
             Level::WARN => LoggingLevel::Warning,
             Level::INFO => LoggingLevel::Info,
             Level::DEBUG => LoggingLevel::Debug,
-            Level::TRACE => LoggingLevel::Debug
+            Level::TRACE => LoggingLevel::Debug,
         }
     }
 }
@@ -47,7 +38,7 @@ impl From<LevelFilter> for LoggingLevel {
             LevelFilter::INFO => LoggingLevel::Info,
             LevelFilter::DEBUG => LoggingLevel::Debug,
             LevelFilter::TRACE => LoggingLevel::Debug,
-            _ => LoggingLevel::Info
+            _ => LoggingLevel::Info,
         }
     }
 }
@@ -106,7 +97,7 @@ pub(super) fn build_notification(event: &Event<'_>) -> Notification {
     let meta = event.metadata();
     let level = meta.level();
     let fields = extract_fields(event);
-    
+
     match meta.target() {
         "progress" => {
             let token = fields
@@ -121,10 +112,8 @@ pub(super) fn build_notification(event: &Event<'_>) -> Notification {
                 .get("value")
                 .map(|v| v.to_string().replace("\"", "").parse().unwrap());
 
-            token.unwrap()
-                .notify(value.unwrap(), total)
-                .into()
-        },
+            token.unwrap().notify(value.unwrap(), total).into()
+        }
         _ => {
             let logger = fields
                 .get("logger")
@@ -179,8 +168,8 @@ impl Visit for Visitor<'_> {
         // Only use this if nothing else handled it
         if !self.map.contains_key(field.name()) {
             let formatted = format!("{value:?}");
-            let value = serde_json::to_value(&formatted)
-                .unwrap_or(serde_json::Value::String(formatted));
+            let value =
+                serde_json::to_value(&formatted).unwrap_or(serde_json::Value::String(formatted));
             self.map.insert(field.name(), value);
         }
     }

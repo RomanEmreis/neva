@@ -1,37 +1,33 @@
-﻿//! Request handling utilities
+//! Request handling utilities
 
-use std::sync::Arc;
-use tokio::{sync::RwLock, time::timeout};
-use std::{time::Duration, sync::atomic::{AtomicI64, Ordering}};
 use crate::client::notification_handler::NotificationsHandler;
 use crate::{
     client::options::McpOptions,
     error::{Error, ErrorCode},
     shared::RequestQueue,
     transport::{
-        Receiver, Sender, 
-        Transport, TransportProto, TransportProtoReceiver, TransportProtoSender
+        Receiver, Sender, Transport, TransportProto, TransportProtoReceiver, TransportProtoSender,
     },
     types::{
-        IntoResponse, Response, Message, MessageBatch, MessageEnvelope,
-        RequestId, Request,
-        notification::Notification,
-        Root, root::ListRootsResult,
+        IntoResponse, Message, MessageBatch, MessageEnvelope, Request, RequestId, Response, Root,
+        elicitation::ElicitationHandler, notification::Notification, root::ListRootsResult,
         sampling::SamplingHandler,
-        elicitation::ElicitationHandler
-    }
+    },
 };
+use std::sync::Arc;
+use std::{
+    sync::atomic::{AtomicI64, Ordering},
+    time::Duration,
+};
+use tokio::{sync::RwLock, time::timeout};
 
 #[cfg(feature = "tasks")]
 use crate::{
     shared::TaskTracker,
     types::{
-        Task, Pagination, CreateTaskResult,
-        CreateMessageRequestParams, 
-        ElicitRequestParams, 
-        ListTasksRequestParams, ListTasksResult,
-        CancelTaskRequestParams,
-        GetTaskPayloadRequestParams, GetTaskRequestParams
+        CancelTaskRequestParams, CreateMessageRequestParams, CreateTaskResult, ElicitRequestParams,
+        GetTaskPayloadRequestParams, GetTaskRequestParams, ListTasksRequestParams, ListTasksResult,
+        Pagination, Task,
     },
 };
 
@@ -41,7 +37,7 @@ const DEFAULT_PAGE_SIZE: usize = 10;
 struct Roots {
     /// Cached list of [`Root`]
     inner: Arc<RwLock<Vec<Root>>>,
-    
+
     /// Notifier for Roots cache updates
     sender: Option<tokio::sync::mpsc::Sender<Vec<Root>>>,
 }
@@ -49,7 +45,7 @@ struct Roots {
 pub(super) struct RequestHandler {
     /// Request counter
     counter: AtomicI64,
-    
+
     /// Request timeout
     timeout: Duration,
 
@@ -58,7 +54,7 @@ pub(super) struct RequestHandler {
 
     /// Current transport sender handle
     sender: TransportProtoSender,
-    
+
     /// Cached list of [`Root`]
     roots: Roots,
 
@@ -73,20 +69,23 @@ pub(super) struct RequestHandler {
 
     /// Task tracker for client sampling tasks.
     #[cfg(feature = "tasks")]
-    tasks: Arc<TaskTracker>
+    tasks: Arc<TaskTracker>,
 }
 
 impl Roots {
     fn new(options: &McpOptions, notifications_sender: &TransportProtoSender) -> Self {
         let mut roots = Self {
             inner: Arc::new(RwLock::new(options.roots())),
-            sender: None
+            sender: None,
         };
 
-        if options.roots_capability().is_some_and(|roots| roots.list_changed) {
+        if options
+            .roots_capability()
+            .is_some_and(|roots| roots.list_changed)
+        {
             let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<Root>>(1);
-            roots.sender = Some(tx); 
-        
+            roots.sender = Some(tx);
+
             let roots = roots.inner.clone();
             let mut sender = notifications_sender.clone();
             tokio::spawn(async move {
@@ -94,9 +93,8 @@ impl Roots {
                     let mut current_roots = roots.write().await;
                     *current_roots = new_roots;
 
-                    let changed = Notification::new(
-                        crate::types::root::commands::LIST_CHANGED,
-                        None);
+                    let changed =
+                        Notification::new(crate::types::root::commands::LIST_CHANGED, None);
                     if let Err(_err) = sender.send(changed.into()).await {
                         #[cfg(feature = "tracing")]
                         tracing::error!("Error sending notification: {:?}", _err);
@@ -104,10 +102,10 @@ impl Roots {
                 }
             });
         }
-        
+
         roots
     }
-    
+
     fn update(&mut self, roots: Vec<Root>) {
         match self.sender.as_mut() {
             None => (),
@@ -115,16 +113,16 @@ impl Roots {
                 _ = sender
                     .try_send(roots)
                     .map_err(|err| Error::new(ErrorCode::InternalError, err))
-            },
+            }
         }
-    } 
+    }
 }
 
 impl RequestHandler {
     /// Creates a new [`RequestHandler`]
     pub(super) fn new(transport: TransportProto, options: &McpOptions) -> Self {
         let (tx, rx) = transport.split();
-        
+
         let handler = Self {
             roots: Roots::new(options, &tx),
             counter: AtomicI64::new(1),
@@ -135,9 +133,9 @@ impl RequestHandler {
             elicitation_handler: options.elicitation_handler.clone(),
             notification_handler: options.notification_handler.clone(),
             #[cfg(feature = "tasks")]
-            tasks: Arc::new(TaskTracker::new())
+            tasks: Arc::new(TaskTracker::new()),
         };
-        
+
         handler.start(rx)
     }
 
@@ -169,7 +167,10 @@ impl RequestHandler {
 
         match timeout(self.timeout, receiver).await {
             Ok(Ok(resp)) => Ok(resp),
-            Ok(Err(_)) => Err(Error::new(ErrorCode::InternalError, "Response channel closed")),
+            Ok(Err(_)) => Err(Error::new(
+                ErrorCode::InternalError,
+                "Response channel closed",
+            )),
             Err(_) => {
                 _ = self.pending.pop(&id);
                 Err(Error::new(ErrorCode::Timeout, "Request timed out"))
@@ -223,13 +224,16 @@ impl RequestHandler {
     pub(super) async fn send_response(&mut self, resp: Response) {
         send_response_impl(&mut self.sender, resp).await;
     }
-    
+
     /// Sends a notification to MCP server
     #[inline]
-    pub(super) async fn send_notification(&mut self, notification: Notification) -> Result<(), Error> {
+    pub(super) async fn send_notification(
+        &mut self,
+        notification: Notification,
+    ) -> Result<(), Error> {
         self.sender.send(notification.into()).await
     }
-    
+
     /// Updates [`Root`] cache
     pub(super) fn notify_roots_changed(&mut self, roots: Vec<Root>) {
         self.roots.update(roots);
@@ -246,7 +250,7 @@ impl RequestHandler {
 
         #[cfg(feature = "tasks")]
         let tasks = self.tasks.clone();
-        
+
         tokio::task::spawn(async move {
             while let Ok(msg) = rx.recv().await {
                 match msg {
@@ -259,12 +263,13 @@ impl RequestHandler {
                             &elicitation_handler,
                             #[cfg(feature = "tasks")]
                             &tasks,
-                        ).await;
+                        )
+                        .await;
                         send_response_impl(&mut sender, resp).await;
-                    },
+                    }
                     Message::Notification(notification) => {
                         dispatch_notification(notification, &notification_handler).await;
-                    },
+                    }
                     Message::Batch(batch) => {
                         // JSON-RPC 2.0 §6 allows either peer to send a batch
                         // containing any mix of Requests, Notifications, and
@@ -298,19 +303,21 @@ impl RequestHandler {
                                         &elicitation_handler,
                                         #[cfg(feature = "tasks")]
                                         &tasks,
-                                    ).await;
+                                    )
+                                    .await;
                                     responses.push(MessageEnvelope::Response(resp));
-                                },
+                                }
                                 MessageEnvelope::Notification(notification) => {
-                                    dispatch_notification(notification, &notification_handler).await;
-                                },
+                                    dispatch_notification(notification, &notification_handler)
+                                        .await;
+                                }
                             }
                         }
                         // MessageBatch::new returns Err for an empty vec (all
                         // items were notifications), in which case no reply is
                         // sent — correct per JSON-RPC 2.0 §6.
                         if let Ok(batch) = MessageBatch::new(responses)
-                            && let Err(_err) = sender.send(Message::Batch(batch)).await 
+                            && let Err(_err) = sender.send(Message::Batch(batch)).await
                         {
                             #[cfg(feature = "tracing")]
                             tracing::error!("Error sending batch response: {_err:?}");
@@ -341,23 +348,28 @@ async fn dispatch_request(
     roots: &Arc<RwLock<Vec<Root>>>,
     sampling_handler: &Option<SamplingHandler>,
     elicitation_handler: &Option<ElicitationHandler>,
-    #[cfg(feature = "tasks")]
-    tasks: &Arc<TaskTracker>,
+    #[cfg(feature = "tasks")] tasks: &Arc<TaskTracker>,
 ) -> Response {
     let req_id = req.id();
     match req.method.as_str() {
-        crate::types::sampling::commands::CREATE => handle_sampling(
-            req,
-            sampling_handler,
-            #[cfg(feature = "tasks")]
-            tasks,
-        ).await,
-        crate::types::elicitation::commands::CREATE => handle_elicitation(
-            req,
-            elicitation_handler,
-            #[cfg(feature = "tasks")]
-            tasks,
-        ).await,
+        crate::types::sampling::commands::CREATE => {
+            handle_sampling(
+                req,
+                sampling_handler,
+                #[cfg(feature = "tasks")]
+                tasks,
+            )
+            .await
+        }
+        crate::types::elicitation::commands::CREATE => {
+            handle_elicitation(
+                req,
+                elicitation_handler,
+                #[cfg(feature = "tasks")]
+                tasks,
+            )
+            .await
+        }
         crate::types::root::commands::LIST => handle_roots(req, roots).await,
         #[cfg(feature = "tasks")]
         crate::types::task::commands::RESULT => get_task_result(req, tasks).await,
@@ -410,22 +422,24 @@ async fn handle_sampling(req: Request, handler: &Option<SamplingHandler>) -> Res
         result.into_response(id)
     } else {
         Response::error(
-            id, 
+            id,
             Error::new(
-                ErrorCode::MethodNotFound, 
-                "Client does not support sampling requests"))
+                ErrorCode::MethodNotFound,
+                "Client does not support sampling requests",
+            ),
+        )
     }
 }
 
 #[inline]
 #[cfg(feature = "tasks")]
 async fn handle_sampling(
-    req: Request, 
+    req: Request,
     handler: &Option<SamplingHandler>,
-    tasks: &Arc<TaskTracker>
+    tasks: &Arc<TaskTracker>,
 ) -> Response {
     let id = req.id();
-    if let Some(handler) = &handler  {
+    if let Some(handler) = &handler {
         let Some(params) = req.params else {
             return Response::error(id, Error::from(ErrorCode::InvalidParams));
         };
@@ -455,8 +469,12 @@ async fn handle_sampling(
         }
     } else {
         Response::error(
-            id, 
-            Error::new(ErrorCode::MethodNotFound, "Client does not support sampling requests"))
+            id,
+            Error::new(
+                ErrorCode::MethodNotFound,
+                "Client does not support sampling requests",
+            ),
+        )
     }
 }
 
@@ -464,7 +482,7 @@ async fn handle_sampling(
 #[cfg(not(feature = "tasks"))]
 async fn handle_elicitation(req: Request, handler: &Option<ElicitationHandler>) -> Response {
     let id = req.id();
-    if let Some(handler) = &handler  {
+    if let Some(handler) = &handler {
         let Some(params) = req.params else {
             return Response::error(id, Error::from(ErrorCode::InvalidParams));
         };
@@ -476,27 +494,32 @@ async fn handle_elicitation(req: Request, handler: &Option<ElicitationHandler>) 
     } else {
         Response::error(
             id,
-            Error::new(ErrorCode::MethodNotFound, "Client does not support elicitation requests"))
+            Error::new(
+                ErrorCode::MethodNotFound,
+                "Client does not support elicitation requests",
+            ),
+        )
     }
 }
 
 #[inline]
 #[cfg(feature = "tasks")]
 async fn handle_elicitation(
-    req: Request, 
+    req: Request,
     handler: &Option<ElicitationHandler>,
-    tasks: &Arc<TaskTracker>
+    tasks: &Arc<TaskTracker>,
 ) -> Response {
     let id = req.id();
-    if let Some(handler) = &handler  {
+    if let Some(handler) = &handler {
         let Some(params) = req.params else {
             return Response::error(id, Error::from(ErrorCode::InvalidParams));
         };
         let Ok(params) = serde_json::from_value(params) else {
             return Response::error(id, Error::from(ErrorCode::ParseError));
         };
-        if let ElicitRequestParams::Url(url_params) = &params && 
-            let Some(task_meta) = &url_params.task {
+        if let ElicitRequestParams::Url(url_params) = &params
+            && let Some(task_meta) = &url_params.task
+        {
             let task = Task::from(*task_meta);
             let handle = tasks.track(task.clone());
 
@@ -520,36 +543,33 @@ async fn handle_elicitation(
     } else {
         Response::error(
             id,
-            Error::new(ErrorCode::MethodNotFound, "Client does not support elicitation requests"))
+            Error::new(
+                ErrorCode::MethodNotFound,
+                "Client does not support elicitation requests",
+            ),
+        )
     }
 }
 
-
 #[inline]
 #[cfg(feature = "tasks")]
-fn handle_list_tasks(
-    req: Request, 
-    tasks: &Arc<TaskTracker>
-) -> Response {
+fn handle_list_tasks(req: Request, tasks: &Arc<TaskTracker>) -> Response {
     let id = req.id();
     let Some(params) = req.params else {
         return Response::error(id, Error::from(ErrorCode::InvalidParams));
     };
     let params: Option<ListTasksRequestParams> = serde_json::from_value(params).ok();
-    ListTasksResult::from(tasks
-        .tasks()
-        .paginate(
-            params.and_then(|p| p.cursor), 
-            DEFAULT_PAGE_SIZE))
-        .into_response(id)
+    ListTasksResult::from(
+        tasks
+            .tasks()
+            .paginate(params.and_then(|p| p.cursor), DEFAULT_PAGE_SIZE),
+    )
+    .into_response(id)
 }
 
 #[inline]
 #[cfg(feature = "tasks")]
-fn cancel_task(
-    req: Request, 
-    tasks: &Arc<TaskTracker>
-) -> Response {
+fn cancel_task(req: Request, tasks: &Arc<TaskTracker>) -> Response {
     let id = req.id();
     let Some(params) = req.params else {
         return Response::error(id, Error::from(ErrorCode::InvalidParams));
@@ -559,18 +579,13 @@ fn cancel_task(
     };
     match tasks.cancel(&params.id) {
         Ok(task) => task.into_response(id),
-        Err(err) => Response::error(
-            id,
-            Error::new(ErrorCode::InvalidParams, err.to_string()))
+        Err(err) => Response::error(id, Error::new(ErrorCode::InvalidParams, err.to_string())),
     }
 }
 
 #[inline]
 #[cfg(feature = "tasks")]
-fn get_task(
-    req: Request, 
-    tasks: &Arc<TaskTracker>
-) -> Response {
+fn get_task(req: Request, tasks: &Arc<TaskTracker>) -> Response {
     let id = req.id();
     let Some(params) = req.params else {
         return Response::error(id, Error::from(ErrorCode::InvalidParams));
@@ -580,18 +595,13 @@ fn get_task(
     };
     match tasks.get_status(&params.id) {
         Ok(task) => task.into_response(id),
-        Err(err) => Response::error(
-            id,
-            Error::new(ErrorCode::InvalidParams, err.to_string()))
+        Err(err) => Response::error(id, Error::new(ErrorCode::InvalidParams, err.to_string())),
     }
 }
 
 #[inline]
 #[cfg(feature = "tasks")]
-async fn get_task_result(
-    req: Request, 
-    tasks: &Arc<TaskTracker>
-) -> Response {
+async fn get_task_result(req: Request, tasks: &Arc<TaskTracker>) -> Response {
     let id = req.id();
     let Some(params) = req.params else {
         return Response::error(id, Error::from(ErrorCode::InvalidParams));
@@ -601,9 +611,7 @@ async fn get_task_result(
     };
     match tasks.get_result(&params.id).await {
         Ok(task) => task.into_response(id),
-        Err(err) => Response::error(
-            id,
-            Error::new(ErrorCode::InvalidParams, err.to_string()))
+        Err(err) => Response::error(id, Error::new(ErrorCode::InvalidParams, err.to_string())),
     }
 }
 
@@ -619,7 +627,9 @@ async fn get_task_result(
 fn validate_batch_ids(items: &[MessageEnvelope]) -> Result<(), Error> {
     let mut seen = std::collections::HashSet::new();
     for envelope in items {
-        if let MessageEnvelope::Request(req) = envelope && !seen.insert(req.id()) {
+        if let MessageEnvelope::Request(req) = envelope
+            && !seen.insert(req.id())
+        {
             return Err(Error::new(
                 ErrorCode::InvalidRequest,
                 "batch contains duplicate request IDs",
@@ -635,9 +645,9 @@ mod tests {
 
     #[tokio::test]
     async fn batch_responses_are_distributed_individually() {
-        use tokio::time::{timeout, Duration};
         use crate::types::MessageBatch;
         use serde_json::json;
+        use tokio::time::{Duration, timeout};
 
         let queue = RequestQueue::default();
 
@@ -656,7 +666,8 @@ mod tests {
             MessageEnvelope::Response(resp1),
             MessageEnvelope::Request(dummy_req),
             MessageEnvelope::Response(resp2),
-        ]).expect("batch must not be empty");
+        ])
+        .expect("batch must not be empty");
 
         // Simulate the batch receive arm
         for envelope in batch {
@@ -677,9 +688,13 @@ mod tests {
 
     #[test]
     fn validate_batch_ids_rejects_duplicate_request_ids() {
-        let req = |id: i64| MessageEnvelope::Request(
-            Request::new(Some(RequestId::Number(id)), "ping", None::<()>)
-        );
+        let req = |id: i64| {
+            MessageEnvelope::Request(Request::new(
+                Some(RequestId::Number(id)),
+                "ping",
+                None::<()>,
+            ))
+        };
 
         // Unique IDs — should pass
         assert!(validate_batch_ids(&[req(1), req(2), req(3)]).is_ok());
@@ -691,12 +706,11 @@ mod tests {
 
     #[test]
     fn validate_batch_ids_ignores_notifications() {
-        let notif = MessageEnvelope::Notification(
-            crate::types::notification::Notification::new("foo", None)
-        );
-        let req = MessageEnvelope::Request(
-            Request::new(Some(RequestId::Number(1)), "ping", None::<()>)
-        );
+        let notif = MessageEnvelope::Notification(crate::types::notification::Notification::new(
+            "foo", None,
+        ));
+        let req =
+            MessageEnvelope::Request(Request::new(Some(RequestId::Number(1)), "ping", None::<()>));
         // Two notifications with no ID fields — should not trigger duplicate check
         assert!(validate_batch_ids(&[notif.clone(), req, notif]).is_ok());
     }
@@ -710,13 +724,12 @@ mod tests {
 
         // Simulate what send_batch does for a [Notification, Request, Notification] batch
         let notification_1 = MessageEnvelope::Notification(
-            crate::types::notification::Notification::new("foo", None)
+            crate::types::notification::Notification::new("foo", None),
         );
-        let request = MessageEnvelope::Request(
-            Request::new(Some(req_id.clone()), "ping", None::<()>)
-        );
+        let request =
+            MessageEnvelope::Request(Request::new(Some(req_id.clone()), "ping", None::<()>));
         let notification_2 = MessageEnvelope::Notification(
-            crate::types::notification::Notification::new("bar", None)
+            crate::types::notification::Notification::new("bar", None),
         );
 
         let items = vec![notification_1, request, notification_2];
@@ -729,7 +742,11 @@ mod tests {
             }
         }
 
-        assert_eq!(receivers.len(), 1, "exactly one receiver for the one Request");
+        assert_eq!(
+            receivers.len(),
+            1,
+            "exactly one receiver for the one Request"
+        );
         assert_eq!(receivers[0].0, req_id, "receiver ID matches request ID");
     }
 }

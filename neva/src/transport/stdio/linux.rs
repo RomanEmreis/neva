@@ -1,10 +1,10 @@
 //! Linux-specific implementation details
 
-use tokio::process::{Child, Command};
 use nix::{
-    sys::signal::{killpg, Signal},
+    sys::signal::{Signal, killpg},
     unistd::Pid,
 };
+use tokio::process::{Child, Command};
 
 /// Process group wrapper for automatic handle closing
 pub(super) struct Job(i32);
@@ -26,7 +26,10 @@ impl Drop for Job {
 
 /// Creates a process in a new group with automatic termination
 #[inline]
-pub(super) fn create_process_group(command: &str, args: &Vec<&str>) -> std::io::Result<(i32, Child)> {
+pub(super) fn create_process_group(
+    command: &str,
+    args: &Vec<&str>,
+) -> std::io::Result<(i32, Child)> {
     let child = Command::new(command)
         .args(args)
         .stdin(std::process::Stdio::piped())
@@ -35,7 +38,7 @@ pub(super) fn create_process_group(command: &str, args: &Vec<&str>) -> std::io::
         .spawn()?;
 
     let group_pid = child.id().expect("Failed to get process id");
-    
+
     Ok((group_pid as i32, child))
 }
 
@@ -47,15 +50,12 @@ mod tests {
 
     #[tokio::test]
     async fn it_tests_process_group_kill() {
-        let (job, _) = create_process_group(
-            "sh",
-            &vec!["-c", "sleep 300 & sleep 300"]
-        ).unwrap();
-        
+        let (job, _) = create_process_group("sh", &vec!["-c", "sleep 300 & sleep 300"]).unwrap();
+
         let job = Job(job);
 
         tokio::time::sleep(Duration::from_millis(100)).await;
-        
+
         drop(job);
 
         let output = Command::new("pgrep")

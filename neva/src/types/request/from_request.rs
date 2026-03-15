@@ -1,8 +1,8 @@
-﻿//! Utilities for extraction params from Request
+//! Utilities for extraction params from Request
 
-use serde::de::DeserializeOwned;
 use crate::error::{Error, ErrorCode};
 use crate::types::Request;
+use serde::de::DeserializeOwned;
 
 /// A trait that helps the extract typed _params_ from request
 pub trait FromRequest: Sized {

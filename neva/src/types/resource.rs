@@ -1,78 +1,75 @@
-﻿//! Represents an MCP resource
+//! Represents an MCP resource
 
-use serde::{Deserialize, Serialize};
-use crate::types::{Annotations, Cursor, Icon};
-use crate::types::request::RequestParamsMeta;
+#[cfg(feature = "server")]
+use crate::app::{
+    context::Context,
+    handler::{FromHandlerParams, HandlerParams},
+};
 #[cfg(feature = "server")]
 use crate::error::Error;
 #[cfg(feature = "server")]
 use crate::types::request::FromRequest;
+use crate::types::request::RequestParamsMeta;
+use crate::types::{Annotations, Cursor, Icon};
 #[cfg(feature = "server")]
-use crate::types::{RequestId, Response, IntoResponse, Request, Page};
-#[cfg(feature = "server")]
-use crate::app::{context::Context, handler::{FromHandlerParams, HandlerParams}};
+use crate::types::{IntoResponse, Page, Request, RequestId, Response};
+use serde::{Deserialize, Serialize};
 
-pub use uri::Uri;
 pub use read_resource_result::{
-    ReadResourceResult, 
-    ResourceContents, 
-    TextResourceContents, 
-    BlobResourceContents,
-    JsonResourceContents,
-    EmptyResourceContents
+    BlobResourceContents, EmptyResourceContents, JsonResourceContents, ReadResourceResult,
+    ResourceContents, TextResourceContents,
 };
 pub use template::{
-    ResourceTemplate,
-    ListResourceTemplatesResult, 
-    ListResourceTemplatesRequestParams
+    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate,
 };
+pub use uri::Uri;
 
 #[cfg(all(feature = "server", feature = "di"))]
-pub(crate) use from_request::{ResourceArgument, Payload, Source};
+pub(crate) use from_request::{Payload, ResourceArgument, Source};
 
 #[cfg(feature = "server")]
 pub(crate) use route::Route;
 
-mod read_resource_result;
-mod uri;
-pub(crate) mod template;
-#[cfg(feature = "server")]
-pub(crate) mod route;
 #[cfg(feature = "server")]
 mod from_request;
+mod read_resource_result;
+#[cfg(feature = "server")]
+pub(crate) mod route;
+pub(crate) mod template;
+mod uri;
 
 /// List of commands for Resources
 pub mod commands {
     /// Command name that returns a list of resources available on MCP server
     pub const LIST: &str = "resources/list";
-    
+
     /// Notification name that indicates that the list of resources has changed.
     pub const LIST_CHANGED: &str = "notifications/resources/list_changed";
-    
+
     /// Command name that returns a list of resource templates available on MCP server.
     pub const TEMPLATES_LIST: &str = "resources/templates/list";
-    
+
     /// Command name that returns the resource data
     pub const READ: &str = "resources/read";
-    
+
     /// Command name that subscribes to resource updates.
     pub const SUBSCRIBE: &str = "resources/subscribe";
-    
+
     /// Command name that unsubscribes from resource updates.
     pub const UNSUBSCRIBE: &str = "resources/unsubscribe";
-    
+
     /// Notification name that indicates that the resource has been updated.
     pub const UPDATED: &str = "notifications/resources/updated";
 }
 
 /// Represents a known resource that the server is capable of reading.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Resource {
     /// The URI of this resource.
     pub uri: Uri,
-    
+
     /// A human-readable name for this resource.
     pub name: String,
 
@@ -118,7 +115,7 @@ pub struct Resource {
 }
 
 /// Sent from the client to request a list of resources the server has.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ListResourcesRequestParams {
@@ -129,11 +126,11 @@ pub struct ListResourcesRequestParams {
 }
 
 /// Sent from the client to the server to read a specific resource URI.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReadResourceRequestParams {
-    /// The URI of the resource to read. The URI can use any protocol; 
+    /// The URI of the resource to read. The URI can use any protocol;
     /// it is up to the server how to interpret it.
     pub uri: Uri,
 
@@ -143,15 +140,15 @@ pub struct ReadResourceRequestParams {
     /// > that are not part of the primary request parameters.
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<RequestParamsMeta>,
-    
+
     /// Path arguments extracted from [`Uri`]
     #[serde(skip)]
     #[cfg(feature = "server")]
-    pub(crate) args: Option<Box<[String]>>
+    pub(crate) args: Option<Box<[String]>>,
 }
 
 /// The server's response to a resources/list request from the client.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ListResourcesResult {
@@ -168,25 +165,25 @@ pub struct ListResourcesResult {
     pub next_cursor: Option<Cursor>,
 }
 
-/// Sent from the client to request resources/updated notifications 
+/// Sent from the client to request resources/updated notifications
 /// from the server whenever a particular resource changes.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SubscribeRequestParams {
-    /// The URI of the resource to subscribe to. 
+    /// The URI of the resource to subscribe to.
     /// The URI can use any protocol; it is up to the server how to interpret it.
     pub uri: Uri,
 }
 
-/// Sent from the client to request not receiving updated notifications 
+/// Sent from the client to request not receiving updated notifications
 /// from the server whenever a primitive resource changes.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UnsubscribeRequestParams {
-    /// The URI of the resource to unsubscribe from. 
-    /// The URI can use any protocol; it is up to the server how to interpret it. 
+    /// The URI of the resource to unsubscribe from.
+    /// The URI can use any protocol; it is up to the server how to interpret it.
     pub uri: Uri,
 }
 
@@ -210,7 +207,7 @@ impl IntoResponse for ListResourcesResult {
     fn into_response(self, req_id: RequestId) -> Response {
         match serde_json::to_value(self) {
             Ok(v) => Response::success(req_id, v),
-            Err(err) => Response::error(req_id, err.into())
+            Err(err) => Response::error(req_id, err.into()),
         }
     }
 }
@@ -221,7 +218,7 @@ impl<const N: usize> From<[Resource; N]> for ListResourcesResult {
     fn from(resources: [Resource; N]) -> Self {
         Self {
             next_cursor: None,
-            resources: resources.to_vec()
+            resources: resources.to_vec(),
         }
     }
 }
@@ -232,7 +229,7 @@ impl From<Vec<Resource>> for ListResourcesResult {
     fn from(resources: Vec<Resource>) -> Self {
         Self {
             next_cursor: None,
-            resources
+            resources,
         }
     }
 }
@@ -243,7 +240,7 @@ impl From<Page<'_, Resource>> for ListResourcesResult {
     fn from(page: Page<'_, Resource>) -> Self {
         Self {
             next_cursor: page.next_cursor,
-            resources: page.items.to_vec()
+            resources: page.items.to_vec(),
         }
     }
 }
@@ -305,7 +302,7 @@ impl From<Uri> for Resource {
             annotations: None,
             meta: None,
             icons: None,
-            uri
+            uri,
         }
     }
 }
@@ -334,7 +331,7 @@ impl From<Uri> for ReadResourceRequestParams {
             meta: None,
             #[cfg(feature = "server")]
             args: None,
-            uri
+            uri,
         }
     }
 }
@@ -346,8 +343,8 @@ impl ReadResourceRequestParams {
         self.meta.get_or_insert_default().context = Some(ctx);
         self
     }
-    
-    /// Includes path arguments extracted from [`Uri`] 
+
+    /// Includes path arguments extracted from [`Uri`]
     #[cfg(feature = "server")]
     pub(crate) fn with_args(mut self, args: Box<[String]>) -> Self {
         self.args = Some(args);
@@ -360,11 +357,11 @@ impl Resource {
     /// Creates a new [`Resource`]
     #[inline]
     pub fn new<U: Into<Uri>, S: Into<String>>(uri: U, name: S) -> Self {
-        Self { 
-            uri: uri.into(), 
+        Self {
+            uri: uri.into(),
             name: name.into(),
             title: None,
-            descr: None, 
+            descr: None,
             mime: None,
             size: None,
             annotations: None,
@@ -372,7 +369,7 @@ impl Resource {
             meta: None,
         }
     }
-    
+
     /// Sets a name for a resource
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = name.into();
@@ -400,12 +397,12 @@ impl Resource {
     /// Sets annotations for the client
     pub fn with_annotations<F>(mut self, config: F) -> Self
     where
-        F: FnOnce(Annotations) -> Annotations
+        F: FnOnce(Annotations) -> Annotations,
     {
         self.annotations = Some(config(Default::default()));
         self
     }
-    
+
     /// Sets a title for a resource
     pub fn with_title(mut self, title: impl Into<String>) -> Self {
         self.title = Some(title.into());
@@ -420,6 +417,4 @@ impl Resource {
 }
 
 #[cfg(test)]
-mod tests {
-    
-}
+mod tests {}

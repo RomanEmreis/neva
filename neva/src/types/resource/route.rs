@@ -1,4 +1,4 @@
-﻿//! A set of route handling tools
+//! A set of route handling tools
 
 use super::ReadResourceResult;
 use crate::app::handler::RequestHandler;
@@ -11,21 +11,21 @@ const CLOSE_BRACKET: char = '}';
 /// Represents route path node
 pub(super) struct RouteNode {
     path: Box<str>,
-    node: Box<Route>
+    node: Box<Route>,
 }
 
 /// A data structure for easy insert and search handler by route template
 pub(crate) struct Route {
     static_routes: Vec<RouteNode>,
     dynamic_route: Option<RouteNode>,
-    handler: Option<ResourceHandler>
+    handler: Option<ResourceHandler>,
 }
 
 /// A handler function for a resource route
 pub(crate) struct ResourceHandler {
     #[cfg(feature = "http-server")]
     pub(crate) template: String,
-    handler: RequestHandler<ReadResourceResult>
+    handler: RequestHandler<ReadResourceResult>,
 }
 
 impl RouteNode {
@@ -34,16 +34,14 @@ impl RouteNode {
     fn new(path: &str) -> Self {
         Self {
             node: Box::new(Route::new()),
-            path: path.into()
+            path: path.into(),
         }
     }
 
     /// Compares two route entries
     #[inline(always)]
     fn cmp(&self, path: &str) -> std::cmp::Ordering {
-        self.path
-            .as_ref()
-            .cmp(path)
+        self.path.as_ref().cmp(path)
     }
 }
 
@@ -73,17 +71,16 @@ impl Route {
             dynamic_route: None,
         }
     }
-    
+
     /// Inserts a route handler
     pub(crate) fn insert(
         &mut self,
         path: &Uri,
         _template: String,
-        handler: RequestHandler<ReadResourceResult>
+        handler: RequestHandler<ReadResourceResult>,
     ) {
         let mut current = self;
-        let path_segments = path.parts()
-            .expect("URI parts should be present");
+        let path_segments = path.parts().expect("URI parts should be present");
 
         for segment in path_segments {
             if is_dynamic_segment(segment) {
@@ -121,7 +118,8 @@ impl Route {
             return None;
         }
 
-        current.handler
+        current
+            .handler
             .as_ref()
             .map(|h| (h, params.into_boxed_slice()))
     }
@@ -139,8 +137,7 @@ impl Route {
 
     #[inline(always)]
     fn insert_dynamic_node(&mut self, segment: &str) -> &mut Self {
-        self
-            .dynamic_route
+        self.dynamic_route
             .get_or_insert_with(|| RouteNode::new(segment))
             .node
             .as_mut()
@@ -149,16 +146,15 @@ impl Route {
 
 #[inline(always)]
 fn is_dynamic_segment(segment: &str) -> bool {
-    segment.starts_with(OPEN_BRACKET) &&
-        segment.ends_with(CLOSE_BRACKET)
+    segment.starts_with(OPEN_BRACKET) && segment.ends_with(CLOSE_BRACKET)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::types::resource::template::ResourceFunc;
     use crate::types::{ResourceContents, Uri};
-    use super::*;
-    
+
     #[test]
     fn it_inserts_and_finds() {
         let uri1: Uri = "res://path/to/{resource}".into();
@@ -174,11 +170,11 @@ mod tests {
                 .with_mime("text/plain")
                 .with_text("some text 2")
         });
-        
+
         let mut route = Route::default();
         route.insert(&uri1, "templ_1".into(), handler1);
         route.insert(&uri2, "templ_2".into(), handler2);
-        
+
         assert!(route.find(&uri1).is_some());
         assert!(route.find(&uri2).is_some());
     }

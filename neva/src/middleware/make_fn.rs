@@ -1,10 +1,10 @@
 //! Middleware factory functions
 
-use std::{future::Future, sync::Arc};
 use crate::{
     middleware::{Middleware, MwContext, Next},
-    types::{Message, Response}
+    types::{Message, Response},
 };
+use std::{future::Future, sync::Arc};
 
 /// Turns a closure into middleware
 #[inline]
@@ -13,18 +13,16 @@ where
     F: Fn(MwContext, Next) -> R + Clone + Send + Sync + 'static,
     R: Future<Output = Response> + Send + 'static,
 {
-    Arc::new(move |ctx: MwContext, next: Next| {
-        Box::pin(f(ctx, next))
-    })
+    Arc::new(move |ctx: MwContext, next: Next| Box::pin(f(ctx, next)))
 }
 
-/// Turns a closure into middleware that runs only 
+/// Turns a closure into middleware that runs only
 /// if the MCP server received a message that satisfies the condition.
 #[inline]
-pub(super) fn make_on<F, P, R>(f: F, p: P)  -> Middleware
+pub(super) fn make_on<F, P, R>(f: F, p: P) -> Middleware
 where
     F: Fn(MwContext, Next) -> R + Clone + Send + Sync + 'static,
-    P: Fn(&Message) -> bool  + Clone + Send + Sync + 'static,
+    P: Fn(&Message) -> bool + Clone + Send + Sync + 'static,
     R: Future<Output = Response> + Send + 'static,
 {
     let mw = move |ctx: MwContext, next: Next| {
@@ -41,10 +39,10 @@ where
     make_mw(mw)
 }
 
-/// Turns a closure into middleware that runs only 
+/// Turns a closure into middleware that runs only
 /// if the MCP server received a message that satisfies the condition.
 #[inline]
-pub(super) fn make_on_command<F, R>(f: F, command: &'static str)  -> Middleware
+pub(super) fn make_on_command<F, R>(f: F, command: &'static str) -> Middleware
 where
     F: Fn(MwContext, Next) -> R + Clone + Send + Sync + 'static,
     R: Future<Output = Response> + Send + 'static,

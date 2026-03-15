@@ -1,18 +1,18 @@
-﻿use std::path::PathBuf;
+use super::{ReadResourceRequestParams, Uri};
 use crate::Context;
 use crate::error::{Error, ErrorCode};
-use crate::types::{Meta, ProgressToken};
 use crate::types::request::RequestParamsMeta;
-use super::{Uri, ReadResourceRequestParams};
+use crate::types::{Meta, ProgressToken};
+use std::path::PathBuf;
 
 /// Represents a payload that needs the type to be extracted from
 pub(crate) enum Payload<'a> {
     /// Resource URI
     Uri(&'a Uri),
-    
+
     /// Resource URI part
     UriPart(String),
-    
+
     /// Request metadata ("_meta")
     Meta(&'a Option<RequestParamsMeta>),
 }
@@ -118,7 +118,7 @@ macro_rules! impl_resource_argument {
 }
 
 impl_resource_argument! {
-    bool, 
+    bool,
     char,
     i8, i16, i32, i64, i128, isize,
     u8, u16, u32, u64, u128, usize,
@@ -151,7 +151,10 @@ impl ResourceArgument for Meta<ProgressToken> {
         let meta = payload.expect_meta();
         meta.as_ref()
             .and_then(|meta| meta.progress_token.clone())
-            .ok_or(Error::new(ErrorCode::InvalidParams, "Missing progress token"))
+            .ok_or(Error::new(
+                ErrorCode::InvalidParams,
+                "Missing progress token",
+            ))
             .map(Meta)
     }
 
@@ -182,14 +185,15 @@ impl ResourceArgument for Context {
 pub(crate) fn extract_arg<T: ResourceArgument<Error = Error>>(
     uri: &Uri,
     meta: &Option<RequestParamsMeta>,
-    iter: &mut impl Iterator<Item = String>
+    iter: &mut impl Iterator<Item = String>,
 ) -> Result<T, Error> {
     match T::source() {
         Source::Meta => T::extract(Payload::Meta(meta)),
         Source::Uri => T::extract(Payload::Uri(uri)),
-        Source::UriPart => T::extract(Payload::UriPart(iter
-            .next()
-            .ok_or(Error::new(ErrorCode::InvalidParams, "Invalid URI param provided"))?))
+        Source::UriPart => T::extract(Payload::UriPart(iter.next().ok_or(Error::new(
+            ErrorCode::InvalidParams,
+            "Invalid URI param provided",
+        ))?)),
     }
 }
 
@@ -197,15 +201,15 @@ macro_rules! impl_from_read_resource_params {
     ($($T: ident),*) => {
         impl<$($T: ResourceArgument<Error = Error>),+> TryFrom<ReadResourceRequestParams> for ($($T,)+) {
             type Error = Error;
-            
+
             #[inline]
             fn try_from(params: ReadResourceRequestParams) -> Result<Self, Self::Error> {
                 let uri = params.uri;
                 let mut iter = params.args.into_iter().flatten();
                 let tuple = (
                     $(
-                        extract_arg::<$T>(&uri, &params.meta, &mut iter)?,   
-                    )*    
+                        extract_arg::<$T>(&uri, &params.meta, &mut iter)?,
+                    )*
                 );
                 Ok(tuple)
             }

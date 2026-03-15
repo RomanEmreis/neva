@@ -1,11 +1,11 @@
-﻿//! Traits and helpers for type extraction from request arguments
+//! Traits and helpers for type extraction from request arguments
 
-use std::collections::hash_map::Iter;
-use serde::de::DeserializeOwned;
 use crate::Context;
 use crate::error::{Error, ErrorCode};
-use crate::types::{Meta, ProgressToken};
 use crate::types::request::RequestParamsMeta;
+use crate::types::{Meta, ProgressToken};
+use serde::de::DeserializeOwned;
+use std::collections::hash_map::Iter;
 
 #[cfg(feature = "tasks")]
 use crate::types::RelatedTaskMetadata;
@@ -96,7 +96,10 @@ impl RequestArgument for Meta<ProgressToken> {
         let meta = payload.expect_meta();
         meta.as_ref()
             .and_then(|meta| meta.progress_token.clone())
-            .ok_or(Error::new(ErrorCode::InvalidParams, "Missing progress token"))
+            .ok_or(Error::new(
+                ErrorCode::InvalidParams,
+                "Missing progress token",
+            ))
             .map(Meta)
     }
 
@@ -115,7 +118,10 @@ impl RequestArgument for Meta<RelatedTaskMetadata> {
         let meta = payload.expect_meta();
         meta.as_ref()
             .and_then(|meta| meta.task.clone())
-            .ok_or(Error::new(ErrorCode::InvalidParams, "Missing progress token"))
+            .ok_or(Error::new(
+                ErrorCode::InvalidParams,
+                "Missing progress token",
+            ))
             .map(Meta)
     }
 
@@ -145,13 +151,18 @@ impl RequestArgument for Context {
 #[inline]
 pub(crate) fn extract_arg<T: RequestArgument<Error = Error>>(
     meta: &Option<RequestParamsMeta>,
-    iter: &mut Iter<'_, String, serde_json::Value>
+    iter: &mut Iter<'_, String, serde_json::Value>,
 ) -> Result<T, Error> {
     match T::source() {
         Source::Meta => T::extract(Payload::Meta(meta)),
-        Source::Args => T::extract(Payload::Args(iter
-            .next()
-            .ok_or(Error::new(ErrorCode::InvalidParams, "Invalid param provided"))?
-            .1.clone())),
+        Source::Args => T::extract(Payload::Args(
+            iter.next()
+                .ok_or(Error::new(
+                    ErrorCode::InvalidParams,
+                    "Invalid param provided",
+                ))?
+                .1
+                .clone(),
+        )),
     }
 }

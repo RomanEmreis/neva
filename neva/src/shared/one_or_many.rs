@@ -1,7 +1,7 @@
 //! Type representing either a vector or a single value if `T`
 
-use std::{ops::{Deref, DerefMut}};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
+use std::ops::{Deref, DerefMut};
 
 /// Type representing either a vector or a single value if `T`
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -9,9 +9,9 @@ use serde::{Serialize, Deserialize};
 pub enum OneOrMany<T> {
     /// Represents a single value.
     One(T),
-    
+
     /// Represents a vector of values.
-    Many(Vec<T>)
+    Many(Vec<T>),
 }
 
 impl<T> From<T> for OneOrMany<T> {
@@ -25,9 +25,11 @@ impl<T> From<Vec<T>> for OneOrMany<T> {
     #[inline]
     fn from(v: Vec<T>) -> Self {
         if v.len() == 1 {
-            Self::One(v.into_iter()
-                .next()
-                .expect("Expected at least one element in vector, but got an empty vector."))
+            Self::One(
+                v.into_iter()
+                    .next()
+                    .expect("Expected at least one element in vector, but got an empty vector."),
+            )
         } else {
             Self::Many(v)
         }
@@ -45,7 +47,6 @@ impl<T> IntoIterator for OneOrMany<T> {
         }
     }
 }
-
 
 impl<T> Deref for OneOrMany<T> {
     type Target = [T];
@@ -68,17 +69,17 @@ impl<T> Default for OneOrMany<T> {
     fn default() -> Self {
         Self::new()
     }
-} 
+}
 
 impl<T> OneOrMany<T> {
     /// Creates an empty [`OneOrMany`].
-    /// 
+    ///
     /// Hold the [`OneOrMany::Many`] with empty vector.
     #[inline]
     pub fn new() -> Self {
         Self::Many(Vec::new())
     }
-    
+
     /// Returns a slice of the underlying data.
     #[inline]
     pub fn as_slice(&self) -> &[T] {
@@ -139,14 +140,14 @@ impl<T> OneOrMany<T> {
     /// Otherwise, returns `false`.
     #[inline(always)]
     pub fn is_empty(&self) -> bool {
-        match self { 
+        match self {
             Self::One(_) => false,
             Self::Many(v) => v.is_empty(),
         }
     }
 
     /// Appends a value onto the back of a collection.
-    /// 
+    ///
     /// If it's called on [`OneOrMany::One`],
     /// it became [`OneOrMany::Many`] with the old value in the front.
     #[inline]
@@ -161,15 +162,15 @@ impl<T> OneOrMany<T> {
                     vec.push(old);
                     vec.push(value);
                 }
-            },
+            }
             OneOrMany::Many(vec) => {
                 vec.push(value);
                 match vec.len() {
-                    0 => {}, // leave Many([])
+                    0 => {} // leave Many([])
                     1 => {
                         let only = vec.pop().unwrap();
                         *self = OneOrMany::One(only);
-                    },
+                    }
                     _ => {}
                 }
             }
@@ -192,11 +193,11 @@ impl<T> OneOrMany<T> {
             OneOrMany::Many(vec) => {
                 let value = vec.pop();
                 match vec.len() {
-                    0 => {}, // leave Many([])
+                    0 => {} // leave Many([])
                     1 => {
                         let only = vec.pop().unwrap();
                         *self = OneOrMany::One(only);
-                    },
+                    }
                     _ => {}
                 }
                 value
@@ -204,12 +205,12 @@ impl<T> OneOrMany<T> {
         }
     }
 
-    /// Removes and returns the element at position `index` within the vector, 
+    /// Removes and returns the element at position `index` within the vector,
     /// shifting all elements after it to the left.
     ///
     /// If it's called on [`OneOrMany::One`],
     /// it became [`OneOrMany::Many`] with an empty vector.
-    /// 
+    ///
     /// # Panics
     /// Panics if index is out of bounds.
     #[inline]
@@ -217,21 +218,21 @@ impl<T> OneOrMany<T> {
         match self {
             OneOrMany::One(_) => {
                 assert!(index < 1, "Index out of bounds");
-                
+
                 if let OneOrMany::One(v) = std::mem::replace(self, OneOrMany::Many(Vec::new())) {
                     v
                 } else {
                     unreachable!()
                 }
-            },
+            }
             OneOrMany::Many(vec) => {
                 let value = vec.remove(index);
                 match vec.len() {
-                    0 => {}, // leave Many([])
+                    0 => {} // leave Many([])
                     1 => {
                         let only = vec.pop().unwrap();
                         *self = OneOrMany::One(only);
-                    },
+                    }
                     _ => {}
                 }
 
@@ -250,8 +251,8 @@ mod tests {
         let empty = OneOrMany::<i32>::new();
         assert!(matches!(empty, OneOrMany::Many(_)));
         assert_eq!(empty.len(), 0);
-    }   
-    
+    }
+
     #[test]
     fn it_can_be_created_from_single_value() {
         let one = OneOrMany::from(1);
@@ -405,12 +406,12 @@ mod tests {
             _ => panic!("Expected Many"),
         }
     }
-    
+
     #[test]
     fn it_pushes_to_one() {
         let mut one = OneOrMany::from(1);
         one.push(2);
-        
+
         assert!(matches!(one, OneOrMany::Many(_)));
         assert_eq!(one.as_slice(), &[1, 2]);
     }
@@ -423,21 +424,21 @@ mod tests {
         assert!(matches!(one, OneOrMany::Many(_)));
         assert_eq!(one.as_slice(), &[1, 2, 3, 4]);
     }
-    
+
     #[test]
     fn it_pushes_to_many_with_empty_one() {
         let mut one = OneOrMany::<i32>::from(vec![]);
         one.push(1);
-        
+
         assert!(matches!(one, OneOrMany::One(_)));
         assert_eq!(one.as_one(), Some(&1));
     }
-    
+
     #[test]
     fn it_pops_from_many() {
         let mut many = OneOrMany::from(vec![1, 2]);
         assert_eq!(many.pop(), Some(2));
-        
+
         assert!(matches!(many, OneOrMany::One(_)));
         assert_eq!(many.as_one(), Some(&1));
     }
@@ -450,31 +451,31 @@ mod tests {
         assert!(matches!(many, OneOrMany::Many(_)));
         assert_eq!(many.len(), 0);
     }
-    
+
     #[test]
     fn it_removes_from_many() {
         let mut many = OneOrMany::<i32>::from(vec![1, 2]);
         assert_eq!(many.remove(0), 1);
-        
+
         assert!(matches!(many, OneOrMany::One(_)));
         assert_eq!(many.as_one(), Some(&2));
     }
-    
+
     #[test]
     fn it_removes_from_one() {
         let mut one = OneOrMany::from(1);
         assert_eq!(one.remove(0), 1);
-        
+
         assert!(matches!(one, OneOrMany::Many(_)));
         assert_eq!(one.len(), 0);
     }
-    
+
     #[test]
     fn it_can_be_indexed() {
         let one = OneOrMany::<i32>::from(vec![1, 2, 3]);
         assert_eq!(one[1], 2);
     }
-    
+
     #[test]
     fn it_can_be_indexed_mutably() {
         let mut one = OneOrMany::<i32>::from(vec![1, 2, 3]);

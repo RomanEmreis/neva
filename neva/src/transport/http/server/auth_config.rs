@@ -1,12 +1,9 @@
 //! Authentication and Authorization configuration tools
 
-use std::fmt::Debug;
 use crate::error::{Error, ErrorCode};
 use serde::Deserialize;
-use volga::auth::{
-    BearerAuthConfig, DecodingKey, Algorithm, Authorizer, 
-    predicate, AuthClaims
-};
+use std::fmt::Debug;
+use volga::auth::{Algorithm, AuthClaims, Authorizer, BearerAuthConfig, DecodingKey, predicate};
 
 const ERR_NO_CLAIMS: &str = "Claims are not provided";
 const ERR_UNAUTHORIZED: &str = "Subject is not authorized to invoke this";
@@ -17,27 +14,27 @@ pub struct DefaultClaims {
     /// Subject
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sub: Option<String>,
-    
+
     /// Issuer
     #[serde(skip_serializing_if = "Option::is_none")]
     pub iss: Option<String>,
-    
+
     /// Audience
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aud: Option<String>,
-    
+
     /// Expiration time
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exp: Option<i64>,
-    
+
     /// Not before time
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nbf: Option<i64>,
-    
+
     /// Issued at time
     #[serde(skip_serializing_if = "Option::is_none")]
     pub iat: Option<i64>,
-    
+
     /// JWT ID
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jti: Option<String>,
@@ -75,7 +72,7 @@ impl AuthClaims for DefaultClaims {
 /// Represents authentication and authorization configuration
 pub struct AuthConfig<C: AuthClaims = DefaultClaims> {
     inner: BearerAuthConfig,
-    authorizer: Authorizer<C>
+    authorizer: Authorizer<C>,
 }
 
 impl Debug for AuthConfig {
@@ -90,7 +87,7 @@ impl Default for AuthConfig {
     fn default() -> Self {
         Self {
             inner: BearerAuthConfig::default(),
-            authorizer: default_auth_rules()
+            authorizer: default_auth_rules(),
         }
     }
 }
@@ -105,12 +102,14 @@ impl From<AuthConfig> for BearerAuthConfig {
 impl<C: AuthClaims> AuthConfig<C> {
     /// Specifies a security key to validate a JWT from a secret
     pub fn set_decoding_key(mut self, secret: &[u8]) -> Self {
-        self.inner = self.inner.set_decoding_key(DecodingKey::from_secret(secret));
+        self.inner = self
+            .inner
+            .set_decoding_key(DecodingKey::from_secret(secret));
         self
     }
-    
+
     /// Specifies the algorithm supported for verifying JWTs
-    /// 
+    ///
     /// Default: [`Algorithm::HS256`]
     /// # Example
     /// ```no_run
@@ -124,7 +123,7 @@ impl<C: AuthClaims> AuthConfig<C> {
     /// ```
     pub fn with_alg(mut self, alg: Algorithm) -> Self {
         self.inner = self.inner.with_alg(alg);
-        self   
+        self
     }
 
     /// Sets one or more acceptable audience members
@@ -142,7 +141,7 @@ impl<C: AuthClaims> AuthConfig<C> {
     pub fn with_aud<I, T>(mut self, aud: I) -> Self
     where
         T: ToString,
-        I: AsRef<[T]>
+        I: AsRef<[T]>,
     {
         self.inner = self.inner.with_aud(aud);
         self
@@ -163,15 +162,15 @@ impl<C: AuthClaims> AuthConfig<C> {
     pub fn with_iss<I, T>(mut self, iss: I) -> Self
     where
         T: ToString,
-        I: AsRef<[T]>
+        I: AsRef<[T]>,
     {
         self.inner = self.inner.with_iss(iss);
         self
     }
 
     /// Specifies whether to validate the `aud` field or not.
-    /// 
-    /// It will return an error if the aud field is not a member of the audience provided. 
+    ///
+    /// It will return an error if the aud field is not a member of the audience provided.
     /// Validation only happens if the aud claim is present in the token.
     ///
     /// Default: `true`
@@ -209,12 +208,12 @@ impl<C: AuthClaims> AuthConfig<C> {
     /// ```
     pub fn validate_exp(mut self, validate: bool) -> Self {
         self.inner = self.inner.validate_exp(validate);
-        self   
+        self
     }
 
     /// Specifies whether to validate the `nbf` field or not.
     ///
-    /// It will return an error if the current timestamp is before the time in the `nbf` field. 
+    /// It will return an error if the current timestamp is before the time in the `nbf` field.
     /// Validation only happens if the `nbf` claim is present in the token.
     ///
     /// Default: `false`
@@ -231,7 +230,7 @@ impl<C: AuthClaims> AuthConfig<C> {
     /// ```
     pub fn validate_nbf(mut self, validate: bool) -> Self {
         self.inner = self.inner.validate_nbf(validate);
-        self  
+        self
     }
 
     /// Deconstructs into [`Authorizer`] and [`BearerAuthConfig`]
@@ -242,9 +241,12 @@ impl<C: AuthClaims> AuthConfig<C> {
 
 /// Validates JWT claims against required permissions
 #[inline]
-pub(crate) fn validate_permissions<C: AuthClaims>(claims: Option<&C>, required: Option<&[String]>) -> Result<(), Error> {
+pub(crate) fn validate_permissions<C: AuthClaims>(
+    claims: Option<&C>,
+    required: Option<&[String]>,
+) -> Result<(), Error> {
     required.map_or(Ok(()), |req| {
-        let claims = claims.ok_or_else(claims_missing)?;    
+        let claims = claims.ok_or_else(claims_missing)?;
         contains_any(claims.permissions(), req)
             .then_some(())
             .ok_or_else(unauthorized)
@@ -253,7 +255,10 @@ pub(crate) fn validate_permissions<C: AuthClaims>(claims: Option<&C>, required: 
 
 /// Validates JWT claims against required roles
 #[inline]
-pub(crate) fn validate_roles<C: AuthClaims>(claims: Option<&C>, required: Option<&[String]>) -> Result<(), Error> {
+pub(crate) fn validate_roles<C: AuthClaims>(
+    claims: Option<&C>,
+    required: Option<&[String]>,
+) -> Result<(), Error> {
     required.map_or(Ok(()), |req| {
         let claims = claims.ok_or_else(claims_missing)?;
         (contains(claims.role(), req) || contains_any(claims.roles(), req))

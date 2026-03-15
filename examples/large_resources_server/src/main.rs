@@ -1,7 +1,7 @@
 //! Run with:
 //!
 //! ```no_rust
-//! npx @modelcontextprotocol/inspector 
+//! npx @modelcontextprotocol/inspector
 //!
 //! cargo run -p large_resources_server
 //! ```
@@ -12,16 +12,14 @@ use neva::prelude::*;
 async fn resource_meta(name: String) -> ResourceContents {
     let uri: Uri = format!("file://{name}").into();
     let res = get_res_info(uri.clone(), name.clone());
-    
-    ResourceContents::new(uri)
-        .with_title(name)
-        .with_json(res)
+
+    ResourceContents::new(uri).with_title(name).with_json(res)
 }
 
 #[resource(uri = "file://{name}")]
 async fn resource_data(uri: Uri, name: String) -> ResourceContents {
     // get resource from somewhere
-    
+
     ResourceContents::new(uri.clone())
         .with_title(name.clone())
         .with_blob("large file")

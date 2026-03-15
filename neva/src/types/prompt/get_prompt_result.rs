@@ -1,10 +1,13 @@
-﻿//! Types and utils for prompt request results
+//! Types and utils for prompt request results
 
-use serde::{Serialize, Deserialize};
 use crate::types::{Content, Role};
 #[cfg(feature = "server")]
-use crate::{error::Error, types::{IntoResponse, RequestId, Response}};
-    
+use crate::{
+    error::Error,
+    types::{IntoResponse, RequestId, Response},
+};
+use serde::{Deserialize, Serialize};
+
 /// The server's response to a prompts/get request from the client.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
@@ -20,7 +23,7 @@ pub struct GetPromptResult {
 
 /// Describes a message returned as part of a prompt.
 ///
-/// This is similar to `SamplingMessage`, but also supports the embedding of 
+/// This is similar to `SamplingMessage`, but also supports the embedding of
 /// resources from the MCP server.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
@@ -38,16 +41,16 @@ impl IntoResponse for GetPromptResult {
     fn into_response(self, req_id: RequestId) -> Response {
         match serde_json::to_value(self) {
             Ok(v) => Response::success(req_id, v),
-            Err(err) => Response::error(req_id, err.into())
+            Err(err) => Response::error(req_id, err.into()),
         }
     }
 }
 
 #[cfg(feature = "server")]
 impl<T1, T2> From<(T1, T2)> for PromptMessage
-where 
+where
     T1: Into<Content>,
-    T2: Into<Role>
+    T2: Into<Role>,
 {
     #[inline]
     fn from((msg, role): (T1, T2)) -> Self {
@@ -57,20 +60,23 @@ where
 
 #[cfg(feature = "server")]
 impl<T> From<T> for GetPromptResult
-where 
-    T: Into<PromptMessage>
+where
+    T: Into<PromptMessage>,
 {
     #[inline]
     fn from(msg: T) -> Self {
-        Self { descr: None, messages: vec![msg.into()] }
+        Self {
+            descr: None,
+            messages: vec![msg.into()],
+        }
     }
 }
 
 #[cfg(feature = "server")]
 impl<T, E> TryFrom<Result<T, E>> for GetPromptResult
-where 
+where
     T: Into<GetPromptResult>,
-    E: Into<Error>
+    E: Into<Error>,
 {
     type Error = E;
 
@@ -78,7 +84,7 @@ where
     fn try_from(value: Result<T, E>) -> Result<Self, Self::Error> {
         match value {
             Ok(ok) => Ok(ok.into()),
-            Err(err) => Err(err)
+            Err(err) => Err(err),
         }
     }
 }
@@ -86,16 +92,13 @@ where
 #[cfg(feature = "server")]
 impl<T> From<Vec<T>> for GetPromptResult
 where
-    T: Into<PromptMessage>
+    T: Into<PromptMessage>,
 {
     #[inline]
     fn from(iter: Vec<T>) -> Self {
         Self {
             descr: None,
-            messages: iter
-                .into_iter()
-                .map(Into::into)
-                .collect(),
+            messages: iter.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -103,16 +106,13 @@ where
 #[cfg(feature = "server")]
 impl<const N: usize, T> From<[T; N]> for GetPromptResult
 where
-    T: Into<PromptMessage>
+    T: Into<PromptMessage>,
 {
     #[inline]
     fn from(iter: [T; N]) -> Self {
         Self {
             descr: None,
-            messages: iter
-                .into_iter()
-                .map(Into::into)
-                .collect(),
+            messages: iter.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -122,22 +122,22 @@ impl PromptMessage {
     /// Creates a new [`PromptMessage`]
     #[inline]
     pub fn new(role: impl Into<Role>) -> Self {
-        Self { 
-            content: Content::empty(), 
-            role: role.into()
+        Self {
+            content: Content::empty(),
+            role: role.into(),
         }
     }
-    
+
     /// Creates a new [`PromptMessage`] with the user role
     pub fn user() -> Self {
         Self::new(Role::User)
     }
-    
+
     /// Creates a new [`PromptMessage`] with the assistant role
     pub fn assistant() -> Self {
         Self::new(Role::Assistant)
     }
-    
+
     /// Sets the content of [`PromptMessage`]
     pub fn with<T: Into<Content>>(mut self, content: T) -> Self {
         self.content = content.into();
@@ -150,12 +150,12 @@ impl GetPromptResult {
     /// Creates a new [`GetPromptResult`]
     #[inline]
     pub fn new() -> Self {
-        Self { 
+        Self {
             messages: Vec::with_capacity(8),
-            descr: None
+            descr: None,
         }
     }
-    
+
     /// Sets the description of the result
     pub fn with_descr<T: Into<String>>(mut self, descr: T) -> Self {
         self.descr = Some(descr.into());
@@ -167,20 +167,17 @@ impl GetPromptResult {
         self.messages.push(message.into());
         self
     }
-    
+
     /// Adds multiple messages to the result
     pub fn with_messages<T, I>(mut self, messages: T) -> Self
-    where 
+    where
         T: IntoIterator<Item = I>,
-        I: Into<PromptMessage>
+        I: Into<PromptMessage>,
     {
-        self.messages
-            .extend(messages.into_iter().map(Into::into));
+        self.messages.extend(messages.into_iter().map(Into::into));
         self
     }
 }
 
 #[cfg(test)]
-mod tests {
-    
-}
+mod tests {}

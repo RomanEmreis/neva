@@ -1,14 +1,14 @@
 //! Types and utilities for tracking tasks
 
-use serde::Serialize;
-use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
-use tokio::sync::watch::{channel, Sender, Receiver};
 use crate::error::{Error, ErrorCode};
 use crate::types::{Task, TaskPayload, TaskStatus};
+use serde::Serialize;
+use tokio::sync::watch::{Receiver, Sender, channel};
+use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
 
 #[derive(Default)]
 pub(crate) struct TaskTracker {
-    tasks: dashmap::DashMap<String, TaskEntry>
+    tasks: dashmap::DashMap<String, TaskEntry>,
 }
 
 /// Alias for [`Option<TaskPayload>`]
@@ -34,10 +34,10 @@ impl TaskTracker {
     #[inline]
     pub(crate) fn new() -> Self {
         Self {
-            tasks: dashmap::DashMap::new()
+            tasks: dashmap::DashMap::new(),
         }
     }
-    
+
     /// Returns a list of currently running tasks.
     pub(crate) fn tasks(&self) -> Vec<Task> {
         self.tasks
@@ -50,15 +50,18 @@ impl TaskTracker {
     pub(crate) fn track(&self, task: Task) -> TaskHandle {
         let token = CancellationToken::new();
         let (tx, rx) = channel(None);
-        
-        self.tasks.insert(task.id.clone(), TaskEntry {
-            token: token.clone(),
-            #[cfg(feature = "server")]
-            tx: tx.clone(),
-            task,
-            rx,
-        });
-        
+
+        self.tasks.insert(
+            task.id.clone(),
+            TaskEntry {
+                token: token.clone(),
+                #[cfg(feature = "server")]
+                tx: tx.clone(),
+                task,
+                rx,
+            },
+        );
+
         TaskHandle { token, tx }
     }
 
@@ -70,7 +73,8 @@ impl TaskTracker {
         } else {
             Err(Error::new(
                 ErrorCode::InvalidParams,
-                format!("Could not find task with id: {id}")))
+                format!("Could not find task with id: {id}"),
+            ))
         }
     }
 
@@ -102,9 +106,7 @@ impl TaskTracker {
     pub(crate) fn reset(&self, id: &str) {
         if let Some(mut entry) = self.tasks.get_mut(id) {
             entry.task.reset();
-            let _ = entry
-                .tx
-                .send(None);
+            let _ = entry.tx.send(None);
         }
     }
 
@@ -116,43 +118,36 @@ impl TaskTracker {
                 Ok(result) => result,
                 Err(_err) => {
                     #[cfg(feature = "tracing")]
-                    tracing::error!(
-                        logger = "neva",
-                        "Unable to serialize task result: {_err:?}");
+                    tracing::error!(logger = "neva", "Unable to serialize task result: {_err:?}");
                     return;
                 }
             };
-            let _ = entry
-                .tx
-                .send(Some(TaskPayload(result)));
+            let _ = entry.tx.send(Some(TaskPayload(result)));
         }
     }
 
-    /// Retrieves the task status 
+    /// Retrieves the task status
     pub(crate) fn get_status(&self, id: &str) -> Result<Task, Error> {
-        self.tasks
-            .get(id)
-            .map(|t| t.task.clone())
-            .ok_or_else(|| Error::new(
+        self.tasks.get(id).map(|t| t.task.clone()).ok_or_else(|| {
+            Error::new(
                 ErrorCode::InvalidParams,
-                format!("Could not find task with id: {id}")))
+                format!("Could not find task with id: {id}"),
+            )
+        })
     }
 
-    /// Returns the task result if it is present, 
+    /// Returns the task result if it is present,
     /// otherwise waits until the result is available or the task will be canceled.
     pub(crate) async fn get_result(&self, id: &str) -> Result<TaskPayload, Error> {
         let (status, mut result_rx, token) = {
-            let entry = self.tasks
-                .get(id)
-                .ok_or_else(|| Error::new(
+            let entry = self.tasks.get(id).ok_or_else(|| {
+                Error::new(
                     ErrorCode::InvalidParams,
-                    format!("Could not find task with id: {id}")))?;
+                    format!("Could not find task with id: {id}"),
+                )
+            })?;
 
-            (
-                entry.task.status,
-                entry.rx.clone(),
-                entry.token.clone(),
-            )
+            (entry.task.status, entry.rx.clone(), entry.token.clone())
         };
 
         if let Some(ref result) = *result_rx.borrow_and_update() {
@@ -192,9 +187,7 @@ impl TaskHandle {
             Ok(result) => result,
             Err(_err) => {
                 #[cfg(feature = "tracing")]
-                tracing::error!(
-                    logger = "neva",
-                    "Unable to serialize task result: {_err:?}");
+                tracing::error!(logger = "neva", "Unable to serialize task result: {_err:?}");
                 return;
             }
         };
@@ -221,12 +214,11 @@ impl TaskHandle {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use super::*;
     use crate::types::TaskStatus;
+    use std::sync::Arc;
 
     #[cfg(feature = "server")]
     use crate::types::CallToolResponse;
@@ -420,7 +412,7 @@ mod tests {
         let task_id = task.id.clone();
 
         let _handle = tracker.track(task.clone());
-        
+
         let tracker = Arc::new(tracker);
 
         tokio::spawn({
@@ -493,7 +485,7 @@ mod tests {
         let handle = tracker.track(task.clone());
 
         let tracker = Arc::new(tracker);
-        
+
         tokio::spawn({
             let tracker = tracker.clone();
             let task_id = task_id.clone();

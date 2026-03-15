@@ -1,18 +1,19 @@
-﻿//! Types and utils for handling read resource results
+//! Types and utils for handling read resource results
 
-use serde::{Deserialize, Serialize};
-use bytes::Bytes;
-use crate::types::{Annotations, Uri};
 use crate::types::helpers::{
-    deserialize_base64_as_bytes,
-    serialize_bytes_as_base64,
-    deserialize_value_from_string,
-    serialize_value_as_string
+    deserialize_base64_as_bytes, deserialize_value_from_string, serialize_bytes_as_base64,
+    serialize_value_as_string,
 };
+use crate::types::{Annotations, Uri};
+use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 #[cfg(feature = "server")]
 use {
-    crate::{error::{Error, ErrorCode}, types::{IntoResponse, RequestId, Response}},
-    serde::de::DeserializeOwned
+    crate::{
+        error::{Error, ErrorCode},
+        types::{IntoResponse, RequestId, Response},
+    },
+    serde::de::DeserializeOwned,
 };
 
 const CHUNK_SIZE: usize = 8192;
@@ -23,7 +24,7 @@ const CHUNK_SIZE: usize = 8192;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReadResourceResult {
     /// A list of ResourceContents that this resource contains.
-    pub contents: Vec<ResourceContents>
+    pub contents: Vec<ResourceContents>,
 }
 
 /// Represents the content of a resource.
@@ -34,19 +35,19 @@ pub struct ReadResourceResult {
 pub enum ResourceContents {
     /// Represents a text resource content
     Text(TextResourceContents),
-    
+
     /// Represents a JSON resource content
     Json(JsonResourceContents),
-    
+
     /// Represents a blob resource content
     Blob(BlobResourceContents),
-    
+
     /// Represents an empty/unknown resource content
     Empty(EmptyResourceContents),
 }
 
 /// Represents a blob resource content
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlobResourceContents {
@@ -58,7 +59,8 @@ pub struct BlobResourceContents {
     /// **Note:** will be serialized as a base64-encoded string
     #[serde(
         serialize_with = "serialize_bytes_as_base64",
-        deserialize_with = "deserialize_base64_as_bytes")]
+        deserialize_with = "deserialize_base64_as_bytes"
+    )]
     pub blob: Bytes,
 
     /// Intended for UI and end-user contexts - optimized to be human-readable and easily understood,
@@ -83,7 +85,7 @@ pub struct BlobResourceContents {
 }
 
 /// Represents a text resource content
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextResourceContents {
@@ -115,7 +117,7 @@ pub struct TextResourceContents {
 }
 
 /// Represents a JSON resource content
-/// 
+///
 /// > **Note:** This is a specialization of [`TextResourceContents`] for JSON content.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
@@ -186,7 +188,7 @@ impl IntoResponse for ReadResourceResult {
     fn into_response(self, req_id: RequestId) -> Response {
         match serde_json::to_value(self) {
             Ok(v) => Response::success(req_id, v),
-            Err(err) => Response::error(req_id, err.into())
+            Err(err) => Response::error(req_id, err.into()),
         }
     }
 }
@@ -195,7 +197,7 @@ impl Default for ReadResourceResult {
     #[inline]
     fn default() -> Self {
         Self {
-            contents: Vec::with_capacity(8)
+            contents: Vec::with_capacity(8),
         }
     }
 }
@@ -222,10 +224,10 @@ impl From<BlobResourceContents> for ResourceContents {
 }
 
 #[cfg(feature = "server")]
-impl<T1, T2> From<(T1, T2)> for TextResourceContents 
-where 
+impl<T1, T2> From<(T1, T2)> for TextResourceContents
+where
     T1: Into<Uri>,
-    T2: Into<String>
+    T2: Into<String>,
 {
     #[inline]
     fn from((uri, text): (T1, T2)) -> Self {
@@ -245,7 +247,7 @@ impl<T1, T2, T3> From<(T1, T2, T3)> for TextResourceContents
 where
     T1: Into<Uri>,
     T2: Into<String>,
-    T3: Into<String>
+    T3: Into<String>,
 {
     #[inline]
     fn from((uri, mime, text): (T1, T2, T3)) -> Self {
@@ -264,7 +266,7 @@ where
 impl<T1, T2> From<(T1, T2)> for ResourceContents
 where
     T1: Into<Uri>,
-    T2: Into<String>
+    T2: Into<String>,
 {
     #[inline]
     fn from(pair: (T1, T2)) -> Self {
@@ -277,7 +279,7 @@ impl<T1, T2, T3> From<(T1, T2, T3)> for ResourceContents
 where
     T1: Into<Uri>,
     T2: Into<String>,
-    T3: Into<String>
+    T3: Into<String>,
 {
     #[inline]
     fn from(triplet: (T1, T2, T3)) -> Self {
@@ -287,20 +289,22 @@ where
 
 #[cfg(feature = "server")]
 impl<T> From<T> for ReadResourceResult
-where 
-    T: Into<ResourceContents>
+where
+    T: Into<ResourceContents>,
 {
     #[inline]
     fn from(content: T) -> Self {
-        Self { contents: vec![content.into()] }
+        Self {
+            contents: vec![content.into()],
+        }
     }
 }
 
 #[cfg(feature = "server")]
 impl<T, E> TryFrom<Result<T, E>> for ReadResourceResult
-where 
+where
     T: Into<ReadResourceResult>,
-    E: Into<Error>
+    E: Into<Error>,
 {
     type Error = E;
 
@@ -308,39 +312,33 @@ where
     fn try_from(value: Result<T, E>) -> Result<Self, Self::Error> {
         match value {
             Ok(ok) => Ok(ok.into()),
-            Err(err) => Err(err)
+            Err(err) => Err(err),
         }
     }
 }
 
 #[cfg(feature = "server")]
 impl<T> From<Vec<T>> for ReadResourceResult
-where 
-    T: Into<ResourceContents>
+where
+    T: Into<ResourceContents>,
 {
     #[inline]
     fn from(vec: Vec<T>) -> Self {
         Self {
-            contents: vec
-                .into_iter()
-                .map(Into::into)
-                .collect(),
+            contents: vec.into_iter().map(Into::into).collect(),
         }
     }
 }
 
 #[cfg(feature = "server")]
 impl<const N: usize, T> From<[T; N]> for ReadResourceResult
-where 
-    T: Into<ResourceContents>
+where
+    T: Into<ResourceContents>,
 {
     #[inline]
     fn from(vec: [T; N]) -> Self {
         Self {
-            contents: vec
-                .into_iter()
-                .map(Into::into)
-                .collect(),
+            contents: vec.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -350,24 +348,23 @@ impl ReadResourceResult {
     /// Creates a new read resource result
     #[inline]
     pub fn new() -> Self {
-        Self::default()  
+        Self::default()
     }
-    
+
     /// Add a resource content to the result
     #[inline]
     pub fn with_content(mut self, content: impl Into<ResourceContents>) -> Self {
         self.contents.push(content.into());
         self
     }
-    
+
     /// Add multiple resource contents to the result
     pub fn with_contents<T, I>(mut self, contents: T) -> Self
-    where 
+    where
         T: IntoIterator<Item = I>,
-        I: Into<ResourceContents>
+        I: Into<ResourceContents>,
     {
-        self.contents
-            .extend(contents.into_iter().map(Into::into));
+        self.contents.extend(contents.into_iter().map(Into::into));
         self
     }
 }
@@ -379,7 +376,7 @@ impl ResourceContents {
     pub fn new(uri: impl Into<Uri>) -> Self {
         Self::Empty(EmptyResourceContents::new(uri))
     }
-    
+
     /// Returns the URI of the resource content
     #[inline]
     pub fn uri(&self) -> &Uri {
@@ -387,7 +384,7 @@ impl ResourceContents {
             Self::Text(text) => &text.uri,
             Self::Json(json) => &json.uri,
             Self::Blob(blob) => &blob.uri,
-            Self::Empty(empty) => &empty.uri
+            Self::Empty(empty) => &empty.uri,
         }
     }
 
@@ -398,7 +395,7 @@ impl ResourceContents {
             Self::Text(text) => Some(&text.text),
             Self::Json(json) => json.value.as_str(),
             Self::Blob(_) => None,
-            Self::Empty(_) => None
+            Self::Empty(_) => None,
         }
     }
 
@@ -409,7 +406,7 @@ impl ResourceContents {
             Self::Text(text) => text.title.as_deref(),
             Self::Json(json) => json.title.as_deref(),
             Self::Blob(blob) => blob.title.as_deref(),
-            Self::Empty(empty) => empty.title.as_deref()
+            Self::Empty(empty) => empty.title.as_deref(),
         }
     }
 
@@ -420,7 +417,7 @@ impl ResourceContents {
             Self::Text(text) => text.annotations.as_ref(),
             Self::Json(json) => json.annotations.as_ref(),
             Self::Blob(blob) => blob.annotations.as_ref(),
-            Self::Empty(empty) => empty.annotations.as_ref()
+            Self::Empty(empty) => empty.annotations.as_ref(),
         }
     }
 
@@ -431,7 +428,7 @@ impl ResourceContents {
             Self::Blob(blob) => Some(&blob.blob),
             Self::Json(_) => None,
             Self::Text(_) => None,
-            Self::Empty(_) => None
+            Self::Empty(_) => None,
         }
     }
 
@@ -439,26 +436,30 @@ impl ResourceContents {
     #[inline]
     pub fn json<T: DeserializeOwned>(&self) -> Result<T, Error> {
         match self {
-            Self::Text(text) => serde_json::from_str(&text.text)
-                .map_err(Error::from),
-            Self::Json(json) => serde_json::from_value(json.value.clone())
-                .map_err(Error::from),
-            Self::Blob(_) => Err(Error::new(ErrorCode::InvalidRequest, "Cannot deserialize blob")),
-            Self::Empty(_) => Err(Error::new(ErrorCode::InvalidRequest, "Cannot empty resource"))
+            Self::Text(text) => serde_json::from_str(&text.text).map_err(Error::from),
+            Self::Json(json) => serde_json::from_value(json.value.clone()).map_err(Error::from),
+            Self::Blob(_) => Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "Cannot deserialize blob",
+            )),
+            Self::Empty(_) => Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "Cannot empty resource",
+            )),
         }
     }
 
     /// Returns the mime type of the resource content
     #[inline]
     pub fn mime(&self) -> Option<&str> {
-        match self { 
+        match self {
             Self::Text(text) => text.mime.as_deref(),
             Self::Json(json) => json.mime.as_deref(),
             Self::Blob(blob) => blob.mime.as_deref(),
-            Self::Empty(empty) => empty.mime.as_deref()
+            Self::Empty(empty) => empty.mime.as_deref(),
         }
     }
-    
+
     /// Sets the mime type of the resource content
     #[inline]
     pub fn with_mime(mut self, mime: impl Into<String>) -> Self {
@@ -487,7 +488,7 @@ impl ResourceContents {
     #[inline]
     pub fn with_annotations<F>(self, config: F) -> Self
     where
-        F: FnOnce(Annotations) -> Annotations
+        F: FnOnce(Annotations) -> Annotations,
     {
         match self {
             Self::Text(text) => Self::Text(text.with_annotations(config)),
@@ -496,7 +497,7 @@ impl ResourceContents {
             Self::Empty(empty) => Self::Empty(empty.with_annotations(config)),
         }
     }
-    
+
     /// Sets the text of the resource content and make it [`TextResourceContents`]
     #[inline]
     pub fn with_text(self, text: impl Into<String>) -> Self {
@@ -533,7 +534,7 @@ impl ResourceContents {
                 annotations: content.annotations,
                 meta: None,
                 text,
-            })
+            }),
         }
     }
 
@@ -573,15 +574,14 @@ impl ResourceContents {
                 annotations: content.annotations,
                 meta: None,
                 blob,
-            })
+            }),
         }
     }
 
     /// Sets the JSON text of the resource content and make it [`TextResourceContents`]
     #[inline]
     pub fn with_json<T: Serialize>(self, data: T) -> Self {
-        let value = serde_json::to_value(data)
-            .expect("Failed to serialize JSON");
+        let value = serde_json::to_value(data).expect("Failed to serialize JSON");
         match self {
             Self::Text(content) => Self::Json(JsonResourceContents {
                 uri: content.uri,
@@ -614,7 +614,7 @@ impl ResourceContents {
                 annotations: content.annotations,
                 meta: None,
                 value,
-            })
+            }),
         }
     }
 }
@@ -639,7 +639,7 @@ impl TextResourceContents {
         self.mime = Some(mime.into());
         self
     }
-    
+
     /// Sets the title of the resource
     #[inline]
     pub fn with_title(mut self, title: impl Into<String>) -> Self {
@@ -650,7 +650,7 @@ impl TextResourceContents {
     /// Sets annotations for the client
     pub fn with_annotations<F>(mut self, config: F) -> Self
     where
-        F: FnOnce(Annotations) -> Annotations
+        F: FnOnce(Annotations) -> Annotations,
     {
         self.annotations = Some(config(Default::default()));
         self
@@ -688,7 +688,7 @@ impl JsonResourceContents {
     /// Sets annotations for the client
     pub fn with_annotations<F>(mut self, config: F) -> Self
     where
-        F: FnOnce(Annotations) -> Annotations
+        F: FnOnce(Annotations) -> Annotations,
     {
         self.annotations = Some(config(Default::default()));
         self
@@ -726,7 +726,7 @@ impl BlobResourceContents {
     /// Sets annotations for the client
     pub fn with_annotations<F>(mut self, config: F) -> Self
     where
-        F: FnOnce(Annotations) -> Annotations
+        F: FnOnce(Annotations) -> Annotations,
     {
         self.annotations = Some(config(Default::default()));
         self
@@ -775,11 +775,11 @@ impl EmptyResourceContents {
         self.title = Some(title.into());
         self
     }
-    
+
     /// Sets annotations for the client
     pub fn with_annotations<F>(mut self, config: F) -> Self
     where
-        F: FnOnce(Annotations) -> Annotations
+        F: FnOnce(Annotations) -> Annotations,
     {
         self.annotations = Some(config(Default::default()));
         self
@@ -789,15 +789,15 @@ impl EmptyResourceContents {
 #[cfg(test)]
 #[cfg(feature = "server")]
 mod tests {
-    use futures_util::StreamExt;
     use super::*;
-    
+    use futures_util::StreamExt;
+
     #[derive(Serialize, Deserialize, Debug, PartialEq)]
     struct User {
         name: String,
         age: u8,
     }
-    
+
     #[test]
     fn it_creates_result_from_array_of_contents() {
         let result = ReadResourceResult::from([
@@ -806,60 +806,83 @@ mod tests {
                 .with_text("test 1"),
             ResourceContents::new("/res1")
                 .with_mime("plain/text")
-                .with_text("test 1")
+                .with_text("test 1"),
         ]);
 
         let json = serde_json::to_string(&result).unwrap();
 
-        assert_eq!(json, r#"{"contents":[{"uri":"/res1","text":"test 1","mimeType":"plain/text"},{"uri":"/res1","text":"test 1","mimeType":"plain/text"}]}"#);
+        assert_eq!(
+            json,
+            r#"{"contents":[{"uri":"/res1","text":"test 1","mimeType":"plain/text"},{"uri":"/res1","text":"test 1","mimeType":"plain/text"}]}"#
+        );
     }
 
     #[test]
     fn it_creates_result_from_array_of_str_tuples1() {
         let result = ReadResourceResult::from([
             TextResourceContents::new("/res1", "test 1"),
-            TextResourceContents::new("/res1", "test 1")
+            TextResourceContents::new("/res1", "test 1"),
         ]);
 
         let json = serde_json::to_string(&result).unwrap();
 
-        assert_eq!(json, r#"{"contents":[{"uri":"/res1","text":"test 1","mimeType":"text/plain"},{"uri":"/res1","text":"test 1","mimeType":"text/plain"}]}"#);
+        assert_eq!(
+            json,
+            r#"{"contents":[{"uri":"/res1","text":"test 1","mimeType":"text/plain"},{"uri":"/res1","text":"test 1","mimeType":"text/plain"}]}"#
+        );
     }
 
     #[test]
     fn it_creates_result_from_array_of_str_tuples2() {
         let result = ReadResourceResult::from([
             TextResourceContents::from(("/res1", "json", "test 1")),
-            TextResourceContents::from(("/res1", "json", "test 1"))
+            TextResourceContents::from(("/res1", "json", "test 1")),
         ]);
 
         let json = serde_json::to_string(&result).unwrap();
 
-        assert_eq!(json, r#"{"contents":[{"uri":"/res1","text":"test 1","mimeType":"json"},{"uri":"/res1","text":"test 1","mimeType":"json"}]}"#);
+        assert_eq!(
+            json,
+            r#"{"contents":[{"uri":"/res1","text":"test 1","mimeType":"json"},{"uri":"/res1","text":"test 1","mimeType":"json"}]}"#
+        );
     }
 
     #[test]
     fn it_creates_result_from_array_of_string_tuples1() {
         let result = ReadResourceResult::from([
             (String::from("/res1"), String::from("test 1")),
-            (String::from("/res1"), String::from("test 1"))
+            (String::from("/res1"), String::from("test 1")),
         ]);
 
         let json = serde_json::to_string(&result).unwrap();
 
-        assert_eq!(json, r#"{"contents":[{"uri":"/res1","text":"test 1","mimeType":"text/plain"},{"uri":"/res1","text":"test 1","mimeType":"text/plain"}]}"#);
+        assert_eq!(
+            json,
+            r#"{"contents":[{"uri":"/res1","text":"test 1","mimeType":"text/plain"},{"uri":"/res1","text":"test 1","mimeType":"text/plain"}]}"#
+        );
     }
 
     #[test]
     fn it_creates_result_from_array_of_string_tuples2() {
         let result = ReadResourceResult::from([
-            (String::from("/res1"), String::from("json"), String::from("test 1")),
-            (String::from("/res1"), String::from("json"), String::from("test 1"))
+            (
+                String::from("/res1"),
+                String::from("json"),
+                String::from("test 1"),
+            ),
+            (
+                String::from("/res1"),
+                String::from("json"),
+                String::from("test 1"),
+            ),
         ]);
 
         let json = serde_json::to_string(&result).unwrap();
 
-        assert_eq!(json, r#"{"contents":[{"uri":"/res1","text":"test 1","mimeType":"json"},{"uri":"/res1","text":"test 1","mimeType":"json"}]}"#);
+        assert_eq!(
+            json,
+            r#"{"contents":[{"uri":"/res1","text":"test 1","mimeType":"json"},{"uri":"/res1","text":"test 1","mimeType":"json"}]}"#
+        );
     }
 
     #[test]
@@ -869,19 +892,27 @@ mod tests {
 
         let json = serde_json::to_string(&result).unwrap();
 
-        assert_eq!(json, r#"{"contents":[{"uri":"/res","text":"test","mimeType":"text/plain"}]}"#);
+        assert_eq!(
+            json,
+            r#"{"contents":[{"uri":"/res","text":"test","mimeType":"text/plain"}]}"#
+        );
     }
 
     #[test]
     fn it_creates_result_from_objet_content() {
-        let content = ResourceContents::new("/res")
-            .with_json(User { name: "John".into(), age: 33 });
-        
+        let content = ResourceContents::new("/res").with_json(User {
+            name: "John".into(),
+            age: 33,
+        });
+
         let result: ReadResourceResult = content.into();
 
         let json = serde_json::to_string(&result).unwrap();
 
-        assert_eq!(json, r#"{"contents":[{"uri":"/res","text":"{\"age\":33,\"name\":\"John\"}","mimeType":"application/json"}]}"#);
+        assert_eq!(
+            json,
+            r#"{"contents":[{"uri":"/res","text":"{\"age\":33,\"name\":\"John\"}","mimeType":"application/json"}]}"#
+        );
     }
 
     #[test]
@@ -889,7 +920,8 @@ mod tests {
         let blob = BlobResourceContents::new("file://hello", "hello world");
 
         let json = serde_json::to_string(&blob).expect("Should serialize");
-        let deserialized: BlobResourceContents = serde_json::from_str(&json).expect("Should deserialize");
+        let deserialized: BlobResourceContents =
+            serde_json::from_str(&json).expect("Should deserialize");
 
         assert_eq!(blob.blob, deserialized.blob);
         assert_eq!(blob.mime, deserialized.mime);
@@ -931,7 +963,10 @@ mod tests {
 
         let result_string = String::from_utf8(collected_data).expect("Should be valid UTF-8");
         assert_eq!(result_string, test_data);
-        assert!(chunk_count > 1, "Should have multiple chunks for large data");
+        assert!(
+            chunk_count > 1,
+            "Should have multiple chunks for large data"
+        );
     }
 
     #[tokio::test]
@@ -963,6 +998,9 @@ mod tests {
 
         let result_string = String::from_utf8(collected_data).expect("Should be valid UTF-8");
         assert_eq!(result_string, test_data);
-        assert_eq!(chunk_count, 1, "Exactly CHUNK_SIZE data should produce one chunk");
+        assert_eq!(
+            chunk_count, 1,
+            "Exactly CHUNK_SIZE data should produce one chunk"
+        );
     }
 }

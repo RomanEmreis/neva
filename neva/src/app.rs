@@ -1,58 +1,55 @@
-﻿//! Represents an MCP application
+//! Represents an MCP application
 
-use tokio_util::sync::CancellationToken;
-use self::{context::{Context, ServerRuntime}, options::{McpOptions, RuntimeMcpOptions}};
-use crate::error::{Error, ErrorCode};
-use crate::transport::{Receiver, Sender, Transport};
-use crate::shared;
-use crate::middleware::{MwContext, Next, make_fn::make_mw};
+use self::{
+    context::{Context, ServerRuntime},
+    options::{McpOptions, RuntimeMcpOptions},
+};
 use crate::app::handler::{
-    FromHandlerParams,
-    GenericHandler,
-    ListResourcesHandler,
-    CompletionHandler,
-    HandlerParams,
-    RequestFunc,
-    RequestHandler
+    CompletionHandler, FromHandlerParams, GenericHandler, HandlerParams, ListResourcesHandler,
+    RequestFunc, RequestHandler,
 };
+use crate::error::{Error, ErrorCode};
+use crate::middleware::{MwContext, Next, make_fn::make_mw};
+use crate::shared;
+use crate::transport::{Receiver, Sender, Transport};
 use crate::types::{
-    InitializeResult, InitializeRequestParams, IntoResponse, Response, Request, RequestId, Message,
-    MessageEnvelope, MessageBatch,
-    CompleteResult, ListToolsRequestParams, CallToolRequestParams, ListToolsResult, CallToolResponse, Tool, ToolHandler,
-    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate,
-    ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult,
-    SubscribeRequestParams, UnsubscribeRequestParams, Resource, resource::template::ResourceFunc,
-    ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult, PromptHandler, Prompt,
-    notification::{Notification, CancelledNotificationParams},
-    cursor::Pagination, Uri
+    CallToolRequestParams, CallToolResponse, CompleteResult, GetPromptRequestParams,
+    GetPromptResult, InitializeRequestParams, InitializeResult, IntoResponse,
+    ListPromptsRequestParams, ListPromptsResult, ListResourceTemplatesRequestParams,
+    ListResourceTemplatesResult, ListResourcesRequestParams, ListResourcesResult,
+    ListToolsRequestParams, ListToolsResult, Message, MessageBatch, MessageEnvelope, Prompt,
+    PromptHandler, ReadResourceRequestParams, ReadResourceResult, Request, Resource,
+    ResourceTemplate, Response, SubscribeRequestParams, Tool, ToolHandler,
+    UnsubscribeRequestParams, Uri,
+    cursor::Pagination,
+    notification::{CancelledNotificationParams, Notification},
+    resource::template::ResourceFunc,
 };
+use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "tasks")]
 use crate::types::{
-    ListTasksRequestParams, ListTasksResult, CancelTaskRequestParams,
-    GetTaskRequestParams, GetTaskPayloadRequestParams, Task, TaskPayload,
+    CancelTaskRequestParams, GetTaskPayloadRequestParams, GetTaskRequestParams,
+    ListTasksRequestParams, ListTasksResult, Task, TaskPayload,
 };
 #[cfg(feature = "tasks")]
 use context::ToolOrTaskResponse;
 
 use std::{
-    fmt::{Debug, Formatter},
     collections::HashMap,
+    fmt::{Debug, Formatter},
     sync::Arc,
 };
 
-#[cfg(feature = "tracing")]
-use {
-    crate::types::notification::SetLevelRequestParams,
-    tracing::Instrument
-};
 #[cfg(feature = "di")]
 use volga_di::{Container, ContainerBuilder};
+#[cfg(feature = "tracing")]
+use {crate::types::notification::SetLevelRequestParams, tracing::Instrument};
 
-pub mod options;
+mod collection;
 pub mod context;
 pub(crate) mod handler;
-mod collection;
+pub mod options;
 
 const DEFAULT_PAGE_SIZE: usize = 10;
 
@@ -63,11 +60,11 @@ type RequestHandlers = HashMap<String, RequestHandler<Response>>;
 pub struct App {
     /// MCP server options
     pub(super) options: McpOptions,
-    
+
     /// DI container
     #[cfg(feature = "di")]
     pub(super) container: ContainerBuilder,
-    
+
     /// MCP server request handlers
     handlers: RequestHandlers,
 }
@@ -82,7 +79,7 @@ impl Debug for App {
 impl App {
     /// Initializes a new MCP app
     pub fn new() -> Self {
-        let mut app = Self { 
+        let mut app = Self {
             options: McpOptions::default(),
             handlers: HashMap::new(),
             #[cfg(feature = "di")]
@@ -90,22 +87,31 @@ impl App {
         };
 
         app.map_handler(crate::commands::INIT, Self::init);
-        app.map_handler(crate::types::completion::commands::COMPLETE, Self::completion);
-        
+        app.map_handler(
+            crate::types::completion::commands::COMPLETE,
+            Self::completion,
+        );
+
         app.map_handler(crate::types::tool::commands::LIST, Self::tools);
         app.map_handler(crate::types::tool::commands::CALL, Self::tool);
-        
+
         app.map_handler(crate::types::resource::commands::LIST, Self::resources);
-        app.map_handler(crate::types::resource::commands::TEMPLATES_LIST, Self::resource_templates);
+        app.map_handler(
+            crate::types::resource::commands::TEMPLATES_LIST,
+            Self::resource_templates,
+        );
         app.map_handler(crate::types::resource::commands::READ, Self::resource);
-        app.map_handler(crate::types::resource::commands::SUBSCRIBE, Self::resource_subscribe);
-        app.map_handler(crate::types::resource::commands::UNSUBSCRIBE, Self::resource_unsubscribe);
-        
+        app.map_handler(
+            crate::types::resource::commands::SUBSCRIBE,
+            Self::resource_subscribe,
+        );
+        app.map_handler(
+            crate::types::resource::commands::UNSUBSCRIBE,
+            Self::resource_unsubscribe,
+        );
+
         app.map_handler(crate::types::prompt::commands::LIST, Self::prompts);
         app.map_handler(crate::types::prompt::commands::GET, Self::prompt);
-        
-        app.map_handler(crate::types::notification::commands::INITIALIZED, Self::notifications_init);
-        app.map_handler(crate::types::notification::commands::CANCELLED, Self::notifications_cancel);
 
         #[cfg(feature = "tasks")]
         {
@@ -114,12 +120,15 @@ impl App {
             app.map_handler(crate::types::task::commands::CANCEL, Self::cancel_task);
             app.map_handler(crate::types::task::commands::RESULT, Self::task_result);
         }
-        
+
         app.map_handler(crate::commands::PING, Self::ping);
 
         #[cfg(feature = "tracing")]
-        app.map_handler(crate::types::notification::commands::SET_LOG_LEVEL, Self::set_log_level);
-        
+        app.map_handler(
+            crate::types::notification::commands::SET_LOG_LEVEL,
+            Self::set_log_level,
+        );
+
         app
     }
 
@@ -146,7 +155,9 @@ impl App {
     /// ```
     pub fn run_blocking(self) {
         if tokio::runtime::Handle::try_current().is_ok() {
-            panic!("`App::run_blocking()` cannot be called inside an existing Tokio runtime. Use `run().await` instead.");
+            panic!(
+                "`App::run_blocking()` cannot be called inside an existing Tokio runtime. Use `run().await` instead."
+            );
         }
 
         let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -163,45 +174,45 @@ impl App {
             }
         };
 
-        runtime.block_on(async {
-            self.run().await
-        });
+        runtime.block_on(async { self.run().await });
     }
-    
+
     /// Run the MCP server
-    /// 
+    ///
     /// # Example
     /// ```no_run
     /// use neva::App;
-    /// 
+    ///
     /// # #[tokio::main]
     /// # async fn main() {
     /// let mut app = App::new();
-    /// 
+    ///
     /// // configure tools, resources, prompts
-    /// 
+    ///
     /// app.run().await;
     /// # }
     /// ```
     pub async fn run(mut self) {
         #[cfg(feature = "macros")]
         self.register_methods();
-        
+
         #[cfg(feature = "tracing")]
-        self.options.add_middleware(make_mw(Self::tracing_middleware));
-        self.options.add_middleware(make_mw(Self::message_middleware));
-        
+        self.options
+            .add_middleware(make_mw(Self::tracing_middleware));
+        self.options
+            .add_middleware(make_mw(Self::message_middleware));
+
         let mut transport = self.options.transport();
         let cancellation_token = transport.start();
         self.wait_for_shutdown_signal(cancellation_token.clone());
-        
+
         let (sender, mut receiver) = transport.split();
         let runtime = ServerRuntime::new(
-            sender, 
-            self.options, 
+            sender,
+            self.options,
             self.handlers,
             #[cfg(feature = "di")]
-            self.container.build()
+            self.container.build(),
         );
         loop {
             tokio::select! {
@@ -227,11 +238,11 @@ impl App {
             }
         }
     }
-    
+
     /// Configure MCP server options
     pub fn with_options<F>(mut self, config: F) -> Self
-    where 
-        F: FnOnce(McpOptions) -> McpOptions
+    where
+        F: FnOnce(McpOptions) -> McpOptions,
     {
         self.options = config(self.options);
         self
@@ -242,12 +253,12 @@ impl App {
     /// # Example
     /// ```no_run
     /// use neva::App;
-    /// 
+    ///
     /// # #[tokio::main]
     /// # async fn main() {
     /// let mut app = App::new();
     ///
-    /// app.map_handler("ping", || async { 
+    /// app.map_handler("ping", || async {
     ///     "pong"
     /// });
     ///
@@ -255,7 +266,7 @@ impl App {
     /// # }
     /// ```
     pub fn map_handler<F, R, Args>(&mut self, name: impl Into<String>, handler: F) -> &mut Self
-    where 
+    where
         F: GenericHandler<Args, Output = R>,
         R: IntoResponse + Send + 'static,
         Args: FromHandlerParams + Send + Sync + 'static,
@@ -276,7 +287,7 @@ impl App {
     /// # async fn main() {
     /// let mut app = App::new();
     ///
-    /// app.map_tool("hello", |name: String| async move { 
+    /// app.map_tool("hello", |name: String| async move {
     ///     format!("Hello, {name}")
     /// });
     ///
@@ -291,9 +302,13 @@ impl App {
     {
         self.options.add_tool(Tool::new(name, handler))
     }
-    
+
     /// Adds a known resource
-    pub fn add_resource<U: Into<Uri>, S: Into<String>>(&mut self, uri: U, name: S) -> &mut Resource {
+    pub fn add_resource<U: Into<Uri>, S: Into<String>>(
+        &mut self,
+        uri: U,
+        name: S,
+    ) -> &mut Resource {
         let resource = Resource::new(uri, name);
         self.options.add_resource(resource)
     }
@@ -316,10 +331,10 @@ impl App {
     /// # }
     /// ```
     pub fn map_resource<F, R, Args>(
-        &mut self, 
-        uri: impl Into<Uri>, 
-        name: impl Into<String>, 
-        handler: F
+        &mut self,
+        uri: impl Into<Uri>,
+        name: impl Into<String>,
+        handler: F,
     ) -> &mut ResourceTemplate
     where
         F: GenericHandler<Args, Output = R>,
@@ -329,7 +344,7 @@ impl App {
     {
         let handler = ResourceFunc::new(handler);
         let template = ResourceTemplate::new(uri, name);
-        
+
         self.options.add_resource_template(template, handler)
     }
 
@@ -384,7 +399,7 @@ impl App {
     where
         F: ListResourcesHandler<Args, Output = R> + Clone + Send + Sync + 'static,
         Args: FromHandlerParams + Send + Sync + 'static,
-        R: Into<ListResourcesResult>
+        R: Into<ListResourcesResult>,
     {
         let handler = move |params, args| {
             let handler = handler.clone();
@@ -415,7 +430,7 @@ impl App {
     where
         F: CompletionHandler<Args, Output = R> + Clone + Send + Sync + 'static,
         Args: FromHandlerParams + Send + Sync + 'static,
-        R: Into<CompleteResult>
+        R: Into<CompleteResult>,
     {
         let handler = move |params, args| {
             let handler = handler.clone();
@@ -427,8 +442,8 @@ impl App {
 
     /// Connection initialization handler
     async fn init(
-        options: RuntimeMcpOptions, 
-        _params: InitializeRequestParams
+        options: RuntimeMcpOptions,
+        _params: InitializeRequestParams,
     ) -> Result<InitializeResult, Error> {
         Ok(InitializeResult::new(&options))
     }
@@ -438,13 +453,11 @@ impl App {
         // return default as its non-optional capability so far
         CompleteResult::default()
     }
-    
+
     /// Tools request handler
-    async fn tools(
-        options: RuntimeMcpOptions, 
-        params: ListToolsRequestParams
-    ) -> ListToolsResult {
-        options.list_tools()
+    async fn tools(options: RuntimeMcpOptions, params: ListToolsRequestParams) -> ListToolsResult {
+        options
+            .list_tools()
             .await
             .paginate(params.cursor, DEFAULT_PAGE_SIZE)
             .into()
@@ -453,9 +466,10 @@ impl App {
     /// Resources request handler
     async fn resources(
         options: RuntimeMcpOptions,
-        params: ListResourcesRequestParams
+        params: ListResourcesRequestParams,
     ) -> ListResourcesResult {
-        options.list_resources()
+        options
+            .list_resources()
             .await
             .paginate(params.cursor, DEFAULT_PAGE_SIZE)
             .into()
@@ -463,26 +477,28 @@ impl App {
 
     /// Resource templates request handler
     async fn resource_templates(
-        options: RuntimeMcpOptions, 
-        params: ListResourceTemplatesRequestParams
+        options: RuntimeMcpOptions,
+        params: ListResourceTemplatesRequestParams,
     ) -> ListResourceTemplatesResult {
-        options.list_resource_templates()
+        options
+            .list_resource_templates()
             .await
             .paginate(params.cursor, DEFAULT_PAGE_SIZE)
             .into()
     }
-    
+
     /// Prompts request handler
     async fn prompts(
-        options: RuntimeMcpOptions, 
-        params: ListPromptsRequestParams
+        options: RuntimeMcpOptions,
+        params: ListPromptsRequestParams,
     ) -> ListPromptsResult {
-        options.list_prompts()
+        options
+            .list_prompts()
             .await
             .paginate(params.cursor, DEFAULT_PAGE_SIZE)
             .into()
     }
-    
+
     /// A tool call request handler
     #[cfg(not(feature = "tasks"))]
     async fn tool(ctx: Context, params: CallToolRequestParams) -> Result<CallToolResponse, Error> {
@@ -491,60 +507,53 @@ impl App {
 
     /// A tool call request handler
     #[cfg(feature = "tasks")]
-    async fn tool(ctx: Context, params: CallToolRequestParams) -> Result<ToolOrTaskResponse, Error> {
+    async fn tool(
+        ctx: Context,
+        params: CallToolRequestParams,
+    ) -> Result<ToolOrTaskResponse, Error> {
         ctx.call_tool_with_task(params).await
     }
 
     /// A read resource request handler
-    async fn resource(ctx: Context, params: ReadResourceRequestParams) -> Result<ReadResourceResult, Error> {
+    async fn resource(
+        ctx: Context,
+        params: ReadResourceRequestParams,
+    ) -> Result<ReadResourceResult, Error> {
         ctx.read_resource(params).await
     }
-    
+
     /// A get prompt request handler
-    async fn prompt(ctx: Context, params: GetPromptRequestParams) -> Result<GetPromptResult, Error> {
+    async fn prompt(
+        ctx: Context,
+        params: GetPromptRequestParams,
+    ) -> Result<GetPromptResult, Error> {
         ctx.get_prompt(params).await
     }
 
     /// Ping request handler
     async fn ping() {}
-    
-    /// A notification initialization request handler
-    async fn notifications_init() {}
-    
-    /// A notification cancel request handler
-    async fn notifications_cancel(
-        options: RuntimeMcpOptions,
-        params: CancelledNotificationParams
-    ) {
-        options.cancel_request(&params.request_id);
-    }
-    
+
     /// A subscription to a resource change request handler
-    async fn resource_subscribe(
-        mut ctx: Context, 
-        params: SubscribeRequestParams
-    ) {
+    async fn resource_subscribe(mut ctx: Context, params: SubscribeRequestParams) {
         ctx.subscribe_to_resource(params.uri);
     }
 
     /// An unsubscription to from resource change request handler
-    async fn resource_unsubscribe(
-        mut ctx: Context,
-        params: UnsubscribeRequestParams
-    ) {
+    async fn resource_unsubscribe(mut ctx: Context, params: UnsubscribeRequestParams) {
         ctx.unsubscribe_from_resource(&params.uri);
     }
-    
+
     /// Tasks request handler
     #[cfg(feature = "tasks")]
     async fn tasks(
         options: RuntimeMcpOptions,
-        params: ListTasksRequestParams
+        params: ListTasksRequestParams,
     ) -> Result<ListTasksResult, Error> {
-        if !options.is_tasks_list_supported() { 
+        if !options.is_tasks_list_supported() {
             return Err(Error::new(
-                ErrorCode::InvalidRequest, 
-                "Server does not support support tasks/list requests."));
+                ErrorCode::InvalidRequest,
+                "Server does not support support tasks/list requests.",
+            ));
         }
         Ok(options
             .list_tasks()
@@ -556,23 +565,21 @@ impl App {
     #[cfg(feature = "tasks")]
     async fn cancel_task(
         options: RuntimeMcpOptions,
-        params: CancelTaskRequestParams
+        params: CancelTaskRequestParams,
     ) -> Result<Task, Error> {
         if options.is_tasks_cancellation_supported() {
             options.cancel_task(&params.id)
         } else {
             Err(Error::new(
                 ErrorCode::InvalidRequest,
-                "Server does not support support tasks/cancel requests."))
+                "Server does not support support tasks/cancel requests.",
+            ))
         }
     }
 
     /// A task status retrieval request handler
     #[cfg(feature = "tasks")]
-    async fn task(
-        options: RuntimeMcpOptions,
-        params: GetTaskRequestParams
-    ) -> Result<Task, Error> {
+    async fn task(options: RuntimeMcpOptions, params: GetTaskRequestParams) -> Result<Task, Error> {
         options.get_task_status(&params.id)
     }
 
@@ -580,32 +587,32 @@ impl App {
     #[cfg(feature = "tasks")]
     async fn task_result(
         options: RuntimeMcpOptions,
-        params: GetTaskPayloadRequestParams
+        params: GetTaskPayloadRequestParams,
     ) -> Result<TaskPayload, Error> {
         options.get_task_result(&params.id).await
     }
-    
+
     /// Sets the logging level
     #[cfg(feature = "tracing")]
     async fn set_log_level(
         options: RuntimeMcpOptions,
-        params: SetLevelRequestParams
+        params: SetLevelRequestParams,
     ) -> Result<(), Error> {
         let current_level = options.log_level();
         tracing::debug!(
-            logger = "neva", 
-            "Logging level has been changed from {:?} to {:?}", current_level, params.level
+            logger = "neva",
+            "Logging level has been changed from {:?} to {:?}",
+            current_level,
+            params.level
         );
-        
+
         options.set_log_level(params.level)
     }
-    
+
     #[cfg(feature = "tracing")]
     async fn tracing_middleware(ctx: MwContext, next: Next) -> Response {
         let span = create_tracing_span(ctx.session_id().cloned());
-        next(ctx)
-            .instrument(span)
-            .await
+        next(ctx).instrument(span).await
     }
 
     #[inline]
@@ -614,8 +621,8 @@ impl App {
     }
 
     async fn execute_batch(batch: MessageBatch, runtime: ServerRuntime) {
-        use futures_util::future::join_all;
         use crate::transport::TransportProtoSender;
+        use futures_util::future::join_all;
 
         // Capture the incoming batch's correlation and HTTP-context fields.
         // `id` + `session_id` are needed so the response batch can be routed
@@ -681,7 +688,7 @@ impl App {
                             .await;
                     }
                     MessageEnvelope::Notification(notification) => {
-                        Self::handle_notification(notification).await;
+                        Self::handle_notification(notification, runtime.clone()).await;
                     }
                     MessageEnvelope::Response(mut resp) => {
                         // Apply the batch's session context so that
@@ -748,7 +755,11 @@ impl App {
             Err(_err) => {
                 // Unreachable in practice: envelopes are non-empty above.
                 #[cfg(feature = "tracing")]
-                tracing::error!(logger = "neva", "Failed to construct batch response: {:?}", _err);
+                tracing::error!(
+                    logger = "neva",
+                    "Failed to construct batch response: {:?}",
+                    _err
+                );
                 return;
             }
         };
@@ -765,60 +776,69 @@ impl App {
     }
 
     async fn message_middleware(ctx: MwContext, _: Next) -> Response {
-        let MwContext { 
-            msg, 
+        let MwContext {
+            msg,
             runtime,
             #[cfg(feature = "di")]
-            scope
+            scope,
         } = ctx;
         let id = msg.id();
         let mut sender = runtime.sender();
-        
-        let resp = Self::handle_message(
-            msg, 
+
+        if let Some(resp) = Self::handle_message(
+            msg,
             runtime,
             #[cfg(feature = "di")]
-            scope
-        ).await;
-
-        if let Err(_err) = sender.send(resp.into()).await {
+            scope,
+        )
+        .await
+            && let Err(_err) = sender.send(resp.into()).await
+        {
             #[cfg(feature = "tracing")]
             tracing::error!(
-                logger = "neva", 
-                error = format!("Error sending response: {:?}", _err));
+                logger = "neva",
+                error = format!("Error sending response: {:?}", _err)
+            );
         }
-        
+
         Response::empty(id)
     }
-    
+
     #[inline]
     async fn handle_message(
-        msg: Message, 
+        msg: Message,
         runtime: ServerRuntime,
-        #[cfg(feature = "di")]
-        scope: Container
-    ) -> Response {
+        #[cfg(feature = "di")] scope: Container,
+    ) -> Option<Response> {
         match msg {
-            Message::Request(req) => Self::handle_request(
-                req, 
-                runtime, 
-                #[cfg(feature = "di")] 
-                scope
-            ).await,
-            Message::Response(resp) => Self::handle_response(resp, runtime).await,
-            Message::Notification(notification) => Self::handle_notification(notification).await,
+            Message::Request(req) => Some(
+                Self::handle_request(
+                    req,
+                    runtime,
+                    #[cfg(feature = "di")]
+                    scope,
+                )
+                .await,
+            ),
+            Message::Response(resp) => Some(Self::handle_response(resp, runtime).await),
+            Message::Notification(notification) => {
+                // JSON-RPC 2.0 §4: notifications must never receive a response.
+                Self::handle_notification(notification, runtime).await;
+                None
+            }
             Message::Batch(_) => {
                 // Batches are dispatched via execute_batch before reaching handle_message
-                unreachable!("Message::Batch should be intercepted in App::run before handle_message")
+                unreachable!(
+                    "Message::Batch should be intercepted in App::run before handle_message"
+                )
             }
         }
     }
-    
+
     async fn handle_request(
-        req: Request, 
+        req: Request,
         runtime: ServerRuntime,
-        #[cfg(feature = "di")]
-        scope: Container
+        #[cfg(feature = "di")] scope: Container,
     ) -> Response {
         #[cfg(feature = "http-server")]
         let mut req = req;
@@ -828,19 +848,17 @@ impl App {
 
         #[cfg(not(feature = "http-server"))]
         let context = runtime.context(session_id);
-        
+
         #[cfg(feature = "http-server")]
         let context = {
             let headers = std::mem::take(&mut req.headers);
-            let claims = req.claims
-                .take()
-                .map(|c| *c);
+            let claims = req.claims.take().map(|c| *c);
             runtime.context(session_id, headers, claims)
         };
-        
+
         #[cfg(feature = "di")]
         let context = context.with_scope(scope);
-        
+
         let options = runtime.options();
         let handlers = runtime.request_handlers();
         let token = options.track_request(&full_id);
@@ -849,18 +867,18 @@ impl App {
         tracing::trace!(logger = "neva", "Received: {:?}", req);
         let resp = if let Some(handler) = handlers.get(&req.method) {
             tokio::select! {
-                resp = handler.call(HandlerParams::Request(context, req)) => {
-                    options.complete_request(&full_id);
-                    resp
+            resp = handler.call(HandlerParams::Request(context, req)) => {
+                options.complete_request(&full_id);
+                resp
+            }
+            _ = token.cancelled() => {
+                #[cfg(feature = "tracing")]
+                tracing::debug!(
+                    logger = "neva",
+                    "The request with ID: {} has been cancelled", full_id);
+                    Err(Error::from(ErrorCode::RequestCancelled))
                 }
-                _ = token.cancelled() => {
-                    #[cfg(feature = "tracing")]
-                    tracing::debug!(
-                        logger = "neva", 
-                        "The request with ID: {} has been cancelled", full_id);
-                        Err(Error::from(ErrorCode::RequestCancelled))
-                    }
-                }
+            }
         } else {
             Err(Error::from(ErrorCode::MethodNotFound))
         };
@@ -871,16 +889,12 @@ impl App {
         }
         resp
     }
-    
+
     async fn handle_response(resp: Response, runtime: ServerRuntime) -> Response {
         let resp_id = resp.id().clone();
-        let session_id = resp
-            .session_id()
-            .cloned();
-        
-        runtime
-            .pending_requests()
-            .complete(resp);
+        let session_id = resp.session_id().cloned();
+
+        runtime.pending_requests().complete(resp);
 
         let mut resp = Response::empty(resp_id);
         if let Some(session_id) = session_id {
@@ -888,14 +902,24 @@ impl App {
         }
         resp
     }
-    
+
     #[inline]
-    async fn handle_notification(notification: Notification) -> Response {
-        if let crate::types::notification::commands::MESSAGE = notification.method.as_str() {
-            #[cfg(feature = "tracing")]
-            notification.write();
+    async fn handle_notification(notification: Notification, runtime: ServerRuntime) {
+        match notification.method.as_str() {
+            crate::types::notification::commands::CANCELLED => {
+                if let Some(params) = notification.params
+                    && let Ok(params) =
+                        serde_json::from_value::<CancelledNotificationParams>(params)
+                {
+                    runtime.options().cancel_request(&params.request_id);
+                }
+            }
+            crate::types::notification::commands::MESSAGE => {
+                #[cfg(feature = "tracing")]
+                notification.write();
+            }
+            _ => {}
         }
-        Response::empty(RequestId::default())
     }
 
     #[inline]
@@ -925,7 +949,8 @@ mod tests {
         let batch = MessageBatch::new(vec![
             MessageEnvelope::Notification(Notification::new("notifications/foo", None)),
             MessageEnvelope::Notification(Notification::new("notifications/bar", None)),
-        ]).expect("non-empty batch must be constructable");
+        ])
+        .expect("non-empty batch must be constructable");
 
         // Replicate the filter logic from execute_batch:
         // Request → Some(response slot), Notification/Response → None
@@ -953,7 +978,8 @@ mod tests {
         let batch = MessageBatch::new(vec![
             MessageEnvelope::Request(req1),
             MessageEnvelope::Request(req2),
-        ]).expect("non-empty batch must be constructable");
+        ])
+        .expect("non-empty batch must be constructable");
 
         // Replicate the filter: only Request envelopes produce response slots
         let response_slots: Vec<MessageEnvelope> = batch
@@ -964,6 +990,10 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(response_slots.len(), 2, "two requests must produce two response slots");
+        assert_eq!(
+            response_slots.len(),
+            2,
+            "two requests must produce two response slots"
+        );
     }
 }

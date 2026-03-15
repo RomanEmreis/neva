@@ -1,65 +1,62 @@
-﻿//! Utilities for the MCP client
+//! Utilities for the MCP client
 
-use std::{future::Future, sync::Arc};
-use std::fmt::{Debug, Formatter};
-use options::McpOptions;
-use serde::Serialize;
-use tokio_util::sync::CancellationToken;
-use handler::RequestHandler;
 use crate::error::{Error, ErrorCode};
 use crate::shared;
 use crate::transport::Transport;
 use crate::types::{
-    ListToolsRequestParams, ListToolsResult, CallToolRequestParams, CallToolResponse,
-    ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult,
-    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, Uri,
-    ListPromptsRequestParams, ListPromptsResult, GetPromptRequestParams, GetPromptResult,
-    ServerCapabilities, ClientCapabilities, Implementation, InitializeRequestParams, InitializeResult,
-    Request, RequestId, Response, RequestParamsMeta, MessageEnvelope,
+    CallToolRequestParams, CallToolResponse, ClientCapabilities, GetPromptRequestParams,
+    GetPromptResult, Implementation, InitializeRequestParams, InitializeResult,
+    ListPromptsRequestParams, ListPromptsResult, ListResourceTemplatesRequestParams,
+    ListResourceTemplatesResult, ListResourcesRequestParams, ListResourcesResult,
+    ListToolsRequestParams, ListToolsResult, MessageEnvelope, ReadResourceRequestParams,
+    ReadResourceResult, Request, RequestId, RequestParamsMeta, Response, Root, ServerCapabilities,
+    Uri,
     cursor::Cursor,
+    elicitation::{ElicitRequestParams, ElicitResult, ElicitationHandler},
     notification::Notification,
     resource::{SubscribeRequestParams, UnsubscribeRequestParams},
     sampling::{CreateMessageRequestParams, CreateMessageResult, SamplingHandler},
-    elicitation::{ElicitRequestParams, ElicitResult, ElicitationHandler},
-    Root
 };
+use handler::RequestHandler;
+use options::McpOptions;
+use serde::Serialize;
+use std::fmt::{Debug, Formatter};
+use std::{future::Future, sync::Arc};
+use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "tasks")]
 use serde::de::DeserializeOwned;
 
 #[cfg(feature = "tasks")]
 use crate::types::{
-    Task, TaskPayload, ListTasksRequestParams, ListTasksResult,
-    GetTaskPayloadRequestParams,
-    CancelTaskRequestParams,
-    GetTaskRequestParams,
-    TaskMetadata,
+    CancelTaskRequestParams, GetTaskPayloadRequestParams, GetTaskRequestParams,
+    ListTasksRequestParams, ListTasksResult, Task, TaskMetadata, TaskPayload,
 };
 
+pub mod batch;
 mod handler;
 mod notification_handler;
 pub mod options;
-pub mod batch;
 pub mod subscribe;
 
 pub use batch::BatchBuilder;
 
-/// Represents an MCP client app 
+/// Represents an MCP client app
 pub struct Client {
     /// MCP client options.
     options: McpOptions,
 
     /// Capabilities supported by the connected server.
     server_capabilities: Option<ServerCapabilities>,
-    
+
     /// Implementation information of the connected server.
     server_info: Option<Implementation>,
-    
+
     /// A [`CancellationToken`] that cancels transport background processes.
     cancellation_token: Option<CancellationToken>,
-    
+
     /// Request handler
-    handler: Option<RequestHandler>
+    handler: Option<RequestHandler>,
 }
 
 impl Debug for Client {
@@ -88,21 +85,21 @@ impl Client {
             server_capabilities: None,
             server_info: None,
             cancellation_token: None,
-            handler: None
+            handler: None,
         }
     }
 
     /// Configure MCP client options
     pub fn with_options<F>(mut self, config: F) -> Self
     where
-        F: FnOnce(McpOptions) -> McpOptions
+        F: FnOnce(McpOptions) -> McpOptions,
     {
         self.options = config(self.options);
         self
     }
-    
+
     /// Adds a new Root
-    /// 
+    ///
     /// # Example
     /// ```no_run
     /// use neva::client::Client;
@@ -139,7 +136,7 @@ impl Client {
     /// # }
     /// ```    
     pub fn add_roots<T, I>(&mut self, roots: I) -> &mut Self
-    where 
+    where
         T: Into<Root>,
         I: IntoIterator<Item = T>,
     {
@@ -147,7 +144,7 @@ impl Client {
         self.publish_roots_changed();
         self
     }
-    
+
     /// Sends the "notifications/roots/list_changed" notification to the server
     pub fn publish_roots_changed(&mut self) {
         if let Some(handler) = self.handler.as_mut() {
@@ -179,38 +176,38 @@ impl Client {
         self.options.add_elicitation_handler(handler);
         self
     }
-    
+
     /// Connects the MCP client to the MCP server
-    /// 
+    ///
     /// # Example
     /// ```no_run
     /// use neva::client::Client;
     /// use neva::error::Error;
-    /// 
+    ///
     /// #[tokio::main]
     /// async fn main() -> Result<(), Error> {
     ///     let mut client = Client::new();
-    /// 
+    ///
     ///     client.connect().await?;
-    /// 
+    ///
     ///     // call tools, read resources, etc.
-    /// 
+    ///
     ///     client.disconnect().await
     /// }
     /// ```
     pub async fn connect(&mut self) -> Result<(), Error> {
         #[cfg(feature = "macros")]
         self.register_methods();
-        
+
         let mut transport = self.options.transport();
         let token = transport.start();
-        
+
         #[cfg(feature = "tracing")]
         self.register_tracing_notification_handlers();
-        
+
         self.cancellation_token = Some(token);
         self.handler = Some(RequestHandler::new(transport, &self.options));
-        
+
         self.wait_for_shutdown_signal();
         self.init().await
     }
@@ -234,14 +231,15 @@ impl Client {
     /// }
     /// ```
     pub async fn disconnect(mut self) -> Result<(), Error> {
-        self.send_notification(crate::types::notification::commands::CANCELLED, None).await?;
+        self.send_notification(crate::types::notification::commands::CANCELLED, None)
+            .await?;
         if let Some(token) = self.cancellation_token {
             token.cancel();
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         Ok(())
     }
-    
+
     /// Sends `initialize` request to an MCP server
     pub async fn init(&mut self) -> Result<(), Error> {
         let params = InitializeRequestParams {
@@ -254,14 +252,15 @@ impl Client {
                 #[cfg(feature = "tasks")]
                 tasks: self.options.tasks_capability(),
                 experimental: None,
-            })
+            }),
         };
 
         let req = Request::new(
-            Some(RequestId::Uuid(uuid::Uuid::new_v4())), 
-            crate::commands::INIT, 
-            Some(params));
-        
+            Some(RequestId::Uuid(uuid::Uuid::new_v4())),
+            crate::commands::INIT,
+            Some(params),
+        );
+
         let resp = self.send_request(req).await?;
 
         let init_result = resp.into_result::<InitializeResult>()?;
@@ -271,7 +270,10 @@ impl Client {
             self.cancel_transport();
             return Err(Error::new(
                 ErrorCode::InvalidRequest,
-                format!("Unsupported server protocol version: {}", init_result.protocol_ver),
+                format!(
+                    "Unsupported server protocol version: {}",
+                    init_result.protocol_ver
+                ),
             ));
         }
         if server_ver != self.options.protocol_ver() {
@@ -285,29 +287,30 @@ impl Client {
                 ),
             ));
         }
-        
+
         self.server_capabilities = Some(init_result.capabilities);
         self.server_info = Some(init_result.server_info);
 
-        self.send_notification(crate::types::notification::commands::INITIALIZED, None).await
+        self.send_notification(crate::types::notification::commands::INITIALIZED, None)
+            .await
     }
-    
+
     /// Sends a ping to the MCP server
     pub async fn ping(&mut self) -> Result<Response, Error> {
         self.command::<()>(crate::commands::PING, None).await
     }
-    
+
     /// Sends a command to the MCP server
-    /// 
+    ///
     /// # Example
     /// ```no_run
     /// use neva::prelude::*;
-    /// 
+    ///
     /// #[derive(serde::Serialize)]
     /// struct MyCommandParams {
     ///     param: String,
     /// }
-    /// 
+    ///
     /// #[tokio::main]
     /// async fn main() -> Result<(), Error> {
     ///     let mut client = Client::new();
@@ -322,15 +325,15 @@ impl Client {
     /// ```
     #[inline]
     pub async fn command<T: Serialize>(
-        &mut self, 
-        command: impl Into<String>, 
-        params: Option<T>
+        &mut self,
+        command: impl Into<String>,
+        params: Option<T>,
     ) -> Result<Response, Error> {
         let id = self.generate_id()?;
         let request = Request::new(Some(id), command, params);
         self.send_request(request).await
     }
-    
+
     /// Requests a list of tools that MCP server provides
     ///
     /// # Example
@@ -352,14 +355,14 @@ impl Client {
     ///
     ///     client.disconnect().await
     /// }
-    /// ``` 
+    /// ```
     pub async fn list_tools(&mut self, cursor: Option<Cursor>) -> Result<ListToolsResult, Error> {
         let params = ListToolsRequestParams { cursor };
         self.command(crate::types::tool::commands::LIST, Some(params))
             .await?
             .into_result()
     }
-    
+
     /// Requests a list of resources that MCP server provides
     ///
     /// # Example
@@ -381,8 +384,11 @@ impl Client {
     ///
     ///     client.disconnect().await
     /// }
-    /// ``` 
-    pub async fn list_resources(&mut self, cursor: Option<Cursor>) -> Result<ListResourcesResult, Error> {
+    /// ```
+    pub async fn list_resources(
+        &mut self,
+        cursor: Option<Cursor>,
+    ) -> Result<ListResourcesResult, Error> {
         let params = ListResourcesRequestParams { cursor };
         self.command(crate::types::resource::commands::LIST, Some(params))
             .await?
@@ -410,12 +416,18 @@ impl Client {
     ///
     ///     client.disconnect().await
     /// }
-    /// ``` 
-    pub async fn list_resource_templates(&mut self, cursor: Option<Cursor>) -> Result<ListResourceTemplatesResult, Error> {
+    /// ```
+    pub async fn list_resource_templates(
+        &mut self,
+        cursor: Option<Cursor>,
+    ) -> Result<ListResourceTemplatesResult, Error> {
         let params = ListResourceTemplatesRequestParams { cursor };
-        self.command(crate::types::resource::commands::TEMPLATES_LIST, Some(params))
-            .await?
-            .into_result()
+        self.command(
+            crate::types::resource::commands::TEMPLATES_LIST,
+            Some(params),
+        )
+        .await?
+        .into_result()
     }
 
     /// Requests a list of prompts that MCP server provides
@@ -439,8 +451,11 @@ impl Client {
     ///
     ///     client.disconnect().await
     /// }
-    /// ``` 
-    pub async fn list_prompts(&mut self, cursor: Option<Cursor>) -> Result<ListPromptsResult, Error> {
+    /// ```
+    pub async fn list_prompts(
+        &mut self,
+        cursor: Option<Cursor>,
+    ) -> Result<ListPromptsResult, Error> {
         let params = ListPromptsRequestParams { cursor };
         self.command(crate::types::prompt::commands::LIST, Some(params))
             .await?
@@ -460,7 +475,7 @@ impl Client {
     ///
     ///     client.connect().await?;
     ///
-    ///     let args = [("message", "Hello MCP!")]; // or let args = ("message", "Hello MCP!"); 
+    ///     let args = [("message", "Hello MCP!")]; // or let args = ("message", "Hello MCP!");
     ///     let result = client.call_tool("echo", args).await?;
     ///     // Do something with the result
     ///
@@ -471,7 +486,7 @@ impl Client {
     /// # Structured output
     /// ```no_run
     /// use neva::prelude::*;
-    /// 
+    ///
     /// #[json_schema(de)]
     /// struct Weather {
     ///     conditions: String,
@@ -486,14 +501,14 @@ impl Client {
     ///     client.connect().await?;
     ///
     ///     let tools = client.list_tools(None).await?;
-    /// 
+    ///
     ///     // Get the tool by name
     ///     let tool: &Tool = tools.get("weather-forecast")
     ///         .expect("Weather forecast tool not found");
-    /// 
+    ///
     ///     let args = ("location", "London");
     ///     let result = client.call_tool("weather-forecast", args).await?;
-    /// 
+    ///
     ///     // Validate the output structure and deserialize the result
     ///     let weather: Weather = tool
     ///         .validate(&result)
@@ -505,32 +520,30 @@ impl Client {
     /// }
     /// ```
     pub async fn call_tool<N, Args>(
-        &mut self, 
-        name: N, 
-        args: Args
+        &mut self,
+        name: N,
+        args: Args,
     ) -> Result<CallToolResponse, Error>
     where
         N: Into<String>,
-        Args: shared::IntoArgs
+        Args: shared::IntoArgs,
     {
         let params = CallToolRequestParams {
             name: name.into(),
             meta: None,
             args: args.into_args(),
             #[cfg(feature = "tasks")]
-            task: None
+            task: None,
         };
-        
-        self.call_tool_raw(params)
-            .await?
-            .into_result()
+
+        self.call_tool_raw(params).await?.into_result()
     }
 
     /// Calls a task-augmented tool that MCP server supports
     ///
     /// # Panics
     /// If the server does not support task-augmented tool calls
-    /// 
+    ///
     /// # Example
     /// ```no_run
     /// use neva::client::Client;
@@ -542,7 +555,7 @@ impl Client {
     ///
     ///     client.connect().await?;
     ///
-    ///     let args = [("message", "Hello MCP!")]; // or let args = ("message", "Hello MCP!"); 
+    ///     let args = [("message", "Hello MCP!")]; // or let args = ("message", "Hello MCP!");
     ///     let result = client.call_tool_as_task("echo", args, None).await?;
     ///     // Do something with the result
     ///
@@ -591,43 +604,42 @@ impl Client {
         &mut self,
         name: N,
         args: Args,
-        ttl: Option<usize>
+        ttl: Option<usize>,
     ) -> Result<CallToolResponse, Error>
     where
         N: Into<String>,
-        Args: shared::IntoArgs
+        Args: shared::IntoArgs,
     {
         assert!(
-            self.is_server_support_call_tool_with_tasks(), 
-            "Server does not support call tool with tasks.");
-        
+            self.is_server_support_call_tool_with_tasks(),
+            "Server does not support call tool with tasks."
+        );
+
         let params = CallToolRequestParams {
             name: name.into(),
             meta: None,
             args: args.into_args(),
-            task: Some(TaskMetadata { ttl })
+            task: Some(TaskMetadata { ttl }),
         };
 
-        let result = self
-            .call_tool_raw(params)
-            .await?
-            .into_result()?;
+        let result = self.call_tool_raw(params).await?.into_result()?;
 
         shared::wait_to_completion(self, result).await
     }
-    
+
     /// Calls a tool
     #[inline]
     pub async fn call_tool_raw(
-        &mut self, 
-        params: CallToolRequestParams
+        &mut self,
+        params: CallToolRequestParams,
     ) -> Result<Response, Error> {
         let id = self.generate_id()?;
-        
+
         let request = Request::new(
             Some(id.clone()),
             crate::types::tool::commands::CALL,
-            Some(params.with_meta(RequestParamsMeta::new(&id))));
+            Some(params.with_meta(RequestParamsMeta::new(&id))),
+        );
 
         self.send_request(request).await
     }
@@ -650,8 +662,11 @@ impl Client {
     ///
     ///     client.disconnect().await
     /// }
-    /// ``` 
-    pub async fn read_resource(&mut self, uri: impl Into<Uri>) -> Result<ReadResourceResult, Error> {
+    /// ```
+    pub async fn read_resource(
+        &mut self,
+        uri: impl Into<Uri>,
+    ) -> Result<ReadResourceResult, Error> {
         let id = self.generate_id()?;
         let request = Request::new(
             Some(id.clone()),
@@ -660,13 +675,11 @@ impl Client {
                 uri: uri.into(),
                 meta: Some(RequestParamsMeta::new(&id)),
                 #[cfg(feature = "server")]
-                args: None
-            })
+                args: None,
+            }),
         );
 
-        self.send_request(request)
-            .await?
-            .into_result()
+        self.send_request(request).await?.into_result()
     }
 
     /// Gets a prompt that MCP server provides
@@ -691,15 +704,15 @@ impl Client {
     ///
     ///     client.disconnect().await
     /// }
-    /// ``` 
+    /// ```
     pub async fn get_prompt<N, Args>(
-        &mut self, 
+        &mut self,
         name: N,
-        args: Args
+        args: Args,
     ) -> Result<GetPromptResult, Error>
     where
         N: Into<String>,
-        Args: shared::IntoArgs
+        Args: shared::IntoArgs,
     {
         let id = self.generate_id()?;
         let request = Request::new(
@@ -708,15 +721,13 @@ impl Client {
             Some(GetPromptRequestParams {
                 name: name.into(),
                 meta: Some(RequestParamsMeta::new(&id)),
-                args: args.into_args()
-            })
+                args: args.into_args(),
+            }),
         );
 
-        self.send_request(request)
-            .await?
-            .into_result()
+        self.send_request(request).await?.into_result()
     }
-    
+
     /// Subscribes to a resource on the server to receive notifications when it changes.
     pub async fn subscribe_to_resource(&mut self, uri: impl Into<Uri>) -> Result<(), Error> {
         if !self.is_resource_subscription_supported() {
@@ -725,12 +736,12 @@ impl Client {
                 "Server does not support resource subscriptions",
             ));
         }
-        
+
         let params = SubscribeRequestParams::from(uri);
         let resp = self
             .command(crate::types::resource::commands::SUBSCRIBE, Some(params))
             .await?;
-        
+
         match resp {
             Response::Ok(_) => Ok(()),
             Response::Err(err) => Err(err.error.into()),
@@ -750,31 +761,31 @@ impl Client {
         let resp = self
             .command(crate::types::resource::commands::UNSUBSCRIBE, Some(params))
             .await?;
-        
+
         match resp {
             Response::Ok(_) => Ok(()),
             Response::Err(err) => Err(err.error.into()),
         }
     }
-    
+
     /// Maps the `handler` to a specific `event`
     pub fn subscribe<E, F, R>(&mut self, event: E, handler: F)
     where
         E: Into<String>,
         F: Fn(Notification) -> R + Clone + Send + Sync + 'static,
-        R: Future<Output = ()> + Send
+        R: Future<Output = ()> + Send,
     {
         self.options
             .notification_handler
             .get_or_insert_default()
             .subscribe(event, handler);
     }
-    
+
     /// Unsubscribe a handler from the `event`
     pub fn unsubscribe(&mut self, event: impl AsRef<str>) {
         if let Some(notification_handler) = &self.options.notification_handler {
             notification_handler.unsubscribe(event);
-        } 
+        }
     }
 
     /// Returns whether the server is configured to send the "notifications/resources/updated"
@@ -816,18 +827,14 @@ impl Client {
     /// Returns whether the client has elicitation capabilities
     #[inline]
     fn is_elicitation_supported(&self) -> bool {
-        self.options.elicitation_capability
-            .as_ref()
-            .is_some()
+        self.options.elicitation_capability.as_ref().is_some()
     }
 
     /// Returns whether the client has task augmentation capabilities
     #[inline]
     #[cfg(feature = "tasks")]
     fn is_client_supports_tasks(&self) -> bool {
-        self.options.tasks_capability
-            .as_ref()
-            .is_some()
+        self.options.tasks_capability.as_ref().is_some()
     }
 
     /// Returns whether the server has task augmentation capabilities
@@ -843,7 +850,8 @@ impl Client {
     #[inline]
     #[cfg(feature = "tasks")]
     fn is_client_support_cancelling_tasks(&self) -> bool {
-        self.options.tasks_capability
+        self.options
+            .tasks_capability
             .as_ref()
             .is_some_and(|c| c.cancel.is_some())
     }
@@ -872,7 +880,8 @@ impl Client {
     #[inline]
     #[cfg(feature = "tasks")]
     fn is_client_support_task_list(&self) -> bool {
-        self.options.tasks_capability
+        self.options
+            .tasks_capability
             .as_ref()
             .is_some_and(|c| c.list.is_some())
     }
@@ -892,7 +901,8 @@ impl Client {
     /// Sends a request to the MCP server
     #[inline]
     async fn send_request(&mut self, req: Request) -> Result<Response, Error> {
-        self.handler.as_mut()
+        self.handler
+            .as_mut()
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?
             .send_request(req)
             .await
@@ -946,7 +956,8 @@ impl Client {
     ) -> Result<Vec<Response>, Error> {
         use futures_util::future::join_all;
 
-        let handler = self.handler
+        let handler = self
+            .handler
             .as_mut()
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
 
@@ -959,7 +970,10 @@ impl Client {
             async move {
                 match tokio::time::timeout(request_timeout, rx).await {
                     Ok(Ok(resp)) => Ok(resp),
-                    Ok(Err(_)) => Err(Error::new(ErrorCode::InternalError, "Response channel closed")),
+                    Ok(Err(_)) => Err(Error::new(
+                        ErrorCode::InternalError,
+                        "Response channel closed",
+                    )),
                     Err(_) => {
                         let _ = pending.pop(&id);
                         Err(Error::new(ErrorCode::Timeout, "Batch request timed out"))
@@ -980,22 +994,24 @@ impl Client {
     #[inline]
     #[cfg(feature = "tasks")]
     async fn send_response(&mut self, req: Response) -> Result<(), Error> {
-        self.handler.as_mut()
+        self.handler
+            .as_mut()
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?
             .send_response(req)
             .await;
         Ok(())
     }
-    
+
     /// Sends a notification to the MCP server
     #[inline]
     async fn send_notification(
         &mut self,
         method: &str,
-        params: Option<serde_json::Value>
+        params: Option<serde_json::Value>,
     ) -> Result<(), Error> {
         let notification = Notification::new(method, params);
-        self.handler.as_mut()
+        self.handler
+            .as_mut()
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?
             .send_notification(notification)
             .await
@@ -1004,12 +1020,12 @@ impl Client {
     #[cfg(feature = "tracing")]
     fn register_tracing_notification_handlers(&mut self) {
         use crate::types::notification::commands::*;
-        
+
         self.subscribe(MESSAGE, Self::default_notification_handler);
         self.subscribe(STDERR, Self::default_notification_handler);
         self.subscribe(PROGRESS, Self::default_notification_handler);
     }
-    
+
     #[cfg(feature = "tracing")]
     async fn default_notification_handler(notification: Notification) {
         notification.write();
@@ -1018,11 +1034,12 @@ impl Client {
     /// Generates a new [`RequestId`]
     #[inline]
     fn generate_id(&self) -> Result<RequestId, Error> {
-        self.handler.as_ref()
+        self.handler
+            .as_ref()
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))
             .map(|h| h.next_id())
     }
-    
+
     /// Cancels the transport and clears connection state without sending a
     /// notification. Used when initialization fails after the transport has
     /// already been started (e.g. protocol version mismatch in `init()`).
@@ -1040,7 +1057,7 @@ impl Client {
             shared::wait_for_shutdown_signal(token);
         };
     }
-    
+
     #[inline(always)]
     #[cfg(feature = "tasks")]
     fn ensure_tasks_supported(&self) {
@@ -1060,8 +1077,8 @@ impl Client {
 impl shared::TaskApi for Client {
     /// Retrieves task result. If the task is not completed yet, waits until it completes or cancels.
     async fn get_task_result<T>(&mut self, id: impl Into<String>) -> Result<T, Error>
-    where 
-        T: DeserializeOwned
+    where
+        T: DeserializeOwned,
     {
         let params = GetTaskPayloadRequestParams { id: id.into() };
         self.command(crate::types::task::commands::RESULT, Some(params))
@@ -1069,29 +1086,29 @@ impl shared::TaskApi for Client {
             .into_result()
     }
 
-    /// Retrieve task status 
+    /// Retrieve task status
     async fn get_task(&mut self, id: impl Into<String>) -> Result<Task, Error> {
         let params = GetTaskRequestParams { id: id.into() };
         self.command(crate::types::task::commands::GET, Some(params))
             .await?
             .into_result()
     }
-    
+
     /// Cancels a task that is currently running
-    /// 
+    ///
     /// # Panics
     /// If the client or server does not support cancelling tasks
     async fn cancel_task(&mut self, id: impl Into<String>) -> Result<Task, Error> {
         assert!(
-            self.is_client_support_cancelling_tasks(), 
+            self.is_client_support_cancelling_tasks(),
             "Client does not support cancelling tasks.  You may configure it with `Client::with_options(|opt| opt.with_tasks(...))` method."
         );
-        
+
         assert!(
-            self.is_server_support_cancelling_tasks(), 
+            self.is_server_support_cancelling_tasks(),
             "Server does not support cancelling tasks."
         );
-        
+
         let params = CancelTaskRequestParams { id: id.into() };
         self.command(crate::types::task::commands::CANCEL, Some(params))
             .await?
@@ -1099,20 +1116,20 @@ impl shared::TaskApi for Client {
     }
 
     /// Retrieves a list of tasks
-    /// 
+    ///
     /// # Panics
     /// If the client or server does not support retrieving a task list
     async fn list_tasks(&mut self, cursor: Option<Cursor>) -> Result<ListTasksResult, Error> {
         assert!(
-            self.is_client_support_task_list(), 
+            self.is_client_support_task_list(),
             "Client does not support retrieving a task list.  You may configure it with `Client::with_options(|opt| opt.with_tasks(...))` method."
         );
-        
+
         assert!(
-            self.is_server_support_task_list(), 
+            self.is_server_support_task_list(),
             "Server does not support retrieving a task list."
         );
-        
+
         let params = ListTasksRequestParams { cursor };
         self.command(crate::types::task::commands::LIST, Some(params))
             .await?
@@ -1124,13 +1141,10 @@ impl shared::TaskApi for Client {
         if let Some(handler) = &self.options.elicitation_handler {
             use crate::types::IntoResponse;
 
-            let result = handler(params)
-                .await
-                .with_related_task(id);
-            
-            let id = id.parse::<RequestId>()
-                .expect("Invalid Request Id");
-            
+            let result = handler(params).await.with_related_task(id);
+
+            let id = id.parse::<RequestId>().expect("Invalid Request Id");
+
             self.send_response(result.into_response(id)).await?;
         }
         Ok(())
@@ -1152,11 +1166,8 @@ where
     })
 }
 
-type Handler<P, O> = Arc<
-    dyn Fn(P) -> std::pin::Pin<Box<dyn Future<Output = O> + Send>>
-    + Send
-    + Sync
->;
+type Handler<P, O> =
+    Arc<dyn Fn(P) -> std::pin::Pin<Box<dyn Future<Output = O> + Send>> + Send + Sync>;
 
 #[cfg(test)]
 mod tests {
@@ -1166,6 +1177,9 @@ mod tests {
     async fn call_batch_requires_connected_client() {
         let mut client = Client::new();
         let result = client.call_batch(vec![]).await;
-        assert!(result.is_err(), "disconnected client should return an error");
+        assert!(
+            result.is_err(),
+            "disconnected client should return an error"
+        );
     }
 }

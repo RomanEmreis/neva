@@ -5,39 +5,34 @@ use reqwest::header::HeaderMap;
 
 #[cfg(feature = "http-server")]
 use {
+    server::{AuthConfig, DefaultClaims},
     volga::{auth::AuthClaims, headers::HeaderMap},
-    server::{AuthConfig, DefaultClaims}
 };
 
-use futures_util::TryFutureExt;
-use std::{borrow::Cow, fmt::Display};
-use tokio_util::sync::CancellationToken;
-use tokio::sync::{mpsc::{self, Receiver, Sender}};
 use crate::{
     error::{Error, ErrorCode},
     shared::MemChr,
-    types::Message
+    types::Message,
 };
+use futures_util::TryFutureExt;
+use std::{borrow::Cow, fmt::Display};
+use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio_util::sync::CancellationToken;
 
-use super::{
-    Transport,
-    Sender as TransportSender,
-    Receiver as TransportReceiver
-};
+use super::{Receiver as TransportReceiver, Sender as TransportSender, Transport};
 
 #[cfg(all(feature = "http-server", feature = "server-tls"))]
-pub use volga::tls::{TlsConfig, DevCertMode};
+pub use volga::tls::{DevCertMode, TlsConfig};
 
 #[cfg(all(feature = "http-client", feature = "client-tls"))]
 use crate::transport::http::client::tls_config::{
-    ClientTlsConfig, 
-    TlsConfig as McpClientTlsConfig
+    ClientTlsConfig, TlsConfig as McpClientTlsConfig,
 };
 
-#[cfg(feature = "http-server")]
-pub(crate) mod server;
 #[cfg(feature = "http-client")]
 pub(crate) mod client;
+#[cfg(feature = "http-server")]
+pub(crate) mod server;
 
 pub(super) const MCP_SESSION_ID: &str = "Mcp-Session-Id";
 const DEFAULT_ADDR: &str = "127.0.0.1:3000";
@@ -56,7 +51,7 @@ pub(super) fn get_mcp_session_id(headers: &HeaderMap) -> Option<uuid::Uuid> {
 pub(crate) enum HttpProto {
     Http,
     #[cfg(any(feature = "server-tls", feature = "client-tls"))]
-    Https
+    Https,
 }
 
 /// Represents HTTP server transport
@@ -116,7 +111,7 @@ pub(crate) struct HttpSender {
 /// Represents HTTP receiver
 pub(crate) struct HttpReceiver {
     tx: Sender<Result<Message, Error>>,
-    rx: Receiver<Result<Message, Error>>
+    rx: Receiver<Result<Message, Error>>,
 }
 
 #[cfg(feature = "http-server")]
@@ -139,7 +134,7 @@ impl Default for HttpServer {
             #[cfg(feature = "server-tls")]
             tls_config: None,
             receiver: HttpReceiver::new(),
-            sender: HttpSender::new()
+            sender: HttpSender::new(),
         }
     }
 }
@@ -154,7 +149,7 @@ impl Default for HttpClient {
             #[cfg(feature = "client-tls")]
             tls_config: None,
             receiver: HttpReceiver::new(),
-            sender: HttpSender::new()
+            sender: HttpSender::new(),
         }
     }
 }
@@ -179,7 +174,7 @@ impl ServiceUrl {
 impl Display for HttpProto {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self { 
+        match &self {
             HttpProto::Http => f.write_str("http"),
             #[cfg(any(feature = "server-tls", feature = "client-tls"))]
             HttpProto::Https => f.write_str("https"),
@@ -250,15 +245,15 @@ impl HttpServer {
     pub fn new(addr: &'static str) -> Self {
         Self::default().bind(addr)
     }
-    
+
     /// Binds HTTP serve to address and port    
     pub fn bind(mut self, addr: &'static str) -> Self {
         self.url.addr = addr;
         self
     }
-    
+
     /// Sets the MCP endpoint
-    /// 
+    ///
     /// Default: `/mcp`
     pub fn with_endpoint(mut self, prefix: &'static str) -> Self {
         self.url.endpoint = prefix;
@@ -269,25 +264,28 @@ impl HttpServer {
     #[cfg(feature = "server-tls")]
     pub fn with_tls<F>(mut self, config: F) -> Self
     where
-        F: FnOnce(TlsConfig) -> TlsConfig
+        F: FnOnce(TlsConfig) -> TlsConfig,
     {
         self.tls_config = Some(config(Default::default()));
         self.url.proto = HttpProto::Https;
         self
     }
-    
+
     /// Configures authentication and authorization
     pub fn with_auth<F>(mut self, config: F) -> Self
-    where 
-        F: FnOnce(AuthConfig) -> AuthConfig
+    where
+        F: FnOnce(AuthConfig) -> AuthConfig,
     {
         self.auth = Some(config(AuthConfig::default()));
-        self    
+        self
     }
-    
+
     fn runtime(&mut self) -> Result<HttpRuntimeContext, Error> {
         let Some(sender_rx) = self.sender.rx.take() else {
-            return Err(Error::new(ErrorCode::InternalError, "The HTTP writer is already in use"));
+            return Err(Error::new(
+                ErrorCode::InternalError,
+                "The HTTP writer is already in use",
+            ));
         };
         Ok(HttpRuntimeContext {
             url: self.url,
@@ -320,16 +318,16 @@ impl HttpClient {
     #[cfg(feature = "client-tls")]
     pub fn with_tls<F>(mut self, config: F) -> Self
     where
-        F: FnOnce(McpClientTlsConfig) -> McpClientTlsConfig
+        F: FnOnce(McpClientTlsConfig) -> McpClientTlsConfig,
     {
         self.tls_config = Some(config(Default::default()));
         self.url.proto = HttpProto::Https;
         self
     }
-    
+
     /// Set the bearer token for requests
     ///
-    ///Default: `None` 
+    ///Default: `None`
     pub fn with_auth(mut self, access_token: impl Into<String>) -> Self {
         self.access_token = Some(access_token.into().into_bytes().into_boxed_slice());
         self
@@ -337,21 +335,22 @@ impl HttpClient {
 
     fn runtime(&mut self) -> Result<ClientRuntimeContext, Error> {
         let Some(sender_rx) = self.sender.rx.take() else {
-            return Err(Error::new(ErrorCode::InternalError, "The HTTP writer is already in use"));
+            return Err(Error::new(
+                ErrorCode::InternalError,
+                "The HTTP writer is already in use",
+            ));
         };
-        
+
         #[cfg(feature = "client-tls")]
-        let tls_config = self.tls_config.take()
-            .map(|tls| tls.build())
-            .transpose()?;
-        
+        let tls_config = self.tls_config.take().map(|tls| tls.build()).transpose()?;
+
         Ok(ClientRuntimeContext {
             url: self.url,
             tx: self.receiver.tx.clone(),
             rx: sender_rx,
             access_token: self.access_token.take(),
             #[cfg(feature = "client-tls")]
-            tls_config
+            tls_config,
         })
     }
 }
@@ -367,10 +366,12 @@ impl TransportSender for HttpSender {
 
 impl TransportReceiver for HttpReceiver {
     async fn recv(&mut self) -> Result<Message, Error> {
-        self.rx
-            .recv()
-            .await
-            .unwrap_or_else(|| Err(Error::new(ErrorCode::InvalidRequest, "Unexpected end of stream")))
+        self.rx.recv().await.unwrap_or_else(|| {
+            Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "Unexpected end of stream",
+            ))
+        })
     }
 }
 
@@ -389,11 +390,8 @@ impl Transport for HttpServer {
                 return token;
             }
         };
-        tokio::spawn(server::serve(
-            runtime,
-            token.clone())
-        );
-        
+        tokio::spawn(server::serve(runtime, token.clone()));
+
         token
     }
 
@@ -418,11 +416,8 @@ impl Transport for HttpClient {
                 return token;
             }
         };
-        tokio::spawn(client::connect(
-            runtime,
-            token.clone()
-        ));
-        
+        tokio::spawn(client::connect(runtime, token.clone()));
+
         token
     }
 
@@ -432,6 +427,4 @@ impl Transport for HttpClient {
 }
 
 #[cfg(test)]
-mod test {
-    
-}
+mod test {}

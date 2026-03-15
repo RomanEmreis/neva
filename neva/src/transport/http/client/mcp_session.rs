@@ -1,9 +1,9 @@
 //! Tools and utilities for MCP Client Session
 
+use crate::transport::http::ServiceUrl;
 use once_cell::sync::OnceCell;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use crate::transport::http::ServiceUrl;
 
 /// Represents current MCP Session
 pub(super) struct McpSession {
@@ -11,7 +11,7 @@ pub(super) struct McpSession {
     sse_ready: Notify,
     url: ServiceUrl,
     session_id: OnceCell<uuid::Uuid>,
-    cancellation_token: CancellationToken
+    cancellation_token: CancellationToken,
 }
 
 impl McpSession {
@@ -22,7 +22,7 @@ impl McpSession {
             sse_ready: Notify::new(),
             session_id: OnceCell::new(),
             cancellation_token: token,
-            url
+            url,
         }
     }
 
@@ -53,7 +53,7 @@ impl McpSession {
             tracing::info!("MCP Session Id already set");
         }
     }
-    
+
     /// Sends a signal that this MCP Session has been initialized
     #[inline]
     pub(super) fn notify_session_initialized(&self) {
@@ -81,12 +81,12 @@ impl McpSession {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use super::*;
-    use uuid::Uuid;
-    use tokio::time::{timeout, Duration};
-    use tokio_util::sync::CancellationToken;
     use crate::transport::http::HttpProto;
+    use std::sync::Arc;
+    use tokio::time::{Duration, timeout};
+    use tokio_util::sync::CancellationToken;
+    use uuid::Uuid;
 
     fn create_session() -> McpSession {
         let url = ServiceUrl {

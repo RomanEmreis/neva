@@ -1,4 +1,4 @@
-﻿//! Utilities and helpers for cross-platform multithreading.
+//! Utilities and helpers for cross-platform multithreading.
 
 /// Cooperatively yields to the Tokio scheduler before spawning a new task,
 /// ensuring fair task scheduling especially under high load or on platforms

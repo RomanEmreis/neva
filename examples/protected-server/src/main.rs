@@ -6,7 +6,7 @@
 //! JWT_SECRET=a-string-secret-at-least-256-bits-long cargo run -p protected-server
 //! ```
 use neva::prelude::*;
-use tracing_subscriber::{filter, reload, prelude::*};
+use tracing_subscriber::{filter, prelude::*, reload};
 
 /// A tool that allowed to everyone
 #[tool]
@@ -36,8 +36,7 @@ async fn restricted_resource(uri: Uri, name: String) -> (String, String) {
 
 #[tokio::main]
 async fn main() {
-    let secret = std::env::var("JWT_SECRET")
-        .expect("JWT_SECRET must be set");
+    let secret = std::env::var("JWT_SECRET").expect("JWT_SECRET must be set");
 
     let (filter, handle) = reload::Layer::new(filter::LevelFilter::DEBUG);
     tracing_subscriber::registry()
@@ -46,14 +45,17 @@ async fn main() {
         .init();
 
     App::new()
-        .with_options(|opt| opt
-            .with_http(|http| http
-                .with_auth(|auth| auth
-                    .validate_exp(false)
-                    .with_aud(["some aud"])
-                    .with_iss(["some issuer"])
-                    .set_decoding_key(secret.as_bytes())))
-            .with_logging(handle))
+        .with_options(|opt| {
+            opt.with_http(|http| {
+                http.with_auth(|auth| {
+                    auth.validate_exp(false)
+                        .with_aud(["some aud"])
+                        .with_iss(["some issuer"])
+                        .set_decoding_key(secret.as_bytes())
+                })
+            })
+            .with_logging(handle)
+        })
         .run()
         .await;
 }

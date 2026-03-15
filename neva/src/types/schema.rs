@@ -1,12 +1,15 @@
 //! Utilities for Primitive JSON schema definitions
 
-use serde::{Deserialize, Serialize, Deserializer, Serializer};
-use serde_json::Value;
-use crate::{error::{Error, ErrorCode}, types::PropertyType};
 use crate::prelude::Schema::{MultiTitledEnum, SingleTitledEnum};
 use crate::types::Schema::{MultiUntitledEnum, SingleUntitledEnum};
+use crate::{
+    error::{Error, ErrorCode},
+    types::PropertyType,
+};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
 
-/// Represents restricted subset of JSON Schema: 
+/// Represents restricted subset of JSON Schema:
 /// - [`StringSchema`]
 /// - [`NumberSchema`]
 /// - [`BooleanSchema`]
@@ -18,10 +21,10 @@ use crate::types::Schema::{MultiUntitledEnum, SingleUntitledEnum};
 pub enum Schema {
     /// See [`StringSchema`]
     String(StringSchema),
-    
+
     /// See [`NumberSchema`]
     Number(NumberSchema),
-    
+
     /// See [`BooleanSchema`]
     Boolean(BooleanSchema),
 
@@ -38,7 +41,7 @@ pub enum Schema {
     MultiTitledEnum(TitledMultiSelectEnumSchema),
 
     /// See [`LegacyTitledEnum`]
-    LegacyEnum(LegacyTitledEnumSchema)
+    LegacyEnum(LegacyTitledEnumSchema),
 }
 
 /// Represents a schema for a string type.
@@ -55,15 +58,15 @@ pub struct StringSchema {
     /// A human-readable description of the property
     #[serde(rename = "description", skip_serializing_if = "Option::is_none")]
     pub descr: Option<String>,
-    
+
     /// The minimum length for the string.
     #[serde(rename = "minLength", skip_serializing_if = "Option::is_none")]
     pub min_length: Option<usize>,
-    
+
     /// The maximum length for the string.
     #[serde(rename = "maxLength", skip_serializing_if = "Option::is_none")]
     pub max_length: Option<usize>,
-    
+
     /// A specific format for the string ("email", "uri", "date", or "date-time").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<StringFormat>,
@@ -103,11 +106,11 @@ pub struct NumberSchema {
     /// A human-readable description of the property
     #[serde(rename = "description", skip_serializing_if = "Option::is_none")]
     pub descr: Option<String>,
-    
+
     /// The minimum allowed value.
     #[serde(rename = "minimum", skip_serializing_if = "Option::is_none")]
     pub min: Option<f64>,
-    
+
     /// The maximum allowed value.
     #[serde(rename = "maximum", skip_serializing_if = "Option::is_none")]
     pub max: Option<f64>,
@@ -127,7 +130,7 @@ pub struct BooleanSchema {
     /// A human-readable description of the property
     #[serde(rename = "description", skip_serializing_if = "Option::is_none")]
     pub descr: Option<String>,
-    
+
     /// The default value for the Boolean.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<bool>,
@@ -135,7 +138,7 @@ pub struct BooleanSchema {
 
 /// Legacy enumeration schema for the protocol versions below `2025-11-25`.
 /// For the newer versions use the [`TitledSingleSelectEnum`] instead.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LegacyTitledEnumSchema {
@@ -150,18 +153,18 @@ pub struct LegacyTitledEnumSchema {
     /// A human-readable description of the property
     #[serde(rename = "description", skip_serializing_if = "Option::is_none")]
     pub descr: Option<String>,
-    
+
     /// The list of allowed string values for the enum.
     #[serde(rename = "enum")]
     pub r#enum: Vec<String>,
- 
+
     /// Optional display names corresponding to the enum values
     #[serde(rename = "enumNames", skip_serializing_if = "Option::is_none")]
-    pub enum_names: Option<Vec<String>>,   
+    pub enum_names: Option<Vec<String>>,
 }
 
 /// Schema for single-selection enumeration without display titles for options.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UntitledSingleSelectEnumSchema {
@@ -231,11 +234,11 @@ pub struct UntitledMultiSelectEnumSchema {
 
     /// The list of allowed string values for the enum.
     pub items: EnumItems,
-    
+
     /// Maximum number of items to select.
     #[serde(rename = "maxItems", skip_serializing_if = "Option::is_none")]
     pub max_items: Option<usize>,
-    
+
     /// Minimum number of items to select.
     #[serde(rename = "minItems", skip_serializing_if = "Option::is_none")]
     pub min_items: Option<usize>,
@@ -293,7 +296,7 @@ pub struct EnumItems {
 }
 
 /// Schema for array items with enum options and display labels.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnumOptions {
@@ -310,7 +313,7 @@ pub struct EnumOption {
     /// The enum value.
     #[serde(rename = "const")]
     pub value: String,
-    
+
     /// Display label for this option.
     pub title: String,
 }
@@ -322,9 +325,9 @@ impl<'de> Deserialize<'de> for Schema {
         D: Deserializer<'de>,
     {
         let value = Value::deserialize(deserializer)?;
-        let obj = value.as_object().ok_or_else(|| {
-            serde::de::Error::custom("Expected object")
-        })?;
+        let obj = value
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("Expected object"))?;
 
         let type_field = obj.get("type").and_then(|v| v.as_str());
         let schema = match type_field {
@@ -332,25 +335,19 @@ impl<'de> Deserialize<'de> for Schema {
                 if obj.contains_key("enum") {
                     if obj.contains_key("enumNames") {
                         Schema::LegacyEnum(
-                            serde_json::from_value(value)
-                                .map_err(serde::de::Error::custom)?
+                            serde_json::from_value(value).map_err(serde::de::Error::custom)?,
                         )
                     } else {
                         Schema::SingleUntitledEnum(
-                            serde_json::from_value(value)
-                                .map_err(serde::de::Error::custom)?
+                            serde_json::from_value(value).map_err(serde::de::Error::custom)?,
                         )
                     }
                 } else if obj.contains_key("oneOf") {
                     Schema::SingleTitledEnum(
-                        serde_json::from_value(value)
-                            .map_err(serde::de::Error::custom)?
+                        serde_json::from_value(value).map_err(serde::de::Error::custom)?,
                     )
                 } else {
-                    Schema::String(
-                        serde_json::from_value(value)
-                            .map_err(serde::de::Error::custom)?
-                    )
+                    Schema::String(serde_json::from_value(value).map_err(serde::de::Error::custom)?)
                 }
             }
             Some("array") => {
@@ -358,13 +355,11 @@ impl<'de> Deserialize<'de> for Schema {
                 if let Some(items_obj) = items.and_then(|v| v.as_object()) {
                     if items_obj.contains_key("anyOf") {
                         Schema::MultiTitledEnum(
-                            serde_json::from_value(value)
-                                .map_err(serde::de::Error::custom)?
+                            serde_json::from_value(value).map_err(serde::de::Error::custom)?,
                         )
                     } else if items_obj.contains_key("enum") {
                         Schema::MultiUntitledEnum(
-                            serde_json::from_value(value)
-                                .map_err(serde::de::Error::custom)?
+                            serde_json::from_value(value).map_err(serde::de::Error::custom)?,
                         )
                     } else {
                         return Err(serde::de::Error::custom("Unknown array schema type"));
@@ -373,18 +368,17 @@ impl<'de> Deserialize<'de> for Schema {
                     return Err(serde::de::Error::custom("Array schema missing items"));
                 }
             }
-            Some("number") | Some("integer") => Schema::Number(
-                serde_json::from_value(value)
-                    .map_err(serde::de::Error::custom)?
-            ),
-            Some("boolean") => Schema::Boolean(
-                serde_json::from_value(value)
-                    .map_err(serde::de::Error::custom)?
-            ),
+            Some("number") | Some("integer") => {
+                Schema::Number(serde_json::from_value(value).map_err(serde::de::Error::custom)?)
+            }
+            Some("boolean") => {
+                Schema::Boolean(serde_json::from_value(value).map_err(serde::de::Error::custom)?)
+            }
             _ => {
-                return Err(serde::de::Error::custom(
-                    format!("Unknown or missing type field: {:?}", type_field)
-                ));
+                return Err(serde::de::Error::custom(format!(
+                    "Unknown or missing type field: {:?}",
+                    type_field
+                )));
             }
         };
 
@@ -457,7 +451,7 @@ impl Default for LegacyTitledEnumSchema {
             r#enum: Vec::new(),
             title: None,
             descr: None,
-            enum_names: None
+            enum_names: None,
         }
     }
 }
@@ -470,7 +464,7 @@ impl Default for UntitledSingleSelectEnumSchema {
             r#enum: Vec::new(),
             title: None,
             descr: None,
-            default: None
+            default: None,
         }
     }
 }
@@ -483,7 +477,7 @@ impl Default for TitledSingleSelectEnumSchema {
             one_of: Vec::new(),
             title: None,
             descr: None,
-            default: None
+            default: None,
         }
     }
 }
@@ -498,7 +492,7 @@ impl Default for UntitledMultiSelectEnumSchema {
             min_items: None,
             title: None,
             descr: None,
-            default: None
+            default: None,
         }
     }
 }
@@ -513,7 +507,7 @@ impl Default for TitledMultiSelectEnumSchema {
             min_items: None,
             title: None,
             descr: None,
-            default: None
+            default: None,
         }
     }
 }
@@ -521,9 +515,9 @@ impl Default for TitledMultiSelectEnumSchema {
 impl Default for EnumItems {
     #[inline]
     fn default() -> Self {
-        Self { 
-            r#type: PropertyType::String, 
-            r#enum: Vec::new()
+        Self {
+            r#type: PropertyType::String,
+            r#enum: Vec::new(),
         }
     }
 }
@@ -531,16 +525,14 @@ impl Default for EnumItems {
 impl Default for EnumOptions {
     #[inline]
     fn default() -> Self {
-        Self {
-            any_of: Vec::new()
-        }
+        Self { any_of: Vec::new() }
     }
 }
 
 impl From<&str> for Schema {
     #[inline]
     fn from(value: &str) -> Self {
-        match value { 
+        match value {
             "string" => Self::string(),
             "number" => Self::number(),
             "boolean" => Self::boolean(),
@@ -554,8 +546,7 @@ impl From<&str> for Schema {
 impl From<&Value> for Schema {
     #[inline]
     fn from(value: &Value) -> Self {
-        serde_json::from_value(value.clone())
-            .unwrap_or_else(|_| Schema::string())
+        serde_json::from_value(value.clone()).unwrap_or_else(|_| Schema::string())
     }
 }
 
@@ -571,20 +562,20 @@ impl Schema {
     pub fn string() -> Self {
         Self::String(Default::default())
     }
-    
+
     /// Creates a new [`Schema`] instance with a [`NumberSchema`] type.
     pub fn number() -> Self {
         Self::Number(Default::default())
     }
-    
+
     /// Creates a new [`Schema`] instance with a [`BooleanSchema`] type.   
     pub fn boolean() -> Self {
         Self::Boolean(Default::default())
     }
-    
+
     /// Creates a new [`Schema`] instance with a [`SingleUntitledEnum`] type.  
     pub fn single_untitled_enum() -> Self {
-        SingleUntitledEnum(Default::default())   
+        SingleUntitledEnum(Default::default())
     }
 
     /// Creates a new [`Schema`] instance with a [`SingleTitledEnum`] type.  
@@ -607,28 +598,34 @@ impl StringSchema {
     /// Validates the string value against the schema.
     #[inline]
     pub(crate) fn validate(&self, value: &Value) -> Result<(), Error> {
-        let str_value = value.as_str()
-            .ok_or(Error::new(ErrorCode::InvalidParams, "Expected string value"))?;
+        let str_value = value.as_str().ok_or(Error::new(
+            ErrorCode::InvalidParams,
+            "Expected string value",
+        ))?;
 
         if let Some(min_len) = self.min_length
-            && str_value.len() < min_len {
+            && str_value.len() < min_len
+        {
             return Err(Error::new(
                 ErrorCode::InvalidParams,
-                format!("String too short: {} < {min_len}", str_value.len())));
+                format!("String too short: {} < {min_len}", str_value.len()),
+            ));
         }
 
         if let Some(max_len) = self.max_length
-            && str_value.len() > max_len {
+            && str_value.len() > max_len
+        {
             return Err(Error::new(
                 ErrorCode::InvalidParams,
-                format!("String too long: {} > {max_len}", str_value.len())));
+                format!("String too long: {} > {max_len}", str_value.len()),
+            ));
         }
 
         // Validate format if specified
         if let Some(format) = &self.format {
             self.validate_string_format(str_value, format)?;
         }
-        
+
         Ok(())
     }
 
@@ -639,19 +636,25 @@ impl StringSchema {
                 if !value.contains('@') || !value.contains('.') {
                     return Err(Error::new(ErrorCode::InvalidParams, "Invalid email format"));
                 }
-            },
+            }
             StringFormat::Uri => {
                 let parts: Vec<&str> = value.splitn(2, "://").collect();
                 if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
                     return Err(Error::new(ErrorCode::InvalidParams, "Invalid URI format"));
                 }
-            },
+            }
             StringFormat::Date => {
                 // Basic date format validation (YYYY-MM-DD)
-                if value.len() != 10 || value.chars().nth(4) != Some('-') || value.chars().nth(7) != Some('-') {
-                    return Err(Error::new(ErrorCode::InvalidParams, "Invalid date format (expected YYYY-MM-DD)"));
+                if value.len() != 10
+                    || value.chars().nth(4) != Some('-')
+                    || value.chars().nth(7) != Some('-')
+                {
+                    return Err(Error::new(
+                        ErrorCode::InvalidParams,
+                        "Invalid date format (expected YYYY-MM-DD)",
+                    ));
                 }
-            },
+            }
             StringFormat::DateTime => {
                 if !value.contains('T') {
                     return Err(Error::new(ErrorCode::InvalidParams, "Invalid date format"));
@@ -666,22 +669,29 @@ impl NumberSchema {
     /// Validates the number value against the schema.
     #[inline]
     pub(crate) fn validate(&self, value: &Value) -> Result<(), Error> {
-        let num_value = value.as_f64()
-            .ok_or(Error::new(ErrorCode::InvalidParams, "Expected number value"))?;
+        let num_value = value.as_f64().ok_or(Error::new(
+            ErrorCode::InvalidParams,
+            "Expected number value",
+        ))?;
 
-        if let Some(min) = self.min && num_value < min {
+        if let Some(min) = self.min
+            && num_value < min
+        {
             return Err(Error::new(
                 ErrorCode::InvalidParams,
-                format!("Number too small: {num_value} < {min}")));
+                format!("Number too small: {num_value} < {min}"),
+            ));
         }
 
-        if let Some(max) = self.max && num_value > max {
-            return Err(
-                Error::new(
-                    ErrorCode::InvalidParams,
-                    format!("Number too large: {num_value} > {max}")));
+        if let Some(max) = self.max
+            && num_value > max
+        {
+            return Err(Error::new(
+                ErrorCode::InvalidParams,
+                format!("Number too large: {num_value} > {max}"),
+            ));
         }
-        
+
         Ok(())
     }
 }
@@ -690,7 +700,8 @@ impl BooleanSchema {
     /// Validates the boolean value against the schema.
     #[inline]
     pub(crate) fn validate(&self, value: &Value) -> Result<(), Error> {
-        value.is_boolean()
+        value
+            .is_boolean()
             .then_some(())
             .ok_or_else(|| Error::new(ErrorCode::InvalidParams, "Expected boolean value"))
     }
@@ -701,12 +712,16 @@ impl LegacyTitledEnumSchema {
     #[inline]
     pub(crate) fn validate(&self, value: &Value) -> Result<(), Error> {
         let str_value = make_str(value)?;
-        self.r#enum.iter()
+        self.r#enum
+            .iter()
             .any(|v| v == str_value)
             .then_some(())
-            .ok_or_else(|| Error::new(
-                ErrorCode::InvalidParams, 
-                format!("Invalid enum value: {str_value}")))
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::InvalidParams,
+                    format!("Invalid enum value: {str_value}"),
+                )
+            })
     }
 }
 
@@ -715,12 +730,16 @@ impl UntitledSingleSelectEnumSchema {
     #[inline]
     pub(crate) fn validate(&self, value: &Value) -> Result<(), Error> {
         let str_value = make_str(value)?;
-        self.r#enum.iter()
+        self.r#enum
+            .iter()
             .any(|v| v == str_value)
             .then_some(())
-            .ok_or_else(|| Error::new(
-                ErrorCode::InvalidParams,
-                format!("Invalid enum value: {str_value}")))
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::InvalidParams,
+                    format!("Invalid enum value: {str_value}"),
+                )
+            })
     }
 }
 
@@ -729,12 +748,16 @@ impl TitledSingleSelectEnumSchema {
     #[inline]
     pub(crate) fn validate(&self, value: &Value) -> Result<(), Error> {
         let str_value = make_str(value)?;
-        self.one_of.iter()
+        self.one_of
+            .iter()
             .any(|v| v.value == str_value)
             .then_some(())
-            .ok_or_else(|| Error::new(
-                ErrorCode::InvalidParams,
-                format!("Invalid enum value: {str_value}")))
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::InvalidParams,
+                    format!("Invalid enum value: {str_value}"),
+                )
+            })
     }
 }
 
@@ -743,8 +766,8 @@ impl UntitledMultiSelectEnumSchema {
     #[inline]
     pub(crate) fn validate(&self, value: &Value) -> Result<(), Error> {
         let mut str_values = make_iter_of_as_array(value)?;
-        str_values.all(|value| self.items.r#enum.iter()
-            .any(|v| v == value))
+        str_values
+            .all(|value| self.items.r#enum.iter().any(|v| v == value))
             .then_some(())
             .ok_or_else(|| Error::new(ErrorCode::InvalidParams, "Invalid enum values"))
     }
@@ -755,8 +778,8 @@ impl TitledMultiSelectEnumSchema {
     #[inline]
     pub(crate) fn validate(&self, value: &Value) -> Result<(), Error> {
         let mut str_values = make_iter_of_as_array(value)?;
-        str_values.all(|value| self.items.any_of.iter()
-            .any(|v| v.value == value))
+        str_values
+            .all(|value| self.items.any_of.iter().any(|v| v.value == value))
             .then_some(())
             .ok_or_else(|| Error::new(ErrorCode::InvalidParams, "Invalid enum values"))
     }
@@ -767,7 +790,7 @@ impl EnumOptions {
     #[inline]
     pub fn new(options: impl IntoIterator<Item = EnumOption>) -> Self {
         Self {
-            any_of: options.into_iter().collect()
+            any_of: options.into_iter().collect(),
         }
     }
 }
@@ -778,7 +801,7 @@ impl EnumOption {
     pub fn new<S: Into<String>>(value: S, title: S) -> Self {
         Self {
             value: value.into(),
-            title: title.into()
+            title: title.into(),
         }
     }
 }
@@ -790,11 +813,9 @@ impl EnumItems {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        Self { 
-            r#type: PropertyType::String, 
-            r#enum: items.into_iter()
-                .map(|s| s.into())
-                .collect()
+        Self {
+            r#type: PropertyType::String,
+            r#enum: items.into_iter().map(|s| s.into()).collect(),
         }
     }
 }
@@ -804,7 +825,12 @@ fn make_iter_of_as_array(value: &Value) -> Result<impl Iterator<Item = &str>, Er
     value
         .as_array()
         .map(|v| v.iter().filter_map(|v| v.as_str()))
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams, "Expected an array of values for enum"))
+        .ok_or_else(|| {
+            Error::new(
+                ErrorCode::InvalidParams,
+                "Expected an array of values for enum",
+            )
+        })
 }
 
 #[inline(always)]
@@ -928,10 +954,7 @@ mod tests {
     #[test]
     fn it_validates_titled_single_select_enum() {
         let schema = TitledSingleSelectEnumSchema {
-            one_of: vec![
-                EnumOption::new("A", "A"),
-                EnumOption::new("B", "B")
-            ],
+            one_of: vec![EnumOption::new("A", "A"), EnumOption::new("B", "B")],
             ..Default::default()
         };
 
@@ -955,10 +978,7 @@ mod tests {
     #[test]
     fn it_validates_titled_multi_select_enum() {
         let schema = TitledMultiSelectEnumSchema {
-            items: EnumOptions::new([
-                EnumOption::new("A", "A"),
-                EnumOption::new("B", "B")
-            ]),
+            items: EnumOptions::new([EnumOption::new("A", "A"), EnumOption::new("B", "B")]),
             ..Default::default()
         };
 
@@ -981,7 +1001,7 @@ mod tests {
             panic!("Expected StringSchema");
         }
     }
-    
+
     #[test]
     fn it_serializes_schema_to_json() {
         let schema = Schema::String(StringSchema {
@@ -989,10 +1009,13 @@ mod tests {
             ..Default::default()
         });
         let json = serde_json::to_value(schema).unwrap();
-        assert_eq!(json, json!({
-            "type": "string",
-            "minLength": 5
-        }))
+        assert_eq!(
+            json,
+            json!({
+                "type": "string",
+                "minLength": 5
+            })
+        )
     }
 
     #[test]
@@ -1016,10 +1039,13 @@ mod tests {
             ..Default::default()
         });
         let json = serde_json::to_value(schema).unwrap();
-        assert_eq!(json, json!({
-            "type": "number",
-            "minimum": 5.0
-        }))
+        assert_eq!(
+            json,
+            json!({
+                "type": "number",
+                "minimum": 5.0
+            })
+        )
     }
 
     #[test]
@@ -1043,10 +1069,13 @@ mod tests {
             ..Default::default()
         });
         let json = serde_json::to_value(schema).unwrap();
-        assert_eq!(json, json!({
-            "type": "boolean",
-            "default": false
-        }))
+        assert_eq!(
+            json,
+            json!({
+                "type": "boolean",
+                "default": false
+            })
+        )
     }
 
     #[test]
@@ -1072,11 +1101,14 @@ mod tests {
             ..Default::default()
         });
         let json = serde_json::to_value(schema).unwrap();
-        assert_eq!(json, json!({
-            "type": "string",
-            "enum": ["Red", "Green", "Blue"],
-            "default": "Red"
-        }))
+        assert_eq!(
+            json,
+            json!({
+                "type": "string",
+                "enum": ["Red", "Green", "Blue"],
+                "default": "Red"
+            })
+        )
     }
 
     #[test]
@@ -1092,11 +1124,14 @@ mod tests {
         });
         let schema: Schema = serde_json::from_value(json).unwrap();
         if let SingleTitledEnum(s) = schema {
-            assert_eq!(s.one_of, [
-                EnumOption::new("#FF0000", "Red"),
-                EnumOption::new("#00FF00", "Green"),
-                EnumOption::new("#0000FF", "Blue"),
-            ]);
+            assert_eq!(
+                s.one_of,
+                [
+                    EnumOption::new("#FF0000", "Red"),
+                    EnumOption::new("#00FF00", "Green"),
+                    EnumOption::new("#0000FF", "Blue"),
+                ]
+            );
         } else {
             panic!("Expected SingleTitledEnum");
         }
@@ -1114,15 +1149,18 @@ mod tests {
             ..Default::default()
         });
         let json = serde_json::to_value(schema).unwrap();
-        assert_eq!(json, json!({
-            "type": "string",
-            "oneOf": [
-                { "const": "#FF0000", "title": "Red" },
-                { "const": "#00FF00", "title": "Green" },
-                { "const": "#0000FF", "title": "Blue" }
-            ],
-            "default": "#FF0000"
-        }))
+        assert_eq!(
+            json,
+            json!({
+                "type": "string",
+                "oneOf": [
+                    { "const": "#FF0000", "title": "Red" },
+                    { "const": "#00FF00", "title": "Green" },
+                    { "const": "#0000FF", "title": "Blue" }
+                ],
+                "default": "#FF0000"
+            })
+        )
     }
 
     #[test]
@@ -1140,11 +1178,14 @@ mod tests {
         });
         let schema: Schema = serde_json::from_value(json).unwrap();
         if let MultiTitledEnum(s) = schema {
-            assert_eq!(s.items.any_of, [
-                EnumOption::new("#FF0000", "Red"),
-                EnumOption::new("#00FF00", "Green"),
-                EnumOption::new("#0000FF", "Blue"),
-            ]);
+            assert_eq!(
+                s.items.any_of,
+                [
+                    EnumOption::new("#FF0000", "Red"),
+                    EnumOption::new("#00FF00", "Green"),
+                    EnumOption::new("#0000FF", "Blue"),
+                ]
+            );
         } else {
             panic!("Expected MultiTitledEnum");
         }
@@ -1162,17 +1203,20 @@ mod tests {
             ..Default::default()
         });
         let json = serde_json::to_value(schema).unwrap();
-        assert_eq!(json, json!({
-            "type": "array",
-            "items": {
-                "anyOf": [
-                    { "const": "#FF0000", "title": "Red" },
-                    { "const": "#00FF00", "title": "Green" },
-                    { "const": "#0000FF", "title": "Blue" }
-                ]
-            },
-            "default": ["#FF0000", "#00FF00"]
-        }))
+        assert_eq!(
+            json,
+            json!({
+                "type": "array",
+                "items": {
+                    "anyOf": [
+                        { "const": "#FF0000", "title": "Red" },
+                        { "const": "#00FF00", "title": "Green" },
+                        { "const": "#0000FF", "title": "Blue" }
+                    ]
+                },
+                "default": ["#FF0000", "#00FF00"]
+            })
+        )
     }
 
     #[test]
@@ -1201,13 +1245,16 @@ mod tests {
             ..Default::default()
         });
         let json = serde_json::to_value(schema).unwrap();
-        assert_eq!(json, json!({
-            "type": "array",
-            "items": {
-                "type": "string",
-                "enum": ["Red", "Green", "Blue"]
-            },
-            "default": ["Red", "Green"]
-        }))
+        assert_eq!(
+            json,
+            json!({
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": ["Red", "Green", "Blue"]
+                },
+                "default": ["Red", "Green"]
+            })
+        )
     }
 }

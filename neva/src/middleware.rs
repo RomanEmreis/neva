@@ -1,18 +1,15 @@
 //! MCP Server middleware utilities
 
+use crate::{
+    app::context::ServerRuntime,
+    types::{Message, Request, RequestId, Response, notification::Notification},
+};
+use futures_util::future::BoxFuture;
 use std::fmt::Debug;
 use std::sync::Arc;
-use futures_util::future::BoxFuture;
-use crate::{
-    app::context::ServerRuntime, 
-    types::{Message, RequestId, Request, Response, notification::Notification}
-};
 
 #[cfg(feature = "di")]
-use {
-    volga_di::Container,
-    crate::error::Error
-};
+use {crate::error::Error, volga_di::Container};
 
 pub(super) mod make_fn;
 pub mod wrap;
@@ -23,10 +20,10 @@ const DEFAULT_MW_CAPACITY: usize = 8;
 pub struct MwContext {
     /// Current JSON-RPC message
     pub msg: Message,
-    
+
     /// Server runtime reference
     pub(super) runtime: ServerRuntime,
-    
+
     /// Dependency injection container scope.
     #[cfg(feature = "di")]
     pub(super) scope: Container,
@@ -35,30 +32,21 @@ pub struct MwContext {
 impl Debug for MwContext {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MwContext")
-            .field("msg", &self.msg)
-            .finish()
+        f.debug_struct("MwContext").field("msg", &self.msg).finish()
     }
 }
 
 /// A reference to the next middleware in the chain
-pub type Next = Arc<
-    dyn Fn(MwContext) -> BoxFuture<'static, Response>
-    + Send 
-    + Sync
->;
+pub type Next = Arc<dyn Fn(MwContext) -> BoxFuture<'static, Response> + Send + Sync>;
 
 /// Middleware function wrapper
-pub(super) type Middleware = Arc<
-    dyn Fn(MwContext, Next) -> BoxFuture<'static, Response>
-    + Send
-    + Sync
->;
+pub(super) type Middleware =
+    Arc<dyn Fn(MwContext, Next) -> BoxFuture<'static, Response> + Send + Sync>;
 
 /// MCP middleware pipeline.
 #[derive(Clone)]
 pub(super) struct Middlewares {
-    pub(super) pipeline: Vec<Middleware>
+    pub(super) pipeline: Vec<Middleware>,
 }
 
 impl MwContext {
@@ -67,11 +55,11 @@ impl MwContext {
     pub(super) fn msg(msg: Message, runtime: ServerRuntime) -> Self {
         #[cfg(feature = "di")]
         let scope = runtime.container.create_scope();
-        Self { 
-            msg, 
+        Self {
+            msg,
             runtime,
             #[cfg(feature = "di")]
-            scope
+            scope,
         }
     }
 
@@ -153,31 +141,29 @@ impl MwContext {
         }
     }
 
-    /// Resolves a service and returns a cloned instance. 
-    /// `T` must implement `Clone` otherwise 
+    /// Resolves a service and returns a cloned instance.
+    /// `T` must implement `Clone` otherwise
     /// use resolve_shared method that returns a shared pointer.
     #[inline]
     #[cfg(feature = "di")]
     pub fn resolve<T: Send + Sync + Clone + 'static>(&self) -> Result<T, Error> {
-        self.scope
-            .resolve::<T>()
-            .map_err(Into::into)
+        self.scope.resolve::<T>().map_err(Into::into)
     }
 
     /// Resolves a service and returns a shared pointer
     #[inline]
     #[cfg(feature = "di")]
     pub fn resolve_shared<T: Send + Sync + 'static>(&self) -> Result<Arc<T>, Error> {
-        self.scope
-            .resolve_shared::<T>()
-            .map_err(Into::into)
+        self.scope.resolve_shared::<T>().map_err(Into::into)
     }
 }
 
 impl Middlewares {
     /// Initializes a new middleware pipeline
     pub(super) fn new() -> Self {
-        Self { pipeline: Vec::with_capacity(DEFAULT_MW_CAPACITY) }
+        Self {
+            pipeline: Vec::with_capacity(DEFAULT_MW_CAPACITY),
+        }
     }
 
     /// Adds middleware function to the pipeline
@@ -192,15 +178,14 @@ impl Middlewares {
             return None;
         }
 
-        let request_handler = self.pipeline
-            .last()
-            .unwrap()
-            .clone();
-        
-        let mut next: Next = Arc::new(move |ctx| request_handler(
-            ctx, 
-            Arc::new(|ctx| Box::pin(async move { Response::empty(ctx.id()) }))
-        ));
+        let request_handler = self.pipeline.last().unwrap().clone();
+
+        let mut next: Next = Arc::new(move |ctx| {
+            request_handler(
+                ctx,
+                Arc::new(|ctx| Box::pin(async move { Response::empty(ctx.id()) })),
+            )
+        });
         for mw in self.pipeline.iter().rev().skip(1) {
             let current_mw: Middleware = mw.clone();
             let prev_next: Next = next.clone();

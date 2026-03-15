@@ -1,16 +1,16 @@
-﻿//! Completion request types
+//! Completion request types
 
-use serde::{Deserialize, Serialize};
 use super::Reference;
 #[cfg(feature = "server")]
 use crate::error::Error;
+use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "server")]
-use crate::types::request::FromRequest;
+use super::{IntoResponse, Request, RequestId, Response};
 #[cfg(feature = "server")]
 use crate::app::handler::{FromHandlerParams, HandlerParams};
 #[cfg(feature = "server")]
-use super::{IntoResponse, RequestId, Response, Request};
+use crate::types::request::FromRequest;
 
 /// List of commands for Completion
 pub mod commands {
@@ -19,18 +19,18 @@ pub mod commands {
 }
 
 /// Represents a completion object in the server's response
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/2024-11-05/schema.json) for details
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Completion {
     /// An array of completion values. Must not exceed 100 items.
     pub values: Vec<String>,
-    
-    /// The total number of completion options available. 
+
+    /// The total number of completion options available.
     /// This can exceed the number of values actually sent in the response.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<usize>,
-    
+
     /// Indicates whether there are additional completion options beyond those provided
     /// in the current response, even if the exact total is unknown.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -38,33 +38,33 @@ pub struct Completion {
 }
 
 /// A request from the client to the server to ask for completion options.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CompleteRequestParams {
     /// The reference's information
     #[serde(rename = "ref")]
     pub r#ref: Reference,
-    
+
     /// The argument's information
     #[serde(rename = "argument")]
     pub arg: Argument,
 }
 
 /// Used for completion requests to provide additional context for the completion options.
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Argument {
     /// The name of the argument.
     pub name: String,
-    
+
     /// The value of the argument to use for completion matching.
     pub value: String,
 }
 
 /// The server's response to a completion/complete request
-/// 
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct CompleteResult {
@@ -97,14 +97,11 @@ impl Completion {
     /// Creates a new empty [`Completion`] object
     #[inline]
     pub fn new<T, V>(values: T, total: usize) -> Self
-    where 
+    where
         T: IntoIterator<Item = V>,
         V: Into<String>,
     {
-        let values: Vec<String> = values
-            .into_iter()
-            .map(Into::into)
-            .collect();
+        let values: Vec<String> = values.into_iter().map(Into::into).collect();
         Self {
             total: Some(total),
             has_more: Some(total > values.len()),
@@ -128,7 +125,7 @@ impl IntoResponse for CompleteResult {
     fn into_response(self, req_id: RequestId) -> Response {
         match serde_json::to_value(self) {
             Ok(v) => Response::success(req_id, v),
-            Err(err) => Response::error(req_id, err.into())
+            Err(err) => Response::error(req_id, err.into()),
         }
     }
 }
@@ -137,10 +134,10 @@ impl IntoResponse for CompleteResult {
 impl From<String> for Completion {
     #[inline]
     fn from(val: String) -> Self {
-        Self { 
-            values: vec![val], 
+        Self {
+            values: vec![val],
             total: None,
-            has_more: None 
+            has_more: None,
         }
     }
 }
@@ -152,7 +149,7 @@ impl From<&str> for Completion {
         Self {
             values: vec![val.into()],
             total: None,
-            has_more: None
+            has_more: None,
         }
     }
 }
@@ -161,7 +158,7 @@ impl From<&str> for Completion {
 impl<T, E> TryFrom<Result<T, E>> for CompleteResult
 where
     T: Into<CompleteResult>,
-    E: Into<Error>
+    E: Into<Error>,
 {
     type Error = E;
 
@@ -169,7 +166,7 @@ where
     fn try_from(value: Result<T, E>) -> Result<Self, Self::Error> {
         match value {
             Ok(ok) => Ok(ok.into()),
-            Err(err) => Err(err)
+            Err(err) => Err(err),
         }
     }
 }
@@ -177,7 +174,7 @@ where
 #[cfg(feature = "server")]
 impl<T> From<T> for CompleteResult
 where
-    T: Into<Completion>
+    T: Into<Completion>,
 {
     #[inline]
     fn from(val: T) -> Self {
@@ -186,15 +183,15 @@ where
 }
 
 #[cfg(feature = "server")]
-impl<T> From<Option<T>> for CompleteResult 
+impl<T> From<Option<T>> for CompleteResult
 where
-    T: Into<Completion>
+    T: Into<Completion>,
 {
     #[inline]
     fn from(value: Option<T>) -> Self {
-        match value { 
+        match value {
             Some(val) => CompleteResult::new(val.into()),
-            None => CompleteResult::default()
+            None => CompleteResult::default(),
         }
     }
 }
@@ -220,10 +217,7 @@ impl From<Vec<&str>> for Completion {
         Self {
             total: Some(len),
             has_more: Some(false),
-            values: vec
-                .into_iter()
-                .map(String::from)
-                .collect(),
+            values: vec.into_iter().map(String::from).collect(),
         }
     }
 }
@@ -249,10 +243,7 @@ impl<const N: usize> From<[&str; N]> for Completion {
         Self {
             total: Some(len),
             has_more: Some(false),
-            values: arr
-                .into_iter()
-                .map(String::from)
-                .collect(),
+            values: arr.into_iter().map(String::from).collect(),
         }
     }
 }
@@ -261,11 +252,11 @@ impl<const N: usize> From<[&str; N]> for Completion {
 #[cfg(feature = "server")]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn it_creates_default_completion() {
         let completion = Completion::default();
-        
+
         assert_eq!(completion.values.len(), 0);
         assert_eq!(completion.total, Some(0));
         assert_eq!(completion.has_more, Some(false));
@@ -279,22 +270,25 @@ mod tests {
         assert_eq!(completion.total, Some(5));
         assert_eq!(completion.has_more, Some(true));
     }
-    
+
     #[test]
     fn it_converts_complete_result_into_response() {
         let result = CompleteResult::default();
-        
+
         let resp = result.into_response(RequestId::default());
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(json, r#"{"jsonrpc":"2.0","id":"(no id)","result":{"completion":{"has_more":false,"total":0,"values":[]}}}"#);
+        assert_eq!(
+            json,
+            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"completion":{"has_more":false,"total":0,"values":[]}}}"#
+        );
     }
-    
+
     #[test]
     fn it_converts_vec_into_completion() {
         let vec = vec!["1", "2", "3"];
         let completion: Completion = vec.into();
-        
+
         assert_eq!(completion.values.len(), 3);
         assert_eq!(completion.total, Some(3));
         assert_eq!(completion.has_more, Some(false));
