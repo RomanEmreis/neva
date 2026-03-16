@@ -236,11 +236,15 @@ async fn handle_message(req: HttpRequest) -> HttpResult {
         }
     };
 
-    // Pre-register the session so any server-initiated events emitted before the
-    // client's SSE GET are buffered and available for replay. Placed after body
-    // validation so malformed requests don't create leaked registry entries.
-    // No-op if the session already exists (live connection or prior pre-registration).
-    manager.sse_registry.pre_register(id);
+    // Pre-register only on the initialize handshake: the server may emit events
+    // between the init POST response and the client's SSE GET. Scoped to init so
+    // subsequent tool-call POSTs (where SSE is already open) do not create entries
+    // for sessions that may never establish or close an SSE channel.
+    if let Message::Request(ref r) = msg
+        && r.method == crate::commands::INIT
+    {
+        manager.sse_registry.pre_register(id);
+    }
 
     if matches!(msg, Message::Notification(_)) {
         // JSON-RPC 2.0 §4 / MCP Streamable HTTP: respond 202 immediately,

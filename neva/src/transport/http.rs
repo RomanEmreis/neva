@@ -290,7 +290,7 @@ impl HttpServer {
 
     /// Sets the SSE event buffer capacity per session for Last-Event-ID replay.
     ///
-    /// Defaults to [`DEFAULT_SSE_BUFFER_CAPACITY`] (64). Pass `0` to disable buffering.
+    /// Defaults to `64`. Pass `0` to disable buffering.
     ///
     /// # Example
     /// ```rust,ignore

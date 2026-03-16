@@ -148,8 +148,16 @@ async fn send_request(
     if let Message::Request(r) = req
         && r.method == crate::commands::INIT
     {
+        let token = session.cancellation_token();
         session.notify_session_initialized();
-        session.sse_ready().await;
+        // Wait for the SSE GET to succeed. If it fails (non-2xx, network error) the
+        // session is cancelled, which unblocks this select and aborts the init flow
+        // rather than hanging forever.
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => return,
+            _ = session.sse_ready() => {},
+        }
     }
 
     let resp = resp.json::<Message>().await;
@@ -232,6 +240,7 @@ async fn handle_sse_connection(
             Err(_err) => {
                 #[cfg(feature = "tracing")]
                 tracing::error!(logger = "neva", "Failed to send SSE request: {}", _err);
+                session.cancellation_token().cancel();
                 return;
             }
         };
@@ -243,6 +252,9 @@ async fn handle_sse_connection(
                 "SSE request failed with status: {}",
                 resp.status()
             );
+            // Cancel the session so any in-flight init POST waiting on sse_ready()
+            // is unblocked instead of hanging forever.
+            session.cancellation_token().cancel();
             return;
         }
 
