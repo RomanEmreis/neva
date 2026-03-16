@@ -555,16 +555,14 @@ async fn handle_elicitation(
 #[cfg(feature = "tasks")]
 fn handle_list_tasks(req: Request, tasks: &Arc<TaskTracker>) -> Response {
     let id = req.id();
-    let Some(params) = req.params else {
-        return Response::error(id, Error::from(ErrorCode::InvalidParams));
+    let cursor = match req.params {
+        None => None,
+        Some(p) => match serde_json::from_value::<ListTasksRequestParams>(p) {
+            Ok(params) => params.cursor,
+            Err(e) => return Response::error(id, Error::new(ErrorCode::InvalidParams, e)),
+        },
     };
-    let params: Option<ListTasksRequestParams> = serde_json::from_value(params).ok();
-    ListTasksResult::from(
-        tasks
-            .tasks()
-            .paginate(params.and_then(|p| p.cursor), DEFAULT_PAGE_SIZE),
-    )
-    .into_response(id)
+    ListTasksResult::from(tasks.tasks().paginate(cursor, DEFAULT_PAGE_SIZE)).into_response(id)
 }
 
 #[inline]
@@ -713,6 +711,51 @@ mod tests {
             MessageEnvelope::Request(Request::new(Some(RequestId::Number(1)), "ping", None::<()>));
         // Two notifications with no ID fields — should not trigger duplicate check
         assert!(validate_batch_ids(&[notif.clone(), req, notif]).is_ok());
+    }
+
+    // --- tasks/list omitted-vs-malformed params ---
+
+    #[cfg(feature = "tasks")]
+    fn make_tasks_request(params: Option<serde_json::Value>) -> Request {
+        Request::new(Some(RequestId::Number(1)), "tasks/list", params)
+    }
+
+    #[test]
+    #[cfg(feature = "tasks")]
+    fn tasks_list_omitted_params_returns_ok() {
+        let tasks = Arc::new(crate::shared::TaskTracker::default());
+        let req = make_tasks_request(None);
+        let resp = handle_list_tasks(req, &tasks);
+        assert!(matches!(resp, Response::Ok(_)));
+    }
+
+    #[test]
+    #[cfg(feature = "tasks")]
+    fn tasks_list_empty_object_params_returns_ok() {
+        let tasks = Arc::new(crate::shared::TaskTracker::default());
+        let req = make_tasks_request(Some(serde_json::json!({})));
+        let resp = handle_list_tasks(req, &tasks);
+        assert!(matches!(resp, Response::Ok(_)));
+    }
+
+    #[test]
+    #[cfg(feature = "tasks")]
+    fn tasks_list_malformed_cursor_returns_invalid_params() {
+        let tasks = Arc::new(crate::shared::TaskTracker::default());
+        let req = make_tasks_request(Some(serde_json::json!({"cursor": {"bad": "shape"}})));
+        let resp = handle_list_tasks(req, &tasks);
+        let Response::Err(err) = resp else { panic!("expected error response") };
+        assert_eq!(err.error.code, ErrorCode::InvalidParams);
+    }
+
+    #[test]
+    #[cfg(feature = "tasks")]
+    fn tasks_list_non_object_params_returns_invalid_params() {
+        let tasks = Arc::new(crate::shared::TaskTracker::default());
+        let req = make_tasks_request(Some(serde_json::json!("not_an_object")));
+        let resp = handle_list_tasks(req, &tasks);
+        let Response::Err(err) = resp else { panic!("expected error response") };
+        assert_eq!(err.error.code, ErrorCode::InvalidParams);
     }
 
     #[test]

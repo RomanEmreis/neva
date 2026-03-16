@@ -1,6 +1,6 @@
 //! Utilities for extraction params from Request
 
-use crate::error::Error;
+use crate::error::{Error, ErrorCode};
 use crate::types::Request;
 use serde::de::DeserializeOwned;
 
@@ -13,14 +13,14 @@ pub trait FromRequest: Sized {
 impl<T: DeserializeOwned> FromRequest for T {
     fn from_request(req: Request) -> Result<Self, Error> {
         let params = req.params.unwrap_or_else(|| serde_json::json!({}));
-        let params = serde_json::from_value(params)?;
-        Ok(params)
+        serde_json::from_value(params).map_err(|e| Error::new(ErrorCode::InvalidParams, e))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ErrorCode;
     use crate::types::{
         Cursor,
         tool::{CallToolRequestParams, ListToolsRequestParams},
@@ -61,15 +61,15 @@ mod tests {
     #[test]
     fn it_errors_when_params_absent_for_required_params_type() {
         let req = make_request(None);
-        let result = CallToolRequestParams::from_request(req);
-        assert!(result.is_err());
+        let err = CallToolRequestParams::from_request(req).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidParams);
     }
 
     #[test]
     fn it_errors_when_required_field_missing_in_params() {
         let req = make_request(Some(serde_json::json!({})));
-        let result = CallToolRequestParams::from_request(req);
-        assert!(result.is_err());
+        let err = CallToolRequestParams::from_request(req).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidParams);
     }
 
     #[test]
