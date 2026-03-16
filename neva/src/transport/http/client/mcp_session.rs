@@ -2,6 +2,7 @@
 
 use crate::transport::http::ServiceUrl;
 use once_cell::sync::OnceCell;
+use std::sync::RwLock;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -11,6 +12,7 @@ pub(super) struct McpSession {
     sse_ready: Notify,
     url: ServiceUrl,
     session_id: OnceCell<uuid::Uuid>,
+    last_event_id: RwLock<Option<String>>,
     cancellation_token: CancellationToken,
 }
 
@@ -21,6 +23,7 @@ impl McpSession {
             initialized: Notify::new(),
             sse_ready: Notify::new(),
             session_id: OnceCell::new(),
+            last_event_id: RwLock::new(None),
             cancellation_token: token,
             url,
         }
@@ -51,6 +54,18 @@ impl McpSession {
         if let Err(_err) = self.session_id.set(id) {
             #[cfg(feature = "tracing")]
             tracing::info!("MCP Session Id already set");
+        }
+    }
+
+    /// Returns the last received SSE event ID, if any
+    pub(super) fn last_event_id(&self) -> Option<String> {
+        self.last_event_id.read().ok().and_then(|g| g.clone())
+    }
+
+    /// Updates the last received SSE event ID
+    pub(super) fn set_last_event_id(&self, id: String) {
+        if let Ok(mut guard) = self.last_event_id.write() {
+            *guard = Some(id);
         }
     }
 
@@ -123,6 +138,27 @@ mod tests {
         session.set_session_id(id);
         assert!(session.has_session_id());
         assert_eq!(session.session_id(), Some(&id));
+    }
+
+    #[test]
+    fn it_returns_none_last_event_id_by_default() {
+        let session = create_session();
+        assert!(session.last_event_id().is_none());
+    }
+
+    #[test]
+    fn it_sets_and_gets_last_event_id() {
+        let session = create_session();
+        session.set_last_event_id("abc-123".to_string());
+        assert_eq!(session.last_event_id(), Some("abc-123".to_string()));
+    }
+
+    #[test]
+    fn it_overwrites_last_event_id_on_each_set() {
+        let session = create_session();
+        session.set_last_event_id("first".to_string());
+        session.set_last_event_id("second".to_string());
+        assert_eq!(session.last_event_id(), Some("second".to_string()));
     }
 
     #[tokio::test]

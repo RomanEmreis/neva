@@ -9,8 +9,10 @@ use crate::{
 use futures_util::{StreamExt, TryStreamExt};
 use reqwest::{
     RequestBuilder,
-    header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE},
+    header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE, HeaderName},
 };
+
+const LAST_EVENT_ID: HeaderName = HeaderName::from_static("last-event-id");
 use std::sync::Arc;
 #[cfg(feature = "client-tls")]
 use tls_config::ClientTlsConfig;
@@ -203,53 +205,66 @@ async fn handle_sse_connection(
         }
     };
 
-    let mut resp = client
-        .get(session.url().as_str().as_ref())
-        .header(ACCEPT, "application/json, text/event-stream")
-        .header(CACHE_CONTROL, "no-cache");
-
-    if let Some(access_token) = access_token {
-        resp = resp.bearer_auth(String::from_utf8_lossy(&access_token));
-    }
-
-    if let Some(session_id) = session.session_id() {
-        resp = resp.header(MCP_SESSION_ID, session_id.to_string());
-    }
-
-    let resp = match resp.send().await {
-        Ok(resp) => resp,
-        Err(_err) => {
-            #[cfg(feature = "tracing")]
-            tracing::error!(logger = "neva", "Failed to send SSE request: {}", _err);
-            return;
-        }
-    };
-
-    let mut stream = sse_stream::SseStream::from_byte_stream(resp.bytes_stream())
-        .fuse()
-        .map_ok(|event| handle_event(event, &resp_tx))
-        .map_err(handle_error);
-
-    session.notify_sse_initialized();
-
     let token = session.cancellation_token();
     loop {
-        tokio::select! {
-            biased;
-            _ = token.cancelled() => break,
-            fut = stream.next() => {
-                let Some(Ok(fut)) = fut else {
-                    #[cfg(feature = "tracing")]
-                    tracing::error!(logger = "neva", "Unexpected stream end");
-                    break;
-                };
-                fut.await;
+        let mut req = client
+            .get(session.url().as_str().as_ref())
+            .header(ACCEPT, "application/json, text/event-stream")
+            .header(CACHE_CONTROL, "no-cache");
+
+        if let Some(ref access_token) = access_token {
+            req = req.bearer_auth(String::from_utf8_lossy(access_token));
+        }
+
+        if let Some(session_id) = session.session_id() {
+            req = req.header(MCP_SESSION_ID, session_id.to_string());
+        }
+
+        if let Some(last_id) = session.last_event_id() {
+            req = req.header(LAST_EVENT_ID, last_id);
+        }
+
+        let resp = match req.send().await {
+            Ok(resp) => resp,
+            Err(_err) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(logger = "neva", "Failed to send SSE request: {}", _err);
+                return;
+            }
+        };
+
+        let mut stream = sse_stream::SseStream::from_byte_stream(resp.bytes_stream())
+            .fuse()
+            .map_ok(|event| handle_event(event, &session, &resp_tx))
+            .map_err(handle_error);
+
+        session.notify_sse_initialized();
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => return,
+                fut = stream.next() => {
+                    let Some(Ok(fut)) = fut else {
+                        #[cfg(feature = "tracing")]
+                        tracing::info!(logger = "neva", "SSE stream ended, reconnecting");
+                        break;
+                    };
+                    fut.await;
+                }
             }
         }
     }
 }
 
-async fn handle_event(event: sse_stream::Sse, resp_tx: &mpsc::Sender<Result<Message, Error>>) {
+async fn handle_event(
+    event: sse_stream::Sse,
+    session: &Arc<McpSession>,
+    resp_tx: &mpsc::Sender<Result<Message, Error>>,
+) {
+    if let Some(id) = &event.id {
+        session.set_last_event_id(id.clone());
+    }
     if event.is_message() {
         handle_msg(event, resp_tx).await
     } else {
