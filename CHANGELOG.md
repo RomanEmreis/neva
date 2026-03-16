@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## 0.2.9
 
+### Added
+* SSE `Last-Event-ID` replay
+
 ### Fixed
 * Fixed a bug when optional `params` field in `Request` was expected as required.
 

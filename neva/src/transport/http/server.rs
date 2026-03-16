@@ -180,25 +180,32 @@ async fn handle_connection(req: HttpRequest) -> HttpResult {
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse().ok());
 
-    // Build msg_stream (replay-prefixed or live-only)
-    let msg_stream: Box<dyn tokio_stream::Stream<Item = SseItem> + Send + Unpin> =
-        if let Some(last_seq) = last_seq {
-            // Snapshot replay buffer after registering (no-gap guarantee)
-            let replay = manager.sse_registry.replay_since(&id, last_seq);
-            let replay_end_seq = replay.last().map(|(s, _)| *s).unwrap_or(last_seq);
+    // Build msg_stream: replay buffered events first, then live.
+    //
+    // With Last-Event-ID: reconnect path — replay events after last_seq.
+    // Without Last-Event-ID: initial connection — replay_all recovers events buffered
+    // during the POST → GET handshake window (pre_register in handle_message ensures
+    // the buffer exists). If the buffer is empty, fall through to pure live stream.
+    let msg_stream: Box<dyn tokio_stream::Stream<Item = SseItem> + Send + Unpin> = {
+        let replay = match last_seq {
+            Some(seq) => manager.sse_registry.replay_since(&id, seq),
+            None => manager.sse_registry.replay_all(&id),
+        };
 
-            let replay_stream = stream::iter(replay).map(|(seq, arc)| SseItem::Tracked(seq, arc));
-
-            let live = UnboundedReceiverStream::new(msg_rx)
-                .filter(move |&(seq, _)| seq > replay_end_seq)
-                .map(|(seq, arc)| SseItem::Tracked(seq, arc));
-
-            Box::new(replay_stream.chain(live))
-        } else {
+        if replay.is_empty() {
             Box::new(
                 UnboundedReceiverStream::new(msg_rx).map(|(seq, arc)| SseItem::Tracked(seq, arc)),
             )
-        };
+        } else {
+            // Deduplicate: live stream must not re-emit events already in replay.
+            let replay_end_seq = replay.last().map(|(s, _)| *s).unwrap_or(0);
+            let replay_stream = stream::iter(replay).map(|(seq, arc)| SseItem::Tracked(seq, arc));
+            let live = UnboundedReceiverStream::new(msg_rx)
+                .filter(move |&(seq, _)| seq > replay_end_seq)
+                .map(|(seq, arc)| SseItem::Tracked(seq, arc));
+            Box::new(replay_stream.chain(live))
+        }
+    };
 
     // Log stream (ephemeral, no id: field)
     let log_stream = UnboundedReceiverStream::new(log_rx).map(|m| SseItem::Ephemeral(Box::new(m)));
@@ -228,6 +235,13 @@ async fn handle_message(req: HttpRequest) -> HttpResult {
             return ok!(resp; [(MCP_SESSION_ID, id.to_string())]);
         }
     };
+
+    // Pre-register the session so any server-initiated events emitted before the
+    // client's SSE GET are buffered and available for replay. Placed after body
+    // validation so malformed requests don't create leaked registry entries.
+    // No-op if the session already exists (live connection or prior pre-registration).
+    manager.sse_registry.pre_register(id);
+
     if matches!(msg, Message::Notification(_)) {
         // JSON-RPC 2.0 §4 / MCP Streamable HTTP: respond 202 immediately,
         // but still forward the notification to the app so it can act on it

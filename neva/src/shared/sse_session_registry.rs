@@ -12,7 +12,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{self, UnboundedSender};
 use uuid::Uuid;
 
 /// Bounded in-memory registry providing SSE event buffering and replay for
@@ -169,6 +169,43 @@ impl SseSessionRegistry {
         }
 
         buf.iter().filter(|(s, _)| *s > last_seq).cloned().collect()
+    }
+
+    /// Returns all buffered events in sequence order.
+    ///
+    /// Used on an initial SSE connection (no `Last-Event-ID`) to recover any events
+    /// buffered during the POST → GET handshake window. Returns empty if the session
+    /// is unknown or the buffer is empty.
+    pub(crate) fn replay_all(&self, id: &Uuid) -> Vec<(u64, Arc<Message>)> {
+        let Some(session) = self.sessions.get(id) else {
+            return Vec::new();
+        };
+        let buf = session.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        buf.iter().cloned().collect()
+    }
+
+    /// Creates a buffer-only session entry if one does not already exist.
+    ///
+    /// Call when a session ID is first minted (on POST /mcp) so that any server-initiated
+    /// events emitted before the client's SSE GET arrive are buffered and available for
+    /// replay. If an entry already exists (live connection or prior pre-registration),
+    /// this is a no-op — the existing buffer and sequence counter are preserved.
+    ///
+    /// Has no effect when `capacity == 0` (buffering disabled).
+    pub(crate) fn pre_register(&self, id: Uuid) {
+        if self.capacity == 0 {
+            return;
+        }
+        self.sessions.entry(id).or_insert_with(|| {
+            let (tx, _rx) = mpsc::unbounded_channel::<(u64, Arc<Message>)>();
+            SseSession {
+                sender: tx,
+                buffer: Mutex::new(VecDeque::new()),
+                next_seq: AtomicU64::new(0),
+                capacity: self.capacity,
+                generation: 0,
+            }
+        });
     }
 }
 
@@ -479,5 +516,83 @@ mod tests {
             seqs.push(seq);
         }
         assert_eq!(seqs, vec![5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn it_buffers_events_during_pre_registration_window() {
+        let registry = SseSessionRegistry::new(8);
+        let id = Uuid::new_v4();
+
+        // Simulate POST /initialize: session minted, SSE GET not yet arrived
+        registry.pre_register(id);
+
+        // Events sent before the SSE GET are buffered (dead channel, not an error)
+        registry.send(make_msg(id)).unwrap(); // seq=0
+        registry.send(make_msg(id)).unwrap(); // seq=1
+
+        // Simulate GET /mcp: register live channel — in-place, preserving buffer
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        registry.register(id, tx);
+
+        // All buffered events are available for replay
+        let all = registry.replay_all(&id);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].0, 0);
+        assert_eq!(all[1].0, 1);
+
+        // Post-handshake events continue from seq=2 and are delivered live
+        registry.send(make_msg(id)).unwrap(); // seq=2
+        let (seq, _) = rx.try_recv().expect("seq=2 must be delivered live");
+        assert_eq!(seq, 2);
+    }
+
+    #[test]
+    fn it_pre_register_is_noop_when_session_already_registered() {
+        let registry = SseSessionRegistry::new(8);
+        let id = Uuid::new_v4();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        registry.register(id, tx);
+        registry.send(make_msg(id)).unwrap(); // seq=0
+
+        // pre_register must not disturb the existing live session
+        registry.pre_register(id);
+
+        registry.send(make_msg(id)).unwrap(); // seq=1
+        let seqs: Vec<u64> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|(s, _)| s)
+            .collect();
+        assert_eq!(seqs, vec![0, 1]);
+    }
+
+    #[test]
+    fn it_pre_register_is_noop_when_capacity_is_zero() {
+        let registry = SseSessionRegistry::new(0);
+        let id = Uuid::new_v4();
+        registry.pre_register(id); // must not create an entry
+        assert!(registry.replay_all(&id).is_empty());
+    }
+
+    #[test]
+    fn it_returns_all_buffered_events() {
+        let registry = SseSessionRegistry::new(8);
+        let id = Uuid::new_v4();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        registry.register(id, tx);
+
+        for _ in 0..3 {
+            registry.send(make_msg(id)).unwrap();
+        }
+
+        let all = registry.replay_all(&id);
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].0, 0);
+        assert_eq!(all[2].0, 2);
+    }
+
+    #[test]
+    fn it_returns_empty_replay_all_for_unknown_session() {
+        let registry = SseSessionRegistry::new(8);
+        assert!(registry.replay_all(&Uuid::new_v4()).is_empty());
     }
 }
