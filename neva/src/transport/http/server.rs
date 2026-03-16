@@ -5,10 +5,11 @@ use super::{HttpRuntimeContext, MCP_SESSION_ID, ServiceUrl, get_mcp_session_id};
 use crate::types::notification::fmt::LOG_REGISTRY;
 use crate::{
     error::{Error, ErrorCode},
-    shared::MessageRegistry,
+    shared::SseSessionRegistry,
     types::{Message, RequestId, Response},
 };
 use dashmap::DashMap;
+use futures_util::stream;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
@@ -31,23 +32,35 @@ pub(crate) mod auth_config;
 
 type RequestMap = Arc<DashMap<RequestId, oneshot::Sender<Message>>>;
 
+/// Unified SSE stream item type.
+///
+/// `Tracked` events carry a sequence number and are buffered for replay.
+/// `Ephemeral` events (tracing log notifications) have no `id:` field — they do not
+/// advance the client's Last-Event-ID and are never replayed.
+enum SseItem {
+    /// MCP protocol message: carries a seq number, buffered for Last-Event-ID replay.
+    Tracked(u64, Arc<Message>),
+    /// Tracing notification: ephemeral, emitted without an SSE `id:` field.
+    Ephemeral(Box<Message>),
+}
+
 #[derive(Clone)]
 struct RequestManager {
     pending: RequestMap,
-    msg_registry: Arc<MessageRegistry>,
+    sse_registry: Arc<SseSessionRegistry>,
     sender: mpsc::Sender<Result<Message, Error>>,
 }
 
 pub(super) async fn serve(rt: HttpRuntimeContext, token: CancellationToken) {
     let pending = Arc::new(DashMap::new());
-    let registry = Arc::new(MessageRegistry::new());
+    let sse_registry = Arc::new(SseSessionRegistry::new(rt.sse_buffer_capacity));
     let manager = RequestManager {
         pending: pending.clone(),
-        msg_registry: registry.clone(),
+        sse_registry: sse_registry.clone(),
         sender: rt.tx,
     };
     tokio::join!(
-        dispatch(pending.clone(), registry.clone(), rt.rx, token.clone()),
+        dispatch(pending.clone(), sse_registry.clone(), rt.rx, token.clone()),
         handle(
             rt.url,
             rt.auth,
@@ -61,7 +74,7 @@ pub(super) async fn serve(rt: HttpRuntimeContext, token: CancellationToken) {
 
 async fn dispatch(
     pending: RequestMap,
-    msg_registry: Arc<MessageRegistry>,
+    sse_registry: Arc<SseSessionRegistry>,
     mut sender_rx: mpsc::Receiver<Message>,
     token: CancellationToken,
 ) {
@@ -76,7 +89,7 @@ async fn dispatch(
                         tracing::error!(logger = "neva", "Failed to send response: {:?}", _e);
                         token.cancel();
                     }
-                } else if let Err(_e) = msg_registry.send(msg) {
+                } else if let Err(_e) = sse_registry.send(msg) {
                     #[cfg(feature = "tracing")]
                     tracing::error!(logger = "neva", "Failed to send server request: {:?}", _e);
                 }
@@ -134,7 +147,7 @@ async fn handle_session_end(req: HttpRequest) -> HttpResult {
 
     #[cfg(feature = "tracing")]
     LOG_REGISTRY.unregister(&id);
-    manager.msg_registry.unregister(&id);
+    manager.sse_registry.terminate(&id);
 
     ok!([(MCP_SESSION_ID, id.to_string())])
 }
@@ -146,19 +159,54 @@ async fn handle_connection(req: HttpRequest) -> HttpResult {
 
     let manager: Dc<RequestManager> = req.extract()?;
 
+    // Create a typed msg channel and untyped log channel
+    let (msg_tx, msg_rx) = mpsc::unbounded_channel::<(u64, Arc<Message>)>();
     let (_log_tx, log_rx) = mpsc::unbounded_channel::<Message>();
-    let (msg_tx, msg_rx) = mpsc::unbounded_channel::<Message>();
 
+    // Register log channel (tracing — unchanged)
     #[cfg(feature = "tracing")]
     LOG_REGISTRY.register(id, _log_tx);
-    manager.msg_registry.register(id, msg_tx);
 
-    let stream = futures_util::stream::select(
-        UnboundedReceiverStream::new(log_rx),
-        UnboundedReceiverStream::new(msg_rx),
-    );
+    // Register msg channel — updates sender/generation in place for reconnects,
+    // preserving buffer and next_seq. The returned generation is intentionally unused here:
+    // handle_session_end uses `terminate()` (unconditional removal) rather than the
+    // generation-protected `unregister()`, so threading generation to that handler is not needed.
+    let _generation = manager.sse_registry.register(id, msg_tx);
 
-    sse!(stream.map(handle_sse_message); [
+    // Parse Last-Event-ID header
+    let last_seq: Option<u64> = req
+        .headers()
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse().ok());
+
+    // Build msg_stream (replay-prefixed or live-only)
+    let msg_stream: Box<dyn tokio_stream::Stream<Item = SseItem> + Send + Unpin> =
+        if let Some(last_seq) = last_seq {
+            // Snapshot replay buffer after registering (no-gap guarantee)
+            let replay = manager.sse_registry.replay_since(&id, last_seq);
+            let replay_end_seq = replay.last().map(|(s, _)| *s).unwrap_or(last_seq);
+
+            let replay_stream = stream::iter(replay).map(|(seq, arc)| SseItem::Tracked(seq, arc));
+
+            let live = UnboundedReceiverStream::new(msg_rx)
+                .filter(move |&(seq, _)| seq > replay_end_seq)
+                .map(|(seq, arc)| SseItem::Tracked(seq, arc));
+
+            Box::new(replay_stream.chain(live))
+        } else {
+            Box::new(
+                UnboundedReceiverStream::new(msg_rx).map(|(seq, arc)| SseItem::Tracked(seq, arc)),
+            )
+        };
+
+    // Log stream (ephemeral, no id: field)
+    let log_stream = UnboundedReceiverStream::new(log_rx).map(|m| SseItem::Ephemeral(Box::new(m)));
+
+    // Merge and stream
+    let merged = stream::select(log_stream, msg_stream);
+
+    sse!(merged.map(handle_sse_message); [
         (MCP_SESSION_ID, id.to_string())
     ])
 }
@@ -273,14 +321,53 @@ fn receiver_error(err: oneshot::error::RecvError) -> volga::error::Error {
     volga::error::Error::new("/", err.to_string())
 }
 
-fn handle_sse_message(msg: Message) -> Result<SseMessage, volga::error::Error> {
-    Ok(SseMessage::new()
-        .id(uuid::Uuid::new_v4().to_string())
-        .json(msg))
+fn handle_sse_message(item: SseItem) -> Result<SseMessage, volga::error::Error> {
+    match item {
+        SseItem::Tracked(seq, msg) => Ok(SseMessage::new().id(seq.to_string()).json(&*msg)),
+        SseItem::Ephemeral(msg) => Ok(SseMessage::new().json(*msg)),
+    }
 }
 
 /// Fetches the [`MCP_SESSION_ID`] header value or created the new [`uuid::Uuid`] if `None`
 #[inline]
 fn get_or_create_mcp_session(headers: &HeaderMap) -> uuid::Uuid {
     get_mcp_session_id(headers).unwrap_or_else(uuid::Uuid::new_v4)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::notification::Notification;
+
+    fn make_notification() -> Message {
+        Message::Notification(Notification::new("test", None))
+    }
+
+    #[test]
+    fn it_emits_id_field_for_tracked_item() {
+        let arc = Arc::new(make_notification());
+        let item = SseItem::Tracked(42, arc);
+        let sse = handle_sse_message(item).expect("should succeed");
+        // SseMessage derives Debug; its internal representation stores fields as
+        // SseField { bytes: "id: 42\n" }, so the Debug output contains "42".
+        let debug = format!("{:?}", sse);
+        assert!(
+            debug.contains("42"),
+            "SSE id field must contain the seq number"
+        );
+    }
+
+    #[test]
+    fn it_does_not_emit_id_field_for_ephemeral_item() {
+        let item = SseItem::Ephemeral(Box::new(make_notification()));
+        let sse = handle_sse_message(item).expect("should succeed");
+        // SseMessage created without .id() — Debug output must not contain an id field.
+        // Relies on Volga rendering id fields as `id: <value>\n` in its Debug output.
+        // make_notification() produces {"jsonrpc":"2.0","method":"test"} — no "id:" in payload.
+        let debug = format!("{:?}", sse);
+        assert!(
+            !debug.contains("id:"),
+            "Ephemeral SSE must not have an id field"
+        );
+    }
 }
