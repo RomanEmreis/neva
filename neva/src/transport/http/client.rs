@@ -11,9 +11,9 @@ use reqwest::{
     RequestBuilder,
     header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE, HeaderName},
 };
-
-const LAST_EVENT_ID: HeaderName = HeaderName::from_static("last-event-id");
 use std::sync::Arc;
+use std::time::Duration;
+
 #[cfg(feature = "client-tls")]
 use tls_config::ClientTlsConfig;
 use tokio::sync::mpsc;
@@ -22,6 +22,9 @@ use tokio_util::sync::CancellationToken;
 pub(super) mod mcp_session;
 #[cfg(feature = "client-tls")]
 pub(crate) mod tls_config;
+
+const LAST_EVENT_ID: HeaderName = HeaderName::from_static("last-event-id");
+const SSE_RECONNECT_DELAY: Duration = Duration::from_secs(3);
 
 pub(super) async fn connect(rt: ClientRuntimeContext, token: CancellationToken) {
     let session = Arc::new(McpSession::new(rt.url, token));
@@ -233,6 +236,16 @@ async fn handle_sse_connection(
             }
         };
 
+        if !resp.status().is_success() {
+            #[cfg(feature = "tracing")]
+            tracing::error!(
+                logger = "neva",
+                "SSE request failed with status: {}",
+                resp.status()
+            );
+            return;
+        }
+
         let mut stream = sse_stream::SseStream::from_byte_stream(resp.bytes_stream())
             .fuse()
             .map_ok(|event| handle_event(event, &session, &resp_tx))
@@ -254,6 +267,13 @@ async fn handle_sse_connection(
                 }
             }
         }
+
+        // Stream ended — wait before reconnecting to avoid hammering the server
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => return,
+            _ = tokio::time::sleep(SSE_RECONNECT_DELAY) => {}
+        }
     }
 }
 
@@ -262,14 +282,18 @@ async fn handle_event(
     session: &Arc<McpSession>,
     resp_tx: &mpsc::Sender<Result<Message, Error>>,
 ) {
-    if let Some(id) = &event.id {
-        session.set_last_event_id(id.clone());
-    }
-    if event.is_message() {
+    let id = event.id.clone();
+    let delivered = if event.is_message() {
         handle_msg(event, resp_tx).await
     } else {
         #[cfg(feature = "tracing")]
         tracing::debug!(logger = "neva", event = ?event);
+        true
+    };
+    // Only advance the last event ID once the message is confirmed delivered,
+    // so a reconnection will not skip events that were received but not processed.
+    if delivered && let Some(id) = id {
+        session.set_last_event_id(id);
     }
 }
 
@@ -279,13 +303,22 @@ fn handle_error(_err: sse_stream::Error) {
     tracing::error!(logger = "neva", "SSE Error: {}", _err);
 }
 
-#[inline]
-async fn handle_msg(event: sse_stream::Sse, resp_tx: &mpsc::Sender<Result<Message, Error>>) {
-    let msg = serde_json::from_str::<Message>(&event.data.unwrap());
+// Returns true if the message was successfully parsed and delivered.
+async fn handle_msg(
+    event: sse_stream::Sse,
+    resp_tx: &mpsc::Sender<Result<Message, Error>>,
+) -> bool {
+    let Some(data) = event.data else {
+        return false;
+    };
+    let msg = serde_json::from_str::<Message>(&data);
+    let parsed_ok = msg.is_ok();
     if let Err(_err) = resp_tx.send(msg.map_err(Error::from)).await {
         #[cfg(feature = "tracing")]
         tracing::error!(logger = "neva", "Failed to send server request: {}", _err);
+        return false;
     }
+    parsed_ok
 }
 
 #[inline]
