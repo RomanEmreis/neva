@@ -744,7 +744,9 @@ mod tests {
         let tasks = Arc::new(crate::shared::TaskTracker::default());
         let req = make_tasks_request(Some(serde_json::json!({"cursor": {"bad": "shape"}})));
         let resp = handle_list_tasks(req, &tasks);
-        let Response::Err(err) = resp else { panic!("expected error response") };
+        let Response::Err(err) = resp else {
+            panic!("expected error response")
+        };
         assert_eq!(err.error.code, ErrorCode::InvalidParams);
     }
 
@@ -754,7 +756,9 @@ mod tests {
         let tasks = Arc::new(crate::shared::TaskTracker::default());
         let req = make_tasks_request(Some(serde_json::json!("not_an_object")));
         let resp = handle_list_tasks(req, &tasks);
-        let Response::Err(err) = resp else { panic!("expected error response") };
+        let Response::Err(err) = resp else {
+            panic!("expected error response")
+        };
         assert_eq!(err.error.code, ErrorCode::InvalidParams);
     }
 
