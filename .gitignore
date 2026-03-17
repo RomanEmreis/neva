@@ -11,3 +11,6 @@
 # IDEs
 .idea/
 .vs/
+
+# Generated dev-certs
+cert/

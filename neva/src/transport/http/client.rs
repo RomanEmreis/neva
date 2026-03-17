@@ -9,9 +9,11 @@ use crate::{
 use futures_util::{StreamExt, TryStreamExt};
 use reqwest::{
     RequestBuilder,
-    header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE},
+    header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE, HeaderName},
 };
 use std::sync::Arc;
+use std::time::Duration;
+
 #[cfg(feature = "client-tls")]
 use tls_config::ClientTlsConfig;
 use tokio::sync::mpsc;
@@ -20,6 +22,9 @@ use tokio_util::sync::CancellationToken;
 pub(super) mod mcp_session;
 #[cfg(feature = "client-tls")]
 pub(crate) mod tls_config;
+
+const LAST_EVENT_ID: HeaderName = HeaderName::from_static("last-event-id");
+const SSE_RECONNECT_DELAY: Duration = Duration::from_secs(3);
 
 pub(super) async fn connect(rt: ClientRuntimeContext, token: CancellationToken) {
     let session = Arc::new(McpSession::new(rt.url, token));
@@ -143,8 +148,16 @@ async fn send_request(
     if let Message::Request(r) = req
         && r.method == crate::commands::INIT
     {
+        let token = session.cancellation_token();
         session.notify_session_initialized();
-        session.sse_ready().await;
+        // Wait for the SSE GET to succeed. If it fails (non-2xx, network error) the
+        // session is cancelled, which unblocks this select and aborts the init flow
+        // rather than hanging forever.
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => return,
+            _ = session.sse_ready() => {},
+        }
     }
 
     let resp = resp.json::<Message>().await;
@@ -203,58 +216,96 @@ async fn handle_sse_connection(
         }
     };
 
-    let mut resp = client
-        .get(session.url().as_str().as_ref())
-        .header(ACCEPT, "application/json, text/event-stream")
-        .header(CACHE_CONTROL, "no-cache");
-
-    if let Some(access_token) = access_token {
-        resp = resp.bearer_auth(String::from_utf8_lossy(&access_token));
-    }
-
-    if let Some(session_id) = session.session_id() {
-        resp = resp.header(MCP_SESSION_ID, session_id.to_string());
-    }
-
-    let resp = match resp.send().await {
-        Ok(resp) => resp,
-        Err(_err) => {
-            #[cfg(feature = "tracing")]
-            tracing::error!(logger = "neva", "Failed to send SSE request: {}", _err);
-            return;
-        }
-    };
-
-    let mut stream = sse_stream::SseStream::from_byte_stream(resp.bytes_stream())
-        .fuse()
-        .map_ok(|event| handle_event(event, &resp_tx))
-        .map_err(handle_error);
-
-    session.notify_sse_initialized();
-
     let token = session.cancellation_token();
     loop {
+        let mut req = client
+            .get(session.url().as_str().as_ref())
+            .header(ACCEPT, "application/json, text/event-stream")
+            .header(CACHE_CONTROL, "no-cache");
+
+        if let Some(ref access_token) = access_token {
+            req = req.bearer_auth(String::from_utf8_lossy(access_token));
+        }
+
+        if let Some(session_id) = session.session_id() {
+            req = req.header(MCP_SESSION_ID, session_id.to_string());
+        }
+
+        if let Some(last_id) = session.last_event_id() {
+            req = req.header(LAST_EVENT_ID, last_id);
+        }
+
+        let resp = match req.send().await {
+            Ok(resp) => resp,
+            Err(_err) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(logger = "neva", "Failed to send SSE request: {}", _err);
+                session.cancellation_token().cancel();
+                return;
+            }
+        };
+
+        if !resp.status().is_success() {
+            #[cfg(feature = "tracing")]
+            tracing::error!(
+                logger = "neva",
+                "SSE request failed with status: {}",
+                resp.status()
+            );
+            // Cancel the session so any in-flight init POST waiting on sse_ready()
+            // is unblocked instead of hanging forever.
+            session.cancellation_token().cancel();
+            return;
+        }
+
+        let mut stream = sse_stream::SseStream::from_byte_stream(resp.bytes_stream())
+            .fuse()
+            .map_ok(|event| handle_event(event, &session, &resp_tx))
+            .map_err(handle_error);
+
+        session.notify_sse_initialized();
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => return,
+                fut = stream.next() => {
+                    let Some(Ok(fut)) = fut else {
+                        #[cfg(feature = "tracing")]
+                        tracing::info!(logger = "neva", "SSE stream ended, reconnecting");
+                        break;
+                    };
+                    fut.await;
+                }
+            }
+        }
+
+        // Stream ended — wait before reconnecting to avoid hammering the server
         tokio::select! {
             biased;
-            _ = token.cancelled() => break,
-            fut = stream.next() => {
-                let Some(Ok(fut)) = fut else {
-                    #[cfg(feature = "tracing")]
-                    tracing::error!(logger = "neva", "Unexpected stream end");
-                    break;
-                };
-                fut.await;
-            }
+            _ = token.cancelled() => return,
+            _ = tokio::time::sleep(SSE_RECONNECT_DELAY) => {}
         }
     }
 }
 
-async fn handle_event(event: sse_stream::Sse, resp_tx: &mpsc::Sender<Result<Message, Error>>) {
-    if event.is_message() {
+async fn handle_event(
+    event: sse_stream::Sse,
+    session: &Arc<McpSession>,
+    resp_tx: &mpsc::Sender<Result<Message, Error>>,
+) {
+    let id = event.id.clone();
+    let delivered = if event.is_message() {
         handle_msg(event, resp_tx).await
     } else {
         #[cfg(feature = "tracing")]
         tracing::debug!(logger = "neva", event = ?event);
+        true
+    };
+    // Only advance the last event ID once the message is confirmed delivered,
+    // so a reconnection will not skip events that were received but not processed.
+    if delivered && let Some(id) = id {
+        session.set_last_event_id(id);
     }
 }
 
@@ -264,13 +315,22 @@ fn handle_error(_err: sse_stream::Error) {
     tracing::error!(logger = "neva", "SSE Error: {}", _err);
 }
 
-#[inline]
-async fn handle_msg(event: sse_stream::Sse, resp_tx: &mpsc::Sender<Result<Message, Error>>) {
-    let msg = serde_json::from_str::<Message>(&event.data.unwrap());
+// Returns true if the message was successfully parsed and delivered.
+async fn handle_msg(
+    event: sse_stream::Sse,
+    resp_tx: &mpsc::Sender<Result<Message, Error>>,
+) -> bool {
+    let Some(data) = event.data else {
+        return false;
+    };
+    let msg = serde_json::from_str::<Message>(&data);
+    let parsed_ok = msg.is_ok();
     if let Err(_err) = resp_tx.send(msg.map_err(Error::from)).await {
         #[cfg(feature = "tracing")]
         tracing::error!(logger = "neva", "Failed to send server request: {}", _err);
+        return false;
     }
+    parsed_ok
 }
 
 #[inline]
@@ -299,5 +359,85 @@ impl From<reqwest::Error> for Error {
     #[inline]
     fn from(err: reqwest::Error) -> Self {
         Error::new(ErrorCode::ParseError, err.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::http::ServiceUrl;
+
+    fn make_session() -> Arc<McpSession> {
+        Arc::new(McpSession::new(
+            ServiceUrl::default(),
+            CancellationToken::new(),
+        ))
+    }
+
+    // A minimal valid JSON-RPC notification that Message will accept
+    const VALID_MSG: &str = r#"{"jsonrpc":"2.0","method":"ping"}"#;
+
+    #[tokio::test]
+    async fn it_advances_last_event_id_on_successful_delivery() {
+        let session = make_session();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        let event = sse_stream::Sse::default().id("evt-1").data(VALID_MSG);
+        handle_event(event, &session, &tx).await;
+
+        assert_eq!(session.last_event_id(), Some("evt-1".to_string()));
+        assert!(rx.try_recv().is_ok(), "message should have been delivered");
+    }
+
+    #[tokio::test]
+    async fn it_does_not_advance_last_event_id_on_parse_failure() {
+        let session = make_session();
+        let (tx, _rx) = mpsc::channel(1);
+
+        let event = sse_stream::Sse::default()
+            .id("evt-bad")
+            .data("not { valid json");
+        handle_event(event, &session, &tx).await;
+
+        assert!(session.last_event_id().is_none());
+    }
+
+    #[tokio::test]
+    async fn it_does_not_advance_last_event_id_when_channel_closed() {
+        let session = make_session();
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+
+        let event = sse_stream::Sse::default().id("evt-dropped").data(VALID_MSG);
+        handle_event(event, &session, &tx).await;
+
+        assert!(session.last_event_id().is_none());
+    }
+
+    #[tokio::test]
+    async fn it_advances_last_event_id_for_non_message_event() {
+        let session = make_session();
+        let (tx, _rx) = mpsc::channel(1);
+
+        // Non-message SSE event (has event: field) — no data sent to channel, but
+        // ID should still advance so the server does not replay it on reconnect.
+        let event = sse_stream::Sse::default()
+            .id("evt-keepalive")
+            .event("keepalive");
+        handle_event(event, &session, &tx).await;
+
+        assert_eq!(session.last_event_id(), Some("evt-keepalive".to_string()));
+    }
+
+    #[tokio::test]
+    async fn it_does_not_advance_last_event_id_when_data_is_absent() {
+        let session = make_session();
+        let (tx, _rx) = mpsc::channel(1);
+
+        // is_message() returns true (no event: field) but data is None
+        let event = sse_stream::Sse::default().id("evt-empty");
+        handle_event(event, &session, &tx).await;
+
+        assert!(session.last_event_id().is_none());
     }
 }

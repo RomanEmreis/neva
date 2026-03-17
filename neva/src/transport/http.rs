@@ -38,6 +38,10 @@ pub(super) const MCP_SESSION_ID: &str = "Mcp-Session-Id";
 const DEFAULT_ADDR: &str = "127.0.0.1:3000";
 const DEFAULT_MCP_ENDPOINT: &str = "/mcp";
 
+/// Default number of SSE events buffered per session for Last-Event-ID replay.
+#[cfg(feature = "http-server")]
+pub(crate) const DEFAULT_SSE_BUFFER_CAPACITY: usize = 64;
+
 #[inline]
 pub(super) fn get_mcp_session_id(headers: &HeaderMap) -> Option<uuid::Uuid> {
     headers
@@ -61,6 +65,7 @@ pub struct HttpServer<C: AuthClaims = DefaultClaims> {
     auth: Option<AuthConfig<C>>,
     #[cfg(feature = "server-tls")]
     tls_config: Option<TlsConfig>,
+    sse_buffer_capacity: usize,
     sender: HttpSender,
     receiver: HttpReceiver,
 }
@@ -90,6 +95,7 @@ pub(super) struct HttpRuntimeContext {
     tls_config: Option<TlsConfig>,
     rx: Receiver<Message>,
     auth: Option<AuthConfig>,
+    pub(super) sse_buffer_capacity: usize,
 }
 
 #[cfg(feature = "http-client")]
@@ -120,6 +126,7 @@ impl std::fmt::Debug for HttpServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HttpServer")
             .field("url", &self.url)
+            .field("sse_buffer_capacity", &self.sse_buffer_capacity)
             .finish()
     }
 }
@@ -133,6 +140,7 @@ impl Default for HttpServer {
             auth: None,
             #[cfg(feature = "server-tls")]
             tls_config: None,
+            sse_buffer_capacity: DEFAULT_SSE_BUFFER_CAPACITY,
             receiver: HttpReceiver::new(),
             sender: HttpSender::new(),
         }
@@ -280,6 +288,21 @@ impl HttpServer {
         self
     }
 
+    /// Sets the SSE event buffer capacity per session for Last-Event-ID replay.
+    ///
+    /// Defaults to `64`. Pass `0` to disable buffering.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// HttpServer::new("127.0.0.1:3000")
+    ///     .with_endpoint("/mcp")
+    ///     .with_sse_buffer(256)
+    /// ```
+    pub fn with_sse_buffer(mut self, capacity: usize) -> Self {
+        self.sse_buffer_capacity = capacity;
+        self
+    }
+
     fn runtime(&mut self) -> Result<HttpRuntimeContext, Error> {
         let Some(sender_rx) = self.sender.rx.take() else {
             return Err(Error::new(
@@ -294,6 +317,7 @@ impl HttpServer {
             auth: self.auth.take(),
             #[cfg(feature = "server-tls")]
             tls_config: self.tls_config.take(),
+            sse_buffer_capacity: self.sse_buffer_capacity,
         })
     }
 }

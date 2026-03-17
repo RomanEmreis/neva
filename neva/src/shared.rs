@@ -3,10 +3,12 @@
 #[cfg(any(feature = "server", feature = "client"))]
 use tokio_util::sync::CancellationToken;
 
-#[cfg(any(feature = "http-server", feature = "tracing"))]
+#[cfg(feature = "tracing")]
 pub(crate) use message_registry::MessageRegistry;
 #[cfg(any(feature = "server", feature = "client"))]
 pub(crate) use requests_queue::RequestQueue;
+#[cfg(feature = "http-server")]
+pub(crate) use sse_session_registry::SseSessionRegistry;
 #[cfg(all(feature = "tasks", feature = "server"))]
 pub(crate) use task_tracker::TaskHandle;
 #[cfg(feature = "tasks")]
@@ -27,13 +29,15 @@ mod arc_str;
 mod either;
 mod into_args;
 mod memchr;
-#[cfg(any(feature = "http-server", feature = "tracing"))]
+#[cfg(feature = "tracing")]
 mod message_registry;
 #[cfg(feature = "http-client")]
 pub mod mt;
 mod one_or_many;
 #[cfg(any(feature = "server", feature = "client"))]
 mod requests_queue;
+#[cfg(feature = "http-server")]
+mod sse_session_registry;
 #[cfg(feature = "tasks")]
 mod task_api;
 #[cfg(feature = "tasks")]
