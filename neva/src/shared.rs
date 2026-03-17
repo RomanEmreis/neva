@@ -3,7 +3,7 @@
 #[cfg(any(feature = "server", feature = "client"))]
 use tokio_util::sync::CancellationToken;
 
-#[cfg(any(feature = "http-server", feature = "tracing"))]
+#[cfg(feature = "tracing")]
 pub(crate) use message_registry::MessageRegistry;
 #[cfg(any(feature = "server", feature = "client"))]
 pub(crate) use requests_queue::RequestQueue;
@@ -29,7 +29,7 @@ mod arc_str;
 mod either;
 mod into_args;
 mod memchr;
-#[cfg(any(feature = "http-server", feature = "tracing"))]
+#[cfg(feature = "tracing")]
 mod message_registry;
 #[cfg(feature = "http-client")]
 pub mod mt;

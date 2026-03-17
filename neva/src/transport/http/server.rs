@@ -9,7 +9,7 @@ use crate::{
     types::{Message, RequestId, Response},
 };
 use dashmap::DashMap;
-use futures_util::stream;
+use futures_util::{future::Either, stream};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
@@ -186,25 +186,23 @@ async fn handle_connection(req: HttpRequest) -> HttpResult {
     // Without Last-Event-ID: initial connection — replay_all recovers events buffered
     // during the POST → GET handshake window (pre_register in handle_message ensures
     // the buffer exists). If the buffer is empty, fall through to pure live stream.
-    let msg_stream: Box<dyn tokio_stream::Stream<Item = SseItem> + Send + Unpin> = {
-        let replay = match last_seq {
-            Some(seq) => manager.sse_registry.replay_since(&id, seq),
-            None => manager.sse_registry.replay_all(&id),
-        };
+    let replay = match last_seq {
+        Some(seq) => manager.sse_registry.replay_since(&id, seq),
+        None => manager.sse_registry.replay_all(&id),
+    };
 
-        if replay.is_empty() {
-            Box::new(
-                UnboundedReceiverStream::new(msg_rx).map(|(seq, arc)| SseItem::Tracked(seq, arc)),
-            )
-        } else {
-            // Deduplicate: live stream must not re-emit events already in replay.
-            let replay_end_seq = replay.last().map(|(s, _)| *s).unwrap_or(0);
-            let replay_stream = stream::iter(replay).map(|(seq, arc)| SseItem::Tracked(seq, arc));
-            let live = UnboundedReceiverStream::new(msg_rx)
-                .filter(move |&(seq, _)| seq > replay_end_seq)
-                .map(|(seq, arc)| SseItem::Tracked(seq, arc));
-            Box::new(replay_stream.chain(live))
-        }
+    let msg_stream = if replay.is_empty() {
+        Either::Left(
+            UnboundedReceiverStream::new(msg_rx).map(|(seq, arc)| SseItem::Tracked(seq, arc)),
+        )
+    } else {
+        // Deduplicate: live stream must not re-emit events already in replay.
+        let replay_end_seq = replay.last().map(|(s, _)| *s).unwrap_or(0);
+        let replay_stream = stream::iter(replay).map(|(seq, arc)| SseItem::Tracked(seq, arc));
+        let live = UnboundedReceiverStream::new(msg_rx)
+            .filter(move |&(seq, _)| seq > replay_end_seq)
+            .map(|(seq, arc)| SseItem::Tracked(seq, arc));
+        Either::Right(replay_stream.chain(live))
     };
 
     // Log stream (ephemeral, no id: field)
