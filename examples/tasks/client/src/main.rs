@@ -41,16 +41,30 @@ async fn main() -> Result<(), Error> {
     client.connect().await?;
 
     tracing::info!("Calling tool with sampling as task...");
-    let result = client.call_tool_as_task("tool_with_sampling", (), None).await;
+    
+    let result = client
+        .task()
+        .call_tool("tool_with_sampling", ()).await;
+    
     tracing::info!("Received result: {:?}", result);
 
     tracing::info!("Calling tool with elicitation as task...");
-    let result = client.call_tool_as_task("tool_with_elicitation", (), None).await;
+    
+    let result = client
+        .task()
+        .call_tool("tool_with_elicitation", ()).await;
+    
     tracing::info!("Received result: {:?}", result);
 
     tracing::info!("Calling an infinite tool as task...");
+    
     let ttl = 10000; // 10 seconds
-    let result = client.call_tool_as_task("endless_tool", (), Some(ttl)).await;
+    
+    let result = client
+        .task()
+        .with_ttl(ttl)
+        .call_tool("endless_tool", ()).await;
+    
     tracing::info!("Received result: {:?}", result);
     
     let result = client.list_tasks(None).await?;

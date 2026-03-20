@@ -108,6 +108,33 @@ impl From<ErrorCode> for Error {
     }
 }
 
+impl ErrorCode {
+    /// Returns the wire-safe equivalent of this code.
+    ///
+    /// Internal codes (`RequestCancelled`, `Timeout`) fall outside the JSON-RPC 2.0
+    /// reserved range (`-32768` to `-32000`) and must never appear in a response
+    /// payload. This method maps them to [`ErrorCode::InternalError`] so callers can
+    /// always serialise a spec-compliant code.
+    ///
+    /// All standard codes are returned unchanged.
+    ///
+    /// # Example
+    /// ```
+    /// use neva::error::ErrorCode;
+    ///
+    /// assert_eq!(ErrorCode::RequestCancelled.wire_code(), ErrorCode::InternalError);
+    /// assert_eq!(ErrorCode::Timeout.wire_code(), ErrorCode::InternalError);
+    /// assert_eq!(ErrorCode::ParseError.wire_code(), ErrorCode::ParseError);
+    /// ```
+    #[inline]
+    pub fn wire_code(self) -> Self {
+        match self {
+            Self::RequestCancelled | Self::Timeout => Self::InternalError,
+            other => other,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,6 +182,30 @@ mod tests {
 
             let error_code: ErrorCode = serde_json::from_str(&error).unwrap();
             assert_eq!(error_code, val);
+        }
+    }
+
+    #[test]
+    fn internal_codes_map_to_internal_error_on_wire() {
+        assert_eq!(
+            ErrorCode::RequestCancelled.wire_code(),
+            ErrorCode::InternalError
+        );
+        assert_eq!(ErrorCode::Timeout.wire_code(), ErrorCode::InternalError);
+    }
+
+    #[test]
+    fn standard_codes_are_unchanged_on_wire() {
+        let standard = [
+            ErrorCode::ParseError,
+            ErrorCode::InvalidRequest,
+            ErrorCode::MethodNotFound,
+            ErrorCode::InvalidParams,
+            ErrorCode::InternalError,
+            ErrorCode::ResourceNotFound,
+        ];
+        for code in standard {
+            assert_eq!(code.wire_code(), code);
         }
     }
 }
