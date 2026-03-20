@@ -545,9 +545,6 @@ impl Client {
 
     /// Calls a task-augmented tool that MCP server supports
     ///
-    /// # Panics
-    /// If the server does not support task-augmented tool calls
-    ///
     /// # Example
     /// ```no_run
     /// use neva::client::Client;
