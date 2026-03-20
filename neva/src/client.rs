@@ -38,8 +38,12 @@ mod handler;
 mod notification_handler;
 pub mod options;
 pub mod subscribe;
+#[cfg(feature = "tasks")]
+pub mod task;
 
 pub use batch::BatchBuilder;
+#[cfg(feature = "tasks")]
+pub use task::TaskBuilder;
 
 /// Represents an MCP client app
 pub struct Client {
@@ -610,21 +614,13 @@ impl Client {
         N: Into<String>,
         Args: shared::IntoArgs,
     {
-        assert!(
-            self.is_server_support_call_tool_with_tasks(),
-            "Server does not support call tool with tasks."
-        );
-
-        let params = CallToolRequestParams {
-            name: name.into(),
-            meta: None,
-            args: args.into_args(),
-            task: Some(TaskMetadata { ttl }),
+        let builder = self.task();
+        let builder = if let Some(t) = ttl {
+            builder.with_ttl(t)
+        } else {
+            builder
         };
-
-        let result = self.call_tool_raw(params).await?.into_result()?;
-
-        shared::wait_to_completion(self, result).await
+        builder.call_tool(name, args).await
     }
 
     /// Calls a tool
@@ -937,6 +933,38 @@ impl Client {
         }
     }
 
+    /// Returns a [`TaskBuilder`] for constructing a task-augmented request.
+    ///
+    /// Chain setters such as [`TaskBuilder::with_ttl`] to configure the task,
+    /// then call [`TaskBuilder::call_tool`] to execute.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::client::Client;
+    /// use neva::error::Error;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let mut client = Client::new();
+    ///     client.connect().await?;
+    ///
+    ///     let result = client
+    ///         .task()
+    ///         .with_ttl(5000)
+    ///         .call_tool("echo", [("message", "Hello MCP!")])
+    ///         .await?;
+    ///
+    ///     client.disconnect().await
+    /// }
+    /// ```
+    #[cfg(feature = "tasks")]
+    pub fn task(&mut self) -> TaskBuilder<'_> {
+        TaskBuilder {
+            client: self,
+            metadata: TaskMetadata::default(),
+        }
+    }
+
     /// Sends a batch of messages to the MCP server and awaits all responses.
     ///
     /// Items that are [`MessageEnvelope::Request`] each get a response slot in
@@ -1058,9 +1086,8 @@ impl Client {
         };
     }
 
-    #[inline(always)]
     #[cfg(feature = "tasks")]
-    fn ensure_tasks_supported(&self) {
+    pub(crate) fn ensure_tasks_supported(&self) {
         assert!(
             self.is_client_supports_tasks(),
             "Client does not support task-augmented requests. You may configure it with `Client::with_options(|opt| opt.with_tasks(...))` method."
@@ -1068,7 +1095,7 @@ impl Client {
 
         assert!(
             self.is_server_supports_tasks(),
-            "Client does not support task-augmented requests."
+            "Server does not support task-augmented requests."
         );
     }
 }
