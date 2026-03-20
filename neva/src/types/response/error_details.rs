@@ -31,7 +31,7 @@ impl From<Error> for ErrorDetails {
     #[inline]
     fn from(err: Error) -> Self {
         Self {
-            code: err.code,
+            code: err.code.wire_code(),
             message: err.to_string(),
             data: None,
         }

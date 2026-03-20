@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.3.0
+
+### Added
+* Improved MCP Client DX for calling task-enabled tools.
+* Added `wire_code()` method that returns a safe JSON-RPC 2.0 supported code. 
+
 ## 0.2.9
 
 ### Added
