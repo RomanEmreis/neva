@@ -187,7 +187,10 @@ mod tests {
 
     #[test]
     fn internal_codes_map_to_internal_error_on_wire() {
-        assert_eq!(ErrorCode::RequestCancelled.wire_code(), ErrorCode::InternalError);
+        assert_eq!(
+            ErrorCode::RequestCancelled.wire_code(),
+            ErrorCode::InternalError
+        );
         assert_eq!(ErrorCode::Timeout.wire_code(), ErrorCode::InternalError);
     }
 
