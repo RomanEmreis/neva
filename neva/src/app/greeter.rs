@@ -155,7 +155,10 @@ mod tests {
         let output = greeter.render();
 
         assert!(output.contains("Tools"), "Tools section should be present");
-        assert!(!output.contains("Prompts"), "Prompts section should be absent");
+        assert!(
+            !output.contains("Prompts"),
+            "Prompts section should be absent"
+        );
         assert!(
             !output.contains("Resource Templates"),
             "Resource Templates section should be absent"
@@ -199,6 +202,9 @@ mod tests {
         assert!(!output.contains("Resource Templates"));
 
         // No trailing blank line after the box close (output ends at ╝\n)
-        assert!(output.trim_end().ends_with('╝'), "Output should end with box bottom");
+        assert!(
+            output.trim_end().ends_with('╝'),
+            "Output should end with box bottom"
+        );
     }
 }

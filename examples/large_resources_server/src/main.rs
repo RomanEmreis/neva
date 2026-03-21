@@ -46,9 +46,10 @@ fn get_res_info(uri: Uri, name: String) -> Resource {
 #[tokio::main]
 async fn main() {
     App::new()
-        .with_options(|opt| opt
-            .with_name("Large resource example server")
-            .with_default_http())
+        .with_options(|opt| {
+            opt.with_name("Large resource example server")
+                .with_default_http()
+        })
         .run()
         .await;
 }

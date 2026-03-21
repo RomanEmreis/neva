@@ -47,8 +47,8 @@ use volga_di::{Container, ContainerBuilder};
 use {crate::types::notification::SetLevelRequestParams, tracing::Instrument};
 
 mod collection;
-mod greeter;
 pub mod context;
+mod greeter;
 pub(crate) mod handler;
 pub mod options;
 
@@ -215,8 +215,13 @@ impl App {
             let transport_label = self.options.transport_label();
             let tools: Vec<String> = self.options.tools.as_ref().keys().cloned().collect();
             let prompts: Vec<String> = self.options.prompts.as_ref().keys().cloned().collect();
-            let resource_templates: Vec<String> =
-                self.options.resources_templates.as_ref().keys().cloned().collect();
+            let resource_templates: Vec<String> = self
+                .options
+                .resources_templates
+                .as_ref()
+                .keys()
+                .cloned()
+                .collect();
 
             greeter::Greeter {
                 server_name: &self.options.implementation.name,

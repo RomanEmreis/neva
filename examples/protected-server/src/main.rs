@@ -53,9 +53,9 @@ async fn main() {
                             .with_aud(["some aud"])
                             .with_iss(["some issuer"])
                             .set_decoding_key(secret.as_bytes())
+                    })
                 })
-            })
-            .with_logging(handle)
+                .with_logging(handle)
         })
         .run()
         .await;
