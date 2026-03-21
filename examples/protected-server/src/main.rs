@@ -46,12 +46,13 @@ async fn main() {
 
     App::new()
         .with_options(|opt| {
-            opt.with_http(|http| {
-                http.with_auth(|auth| {
-                    auth.validate_exp(false)
-                        .with_aud(["some aud"])
-                        .with_iss(["some issuer"])
-                        .set_decoding_key(secret.as_bytes())
+            opt.with_name("Protected Server Example")
+                .with_http(|http| {
+                    http.with_auth(|auth| {
+                        auth.validate_exp(false)
+                            .with_aud(["some aud"])
+                            .with_iss(["some issuer"])
+                            .set_decoding_key(secret.as_bytes())
                 })
             })
             .with_logging(handle)

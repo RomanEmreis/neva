@@ -47,6 +47,7 @@ use volga_di::{Container, ContainerBuilder};
 use {crate::types::notification::SetLevelRequestParams, tracing::Instrument};
 
 mod collection;
+mod greeter;
 pub mod context;
 pub(crate) mod handler;
 pub mod options;
@@ -56,8 +57,10 @@ const DEFAULT_PAGE_SIZE: usize = 10;
 type RequestHandlers = HashMap<String, RequestHandler<Response>>;
 
 /// Represents an MCP server application
-#[derive(Default)]
 pub struct App {
+    /// Whether to print the startup greeting banner
+    greeting: bool,
+
     /// MCP server options
     pub(super) options: McpOptions,
 
@@ -76,10 +79,18 @@ impl Debug for App {
     }
 }
 
+impl Default for App {
+    /// Creates a default [`App`] with all built-in handlers registered.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl App {
     /// Initializes a new MCP app
     pub fn new() -> Self {
         let mut app = Self {
+            greeting: cfg!(debug_assertions),
             options: McpOptions::default(),
             handlers: HashMap::new(),
             #[cfg(feature = "di")]
@@ -196,6 +207,30 @@ impl App {
         #[cfg(feature = "macros")]
         self.register_methods();
 
+        // ORDERING CONSTRAINT: must execute after register_methods() so macro-registered
+        // tools/prompts are present; must execute before self.options.transport() consumes
+        // `proto` and before ServerRuntime::new() transitions collections to Runtime state
+        // (Collection::as_ref() panics if called in Runtime state).
+        if self.greeting {
+            let transport_label = self.options.transport_label();
+            let tools: Vec<String> = self.options.tools.as_ref().keys().cloned().collect();
+            let prompts: Vec<String> = self.options.prompts.as_ref().keys().cloned().collect();
+            let resource_templates: Vec<String> =
+                self.options.resources_templates.as_ref().keys().cloned().collect();
+
+            greeter::Greeter {
+                server_name: &self.options.implementation.name,
+                server_version: &self.options.implementation.version,
+                neva_version: env!("CARGO_PKG_VERSION"),
+                transport_label: &transport_label,
+                tools: &tools,
+                prompts: &prompts,
+                resource_templates: &resource_templates,
+                use_color: std::env::var_os("NO_COLOR").is_none(),
+            }
+            .print();
+        }
+
         #[cfg(feature = "tracing")]
         self.options
             .add_middleware(make_mw(Self::tracing_middleware));
@@ -237,6 +272,36 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Enable the greeting banner on startup (forced on, even in release builds).
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::App;
+    ///
+    /// # fn main() {
+    /// let app = App::new().with_greeting();
+    /// # }
+    /// ```
+    pub fn with_greeting(mut self) -> Self {
+        self.greeting = true;
+        self
+    }
+
+    /// Suppress the greeting banner on startup.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::App;
+    ///
+    /// # fn main() {
+    /// let app = App::new().without_greeting();
+    /// # }
+    /// ```
+    pub fn without_greeting(mut self) -> Self {
+        self.greeting = false;
+        self
     }
 
     /// Configure MCP server options
@@ -939,7 +1004,20 @@ fn create_tracing_span(session_id: Option<uuid::Uuid>) -> tracing::Span {
 
 #[cfg(test)]
 mod tests {
+    use super::App;
     use crate::types::{MessageBatch, MessageEnvelope};
+
+    #[test]
+    fn it_enables_greeting_with_with_greeting() {
+        let app = App::new().with_greeting();
+        assert!(app.greeting);
+    }
+
+    #[test]
+    fn it_disables_greeting_with_without_greeting() {
+        let app = App::new().without_greeting();
+        assert!(!app.greeting);
+    }
 
     #[test]
     fn batch_filtering_notifications_yield_no_response_slots() {

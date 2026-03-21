@@ -9,7 +9,9 @@ async fn roots_request(mut ctx: Context) -> Result<String, Error> {
 #[tokio::main]
 async fn main() {
     App::new()
-        .with_options(|opt| opt.with_default_http())
+        .with_options(|opt| opt
+            .with_name("Roots Example Server")
+            .with_default_http())
         .run()
         .await;
 }

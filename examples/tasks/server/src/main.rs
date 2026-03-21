@@ -39,6 +39,7 @@ fn main() {
     
     App::new()
         .with_options(|opt| opt
+            .with_name("Tasks Example Server")
             .with_default_http()
             .with_tasks(|t| t.with_all()))
         .run_blocking();

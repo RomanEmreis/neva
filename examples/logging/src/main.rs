@@ -29,6 +29,7 @@ async fn main() {
         .with_options(|opt| {
             opt.with_stdio()
                 .with_mcp_version("2024-11-05")
+                .with_name("Logging Example Server")
                 .with_logging(handle)
         })
         .run()

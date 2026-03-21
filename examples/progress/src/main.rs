@@ -42,7 +42,9 @@ async fn main() {
         .init();
 
     App::new()
-        .with_options(|opt| opt.with_tasks(|tasks| tasks.with_all()).with_default_http())
+        .with_options(|opt| opt
+            .with_name("Progress Example Server")
+            .with_tasks(|tasks| tasks.with_all()).with_default_http())
         .run()
         .await;
 }
