@@ -89,7 +89,9 @@ async fn main() {
             .set_decoding_key(secret.as_bytes()));
     
     App::new()
-        .with_options(|opt| opt.set_http(http))
+        .with_options(|opt| opt
+            .with_name("Sampling Example Server")
+            .set_http(http))
         .run()
         .await;
 }

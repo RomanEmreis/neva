@@ -303,6 +303,11 @@ impl HttpServer {
         self
     }
 
+    /// Returns the URL label used for display in the greeting banner
+    pub(crate) fn url_label(&self) -> String {
+        self.url.to_string()
+    }
+
     fn runtime(&mut self) -> Result<HttpRuntimeContext, Error> {
         let Some(sender_rx) = self.sender.rx.take() else {
             return Err(Error::new(

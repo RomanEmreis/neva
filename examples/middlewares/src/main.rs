@@ -67,7 +67,11 @@ async fn main() {
         .init();
 
     App::new()
-        .with_options(|opt| opt.with_stdio().with_logging(handle))
+        .with_options(|opt| {
+            opt.with_name("Middleware Example Server")
+                .with_stdio()
+                .with_logging(handle)
+        })
         .wrap(logging_middleware) // Wraps all requests that pass through the server
         .wrap_tools(global_tool_middleware) // Wraps all tools/call requests that pass through the server
         .run()

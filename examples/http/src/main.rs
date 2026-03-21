@@ -26,6 +26,7 @@ async fn main() {
     App::new()
         .with_options(|opt| {
             opt.with_http(|http| http.bind("127.0.0.1:3000").with_endpoint("/mcp"))
+                .with_name("Streamable HTTP Example Server")
                 .with_logging(handle)
         })
         .run()

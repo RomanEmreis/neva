@@ -32,7 +32,8 @@ async fn get_resource(uri: Uri) -> ResourceContents {
 #[tokio::main]
 async fn main() {
     let mut app = App::new().with_options(|opt| {
-        opt.with_stdio()
+        opt.with_name("Updates Example Server")
+            .with_stdio()
             .with_resources(|res| res.with_subscribe().with_list_changed())
             .with_mcp_version("2024-11-05")
     });

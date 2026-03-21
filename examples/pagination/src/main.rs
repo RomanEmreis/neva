@@ -55,7 +55,10 @@ async fn filter_resources(
 #[tokio::main]
 async fn main() {
     App::new()
-        .with_options(|opt| opt.with_http(|http| http.bind("127.0.0.1:3000")))
+        .with_options(|opt| {
+            opt.with_name("Pagination Example Server")
+                .with_http(|http| http.bind("127.0.0.1:3000"))
+        })
         .add_singleton(ResourcesRepository::new())
         .run()
         .await;

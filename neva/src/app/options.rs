@@ -390,6 +390,16 @@ impl McpOptions {
         transport.unwrap_or_default()
     }
 
+    /// Returns a display label for the currently configured transport
+    pub(super) fn transport_label(&self) -> String {
+        match &self.proto {
+            Some(TransportProto::StdIoServer(_)) => "stdio".to_owned(),
+            #[cfg(feature = "http-server")]
+            Some(TransportProto::HttpServer(http)) => http.url_label(),
+            _ => "(none)".to_owned(),
+        }
+    }
+
     /// Returns a tool by its name
     #[inline]
     pub(crate) async fn get_tool(&self, name: &str) -> Option<Tool> {
@@ -837,5 +847,25 @@ mod tests {
         let options = McpOptions::default();
 
         assert!(options.prompts_capability().is_none());
+    }
+
+    #[test]
+    fn it_returns_stdio_label() {
+        let options = McpOptions::default().with_stdio();
+        assert_eq!(options.transport_label(), "stdio");
+    }
+
+    #[test]
+    fn it_returns_none_label_when_no_transport() {
+        let options = McpOptions::default();
+        assert_eq!(options.transport_label(), "(none)");
+    }
+
+    #[cfg(feature = "http-server")]
+    #[test]
+    fn it_returns_http_label_when_http_transport() {
+        let options = McpOptions::default().with_default_http();
+        // Default HTTP: 127.0.0.1:3000/mcp
+        assert_eq!(options.transport_label(), "http://127.0.0.1:3000/mcp");
     }
 }
