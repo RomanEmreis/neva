@@ -9,8 +9,8 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 documentation.workspace = true
-categories = ["web-programming::http-server", "web-programming::http-client", "network-programming", "asynchronous"]
-keywords = ["modelcontextprotocol", "mcp", "sdk", "ai", "framework"]
+keywords.workspace = true
+categories.workspace = true
 
 [lib]
 proc-macro = true
