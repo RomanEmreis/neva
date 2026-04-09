@@ -3,13 +3,13 @@
 use crate::error::{Error, ErrorCode};
 use crate::types::Message;
 use dashmap::DashMap;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{Sender, error::TrySendError};
 use uuid::Uuid;
 
 /// A concurrent message registry that bounds the MCP session ID and related message channel
 #[derive(Default)]
 pub(crate) struct MessageRegistry {
-    inner: DashMap<Uuid, UnboundedSender<Message>>,
+    inner: DashMap<Uuid, Sender<Message>>,
 }
 
 #[allow(dead_code)]
@@ -24,25 +24,50 @@ impl MessageRegistry {
 
     /// Registers MCP session channel
     #[inline]
-    pub(crate) fn register(&self, key: Uuid, sender: UnboundedSender<Message>) {
+    pub(crate) fn register(&self, key: Uuid, sender: Sender<Message>) {
         self.inner.insert(key, sender);
     }
 
     /// Unregisters MCP session channel
     #[inline]
-    pub(crate) fn unregister(&self, key: &Uuid) -> Option<(Uuid, UnboundedSender<Message>)> {
+    pub(crate) fn unregister(&self, key: &Uuid) -> Option<(Uuid, Sender<Message>)> {
         self.inner.remove(key)
     }
 
     /// Sends a message into an appropriate channel
     #[inline]
     pub(crate) fn send(&self, message: Message) -> Result<(), Error> {
-        let session_id = message.session_id().ok_or(ErrorCode::InvalidParams)?;
+        let session_id = *message.session_id().ok_or(ErrorCode::InvalidParams)?;
 
-        if let Some(sender) = self.inner.get(session_id) {
-            sender
-                .send(message)
-                .map_err(|e| Error::new(ErrorCode::InternalError, e))
+        if let Some(sender) = self.inner.get(&session_id) {
+            match sender.try_send(message) {
+                Ok(()) => Ok(()),
+                Err(err) => {
+                    let err_text = err.to_string();
+                    match err {
+                        TrySendError::Full(_message) => {
+                            #[cfg(feature = "tracing")]
+                            tracing::warn!(
+                                logger = "neva",
+                                "Dropping SSE log message for session {}: {}",
+                                session_id,
+                                err_text
+                            );
+                            Ok(())
+                        }
+                        TrySendError::Closed(_message) => {
+                            #[cfg(feature = "tracing")]
+                            tracing::warn!(
+                                logger = "neva",
+                                "Failed to deliver SSE log message for session {}: {}",
+                                session_id,
+                                err_text
+                            );
+                            Err(Error::new(ErrorCode::InternalError, err_text))
+                        }
+                    }
+                }
+            }
         } else {
             Err(Error::new(ErrorCode::InvalidParams, "Sender not found"))
         }
@@ -66,7 +91,7 @@ mod tests {
     fn it_registers_and_unregisters() {
         let registry = MessageRegistry::new();
         let session_id = Uuid::new_v4();
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(8);
 
         // Test registration
         registry.register(session_id, tx.clone());
@@ -87,7 +112,7 @@ mod tests {
     async fn it_sends_message() {
         let registry = MessageRegistry::new();
         let session_id = Uuid::new_v4();
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(8);
 
         registry.register(session_id, tx);
 
