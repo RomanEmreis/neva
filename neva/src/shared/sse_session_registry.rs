@@ -146,22 +146,28 @@ impl SseSessionRegistry {
             Err(TrySendError::Full((_seq, _arc))) => {
                 session.sender = Self::disconnected_sender();
                 #[cfg(feature = "tracing")]
-                tracing::warn!(
-                    logger = "neva",
-                    "Lagging SSE client for session {}: disconnecting live stream at seq={}",
-                    session_id,
-                    seq
-                );
+                {
+                    crate::types::notification::fmt::LOG_REGISTRY.unregister(&session_id);
+                    tracing::warn!(
+                        logger = "neva",
+                        "Lagging SSE client for session {}: disconnecting SSE stream at seq={}",
+                        session_id,
+                        seq
+                    );
+                }
             }
             Err(TrySendError::Closed((_seq, _arc))) => {
                 session.sender = Self::disconnected_sender();
                 #[cfg(feature = "tracing")]
-                tracing::warn!(
-                    logger = "neva",
-                    "Dead channel for session {}: seq={} is in buffer for next reconnect",
-                    session_id,
-                    seq
-                );
+                {
+                    crate::types::notification::fmt::LOG_REGISTRY.unregister(&session_id);
+                    tracing::warn!(
+                        logger = "neva",
+                        "Dead channel for session {}: seq={} is in buffer for next reconnect",
+                        session_id,
+                        seq
+                    );
+                }
             }
         }
 

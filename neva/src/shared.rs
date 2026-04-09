@@ -68,7 +68,7 @@ async fn wait_for_shutdown_signal_impl() -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal as unix_signal};
-        
+
         let mut terminate = unix_signal(SignalKind::terminate())?;
 
         tokio::select! {
@@ -82,17 +82,17 @@ async fn wait_for_shutdown_signal_impl() -> std::io::Result<()> {
         #[cfg(windows)]
         {
             use tokio::signal::windows;
-            
+
             let mut ctrl_break = windows::ctrl_break()?;
             let mut ctrl_close = windows::ctrl_close()?;
             let mut ctrl_shutdown = windows::ctrl_shutdown()?;
 
             tokio::select! {
-                    result = tokio::signal::ctrl_c() => result,
-                    _ = ctrl_break.recv() => Ok(()),
-                    _ = ctrl_close.recv() => Ok(()),
-                    _ = ctrl_shutdown.recv() => Ok(()),
-                }
+                result = tokio::signal::ctrl_c() => result,
+                _ = ctrl_break.recv() => Ok(()),
+                _ = ctrl_close.recv() => Ok(()),
+                _ = ctrl_shutdown.recv() => Ok(()),
+            }
         }
 
         #[cfg(not(windows))]

@@ -319,8 +319,9 @@ impl HttpServer {
 
     /// Sets the live SSE queue capacity per active connection for tracked MCP events.
     ///
-    /// Defaults to `256`. When the queue fills, the live connection is disconnected
-    /// and recent events remain available through the replay buffer configured by
+    /// Defaults to `256`.
+    /// When the queue fills, the live connection is disconnected and recent
+    /// events remain available through the replay buffer configured by
     /// [`HttpServer::with_sse_buffer`].
     ///
     /// # Example
@@ -329,13 +330,18 @@ impl HttpServer {
     ///     .with_sse_live_queue(512)
     /// ```
     pub fn with_sse_live_queue(mut self, capacity: usize) -> Self {
+        assert!(
+            capacity > 0,
+            "SSE live queue capacity must be greater than 0"
+        );
         self.sse_live_queue_capacity = capacity;
         self
     }
 
     /// Sets the live SSE queue capacity per active connection for ephemeral log events.
     ///
-    /// Defaults to `256`. When the queue fills, new log notifications are dropped.
+    /// Defaults to `256`.
+    /// When the queue fills, new log notifications are dropped.
     ///
     /// # Example
     /// ```rust,ignore
@@ -343,6 +349,10 @@ impl HttpServer {
     ///     .with_sse_log_queue(128)
     /// ```
     pub fn with_sse_log_queue(mut self, capacity: usize) -> Self {
+        assert!(
+            capacity > 0,
+            "SSE log queue capacity must be greater than 0"
+        );
         self.sse_log_queue_capacity = capacity;
         self
     }
