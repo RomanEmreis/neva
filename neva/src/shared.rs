@@ -47,7 +47,7 @@ mod task_tracker;
 #[cfg(any(feature = "server", feature = "client"))]
 pub(crate) fn wait_for_shutdown_signal(token: CancellationToken) {
     tokio::spawn(async move {
-        match tokio::signal::ctrl_c().await {
+        match wait_for_shutdown_signal_impl().await {
             Ok(_) => (),
             #[cfg(feature = "tracing")]
             Err(err) => tracing::error!(
@@ -60,4 +60,44 @@ pub(crate) fn wait_for_shutdown_signal(token: CancellationToken) {
         }
         token.cancel();
     });
+}
+
+#[inline]
+#[cfg(any(feature = "server", feature = "client"))]
+async fn wait_for_shutdown_signal_impl() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal as unix_signal};
+        
+        let mut terminate = unix_signal(SignalKind::terminate())?;
+
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        #[cfg(windows)]
+        {
+            use tokio::signal::windows;
+            
+            let mut ctrl_break = windows::ctrl_break()?;
+            let mut ctrl_close = windows::ctrl_close()?;
+            let mut ctrl_shutdown = windows::ctrl_shutdown()?;
+
+            tokio::select! {
+                    result = tokio::signal::ctrl_c() => result,
+                    _ = ctrl_break.recv() => Ok(()),
+                    _ = ctrl_close.recv() => Ok(()),
+                    _ = ctrl_shutdown.recv() => Ok(()),
+                }
+        }
+
+        #[cfg(not(windows))]
+        {
+            tokio::signal::ctrl_c().await
+        }
+    }
 }
