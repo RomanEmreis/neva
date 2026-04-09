@@ -100,6 +100,7 @@ impl<'a> Greeter<'a> {
             }
         }
 
+        out.push('\n');
         out
     }
 
