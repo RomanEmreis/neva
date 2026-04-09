@@ -12,7 +12,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
-use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::sync::mpsc::{Sender, error::TrySendError};
 use uuid::Uuid;
 
 /// Bounded in-memory registry providing SSE event buffering and replay for
@@ -24,7 +24,7 @@ pub(crate) struct SseSessionRegistry {
 }
 
 struct SseSession {
-    sender: UnboundedSender<(u64, Arc<Message>)>,
+    sender: Sender<(u64, Arc<Message>)>,
     buffer: Mutex<VecDeque<(u64, Arc<Message>)>>,
     /// Relaxed ordering: single-writer (dispatch loop); Mutex on buffer provides
     /// happens-before for all readers.
@@ -36,6 +36,12 @@ struct SseSession {
 }
 
 impl SseSessionRegistry {
+    fn disconnected_sender() -> Sender<(u64, Arc<Message>)> {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+        tx
+    }
+
     /// Creates a new [`SseSessionRegistry`].
     ///
     /// `capacity` is the maximum number of events buffered per session.
@@ -61,14 +67,14 @@ impl SseSessionRegistry {
     ///
     /// Returns the new generation number. The caller must pass this value to
     /// [`unregister`] when the connection ends.
-    pub(crate) fn register(&self, id: Uuid, sender: UnboundedSender<(u64, Arc<Message>)>) -> u64 {
+    pub(crate) fn register(&self, id: Uuid, sender: Sender<(u64, Arc<Message>)>) -> u64 {
         let generation = self.next_gen.fetch_add(1, Ordering::Relaxed) + 1;
 
         self.sessions
             .entry(id)
             .and_modify(|s| {
                 // `sender.clone()` is forced by the DashMap entry API: `or_insert_with`
-                // consumes `sender` by move, so `and_modify` must clone. UnboundedSender<T>: Clone.
+                // consumes `sender` by move, so `and_modify` must clone.
                 s.sender = sender.clone();
                 s.generation = generation;
             })
@@ -114,7 +120,7 @@ impl SseSessionRegistry {
             return Err(Error::new(ErrorCode::InvalidParams, "missing session id"));
         };
 
-        let Some(session) = self.sessions.get(&session_id) else {
+        let Some(mut session) = self.sessions.get_mut(&session_id) else {
             #[cfg(feature = "tracing")]
             tracing::warn!(
                 logger = "neva",
@@ -135,14 +141,34 @@ impl SseSessionRegistry {
             }
         }
 
-        if let Err(_e) = session.sender.send((seq, arc)) {
-            #[cfg(feature = "tracing")]
-            tracing::warn!(
-                logger = "neva",
-                "Dead channel for session {}: seq={} is in buffer for next reconnect",
-                session_id,
-                seq
-            );
+        match session.sender.try_send((seq, arc)) {
+            Ok(()) => {}
+            Err(TrySendError::Full((_seq, _arc))) => {
+                session.sender = Self::disconnected_sender();
+                #[cfg(feature = "tracing")]
+                {
+                    crate::types::notification::fmt::LOG_REGISTRY.unregister(&session_id);
+                    tracing::warn!(
+                        logger = "neva",
+                        "Lagging SSE client for session {}: disconnecting SSE stream at seq={}",
+                        session_id,
+                        seq
+                    );
+                }
+            }
+            Err(TrySendError::Closed((_seq, _arc))) => {
+                session.sender = Self::disconnected_sender();
+                #[cfg(feature = "tracing")]
+                {
+                    crate::types::notification::fmt::LOG_REGISTRY.unregister(&session_id);
+                    tracing::warn!(
+                        logger = "neva",
+                        "Dead channel for session {}: seq={} is in buffer for next reconnect",
+                        session_id,
+                        seq
+                    );
+                }
+            }
         }
 
         Ok(())
@@ -196,15 +222,12 @@ impl SseSessionRegistry {
         if self.capacity == 0 {
             return;
         }
-        self.sessions.entry(id).or_insert_with(|| {
-            let (tx, _rx) = mpsc::unbounded_channel::<(u64, Arc<Message>)>();
-            SseSession {
-                sender: tx,
-                buffer: Mutex::new(VecDeque::new()),
-                next_seq: AtomicU64::new(0),
-                capacity: self.capacity,
-                generation: 0,
-            }
+        self.sessions.entry(id).or_insert_with(|| SseSession {
+            sender: Self::disconnected_sender(),
+            buffer: Mutex::new(VecDeque::new()),
+            next_seq: AtomicU64::new(0),
+            capacity: self.capacity,
+            generation: 0,
         });
     }
 }
@@ -232,7 +255,7 @@ mod tests {
     fn it_returns_generation_1_for_first_registration() {
         let registry = SseSessionRegistry::new(8);
         let id = Uuid::new_v4();
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(8);
         let generation = registry.register(id, tx);
         assert_eq!(generation, 1);
     }
@@ -241,8 +264,8 @@ mod tests {
     fn it_returns_higher_generation_on_re_register() {
         let registry = SseSessionRegistry::new(8);
         let id = Uuid::new_v4();
-        let (tx1, _rx1) = mpsc::unbounded_channel();
-        let (tx2, _rx2) = mpsc::unbounded_channel();
+        let (tx1, _rx1) = mpsc::channel(8);
+        let (tx2, _rx2) = mpsc::channel(8);
         let gen1 = registry.register(id, tx1);
         let gen2 = registry.register(id, tx2);
         assert!(
@@ -257,14 +280,14 @@ mod tests {
         let id = Uuid::new_v4();
 
         // First connection: send 3 events → seqs 0, 1, 2
-        let (tx1, _rx1) = mpsc::unbounded_channel();
+        let (tx1, _rx1) = mpsc::channel(16);
         registry.register(id, tx1);
         for _ in 0..3 {
             registry.send(make_msg(id)).unwrap();
         }
 
         // Reconnect: register new sender. Must NOT reset next_seq.
-        let (tx2, mut rx2) = mpsc::unbounded_channel();
+        let (tx2, mut rx2) = mpsc::channel(16);
         registry.register(id, tx2);
 
         // Post-reconnect events must continue from seq=3, not reset to 0.
@@ -292,10 +315,10 @@ mod tests {
         let registry = SseSessionRegistry::new(8);
         let id = Uuid::new_v4();
 
-        let (tx1, mut rx1) = mpsc::unbounded_channel();
+        let (tx1, mut rx1) = mpsc::channel(8);
         registry.register(id, tx1);
 
-        let (tx2, mut rx2) = mpsc::unbounded_channel();
+        let (tx2, mut rx2) = mpsc::channel(8);
         registry.register(id, tx2);
 
         registry.send(make_msg(id)).unwrap();
@@ -309,7 +332,7 @@ mod tests {
     fn it_removes_session_when_generation_matches() {
         let registry = SseSessionRegistry::new(8);
         let id = Uuid::new_v4();
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(8);
         let generation = registry.register(id, tx);
         registry.unregister(&id, generation);
         assert!(registry.replay_since(&id, 0).is_empty());
@@ -322,11 +345,11 @@ mod tests {
         let registry = SseSessionRegistry::new(8);
         let id = Uuid::new_v4();
 
-        let (tx1, _rx1) = mpsc::unbounded_channel();
+        let (tx1, _rx1) = mpsc::channel(8);
         let gen1 = registry.register(id, tx1);
 
         // Reconnect
-        let (tx2, mut rx2) = mpsc::unbounded_channel();
+        let (tx2, mut rx2) = mpsc::channel(8);
         registry.register(id, tx2);
 
         // Old generation unregister must be a no-op
@@ -341,7 +364,7 @@ mod tests {
     fn it_terminates_session_unconditionally() {
         let registry = SseSessionRegistry::new(8);
         let id = Uuid::new_v4();
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(8);
         registry.register(id, tx);
         registry.terminate(&id);
         assert!(registry.replay_since(&id, 0).is_empty());
@@ -351,7 +374,7 @@ mod tests {
     fn it_buffers_event_and_delivers_to_channel() {
         let registry = SseSessionRegistry::new(8);
         let id = Uuid::new_v4();
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(8);
         registry.register(id, tx);
 
         // Send first event: seq=0
@@ -370,7 +393,7 @@ mod tests {
     fn it_shares_arc_allocation_between_buffer_and_channel() {
         let registry2 = SseSessionRegistry::new(1);
         let id2 = Uuid::new_v4();
-        let (tx2, mut rx2) = mpsc::unbounded_channel();
+        let (tx2, mut rx2) = mpsc::channel(1);
         registry2.register(id2, tx2);
         registry2.send(make_msg(id2)).unwrap(); // seq=0, capacity=1 so buf=[seq=0]
 
@@ -387,7 +410,7 @@ mod tests {
     fn it_evicts_oldest_event_when_buffer_is_at_capacity() {
         let registry = SseSessionRegistry::new(3);
         let id = Uuid::new_v4();
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(3);
         registry.register(id, tx);
 
         // Send 4 events into a capacity-3 buffer
@@ -407,7 +430,7 @@ mod tests {
     fn it_returns_empty_replay_when_capacity_is_zero() {
         let registry = SseSessionRegistry::new(0);
         let id = Uuid::new_v4();
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(1);
         registry.register(id, tx);
 
         registry.send(make_msg(id)).unwrap();
@@ -422,7 +445,7 @@ mod tests {
     fn it_returns_events_strictly_after_last_seq() {
         let registry = SseSessionRegistry::new(8);
         let id = Uuid::new_v4();
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(8);
         registry.register(id, tx);
 
         for _ in 0..5 {
@@ -439,7 +462,7 @@ mod tests {
     fn it_returns_full_buffer_when_last_seq_is_evicted() {
         let registry = SseSessionRegistry::new(3);
         let id = Uuid::new_v4();
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(3);
         registry.register(id, tx);
 
         for _ in 0..5 {
@@ -456,7 +479,7 @@ mod tests {
     fn it_returns_empty_when_last_seq_equals_newest() {
         let registry = SseSessionRegistry::new(8);
         let id = Uuid::new_v4();
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(8);
         registry.register(id, tx);
 
         for _ in 0..3 {
@@ -477,7 +500,7 @@ mod tests {
     fn it_still_buffers_when_channel_is_dead() {
         let registry = SseSessionRegistry::new(8);
         let id = Uuid::new_v4();
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(8);
         registry.register(id, tx);
         drop(rx); // kill the channel
 
@@ -496,14 +519,14 @@ mod tests {
         let registry = SseSessionRegistry::new(16);
         let id = Uuid::new_v4();
 
-        let (tx1, _rx1) = mpsc::unbounded_channel();
+        let (tx1, _rx1) = mpsc::channel(16);
         registry.register(id, tx1);
         for _ in 0..5 {
             registry.send(make_msg(id)).unwrap();
         }
         // seqs 0..=4
 
-        let (tx2, mut rx2) = mpsc::unbounded_channel();
+        let (tx2, mut rx2) = mpsc::channel(16);
         registry.register(id, tx2);
         for _ in 0..5 {
             registry.send(make_msg(id)).unwrap();
@@ -531,7 +554,7 @@ mod tests {
         registry.send(make_msg(id)).unwrap(); // seq=1
 
         // Simulate GET /mcp: register live channel — in-place, preserving buffer
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(8);
         registry.register(id, tx);
 
         // All buffered events are available for replay
@@ -551,7 +574,7 @@ mod tests {
         let registry = SseSessionRegistry::new(8);
         let id = Uuid::new_v4();
 
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(8);
         registry.register(id, tx);
         registry.send(make_msg(id)).unwrap(); // seq=0
 
@@ -577,7 +600,7 @@ mod tests {
     fn it_returns_all_buffered_events() {
         let registry = SseSessionRegistry::new(8);
         let id = Uuid::new_v4();
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(8);
         registry.register(id, tx);
 
         for _ in 0..3 {
@@ -594,5 +617,28 @@ mod tests {
     fn it_returns_empty_replay_all_for_unknown_session() {
         let registry = SseSessionRegistry::new(8);
         assert!(registry.replay_all(&Uuid::new_v4()).is_empty());
+    }
+
+    #[test]
+    fn it_disconnects_live_stream_when_queue_fills() {
+        let registry = SseSessionRegistry::new(8);
+        let id = Uuid::new_v4();
+        let (tx, mut rx) = mpsc::channel(1);
+        registry.register(id, tx);
+
+        registry.send(make_msg(id)).unwrap(); // fills live queue with seq=0
+        registry.send(make_msg(id)).unwrap(); // seq=1 disconnects the live queue
+
+        let (seq, _) = rx.try_recv().expect("first event must remain queued");
+        assert_eq!(seq, 0);
+        assert!(
+            rx.try_recv().is_err(),
+            "second event must not be queued live"
+        );
+
+        let replayed = registry.replay_all(&id);
+        assert_eq!(replayed.len(), 2);
+        assert_eq!(replayed[0].0, 0);
+        assert_eq!(replayed[1].0, 1);
     }
 }

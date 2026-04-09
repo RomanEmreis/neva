@@ -12,7 +12,7 @@ use dashmap::DashMap;
 use futures_util::{future::Either, stream};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
-use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
+use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 #[cfg(feature = "server-tls")]
 use volga::tls::TlsConfig;
@@ -49,6 +49,8 @@ struct RequestManager {
     pending: RequestMap,
     sse_registry: Arc<SseSessionRegistry>,
     sender: mpsc::Sender<Result<Message, Error>>,
+    sse_live_queue_capacity: usize,
+    sse_log_queue_capacity: usize,
 }
 
 pub(super) async fn serve(rt: HttpRuntimeContext, token: CancellationToken) {
@@ -58,6 +60,8 @@ pub(super) async fn serve(rt: HttpRuntimeContext, token: CancellationToken) {
         pending: pending.clone(),
         sse_registry: sse_registry.clone(),
         sender: rt.tx,
+        sse_live_queue_capacity: rt.sse_live_queue_capacity,
+        sse_log_queue_capacity: rt.sse_log_queue_capacity,
     };
     tokio::join!(
         dispatch(pending.clone(), sse_registry.clone(), rt.rx, token.clone()),
@@ -160,8 +164,8 @@ async fn handle_connection(req: HttpRequest) -> HttpResult {
     let manager: Dc<RequestManager> = req.extract()?;
 
     // Create a typed msg channel and untyped log channel
-    let (msg_tx, msg_rx) = mpsc::unbounded_channel::<(u64, Arc<Message>)>();
-    let (_log_tx, log_rx) = mpsc::unbounded_channel::<Message>();
+    let (msg_tx, msg_rx) = mpsc::channel::<(u64, Arc<Message>)>(manager.sse_live_queue_capacity);
+    let (_log_tx, log_rx) = mpsc::channel::<Message>(manager.sse_log_queue_capacity);
 
     // Register log channel (tracing — unchanged)
     #[cfg(feature = "tracing")]
@@ -192,21 +196,19 @@ async fn handle_connection(req: HttpRequest) -> HttpResult {
     };
 
     let msg_stream = if replay.is_empty() {
-        Either::Left(
-            UnboundedReceiverStream::new(msg_rx).map(|(seq, arc)| SseItem::Tracked(seq, arc)),
-        )
+        Either::Left(ReceiverStream::new(msg_rx).map(|(seq, arc)| SseItem::Tracked(seq, arc)))
     } else {
         // Deduplicate: live stream must not re-emit events already in replay.
         let replay_end_seq = replay.last().map(|(s, _)| *s).unwrap_or(0);
         let replay_stream = stream::iter(replay).map(|(seq, arc)| SseItem::Tracked(seq, arc));
-        let live = UnboundedReceiverStream::new(msg_rx)
+        let live = ReceiverStream::new(msg_rx)
             .filter(move |&(seq, _)| seq > replay_end_seq)
             .map(|(seq, arc)| SseItem::Tracked(seq, arc));
         Either::Right(replay_stream.chain(live))
     };
 
     // Log stream (ephemeral, no id: field)
-    let log_stream = UnboundedReceiverStream::new(log_rx).map(|m| SseItem::Ephemeral(Box::new(m)));
+    let log_stream = ReceiverStream::new(log_rx).map(|m| SseItem::Ephemeral(Box::new(m)));
 
     // Merge and stream
     let merged = stream::select(log_stream, msg_stream);

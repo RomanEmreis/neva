@@ -41,6 +41,12 @@ const DEFAULT_MCP_ENDPOINT: &str = "/mcp";
 /// Default number of SSE events buffered per session for Last-Event-ID replay.
 #[cfg(feature = "http-server")]
 pub(crate) const DEFAULT_SSE_BUFFER_CAPACITY: usize = 64;
+/// Default number of tracked SSE events queued for a live connection.
+#[cfg(feature = "http-server")]
+pub(crate) const DEFAULT_SSE_LIVE_QUEUE_CAPACITY: usize = 256;
+/// Default number of ephemeral log events queued for a live connection.
+#[cfg(feature = "http-server")]
+pub(crate) const DEFAULT_SSE_LOG_QUEUE_CAPACITY: usize = 256;
 
 #[inline]
 pub(super) fn get_mcp_session_id(headers: &HeaderMap) -> Option<uuid::Uuid> {
@@ -66,6 +72,8 @@ pub struct HttpServer<C: AuthClaims = DefaultClaims> {
     #[cfg(feature = "server-tls")]
     tls_config: Option<TlsConfig>,
     sse_buffer_capacity: usize,
+    sse_live_queue_capacity: usize,
+    sse_log_queue_capacity: usize,
     sender: HttpSender,
     receiver: HttpReceiver,
 }
@@ -96,6 +104,8 @@ pub(super) struct HttpRuntimeContext {
     rx: Receiver<Message>,
     auth: Option<AuthConfig>,
     pub(super) sse_buffer_capacity: usize,
+    pub(super) sse_live_queue_capacity: usize,
+    pub(super) sse_log_queue_capacity: usize,
 }
 
 #[cfg(feature = "http-client")]
@@ -127,6 +137,8 @@ impl std::fmt::Debug for HttpServer {
         f.debug_struct("HttpServer")
             .field("url", &self.url)
             .field("sse_buffer_capacity", &self.sse_buffer_capacity)
+            .field("sse_live_queue_capacity", &self.sse_live_queue_capacity)
+            .field("sse_log_queue_capacity", &self.sse_log_queue_capacity)
             .finish()
     }
 }
@@ -141,6 +153,8 @@ impl Default for HttpServer {
             #[cfg(feature = "server-tls")]
             tls_config: None,
             sse_buffer_capacity: DEFAULT_SSE_BUFFER_CAPACITY,
+            sse_live_queue_capacity: DEFAULT_SSE_LIVE_QUEUE_CAPACITY,
+            sse_log_queue_capacity: DEFAULT_SSE_LOG_QUEUE_CAPACITY,
             receiver: HttpReceiver::new(),
             sender: HttpSender::new(),
         }
@@ -303,6 +317,46 @@ impl HttpServer {
         self
     }
 
+    /// Sets the live SSE queue capacity per active connection for tracked MCP events.
+    ///
+    /// Defaults to `256`.
+    /// When the queue fills, the live connection is disconnected and recent
+    /// events remain available through the replay buffer configured by
+    /// [`HttpServer::with_sse_buffer`].
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// HttpServer::new("127.0.0.1:3000")
+    ///     .with_sse_live_queue(512)
+    /// ```
+    pub fn with_sse_live_queue(mut self, capacity: usize) -> Self {
+        assert!(
+            capacity > 0,
+            "SSE live queue capacity must be greater than 0"
+        );
+        self.sse_live_queue_capacity = capacity;
+        self
+    }
+
+    /// Sets the live SSE queue capacity per active connection for ephemeral log events.
+    ///
+    /// Defaults to `256`.
+    /// When the queue fills, new log notifications are dropped.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// HttpServer::new("127.0.0.1:3000")
+    ///     .with_sse_log_queue(128)
+    /// ```
+    pub fn with_sse_log_queue(mut self, capacity: usize) -> Self {
+        assert!(
+            capacity > 0,
+            "SSE log queue capacity must be greater than 0"
+        );
+        self.sse_log_queue_capacity = capacity;
+        self
+    }
+
     /// Returns the URL label used for display in the greeting banner
     pub(crate) fn url_label(&self) -> String {
         self.url.to_string()
@@ -323,6 +377,8 @@ impl HttpServer {
             #[cfg(feature = "server-tls")]
             tls_config: self.tls_config.take(),
             sse_buffer_capacity: self.sse_buffer_capacity,
+            sse_live_queue_capacity: self.sse_live_queue_capacity,
+            sse_log_queue_capacity: self.sse_log_queue_capacity,
         })
     }
 }
