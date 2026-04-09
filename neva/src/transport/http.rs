@@ -15,9 +15,12 @@ use crate::{
     types::Message,
 };
 use futures_util::TryFutureExt;
-use std::{borrow::Cow, fmt::Display, time::Duration};
+use std::{borrow::Cow, fmt::Display};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio_util::sync::CancellationToken;
+
+#[cfg(feature = "http-server")]
+use std::time::Duration;
 
 use super::{Receiver as TransportReceiver, Sender as TransportSender, Transport};
 
