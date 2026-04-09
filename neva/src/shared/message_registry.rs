@@ -34,6 +34,13 @@ impl MessageRegistry {
         self.inner.remove(key)
     }
 
+    /// Unregisters MCP session channel only when it matches `sender`.
+    #[inline]
+    pub(crate) fn unregister_if_same_sender(&self, key: &Uuid, sender: &Sender<Message>) {
+        self.inner
+            .remove_if(key, |_, current| current.same_channel(sender));
+    }
+
     /// Sends a message into an appropriate channel
     #[inline]
     pub(crate) fn send(&self, message: Message) -> Result<(), Error> {
@@ -106,6 +113,21 @@ mod tests {
         let random_id = Uuid::new_v4();
         let result = registry.unregister(&random_id);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn it_unregisters_only_matching_sender() {
+        let registry = MessageRegistry::new();
+        let session_id = Uuid::new_v4();
+        let (tx1, _rx1) = mpsc::channel(8);
+        let (tx2, _rx2) = mpsc::channel(8);
+
+        registry.register(session_id, tx1.clone());
+        registry.unregister_if_same_sender(&session_id, &tx2);
+        assert!(registry.inner.contains_key(&session_id));
+
+        registry.unregister_if_same_sender(&session_id, &tx1);
+        assert!(!registry.inner.contains_key(&session_id));
     }
 
     #[tokio::test]

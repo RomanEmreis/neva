@@ -57,12 +57,14 @@ struct SseConnectionCleanup {
     id: uuid::Uuid,
     generation: u64,
     registry: Arc<SseSessionRegistry>,
+    #[cfg(feature = "tracing")]
+    log_sender: mpsc::Sender<Message>,
 }
 
 impl Drop for SseConnectionCleanup {
     fn drop(&mut self) {
         #[cfg(feature = "tracing")]
-        LOG_REGISTRY.unregister(&self.id);
+        LOG_REGISTRY.unregister_if_same_sender(&self.id, &self.log_sender);
         self.registry.unregister(&self.id, self.generation);
     }
 }
@@ -206,7 +208,7 @@ async fn handle_connection(req: HttpRequest) -> HttpResult {
 
     // Register log channel (tracing — unchanged)
     #[cfg(feature = "tracing")]
-    LOG_REGISTRY.register(id, _log_tx);
+    LOG_REGISTRY.register(id, _log_tx.clone());
 
     // Register msg channel — updates sender/generation in place for reconnects,
     // preserving buffer and next_seq. The returned generation is intentionally unused here:
@@ -253,6 +255,8 @@ async fn handle_connection(req: HttpRequest) -> HttpResult {
         id,
         generation,
         registry: manager.sse_registry.clone(),
+        #[cfg(feature = "tracing")]
+        log_sender: _log_tx.clone(),
     };
     let guarded = stream::poll_fn(move |cx| {
         let _cleanup = &cleanup;

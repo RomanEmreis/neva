@@ -256,15 +256,23 @@ impl SseSessionRegistry {
                     .last_activity
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
-                (entry.sender.is_closed() && now.duration_since(last_activity) >= ttl)
+                (entry.sender.is_closed() && now.saturating_duration_since(last_activity) >= ttl)
                     .then_some(*entry.key())
             })
             .collect();
 
         for id in stale_ids {
-            self.sessions.remove(&id);
+            let removed = self.sessions.remove_if(&id, |_, session| {
+                let last_activity = *session
+                    .last_activity
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                session.sender.is_closed() && now.saturating_duration_since(last_activity) >= ttl
+            });
             #[cfg(feature = "tracing")]
-            crate::types::notification::fmt::LOG_REGISTRY.unregister(&id);
+            if removed.is_some() {
+                crate::types::notification::fmt::LOG_REGISTRY.unregister(&id);
+            }
         }
     }
 }
