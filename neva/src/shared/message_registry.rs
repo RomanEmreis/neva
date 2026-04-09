@@ -9,7 +9,12 @@ use uuid::Uuid;
 /// A concurrent message registry that bounds the MCP session ID and related message channel
 #[derive(Default)]
 pub(crate) struct MessageRegistry {
-    inner: DashMap<Uuid, Sender<Message>>,
+    inner: DashMap<Uuid, MessageSession>,
+}
+
+struct MessageSession {
+    sender: Sender<Message>,
+    generation: u64,
 }
 
 #[allow(dead_code)]
@@ -24,21 +29,22 @@ impl MessageRegistry {
 
     /// Registers MCP session channel
     #[inline]
-    pub(crate) fn register(&self, key: Uuid, sender: Sender<Message>) {
-        self.inner.insert(key, sender);
+    pub(crate) fn register(&self, key: Uuid, generation: u64, sender: Sender<Message>) {
+        self.inner
+            .insert(key, MessageSession { sender, generation });
     }
 
     /// Unregisters MCP session channel
     #[inline]
-    pub(crate) fn unregister(&self, key: &Uuid) -> Option<(Uuid, Sender<Message>)> {
-        self.inner.remove(key)
+    pub(crate) fn unregister(&self, key: &Uuid) -> bool {
+        self.inner.remove(key).is_some()
     }
 
-    /// Unregisters MCP session channel only when it matches `sender`.
+    /// Unregisters MCP session channel only when it matches `generation`.
     #[inline]
-    pub(crate) fn unregister_if_same_sender(&self, key: &Uuid, sender: &Sender<Message>) {
+    pub(crate) fn unregister_if_generation(&self, key: &Uuid, generation: u64) {
         self.inner
-            .remove_if(key, |_, current| current.same_channel(sender));
+            .remove_if(key, |_, current| current.generation == generation);
     }
 
     /// Sends a message into an appropriate channel
@@ -46,8 +52,8 @@ impl MessageRegistry {
     pub(crate) fn send(&self, message: Message) -> Result<(), Error> {
         let session_id = *message.session_id().ok_or(ErrorCode::InvalidParams)?;
 
-        if let Some(sender) = self.inner.get(&session_id) {
-            match sender.try_send(message) {
+        if let Some(entry) = self.inner.get(&session_id) {
+            match entry.sender.try_send(message) {
                 Ok(()) => Ok(()),
                 Err(err) => {
                     let err_text = err.to_string();
@@ -101,32 +107,36 @@ mod tests {
         let (tx, _rx) = mpsc::channel(8);
 
         // Test registration
-        registry.register(session_id, tx.clone());
+        registry.register(session_id, 1, tx.clone());
         assert!(registry.inner.contains_key(&session_id));
 
         // Test unregistration
         let result = registry.unregister(&session_id);
-        assert!(result.is_some());
+        assert!(result);
         assert!(!registry.inner.contains_key(&session_id));
 
         // Test unregistering non-existent session
         let random_id = Uuid::new_v4();
         let result = registry.unregister(&random_id);
-        assert!(result.is_none());
+        assert!(!result);
     }
 
     #[test]
-    fn it_unregisters_only_matching_sender() {
+    fn it_unregisters_only_matching_generation() {
         let registry = MessageRegistry::new();
         let session_id = Uuid::new_v4();
         let (tx1, _rx1) = mpsc::channel(8);
         let (tx2, _rx2) = mpsc::channel(8);
 
-        registry.register(session_id, tx1.clone());
-        registry.unregister_if_same_sender(&session_id, &tx2);
+        registry.register(session_id, 1, tx1);
+        registry.unregister_if_generation(&session_id, 2);
         assert!(registry.inner.contains_key(&session_id));
 
-        registry.unregister_if_same_sender(&session_id, &tx1);
+        registry.register(session_id, 2, tx2);
+        registry.unregister_if_generation(&session_id, 1);
+        assert!(registry.inner.contains_key(&session_id));
+
+        registry.unregister_if_generation(&session_id, 2);
         assert!(!registry.inner.contains_key(&session_id));
     }
 
@@ -136,7 +146,7 @@ mod tests {
         let session_id = Uuid::new_v4();
         let (tx, mut rx) = mpsc::channel(8);
 
-        registry.register(session_id, tx);
+        registry.register(session_id, 1, tx);
 
         // Create a test message
         let test_message =

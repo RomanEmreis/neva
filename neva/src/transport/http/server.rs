@@ -57,14 +57,12 @@ struct SseConnectionCleanup {
     id: uuid::Uuid,
     generation: u64,
     registry: Arc<SseSessionRegistry>,
-    #[cfg(feature = "tracing")]
-    log_sender: mpsc::Sender<Message>,
 }
 
 impl Drop for SseConnectionCleanup {
     fn drop(&mut self) {
         #[cfg(feature = "tracing")]
-        LOG_REGISTRY.unregister_if_same_sender(&self.id, &self.log_sender);
+        LOG_REGISTRY.unregister_if_generation(&self.id, self.generation);
         self.registry.unregister(&self.id, self.generation);
     }
 }
@@ -206,15 +204,15 @@ async fn handle_connection(req: HttpRequest) -> HttpResult {
     let (msg_tx, msg_rx) = mpsc::channel::<(u64, Arc<Message>)>(manager.sse_live_queue_capacity);
     let (_log_tx, log_rx) = mpsc::channel::<Message>(manager.sse_log_queue_capacity);
 
-    // Register log channel (tracing — unchanged)
-    #[cfg(feature = "tracing")]
-    LOG_REGISTRY.register(id, _log_tx.clone());
-
     // Register msg channel — updates sender/generation in place for reconnects,
     // preserving buffer and next_seq. The returned generation is intentionally unused here:
     // handle_session_end uses `terminate()` (unconditional removal) rather than the
     // generation-protected `unregister()`, so threading generation to that handler is not needed.
     let generation = manager.sse_registry.register(id, msg_tx);
+
+    // Register log channel with the same generation as the tracked SSE stream.
+    #[cfg(feature = "tracing")]
+    LOG_REGISTRY.register(id, generation, _log_tx);
 
     // Parse Last-Event-ID header
     let last_seq: Option<u64> = req
@@ -255,8 +253,6 @@ async fn handle_connection(req: HttpRequest) -> HttpResult {
         id,
         generation,
         registry: manager.sse_registry.clone(),
-        #[cfg(feature = "tracing")]
-        log_sender: _log_tx.clone(),
     };
     let guarded = stream::poll_fn(move |cx| {
         let _cleanup = &cleanup;

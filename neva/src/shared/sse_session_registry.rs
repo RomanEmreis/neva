@@ -262,7 +262,7 @@ impl SseSessionRegistry {
             .collect();
 
         for id in stale_ids {
-            let removed = self.sessions.remove_if(&id, |_, session| {
+            let _removed = self.sessions.remove_if(&id, |_, session| {
                 let last_activity = *session
                     .last_activity
                     .lock()
@@ -270,7 +270,7 @@ impl SseSessionRegistry {
                 session.sender.is_closed() && now.saturating_duration_since(last_activity) >= ttl
             });
             #[cfg(feature = "tracing")]
-            if removed.is_some() {
+            if _removed.is_some() {
                 crate::types::notification::fmt::LOG_REGISTRY.unregister(&id);
             }
         }
