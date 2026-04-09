@@ -9,8 +9,8 @@ use crate::{
     types::{Message, RequestId, Response},
 };
 use dashmap::DashMap;
-use futures_util::{future::Either, stream};
-use std::sync::Arc;
+use futures_util::{Stream, future::Either, stream};
+use std::{pin::Pin, sync::Arc};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
@@ -53,6 +53,20 @@ struct RequestManager {
     sse_log_queue_capacity: usize,
 }
 
+struct SseConnectionCleanup {
+    id: uuid::Uuid,
+    generation: u64,
+    registry: Arc<SseSessionRegistry>,
+}
+
+impl Drop for SseConnectionCleanup {
+    fn drop(&mut self) {
+        #[cfg(feature = "tracing")]
+        LOG_REGISTRY.unregister_if_generation(&self.id, self.generation);
+        self.registry.unregister(&self.id, self.generation);
+    }
+}
+
 pub(super) async fn serve(rt: HttpRuntimeContext, token: CancellationToken) {
     let pending = Arc::new(DashMap::new());
     let sse_registry = Arc::new(SseSessionRegistry::new(rt.sse_buffer_capacity));
@@ -65,6 +79,12 @@ pub(super) async fn serve(rt: HttpRuntimeContext, token: CancellationToken) {
     };
     tokio::join!(
         dispatch(pending.clone(), sse_registry.clone(), rt.rx, token.clone()),
+        cleanup_stale_sessions(
+            sse_registry.clone(),
+            rt.sse_cleanup_interval,
+            rt.sse_session_ttl,
+            token.clone()
+        ),
         handle(
             rt.url,
             rt.auth,
@@ -98,6 +118,23 @@ async fn dispatch(
                     tracing::error!(logger = "neva", "Failed to send server request: {:?}", _e);
                 }
             }
+        }
+    }
+}
+
+async fn cleanup_stale_sessions(
+    sse_registry: Arc<SseSessionRegistry>,
+    interval: std::time::Duration,
+    ttl: std::time::Duration,
+    token: CancellationToken,
+) {
+    let mut ticker = tokio::time::interval(interval);
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => break,
+            _ = ticker.tick() => sse_registry.evict_stale(ttl),
         }
     }
 }
@@ -167,15 +204,15 @@ async fn handle_connection(req: HttpRequest) -> HttpResult {
     let (msg_tx, msg_rx) = mpsc::channel::<(u64, Arc<Message>)>(manager.sse_live_queue_capacity);
     let (_log_tx, log_rx) = mpsc::channel::<Message>(manager.sse_log_queue_capacity);
 
-    // Register log channel (tracing — unchanged)
-    #[cfg(feature = "tracing")]
-    LOG_REGISTRY.register(id, _log_tx);
-
     // Register msg channel — updates sender/generation in place for reconnects,
     // preserving buffer and next_seq. The returned generation is intentionally unused here:
     // handle_session_end uses `terminate()` (unconditional removal) rather than the
     // generation-protected `unregister()`, so threading generation to that handler is not needed.
-    let _generation = manager.sse_registry.register(id, msg_tx);
+    let generation = manager.sse_registry.register(id, msg_tx);
+
+    // Register log channel with the same generation as the tracked SSE stream.
+    #[cfg(feature = "tracing")]
+    LOG_REGISTRY.register(id, generation, _log_tx);
 
     // Parse Last-Event-ID header
     let last_seq: Option<u64> = req
@@ -211,9 +248,18 @@ async fn handle_connection(req: HttpRequest) -> HttpResult {
     let log_stream = ReceiverStream::new(log_rx).map(|m| SseItem::Ephemeral(Box::new(m)));
 
     // Merge and stream
-    let merged = stream::select(log_stream, msg_stream);
+    let mut merged = stream::select(log_stream, msg_stream);
+    let cleanup = SseConnectionCleanup {
+        id,
+        generation,
+        registry: manager.sse_registry.clone(),
+    };
+    let guarded = stream::poll_fn(move |cx| {
+        let _cleanup = &cleanup;
+        Pin::new(&mut merged).poll_next(cx)
+    });
 
-    sse!(merged.map(handle_sse_message); [
+    sse!(guarded.map(handle_sse_message); [
         (MCP_SESSION_ID, id.to_string())
     ])
 }
