@@ -15,7 +15,7 @@ use crate::{
     types::Message,
 };
 use futures_util::TryFutureExt;
-use std::{borrow::Cow, fmt::Display};
+use std::{borrow::Cow, fmt::Display, time::Duration};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 
@@ -47,6 +47,12 @@ pub(crate) const DEFAULT_SSE_LIVE_QUEUE_CAPACITY: usize = 256;
 /// Default number of ephemeral log events queued for a live connection.
 #[cfg(feature = "http-server")]
 pub(crate) const DEFAULT_SSE_LOG_QUEUE_CAPACITY: usize = 256;
+/// Default interval between stale SSE session cleanup sweeps.
+#[cfg(feature = "http-server")]
+pub(crate) const DEFAULT_SSE_CLEANUP_INTERVAL: Duration = Duration::from_secs(300);
+/// Default inactivity TTL for disconnected SSE sessions before eviction.
+#[cfg(feature = "http-server")]
+pub(crate) const DEFAULT_SSE_SESSION_TTL: Duration = Duration::from_secs(1800);
 
 #[inline]
 pub(super) fn get_mcp_session_id(headers: &HeaderMap) -> Option<uuid::Uuid> {
@@ -74,6 +80,8 @@ pub struct HttpServer<C: AuthClaims = DefaultClaims> {
     sse_buffer_capacity: usize,
     sse_live_queue_capacity: usize,
     sse_log_queue_capacity: usize,
+    sse_cleanup_interval: Duration,
+    sse_session_ttl: Duration,
     sender: HttpSender,
     receiver: HttpReceiver,
 }
@@ -106,6 +114,8 @@ pub(super) struct HttpRuntimeContext {
     pub(super) sse_buffer_capacity: usize,
     pub(super) sse_live_queue_capacity: usize,
     pub(super) sse_log_queue_capacity: usize,
+    pub(super) sse_cleanup_interval: Duration,
+    pub(super) sse_session_ttl: Duration,
 }
 
 #[cfg(feature = "http-client")]
@@ -139,6 +149,8 @@ impl std::fmt::Debug for HttpServer {
             .field("sse_buffer_capacity", &self.sse_buffer_capacity)
             .field("sse_live_queue_capacity", &self.sse_live_queue_capacity)
             .field("sse_log_queue_capacity", &self.sse_log_queue_capacity)
+            .field("sse_cleanup_interval", &self.sse_cleanup_interval)
+            .field("sse_session_ttl", &self.sse_session_ttl)
             .finish()
     }
 }
@@ -155,6 +167,8 @@ impl Default for HttpServer {
             sse_buffer_capacity: DEFAULT_SSE_BUFFER_CAPACITY,
             sse_live_queue_capacity: DEFAULT_SSE_LIVE_QUEUE_CAPACITY,
             sse_log_queue_capacity: DEFAULT_SSE_LOG_QUEUE_CAPACITY,
+            sse_cleanup_interval: DEFAULT_SSE_CLEANUP_INTERVAL,
+            sse_session_ttl: DEFAULT_SSE_SESSION_TTL,
             receiver: HttpReceiver::new(),
             sender: HttpSender::new(),
         }
@@ -357,6 +371,43 @@ impl HttpServer {
         self
     }
 
+    /// Sets how often stale SSE sessions are scanned for eviction.
+    ///
+    /// Defaults to `300s`.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use std::time::Duration;
+    ///
+    /// HttpServer::new("127.0.0.1:3000")
+    ///     .with_sse_cleanup_interval(Duration::from_secs(60))
+    /// ```
+    pub fn with_sse_cleanup_interval(mut self, interval: Duration) -> Self {
+        assert!(
+            !interval.is_zero(),
+            "SSE cleanup interval must be greater than 0"
+        );
+        self.sse_cleanup_interval = interval;
+        self
+    }
+
+    /// Sets the inactivity TTL for disconnected SSE sessions before eviction.
+    ///
+    /// Defaults to `1800s`.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use std::time::Duration;
+    ///
+    /// HttpServer::new("127.0.0.1:3000")
+    ///     .with_sse_session_ttl(Duration::from_secs(7200))
+    /// ```
+    pub fn with_sse_session_ttl(mut self, ttl: Duration) -> Self {
+        assert!(!ttl.is_zero(), "SSE session TTL must be greater than 0");
+        self.sse_session_ttl = ttl;
+        self
+    }
+
     /// Returns the URL label used for display in the greeting banner
     pub(crate) fn url_label(&self) -> String {
         self.url.to_string()
@@ -379,6 +430,8 @@ impl HttpServer {
             sse_buffer_capacity: self.sse_buffer_capacity,
             sse_live_queue_capacity: self.sse_live_queue_capacity,
             sse_log_queue_capacity: self.sse_log_queue_capacity,
+            sse_cleanup_interval: self.sse_cleanup_interval,
+            sse_session_ttl: self.sse_session_ttl,
         })
     }
 }

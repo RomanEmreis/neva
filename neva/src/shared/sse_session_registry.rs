@@ -11,6 +11,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    time::{Duration, Instant},
 };
 use tokio::sync::mpsc::{Sender, error::TrySendError};
 use uuid::Uuid;
@@ -26,6 +27,7 @@ pub(crate) struct SseSessionRegistry {
 struct SseSession {
     sender: Sender<(u64, Arc<Message>)>,
     buffer: Mutex<VecDeque<(u64, Arc<Message>)>>,
+    last_activity: Mutex<Instant>,
     /// Relaxed ordering: single-writer (dispatch loop); Mutex on buffer provides
     /// happens-before for all readers.
     next_seq: AtomicU64,
@@ -69,6 +71,7 @@ impl SseSessionRegistry {
     /// [`unregister`] when the connection ends.
     pub(crate) fn register(&self, id: Uuid, sender: Sender<(u64, Arc<Message>)>) -> u64 {
         let generation = self.next_gen.fetch_add(1, Ordering::Relaxed) + 1;
+        let now = Instant::now();
 
         self.sessions
             .entry(id)
@@ -77,10 +80,12 @@ impl SseSessionRegistry {
                 // consumes `sender` by move, so `and_modify` must clone.
                 s.sender = sender.clone();
                 s.generation = generation;
+                *s.last_activity.lock().unwrap_or_else(|e| e.into_inner()) = now;
             })
             .or_insert_with(|| SseSession {
                 sender,
                 buffer: Mutex::new(VecDeque::new()),
+                last_activity: Mutex::new(now),
                 next_seq: AtomicU64::new(0),
                 capacity: self.capacity,
                 generation,
@@ -89,17 +94,21 @@ impl SseSessionRegistry {
         generation
     }
 
-    /// Removes a session only if its stored generation matches `generation`.
+    /// Disconnects the live sender only if the stored generation matches `generation`.
     ///
     /// No-op when the session has been re-registered with a newer generation, preventing
-    /// stale cleanup from evicting a live reconnected session.
-    ///
-    /// Currently unused: reserved for future implicit connection-drop cleanup.
-    /// Active connections use [`terminate`] via the explicit DELETE handler.
-    #[allow(dead_code)]
+    /// stale cleanup from disconnecting a live reconnected session. Buffered replay state is
+    /// preserved so clients can resume after a transient GET drop.
     pub(crate) fn unregister(&self, id: &Uuid, generation: u64) {
-        self.sessions
-            .remove_if(id, |_, s| s.generation == generation);
+        if let Some(mut session) = self.sessions.get_mut(id)
+            && session.generation == generation
+        {
+            session.sender = Self::disconnected_sender();
+            *session
+                .last_activity
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Instant::now();
+        }
     }
 
     /// Unconditionally removes a session.
@@ -132,6 +141,10 @@ impl SseSessionRegistry {
 
         let arc = Arc::new(message);
         let seq = session.next_seq.fetch_add(1, Ordering::Relaxed);
+        *session
+            .last_activity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Instant::now();
 
         if session.capacity > 0 {
             let mut buf = session.buffer.lock().unwrap_or_else(|e| e.into_inner());
@@ -225,10 +238,34 @@ impl SseSessionRegistry {
         self.sessions.entry(id).or_insert_with(|| SseSession {
             sender: Self::disconnected_sender(),
             buffer: Mutex::new(VecDeque::new()),
+            last_activity: Mutex::new(Instant::now()),
             next_seq: AtomicU64::new(0),
             capacity: self.capacity,
             generation: 0,
         });
+    }
+
+    /// Removes disconnected sessions whose last activity is older than `ttl`.
+    pub(crate) fn evict_stale(&self, ttl: Duration) {
+        let now = Instant::now();
+        let stale_ids: Vec<Uuid> = self
+            .sessions
+            .iter()
+            .filter_map(|entry| {
+                let last_activity = *entry
+                    .last_activity
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                (entry.sender.is_closed() && now.duration_since(last_activity) >= ttl)
+                    .then_some(*entry.key())
+            })
+            .collect();
+
+        for id in stale_ids {
+            self.sessions.remove(&id);
+            #[cfg(feature = "tracing")]
+            crate::types::notification::fmt::LOG_REGISTRY.unregister(&id);
+        }
     }
 }
 
@@ -329,19 +366,24 @@ mod tests {
     }
 
     #[test]
-    fn it_removes_session_when_generation_matches() {
+    fn it_disconnects_session_when_generation_matches() {
         let registry = SseSessionRegistry::new(8);
         let id = Uuid::new_v4();
-        let (tx, _rx) = mpsc::channel(8);
+        let (tx, mut rx) = mpsc::channel(8);
         let generation = registry.register(id, tx);
         registry.unregister(&id, generation);
-        assert!(registry.replay_since(&id, 0).is_empty());
-        // send should be a no-op (session gone), not an error
-        let _ = registry.send(make_msg(id));
+
+        registry.send(make_msg(id)).unwrap();
+        assert!(rx.try_recv().is_err(), "live sender must be disconnected");
+        assert_eq!(
+            registry.replay_all(&id).len(),
+            1,
+            "buffer must be preserved"
+        );
     }
 
     #[test]
-    fn it_does_not_remove_session_when_generation_is_stale() {
+    fn it_does_not_disconnect_session_when_generation_is_stale() {
         let registry = SseSessionRegistry::new(8);
         let id = Uuid::new_v4();
 
@@ -640,5 +682,44 @@ mod tests {
         assert_eq!(replayed.len(), 2);
         assert_eq!(replayed[0].0, 0);
         assert_eq!(replayed[1].0, 1);
+    }
+
+    #[test]
+    fn it_evicts_stale_disconnected_sessions() {
+        let registry = SseSessionRegistry::new(8);
+        let id = Uuid::new_v4();
+        let (tx, _rx) = mpsc::channel(8);
+        let generation = registry.register(id, tx);
+        registry.unregister(&id, generation);
+
+        {
+            let session = registry.sessions.get_mut(&id).unwrap();
+            *session
+                .last_activity
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Instant::now() - Duration::from_secs(10);
+        }
+
+        registry.evict_stale(Duration::from_secs(1));
+        assert!(registry.replay_all(&id).is_empty());
+    }
+
+    #[test]
+    fn it_keeps_live_sessions_even_when_idle() {
+        let registry = SseSessionRegistry::new(8);
+        let id = Uuid::new_v4();
+        let (tx, _rx) = mpsc::channel(8);
+        registry.register(id, tx);
+
+        {
+            let session = registry.sessions.get_mut(&id).unwrap();
+            *session
+                .last_activity
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Instant::now() - Duration::from_secs(10);
+        }
+
+        registry.evict_stale(Duration::from_secs(1));
+        assert!(registry.sessions.contains_key(&id));
     }
 }
