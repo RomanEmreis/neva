@@ -11,7 +11,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 license = "MIT"
 edition = "2024"
 rust-version = "1.90.0"
@@ -27,7 +27,7 @@ categories = [
 ]
 
 [workspace.dependencies]
-neva_macros = { path = "neva_macros", version = "0.3.0" }
+neva_macros = { path = "neva_macros", version = "0.3.1" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
