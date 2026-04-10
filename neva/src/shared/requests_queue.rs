@@ -150,7 +150,9 @@ impl RequestQueue {
     #[inline]
     pub(crate) fn pop(&self, id: &RequestId) -> Option<RequestHandle> {
         if self.is_expired(id) {
-            let _ = self.pending.remove(id);
+            if let Some((_, handle)) = self.pending.remove(id) {
+                handle.send_timeout(id.clone());
+            }
             return None;
         }
 
@@ -330,6 +332,26 @@ mod tests {
             timeout(Duration::from_secs(1), live).await.is_ok(),
             "non-target receiver should remain open"
         );
+    }
+
+    #[tokio::test]
+    async fn pop_sends_timeout_response_for_expired_request() {
+        let queue = RequestQueue::new(Duration::from_millis(5));
+        let id = RequestId::Number(1);
+
+        let receiver = queue.push(&id);
+        queue.activate(&id);
+
+        std::thread::sleep(Duration::from_millis(10));
+
+        assert!(queue.pop(&id).is_none());
+
+        let response = receiver.await.expect("expired request should resolve");
+        let err = response
+            .into_result::<serde_json::Value>()
+            .expect_err("expired request should resolve as timeout");
+
+        assert_eq!(err.code, crate::error::ErrorCode::Timeout);
     }
 
     #[tokio::test]
