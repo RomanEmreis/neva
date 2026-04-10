@@ -334,7 +334,7 @@ impl Context {
         self.clone().get_prompt(params).await
     }
 
-    /// Reads a resource contents
+    /// Reads a resource content
     ///
     /// # Example
     /// ```no_run

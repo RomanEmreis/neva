@@ -2,6 +2,7 @@
 
 use crate::error::{Error, ErrorCode};
 use crate::types::{Task, TaskPayload, TaskStatus};
+use chrono::Utc;
 use serde::Serialize;
 use tokio::sync::watch::{Receiver, Sender, channel};
 use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
@@ -40,6 +41,8 @@ impl TaskTracker {
 
     /// Returns a list of currently running tasks.
     pub(crate) fn tasks(&self) -> Vec<Task> {
+        self.cleanup_expired();
+
         self.tasks
             .iter()
             .map(|entry| entry.task.clone())
@@ -48,6 +51,8 @@ impl TaskTracker {
 
     /// Tacks the task and returns the [`TaskHandle`] for this task
     pub(crate) fn track(&self, task: Task) -> TaskHandle {
+        self.cleanup_expired();
+
         let token = CancellationToken::new();
         let (tx, rx) = channel(None);
 
@@ -67,6 +72,8 @@ impl TaskTracker {
 
     /// Cancels the task
     pub(crate) fn cancel(&self, id: &str) -> Result<Task, Error> {
+        self.cleanup_expired();
+
         if let Some((_, entry)) = self.tasks.remove(id) {
             entry.token.cancel();
             Ok(entry.task.cancel())
@@ -80,6 +87,8 @@ impl TaskTracker {
 
     /// Completes the task
     pub(crate) fn complete(&self, id: &str) {
+        self.cleanup_expired();
+
         if let Some(mut entry) = self.tasks.get_mut(id) {
             entry.task.complete();
         }
@@ -88,6 +97,8 @@ impl TaskTracker {
     /// Fails the task
     #[cfg(feature = "server")]
     pub(crate) fn fail(&self, id: &str) {
+        self.cleanup_expired();
+
         if let Some(mut entry) = self.tasks.get_mut(id) {
             entry.task.fail();
         }
@@ -96,6 +107,8 @@ impl TaskTracker {
     /// Sets the task into `input_required` status
     #[cfg(feature = "server")]
     pub(crate) fn require_input(&self, id: &str) {
+        self.cleanup_expired();
+
         if let Some(mut entry) = self.tasks.get_mut(id) {
             entry.task.require_input();
         }
@@ -104,6 +117,8 @@ impl TaskTracker {
     /// Sets the task into `working` status
     #[cfg(feature = "server")]
     pub(crate) fn reset(&self, id: &str) {
+        self.cleanup_expired();
+
         if let Some(mut entry) = self.tasks.get_mut(id) {
             entry.task.reset();
             let _ = entry.tx.send(None);
@@ -113,6 +128,8 @@ impl TaskTracker {
     /// Sets the result of the [`Task`].
     #[cfg(feature = "server")]
     pub(crate) fn set_result<T: Serialize>(&self, id: &str, result: T) {
+        self.cleanup_expired();
+
         if let Some(entry) = self.tasks.get(id) {
             let result = match serde_json::to_value(result) {
                 Ok(result) => result,
@@ -128,6 +145,8 @@ impl TaskTracker {
 
     /// Retrieves the task status
     pub(crate) fn get_status(&self, id: &str) -> Result<Task, Error> {
+        self.cleanup_expired();
+
         self.tasks.get(id).map(|t| t.task.clone()).ok_or_else(|| {
             Error::new(
                 ErrorCode::InvalidParams,
@@ -139,6 +158,8 @@ impl TaskTracker {
     /// Returns the task result if it is present,
     /// otherwise waits until the result is available or the task will be canceled.
     pub(crate) async fn get_result(&self, id: &str) -> Result<TaskPayload, Error> {
+        self.cleanup_expired();
+
         let (status, mut result_rx, token) = {
             let entry = self.tasks.get(id).ok_or_else(|| {
                 Error::new(
@@ -177,6 +198,23 @@ impl TaskTracker {
                 }
             }
         }
+    }
+
+    #[inline]
+    fn cleanup_expired(&self) {
+        self.tasks
+            .retain(|_, entry| !Self::is_expired_terminal_task(&entry.task));
+    }
+
+    #[inline]
+    fn is_expired_terminal_task(task: &Task) -> bool {
+        matches!(
+            task.status,
+            TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+        ) && Utc::now()
+            .signed_duration_since(task.created_at)
+            .num_milliseconds()
+            >= task.ttl as i64
     }
 }
 
@@ -557,5 +595,20 @@ mod tests {
         tracker.complete(&task_id);
         let status = tracker.get_status(&task_id).unwrap();
         assert_eq!(status.status, TaskStatus::Completed);
+    }
+
+    #[test]
+    fn it_does_remove_expired_completed_tasks() {
+        let tracker = TaskTracker::new();
+        let task = Task::from(crate::types::TaskMetadata { ttl: Some(1) });
+        let task_id = task.id.clone();
+
+        let _handle = tracker.track(task);
+        tracker.complete(&task_id);
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        assert!(tracker.get_status(&task_id).is_err());
+        assert_eq!(tracker.tasks().len(), 0);
     }
 }
