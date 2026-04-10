@@ -126,7 +126,7 @@ impl RequestHandler {
         let handler = Self {
             roots: Roots::new(options, &tx),
             counter: AtomicI64::new(1),
-            pending: RequestQueue::default(),
+            pending: RequestQueue::new(options.timeout),
             sender: tx,
             timeout: options.timeout,
             sampling_handler: options.sampling_handler.clone(),

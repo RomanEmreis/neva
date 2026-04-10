@@ -127,8 +127,9 @@ impl ServerRuntime {
         #[cfg(feature = "di")] container: Container,
     ) -> Self {
         let middlewares = options.middlewares.take();
+        let request_timeout = options.request_timeout;
         Self {
-            pending: Default::default(),
+            pending: RequestQueue::new(request_timeout),
             handlers: Arc::new(handlers),
             options: options.into_runtime(),
             mw_start: middlewares.and_then(|mw| mw.compose()),

@@ -2,29 +2,37 @@
 
 use crate::types::{RequestId, Response};
 use dashmap::DashMap;
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
+
+const DEFAULT_REQUEST_TTL: Duration = Duration::from_secs(10);
 
 /// Represents a request handle
 pub(crate) struct RequestHandle {
     sender: oneshot::Sender<Response>,
     _cancellation_token: CancellationToken,
+    expires_at: Instant,
 }
 
 /// Represents a request tracking "queue" that holds a hash map of [`oneshot::Sender`] for requests
 /// that are awaiting responses.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub(crate) struct RequestQueue {
     pending: Arc<DashMap<RequestId, RequestHandle>>,
+    ttl: Duration,
 }
 
 impl RequestHandle {
     /// Creates a new [`RequestHandle`]
-    pub(super) fn new(sender: oneshot::Sender<Response>) -> Self {
+    pub(super) fn new(sender: oneshot::Sender<Response>, ttl: Duration) -> Self {
         Self {
             sender,
             _cancellation_token: CancellationToken::new(),
+            expires_at: Instant::now() + ttl,
         }
     }
 
@@ -45,27 +53,56 @@ impl RequestHandle {
 }
 
 impl RequestQueue {
+    /// Creates a new [`RequestQueue`] with the given entry TTL.
+    #[inline]
+    pub(crate) fn new(ttl: Duration) -> Self {
+        Self {
+            pending: Arc::new(DashMap::new()),
+            ttl,
+        }
+    }
+
     /// Pushes a request with [`RequestId`] to the "queue"
     /// and returns a [`oneshot::Receiver`] for the response.
     #[inline]
     pub(crate) fn push(&self, id: &RequestId) -> oneshot::Receiver<Response> {
+        self.cleanup_expired();
+
         let (sender, receiver) = oneshot::channel();
-        self.pending.insert(id.clone(), RequestHandle::new(sender));
+        self.pending
+            .insert(id.clone(), RequestHandle::new(sender, self.ttl));
         receiver
     }
 
     /// Pops the [`RequestHandle`] by [`RequestId`] and removes it from the queue
     #[inline]
     pub(crate) fn pop(&self, id: &RequestId) -> Option<RequestHandle> {
+        self.cleanup_expired();
+
         self.pending.remove(id).map(|(_, handle)| handle)
     }
 
     /// Takes a [`Response`] and completes the request if it's still pending
     #[inline]
     pub(crate) fn complete(&self, resp: Response) {
+        self.cleanup_expired();
+
         if let Some(sender) = self.pop(&resp.full_id()) {
             sender.send(resp)
         }
+    }
+
+    #[inline]
+    fn cleanup_expired(&self) {
+        let now = Instant::now();
+        self.pending.retain(|_, handle| handle.expires_at > now);
+    }
+}
+
+impl Default for RequestQueue {
+    #[inline]
+    fn default() -> Self {
+        Self::new(DEFAULT_REQUEST_TTL)
     }
 }
 
@@ -154,5 +191,16 @@ mod tests {
         queue.complete(response);
 
         // Nothing to assert really, just verifying it doesn't panic or error
+    }
+
+    #[test]
+    fn it_does_remove_expired_pending_requests() {
+        let queue = RequestQueue::new(Duration::from_millis(1));
+        let id = RequestId::Number(1);
+
+        let _receiver = queue.push(&id);
+        std::thread::sleep(Duration::from_millis(10));
+
+        assert!(queue.pop(&id).is_none());
     }
 }

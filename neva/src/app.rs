@@ -21,7 +21,6 @@ use crate::types::{
     PromptHandler, ReadResourceRequestParams, ReadResourceResult, Request, Resource,
     ResourceTemplate, Response, SubscribeRequestParams, Tool, ToolHandler,
     UnsubscribeRequestParams, Uri,
-    cursor::Pagination,
     notification::{CancelledNotificationParams, Notification},
     resource::template::ResourceFunc,
 };
@@ -31,6 +30,7 @@ use tokio_util::sync::CancellationToken;
 use crate::types::{
     CancelTaskRequestParams, GetTaskPayloadRequestParams, GetTaskRequestParams,
     ListTasksRequestParams, ListTasksResult, Task, TaskPayload,
+    cursor::Pagination
 };
 #[cfg(feature = "tasks")]
 use context::ToolOrTaskResponse;
