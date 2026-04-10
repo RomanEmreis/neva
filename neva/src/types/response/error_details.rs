@@ -2,6 +2,9 @@
 
 use crate::error::{Error, ErrorCode};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+const INTERNAL_CODE_KEY: &str = "__neva_internal_code";
 
 /// Detailed error information
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,7 +44,8 @@ impl From<Error> for ErrorDetails {
 impl From<ErrorDetails> for Error {
     #[inline]
     fn from(details: ErrorDetails) -> Self {
-        Error::new(details.code, details.message)
+        let code = details.internal_code().unwrap_or(details.code);
+        Error::new(code, details.message)
     }
 }
 
@@ -54,5 +58,24 @@ impl ErrorDetails {
             message: err.into(),
             data: None,
         }
+    }
+
+    #[inline]
+    pub(crate) fn timeout() -> Self {
+        Self {
+            code: ErrorCode::InternalError,
+            message: ErrorCode::Timeout.to_string(),
+            data: Some(json!({
+                INTERNAL_CODE_KEY: i32::from(ErrorCode::Timeout),
+            })),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn internal_code(&self) -> Option<ErrorCode> {
+        let value = self.data.as_ref()?.get(INTERNAL_CODE_KEY)?.as_i64()?;
+        i32::try_from(value)
+            .ok()
+            .and_then(|value| value.try_into().ok())
     }
 }

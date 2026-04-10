@@ -89,6 +89,12 @@ impl RequestHandle {
             }
         };
     }
+
+    /// Completes the pending request with a timeout response.
+    #[inline]
+    pub(crate) fn send_timeout(self, id: RequestId) {
+        self.send(Response::timeout(id));
+    }
 }
 
 impl RequestQueue {
@@ -182,8 +188,8 @@ impl RequestQueue {
                 .get(&id)
                 .is_some_and(|handle| handle.expires_at == Some(expires_at));
 
-            if should_remove {
-                let _ = self.pending.remove(&id);
+            if should_remove && let Some((_, handle)) = self.pending.remove(&id) {
+                handle.send_timeout(id);
             }
         }
     }
@@ -324,6 +330,29 @@ mod tests {
             timeout(Duration::from_secs(1), live).await.is_ok(),
             "non-target receiver should remain open"
         );
+    }
+
+    #[tokio::test]
+    async fn cleanup_sends_timeout_response_for_expired_requests() {
+        let queue = RequestQueue::new(Duration::from_millis(5));
+        let expired_id = RequestId::Number(1);
+        let live_id = RequestId::Number(2);
+
+        let expired = queue.push(&expired_id);
+        let _live = queue.push(&live_id);
+        queue.activate(&expired_id);
+
+        std::thread::sleep(Duration::from_millis(10));
+
+        let response = Response::success(live_id, json!({ "content": "done" }));
+        queue.complete(response);
+
+        let response = expired.await.expect("expired request should resolve");
+        let err = response
+            .into_result::<serde_json::Value>()
+            .expect_err("expired request should resolve as timeout");
+
+        assert_eq!(err.code, crate::error::ErrorCode::Timeout);
     }
 
     #[test]

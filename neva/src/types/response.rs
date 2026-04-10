@@ -120,6 +120,18 @@ impl Response {
         })
     }
 
+    #[inline]
+    pub(crate) fn timeout(id: RequestId) -> Self {
+        Response::Err(ErrorResponse {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            session_id: None,
+            #[cfg(feature = "http-server")]
+            headers: HeaderMap::with_capacity(8),
+            id,
+            error: ErrorDetails::timeout(),
+        })
+    }
+
     /// Returns [`Response`] ID
     pub fn id(&self) -> &RequestId {
         match &self {
@@ -180,6 +192,18 @@ impl Response {
         match self {
             Response::Ok(ok) => serde_json::from_value::<T>(ok.result).map_err(Into::into),
             Response::Err(err) => Err(err.error.into()),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn into_transport_result(self) -> Result<Self, Error> {
+        match self {
+            Response::Err(err)
+                if err.error.internal_code() == Some(crate::error::ErrorCode::Timeout) =>
+            {
+                Err(err.error.into())
+            }
+            resp => Ok(resp),
         }
     }
 }

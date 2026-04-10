@@ -994,7 +994,7 @@ impl Client {
             let pending = pending.clone();
             async move {
                 match tokio::time::timeout(request_timeout, rx).await {
-                    Ok(Ok(resp)) => Ok(resp),
+                    Ok(Ok(resp)) => resp.into_transport_result(),
                     Ok(Err(_)) => Err(Error::new(
                         ErrorCode::InternalError,
                         "Response channel closed",

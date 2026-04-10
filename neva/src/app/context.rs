@@ -773,7 +773,13 @@ impl Context {
             self.options.tasks.require_input(&task_id);
 
             let resp = match timeout(self.timeout, receiver).await {
-                Ok(Ok(resp)) => resp,
+                Ok(Ok(resp)) => match resp.into_transport_result() {
+                    Ok(resp) => resp,
+                    Err(err) => {
+                        self.options.tasks.fail(&task_id);
+                        return Err(err);
+                    }
+                },
                 Ok(Err(_)) => {
                     self.options.tasks.fail(&task_id);
                     return Err(Error::new(
@@ -925,7 +931,7 @@ impl Context {
         self.pending.activate(&id);
 
         match timeout(self.timeout, receiver).await {
-            Ok(Ok(resp)) => Ok(resp),
+            Ok(Ok(resp)) => resp.into_transport_result(),
             Ok(Err(_)) => Err(Error::new(
                 ErrorCode::InternalError,
                 "Response channel closed",

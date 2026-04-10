@@ -170,7 +170,7 @@ impl RequestHandler {
         self.pending.activate(&id);
 
         match timeout(self.timeout, receiver).await {
-            Ok(Ok(resp)) => Ok(resp),
+            Ok(Ok(resp)) => resp.into_transport_result(),
             Ok(Err(_)) => Err(Error::new(
                 ErrorCode::InternalError,
                 "Response channel closed",
