@@ -4,7 +4,7 @@ use crate::client::notification_handler::NotificationsHandler;
 use crate::{
     client::options::McpOptions,
     error::{Error, ErrorCode},
-    shared::RequestQueue,
+    shared::{PendingResponse, RequestQueue},
     transport::{
         Receiver, Sender, Transport, TransportProto, TransportProtoReceiver, TransportProtoSender,
     },
@@ -126,7 +126,7 @@ impl RequestHandler {
         let handler = Self {
             roots: Roots::new(options, &tx),
             counter: AtomicI64::new(1),
-            pending: RequestQueue::default(),
+            pending: RequestQueue::new(options.timeout),
             sender: tx,
             timeout: options.timeout,
             sampling_handler: options.sampling_handler.clone(),
@@ -163,10 +163,17 @@ impl RequestHandler {
     pub(super) async fn send_request(&mut self, request: Request) -> Result<Response, Error> {
         let id = request.id();
         let receiver = self.pending.push(&id);
-        self.sender.send(request.into()).await?;
+        if let Err(err) = self.sender.send(request.into()).await {
+            let _ = self.pending.pop(&id);
+            return Err(err);
+        }
+        self.pending.activate(&id);
 
         match timeout(self.timeout, receiver).await {
-            Ok(Ok(resp)) => Ok(resp),
+            Ok(Ok(PendingResponse::Response(resp))) => Ok(resp),
+            Ok(Ok(PendingResponse::Timeout)) => {
+                Err(Error::new(ErrorCode::Timeout, "Request timed out"))
+            }
             Ok(Err(_)) => Err(Error::new(
                 ErrorCode::InternalError,
                 "Response channel closed",
@@ -192,7 +199,7 @@ impl RequestHandler {
     pub(super) async fn send_batch(
         &mut self,
         items: Vec<MessageEnvelope>,
-    ) -> Result<Vec<(RequestId, tokio::sync::oneshot::Receiver<Response>)>, Error> {
+    ) -> Result<Vec<(RequestId, tokio::sync::oneshot::Receiver<PendingResponse>)>, Error> {
         validate_batch_ids(&items)?;
 
         let mut receivers = Vec::new();
@@ -213,6 +220,9 @@ impl RequestHandler {
                 let _ = self.pending.pop(id);
             }
             return Err(e);
+        }
+        for (id, _rx) in &receivers {
+            self.pending.activate(id);
         }
 
         Ok(receivers)
@@ -291,28 +301,16 @@ impl RequestHandler {
                         // array — collect all per-request responses and send
                         // them back as one Message::Batch rather than as
                         // individual messages.
-                        let mut responses = Vec::new();
-                        for envelope in deferred {
-                            match envelope {
-                                MessageEnvelope::Response(_) => unreachable!(),
-                                MessageEnvelope::Request(req) => {
-                                    let resp = dispatch_request(
-                                        req,
-                                        &roots,
-                                        &sampling_handler,
-                                        &elicitation_handler,
-                                        #[cfg(feature = "tasks")]
-                                        &tasks,
-                                    )
-                                    .await;
-                                    responses.push(MessageEnvelope::Response(resp));
-                                }
-                                MessageEnvelope::Notification(notification) => {
-                                    dispatch_notification(notification, &notification_handler)
-                                        .await;
-                                }
-                            }
-                        }
+                        let responses = dispatch_batch_deferred(
+                            deferred,
+                            &roots,
+                            &sampling_handler,
+                            &elicitation_handler,
+                            &notification_handler,
+                            #[cfg(feature = "tasks")]
+                            &tasks,
+                        )
+                        .await;
                         // MessageBatch::new returns Err for an empty vec (all
                         // items were notifications), in which case no reply is
                         // sent — correct per JSON-RPC 2.0 §6.
@@ -328,6 +326,41 @@ impl RequestHandler {
         });
         self
     }
+}
+
+#[inline]
+async fn dispatch_batch_deferred(
+    deferred: Vec<MessageEnvelope>,
+    roots: &Arc<RwLock<Vec<Root>>>,
+    sampling_handler: &Option<SamplingHandler>,
+    elicitation_handler: &Option<ElicitationHandler>,
+    notification_handler: &Option<Arc<NotificationsHandler>>,
+    #[cfg(feature = "tasks")] tasks: &Arc<TaskTracker>,
+) -> Vec<MessageEnvelope> {
+    use futures_util::future::join_all;
+
+    let futures = deferred.into_iter().map(|envelope| async move {
+        match envelope {
+            MessageEnvelope::Response(_) => unreachable!(),
+            MessageEnvelope::Request(req) => Some(MessageEnvelope::Response(
+                dispatch_request(
+                    req,
+                    roots,
+                    sampling_handler,
+                    elicitation_handler,
+                    #[cfg(feature = "tasks")]
+                    tasks,
+                )
+                .await,
+            )),
+            MessageEnvelope::Notification(notification) => {
+                dispatch_notification(notification, notification_handler).await;
+                None
+            }
+        }
+    });
+
+    join_all(futures).await.into_iter().flatten().collect()
 }
 
 #[inline]
@@ -640,6 +673,8 @@ fn validate_batch_ids(items: &[MessageEnvelope]) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::pin::Pin;
+    use tokio::time::Instant;
 
     #[tokio::test]
     async fn batch_responses_are_distributed_individually() {
@@ -681,6 +716,57 @@ mod tests {
         assert!(
             timeout(Duration::from_millis(100), rx2).await.is_ok(),
             "rx2 should have received its response"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_requests_are_dispatched_concurrently() {
+        use crate::types::sampling::{CreateMessageRequestParams, CreateMessageResult};
+        use tokio::time::Duration;
+
+        let roots = Arc::new(RwLock::new(Vec::<Root>::new()));
+        let sampling_handler: Option<SamplingHandler> = Some(Arc::new(
+            |_params: CreateMessageRequestParams| -> Pin<
+                Box<dyn Future<Output = CreateMessageResult> + Send + 'static>,
+            > {
+                Box::pin(async move {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    CreateMessageResult::assistant()
+                })
+            },
+        ));
+        let elicitation_handler = None;
+        let notification_handler = None;
+
+        let deferred = vec![
+            MessageEnvelope::Request(Request::new(
+                Some(RequestId::Number(1)),
+                crate::types::sampling::commands::CREATE,
+                Some(CreateMessageRequestParams::default()),
+            )),
+            MessageEnvelope::Request(Request::new(
+                Some(RequestId::Number(2)),
+                crate::types::sampling::commands::CREATE,
+                Some(CreateMessageRequestParams::default()),
+            )),
+        ];
+
+        let started = Instant::now();
+        let responses = dispatch_batch_deferred(
+            deferred,
+            &roots,
+            &sampling_handler,
+            &elicitation_handler,
+            &notification_handler,
+            #[cfg(feature = "tasks")]
+            &Arc::new(crate::shared::TaskTracker::default()),
+        )
+        .await;
+
+        assert_eq!(responses.len(), 2);
+        assert!(
+            started.elapsed() < Duration::from_millis(180),
+            "batch requests should run concurrently"
         );
     }
 

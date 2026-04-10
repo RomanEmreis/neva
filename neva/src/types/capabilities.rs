@@ -107,7 +107,7 @@ pub struct SamplingToolsCapability {
 /// > **Note:** This capability enables the MCP client to respond to elicitation requests from an MCP server.
 /// >
 /// > When this capability is enabled, an MCP server can request the client to provide additional information
-/// > during interactions. The client must set a <see cref="ElicitationHandler"/> to process these requests.
+/// > during interactions.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]

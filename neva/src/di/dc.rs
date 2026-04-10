@@ -13,11 +13,6 @@ use std::{
 /// `Dc` stands for Dependency Container.  
 /// This struct wraps an injectable type `T` that is **shared** between all handlers
 /// through an [`Arc`].
-///
-/// # Example
-/// ```no_run
-///
-/// ```
 #[derive(Debug, Clone)]
 pub struct Dc<T: Send + Sync>(Arc<T>);
 

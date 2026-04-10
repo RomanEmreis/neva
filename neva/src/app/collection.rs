@@ -1,6 +1,7 @@
 //! Represents a generic-collection implementation that can be mutated during runtime
 
 use crate::error::{Error, ErrorCode};
+use crate::types::Cursor;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 
@@ -79,6 +80,44 @@ impl<T: Clone> Collection<T> {
             Self::Runtime(lock) => lock.read().await.values().cloned().collect(),
         }
     }
+
+    /// Returns a paginated list of values, cloning only the current page.
+    #[inline]
+    pub(crate) async fn page_values(
+        &self,
+        cursor: Option<Cursor>,
+        page_size: usize,
+    ) -> (Vec<T>, Option<Cursor>) {
+        match self {
+            Self::Init(map) => Self::collect_page(map.values(), cursor, page_size),
+            Self::Runtime(lock) => {
+                let guard = lock.read().await;
+                Self::collect_page(guard.values(), cursor, page_size)
+            }
+        }
+    }
+
+    #[inline]
+    fn collect_page<'a>(
+        iter: impl Iterator<Item = &'a T>,
+        cursor: Option<Cursor>,
+        page_size: usize,
+    ) -> (Vec<T>, Option<Cursor>)
+    where
+        T: 'a,
+    {
+        let start = *cursor.unwrap_or_default();
+        let mut iter = iter.skip(start);
+        let mut items = Vec::with_capacity(page_size);
+
+        for item in iter.by_ref().take(page_size) {
+            items.push(item.clone());
+        }
+
+        let next_cursor = iter.next().map(|_| Cursor(start + items.len()));
+
+        (items, next_cursor)
+    }
 }
 
 impl<T: Clone> AsMut<HashMap<String, T>> for Collection<T> {
@@ -100,5 +139,34 @@ impl<T: Clone> AsRef<HashMap<String, T>> for Collection<T> {
         } else {
             unreachable!()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn page_values_returns_only_requested_page() {
+        let mut collection = Collection::new();
+        collection.as_mut().insert("a".to_string(), 1);
+        collection.as_mut().insert("b".to_string(), 2);
+        collection.as_mut().insert("c".to_string(), 3);
+
+        let (items, next_cursor) = collection.page_values(None, 2).await;
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(next_cursor, Some(Cursor(2)));
+    }
+
+    #[tokio::test]
+    async fn page_values_returns_empty_page_past_end() {
+        let mut collection = Collection::new();
+        collection.as_mut().insert("a".to_string(), 1);
+
+        let (items, next_cursor) = collection.page_values(Some(Cursor(5)), 2).await;
+
+        assert!(items.is_empty());
+        assert_eq!(next_cursor, None);
     }
 }

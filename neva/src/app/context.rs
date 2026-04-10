@@ -127,8 +127,9 @@ impl ServerRuntime {
         #[cfg(feature = "di")] container: Container,
     ) -> Self {
         let middlewares = options.middlewares.take();
+        let request_timeout = options.request_timeout;
         Self {
-            pending: Default::default(),
+            pending: RequestQueue::new(request_timeout),
             handlers: Arc::new(handlers),
             options: options.into_runtime(),
             mw_start: middlewares.and_then(|mw| mw.compose()),
@@ -334,7 +335,7 @@ impl Context {
         self.clone().get_prompt(params).await
     }
 
-    /// Reads a resource contents
+    /// Reads a resource content
     ///
     /// # Example
     /// ```no_run
@@ -772,7 +773,11 @@ impl Context {
             self.options.tasks.require_input(&task_id);
 
             let resp = match timeout(self.timeout, receiver).await {
-                Ok(Ok(resp)) => resp,
+                Ok(Ok(crate::shared::PendingResponse::Response(resp))) => resp,
+                Ok(Ok(crate::shared::PendingResponse::Timeout)) => {
+                    self.options.tasks.fail(&task_id);
+                    return Err(Error::new(ErrorCode::Timeout, "Request timed out"));
+                }
                 Ok(Err(_)) => {
                     self.options.tasks.fail(&task_id);
                     return Err(Error::new(
@@ -917,10 +922,17 @@ impl Context {
 
         let id = req.full_id();
         let receiver = self.pending.push(&id);
-        self.sender.send(req.into()).await?;
+        if let Err(err) = self.sender.send(req.into()).await {
+            let _ = self.pending.pop(&id);
+            return Err(err);
+        }
+        self.pending.activate(&id);
 
         match timeout(self.timeout, receiver).await {
-            Ok(Ok(resp)) => Ok(resp),
+            Ok(Ok(crate::shared::PendingResponse::Response(resp))) => Ok(resp),
+            Ok(Ok(crate::shared::PendingResponse::Timeout)) => {
+                Err(Error::new(ErrorCode::Timeout, "Request timed out"))
+            }
             Ok(Err(_)) => Err(Error::new(
                 ErrorCode::InternalError,
                 "Response channel closed",

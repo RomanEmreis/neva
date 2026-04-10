@@ -2,13 +2,23 @@
 
 use crate::error::{Error, ErrorCode};
 use crate::types::{Task, TaskPayload, TaskStatus};
+use chrono::Utc;
 use serde::Serialize;
+use std::{
+    cmp::Ordering,
+    collections::BinaryHeap,
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
+    },
+};
 use tokio::sync::watch::{Receiver, Sender, channel};
 use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
 
-#[derive(Default)]
 pub(crate) struct TaskTracker {
     tasks: dashmap::DashMap<String, TaskEntry>,
+    expirations: Mutex<BinaryHeap<TaskExpiry>>,
+    next_expiry_seq: AtomicU64,
 }
 
 /// Alias for [`Option<TaskPayload>`]
@@ -29,17 +39,53 @@ pub(crate) struct TaskHandle {
     tx: Sender<MaybePayload>,
 }
 
+struct TaskExpiry {
+    deadline_ms: i64,
+    sequence: u64,
+    id: String,
+}
+
+impl PartialEq for TaskExpiry {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.deadline_ms == other.deadline_ms && self.sequence == other.sequence
+    }
+}
+
+impl Eq for TaskExpiry {}
+
+impl PartialOrd for TaskExpiry {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TaskExpiry {
+    #[inline]
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .deadline_ms
+            .cmp(&self.deadline_ms)
+            .then_with(|| other.sequence.cmp(&self.sequence))
+    }
+}
+
 impl TaskTracker {
     /// Creates a new [`TaskTracker`]
     #[inline]
     pub(crate) fn new() -> Self {
         Self {
             tasks: dashmap::DashMap::new(),
+            expirations: Mutex::new(BinaryHeap::new()),
+            next_expiry_seq: AtomicU64::new(0),
         }
     }
 
     /// Returns a list of currently running tasks.
     pub(crate) fn tasks(&self) -> Vec<Task> {
+        self.cleanup_expired();
+
         self.tasks
             .iter()
             .map(|entry| entry.task.clone())
@@ -48,6 +94,8 @@ impl TaskTracker {
 
     /// Tacks the task and returns the [`TaskHandle`] for this task
     pub(crate) fn track(&self, task: Task) -> TaskHandle {
+        self.cleanup_expired();
+
         let token = CancellationToken::new();
         let (tx, rx) = channel(None);
 
@@ -67,6 +115,8 @@ impl TaskTracker {
 
     /// Cancels the task
     pub(crate) fn cancel(&self, id: &str) -> Result<Task, Error> {
+        self.cleanup_expired();
+
         if let Some((_, entry)) = self.tasks.remove(id) {
             entry.token.cancel();
             Ok(entry.task.cancel())
@@ -80,22 +130,30 @@ impl TaskTracker {
 
     /// Completes the task
     pub(crate) fn complete(&self, id: &str) {
+        self.cleanup_expired();
+
         if let Some(mut entry) = self.tasks.get_mut(id) {
             entry.task.complete();
+            self.schedule_expiry(&entry.task);
         }
     }
 
     /// Fails the task
     #[cfg(feature = "server")]
     pub(crate) fn fail(&self, id: &str) {
+        self.cleanup_expired();
+
         if let Some(mut entry) = self.tasks.get_mut(id) {
             entry.task.fail();
+            self.schedule_expiry(&entry.task);
         }
     }
 
     /// Sets the task into `input_required` status
     #[cfg(feature = "server")]
     pub(crate) fn require_input(&self, id: &str) {
+        self.cleanup_expired();
+
         if let Some(mut entry) = self.tasks.get_mut(id) {
             entry.task.require_input();
         }
@@ -104,6 +162,8 @@ impl TaskTracker {
     /// Sets the task into `working` status
     #[cfg(feature = "server")]
     pub(crate) fn reset(&self, id: &str) {
+        self.cleanup_expired();
+
         if let Some(mut entry) = self.tasks.get_mut(id) {
             entry.task.reset();
             let _ = entry.tx.send(None);
@@ -113,6 +173,8 @@ impl TaskTracker {
     /// Sets the result of the [`Task`].
     #[cfg(feature = "server")]
     pub(crate) fn set_result<T: Serialize>(&self, id: &str, result: T) {
+        self.cleanup_expired();
+
         if let Some(entry) = self.tasks.get(id) {
             let result = match serde_json::to_value(result) {
                 Ok(result) => result,
@@ -128,6 +190,8 @@ impl TaskTracker {
 
     /// Retrieves the task status
     pub(crate) fn get_status(&self, id: &str) -> Result<Task, Error> {
+        self.cleanup_expired();
+
         self.tasks.get(id).map(|t| t.task.clone()).ok_or_else(|| {
             Error::new(
                 ErrorCode::InvalidParams,
@@ -139,6 +203,8 @@ impl TaskTracker {
     /// Returns the task result if it is present,
     /// otherwise waits until the result is available or the task will be canceled.
     pub(crate) async fn get_result(&self, id: &str) -> Result<TaskPayload, Error> {
+        self.cleanup_expired();
+
         let (status, mut result_rx, token) = {
             let entry = self.tasks.get(id).ok_or_else(|| {
                 Error::new(
@@ -177,6 +243,70 @@ impl TaskTracker {
                 }
             }
         }
+    }
+
+    #[inline]
+    fn cleanup_expired(&self) {
+        let now_ms = Utc::now().timestamp_millis();
+        let mut expired = Vec::new();
+
+        if let Ok(mut expirations) = self.expirations.lock() {
+            while expirations
+                .peek()
+                .is_some_and(|entry| entry.deadline_ms <= now_ms)
+            {
+                let entry = expirations.pop().expect("peeked entry must exist");
+                expired.push((entry.id, entry.deadline_ms));
+            }
+        }
+
+        for (id, deadline_ms) in expired {
+            let should_remove = self.tasks.get(&id).is_some_and(|entry| {
+                Self::is_terminal(&entry.task)
+                    && Self::task_deadline_ms(&entry.task).is_some_and(|d| d == deadline_ms)
+            });
+
+            if should_remove {
+                let _ = self.tasks.remove(&id);
+            }
+        }
+    }
+
+    #[inline]
+    fn is_terminal(task: &Task) -> bool {
+        matches!(
+            task.status,
+            TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+        )
+    }
+
+    #[inline]
+    fn schedule_expiry(&self, task: &Task) {
+        let Some(deadline_ms) = Self::task_deadline_ms(task) else {
+            return;
+        };
+
+        let sequence = self.next_expiry_seq.fetch_add(1, AtomicOrdering::Relaxed);
+        if let Ok(mut expirations) = self.expirations.lock() {
+            expirations.push(TaskExpiry {
+                deadline_ms,
+                sequence,
+                id: task.id.clone(),
+            });
+        }
+    }
+
+    #[inline]
+    fn task_deadline_ms(task: &Task) -> Option<i64> {
+        let ttl_ms = i64::try_from(task.ttl).unwrap_or(i64::MAX);
+        task.created_at.timestamp_millis().checked_add(ttl_ms)
+    }
+}
+
+impl Default for TaskTracker {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -557,5 +687,20 @@ mod tests {
         tracker.complete(&task_id);
         let status = tracker.get_status(&task_id).unwrap();
         assert_eq!(status.status, TaskStatus::Completed);
+    }
+
+    #[test]
+    fn it_does_remove_expired_completed_tasks() {
+        let tracker = TaskTracker::new();
+        let task = Task::from(crate::types::TaskMetadata { ttl: Some(1) });
+        let task_id = task.id.clone();
+
+        let _handle = tracker.track(task);
+        tracker.complete(&task_id);
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        assert!(tracker.get_status(&task_id).is_err());
+        assert_eq!(tracker.tasks().len(), 0);
     }
 }

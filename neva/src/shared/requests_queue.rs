@@ -2,35 +2,106 @@
 
 use crate::types::{RequestId, Response};
 use dashmap::DashMap;
-use std::sync::Arc;
+use std::{
+    cmp::Ordering,
+    collections::BinaryHeap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
+    },
+    time::{Duration, Instant},
+};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+const DEFAULT_REQUEST_TTL: Duration = Duration::from_secs(10);
+
+/// Result sent through the internal pending-request channel.
+///
+/// This stays as an explicit enum instead of `Option<Response>` so the timeout
+/// path is self-describing at the type level. The `Response` variant is large,
+/// but this is the hot path and boxing would add a heap allocation to every
+/// successful request; keep the full response inline and allow the size
+/// difference intentionally.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
+pub(crate) enum PendingResponse {
+    /// A regular JSON-RPC response received from the peer.
+    Response(Response),
+    /// A locally generated timeout for an expired pending request.
+    Timeout,
+}
+
+impl PendingResponse {
+    #[inline]
+    #[cfg(test)]
+    fn matches_timeout(&self) -> bool {
+        matches!(self, Self::Timeout)
+    }
+}
+
 /// Represents a request handle
 pub(crate) struct RequestHandle {
-    sender: oneshot::Sender<Response>,
+    sender: oneshot::Sender<PendingResponse>,
     _cancellation_token: CancellationToken,
+    expires_at: Option<Instant>,
 }
 
 /// Represents a request tracking "queue" that holds a hash map of [`oneshot::Sender`] for requests
 /// that are awaiting responses.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub(crate) struct RequestQueue {
     pending: Arc<DashMap<RequestId, RequestHandle>>,
+    expirations: Arc<Mutex<BinaryHeap<RequestExpiry>>>,
+    next_expiry_seq: Arc<AtomicU64>,
+    ttl: Duration,
+}
+
+struct RequestExpiry {
+    expires_at: Instant,
+    sequence: u64,
+    id: RequestId,
+}
+
+impl PartialEq for RequestExpiry {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.expires_at == other.expires_at && self.sequence == other.sequence
+    }
+}
+
+impl Eq for RequestExpiry {}
+
+impl PartialOrd for RequestExpiry {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RequestExpiry {
+    #[inline]
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .expires_at
+            .cmp(&self.expires_at)
+            .then_with(|| other.sequence.cmp(&self.sequence))
+    }
 }
 
 impl RequestHandle {
     /// Creates a new [`RequestHandle`]
-    pub(super) fn new(sender: oneshot::Sender<Response>) -> Self {
+    pub(super) fn new(sender: oneshot::Sender<PendingResponse>, ttl: Duration) -> Self {
         Self {
             sender,
             _cancellation_token: CancellationToken::new(),
+            expires_at: (!ttl.is_zero()).then_some(Instant::now() + ttl),
         }
     }
 
     /// Sends a [`Response`] to MCP server
     pub(crate) fn send(self, resp: Response) {
-        match self.sender.send(resp) {
+        match self.sender.send(PendingResponse::Response(resp)) {
             Ok(_) => (),
             Err(_err) => {
                 #[cfg(feature = "tracing")]
@@ -42,30 +113,136 @@ impl RequestHandle {
             }
         };
     }
+
+    /// Completes the pending request with a timeout response.
+    #[inline]
+    pub(crate) fn send_timeout(self) {
+        match self.sender.send(PendingResponse::Timeout) {
+            Ok(_) => (),
+            Err(_err) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(
+                    logger = "neva",
+                    "Request handler failed to send timeout response: {:?}",
+                    _err
+                );
+            }
+        };
+    }
 }
 
 impl RequestQueue {
+    /// Creates a new [`RequestQueue`] with the given entry TTL.
+    #[inline]
+    pub(crate) fn new(ttl: Duration) -> Self {
+        Self {
+            pending: Arc::new(DashMap::new()),
+            expirations: Arc::new(Mutex::new(BinaryHeap::new())),
+            next_expiry_seq: Arc::new(AtomicU64::new(0)),
+            ttl,
+        }
+    }
+
     /// Pushes a request with [`RequestId`] to the "queue"
     /// and returns a [`oneshot::Receiver`] for the response.
     #[inline]
-    pub(crate) fn push(&self, id: &RequestId) -> oneshot::Receiver<Response> {
+    pub(crate) fn push(&self, id: &RequestId) -> oneshot::Receiver<PendingResponse> {
         let (sender, receiver) = oneshot::channel();
-        self.pending.insert(id.clone(), RequestHandle::new(sender));
+        let mut handle = RequestHandle::new(sender, self.ttl);
+        handle.expires_at = None;
+        self.pending.insert(id.clone(), handle);
         receiver
+    }
+
+    /// Starts the TTL countdown for a queued request after it has been sent.
+    #[inline]
+    pub(crate) fn activate(&self, id: &RequestId) {
+        if let Some(mut handle) = self.pending.get_mut(id) {
+            let Some(expires_at) = (!self.ttl.is_zero()).then_some(Instant::now() + self.ttl)
+            else {
+                handle.expires_at = None;
+                return;
+            };
+
+            handle.expires_at = Some(expires_at);
+            drop(handle);
+
+            let sequence = self.next_expiry_seq.fetch_add(1, AtomicOrdering::Relaxed);
+            if let Ok(mut expirations) = self.expirations.lock() {
+                expirations.push(RequestExpiry {
+                    expires_at,
+                    sequence,
+                    id: id.clone(),
+                });
+            }
+        }
+
+        self.cleanup_expired();
     }
 
     /// Pops the [`RequestHandle`] by [`RequestId`] and removes it from the queue
     #[inline]
     pub(crate) fn pop(&self, id: &RequestId) -> Option<RequestHandle> {
+        if self.is_expired(id) {
+            if let Some((_, handle)) = self.pending.remove(id) {
+                handle.send_timeout();
+            }
+            return None;
+        }
+
         self.pending.remove(id).map(|(_, handle)| handle)
     }
 
     /// Takes a [`Response`] and completes the request if it's still pending
     #[inline]
     pub(crate) fn complete(&self, resp: Response) {
+        self.cleanup_expired();
+
         if let Some(sender) = self.pop(&resp.full_id()) {
             sender.send(resp)
         }
+    }
+
+    #[inline]
+    fn cleanup_expired(&self) {
+        let now = Instant::now();
+        let mut expired = Vec::new();
+
+        if let Ok(mut expirations) = self.expirations.lock() {
+            while expirations
+                .peek()
+                .is_some_and(|entry| entry.expires_at <= now)
+            {
+                let entry = expirations.pop().expect("peeked entry must exist");
+                expired.push((entry.id, entry.expires_at));
+            }
+        }
+
+        for (id, expires_at) in expired {
+            let should_remove = self
+                .pending
+                .get(&id)
+                .is_some_and(|handle| handle.expires_at == Some(expires_at));
+
+            if should_remove && let Some((_, handle)) = self.pending.remove(&id) {
+                handle.send_timeout();
+            }
+        }
+    }
+
+    #[inline]
+    fn is_expired(&self, id: &RequestId) -> bool {
+        self.pending
+            .get(id)
+            .and_then(|handle| handle.expires_at)
+            .is_some_and(|expires_at| expires_at <= Instant::now())
+    }
+}
+
+impl Default for RequestQueue {
+    #[inline]
+    fn default() -> Self {
+        Self::new(DEFAULT_REQUEST_TTL)
     }
 }
 
@@ -106,10 +283,11 @@ mod tests {
             unreachable!()
         };
 
-        let Response::Ok(actual) = timeout(Duration::from_secs(1), receiver)
-            .await
-            .expect("Receiver should complete")
-            .expect("Sender should send")
+        let PendingResponse::Response(Response::Ok(actual)) =
+            timeout(Duration::from_secs(1), receiver)
+                .await
+                .expect("Receiver should complete")
+                .expect("Sender should send")
         else {
             unreachable!()
         };
@@ -132,10 +310,11 @@ mod tests {
             unreachable!()
         };
 
-        let Response::Ok(actual) = timeout(Duration::from_secs(1), receiver)
-            .await
-            .expect("Should receive within timeout")
-            .expect("Should receive response")
+        let PendingResponse::Response(Response::Ok(actual)) =
+            timeout(Duration::from_secs(1), receiver)
+                .await
+                .expect("Should receive within timeout")
+                .expect("Should receive response")
         else {
             unreachable!()
         };
@@ -154,5 +333,96 @@ mod tests {
         queue.complete(response);
 
         // Nothing to assert really, just verifying it doesn't panic or error
+    }
+
+    #[test]
+    fn it_does_remove_expired_pending_requests() {
+        let queue = RequestQueue::new(Duration::from_millis(1));
+        let id = RequestId::Number(1);
+
+        let _receiver = queue.push(&id);
+        queue.activate(&id);
+        std::thread::sleep(Duration::from_millis(10));
+
+        assert!(queue.pop(&id).is_none());
+    }
+
+    #[tokio::test]
+    async fn pop_does_not_close_non_target_receivers() {
+        let queue = RequestQueue::new(Duration::from_millis(5));
+        let expired_id = RequestId::Number(1);
+        let live_id = RequestId::Number(2);
+
+        let _expired = queue.push(&expired_id);
+        let live = queue.push(&live_id);
+        queue.activate(&expired_id);
+
+        std::thread::sleep(Duration::from_millis(10));
+
+        assert!(queue.pop(&expired_id).is_none());
+
+        let response = Response::success(live_id, json!({ "content": "done" }));
+        queue.complete(response);
+
+        assert!(
+            timeout(Duration::from_secs(1), live).await.is_ok(),
+            "non-target receiver should remain open"
+        );
+    }
+
+    #[tokio::test]
+    async fn pop_sends_timeout_response_for_expired_request() {
+        let queue = RequestQueue::new(Duration::from_millis(5));
+        let id = RequestId::Number(1);
+
+        let receiver = queue.push(&id);
+        queue.activate(&id);
+
+        std::thread::sleep(Duration::from_millis(10));
+
+        assert!(queue.pop(&id).is_none());
+
+        assert!(
+            receiver
+                .await
+                .expect("expired request should resolve")
+                .matches_timeout(),
+            "expired request should resolve as timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_sends_timeout_response_for_expired_requests() {
+        let queue = RequestQueue::new(Duration::from_millis(5));
+        let expired_id = RequestId::Number(1);
+        let live_id = RequestId::Number(2);
+
+        let expired = queue.push(&expired_id);
+        let _live = queue.push(&live_id);
+        queue.activate(&expired_id);
+
+        std::thread::sleep(Duration::from_millis(10));
+
+        let response = Response::success(live_id, json!({ "content": "done" }));
+        queue.complete(response);
+
+        assert!(
+            expired
+                .await
+                .expect("expired request should resolve")
+                .matches_timeout(),
+            "expired request should resolve as timeout"
+        );
+    }
+
+    #[test]
+    fn push_does_not_start_ttl_until_activated() {
+        let queue = RequestQueue::new(Duration::from_millis(1));
+        let id = RequestId::Number(1);
+
+        let _receiver = queue.push(&id);
+        std::thread::sleep(Duration::from_millis(10));
+
+        assert!(queue.pop(&id).is_some());
     }
 }

@@ -21,7 +21,6 @@ use crate::types::{
     PromptHandler, ReadResourceRequestParams, ReadResourceResult, Request, Resource,
     ResourceTemplate, Response, SubscribeRequestParams, Tool, ToolHandler,
     UnsubscribeRequestParams, Uri,
-    cursor::Pagination,
     notification::{CancelledNotificationParams, Notification},
     resource::template::ResourceFunc,
 };
@@ -30,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 #[cfg(feature = "tasks")]
 use crate::types::{
     CancelTaskRequestParams, GetTaskPayloadRequestParams, GetTaskRequestParams,
-    ListTasksRequestParams, ListTasksResult, Task, TaskPayload,
+    ListTasksRequestParams, ListTasksResult, Task, TaskPayload, cursor::Pagination,
 };
 #[cfg(feature = "tasks")]
 use context::ToolOrTaskResponse;
@@ -526,11 +525,10 @@ impl App {
 
     /// Tools request handler
     async fn tools(options: RuntimeMcpOptions, params: ListToolsRequestParams) -> ListToolsResult {
-        options
-            .list_tools()
-            .await
-            .paginate(params.cursor, DEFAULT_PAGE_SIZE)
-            .into()
+        let (tools, next_cursor) = options
+            .list_tools_page(params.cursor, DEFAULT_PAGE_SIZE)
+            .await;
+        ListToolsResult { tools, next_cursor }
     }
 
     /// Resources request handler
@@ -538,11 +536,13 @@ impl App {
         options: RuntimeMcpOptions,
         params: ListResourcesRequestParams,
     ) -> ListResourcesResult {
-        options
-            .list_resources()
-            .await
-            .paginate(params.cursor, DEFAULT_PAGE_SIZE)
-            .into()
+        let (resources, next_cursor) = options
+            .list_resources_page(params.cursor, DEFAULT_PAGE_SIZE)
+            .await;
+        ListResourcesResult {
+            resources,
+            next_cursor,
+        }
     }
 
     /// Resource templates request handler
@@ -550,11 +550,13 @@ impl App {
         options: RuntimeMcpOptions,
         params: ListResourceTemplatesRequestParams,
     ) -> ListResourceTemplatesResult {
-        options
-            .list_resource_templates()
-            .await
-            .paginate(params.cursor, DEFAULT_PAGE_SIZE)
-            .into()
+        let (resource_templates, next_cursor) = options
+            .list_resource_templates_page(params.cursor, DEFAULT_PAGE_SIZE)
+            .await;
+        ListResourceTemplatesResult {
+            templates: resource_templates,
+            next_cursor,
+        }
     }
 
     /// Prompts request handler
@@ -562,11 +564,13 @@ impl App {
         options: RuntimeMcpOptions,
         params: ListPromptsRequestParams,
     ) -> ListPromptsResult {
-        options
-            .list_prompts()
-            .await
-            .paginate(params.cursor, DEFAULT_PAGE_SIZE)
-            .into()
+        let (prompts, next_cursor) = options
+            .list_prompts_page(params.cursor, DEFAULT_PAGE_SIZE)
+            .await;
+        ListPromptsResult {
+            prompts,
+            next_cursor,
+        }
     }
 
     /// A tool call request handler
