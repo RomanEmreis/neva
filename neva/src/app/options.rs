@@ -13,7 +13,7 @@ use crate::middleware::{Middleware, Middlewares};
 
 use crate::PROTOCOL_VERSIONS;
 use crate::types::{
-    Implementation, Prompt, PromptsCapability, ReadResourceResult, RequestId, Resource,
+    Cursor, Implementation, Prompt, PromptsCapability, ReadResourceResult, RequestId, Resource,
     ResourceTemplate, ResourcesCapability, Tool, ToolsCapability, Uri,
     resource::{Route, route::ResourceHandler},
 };
@@ -406,10 +406,14 @@ impl McpOptions {
         self.tools.get(name).await
     }
 
-    /// Returns a list of available tools
+    /// Returns a paginated list of available tools.
     #[inline]
-    pub(crate) async fn list_tools(&self) -> Vec<Tool> {
-        self.tools.values().await
+    pub(crate) async fn list_tools_page(
+        &self,
+        cursor: Option<Cursor>,
+        page_size: usize,
+    ) -> (Vec<Tool>, Option<Cursor>) {
+        self.tools.page_values(cursor, page_size).await
     }
 
     /// Reads a resource by its URI
@@ -418,16 +422,26 @@ impl McpOptions {
         self.resource_routes.find(uri)
     }
 
-    /// Returns a list of available resources
+    /// Returns a paginated list of available resources.
     #[inline]
-    pub(crate) async fn list_resources(&self) -> Vec<Resource> {
-        self.resources.values().await
+    pub(crate) async fn list_resources_page(
+        &self,
+        cursor: Option<Cursor>,
+        page_size: usize,
+    ) -> (Vec<Resource>, Option<Cursor>) {
+        self.resources.page_values(cursor, page_size).await
     }
 
-    /// Returns a list of available resource templates
+    /// Returns a paginated list of available resource templates.
     #[inline]
-    pub(crate) async fn list_resource_templates(&self) -> Vec<ResourceTemplate> {
-        self.resources_templates.values().await
+    pub(crate) async fn list_resource_templates_page(
+        &self,
+        cursor: Option<Cursor>,
+        page_size: usize,
+    ) -> (Vec<ResourceTemplate>, Option<Cursor>) {
+        self.resources_templates
+            .page_values(cursor, page_size)
+            .await
     }
 
     /// Returns a tool by its name
@@ -436,10 +450,14 @@ impl McpOptions {
         self.prompts.get(name).await
     }
 
-    /// Returns a list of available prompts
+    /// Returns a paginated list of available prompts.
     #[inline]
-    pub(crate) async fn list_prompts(&self) -> Vec<Prompt> {
-        self.prompts.values().await
+    pub(crate) async fn list_prompts_page(
+        &self,
+        cursor: Option<Cursor>,
+        page_size: usize,
+    ) -> (Vec<Prompt>, Option<Cursor>) {
+        self.prompts.page_values(cursor, page_size).await
     }
 
     /// Returns [`ToolsCapability`] if configured.
@@ -614,8 +632,9 @@ mod tests {
 
         options.add_tool(Tool::new("tool", || async { "test" }));
 
-        let tools = options.list_tools().await;
+        let (tools, next_cursor) = options.list_tools_page(None, 10).await;
         assert_eq!(tools.len(), 1);
+        assert_eq!(next_cursor, None);
     }
 
     #[tokio::test]
@@ -624,8 +643,9 @@ mod tests {
 
         options.add_resource(Resource::new("res://res", "res"));
 
-        let resources = options.list_resources().await;
+        let (resources, next_cursor) = options.list_resources_page(None, 10).await;
         assert_eq!(resources.len(), 1);
+        assert_eq!(next_cursor, None);
     }
 
     #[tokio::test]
@@ -693,8 +713,9 @@ mod tests {
             ResourceFunc::new(handler),
         );
 
-        let resources = options.list_resource_templates().await;
+        let (resources, next_cursor) = options.list_resource_templates_page(None, 10).await;
         assert_eq!(resources.len(), 1);
+        assert_eq!(next_cursor, None);
     }
 
     #[tokio::test]
@@ -747,8 +768,9 @@ mod tests {
 
         options.add_prompt(Prompt::new("test", || async { [("test", Role::User)] }));
 
-        let prompts = options.list_prompts().await;
+        let (prompts, next_cursor) = options.list_prompts_page(None, 10).await;
         assert_eq!(prompts.len(), 1);
+        assert_eq!(next_cursor, None);
     }
 
     #[test]
