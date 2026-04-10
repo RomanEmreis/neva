@@ -3,7 +3,12 @@
 use crate::types::{RequestId, Response};
 use dashmap::DashMap;
 use std::{
-    sync::Arc,
+    cmp::Ordering,
+    collections::BinaryHeap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::oneshot;
@@ -23,7 +28,41 @@ pub(crate) struct RequestHandle {
 #[derive(Clone)]
 pub(crate) struct RequestQueue {
     pending: Arc<DashMap<RequestId, RequestHandle>>,
+    expirations: Arc<Mutex<BinaryHeap<RequestExpiry>>>,
+    next_expiry_seq: Arc<AtomicU64>,
     ttl: Duration,
+}
+
+struct RequestExpiry {
+    expires_at: Instant,
+    sequence: u64,
+    id: RequestId,
+}
+
+impl PartialEq for RequestExpiry {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.expires_at == other.expires_at && self.sequence == other.sequence
+    }
+}
+
+impl Eq for RequestExpiry {}
+
+impl PartialOrd for RequestExpiry {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RequestExpiry {
+    #[inline]
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .expires_at
+            .cmp(&self.expires_at)
+            .then_with(|| other.sequence.cmp(&self.sequence))
+    }
 }
 
 impl RequestHandle {
@@ -58,6 +97,8 @@ impl RequestQueue {
     pub(crate) fn new(ttl: Duration) -> Self {
         Self {
             pending: Arc::new(DashMap::new()),
+            expirations: Arc::new(Mutex::new(BinaryHeap::new())),
+            next_expiry_seq: Arc::new(AtomicU64::new(0)),
             ttl,
         }
     }
@@ -66,8 +107,6 @@ impl RequestQueue {
     /// and returns a [`oneshot::Receiver`] for the response.
     #[inline]
     pub(crate) fn push(&self, id: &RequestId) -> oneshot::Receiver<Response> {
-        self.cleanup_expired();
-
         let (sender, receiver) = oneshot::channel();
         let mut handle = RequestHandle::new(sender, self.ttl);
         handle.expires_at = None;
@@ -79,8 +118,26 @@ impl RequestQueue {
     #[inline]
     pub(crate) fn activate(&self, id: &RequestId) {
         if let Some(mut handle) = self.pending.get_mut(id) {
-            handle.expires_at = (!self.ttl.is_zero()).then_some(Instant::now() + self.ttl);
+            let Some(expires_at) = (!self.ttl.is_zero()).then_some(Instant::now() + self.ttl)
+            else {
+                handle.expires_at = None;
+                return;
+            };
+
+            handle.expires_at = Some(expires_at);
+            drop(handle);
+
+            let sequence = self.next_expiry_seq.fetch_add(1, AtomicOrdering::Relaxed);
+            if let Ok(mut expirations) = self.expirations.lock() {
+                expirations.push(RequestExpiry {
+                    expires_at,
+                    sequence,
+                    id: id.clone(),
+                });
+            }
         }
+
+        self.cleanup_expired();
     }
 
     /// Pops the [`RequestHandle`] by [`RequestId`] and removes it from the queue
@@ -107,8 +164,28 @@ impl RequestQueue {
     #[inline]
     fn cleanup_expired(&self) {
         let now = Instant::now();
-        self.pending
-            .retain(|_, handle| handle.expires_at.is_none_or(|expires_at| expires_at > now));
+        let mut expired = Vec::new();
+
+        if let Ok(mut expirations) = self.expirations.lock() {
+            while expirations
+                .peek()
+                .is_some_and(|entry| entry.expires_at <= now)
+            {
+                let entry = expirations.pop().expect("peeked entry must exist");
+                expired.push((entry.id, entry.expires_at));
+            }
+        }
+
+        for (id, expires_at) in expired {
+            let should_remove = self
+                .pending
+                .get(&id)
+                .is_some_and(|handle| handle.expires_at == Some(expires_at));
+
+            if should_remove {
+                let _ = self.pending.remove(&id);
+            }
+        }
     }
 
     #[inline]
