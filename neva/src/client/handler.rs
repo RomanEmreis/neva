@@ -4,7 +4,7 @@ use crate::client::notification_handler::NotificationsHandler;
 use crate::{
     client::options::McpOptions,
     error::{Error, ErrorCode},
-    shared::RequestQueue,
+    shared::{PendingResponse, RequestQueue},
     transport::{
         Receiver, Sender, Transport, TransportProto, TransportProtoReceiver, TransportProtoSender,
     },
@@ -170,7 +170,10 @@ impl RequestHandler {
         self.pending.activate(&id);
 
         match timeout(self.timeout, receiver).await {
-            Ok(Ok(resp)) => resp.into_transport_result(),
+            Ok(Ok(PendingResponse::Response(resp))) => Ok(resp),
+            Ok(Ok(PendingResponse::Timeout)) => {
+                Err(Error::new(ErrorCode::Timeout, "Request timed out"))
+            }
             Ok(Err(_)) => Err(Error::new(
                 ErrorCode::InternalError,
                 "Response channel closed",
@@ -196,7 +199,7 @@ impl RequestHandler {
     pub(super) async fn send_batch(
         &mut self,
         items: Vec<MessageEnvelope>,
-    ) -> Result<Vec<(RequestId, tokio::sync::oneshot::Receiver<Response>)>, Error> {
+    ) -> Result<Vec<(RequestId, tokio::sync::oneshot::Receiver<PendingResponse>)>, Error> {
         validate_batch_ids(&items)?;
 
         let mut receivers = Vec::new();

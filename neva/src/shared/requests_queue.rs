@@ -16,9 +16,33 @@ use tokio_util::sync::CancellationToken;
 
 const DEFAULT_REQUEST_TTL: Duration = Duration::from_secs(10);
 
+/// Result sent through the internal pending-request channel.
+///
+/// This stays as an explicit enum instead of `Option<Response>` so the timeout
+/// path is self-describing at the type level. The `Response` variant is large,
+/// but this is the hot path and boxing would add a heap allocation to every
+/// successful request; keep the full response inline and allow the size
+/// difference intentionally.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
+pub(crate) enum PendingResponse {
+    /// A regular JSON-RPC response received from the peer.
+    Response(Response),
+    /// A locally generated timeout for an expired pending request.
+    Timeout,
+}
+
+impl PendingResponse {
+    #[inline]
+    #[cfg(test)]
+    fn matches_timeout(&self) -> bool {
+        matches!(self, Self::Timeout)
+    }
+}
+
 /// Represents a request handle
 pub(crate) struct RequestHandle {
-    sender: oneshot::Sender<Response>,
+    sender: oneshot::Sender<PendingResponse>,
     _cancellation_token: CancellationToken,
     expires_at: Option<Instant>,
 }
@@ -67,7 +91,7 @@ impl Ord for RequestExpiry {
 
 impl RequestHandle {
     /// Creates a new [`RequestHandle`]
-    pub(super) fn new(sender: oneshot::Sender<Response>, ttl: Duration) -> Self {
+    pub(super) fn new(sender: oneshot::Sender<PendingResponse>, ttl: Duration) -> Self {
         Self {
             sender,
             _cancellation_token: CancellationToken::new(),
@@ -77,7 +101,7 @@ impl RequestHandle {
 
     /// Sends a [`Response`] to MCP server
     pub(crate) fn send(self, resp: Response) {
-        match self.sender.send(resp) {
+        match self.sender.send(PendingResponse::Response(resp)) {
             Ok(_) => (),
             Err(_err) => {
                 #[cfg(feature = "tracing")]
@@ -92,8 +116,18 @@ impl RequestHandle {
 
     /// Completes the pending request with a timeout response.
     #[inline]
-    pub(crate) fn send_timeout(self, id: RequestId) {
-        self.send(Response::timeout(id));
+    pub(crate) fn send_timeout(self) {
+        match self.sender.send(PendingResponse::Timeout) {
+            Ok(_) => (),
+            Err(_err) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(
+                    logger = "neva",
+                    "Request handler failed to send timeout response: {:?}",
+                    _err
+                );
+            }
+        };
     }
 }
 
@@ -112,7 +146,7 @@ impl RequestQueue {
     /// Pushes a request with [`RequestId`] to the "queue"
     /// and returns a [`oneshot::Receiver`] for the response.
     #[inline]
-    pub(crate) fn push(&self, id: &RequestId) -> oneshot::Receiver<Response> {
+    pub(crate) fn push(&self, id: &RequestId) -> oneshot::Receiver<PendingResponse> {
         let (sender, receiver) = oneshot::channel();
         let mut handle = RequestHandle::new(sender, self.ttl);
         handle.expires_at = None;
@@ -151,7 +185,7 @@ impl RequestQueue {
     pub(crate) fn pop(&self, id: &RequestId) -> Option<RequestHandle> {
         if self.is_expired(id) {
             if let Some((_, handle)) = self.pending.remove(id) {
-                handle.send_timeout(id.clone());
+                handle.send_timeout();
             }
             return None;
         }
@@ -191,7 +225,7 @@ impl RequestQueue {
                 .is_some_and(|handle| handle.expires_at == Some(expires_at));
 
             if should_remove && let Some((_, handle)) = self.pending.remove(&id) {
-                handle.send_timeout(id);
+                handle.send_timeout();
             }
         }
     }
@@ -249,10 +283,11 @@ mod tests {
             unreachable!()
         };
 
-        let Response::Ok(actual) = timeout(Duration::from_secs(1), receiver)
-            .await
-            .expect("Receiver should complete")
-            .expect("Sender should send")
+        let PendingResponse::Response(Response::Ok(actual)) =
+            timeout(Duration::from_secs(1), receiver)
+                .await
+                .expect("Receiver should complete")
+                .expect("Sender should send")
         else {
             unreachable!()
         };
@@ -275,10 +310,11 @@ mod tests {
             unreachable!()
         };
 
-        let Response::Ok(actual) = timeout(Duration::from_secs(1), receiver)
-            .await
-            .expect("Should receive within timeout")
-            .expect("Should receive response")
+        let PendingResponse::Response(Response::Ok(actual)) =
+            timeout(Duration::from_secs(1), receiver)
+                .await
+                .expect("Should receive within timeout")
+                .expect("Should receive response")
         else {
             unreachable!()
         };
@@ -346,12 +382,13 @@ mod tests {
 
         assert!(queue.pop(&id).is_none());
 
-        let response = receiver.await.expect("expired request should resolve");
-        let err = response
-            .into_result::<serde_json::Value>()
-            .expect_err("expired request should resolve as timeout");
-
-        assert_eq!(err.code, crate::error::ErrorCode::Timeout);
+        assert!(
+            receiver
+                .await
+                .expect("expired request should resolve")
+                .matches_timeout(),
+            "expired request should resolve as timeout"
+        );
     }
 
     #[tokio::test]
@@ -369,12 +406,13 @@ mod tests {
         let response = Response::success(live_id, json!({ "content": "done" }));
         queue.complete(response);
 
-        let response = expired.await.expect("expired request should resolve");
-        let err = response
-            .into_result::<serde_json::Value>()
-            .expect_err("expired request should resolve as timeout");
-
-        assert_eq!(err.code, crate::error::ErrorCode::Timeout);
+        assert!(
+            expired
+                .await
+                .expect("expired request should resolve")
+                .matches_timeout(),
+            "expired request should resolve as timeout"
+        );
     }
 
     #[test]

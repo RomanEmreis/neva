@@ -994,7 +994,10 @@ impl Client {
             let pending = pending.clone();
             async move {
                 match tokio::time::timeout(request_timeout, rx).await {
-                    Ok(Ok(resp)) => resp.into_transport_result(),
+                    Ok(Ok(crate::shared::PendingResponse::Response(resp))) => Ok(resp),
+                    Ok(Ok(crate::shared::PendingResponse::Timeout)) => {
+                        Err(Error::new(ErrorCode::Timeout, "Batch request timed out"))
+                    }
                     Ok(Err(_)) => Err(Error::new(
                         ErrorCode::InternalError,
                         "Response channel closed",

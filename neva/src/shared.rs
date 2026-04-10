@@ -6,6 +6,8 @@ use tokio_util::sync::CancellationToken;
 #[cfg(feature = "tracing")]
 pub(crate) use message_registry::MessageRegistry;
 #[cfg(any(feature = "server", feature = "client"))]
+pub(crate) use requests_queue::PendingResponse;
+#[cfg(any(feature = "server", feature = "client"))]
 pub(crate) use requests_queue::RequestQueue;
 #[cfg(feature = "http-server")]
 pub(crate) use sse_session_registry::SseSessionRegistry;

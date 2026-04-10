@@ -773,13 +773,11 @@ impl Context {
             self.options.tasks.require_input(&task_id);
 
             let resp = match timeout(self.timeout, receiver).await {
-                Ok(Ok(resp)) => match resp.into_transport_result() {
-                    Ok(resp) => resp,
-                    Err(err) => {
-                        self.options.tasks.fail(&task_id);
-                        return Err(err);
-                    }
-                },
+                Ok(Ok(crate::shared::PendingResponse::Response(resp))) => resp,
+                Ok(Ok(crate::shared::PendingResponse::Timeout)) => {
+                    self.options.tasks.fail(&task_id);
+                    return Err(Error::new(ErrorCode::Timeout, "Request timed out"));
+                }
                 Ok(Err(_)) => {
                     self.options.tasks.fail(&task_id);
                     return Err(Error::new(
@@ -931,7 +929,10 @@ impl Context {
         self.pending.activate(&id);
 
         match timeout(self.timeout, receiver).await {
-            Ok(Ok(resp)) => resp.into_transport_result(),
+            Ok(Ok(crate::shared::PendingResponse::Response(resp))) => Ok(resp),
+            Ok(Ok(crate::shared::PendingResponse::Timeout)) => {
+                Err(Error::new(ErrorCode::Timeout, "Request timed out"))
+            }
             Ok(Err(_)) => Err(Error::new(
                 ErrorCode::InternalError,
                 "Response channel closed",
