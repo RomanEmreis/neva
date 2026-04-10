@@ -15,7 +15,7 @@ const DEFAULT_REQUEST_TTL: Duration = Duration::from_secs(10);
 pub(crate) struct RequestHandle {
     sender: oneshot::Sender<Response>,
     _cancellation_token: CancellationToken,
-    expires_at: Instant,
+    expires_at: Option<Instant>,
 }
 
 /// Represents a request tracking "queue" that holds a hash map of [`oneshot::Sender`] for requests
@@ -32,7 +32,7 @@ impl RequestHandle {
         Self {
             sender,
             _cancellation_token: CancellationToken::new(),
-            expires_at: Instant::now() + ttl,
+            expires_at: (!ttl.is_zero()).then_some(Instant::now() + ttl),
         }
     }
 
@@ -69,9 +69,18 @@ impl RequestQueue {
         self.cleanup_expired();
 
         let (sender, receiver) = oneshot::channel();
-        self.pending
-            .insert(id.clone(), RequestHandle::new(sender, self.ttl));
+        let mut handle = RequestHandle::new(sender, self.ttl);
+        handle.expires_at = None;
+        self.pending.insert(id.clone(), handle);
         receiver
+    }
+
+    /// Starts the TTL countdown for a queued request after it has been sent.
+    #[inline]
+    pub(crate) fn activate(&self, id: &RequestId) {
+        if let Some(mut handle) = self.pending.get_mut(id) {
+            handle.expires_at = (!self.ttl.is_zero()).then_some(Instant::now() + self.ttl);
+        }
     }
 
     /// Pops the [`RequestHandle`] by [`RequestId`] and removes it from the queue
@@ -98,14 +107,16 @@ impl RequestQueue {
     #[inline]
     fn cleanup_expired(&self) {
         let now = Instant::now();
-        self.pending.retain(|_, handle| handle.expires_at > now);
+        self.pending
+            .retain(|_, handle| handle.expires_at.is_none_or(|expires_at| expires_at > now));
     }
 
     #[inline]
     fn is_expired(&self, id: &RequestId) -> bool {
         self.pending
             .get(id)
-            .is_some_and(|handle| handle.expires_at <= Instant::now())
+            .and_then(|handle| handle.expires_at)
+            .is_some_and(|expires_at| expires_at <= Instant::now())
     }
 }
 
@@ -209,6 +220,7 @@ mod tests {
         let id = RequestId::Number(1);
 
         let _receiver = queue.push(&id);
+        queue.activate(&id);
         std::thread::sleep(Duration::from_millis(10));
 
         assert!(queue.pop(&id).is_none());
@@ -222,6 +234,7 @@ mod tests {
 
         let _expired = queue.push(&expired_id);
         let live = queue.push(&live_id);
+        queue.activate(&expired_id);
 
         std::thread::sleep(Duration::from_millis(10));
 
@@ -234,5 +247,16 @@ mod tests {
             timeout(Duration::from_secs(1), live).await.is_ok(),
             "non-target receiver should remain open"
         );
+    }
+
+    #[test]
+    fn push_does_not_start_ttl_until_activated() {
+        let queue = RequestQueue::new(Duration::from_millis(1));
+        let id = RequestId::Number(1);
+
+        let _receiver = queue.push(&id);
+        std::thread::sleep(Duration::from_millis(10));
+
+        assert!(queue.pop(&id).is_some());
     }
 }

@@ -208,13 +208,15 @@ impl TaskTracker {
 
     #[inline]
     fn is_expired_terminal_task(task: &Task) -> bool {
+        let ttl_ms = i64::try_from(task.ttl).unwrap_or(i64::MAX);
+
         matches!(
             task.status,
             TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
         ) && Utc::now()
             .signed_duration_since(task.created_at)
             .num_milliseconds()
-            >= task.ttl as i64
+            >= ttl_ms
     }
 }
 

@@ -163,7 +163,11 @@ impl RequestHandler {
     pub(super) async fn send_request(&mut self, request: Request) -> Result<Response, Error> {
         let id = request.id();
         let receiver = self.pending.push(&id);
-        self.sender.send(request.into()).await?;
+        if let Err(err) = self.sender.send(request.into()).await {
+            let _ = self.pending.pop(&id);
+            return Err(err);
+        }
+        self.pending.activate(&id);
 
         match timeout(self.timeout, receiver).await {
             Ok(Ok(resp)) => Ok(resp),
@@ -213,6 +217,9 @@ impl RequestHandler {
                 let _ = self.pending.pop(id);
             }
             return Err(e);
+        }
+        for (id, _rx) in &receivers {
+            self.pending.activate(id);
         }
 
         Ok(receivers)

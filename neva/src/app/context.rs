@@ -918,7 +918,11 @@ impl Context {
 
         let id = req.full_id();
         let receiver = self.pending.push(&id);
-        self.sender.send(req.into()).await?;
+        if let Err(err) = self.sender.send(req.into()).await {
+            let _ = self.pending.pop(&id);
+            return Err(err);
+        }
+        self.pending.activate(&id);
 
         match timeout(self.timeout, receiver).await {
             Ok(Ok(resp)) => Ok(resp),
