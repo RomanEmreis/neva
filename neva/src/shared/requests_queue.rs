@@ -77,7 +77,10 @@ impl RequestQueue {
     /// Pops the [`RequestHandle`] by [`RequestId`] and removes it from the queue
     #[inline]
     pub(crate) fn pop(&self, id: &RequestId) -> Option<RequestHandle> {
-        self.cleanup_expired();
+        if self.is_expired(id) {
+            let _ = self.pending.remove(id);
+            return None;
+        }
 
         self.pending.remove(id).map(|(_, handle)| handle)
     }
@@ -96,6 +99,13 @@ impl RequestQueue {
     fn cleanup_expired(&self) {
         let now = Instant::now();
         self.pending.retain(|_, handle| handle.expires_at > now);
+    }
+
+    #[inline]
+    fn is_expired(&self, id: &RequestId) -> bool {
+        self.pending
+            .get(id)
+            .is_some_and(|handle| handle.expires_at <= Instant::now())
     }
 }
 
@@ -202,5 +212,27 @@ mod tests {
         std::thread::sleep(Duration::from_millis(10));
 
         assert!(queue.pop(&id).is_none());
+    }
+
+    #[tokio::test]
+    async fn pop_does_not_close_non_target_receivers() {
+        let queue = RequestQueue::new(Duration::from_millis(5));
+        let expired_id = RequestId::Number(1);
+        let live_id = RequestId::Number(2);
+
+        let _expired = queue.push(&expired_id);
+        let live = queue.push(&live_id);
+
+        std::thread::sleep(Duration::from_millis(10));
+
+        assert!(queue.pop(&expired_id).is_none());
+
+        let response = Response::success(live_id, json!({ "content": "done" }));
+        queue.complete(response);
+
+        assert!(
+            timeout(Duration::from_secs(1), live).await.is_ok(),
+            "non-target receiver should remain open"
+        );
     }
 }

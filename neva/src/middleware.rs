@@ -181,14 +181,9 @@ impl Middlewares {
         let request_handler = self.pipeline.last().unwrap().clone();
         let mut next: Next = {
             let dummy: Next = Arc::new(|ctx| Box::pin(async move { Response::empty(ctx.id()) }));
-            Arc::new(move |ctx| {
-                request_handler(
-                    ctx,
-                    dummy.clone(),
-                )
-            })
+            Arc::new(move |ctx| request_handler(ctx, dummy.clone()))
         };
-        
+
         for mw in self.pipeline.iter().rev().skip(1) {
             let current_mw: Middleware = mw.clone();
             let prev_next: Next = next.clone();

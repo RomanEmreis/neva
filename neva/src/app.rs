@@ -29,8 +29,7 @@ use tokio_util::sync::CancellationToken;
 #[cfg(feature = "tasks")]
 use crate::types::{
     CancelTaskRequestParams, GetTaskPayloadRequestParams, GetTaskRequestParams,
-    ListTasksRequestParams, ListTasksResult, Task, TaskPayload,
-    cursor::Pagination
+    ListTasksRequestParams, ListTasksResult, Task, TaskPayload, cursor::Pagination,
 };
 #[cfg(feature = "tasks")]
 use context::ToolOrTaskResponse;
