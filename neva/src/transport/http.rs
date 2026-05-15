@@ -789,7 +789,6 @@ mod engine_smoke_tests {
         }
     }
 
-
     #[tokio::test(flavor = "multi_thread")]
     async fn engine_run_is_invoked_and_cancellation_propagates() {
         let started = Arc::new(AtomicBool::new(false));
