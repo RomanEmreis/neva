@@ -87,32 +87,36 @@ pub(crate) const PROTOCOL_VERSIONS: [&str; 4] =
 
 #[cfg(feature = "http-server")]
 pub mod auth {
-    //! Authentication utilities — the [`Claims`] trait + (under the Volga
-    //! adapter) the bearer-auth configuration types.
+    //! Authentication utilities — neva's engine-neutral [`Claims`] trait
+    //! + (under the Volga adapter) the bearer-auth configuration types.
 
-    /// `Claims` is the trait neva uses for typed per-tool authorization.
+    /// `Claims` is neva's engine-neutral trait for typed per-tool
+    /// authorization. Implement this for your custom claims type to enable
+    /// `with_roles` / `with_permissions` gating regardless of which HTTP
+    /// engine delivered the request.
     ///
-    /// Under the default Volga adapter this is `volga::auth::AuthClaims`;
-    /// under the engine-agnostic build, it's neva's local definition with
-    /// identical method shape (`role`, `roles`, `permissions`).
-    #[cfg(feature = "http-server-volga")]
-    pub use volga::auth::AuthClaims as Claims;
-
-    #[cfg(not(feature = "http-server-volga"))]
+    /// The Volga adapter's `DefaultClaims` already implements both this
+    /// trait and `volga::auth::AuthClaims`, so the same per-tool validator
+    /// runs across every engine.
     pub use crate::transport::http::core::types::Claims;
 
-    #[cfg(not(feature = "http-server-volga"))]
-    pub use crate::transport::http::core::types::DefaultClaims;
-
     /// `DefaultClaims` is a pre-built [`Claims`] impl matching the JWT
-    /// standard claim names.
-    #[cfg(feature = "http-server-volga")]
-    pub use crate::transport::http::server::volga::auth_config::DefaultClaims;
+    /// standard claim names. Engine-agnostic — under the Volga adapter
+    /// it additionally implements `volga::auth::AuthClaims` so it can
+    /// be fed straight into Volga's bearer-auth pipeline.
+    pub use crate::transport::http::core::types::DefaultClaims;
 
     /// `AuthConfig` is the Volga-flavored builder used with
     /// `HttpServer::with_auth(...)`. Available only under the Volga adapter.
     #[cfg(feature = "http-server-volga")]
     pub use crate::transport::http::server::volga::auth_config::AuthConfig;
+
+    /// Volga's claims trait, re-exported for users who need to plug a
+    /// custom claims type into Volga's `Authorizer<C>`. For neva's own
+    /// per-tool checks, implement [`Claims`] instead — that one is
+    /// engine-neutral.
+    #[cfg(feature = "http-server-volga")]
+    pub use volga::auth::AuthClaims;
 
     // Volga's `Claims` is a derive macro in the macro namespace; re-export
     // it as `ClaimsDerive` so it doesn't collide with the `Claims` trait

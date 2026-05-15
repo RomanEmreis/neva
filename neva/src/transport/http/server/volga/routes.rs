@@ -28,8 +28,8 @@ use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt as _;
 use std::sync::Arc;
 
-use super::auth_config::DefaultClaims;
 use super::responder::VolgaSseResponder;
+use crate::transport::http::core::types::DefaultClaims;
 
 /// Read the body of a Volga `HttpRequest` into a buffer.
 ///

@@ -87,21 +87,26 @@ pub trait SseResponder: Send + Sync + 'static {
 
 /// Typed claims contract used by neva's per-tool authorization checks.
 ///
-/// Identical shape to `volga::auth::AuthClaims`. When the
-/// `http-server-volga` feature is active, [`crate::auth::Claims`] is a
-/// re-export of `volga::auth::AuthClaims`; this local definition is used
-/// only in the engine-agnostic build.
+/// This is neva's engine-neutral trait. Engine adapters that want their
+/// own claims type (axum, hyper, ...) implement this trait so that
+/// `with_roles` / `with_permissions` on tools, prompts, and resources
+/// continue to gate access regardless of which HTTP stack delivered the
+/// request.
+///
+/// Under the default Volga adapter, `volga::auth::AuthClaims` is also
+/// re-exported as [`crate::auth::Claims`], and the Volga-flavored
+/// `DefaultClaims` implements this trait too — so the same validator
+/// runs for every engine.
 ///
 /// # Example
 ///
 /// ```rust,ignore
 /// struct MyClaims { sub: String, role: String }
 ///
-/// impl neva::transport::http::core::types::Claims for MyClaims {
+/// impl neva::auth::Claims for MyClaims {
 ///     fn role(&self) -> Option<&str> { Some(&self.role) }
 /// }
 /// ```
-#[cfg(not(feature = "http-server-volga"))]
 pub trait Claims: Send + Sync + 'static {
     /// Single role for this subject, if any.
     fn role(&self) -> Option<&str> {
@@ -117,16 +122,33 @@ pub trait Claims: Send + Sync + 'static {
     }
 }
 
-/// Default claims used when no custom claims type is configured.
-///
-/// Identical fields and serde shape to the Volga-flavored `DefaultClaims`.
-/// The local copy is used only in the non-Volga build.
-#[cfg(not(feature = "http-server-volga"))]
+/// Engine-agnostic pre-built [`Claims`] type matching the JWT standard
+/// claim names. Available for every HTTP engine — under the Volga
+/// adapter it also implements `volga::auth::AuthClaims` so it can be
+/// fed straight into Volga's bearer-auth pipeline.
 #[derive(Default, Clone, Debug, serde::Deserialize)]
 pub struct DefaultClaims {
-    /// JWT `sub` claim.
+    /// JWT `sub` claim — subject.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sub: Option<String>,
+    /// JWT `iss` claim — issuer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iss: Option<String>,
+    /// JWT `aud` claim — audience.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aud: Option<String>,
+    /// JWT `exp` claim — expiration time (seconds since epoch).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exp: Option<i64>,
+    /// JWT `nbf` claim — not-before time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nbf: Option<i64>,
+    /// JWT `iat` claim — issued-at time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iat: Option<i64>,
+    /// JWT `jti` claim — token id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jti: Option<String>,
     /// Subject role.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
@@ -138,7 +160,6 @@ pub struct DefaultClaims {
     pub permissions: Option<Vec<String>>,
 }
 
-#[cfg(not(feature = "http-server-volga"))]
 impl Claims for DefaultClaims {
     fn role(&self) -> Option<&str> {
         self.role.as_deref()

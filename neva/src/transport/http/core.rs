@@ -9,6 +9,7 @@ pub mod context;
 pub mod engine;
 pub mod types;
 
+pub(crate) mod auth;
 pub(crate) mod cleanup;
 pub(crate) mod dispatch;
 

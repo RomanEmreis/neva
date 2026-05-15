@@ -29,8 +29,8 @@ use std::{
 };
 use tokio::time::timeout;
 
-#[cfg(feature = "http-server-volga")]
-use crate::transport::http::server::volga::auth_config::{validate_permissions, validate_roles};
+#[cfg(feature = "http-server")]
+use crate::transport::http::core::auth::{validate_permissions, validate_roles};
 #[cfg(feature = "tasks")]
 use crate::{
     shared::Either,
@@ -87,7 +87,6 @@ pub struct Context {
 
     /// Represents JWT claims of the current request
     #[cfg(feature = "http-server")]
-    #[allow(dead_code)] // read by tool handlers + (under Volga) by validate_claims
     pub(crate) claims: Option<DefaultClaims>,
 
     /// Represents MCP server options
@@ -488,7 +487,7 @@ impl Context {
         let opt = self.options.clone();
         match opt.read_resource(&params.uri) {
             Some((handler, args)) => {
-                #[cfg(feature = "http-server-volga")]
+                #[cfg(feature = "http-server")]
                 {
                     let template = opt.resources_templates.get(&handler.template).await;
                     self.validate_claims(
@@ -512,7 +511,7 @@ impl Context {
         match self.options.get_prompt(&params.name).await {
             None => Err(Error::new(ErrorCode::InvalidParams, "Prompt not found")),
             Some(prompt) => {
-                #[cfg(feature = "http-server-volga")]
+                #[cfg(feature = "http-server")]
                 self.validate_claims(prompt.roles.as_deref(), prompt.permissions.as_deref())?;
                 prompt.call(params.with_context(self).into()).await
             }
@@ -527,7 +526,7 @@ impl Context {
         match self.options.get_tool(&params.name).await {
             None => Err(Error::new(ErrorCode::InvalidParams, "Tool not found")),
             Some(tool) => {
-                #[cfg(feature = "http-server-volga")]
+                #[cfg(feature = "http-server")]
                 self.validate_claims(tool.roles.as_deref(), tool.permissions.as_deref())?;
                 tool.call(params.with_context(self).into()).await
             }
@@ -543,7 +542,7 @@ impl Context {
         match self.options.get_tool(&params.name).await {
             None => Err(Error::new(ErrorCode::InvalidParams, "Tool not found")),
             Some(tool) => {
-                #[cfg(feature = "http-server-volga")]
+                #[cfg(feature = "http-server")]
                 self.validate_claims(tool.roles.as_deref(), tool.permissions.as_deref())?;
 
                 let task_support = tool.task_support();
@@ -857,7 +856,7 @@ impl Context {
     }
 
     #[inline]
-    #[cfg(feature = "http-server-volga")]
+    #[cfg(feature = "http-server")]
     fn validate_claims(
         &self,
         roles: Option<&[String]>,

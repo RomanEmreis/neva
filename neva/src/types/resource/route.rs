@@ -23,7 +23,7 @@ pub(crate) struct Route {
 
 /// A handler function for a resource route
 pub(crate) struct ResourceHandler {
-    #[cfg(feature = "http-server-volga")]
+    #[cfg(feature = "http-server")]
     pub(crate) template: String,
     handler: RequestHandler<ReadResourceResult>,
 }
@@ -91,7 +91,7 @@ impl Route {
         }
 
         current.handler = Some(ResourceHandler {
-            #[cfg(feature = "http-server-volga")]
+            #[cfg(feature = "http-server")]
             template: _template.clone(),
             handler: handler.clone(),
         });
