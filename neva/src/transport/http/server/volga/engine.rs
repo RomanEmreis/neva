@@ -7,11 +7,16 @@
 
 use super::auth_config::AuthConfig;
 use crate::error::{Error, ErrorCode};
-use crate::transport::http::core::{context::HttpContext, engine::HttpEngine};
-use ::volga::App;
+use crate::transport::http::core::{
+    context::HttpContext,
+    engine::HttpEngine,
+    types::{HttpRequest as NeutralRequest, HttpResponse as NeutralResponse},
+};
+use ::volga::{App, HttpBody, HttpRequest, HttpResult};
 #[cfg(feature = "server-tls")]
 use ::volga::tls::TlsConfig;
-use std::{future::Future, sync::Arc};
+use bytes::BytesMut;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use super::responder::VolgaSseResponder;
@@ -48,47 +53,93 @@ impl std::fmt::Debug for VolgaEngine {
 }
 
 impl HttpEngine for VolgaEngine {
+    type Request = HttpRequest;
+    type Response = HttpResult;
     type SseResponder = VolgaSseResponder;
 
-    #[allow(clippy::manual_async_fn)]
-    fn run(
-        self,
-        ctx: Arc<HttpContext>,
-        token: CancellationToken,
-    ) -> impl Future<Output = Result<(), Error>> + Send {
-        async move {
-            let addr = ctx.addr();
-            let endpoint = ctx.endpoint();
-
-            let mut server = App::new().bind(addr).with_no_delay().without_greeter();
-
-            if let Some(auth) = self.auth {
-                let (bearer, rules) = auth.into_parts();
-                server = server.with_bearer_auth(|_| bearer);
-                server.authorize(rules);
+    async fn into_neutral(req: Self::Request) -> NeutralRequest {
+        let mut builder = http::Request::builder()
+            .method(req.method().clone())
+            .uri(req.uri().clone())
+            .version(req.version());
+        if let Some(headers_mut) = builder.headers_mut() {
+            for (k, v) in req.headers().iter() {
+                headers_mut.append(k, v.clone());
             }
-
-            #[cfg(feature = "server-tls")]
-            if let Some(tls) = self.tls {
-                server = server.set_tls(tls);
-            }
-
-            server
-                .add_singleton(ctx.clone())
-                .map_err(handle_http_error)
-                .group(endpoint, |mcp| {
-                    mcp.map_post("/", routes::post);
-                    mcp.map_get("/", routes::get);
-                    mcp.map_delete("/", routes::delete);
-                });
-
-            if let Err(e) = server.run().await {
-                token.cancel();
-                return Err(Error::new(ErrorCode::InternalError, e.to_string()));
-            }
-            Ok(())
         }
+        let body = read_body(req.into_body()).await.unwrap_or_default();
+        builder.body(body).expect("valid request")
     }
+
+    fn into_engine(resp: NeutralResponse) -> Self::Response {
+        let (parts, body) = resp.into_parts();
+        let status = parts.status.as_u16();
+
+        let mut buf = BytesMut::with_capacity(body.len());
+        buf.extend_from_slice(&body);
+        let http_body = HttpBody::full(buf.freeze());
+
+        let mut builder = ::volga::builder!(status);
+        for (name, value) in parts.headers.iter() {
+            builder = builder.header_raw(name.as_str(), value.as_bytes());
+        }
+        builder.body(http_body)
+    }
+
+    async fn run(self, ctx: HttpContext, token: CancellationToken) -> Result<(), Error> {
+        // Volga wires shared state through DI as `Arc<HttpContext>`, so
+        // wrap once here for the duration of the engine's lifetime.
+        let ctx = Arc::new(ctx);
+        let addr = ctx.addr().to_owned();
+        let endpoint = ctx.endpoint().to_owned();
+
+        let mut server = App::new()
+            .bind(addr.as_str())
+            .with_no_delay()
+            .without_greeter();
+
+        if let Some(auth) = self.auth {
+            let (bearer, rules) = auth.into_parts();
+            server = server.with_bearer_auth(|_| bearer);
+            server.authorize(rules);
+        }
+
+        #[cfg(feature = "server-tls")]
+        if let Some(tls) = self.tls {
+            server = server.set_tls(tls);
+        }
+
+        server
+            .add_singleton(ctx)
+            .map_err(handle_http_error)
+            .group(endpoint.as_str(), |mcp| {
+                mcp.map_post("/", routes::post);
+                mcp.map_get("/", routes::get);
+                mcp.map_delete("/", routes::delete);
+            });
+
+        if let Err(e) = server.run().await {
+            token.cancel();
+            return Err(Error::new(ErrorCode::InternalError, e.to_string()));
+        }
+        Ok(())
+    }
+}
+
+/// Read the body of a Volga `HttpRequest` into a buffer.
+///
+/// MCP JSON-RPC frames are bounded; falling back to an empty body on
+/// transport failure lets the protocol layer reply with a clean
+/// JSON-RPC `ParseError` instead of a 500.
+async fn read_body(body: HttpBody) -> Result<bytes::Bytes, ::volga::error::Error> {
+    use futures_util::StreamExt as _;
+    let mut stream = body.into_data_stream();
+    let mut buf = BytesMut::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| ::volga::error::Error::server_error(e.to_string()))?;
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf.freeze())
 }
 
 async fn handle_http_error(_err: ::volga::error::Error) {

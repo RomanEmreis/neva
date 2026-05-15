@@ -450,7 +450,7 @@ where
         &mut self,
     ) -> Result<
         (
-            std::sync::Arc<crate::transport::http::core::context::HttpContext>,
+            crate::transport::http::core::context::HttpContext,
             tokio::sync::mpsc::Receiver<Message>,
         ),
         Error,
@@ -466,15 +466,15 @@ where
             self.sse_buffer_capacity,
         ));
         let ctx = crate::transport::http::core::context::HttpContext {
-            addr: self.url.addr,
-            endpoint: self.url.endpoint,
+            addr: self.url.addr.into(),
+            endpoint: self.url.endpoint.into(),
             pending,
             sse_registry,
             inbound_tx: self.receiver.tx.clone(),
             sse_live_queue_capacity: self.sse_live_queue_capacity,
             sse_log_queue_capacity: self.sse_log_queue_capacity,
         };
-        Ok((std::sync::Arc::new(ctx), sender_rx))
+        Ok((ctx, sender_rx))
     }
 }
 
@@ -643,31 +643,29 @@ where
             .take()
             .expect("HttpServer::start called twice or after engine was moved");
 
-        let ctx_for_dispatch = ctx.clone();
-        let ctx_for_cleanup = ctx.clone();
-        let ctx_for_engine = ctx.clone();
+        let pending = ctx.pending.clone();
+        let sse_registry = ctx.sse_registry.clone();
+        let cleanup_registry = ctx.sse_registry.clone();
         let cleanup_interval = self.sse_cleanup_interval;
         let session_ttl = self.sse_session_ttl;
         let engine_token = token.clone();
 
         tokio::spawn(async move {
-            let pending = ctx_for_dispatch.pending.clone();
-            let registry = ctx_for_dispatch.sse_registry.clone();
             tokio::join!(
                 crate::transport::http::core::dispatch::dispatch(
                     pending,
-                    registry,
+                    sse_registry,
                     sender_rx,
                     engine_token.clone(),
                 ),
                 crate::transport::http::core::cleanup::cleanup_stale_sessions(
-                    ctx_for_cleanup.sse_registry.clone(),
+                    cleanup_registry,
                     cleanup_interval,
                     session_ttl,
                     engine_token.clone(),
                 ),
                 async {
-                    if let Err(_e) = engine.run(ctx_for_engine, engine_token.clone()).await {
+                    if let Err(_e) = engine.run(ctx, engine_token.clone()).await {
                         #[cfg(feature = "tracing")]
                         tracing::error!(logger = "neva", "HTTP engine error: {:?}", _e);
                         engine_token.cancel();
@@ -736,7 +734,9 @@ mod engine_smoke_tests {
     use crate::error::Error;
     use crate::transport::Transport;
     use crate::transport::http::core::{
-        context::HttpContext, engine::HttpEngine, types::SseResponder,
+        context::HttpContext,
+        engine::HttpEngine,
+        types::{HttpRequest, HttpResponse, SseResponder},
     };
     use crate::types::Message;
     use std::future::Future;
@@ -761,11 +761,21 @@ mod engine_smoke_tests {
     }
 
     impl HttpEngine for MockEngine {
+        type Request = HttpRequest;
+        type Response = HttpResponse;
         type SseResponder = MockResponder;
+
+        async fn into_neutral(req: Self::Request) -> HttpRequest {
+            req
+        }
+
+        fn into_engine(resp: HttpResponse) -> Self::Response {
+            resp
+        }
 
         fn run(
             self,
-            _ctx: Arc<HttpContext>,
+            _ctx: HttpContext,
             token: CancellationToken,
         ) -> impl Future<Output = Result<(), Error>> + Send {
             let started = self.started;
@@ -778,6 +788,7 @@ mod engine_smoke_tests {
             }
         }
     }
+
 
     #[tokio::test(flavor = "multi_thread")]
     async fn engine_run_is_invoked_and_cancellation_propagates() {

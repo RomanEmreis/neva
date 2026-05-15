@@ -15,14 +15,17 @@ pub(crate) type RequestMap = Arc<DashMap<crate::types::RequestId, oneshot::Sende
 /// the bound address, the endpoint prefix, the pending-request map,
 /// the SSE session registry, and per-session queue capacities.
 ///
-/// Engines treat this type as opaque — its fields are `pub(crate)`.
-/// The only operations engines need are reading `addr`/`endpoint`,
-/// cloning the `Arc<HttpContext>` into route handlers, and passing
-/// `&HttpContext` to the [`handlers`](super::handlers) helpers.
-#[derive(Debug)]
+/// All fields are cheaply cloneable (Arc / Copy), so engines can move
+/// the whole context into route handlers — wrap it in `Arc` only if
+/// the framework's state pattern requires that (Volga `add_singleton`,
+/// axum `with_state`).
+///
+/// Fields are `pub(crate)`; engines interact through the public
+/// accessors and the helpers in [`super::handlers`].
+#[derive(Clone, Debug)]
 pub struct HttpContext {
-    pub(crate) addr: &'static str,
-    pub(crate) endpoint: &'static str,
+    pub(crate) addr: Arc<str>,
+    pub(crate) endpoint: Arc<str>,
     pub(crate) pending: RequestMap,
     pub(crate) sse_registry: Arc<SseSessionRegistry>,
     pub(crate) inbound_tx: mpsc::Sender<Result<Message, Error>>,
@@ -32,12 +35,12 @@ pub struct HttpContext {
 
 impl HttpContext {
     /// The address this server is bound to (e.g. `"127.0.0.1:3000"`).
-    pub fn addr(&self) -> &'static str {
-        self.addr
+    pub fn addr(&self) -> &str {
+        &self.addr
     }
 
     /// The MCP endpoint prefix (e.g. `"/mcp"`).
-    pub fn endpoint(&self) -> &'static str {
-        self.endpoint
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
     }
 }

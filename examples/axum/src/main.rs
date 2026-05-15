@@ -10,9 +10,11 @@
 //! into neva's Streamable HTTP transport. It pulls in `neva` with only the
 //! engine-agnostic `http-server` feature (no Volga in deps), implements
 //! the [`HttpEngine`] contract for an `AxumEngine`, and wires it into
-//! `HttpServer::from_engine`.
+//! `HttpServer::from_engine`. Conversion between axum's native types and
+//! neva's neutral [`HttpRequest`] / [`HttpResponse`] lives on the engine
+//! itself; route handlers stay one-liners.
 
-use std::{convert::Infallible, future::Future, sync::Arc};
+use std::{convert::Infallible, sync::Arc};
 
 use axum::{
     Router,
@@ -63,33 +65,65 @@ impl SseResponder for AxumSseResponder {
 struct AxumEngine;
 
 impl HttpEngine for AxumEngine {
+    type Request = axum::http::Request<Body>;
+    type Response = Response;
     type SseResponder = AxumSseResponder;
 
-    fn run(
-        self,
-        ctx: Arc<HttpContext>,
-        token: CancellationToken,
-    ) -> impl Future<Output = Result<(), Error>> + Send {
-        async move {
-            let addr = ctx.addr();
-            let endpoint = ctx.endpoint();
+    async fn into_neutral(req: Self::Request) -> HttpRequest {
+        let (parts, body) = req.into_parts();
+        let bytes = body
+            .collect()
+            .await
+            .map(|c| c.to_bytes())
+            .unwrap_or_default();
 
-            let app = Router::new()
-                .route(
-                    endpoint,
-                    post(post_handler).get(get_handler).delete(delete_handler),
-                )
-                .with_state(ctx);
-
-            let listener = tokio::net::TcpListener::bind(addr)
-                .await
-                .map_err(|e| Error::new(ErrorCode::InternalError, e.to_string()))?;
-
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async move { token.cancelled().await })
-                .await
-                .map_err(|e| Error::new(ErrorCode::InternalError, e.to_string()))
+        let mut builder = http::Request::builder()
+            .method(parts.method)
+            .uri(parts.uri)
+            .version(parts.version);
+        if let Some(headers) = builder.headers_mut() {
+            for (name, value) in parts.headers.iter() {
+                headers.append(name, value.clone());
+            }
         }
+        builder.body(bytes).expect("valid request")
+    }
+
+    fn into_engine(resp: HttpResponse) -> Self::Response {
+        let (parts, body) = resp.into_parts();
+        let mut builder = http::Response::builder()
+            .status(parts.status)
+            .version(parts.version);
+        if let Some(headers) = builder.headers_mut() {
+            for (name, value) in parts.headers.iter() {
+                headers.append(name, value.clone());
+            }
+        }
+        builder.body(Body::from(body)).expect("valid response")
+    }
+
+    async fn run(self, ctx: HttpContext, token: CancellationToken) -> Result<(), Error> {
+        let addr = ctx.addr().to_owned();
+        let endpoint = ctx.endpoint().to_owned();
+        // axum's `State` extractor wants a cheaply-clonable handle;
+        // wrap the (already cheap) context in `Arc` once for sharing.
+        let ctx = Arc::new(ctx);
+
+        let app = Router::new()
+            .route(
+                &endpoint,
+                post(post_handler).get(get_handler).delete(delete_handler),
+            )
+            .with_state(ctx);
+
+        let listener = tokio::net::TcpListener::bind(&addr)
+            .await
+            .map_err(|e| Error::new(ErrorCode::InternalError, e.to_string()))?;
+
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move { token.cancelled().await })
+            .await
+            .map_err(|e| Error::new(ErrorCode::InternalError, e.to_string()))
     }
 }
 
@@ -97,27 +131,21 @@ async fn post_handler(
     State(ctx): State<Arc<HttpContext>>,
     req: axum::http::Request<Body>,
 ) -> Response {
-    let neutral = into_neutral(req).await;
-    let resp = handlers::handle_post(neutral, &ctx).await;
-    from_neutral(resp)
+    handlers::dispatch_post::<AxumEngine>(req, &ctx).await
 }
 
 async fn delete_handler(
     State(ctx): State<Arc<HttpContext>>,
     req: axum::http::Request<Body>,
 ) -> Response {
-    let neutral = into_neutral(req).await;
-    let resp = handlers::handle_delete(neutral, &ctx).await;
-    from_neutral(resp)
+    handlers::dispatch_delete::<AxumEngine>(req, &ctx).await
 }
 
 async fn get_handler(
     State(ctx): State<Arc<HttpContext>>,
     req: axum::http::Request<Body>,
 ) -> Response {
-    let neutral = into_neutral(req).await;
-    let outcome = handlers::handle_get_sse(neutral, &ctx, &AxumSseResponder).await;
-    match outcome {
+    match handlers::dispatch_get_sse::<AxumEngine>(req, &ctx, &AxumSseResponder).await {
         SseResponse::Stream { headers, stream } => {
             let sse = Sse::new(stream).keep_alive(KeepAlive::default());
             let mut response: Response = sse.into_response();
@@ -126,44 +154,8 @@ async fn get_handler(
             }
             response
         }
-        SseResponse::Status(resp) => from_neutral(resp),
+        SseResponse::Status(resp) => AxumEngine::into_engine(resp),
     }
-}
-
-/// Convert axum's `Request<Body>` into the neutral `http::Request<Bytes>`
-/// that neva's protocol helpers consume.
-async fn into_neutral(req: axum::http::Request<Body>) -> HttpRequest {
-    let (parts, body) = req.into_parts();
-    let bytes = body
-        .collect()
-        .await
-        .map(|c| c.to_bytes())
-        .unwrap_or_default();
-
-    let mut builder = http::Request::builder()
-        .method(parts.method)
-        .uri(parts.uri)
-        .version(parts.version);
-    if let Some(headers) = builder.headers_mut() {
-        for (name, value) in parts.headers.iter() {
-            headers.append(name, value.clone());
-        }
-    }
-    builder.body(bytes).expect("valid request")
-}
-
-/// Convert neva's neutral `http::Response<Bytes>` into an axum response.
-fn from_neutral(resp: HttpResponse) -> Response {
-    let (parts, body) = resp.into_parts();
-    let mut builder = http::Response::builder()
-        .status(parts.status)
-        .version(parts.version);
-    if let Some(headers) = builder.headers_mut() {
-        for (name, value) in parts.headers.iter() {
-            headers.append(name, value.clone());
-        }
-    }
-    builder.body(Body::from(body)).expect("valid response")
 }
 
 #[tool]

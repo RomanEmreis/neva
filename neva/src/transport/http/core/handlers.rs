@@ -19,10 +19,55 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use super::{
     context::HttpContext,
+    engine::HttpEngine,
     types::{HttpRequest, HttpResponse, SseResponder, SseResponse},
 };
 
 pub(crate) const MCP_SESSION_ID: &str = "Mcp-Session-Id";
+
+/// One-call POST pipeline for engine adapters: convert the engine-native
+/// request into neva's neutral form via [`HttpEngine::into_neutral`],
+/// run the JSON-RPC dispatch via [`handle_post`], then convert the
+/// neutral response back via [`HttpEngine::into_engine`].
+///
+/// Lets a route handler collapse to a single line, e.g. (axum):
+///
+/// ```rust,ignore
+/// async fn post_handler(
+///     State(ctx): State<Arc<HttpContext>>,
+///     req: axum::Request<Body>,
+/// ) -> axum::Response {
+///     handlers::dispatch_post::<MyEngine>(req, &ctx).await
+/// }
+/// ```
+pub async fn dispatch_post<E: HttpEngine>(req: E::Request, ctx: &HttpContext) -> E::Response {
+    let neutral = E::into_neutral(req).await;
+    let resp = handle_post(neutral, ctx).await;
+    E::into_engine(resp)
+}
+
+/// One-call DELETE pipeline for engine adapters. See [`dispatch_post`].
+pub async fn dispatch_delete<E: HttpEngine>(req: E::Request, ctx: &HttpContext) -> E::Response {
+    let neutral = E::into_neutral(req).await;
+    let resp = handle_delete(neutral, ctx).await;
+    E::into_engine(resp)
+}
+
+/// One-call GET-SSE pipeline for engine adapters: converts the
+/// engine-native request to neutral and runs the GET-SSE handshake.
+///
+/// The returned [`SseResponse`] is engine-agnostic; the engine still
+/// matches `Stream { headers, stream }` (wrapping the stream in its
+/// native SSE response type) vs `Status(resp)` (passing `resp` through
+/// [`HttpEngine::into_engine`]).
+pub async fn dispatch_get_sse<E: HttpEngine>(
+    req: E::Request,
+    ctx: &HttpContext,
+    responder: &E::SseResponder,
+) -> SseResponse<impl Stream<Item = <E::SseResponder as SseResponder>::Event> + Send + 'static> {
+    let neutral = E::into_neutral(req).await;
+    handle_get_sse(neutral, ctx, responder).await
+}
 
 /// Handle a POST `/{endpoint}` request — the JSON-RPC message ingress.
 ///
@@ -300,8 +345,8 @@ mod tests {
         let (inbound_tx, inbound_rx) =
             mpsc::channel::<Result<crate::types::Message, crate::error::Error>>(8);
         let ctx = HttpContext {
-            addr: "127.0.0.1:0",
-            endpoint: "/mcp",
+            addr: "127.0.0.1:0".into(),
+            endpoint: "/mcp".into(),
             pending: Arc::new(DashMap::new()),
             sse_registry: Arc::new(SseSessionRegistry::new(8)),
             inbound_tx,

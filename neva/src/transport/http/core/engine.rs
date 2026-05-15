@@ -1,22 +1,26 @@
 //! The [`HttpEngine`] contract — what an HTTP-stack adapter must implement.
 
 use crate::error::Error;
-use std::{future::Future, sync::Arc};
+use std::future::Future;
 use tokio_util::sync::CancellationToken;
 
-use super::{context::HttpContext, types::SseResponder};
+use super::{
+    context::HttpContext,
+    types::{HttpRequest, HttpResponse, SseResponder},
+};
 
 /// Contract for an HTTP framework adapter.
 ///
-/// One method. The engine binds to `ctx.addr`, registers three routes
-/// (`POST`, `GET`, `DELETE` on `ctx.endpoint`), calls neva's helpers in
-/// [`super::handlers`] inside its route handlers, and runs until `token`
-/// fires.
+/// The engine declares its native request/response types, supplies the
+/// two conversion bridges, and runs an HTTP server until `token` fires.
+/// All JSON-RPC framing, SSE replay/dedup, batch fast-path, and oneshot
+/// pending logic stays in neva — an engine adapter is the thinnest
+/// possible shim from neva's neutral types onto a framework's native
+/// types.
 ///
-/// All protocol logic — JSON-RPC framing, SSE replay/dedup, batch
-/// fast-path, oneshot pending — lives in neva. An engine adapter is the
-/// thinnest possible shim from neva's neutral types onto the framework's
-/// native types.
+/// Route handlers typically just call the `dispatch_*` helpers in
+/// [`super::handlers`], which compose conversion + protocol dispatch +
+/// conversion-back in one call.
 ///
 /// # Example
 ///
@@ -24,25 +28,39 @@ use super::{context::HttpContext, types::SseResponder};
 /// struct MyEngine;
 ///
 /// impl HttpEngine for MyEngine {
+///     type Request     = framework::Request;
+///     type Response    = framework::Response;
 ///     type SseResponder = MyResponder;
-///     async fn run(
-///         self,
-///         ctx: Arc<HttpContext>,
-///         token: CancellationToken,
-///     ) -> Result<(), Error> {
-///         // bind ctx.addr, wire routes on ctx.endpoint, call handlers::*
-///         Ok(())
-///     }
+///
+///     async fn into_neutral(req: Self::Request) -> HttpRequest { ... }
+///     fn into_engine(resp: HttpResponse) -> Self::Response { ... }
+///
+///     async fn run(self, ctx: HttpContext, token: CancellationToken)
+///         -> Result<(), Error> { ... }
 /// }
 /// ```
 pub trait HttpEngine: Send + Sync + 'static {
-    /// Engine-native SSE event type producer.
-    type SseResponder: SseResponder;
+    /// Engine-native inbound request type (e.g. `axum::Request<Body>`).
+    type Request: Send + 'static;
+
+    /// Engine-native outbound response type (e.g. `axum::Response`).
+    type Response: Send + 'static;
+
+    /// Bridge that builds engine-native SSE events from MCP messages.
+    type SseResponder: SseResponder + Clone;
+
+    /// Convert an engine-native request into neva's neutral
+    /// [`HttpRequest`]. The body must be fully buffered before return.
+    fn into_neutral(req: Self::Request) -> impl Future<Output = HttpRequest> + Send;
+
+    /// Build an engine-native response from neva's neutral
+    /// [`HttpResponse`].
+    fn into_engine(resp: HttpResponse) -> Self::Response;
 
     /// Run the HTTP server until `token` fires.
     fn run(
         self,
-        ctx: Arc<HttpContext>,
+        ctx: HttpContext,
         token: CancellationToken,
     ) -> impl Future<Output = Result<(), Error>> + Send;
 }
