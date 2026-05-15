@@ -154,16 +154,44 @@ impl McpOptions {
         self
     }
 
-    /// Sets Streamable HTTP as a transport protocol
+    /// Sets Streamable HTTP as a transport protocol.
+    ///
+    /// Accepts any `HttpServer<C, E>` for any engine `E: HttpEngine`. When
+    /// no engine is specified (using the default `HttpServer::new(...)`),
+    /// the Volga engine is used.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Default (Volga):
+    /// let opts = McpOptions::default().set_http(HttpServer::new("127.0.0.1:3000"));
+    /// ```
     #[cfg(feature = "http-server")]
-    pub fn set_http(mut self, http: HttpServer) -> Self {
+    pub fn set_http<C, E>(mut self, http: HttpServer<C, E>) -> Self
+    where
+        C: Send + Sync + 'static,
+        E: crate::transport::http::core::engine::HttpEngine,
+    {
         self.proto = Some(TransportProto::HttpServer(Box::new(http)));
         self
     }
 
-    /// Sets Streamable HTTP as a transport protocol
-    #[cfg(feature = "http-server")]
-    pub fn with_http<F: FnOnce(HttpServer) -> HttpServer>(mut self, config: F) -> Self {
+    /// Sets Streamable HTTP as a transport protocol, using the default
+    /// Volga engine. The closure receives the default-constructed server
+    /// for fluent configuration.
+    #[cfg(feature = "http-server-volga")]
+    pub fn with_http<F>(mut self, config: F) -> Self
+    where
+        F: FnOnce(
+            HttpServer<
+                crate::transport::http::server::DefaultClaims,
+                crate::transport::http::server::VolgaEngine,
+            >,
+        ) -> HttpServer<
+            crate::transport::http::server::DefaultClaims,
+            crate::transport::http::server::VolgaEngine,
+        >,
+    {
         self.proto = Some(TransportProto::HttpServer(Box::new(config(
             HttpServer::default(),
         ))));
@@ -176,7 +204,7 @@ impl McpOptions {
     /// * __IP__: 127.0.0.1
     /// * __PORT__: 3000
     /// * __ENDPOINT__: /mcp
-    #[cfg(feature = "http-server")]
+    #[cfg(feature = "http-server-volga")]
     pub fn with_default_http(self) -> Self {
         self.with_http(|http| http)
     }

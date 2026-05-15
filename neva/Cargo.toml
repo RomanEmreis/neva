@@ -21,6 +21,7 @@ bytes = "1.11.1"
 chrono = { version = "0.4.44", features = ["serde"] }
 dashmap = "6.1.0"
 futures-util = { version = "0.3.32", default-features = false, features = ["alloc"] }
+http = "1.4.0"
 memchr = "2.8.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
@@ -63,11 +64,15 @@ tasks = []
 tracing = ["dep:tracing", "dep:tracing-subscriber", "dep:once_cell", "volga?/tracing"]
 
 # server
-server-full = ["server-macros", "tracing", "http-server", "server-tls", "di", "tasks"]
+server-full = ["server-macros", "tracing", "http-server-volga", "server-tls", "di", "tasks"]
 server-macros = ["server", "macros", "neva_macros?/server"]
-server-tls = ["volga?/tls", "volga?/dev-cert"]
-http-server = ["server", "dep:volga", "dep:tokio-stream"]
-server = ["tokio/signal"]
+server-tls = ["http-server-volga", "volga?/tls", "volga?/dev-cert"]
+# Engine-agnostic Streamable HTTP abstractions. Enable this and implement
+# `HttpEngine` for your own stack (e.g. axum, hyper). No Volga in deps.
+http-server = ["server", "dep:tokio-stream"]
+# Default Volga adapter — pulls Volga as a dep and provides VolgaEngine.
+http-server-volga = ["http-server", "dep:volga"]
+server = ["tokio/signal", "tokio/rt-multi-thread"]
 
 # client
 client-full = ["client-macros", "tracing", "http-client", "client-tls", "tasks"]

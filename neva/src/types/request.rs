@@ -9,7 +9,7 @@ use std::fmt::{Debug, Formatter};
 use crate::Context;
 
 #[cfg(feature = "http-server")]
-use {crate::auth::DefaultClaims, volga::headers::HeaderMap};
+use {crate::auth::DefaultClaims, http::HeaderMap};
 
 #[cfg(feature = "tasks")]
 use crate::types::RelatedTaskMetadata;

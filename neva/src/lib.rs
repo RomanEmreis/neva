@@ -87,10 +87,38 @@ pub(crate) const PROTOCOL_VERSIONS: [&str; 4] =
 
 #[cfg(feature = "http-server")]
 pub mod auth {
-    //! Authentication utilities
+    //! Authentication utilities — the [`Claims`] trait + (under the Volga
+    //! adapter) the bearer-auth configuration types.
 
-    pub use crate::transport::http::server::{AuthConfig, DefaultClaims};
-    pub use volga::auth::{Algorithm, Authorizer, Claims};
+    /// `Claims` is the trait neva uses for typed per-tool authorization.
+    ///
+    /// Under the default Volga adapter this is `volga::auth::AuthClaims`;
+    /// under the engine-agnostic build, it's neva's local definition with
+    /// identical method shape (`role`, `roles`, `permissions`).
+    #[cfg(feature = "http-server-volga")]
+    pub use volga::auth::AuthClaims as Claims;
+
+    #[cfg(not(feature = "http-server-volga"))]
+    pub use crate::transport::http::core::types::Claims;
+
+    #[cfg(not(feature = "http-server-volga"))]
+    pub use crate::transport::http::core::types::DefaultClaims;
+
+    /// `DefaultClaims` is a pre-built [`Claims`] impl matching the JWT
+    /// standard claim names.
+    #[cfg(feature = "http-server-volga")]
+    pub use crate::transport::http::server::volga::auth_config::DefaultClaims;
+
+    /// `AuthConfig` is the Volga-flavored builder used with
+    /// `HttpServer::with_auth(...)`. Available only under the Volga adapter.
+    #[cfg(feature = "http-server-volga")]
+    pub use crate::transport::http::server::volga::auth_config::AuthConfig;
+
+    // Volga's `Claims` is a derive macro in the macro namespace; re-export
+    // it as `ClaimsDerive` so it doesn't collide with the `Claims` trait
+    // alias above (which lives in the type namespace).
+    #[cfg(feature = "http-server-volga")]
+    pub use volga::auth::{Algorithm, Authorizer, Claims as ClaimsDerive};
 }
 
 pub mod json {
@@ -108,6 +136,8 @@ pub mod prelude {
     pub use crate::json::*;
     pub use crate::types::*;
 
+    #[cfg(feature = "http-server")]
+    pub use crate::auth::Claims;
     #[cfg(feature = "http-server")]
     pub use crate::transport::HttpServer;
     #[cfg(all(feature = "http-server", feature = "server-tls"))]

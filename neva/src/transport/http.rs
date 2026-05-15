@@ -1,13 +1,7 @@
 //! Streamable HTTP transport implementation
 
-#[cfg(all(feature = "client", not(feature = "server")))]
-use reqwest::header::HeaderMap;
-
-#[cfg(feature = "http-server")]
-use {
-    server::{AuthConfig, DefaultClaims},
-    volga::{auth::AuthClaims, headers::HeaderMap},
-};
+#[cfg(feature = "http-client")]
+use http::HeaderMap;
 
 use crate::{
     error::{Error, ErrorCode},
@@ -24,7 +18,7 @@ use std::time::Duration;
 
 use super::{Receiver as TransportReceiver, Sender as TransportSender, Transport};
 
-#[cfg(all(feature = "http-server", feature = "server-tls"))]
+#[cfg(all(feature = "http-server-volga", feature = "server-tls"))]
 pub use volga::tls::{DevCertMode, TlsConfig};
 
 #[cfg(all(feature = "http-client", feature = "client-tls"))]
@@ -35,8 +29,11 @@ use crate::transport::http::client::tls_config::{
 #[cfg(feature = "http-client")]
 pub(crate) mod client;
 #[cfg(feature = "http-server")]
+pub mod core;
+#[cfg(feature = "http-server-volga")]
 pub(crate) mod server;
 
+#[cfg(feature = "http-client")]
 pub(super) const MCP_SESSION_ID: &str = "Mcp-Session-Id";
 const DEFAULT_ADDR: &str = "127.0.0.1:3000";
 const DEFAULT_MCP_ENDPOINT: &str = "/mcp";
@@ -58,6 +55,7 @@ pub(crate) const DEFAULT_SSE_CLEANUP_INTERVAL: Duration = Duration::from_secs(30
 pub(crate) const DEFAULT_SSE_SESSION_TTL: Duration = Duration::from_secs(1800);
 
 #[inline]
+#[cfg(feature = "http-client")]
 pub(super) fn get_mcp_session_id(headers: &HeaderMap) -> Option<uuid::Uuid> {
     headers
         .get(MCP_SESSION_ID)
@@ -73,13 +71,27 @@ pub(crate) enum HttpProto {
     Https,
 }
 
-/// Represents HTTP server transport
+/// Streamable HTTP server transport.
+///
+/// Generic on a `Claims` type and an
+/// [`HttpEngine`](crate::transport::http::core::engine::HttpEngine).
+/// Under the default `http-server-volga` feature, type defaults make
+/// `HttpServer::new(addr)` resolve to
+/// `HttpServer<DefaultClaims, VolgaEngine>`; under `http-server-core`
+/// alone, type params must be supplied (e.g. via
+/// [`HttpServer::from_engine`](Self::from_engine)).
+///
+/// The engine is held in an `Option` purely so it can be `.take()`d out
+/// of `&mut self` during `start()` (which moves the engine into a spawned
+/// task). The `Option` is always `Some` between construction and the
+/// first `start()` call.
 #[cfg(feature = "http-server")]
-pub struct HttpServer<C: AuthClaims = DefaultClaims> {
+pub struct HttpServer<C, E>
+where
+    E: crate::transport::http::core::engine::HttpEngine,
+{
     url: ServiceUrl,
-    auth: Option<AuthConfig<C>>,
-    #[cfg(feature = "server-tls")]
-    tls_config: Option<TlsConfig>,
+    engine: Option<E>,
     sse_buffer_capacity: usize,
     sse_live_queue_capacity: usize,
     sse_log_queue_capacity: usize,
@@ -87,8 +99,10 @@ pub struct HttpServer<C: AuthClaims = DefaultClaims> {
     sse_session_ttl: Duration,
     sender: HttpSender,
     receiver: HttpReceiver,
+    _claims: std::marker::PhantomData<fn() -> C>,
 }
 
+/// Streamable HTTP client transport.
 #[cfg(feature = "http-client")]
 pub struct HttpClient {
     url: ServiceUrl,
@@ -104,21 +118,6 @@ pub(crate) struct ServiceUrl {
     proto: HttpProto,
     addr: &'static str,
     endpoint: &'static str,
-}
-
-#[cfg(feature = "http-server")]
-pub(super) struct HttpRuntimeContext {
-    url: ServiceUrl,
-    tx: Sender<Result<Message, Error>>,
-    #[cfg(feature = "server-tls")]
-    tls_config: Option<TlsConfig>,
-    rx: Receiver<Message>,
-    auth: Option<AuthConfig>,
-    pub(super) sse_buffer_capacity: usize,
-    pub(super) sse_live_queue_capacity: usize,
-    pub(super) sse_log_queue_capacity: usize,
-    pub(super) sse_cleanup_interval: Duration,
-    pub(super) sse_session_ttl: Duration,
 }
 
 #[cfg(feature = "http-client")]
@@ -144,11 +143,14 @@ pub(crate) struct HttpReceiver {
 }
 
 #[cfg(feature = "http-server")]
-impl std::fmt::Debug for HttpServer {
-    #[inline]
+impl<C, E> std::fmt::Debug for HttpServer<C, E>
+where
+    E: crate::transport::http::core::engine::HttpEngine + std::fmt::Debug,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HttpServer")
             .field("url", &self.url)
+            .field("engine", &self.engine)
             .field("sse_buffer_capacity", &self.sse_buffer_capacity)
             .field("sse_live_queue_capacity", &self.sse_live_queue_capacity)
             .field("sse_log_queue_capacity", &self.sse_log_queue_capacity)
@@ -158,15 +160,13 @@ impl std::fmt::Debug for HttpServer {
     }
 }
 
-#[cfg(feature = "http-server")]
-impl Default for HttpServer {
+#[cfg(feature = "http-server-volga")]
+impl Default for HttpServer<server::DefaultClaims, server::VolgaEngine> {
     #[inline]
     fn default() -> Self {
         Self {
             url: ServiceUrl::default(),
-            auth: None,
-            #[cfg(feature = "server-tls")]
-            tls_config: None,
+            engine: Some(server::VolgaEngine::default()),
             sse_buffer_capacity: DEFAULT_SSE_BUFFER_CAPACITY,
             sse_live_queue_capacity: DEFAULT_SSE_LIVE_QUEUE_CAPACITY,
             sse_log_queue_capacity: DEFAULT_SSE_LOG_QUEUE_CAPACITY,
@@ -174,6 +174,7 @@ impl Default for HttpServer {
             sse_session_ttl: DEFAULT_SSE_SESSION_TTL,
             receiver: HttpReceiver::new(),
             sender: HttpSender::new(),
+            _claims: std::marker::PhantomData,
         }
     }
 }
@@ -278,14 +279,48 @@ impl HttpReceiver {
 }
 
 #[cfg(feature = "http-server")]
-impl HttpServer {
-    /// Creates a new [`HttpServer`]
-    #[inline]
-    pub fn new(addr: &'static str) -> Self {
-        Self::default().bind(addr)
+impl<E> HttpServer<crate::auth::DefaultClaims, E>
+where
+    E: crate::transport::http::core::engine::HttpEngine,
+{
+    /// Creates a new [`HttpServer`] bound to `addr`, running the supplied
+    /// engine. This is the engine-agnostic constructor — use it when
+    /// plugging in a non-default engine.
+    ///
+    /// Returns `HttpServer<DefaultClaims, E>`. For a custom claims type,
+    /// construct via the generic [`Self::with_engine`] swap on an existing
+    /// server.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let server = HttpServer::from_engine("127.0.0.1:3000", MyAxumEngine::new());
+    /// ```
+    pub fn from_engine(addr: &'static str, engine: E) -> Self {
+        let url = ServiceUrl {
+            addr,
+            ..ServiceUrl::default()
+        };
+        Self {
+            url,
+            engine: Some(engine),
+            sse_buffer_capacity: DEFAULT_SSE_BUFFER_CAPACITY,
+            sse_live_queue_capacity: DEFAULT_SSE_LIVE_QUEUE_CAPACITY,
+            sse_log_queue_capacity: DEFAULT_SSE_LOG_QUEUE_CAPACITY,
+            sse_cleanup_interval: DEFAULT_SSE_CLEANUP_INTERVAL,
+            sse_session_ttl: DEFAULT_SSE_SESSION_TTL,
+            receiver: HttpReceiver::new(),
+            sender: HttpSender::new(),
+            _claims: std::marker::PhantomData,
+        }
     }
+}
 
-    /// Binds HTTP serve to address and port    
+#[cfg(feature = "http-server")]
+impl<C, E> HttpServer<C, E>
+where
+    E: crate::transport::http::core::engine::HttpEngine,
+{
+    /// Binds HTTP serve to address and port
     pub fn bind(mut self, addr: &'static str) -> Self {
         self.url.addr = addr;
         self
@@ -299,24 +334,24 @@ impl HttpServer {
         self
     }
 
-    /// Configures HTTP server's TLS configuration
-    #[cfg(feature = "server-tls")]
-    pub fn with_tls<F>(mut self, config: F) -> Self
+    /// Swap the HTTP engine. Engine-specific config (auth, TLS) does not
+    /// carry over — the new engine starts with its own defaults.
+    pub fn with_engine<E2>(self, engine: E2) -> HttpServer<C, E2>
     where
-        F: FnOnce(TlsConfig) -> TlsConfig,
+        E2: crate::transport::http::core::engine::HttpEngine,
     {
-        self.tls_config = Some(config(Default::default()));
-        self.url.proto = HttpProto::Https;
-        self
-    }
-
-    /// Configures authentication and authorization
-    pub fn with_auth<F>(mut self, config: F) -> Self
-    where
-        F: FnOnce(AuthConfig) -> AuthConfig,
-    {
-        self.auth = Some(config(AuthConfig::default()));
-        self
+        HttpServer {
+            url: self.url,
+            engine: Some(engine),
+            sse_buffer_capacity: self.sse_buffer_capacity,
+            sse_live_queue_capacity: self.sse_live_queue_capacity,
+            sse_log_queue_capacity: self.sse_log_queue_capacity,
+            sse_cleanup_interval: self.sse_cleanup_interval,
+            sse_session_ttl: self.sse_session_ttl,
+            sender: self.sender,
+            receiver: self.receiver,
+            _claims: std::marker::PhantomData,
+        }
     }
 
     /// Sets the SSE event buffer capacity per session for Last-Event-ID replay.
@@ -411,31 +446,94 @@ impl HttpServer {
         self
     }
 
-    /// Returns the URL label used for display in the greeting banner
-    pub(crate) fn url_label(&self) -> String {
-        self.url.to_string()
-    }
-
-    fn runtime(&mut self) -> Result<HttpRuntimeContext, Error> {
+    fn build_context_and_engine(
+        &mut self,
+    ) -> Result<
+        (
+            std::sync::Arc<crate::transport::http::core::context::HttpContext>,
+            tokio::sync::mpsc::Receiver<Message>,
+        ),
+        Error,
+    > {
         let Some(sender_rx) = self.sender.rx.take() else {
             return Err(Error::new(
                 ErrorCode::InternalError,
                 "The HTTP writer is already in use",
             ));
         };
-        Ok(HttpRuntimeContext {
-            url: self.url,
-            tx: self.receiver.tx.clone(),
-            rx: sender_rx,
-            auth: self.auth.take(),
-            #[cfg(feature = "server-tls")]
-            tls_config: self.tls_config.take(),
-            sse_buffer_capacity: self.sse_buffer_capacity,
+        let pending = std::sync::Arc::new(dashmap::DashMap::new());
+        let sse_registry = std::sync::Arc::new(crate::shared::SseSessionRegistry::new(
+            self.sse_buffer_capacity,
+        ));
+        let ctx = crate::transport::http::core::context::HttpContext {
+            addr: self.url.addr,
+            endpoint: self.url.endpoint,
+            pending,
+            sse_registry,
+            inbound_tx: self.receiver.tx.clone(),
             sse_live_queue_capacity: self.sse_live_queue_capacity,
             sse_log_queue_capacity: self.sse_log_queue_capacity,
-            sse_cleanup_interval: self.sse_cleanup_interval,
-            sse_session_ttl: self.sse_session_ttl,
-        })
+        };
+        Ok((std::sync::Arc::new(ctx), sender_rx))
+    }
+}
+
+#[cfg(feature = "http-server-volga")]
+impl HttpServer<server::DefaultClaims, server::VolgaEngine> {
+    /// Creates a new `HttpServer` bound to the given address, using the
+    /// default Volga engine.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use neva::transport::http::HttpServer;
+    ///
+    /// let _ = HttpServer::new("127.0.0.1:3000");
+    /// ```
+    pub fn new(addr: &'static str) -> Self {
+        let url = ServiceUrl {
+            addr,
+            ..ServiceUrl::default()
+        };
+        Self {
+            url,
+            engine: Some(server::VolgaEngine::default()),
+            sse_buffer_capacity: DEFAULT_SSE_BUFFER_CAPACITY,
+            sse_live_queue_capacity: DEFAULT_SSE_LIVE_QUEUE_CAPACITY,
+            sse_log_queue_capacity: DEFAULT_SSE_LOG_QUEUE_CAPACITY,
+            sse_cleanup_interval: DEFAULT_SSE_CLEANUP_INTERVAL,
+            sse_session_ttl: DEFAULT_SSE_SESSION_TTL,
+            receiver: HttpReceiver::new(),
+            sender: HttpSender::new(),
+            _claims: std::marker::PhantomData,
+        }
+    }
+
+    /// Configures authentication and authorization (Volga-specific).
+    pub fn with_auth<F>(mut self, config: F) -> Self
+    where
+        F: FnOnce(server::AuthConfig) -> server::AuthConfig,
+    {
+        let engine = self
+            .engine
+            .as_mut()
+            .expect("HttpServer::with_auth called after start()");
+        engine.auth = Some(config(server::AuthConfig::default()));
+        self
+    }
+
+    /// Configures TLS (Volga-specific).
+    #[cfg(feature = "server-tls")]
+    pub fn with_tls<F>(mut self, config: F) -> Self
+    where
+        F: FnOnce(TlsConfig) -> TlsConfig,
+    {
+        let engine = self
+            .engine
+            .as_mut()
+            .expect("HttpServer::with_tls called after start()");
+        engine.tls = Some(config(Default::default()));
+        self.url.proto = HttpProto::Https;
+        self
     }
 }
 
@@ -517,21 +615,66 @@ impl TransportReceiver for HttpReceiver {
 }
 
 #[cfg(feature = "http-server")]
-impl Transport for HttpServer {
+impl<C, E> Transport for HttpServer<C, E>
+where
+    C: Send + 'static,
+    E: crate::transport::http::core::engine::HttpEngine,
+{
     type Sender = HttpSender;
     type Receiver = HttpReceiver;
 
     fn start(&mut self) -> CancellationToken {
         let token = CancellationToken::new();
-        let runtime = match self.runtime() {
-            Ok(runtime) => runtime,
+        let (ctx, sender_rx) = match self.build_context_and_engine() {
+            Ok(x) => x,
             Err(_err) => {
                 #[cfg(feature = "tracing")]
                 tracing::error!(logger = "neva", "Failed to start HTTP server: {}", _err);
                 return token;
             }
         };
-        tokio::spawn(server::serve(runtime, token.clone()));
+
+        // Take the engine out of the Option so we can move it into the
+        // spawned task. start() must only be called once per HttpServer
+        // — the App's run loop owns the HttpServer instance and calls
+        // start() exactly once.
+        let engine = self
+            .engine
+            .take()
+            .expect("HttpServer::start called twice or after engine was moved");
+
+        let ctx_for_dispatch = ctx.clone();
+        let ctx_for_cleanup = ctx.clone();
+        let ctx_for_engine = ctx.clone();
+        let cleanup_interval = self.sse_cleanup_interval;
+        let session_ttl = self.sse_session_ttl;
+        let engine_token = token.clone();
+
+        tokio::spawn(async move {
+            let pending = ctx_for_dispatch.pending.clone();
+            let registry = ctx_for_dispatch.sse_registry.clone();
+            tokio::join!(
+                crate::transport::http::core::dispatch::dispatch(
+                    pending,
+                    registry,
+                    sender_rx,
+                    engine_token.clone(),
+                ),
+                crate::transport::http::core::cleanup::cleanup_stale_sessions(
+                    ctx_for_cleanup.sse_registry.clone(),
+                    cleanup_interval,
+                    session_ttl,
+                    engine_token.clone(),
+                ),
+                async {
+                    if let Err(_e) = engine.run(ctx_for_engine, engine_token.clone()).await {
+                        #[cfg(feature = "tracing")]
+                        tracing::error!(logger = "neva", "HTTP engine error: {:?}", _e);
+                        engine_token.cancel();
+                    }
+                }
+            );
+        });
 
         token
     }
@@ -539,6 +682,26 @@ impl Transport for HttpServer {
     #[inline]
     fn split(self) -> (Self::Sender, Self::Receiver) {
         (self.sender, self.receiver)
+    }
+}
+
+#[cfg(feature = "http-server")]
+impl<C, E> crate::transport::http::core::engine::HttpTransport for HttpServer<C, E>
+where
+    C: Send + 'static,
+    E: crate::transport::http::core::engine::HttpEngine,
+{
+    fn start(&mut self) -> CancellationToken {
+        <Self as Transport>::start(self)
+    }
+
+    fn split_into_proto(self: Box<Self>) -> (HttpSender, HttpReceiver) {
+        let s = *self;
+        Transport::split(s)
+    }
+
+    fn url_label(&self) -> String {
+        self.url.to_string()
     }
 }
 
@@ -567,5 +730,74 @@ impl Transport for HttpClient {
     }
 }
 
-#[cfg(test)]
-mod test {}
+#[cfg(all(test, feature = "http-server"))]
+mod engine_smoke_tests {
+    use super::*;
+    use crate::error::Error;
+    use crate::transport::Transport;
+    use crate::transport::http::core::{
+        context::HttpContext, engine::HttpEngine, types::SseResponder,
+    };
+    use crate::types::Message;
+    use std::future::Future;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    #[derive(Clone, Default)]
+    struct MockResponder;
+
+    impl SseResponder for MockResponder {
+        type Event = ();
+        fn tracked(&self, _seq: u64, _msg: &Message) {}
+        fn ephemeral(&self, _msg: &Message) {}
+    }
+
+    #[derive(Default)]
+    struct MockEngine {
+        started: Arc<AtomicBool>,
+        exited: Arc<AtomicBool>,
+    }
+
+    impl HttpEngine for MockEngine {
+        type SseResponder = MockResponder;
+
+        fn run(
+            self,
+            _ctx: Arc<HttpContext>,
+            token: CancellationToken,
+        ) -> impl Future<Output = Result<(), Error>> + Send {
+            let started = self.started;
+            let exited = self.exited;
+            async move {
+                started.store(true, Ordering::SeqCst);
+                token.cancelled().await;
+                exited.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn engine_run_is_invoked_and_cancellation_propagates() {
+        let started = Arc::new(AtomicBool::new(false));
+        let exited = Arc::new(AtomicBool::new(false));
+        let engine = MockEngine {
+            started: started.clone(),
+            exited: exited.clone(),
+        };
+        let mut server = HttpServer::default().with_engine(engine);
+        let token = <HttpServer<_, _> as Transport>::start(&mut server);
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(started.load(Ordering::SeqCst), "engine.run was not invoked");
+
+        token.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            exited.load(Ordering::SeqCst),
+            "engine did not exit on cancellation"
+        );
+    }
+}

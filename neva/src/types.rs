@@ -19,7 +19,7 @@ use crate::{
 pub use request::FromRequest;
 
 #[cfg(feature = "http-server")]
-use {crate::auth::DefaultClaims, volga::headers::HeaderMap};
+use {crate::auth::DefaultClaims, http::HeaderMap};
 
 pub use capabilities::{
     ClientCapabilities, CompletionsCapability, ElicitationCapability, ElicitationFormCapability,

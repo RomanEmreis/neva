@@ -16,7 +16,7 @@ pub(crate) use http::HttpClient;
 pub(crate) use stdio::StdIoClient;
 
 #[cfg(any(feature = "http-server", feature = "http-client"))]
-pub(crate) mod http;
+pub mod http;
 pub(crate) mod stdio;
 
 /// Describes a sender that can send messages to a client
@@ -51,7 +51,7 @@ pub(crate) enum TransportProto {
     #[cfg(feature = "server")]
     StdIoServer(StdIoServer),
     #[cfg(feature = "http-server")]
-    HttpServer(Box<HttpServer>),
+    HttpServer(Box<dyn crate::transport::http::core::engine::HttpTransport>),
     #[cfg(feature = "http-client")]
     HttpClient(HttpClient),
     //Ws(Websocket),
@@ -175,7 +175,7 @@ impl Transport for TransportProto {
             }
             #[cfg(feature = "http-server")]
             TransportProto::HttpServer(http) => {
-                let (tx, rx) = http.split();
+                let (tx, rx) = http.split_into_proto();
                 (
                     TransportProtoSender::Http(tx),
                     TransportProtoReceiver::Http(rx),
