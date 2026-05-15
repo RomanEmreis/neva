@@ -22,7 +22,6 @@ use ::volga::{
 use std::sync::Arc;
 
 use super::engine::VolgaEngine;
-use super::responder::VolgaSseResponder;
 use crate::transport::http::core::types::DefaultClaims;
 
 /// Extract the `Authorization` header and decode it into [`DefaultClaims`]
@@ -65,8 +64,7 @@ pub(crate) async fn delete(req: HttpRequest) -> HttpResult {
 /// `GET /<endpoint>` — SSE subscribe.
 pub(crate) async fn get(req: HttpRequest) -> HttpResult {
     let manager: Dc<Arc<HttpContext>> = req.extract()?;
-    let outcome =
-        handlers::dispatch_get_sse::<VolgaEngine>(req, &manager, &VolgaSseResponder).await;
+    let outcome = handlers::dispatch_get_sse::<VolgaEngine>(req, &manager).await;
     match outcome {
         SseResponse::Stream { headers, stream } => {
             let session_id = headers

@@ -10,9 +10,9 @@
 //! into neva's Streamable HTTP transport. It pulls in `neva` with only the
 //! engine-agnostic `http-server` feature (no Volga in deps), implements
 //! the [`HttpEngine`] contract for an `AxumEngine`, and wires it into
-//! `HttpServer::from_engine`. Conversion between axum's native types and
-//! neva's neutral [`HttpRequest`] / [`HttpResponse`] lives on the engine
-//! itself; route handlers stay one-liners.
+//! `HttpServer::from_engine`. All adapter surfaces — HTTP request /
+//! response conversion *and* SSE event construction — live on the
+//! engine, so route handlers are one-liners.
 
 use std::{convert::Infallible, sync::Arc};
 
@@ -35,30 +35,11 @@ use neva::{
         context::HttpContext,
         engine::HttpEngine,
         handlers,
-        types::{HttpRequest, HttpResponse, SseResponder, SseResponse},
+        types::{HttpRequest, HttpResponse, SseResponse},
     },
     types::Message,
 };
 use tokio_util::sync::CancellationToken;
-
-/// Engine-side SSE responder — emits axum-native `Event` values directly.
-#[derive(Clone, Copy, Debug, Default)]
-struct AxumSseResponder;
-
-impl SseResponder for AxumSseResponder {
-    type Event = Result<Event, Infallible>;
-
-    fn tracked(&self, seq: u64, msg: &Message) -> Self::Event {
-        Ok(Event::default()
-            .id(seq.to_string())
-            .json_data(msg)
-            .unwrap_or_default())
-    }
-
-    fn ephemeral(&self, msg: &Message) -> Self::Event {
-        Ok(Event::default().json_data(msg).unwrap_or_default())
-    }
-}
 
 /// HTTP engine backed by [axum](https://docs.rs/axum).
 #[derive(Default, Debug)]
@@ -67,7 +48,7 @@ struct AxumEngine;
 impl HttpEngine for AxumEngine {
     type Request = axum::http::Request<Body>;
     type Response = Response;
-    type SseResponder = AxumSseResponder;
+    type SseEvent = Result<Event, Infallible>;
 
     async fn into_neutral(req: Self::Request) -> HttpRequest {
         let (parts, body) = req.into_parts();
@@ -100,6 +81,17 @@ impl HttpEngine for AxumEngine {
             }
         }
         builder.body(Body::from(body)).expect("valid response")
+    }
+
+    fn sse_tracked(seq: u64, msg: &Message) -> Self::SseEvent {
+        Ok(Event::default()
+            .id(seq.to_string())
+            .json_data(msg)
+            .unwrap_or_default())
+    }
+
+    fn sse_ephemeral(msg: &Message) -> Self::SseEvent {
+        Ok(Event::default().json_data(msg).unwrap_or_default())
     }
 
     async fn run(self, ctx: HttpContext, token: CancellationToken) -> Result<(), Error> {
@@ -145,7 +137,7 @@ async fn get_handler(
     State(ctx): State<Arc<HttpContext>>,
     req: axum::http::Request<Body>,
 ) -> Response {
-    match handlers::dispatch_get_sse::<AxumEngine>(req, &ctx, &AxumSseResponder).await {
+    match handlers::dispatch_get_sse::<AxumEngine>(req, &ctx).await {
         SseResponse::Stream { headers, stream } => {
             let sse = Sse::new(stream).keep_alive(KeepAlive::default());
             let mut response: Response = sse.into_response();

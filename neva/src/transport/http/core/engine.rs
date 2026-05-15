@@ -1,22 +1,22 @@
 //! The [`HttpEngine`] contract — what an HTTP-stack adapter must implement.
 
-use crate::error::Error;
+use crate::{error::Error, types::Message};
 use std::future::Future;
 use tokio_util::sync::CancellationToken;
 
 use super::{
     context::HttpContext,
-    types::{HttpRequest, HttpResponse, SseResponder},
+    types::{HttpRequest, HttpResponse},
 };
 
 /// Contract for an HTTP framework adapter.
 ///
-/// The engine declares its native request/response types, supplies the
-/// two conversion bridges, and runs an HTTP server until `token` fires.
-/// All JSON-RPC framing, SSE replay/dedup, batch fast-path, and oneshot
-/// pending logic stays in neva — an engine adapter is the thinnest
-/// possible shim from neva's neutral types onto a framework's native
-/// types.
+/// The engine declares its native request/response types, supplies two
+/// HTTP conversion bridges and two SSE event constructors, and runs an
+/// HTTP server until `token` fires. All JSON-RPC framing, SSE
+/// replay/dedup, batch fast-path, and oneshot pending logic stays in
+/// neva — an engine adapter is the thinnest possible shim from neva's
+/// neutral types onto a framework's native types.
 ///
 /// Route handlers typically just call the `dispatch_*` helpers in
 /// [`super::handlers`], which compose conversion + protocol dispatch +
@@ -28,12 +28,15 @@ use super::{
 /// struct MyEngine;
 ///
 /// impl HttpEngine for MyEngine {
-///     type Request     = framework::Request;
-///     type Response    = framework::Response;
-///     type SseResponder = MyResponder;
+///     type Request  = framework::Request;
+///     type Response = framework::Response;
+///     type SseEvent = framework::sse::Event;
 ///
 ///     async fn into_neutral(req: Self::Request) -> HttpRequest { ... }
 ///     fn into_engine(resp: HttpResponse) -> Self::Response { ... }
+///
+///     fn sse_tracked(seq: u64, msg: &Message) -> Self::SseEvent { ... }
+///     fn sse_ephemeral(msg: &Message) -> Self::SseEvent { ... }
 ///
 ///     async fn run(self, ctx: HttpContext, token: CancellationToken)
 ///         -> Result<(), Error> { ... }
@@ -46,8 +49,8 @@ pub trait HttpEngine: Send + Sync + 'static {
     /// Engine-native outbound response type (e.g. `axum::Response`).
     type Response: Send + 'static;
 
-    /// Bridge that builds engine-native SSE events from MCP messages.
-    type SseResponder: SseResponder + Clone;
+    /// Engine-native SSE event type (e.g. `volga::http::sse::Message`).
+    type SseEvent: Send + 'static;
 
     /// Convert an engine-native request into neva's neutral
     /// [`HttpRequest`]. The body must be fully buffered before return.
@@ -56,6 +59,14 @@ pub trait HttpEngine: Send + Sync + 'static {
     /// Build an engine-native response from neva's neutral
     /// [`HttpResponse`].
     fn into_engine(resp: HttpResponse) -> Self::Response;
+
+    /// Build an SSE event WITH an `id:` field (advances the client's
+    /// `Last-Event-ID`, eligible for replay on reconnect).
+    fn sse_tracked(seq: u64, msg: &Message) -> Self::SseEvent;
+
+    /// Build an SSE event WITHOUT an `id:` field (ephemeral
+    /// log / notification).
+    fn sse_ephemeral(msg: &Message) -> Self::SseEvent;
 
     /// Run the HTTP server until `token` fires.
     fn run(

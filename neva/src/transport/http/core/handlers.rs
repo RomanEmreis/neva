@@ -20,7 +20,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use super::{
     context::HttpContext,
     engine::HttpEngine,
-    types::{HttpRequest, HttpResponse, SseResponder, SseResponse},
+    types::{HttpRequest, HttpResponse, SseResponse},
 };
 
 pub(crate) const MCP_SESSION_ID: &str = "Mcp-Session-Id";
@@ -63,10 +63,9 @@ pub async fn dispatch_delete<E: HttpEngine>(req: E::Request, ctx: &HttpContext) 
 pub async fn dispatch_get_sse<E: HttpEngine>(
     req: E::Request,
     ctx: &HttpContext,
-    responder: &E::SseResponder,
-) -> SseResponse<impl Stream<Item = <E::SseResponder as SseResponder>::Event> + Send + 'static> {
+) -> SseResponse<impl Stream<Item = E::SseEvent> + Send + 'static> {
     let neutral = E::into_neutral(req).await;
-    handle_get_sse(neutral, ctx, responder).await
+    handle_get_sse::<E>(neutral, ctx).await
 }
 
 /// Handle a POST `/{endpoint}` request — the JSON-RPC message ingress.
@@ -218,9 +217,9 @@ fn parse_session_id(headers: &HeaderMap) -> Option<uuid::Uuid> {
         .and_then(|s| uuid::Uuid::parse_str(s).ok())
 }
 
-/// Internal item type used inside the GET handler — the `SseResponder` is
-/// invoked exactly once per emitted event to produce the engine-native
-/// representation.
+/// Internal item type used inside the GET handler — the engine's
+/// `sse_tracked` / `sse_ephemeral` is invoked exactly once per emitted
+/// event to produce the engine-native representation.
 enum SseItem {
     Tracked(u64, Arc<Message>),
     Ephemeral(Box<Message>),
@@ -246,17 +245,17 @@ impl Drop for SseConnectionCleanup {
 /// Returns `SseResponse::Status(400)` if the session id is missing,
 /// otherwise opens (or reconnects to) the session in the SSE registry
 /// and returns `SseResponse::Stream { headers, stream }` where `stream`
-/// is an `impl Stream<Item = R::Event>` produced by calling the engine's
-/// `SseResponder` for each underlying `SseItem`.
+/// is an `impl Stream<Item = E::SseEvent>` produced by calling the
+/// engine's [`HttpEngine::sse_tracked`] / [`HttpEngine::sse_ephemeral`]
+/// for each underlying `SseItem`.
 ///
 /// The stream takes ownership of an `SseConnectionCleanup` drop-guard
 /// that unregisters the session from the registry (and the log
 /// registry, when tracing is on) when the connection closes.
-pub async fn handle_get_sse<R: SseResponder + Clone>(
+pub async fn handle_get_sse<E: HttpEngine>(
     req: HttpRequest,
     ctx: &HttpContext,
-    responder: &R,
-) -> SseResponse<impl Stream<Item = R::Event> + Send + 'static> {
+) -> SseResponse<impl Stream<Item = E::SseEvent> + Send + 'static> {
     let Some(id) = parse_session_id(req.headers()) else {
         return SseResponse::Status(
             http::Response::builder()
@@ -308,14 +307,13 @@ pub async fn handle_get_sse<R: SseResponder + Clone>(
         registry: ctx.sse_registry.clone(),
     };
     let mut merged = Box::pin(merged);
-    let responder = responder.clone();
     let guarded = stream::poll_fn(move |cx| {
         let _cleanup = &cleanup;
         Pin::new(&mut merged).poll_next(cx)
     })
-    .map(move |item| match item {
-        SseItem::Tracked(seq, msg) => responder.tracked(seq, &msg),
-        SseItem::Ephemeral(msg) => responder.ephemeral(&msg),
+    .map(|item| match item {
+        SseItem::Tracked(seq, msg) => E::sse_tracked(seq, &msg),
+        SseItem::Ephemeral(msg) => E::sse_ephemeral(&msg),
     });
 
     let mut headers = HeaderMap::new();
@@ -469,16 +467,34 @@ mod tests {
         );
     }
 
-    #[derive(Clone)]
-    struct TestResponder;
+    /// Minimal `HttpEngine` impl used only to exercise `handle_get_sse`
+    /// in unit tests. `into_neutral` / `into_engine` / `run` are not
+    /// invoked by these tests so they are left as `unreachable!()`.
+    struct TestEngine;
 
-    impl super::SseResponder for TestResponder {
-        type Event = (Option<u64>, String);
-        fn tracked(&self, seq: u64, msg: &Message) -> Self::Event {
+    impl super::HttpEngine for TestEngine {
+        type Request = HttpRequest;
+        type Response = HttpResponse;
+        type SseEvent = (Option<u64>, String);
+
+        async fn into_neutral(_req: Self::Request) -> HttpRequest {
+            unreachable!()
+        }
+        fn into_engine(_resp: HttpResponse) -> Self::Response {
+            unreachable!()
+        }
+        fn sse_tracked(seq: u64, msg: &Message) -> Self::SseEvent {
             (Some(seq), serde_json::to_string(msg).unwrap())
         }
-        fn ephemeral(&self, msg: &Message) -> Self::Event {
+        fn sse_ephemeral(msg: &Message) -> Self::SseEvent {
             (None, serde_json::to_string(msg).unwrap())
+        }
+        async fn run(
+            self,
+            _ctx: HttpContext,
+            _token: tokio_util::sync::CancellationToken,
+        ) -> Result<(), crate::error::Error> {
+            unreachable!()
         }
     }
 
@@ -490,7 +506,7 @@ mod tests {
             .uri("/mcp")
             .body(Bytes::new())
             .unwrap();
-        let resp = handle_get_sse(req, &ctx, &TestResponder).await;
+        let resp = handle_get_sse::<TestEngine>(req, &ctx).await;
         match resp {
             SseResponse::Status(r) => assert_eq!(r.status(), http::StatusCode::BAD_REQUEST),
             SseResponse::Stream { .. } => panic!("expected Status, got Stream"),
@@ -508,7 +524,7 @@ mod tests {
             .header(MCP_SESSION_ID, id.to_string())
             .body(Bytes::new())
             .unwrap();
-        let resp = handle_get_sse(req, &ctx, &TestResponder).await;
+        let resp = handle_get_sse::<TestEngine>(req, &ctx).await;
         match resp {
             SseResponse::Stream { headers, stream: _ } => {
                 assert_eq!(

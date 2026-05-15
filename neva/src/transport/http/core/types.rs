@@ -55,36 +55,6 @@ pub enum SseResponse<S> {
     Status(HttpResponse),
 }
 
-/// Bridge that turns neva's per-event protocol data into the engine's
-/// native SSE event type, so the framework boundary does zero conversion.
-///
-/// Two constructors cover every event the MCP transport emits today:
-/// `tracked` (with an `id:` field, counts toward Last-Event-ID replay) and
-/// `ephemeral` (without an `id:` field, e.g. tracing log notifications).
-///
-/// # Example
-///
-/// ```rust,ignore
-/// struct PrintResponder;
-/// impl SseResponder for PrintResponder {
-///     type Event = String;
-///     fn tracked(&self, seq: u64, msg: &neva::types::Message) -> String {
-///         format!("id:{seq} data:{}", serde_json::to_string(msg).unwrap())
-///     }
-///     fn ephemeral(&self, msg: &neva::types::Message) -> String {
-///         format!("data:{}", serde_json::to_string(msg).unwrap())
-///     }
-/// }
-/// ```
-pub trait SseResponder: Send + Sync + 'static {
-    /// Engine-native SSE event type (e.g. `volga::http::sse::Message`).
-    type Event: Send + 'static;
-    /// Build an event WITH an `id:` field (advances client's Last-Event-ID).
-    fn tracked(&self, seq: u64, msg: &crate::types::Message) -> Self::Event;
-    /// Build an event WITHOUT an `id:` field (ephemeral log/notification).
-    fn ephemeral(&self, msg: &crate::types::Message) -> Self::Event;
-}
-
 /// Typed claims contract used by neva's per-tool authorization checks.
 ///
 /// This is neva's engine-neutral trait. Engine adapters that want their

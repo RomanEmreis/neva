@@ -9,7 +9,6 @@
 
 pub(crate) mod auth_config;
 pub(crate) mod engine;
-pub(crate) mod responder;
 pub(crate) mod routes;
 
 pub(crate) use engine::VolgaEngine;

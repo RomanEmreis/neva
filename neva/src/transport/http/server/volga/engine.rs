@@ -12,14 +12,14 @@ use crate::transport::http::core::{
     engine::HttpEngine,
     types::{HttpRequest as NeutralRequest, HttpResponse as NeutralResponse},
 };
+use crate::types::Message;
 #[cfg(feature = "server-tls")]
 use ::volga::tls::TlsConfig;
-use ::volga::{App, HttpBody, HttpRequest, HttpResult};
+use ::volga::{App, HttpBody, HttpRequest, HttpResult, http::sse::Message as SseMessage};
 use bytes::BytesMut;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use super::responder::VolgaSseResponder;
 use super::routes;
 
 /// Default HTTP engine backed by [Volga](https://docs.rs/volga).
@@ -55,7 +55,7 @@ impl std::fmt::Debug for VolgaEngine {
 impl HttpEngine for VolgaEngine {
     type Request = HttpRequest;
     type Response = HttpResult;
-    type SseResponder = VolgaSseResponder;
+    type SseEvent = SseMessage;
 
     async fn into_neutral(req: Self::Request) -> NeutralRequest {
         let mut builder = http::Request::builder()
@@ -84,6 +84,14 @@ impl HttpEngine for VolgaEngine {
             builder = builder.header_raw(name.as_str(), value.as_bytes());
         }
         builder.body(http_body)
+    }
+
+    fn sse_tracked(seq: u64, msg: &Message) -> Self::SseEvent {
+        SseMessage::new().id(seq.to_string()).json(msg)
+    }
+
+    fn sse_ephemeral(msg: &Message) -> Self::SseEvent {
+        SseMessage::new().json(msg)
     }
 
     async fn run(self, ctx: HttpContext, token: CancellationToken) -> Result<(), Error> {

@@ -736,7 +736,7 @@ mod engine_smoke_tests {
     use crate::transport::http::core::{
         context::HttpContext,
         engine::HttpEngine,
-        types::{HttpRequest, HttpResponse, SseResponder},
+        types::{HttpRequest, HttpResponse},
     };
     use crate::types::Message;
     use std::future::Future;
@@ -744,15 +744,6 @@ mod engine_smoke_tests {
         Arc,
         atomic::{AtomicBool, Ordering},
     };
-
-    #[derive(Clone, Default)]
-    struct MockResponder;
-
-    impl SseResponder for MockResponder {
-        type Event = ();
-        fn tracked(&self, _seq: u64, _msg: &Message) {}
-        fn ephemeral(&self, _msg: &Message) {}
-    }
 
     #[derive(Default)]
     struct MockEngine {
@@ -763,7 +754,7 @@ mod engine_smoke_tests {
     impl HttpEngine for MockEngine {
         type Request = HttpRequest;
         type Response = HttpResponse;
-        type SseResponder = MockResponder;
+        type SseEvent = ();
 
         async fn into_neutral(req: Self::Request) -> HttpRequest {
             req
@@ -772,6 +763,9 @@ mod engine_smoke_tests {
         fn into_engine(resp: HttpResponse) -> Self::Response {
             resp
         }
+
+        fn sse_tracked(_seq: u64, _msg: &Message) -> Self::SseEvent {}
+        fn sse_ephemeral(_msg: &Message) -> Self::SseEvent {}
 
         fn run(
             self,
