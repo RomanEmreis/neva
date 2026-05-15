@@ -787,7 +787,7 @@ mod engine_smoke_tests {
             started: started.clone(),
             exited: exited.clone(),
         };
-        let mut server = HttpServer::default().with_engine(engine);
+        let mut server = HttpServer::from_engine("127.0.0.1:0", engine);
         let token = <HttpServer<_, _> as Transport>::start(&mut server);
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

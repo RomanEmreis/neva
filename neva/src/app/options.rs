@@ -911,7 +911,7 @@ mod tests {
         assert_eq!(options.transport_label(), "(none)");
     }
 
-    #[cfg(feature = "http-server")]
+    #[cfg(feature = "http-server-volga")]
     #[test]
     fn it_returns_http_label_when_http_transport() {
         let options = McpOptions::default().with_default_http();
