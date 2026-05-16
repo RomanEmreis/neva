@@ -457,15 +457,7 @@ where
         self
     }
 
-    fn build_context_and_engine(
-        &mut self,
-    ) -> Result<
-        (
-            HttpContext,
-            Receiver<Message>,
-        ),
-        Error,
-    > {
+    fn build_context_and_engine(&mut self) -> Result<(HttpContext, Receiver<Message>), Error> {
         let Some(sender_rx) = self.sender.rx.take() else {
             return Err(Error::new(
                 ErrorCode::InternalError,
@@ -663,12 +655,7 @@ where
 
         tokio::spawn(async move {
             tokio::join!(
-                core::dispatch::dispatch(
-                    pending,
-                    sse_registry,
-                    sender_rx,
-                    engine_token.clone(),
-                ),
+                core::dispatch::dispatch(pending, sse_registry, sender_rx, engine_token.clone(),),
                 core::cleanup::cleanup_stale_sessions(
                     cleanup_registry,
                     cleanup_interval,
