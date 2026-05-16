@@ -1,5 +1,5 @@
 //! Volga-based default implementation of
-//! [`HttpEngine`](crate::transport::http::core::engine::HttpEngine).
+//! [`HttpEngine`](engine::HttpEngine).
 //!
 //! This is the engine bound by default when the `http-server-volga`
 //! feature is enabled. It implements `HttpEngine` by binding a
@@ -11,4 +11,4 @@ pub(crate) mod auth_config;
 pub(crate) mod engine;
 pub(crate) mod routes;
 
-pub(crate) use engine::VolgaEngine;
+pub use engine::VolgaEngine;

@@ -12,4 +12,4 @@ pub(crate) mod volga;
 pub(crate) use volga::auth_config::AuthConfig;
 
 #[cfg(feature = "http-server-volga")]
-pub(crate) use volga::VolgaEngine;
+pub use volga::VolgaEngine;

@@ -2,12 +2,15 @@
 
 use crate::app::{collection::Collection, handler::RequestHandler};
 #[cfg(feature = "http-server")]
-use crate::transport::HttpServer;
+use crate::transport::{HttpEngine, HttpServer};
 use crate::transport::{StdIoServer, TransportProto};
 use dashmap::{DashMap, DashSet};
 use std::fmt::{Debug, Formatter};
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
+
+#[cfg(feature = "http-server-volga")]
+use crate::transport::http::server::{DefaultClaims, VolgaEngine};
 
 use crate::middleware::{Middleware, Middlewares};
 
@@ -170,7 +173,7 @@ impl McpOptions {
     pub fn set_http<C, E>(mut self, http: HttpServer<C, E>) -> Self
     where
         C: Send + Sync + 'static,
-        E: crate::transport::http::core::engine::HttpEngine,
+        E: HttpEngine,
     {
         self.proto = Some(TransportProto::HttpServer(Box::new(http)));
         self
@@ -182,15 +185,7 @@ impl McpOptions {
     #[cfg(feature = "http-server-volga")]
     pub fn with_http<F>(mut self, config: F) -> Self
     where
-        F: FnOnce(
-            HttpServer<
-                crate::transport::http::server::DefaultClaims,
-                crate::transport::http::server::VolgaEngine,
-            >,
-        ) -> HttpServer<
-            crate::transport::http::server::DefaultClaims,
-            crate::transport::http::server::VolgaEngine,
-        >,
+        F: FnOnce(HttpServer<DefaultClaims, VolgaEngine>) -> HttpServer<DefaultClaims, VolgaEngine>,
     {
         self.proto = Some(TransportProto::HttpServer(Box::new(config(
             HttpServer::default(),

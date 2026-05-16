@@ -26,6 +26,9 @@ use crate::transport::http::client::tls_config::{
 #[cfg(all(feature = "http-server-volga", feature = "server-tls"))]
 pub use volga::tls::{DevCertMode, TlsConfig};
 
+#[cfg(feature = "http-server-volga")]
+pub use server::VolgaEngine;
+
 #[cfg(feature = "http-server")]
 pub use core::{
     context::HttpContext,
@@ -82,7 +85,7 @@ pub(crate) enum HttpProto {
 /// Streamable HTTP server transport.
 ///
 /// Generic on a `Claims` type and an
-/// [`HttpEngine`](crate::transport::http::core::engine::HttpEngine).
+/// [`HttpEngine`].
 /// Under the default `http-server-volga` feature, type defaults make
 /// `HttpServer::new(addr)` resolve to
 /// `HttpServer<DefaultClaims, VolgaEngine>`; under `http-server-core`
@@ -96,7 +99,7 @@ pub(crate) enum HttpProto {
 #[cfg(feature = "http-server")]
 pub struct HttpServer<C, E>
 where
-    E: crate::transport::http::core::engine::HttpEngine,
+    E: HttpEngine,
 {
     url: ServiceUrl,
     engine: Option<E>,
@@ -153,7 +156,7 @@ pub(crate) struct HttpReceiver {
 #[cfg(feature = "http-server")]
 impl<C, E> std::fmt::Debug for HttpServer<C, E>
 where
-    E: crate::transport::http::core::engine::HttpEngine + std::fmt::Debug,
+    E: HttpEngine + std::fmt::Debug,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HttpServer")
@@ -326,7 +329,7 @@ where
 #[cfg(feature = "http-server")]
 impl<C, E> HttpServer<C, E>
 where
-    E: crate::transport::http::core::engine::HttpEngine,
+    E: HttpEngine,
 {
     /// Binds HTTP serve to address and port
     pub fn bind(mut self, addr: &'static str) -> Self {
@@ -346,7 +349,7 @@ where
     /// carry over — the new engine starts with its own defaults.
     pub fn with_engine<E2>(self, engine: E2) -> HttpServer<C, E2>
     where
-        E2: crate::transport::http::core::engine::HttpEngine,
+        E2: HttpEngine,
     {
         HttpServer {
             url: self.url,
@@ -458,8 +461,8 @@ where
         &mut self,
     ) -> Result<
         (
-            crate::transport::http::core::context::HttpContext,
-            tokio::sync::mpsc::Receiver<Message>,
+            HttpContext,
+            Receiver<Message>,
         ),
         Error,
     > {
@@ -473,7 +476,7 @@ where
         let sse_registry = std::sync::Arc::new(crate::shared::SseSessionRegistry::new(
             self.sse_buffer_capacity,
         ));
-        let ctx = crate::transport::http::core::context::HttpContext {
+        let ctx = HttpContext {
             addr: self.url.addr.into(),
             endpoint: self.url.endpoint.into(),
             pending,
@@ -487,7 +490,7 @@ where
 }
 
 #[cfg(feature = "http-server-volga")]
-impl HttpServer<server::DefaultClaims, server::VolgaEngine> {
+impl HttpServer<server::DefaultClaims, VolgaEngine> {
     /// Creates a new `HttpServer` bound to the given address, using the
     /// default Volga engine.
     ///
@@ -504,7 +507,7 @@ impl HttpServer<server::DefaultClaims, server::VolgaEngine> {
         };
         Self {
             url,
-            engine: Some(server::VolgaEngine::default()),
+            engine: Some(VolgaEngine::default()),
             sse_buffer_capacity: DEFAULT_SSE_BUFFER_CAPACITY,
             sse_live_queue_capacity: DEFAULT_SSE_LIVE_QUEUE_CAPACITY,
             sse_log_queue_capacity: DEFAULT_SSE_LOG_QUEUE_CAPACITY,
@@ -626,7 +629,7 @@ impl TransportReceiver for HttpReceiver {
 impl<C, E> Transport for HttpServer<C, E>
 where
     C: Send + 'static,
-    E: crate::transport::http::core::engine::HttpEngine,
+    E: HttpEngine,
 {
     type Sender = HttpSender;
     type Receiver = HttpReceiver;
@@ -660,13 +663,13 @@ where
 
         tokio::spawn(async move {
             tokio::join!(
-                crate::transport::http::core::dispatch::dispatch(
+                core::dispatch::dispatch(
                     pending,
                     sse_registry,
                     sender_rx,
                     engine_token.clone(),
                 ),
-                crate::transport::http::core::cleanup::cleanup_stale_sessions(
+                core::cleanup::cleanup_stale_sessions(
                     cleanup_registry,
                     cleanup_interval,
                     session_ttl,
@@ -692,10 +695,10 @@ where
 }
 
 #[cfg(feature = "http-server")]
-impl<C, E> crate::transport::http::core::engine::HttpTransport for HttpServer<C, E>
+impl<C, E> core::engine::HttpTransport for HttpServer<C, E>
 where
     C: Send + 'static,
-    E: crate::transport::http::core::engine::HttpEngine,
+    E: HttpEngine,
 {
     fn start(&mut self) -> CancellationToken {
         <Self as Transport>::start(self)
@@ -802,11 +805,11 @@ mod engine_smoke_tests {
         let mut server = HttpServer::from_engine("127.0.0.1:0", engine);
         let token = <HttpServer<_, _> as Transport>::start(&mut server);
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(started.load(Ordering::SeqCst), "engine.run was not invoked");
 
         token.cancel();
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
             exited.load(Ordering::SeqCst),
             "engine did not exit on cancellation"
