@@ -37,9 +37,10 @@ use super::{
 /// and any tool/prompt/resource that declares required roles or
 /// permissions will reject it.
 ///
-/// The default [`crate::transport::http::server::volga::VolgaEngine`]
-/// does this automatically using Volga's `BearerTokenService`. A custom
-/// engine adapter wires up the equivalent step in its own POST route.
+/// The default `VolgaEngine` (selected by `HttpServer::default()` /
+/// `with_default_http`) does this automatically using Volga's
+/// `BearerTokenService`. A custom engine adapter wires up the equivalent
+/// step in its own POST route.
 ///
 /// [`dispatch_post`]: super::handlers::dispatch_post
 ///

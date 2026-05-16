@@ -73,8 +73,9 @@ pub use sampling::{
     ToolChoiceMode,
 };
 pub use schema::{
-    BooleanSchema, NumberSchema, Schema, StringFormat, StringSchema, TitledMultiSelectEnumSchema,
-    TitledSingleSelectEnumSchema, UntitledMultiSelectEnumSchema, UntitledSingleSelectEnumSchema,
+    BooleanSchema, LegacyTitledEnumSchema, NumberSchema, Schema, StringFormat, StringSchema,
+    TitledMultiSelectEnumSchema, TitledSingleSelectEnumSchema, UntitledMultiSelectEnumSchema,
+    UntitledSingleSelectEnumSchema,
 };
 
 pub use icon::{Icon, IconSize, IconTheme};

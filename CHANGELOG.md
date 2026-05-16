@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.3.2
+
+### Added
+* Lazy cleanup for expired tasks
+
+### Changed
+* JSON RPC batches are now processing in parallel
+* Improved pagination for `list/tools`, `list/prompts` and `list/resources` commands
+
+### Fixed
+* Removed unnecessary heap allocation for the middleware pipeline
+* Request timeout and cleanup
+
+## 0.3.1
+
+### Added
+* SSE backpressure configuration.
+* Graceful session cleanup and sweeper for stale sessions
+
 ## 0.3.0
 
 ### Added

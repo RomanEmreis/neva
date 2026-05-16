@@ -42,6 +42,17 @@ jobs:
       - name: Run all features client
         run: cargo clippy --all-targets --features client-full -- -D warnings
   
+  doc_check:
+    runs-on: ubuntu-latest
+    needs: clippy_check
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check docs build clean
+        run: cargo doc --no-deps --all-features
+
   build:
     environment: CICD
     runs-on: ubuntu-latest

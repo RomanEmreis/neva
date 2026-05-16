@@ -274,7 +274,7 @@ impl McpOptions {
         self
     }
 
-    /// Configures [`LogLevelHandle`] that allow to change the [`LoggingLevel`] in runtime
+    /// Configures a `tracing_subscriber::reload::Handle` that allows changing the [`LoggingLevel`] at runtime
     #[cfg(feature = "tracing")]
     pub fn with_logging(mut self, log_handle: Handle<LevelFilter, Registry>) -> Self {
         self.log_level = Some(log_handle);

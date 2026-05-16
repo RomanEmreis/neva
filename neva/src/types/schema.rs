@@ -28,19 +28,19 @@ pub enum Schema {
     /// See [`BooleanSchema`]
     Boolean(BooleanSchema),
 
-    /// See [`UntitledSingleSelectEnum`]
+    /// See [`UntitledSingleSelectEnumSchema`]
     SingleUntitledEnum(UntitledSingleSelectEnumSchema),
 
-    /// See [`TitledSingleSelectEnum`]
+    /// See [`TitledSingleSelectEnumSchema`]
     SingleTitledEnum(TitledSingleSelectEnumSchema),
 
-    /// See [`UntitledMultiSelectEnum`]
+    /// See [`UntitledMultiSelectEnumSchema`]
     MultiUntitledEnum(UntitledMultiSelectEnumSchema),
 
-    /// See [`TitledMultiSelectEnum`]
+    /// See [`TitledMultiSelectEnumSchema`]
     MultiTitledEnum(TitledMultiSelectEnumSchema),
 
-    /// See [`LegacyTitledEnum`]
+    /// See [`LegacyTitledEnumSchema`]
     LegacyEnum(LegacyTitledEnumSchema),
 }
 
@@ -137,7 +137,7 @@ pub struct BooleanSchema {
 }
 
 /// Legacy enumeration schema for the protocol versions below `2025-11-25`.
-/// For the newer versions use the [`TitledSingleSelectEnum`] instead.
+/// For the newer versions use the [`TitledSingleSelectEnumSchema`] instead.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Debug, Clone, Serialize, Deserialize)]

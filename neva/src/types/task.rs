@@ -200,7 +200,7 @@ pub struct RelatedTaskMetadata {
 
 /// Represents the response to a `tasks/result` request.
 /// The inner `Value` matches the result type of the original request.
-/// For example, a `tools/call` task would return the [`CallToolResponse`] structure.
+/// For example, a `tools/call` task would return the [`crate::types::CallToolResponse`] structure.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskPayload(pub Value);
 
