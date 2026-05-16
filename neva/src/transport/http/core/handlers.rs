@@ -26,9 +26,9 @@ use super::{
 pub(crate) const MCP_SESSION_ID: &str = "Mcp-Session-Id";
 
 /// One-call POST pipeline for engine adapters: convert the engine-native
-/// request into neva's neutral form via [`HttpEngine::into_neutral`],
+/// request into neva's neutral form via [`HttpEngine::adapt_request`],
 /// run the JSON-RPC dispatch via [`handle_post`], then convert the
-/// neutral response back via [`HttpEngine::into_engine`].
+/// neutral response back via [`HttpEngine::adapt_response`].
 ///
 /// Lets a route handler collapse to a single line, e.g. (axum):
 ///
@@ -44,20 +44,20 @@ pub(crate) const MCP_SESSION_ID: &str = "Mcp-Session-Id";
 /// **Authorization:** if the engine wants neva's per-tool / per-prompt /
 /// per-resource role & permission gates to engage, it must insert an
 /// `Arc<dyn neva::auth::Claims>` into `req.extensions_mut()` before
-/// `into_neutral` returns (typically inside `HttpEngine::into_neutral`
+/// `adapt_request` returns (typically inside `HttpEngine::adapt_request`
 /// or in the engine's route handler just before this call). See the
 /// [`HttpEngine`] doc comment for the full contract.
 pub async fn dispatch_post<E: HttpEngine>(req: E::Request, ctx: &HttpContext) -> E::Response {
-    let neutral = E::into_neutral(req).await;
+    let neutral = E::adapt_request(req).await;
     let resp = handle_post(neutral, ctx).await;
-    E::into_engine(resp)
+    E::adapt_response(resp)
 }
 
 /// One-call DELETE pipeline for engine adapters. See [`dispatch_post`].
 pub async fn dispatch_delete<E: HttpEngine>(req: E::Request, ctx: &HttpContext) -> E::Response {
-    let neutral = E::into_neutral(req).await;
+    let neutral = E::adapt_request(req).await;
     let resp = handle_delete(neutral, ctx).await;
-    E::into_engine(resp)
+    E::adapt_response(resp)
 }
 
 /// One-call GET-SSE pipeline for engine adapters: converts the
@@ -66,12 +66,12 @@ pub async fn dispatch_delete<E: HttpEngine>(req: E::Request, ctx: &HttpContext) 
 /// The returned [`SseResponse`] is engine-agnostic; the engine still
 /// matches `Stream { headers, stream }` (wrapping the stream in its
 /// native SSE response type) vs `Status(resp)` (passing `resp` through
-/// [`HttpEngine::into_engine`]).
+/// [`HttpEngine::adapt_response`]).
 pub async fn dispatch_get_sse<E: HttpEngine>(
     req: E::Request,
     ctx: &HttpContext,
 ) -> SseResponse<impl Stream<Item = E::SseEvent> + Send + 'static> {
-    let neutral = E::into_neutral(req).await;
+    let neutral = E::adapt_request(req).await;
     handle_get_sse::<E>(neutral, ctx).await
 }
 
@@ -231,7 +231,7 @@ fn parse_session_id(headers: &HeaderMap) -> Option<uuid::Uuid> {
 }
 
 /// Internal item type used inside the GET handler — the engine's
-/// `sse_tracked` / `sse_ephemeral` is invoked exactly once per emitted
+/// `tracked_event` / `ephemeral_event` is invoked exactly once per emitted
 /// event to produce the engine-native representation.
 enum SseItem {
     Tracked(u64, Arc<Message>),
@@ -259,7 +259,7 @@ impl Drop for SseConnectionCleanup {
 /// otherwise opens (or reconnects to) the session in the SSE registry
 /// and returns `SseResponse::Stream { headers, stream }` where `stream`
 /// is an `impl Stream<Item = E::SseEvent>` produced by calling the
-/// engine's [`HttpEngine::sse_tracked`] / [`HttpEngine::sse_ephemeral`]
+/// engine's [`HttpEngine::tracked_event`] / [`HttpEngine::ephemeral_event`]
 /// for each underlying `SseItem`.
 ///
 /// The stream takes ownership of an `SseConnectionCleanup` drop-guard
@@ -325,8 +325,8 @@ pub async fn handle_get_sse<E: HttpEngine>(
         Pin::new(&mut merged).poll_next(cx)
     })
     .map(|item| match item {
-        SseItem::Tracked(seq, msg) => E::sse_tracked(seq, &msg),
-        SseItem::Ephemeral(msg) => E::sse_ephemeral(&msg),
+        SseItem::Tracked(seq, msg) => E::tracked_event(seq, &msg),
+        SseItem::Ephemeral(msg) => E::ephemeral_event(&msg),
     });
 
     let mut headers = HeaderMap::new();
@@ -481,7 +481,7 @@ mod tests {
     }
 
     /// Minimal `HttpEngine` impl used only to exercise `handle_get_sse`
-    /// in unit tests. `into_neutral` / `into_engine` / `run` are not
+    /// in unit tests. `adapt_request` / `adapt_response` / `run` are not
     /// invoked by these tests so they are left as `unreachable!()`.
     struct TestEngine;
 
@@ -490,16 +490,16 @@ mod tests {
         type Response = HttpResponse;
         type SseEvent = (Option<u64>, String);
 
-        async fn into_neutral(_req: Self::Request) -> HttpRequest {
+        async fn adapt_request(_req: Self::Request) -> HttpRequest {
             unreachable!()
         }
-        fn into_engine(_resp: HttpResponse) -> Self::Response {
+        fn adapt_response(_resp: HttpResponse) -> Self::Response {
             unreachable!()
         }
-        fn sse_tracked(seq: u64, msg: &Message) -> Self::SseEvent {
+        fn tracked_event(seq: u64, msg: &Message) -> Self::SseEvent {
             (Some(seq), serde_json::to_string(msg).unwrap())
         }
-        fn sse_ephemeral(msg: &Message) -> Self::SseEvent {
+        fn ephemeral_event(msg: &Message) -> Self::SseEvent {
             (None, serde_json::to_string(msg).unwrap())
         }
         async fn run(

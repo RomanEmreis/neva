@@ -756,16 +756,16 @@ mod engine_smoke_tests {
         type Response = HttpResponse;
         type SseEvent = ();
 
-        async fn into_neutral(req: Self::Request) -> HttpRequest {
+        async fn adapt_request(req: Self::Request) -> HttpRequest {
             req
         }
 
-        fn into_engine(resp: HttpResponse) -> Self::Response {
+        fn adapt_response(resp: HttpResponse) -> Self::Response {
             resp
         }
 
-        fn sse_tracked(_seq: u64, _msg: &Message) -> Self::SseEvent {}
-        fn sse_ephemeral(_msg: &Message) -> Self::SseEvent {}
+        fn tracked_event(_seq: u64, _msg: &Message) -> Self::SseEvent {}
+        fn ephemeral_event(_msg: &Message) -> Self::SseEvent {}
 
         fn run(
             self,

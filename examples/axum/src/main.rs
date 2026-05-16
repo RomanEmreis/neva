@@ -50,7 +50,7 @@ impl HttpEngine for AxumEngine {
     type Response = Response;
     type SseEvent = Result<Event, Infallible>;
 
-    async fn into_neutral(req: Self::Request) -> HttpRequest {
+    async fn adapt_request(req: Self::Request) -> HttpRequest {
         let (parts, body) = req.into_parts();
         let bytes = body
             .collect()
@@ -70,7 +70,7 @@ impl HttpEngine for AxumEngine {
         builder.body(bytes).expect("valid request")
     }
 
-    fn into_engine(resp: HttpResponse) -> Self::Response {
+    fn adapt_response(resp: HttpResponse) -> Self::Response {
         let (parts, body) = resp.into_parts();
         let mut builder = http::Response::builder()
             .status(parts.status)
@@ -83,14 +83,14 @@ impl HttpEngine for AxumEngine {
         builder.body(Body::from(body)).expect("valid response")
     }
 
-    fn sse_tracked(seq: u64, msg: &Message) -> Self::SseEvent {
+    fn tracked_event(seq: u64, msg: &Message) -> Self::SseEvent {
         Ok(Event::default()
             .id(seq.to_string())
             .json_data(msg)
             .unwrap_or_default())
     }
 
-    fn sse_ephemeral(msg: &Message) -> Self::SseEvent {
+    fn ephemeral_event(msg: &Message) -> Self::SseEvent {
         Ok(Event::default().json_data(msg).unwrap_or_default())
     }
 
@@ -146,7 +146,7 @@ async fn get_handler(
             }
             response
         }
-        SseResponse::Status(resp) => AxumEngine::into_engine(resp),
+        SseResponse::Status(resp) => AxumEngine::adapt_response(resp),
     }
 }
 

@@ -53,11 +53,11 @@ use super::{
 ///     type Response = framework::Response;
 ///     type SseEvent = framework::sse::Event;
 ///
-///     async fn into_neutral(req: Self::Request) -> HttpRequest { ... }
-///     fn into_engine(resp: HttpResponse) -> Self::Response { ... }
+///     async fn adapt_request(req: Self::Request) -> HttpRequest { ... }
+///     fn adapt_response(resp: HttpResponse) -> Self::Response { ... }
 ///
-///     fn sse_tracked(seq: u64, msg: &Message) -> Self::SseEvent { ... }
-///     fn sse_ephemeral(msg: &Message) -> Self::SseEvent { ... }
+///     fn tracked_event(seq: u64, msg: &Message) -> Self::SseEvent { ... }
+///     fn ephemeral_event(msg: &Message) -> Self::SseEvent { ... }
 ///
 ///     async fn run(self, ctx: HttpContext, token: CancellationToken)
 ///         -> Result<(), Error> { ... }
@@ -75,19 +75,19 @@ pub trait HttpEngine: Send + Sync + 'static {
 
     /// Convert an engine-native request into neva's neutral
     /// [`HttpRequest`]. The body must be fully buffered before return.
-    fn into_neutral(req: Self::Request) -> impl Future<Output = HttpRequest> + Send;
+    fn adapt_request(req: Self::Request) -> impl Future<Output = HttpRequest> + Send;
 
     /// Build an engine-native response from neva's neutral
     /// [`HttpResponse`].
-    fn into_engine(resp: HttpResponse) -> Self::Response;
+    fn adapt_response(resp: HttpResponse) -> Self::Response;
 
     /// Build an SSE event WITH an `id:` field (advances the client's
     /// `Last-Event-ID`, eligible for replay on reconnect).
-    fn sse_tracked(seq: u64, msg: &Message) -> Self::SseEvent;
+    fn tracked_event(seq: u64, msg: &Message) -> Self::SseEvent;
 
     /// Build an SSE event WITHOUT an `id:` field (ephemeral
     /// log / notification).
-    fn sse_ephemeral(msg: &Message) -> Self::SseEvent;
+    fn ephemeral_event(msg: &Message) -> Self::SseEvent;
 
     /// Run the HTTP server until `token` fires.
     fn run(

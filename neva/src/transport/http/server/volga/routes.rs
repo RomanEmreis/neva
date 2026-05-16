@@ -4,7 +4,7 @@
 //!
 //! Conversion (`HttpRequest` ↔ neutral, neutral response ↔
 //! `HttpResult`) lives on [`super::engine::VolgaEngine`] via
-//! [`HttpEngine::into_neutral`] / [`HttpEngine::into_engine`]; these
+//! [`HttpEngine::adapt_request`] / [`HttpEngine::adapt_response`]; these
 //! routes call those methods so the seam matches every other engine.
 
 use crate::transport::http::core::{
@@ -42,7 +42,7 @@ pub(crate) async fn post(req: HttpRequest) -> HttpResult {
     let manager: Dc<Arc<HttpContext>> = req.extract()?;
     let bts: Option<BearerTokenService> = req.extract()?;
 
-    let mut neutral = VolgaEngine::into_neutral(req).await;
+    let mut neutral = VolgaEngine::adapt_request(req).await;
 
     // Stash claims (if any) in the neutral request's extensions so the
     // engine-agnostic handler can attach them to the outgoing message.
@@ -56,15 +56,15 @@ pub(crate) async fn post(req: HttpRequest) -> HttpResult {
     }
 
     let resp = handlers::handle_post(neutral, &manager).await;
-    VolgaEngine::into_engine(resp)
+    VolgaEngine::adapt_response(resp)
 }
 
 /// `DELETE /<endpoint>` — explicit session termination.
 pub(crate) async fn delete(req: HttpRequest) -> HttpResult {
     let manager: Dc<Arc<HttpContext>> = req.extract()?;
-    let neutral = VolgaEngine::into_neutral(req).await;
+    let neutral = VolgaEngine::adapt_request(req).await;
     let resp = handlers::handle_delete(neutral, &manager).await;
-    VolgaEngine::into_engine(resp)
+    VolgaEngine::adapt_response(resp)
 }
 
 /// `GET /<endpoint>` — SSE subscribe.
@@ -84,6 +84,6 @@ pub(crate) async fn get(req: HttpRequest) -> HttpResult {
                 sse!(stream)
             }
         }
-        SseResponse::Status(resp) => VolgaEngine::into_engine(resp),
+        SseResponse::Status(resp) => VolgaEngine::adapt_response(resp),
     }
 }

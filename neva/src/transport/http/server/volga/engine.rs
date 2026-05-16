@@ -57,7 +57,7 @@ impl HttpEngine for VolgaEngine {
     type Response = HttpResult;
     type SseEvent = SseMessage;
 
-    async fn into_neutral(req: Self::Request) -> NeutralRequest {
+    async fn adapt_request(req: Self::Request) -> NeutralRequest {
         let mut builder = http::Request::builder()
             .method(req.method().clone())
             .uri(req.uri().clone())
@@ -71,7 +71,7 @@ impl HttpEngine for VolgaEngine {
         builder.body(body).expect("valid request")
     }
 
-    fn into_engine(resp: NeutralResponse) -> Self::Response {
+    fn adapt_response(resp: NeutralResponse) -> Self::Response {
         let (parts, body) = resp.into_parts();
         let status = parts.status.as_u16();
 
@@ -86,11 +86,11 @@ impl HttpEngine for VolgaEngine {
         builder.body(http_body)
     }
 
-    fn sse_tracked(seq: u64, msg: &Message) -> Self::SseEvent {
+    fn tracked_event(seq: u64, msg: &Message) -> Self::SseEvent {
         SseMessage::new().id(seq.to_string()).json(msg)
     }
 
-    fn sse_ephemeral(msg: &Message) -> Self::SseEvent {
+    fn ephemeral_event(msg: &Message) -> Self::SseEvent {
         SseMessage::new().json(msg)
     }
 
