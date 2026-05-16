@@ -157,11 +157,11 @@ pub mod prelude {
     pub use crate::json::*;
     pub use crate::types::*;
 
-    #[cfg(feature = "http-server")]
-    pub use crate::auth::{Claims, DefaultClaims};
     #[cfg(feature = "http-server-volga")]
     pub use crate::auth::AuthConfig;
-    
+    #[cfg(feature = "http-server")]
+    pub use crate::auth::{Claims, DefaultClaims};
+
     #[cfg(all(feature = "http-server", feature = "server-tls"))]
     pub use crate::transport::http::{DevCertMode, TlsConfig};
     #[cfg(feature = "http-server")]
