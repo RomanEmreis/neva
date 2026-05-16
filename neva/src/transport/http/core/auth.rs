@@ -19,9 +19,13 @@ const ERR_UNAUTHORIZED: &str = "Subject is not authorized to invoke this";
 /// subject's permissions match a required one. Returns an unauthorized
 /// error otherwise, or a "claims missing" error if required is set but
 /// `claims` is `None`.
+///
+/// Accepts `Option<&dyn Claims>` so the same validator runs against any
+/// engine-supplied claims type — Volga's `DefaultClaims` or a custom
+/// claims struct from an axum / hyper adapter.
 #[inline]
-pub(crate) fn validate_permissions<C: Claims>(
-    claims: Option<&C>,
+pub(crate) fn validate_permissions(
+    claims: Option<&dyn Claims>,
     required: Option<&[String]>,
 ) -> Result<(), Error> {
     required.map_or(Ok(()), |req| {
@@ -36,9 +40,12 @@ pub(crate) fn validate_permissions<C: Claims>(
 ///
 /// Returns `Ok(())` if `required` is `None`, or if the subject's `role`
 /// or any of `roles` matches a required role.
+///
+/// Accepts `Option<&dyn Claims>` so the same validator runs against any
+/// engine-supplied claims type.
 #[inline]
-pub(crate) fn validate_roles<C: Claims>(
-    claims: Option<&C>,
+pub(crate) fn validate_roles(
+    claims: Option<&dyn Claims>,
     required: Option<&[String]>,
 ) -> Result<(), Error> {
     required.map_or(Ok(()), |req| {
@@ -73,7 +80,7 @@ fn claims_missing() -> Error {
 mod tests {
     use super::*;
 
-    #[derive(Default)]
+    #[derive(Default, Debug)]
     struct TestClaims {
         role: Option<String>,
         roles: Option<Vec<String>>,
@@ -94,14 +101,14 @@ mod tests {
 
     #[test]
     fn no_required_permissions_passes_without_claims() {
-        let r = validate_permissions::<TestClaims>(None, None);
+        let r = validate_permissions(None, None);
         assert!(r.is_ok());
     }
 
     #[test]
     fn required_permissions_without_claims_fails() {
         let req = vec!["read".into()];
-        let r = validate_permissions::<TestClaims>(None, Some(&req));
+        let r = validate_permissions(None, Some(&req));
         assert!(r.is_err());
     }
 
@@ -112,7 +119,7 @@ mod tests {
             permissions: Some(vec!["read".into()]),
             ..Default::default()
         };
-        assert!(validate_permissions(Some(&claims), Some(&req)).is_ok());
+        assert!(validate_permissions(Some(&claims as &dyn Claims), Some(&req)).is_ok());
     }
 
     #[test]
@@ -122,7 +129,7 @@ mod tests {
             permissions: Some(vec!["read".into()]),
             ..Default::default()
         };
-        assert!(validate_permissions(Some(&claims), Some(&req)).is_err());
+        assert!(validate_permissions(Some(&claims as &dyn Claims), Some(&req)).is_err());
     }
 
     #[test]
@@ -132,7 +139,7 @@ mod tests {
             role: Some("admin".into()),
             ..Default::default()
         };
-        assert!(validate_roles(Some(&claims), Some(&req)).is_ok());
+        assert!(validate_roles(Some(&claims as &dyn Claims), Some(&req)).is_ok());
     }
 
     #[test]
@@ -142,7 +149,7 @@ mod tests {
             roles: Some(vec!["user".into(), "admin".into()]),
             ..Default::default()
         };
-        assert!(validate_roles(Some(&claims), Some(&req)).is_ok());
+        assert!(validate_roles(Some(&claims as &dyn Claims), Some(&req)).is_ok());
     }
 
     #[test]
@@ -152,6 +159,29 @@ mod tests {
             role: Some("user".into()),
             ..Default::default()
         };
-        assert!(validate_roles(Some(&claims), Some(&req)).is_err());
+        assert!(validate_roles(Some(&claims as &dyn Claims), Some(&req)).is_err());
+    }
+
+    /// Verify that two different `Claims`-implementing types both flow
+    /// through the same dyn-Claims validator — this is the engine
+    /// neutrality contract.
+    #[test]
+    fn validator_accepts_heterogeneous_claims_types() {
+        #[derive(Debug)]
+        struct AltClaims;
+        impl Claims for AltClaims {
+            fn role(&self) -> Option<&str> {
+                Some("admin")
+            }
+        }
+
+        let req = vec!["admin".into()];
+        let alt: AltClaims = AltClaims;
+        let test = TestClaims {
+            role: Some("admin".into()),
+            ..Default::default()
+        };
+        assert!(validate_roles(Some(&alt as &dyn Claims), Some(&req)).is_ok());
+        assert!(validate_roles(Some(&test as &dyn Claims), Some(&req)).is_ok());
     }
 }

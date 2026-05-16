@@ -926,7 +926,7 @@ impl App {
         #[cfg(feature = "http-server")]
         let context = {
             let headers = std::mem::take(&mut req.headers);
-            let claims = req.claims.take().map(|c| *c);
+            let claims = req.claims.take();
             runtime.context(session_id, headers, claims)
         };
 

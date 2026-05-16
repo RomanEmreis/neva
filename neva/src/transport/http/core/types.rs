@@ -71,13 +71,17 @@ pub enum SseResponse<S> {
 /// # Example
 ///
 /// ```rust,ignore
+/// #[derive(Debug)]
 /// struct MyClaims { sub: String, role: String }
 ///
 /// impl neva::auth::Claims for MyClaims {
 ///     fn role(&self) -> Option<&str> { Some(&self.role) }
 /// }
 /// ```
-pub trait Claims: Send + Sync + 'static {
+///
+/// `Debug` is required so that `Request` (which derives `Debug`) can
+/// hold an `Arc<dyn Claims>`.
+pub trait Claims: std::fmt::Debug + Send + Sync + 'static {
     /// Single role for this subject, if any.
     fn role(&self) -> Option<&str> {
         None

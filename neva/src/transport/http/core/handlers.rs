@@ -6,7 +6,7 @@
 //! [`HttpResponse`] (or an [`SseResponse`] for the GET handler).
 
 use crate::{
-    auth::DefaultClaims,
+    auth::Claims,
     error::{Error, ErrorCode},
     types::{Message, RequestId, Response},
 };
@@ -40,6 +40,13 @@ pub(crate) const MCP_SESSION_ID: &str = "Mcp-Session-Id";
 ///     handlers::dispatch_post::<MyEngine>(req, &ctx).await
 /// }
 /// ```
+///
+/// **Authorization:** if the engine wants neva's per-tool / per-prompt /
+/// per-resource role & permission gates to engage, it must insert an
+/// `Arc<dyn neva::auth::Claims>` into `req.extensions_mut()` before
+/// `into_neutral` returns (typically inside `HttpEngine::into_neutral`
+/// or in the engine's route handler just before this call). See the
+/// [`HttpEngine`] doc comment for the full contract.
 pub async fn dispatch_post<E: HttpEngine>(req: E::Request, ctx: &HttpContext) -> E::Response {
     let neutral = E::into_neutral(req).await;
     let resp = handle_post(neutral, ctx).await;
@@ -85,7 +92,13 @@ pub async fn dispatch_get_sse<E: HttpEngine>(
 pub async fn handle_post(req: HttpRequest, ctx: &HttpContext) -> HttpResponse {
     let mut headers = req.headers().clone();
     let id = get_or_create_mcp_session(&headers);
-    let claims = req.extensions().get::<DefaultClaims>().cloned();
+    // Engine-neutral claims pickup: any engine that decoded auth claims
+    // for this request is expected to insert them as
+    // `Arc<dyn neva::auth::Claims>` into `req.extensions_mut()` before
+    // calling `dispatch_post`. Per-tool/prompt/resource role and
+    // permission gates then run against whatever concrete claims type
+    // the engine supplied.
+    let claims = req.extensions().get::<Arc<dyn Claims>>().cloned();
     let body = req.into_body();
 
     let msg = match parse_message(&body) {

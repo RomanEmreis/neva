@@ -22,6 +22,27 @@ use super::{
 /// [`super::handlers`], which compose conversion + protocol dispatch +
 /// conversion-back in one call.
 ///
+/// # Authorization contract
+///
+/// To enable neva's per-tool / per-prompt / per-resource role and
+/// permission gates, the engine is responsible for decoding the
+/// inbound request's auth credential (bearer token, session cookie,
+/// custom header — whatever the engine supports) into a value
+/// implementing [`crate::auth::Claims`], wrapping it in
+/// `Arc<dyn neva::auth::Claims>`, and inserting it into
+/// `request.extensions_mut()` **before** calling [`dispatch_post`].
+///
+/// neva itself does not parse credentials — that is the engine's job.
+/// If no claims are inserted, neva treats the request as unauthenticated
+/// and any tool/prompt/resource that declares required roles or
+/// permissions will reject it.
+///
+/// The default [`crate::transport::http::server::volga::VolgaEngine`]
+/// does this automatically using Volga's `BearerTokenService`. A custom
+/// engine adapter wires up the equivalent step in its own POST route.
+///
+/// [`dispatch_post`]: super::handlers::dispatch_post
+///
 /// # Example
 ///
 /// ```rust,ignore

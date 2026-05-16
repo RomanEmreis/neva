@@ -98,6 +98,23 @@ pub mod auth {
     /// The Volga adapter's `DefaultClaims` already implements both this
     /// trait and `volga::auth::AuthClaims`, so the same per-tool validator
     /// runs across every engine.
+    ///
+    /// # Engine contract
+    ///
+    /// An [`HttpEngine`](crate::transport::http::core::engine::HttpEngine)
+    /// adapter that wants protected tools/prompts/resources to authorize
+    /// must wrap its decoded claims in `Arc<dyn Claims>` and insert it
+    /// into the inbound request's extensions before calling the
+    /// `dispatch_post` helper:
+    ///
+    /// ```rust,ignore
+    /// use std::sync::Arc;
+    /// use neva::auth::Claims;
+    ///
+    /// // in the engine's POST route, after decoding the bearer token:
+    /// let claims: Arc<dyn Claims> = Arc::new(my_decoded_claims);
+    /// neutral_req.extensions_mut().insert(claims);
+    /// ```
     pub use crate::transport::http::core::types::Claims;
 
     /// `DefaultClaims` is a pre-built [`Claims`] impl matching the JWT

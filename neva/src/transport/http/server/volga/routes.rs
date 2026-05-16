@@ -22,6 +22,7 @@ use ::volga::{
 use std::sync::Arc;
 
 use super::engine::VolgaEngine;
+use crate::auth::Claims;
 use crate::transport::http::core::types::DefaultClaims;
 
 /// Extract the `Authorization` header and decode it into [`DefaultClaims`]
@@ -45,7 +46,12 @@ pub(crate) async fn post(req: HttpRequest) -> HttpResult {
 
     // Stash claims (if any) in the neutral request's extensions so the
     // engine-agnostic handler can attach them to the outgoing message.
+    // The wire shape here is `Arc<dyn Claims>`, matching the contract
+    // documented on `HttpEngine` — every engine inserts its own
+    // `Claims`-implementing type wrapped in `Arc<dyn Claims>` so neva's
+    // per-tool/prompt/resource gates run identically across engines.
     if let Some(claims) = decode_claims(bts, neutral.headers()) {
+        let claims: Arc<dyn Claims> = Arc::new(claims);
         neutral.extensions_mut().insert(claims);
     }
 
