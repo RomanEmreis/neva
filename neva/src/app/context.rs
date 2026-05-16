@@ -29,6 +29,8 @@ use std::{
 };
 use tokio::time::timeout;
 
+#[cfg(feature = "http-server")]
+use crate::transport::http::core::auth::{validate_permissions, validate_roles};
 #[cfg(feature = "tasks")]
 use crate::{
     shared::Either,
@@ -43,11 +45,7 @@ use serde::de::DeserializeOwned;
 #[cfg(feature = "di")]
 use volga_di::Container;
 #[cfg(feature = "http-server")]
-use {
-    crate::auth::DefaultClaims,
-    crate::transport::http::server::{validate_permissions, validate_roles},
-    volga::headers::HeaderMap,
-};
+use {crate::auth::Claims, http::HeaderMap};
 
 #[cfg(feature = "tasks")]
 pub(crate) type ToolOrTaskResponse = Either<CreateTaskResult, CallToolResponse>;
@@ -87,9 +85,13 @@ pub struct Context {
     #[cfg(feature = "http-server")]
     pub headers: HeaderMap,
 
-    /// Represents JWT claims of the current request
+    /// Type-erased JWT/auth claims of the current request.
+    ///
+    /// Inserted by the HTTP engine. Any type implementing [`Claims`]
+    /// works — neva's `DefaultClaims`, or a custom claims struct from a
+    /// custom engine adapter.
     #[cfg(feature = "http-server")]
-    pub(crate) claims: Option<DefaultClaims>,
+    pub(crate) claims: Option<Arc<dyn Claims>>,
 
     /// Represents MCP server options
     pub(crate) options: RuntimeMcpOptions,
@@ -183,7 +185,7 @@ impl ServerRuntime {
         &self,
         session_id: Option<uuid::Uuid>,
         headers: HeaderMap,
-        claims: Option<DefaultClaims>,
+        claims: Option<Arc<dyn Claims>>,
     ) -> Context {
         Context {
             session_id,
@@ -864,7 +866,7 @@ impl Context {
         roles: Option<&[String]>,
         permissions: Option<&[String]>,
     ) -> Result<(), Error> {
-        let claims = self.claims.as_ref();
+        let claims = self.claims.as_deref();
         validate_roles(claims, roles)?;
         validate_permissions(claims, permissions)?;
         Ok(())

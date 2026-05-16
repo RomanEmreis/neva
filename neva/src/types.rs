@@ -19,7 +19,7 @@ use crate::{
 pub use request::FromRequest;
 
 #[cfg(feature = "http-server")]
-use {crate::auth::DefaultClaims, volga::headers::HeaderMap};
+use {crate::auth::Claims, http::HeaderMap, std::sync::Arc};
 
 pub use capabilities::{
     ClientCapabilities, CompletionsCapability, ElicitationCapability, ElicitationFormCapability,
@@ -73,8 +73,9 @@ pub use sampling::{
     ToolChoiceMode,
 };
 pub use schema::{
-    BooleanSchema, NumberSchema, Schema, StringFormat, StringSchema, TitledMultiSelectEnumSchema,
-    TitledSingleSelectEnumSchema, UntitledMultiSelectEnumSchema, UntitledSingleSelectEnumSchema,
+    BooleanSchema, LegacyTitledEnumSchema, NumberSchema, Schema, StringFormat, StringSchema,
+    TitledMultiSelectEnumSchema, TitledSingleSelectEnumSchema, UntitledMultiSelectEnumSchema,
+    UntitledSingleSelectEnumSchema,
 };
 
 pub use icon::{Icon, IconSize, IconTheme};
@@ -189,8 +190,11 @@ pub struct MessageBatch {
     ///
     /// Copied onto each inner [`Request`] in `execute_batch` so that
     /// role/permission guards work correctly for batched HTTP calls.
+    ///
+    /// Type-erased — the HTTP engine may insert any [`Claims`]-implementing
+    /// type (e.g. neva's `DefaultClaims`, or a custom claims struct).
     #[cfg(feature = "http-server")]
-    pub(crate) claims: Option<Box<DefaultClaims>>,
+    pub(crate) claims: Option<Arc<dyn Claims>>,
 
     items: Vec<MessageEnvelope>,
 }
@@ -594,12 +598,17 @@ impl Message {
         self
     }
 
-    /// Sets Authentication and Authorization claims for [`Request`] or [`MessageBatch`] message
+    /// Sets Authentication and Authorization claims for [`Request`] or [`MessageBatch`] message.
+    ///
+    /// Accepts an [`Arc`]-wrapped trait object so any HTTP engine can
+    /// attach its own [`Claims`]-implementing type — neva does not
+    /// require the concrete type, only that it can supply roles and
+    /// permissions for the per-tool/prompt/resource gate.
     #[cfg(feature = "http-server")]
-    pub(crate) fn set_claims(mut self, claims: DefaultClaims) -> Self {
+    pub(crate) fn set_claims(mut self, claims: Arc<dyn Claims>) -> Self {
         match self {
-            Message::Request(ref mut req) => req.claims = Some(Box::new(claims)),
-            Message::Batch(ref mut batch) => batch.claims = Some(Box::new(claims)),
+            Message::Request(ref mut req) => req.claims = Some(claims),
+            Message::Batch(ref mut batch) => batch.claims = Some(claims),
             _ => (),
         }
         self

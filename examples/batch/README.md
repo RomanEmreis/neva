@@ -1,4 +1,4 @@
-# Example of using LLM Sampling Capability
+# Example of message batching
 
 ## Run the server
 ```

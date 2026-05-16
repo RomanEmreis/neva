@@ -118,7 +118,7 @@ pub struct CreateMessageRequestParams {
     pub tool_choice: Option<ToolChoice>,
 
     /// If specified, the caller is requesting task-augmented execution for this request.
-    /// The request will return a [`CreateTaskResult`] immediately, and the actual result can be
+    /// The request will return a [`crate::types::CreateTaskResult`] immediately, and the actual result can be
     /// retrieved later via `tasks/result`.
     ///
     /// **Note:** Task augmentation is subject to capability negotiation - receivers **MUST** declare support

@@ -42,6 +42,7 @@ fn format_contact(c: Contact) -> String {
 #[tokio::main]
 async fn main() {
     App::new()
+        .without_greeting()
         .with_options(|opt| opt
             .with_name("Elicitation Example Server")
             .with_stdio())

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 #[cfg(feature = "http-server")]
-use volga::headers::HeaderMap;
+use http::HeaderMap;
 
 pub use error_details::ErrorDetails;
 pub use into_response::IntoResponse;

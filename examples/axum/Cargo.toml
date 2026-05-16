@@ -1,0 +1,14 @@
+[package]
+name = "example-axum"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+neva = { path = "../../neva", features = ["http-server", "server-macros", "tracing", "di"] }
+axum = "0.8.9"
+http = "1.4.0"
+http-body-util = "0.1.3"
+tokio = { version = "1.47", features = ["full"] }
+tokio-util = "0.7"
+tracing-subscriber = "0.3"

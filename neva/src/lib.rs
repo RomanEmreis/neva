@@ -4,7 +4,7 @@
 //! ## Dependencies
 //! ```toml
 //! [dependencies]
-//! neva = { version = "0.2.1", features = ["full"] }
+//! neva = { version = "0.3.3", features = ["full"] }
 //! tokio = { version = "1", features = ["full"] }
 //! ```
 //!
@@ -87,10 +87,59 @@ pub(crate) const PROTOCOL_VERSIONS: [&str; 4] =
 
 #[cfg(feature = "http-server")]
 pub mod auth {
-    //! Authentication utilities
+    //! Authentication utilities — neva's engine-neutral [`Claims`] trait
+    //! + (under the Volga adapter) the bearer-auth configuration types.
 
-    pub use crate::transport::http::server::{AuthConfig, DefaultClaims};
-    pub use volga::auth::{Algorithm, Authorizer, Claims};
+    /// `Claims` is neva's engine-neutral trait for typed per-tool
+    /// authorization. Implement this for your custom claims type to enable
+    /// `with_roles` / `with_permissions` gating regardless of which HTTP
+    /// engine delivered the request.
+    ///
+    /// The Volga adapter's `DefaultClaims` already implements both this
+    /// trait and `volga::auth::AuthClaims`, so the same per-tool validator
+    /// runs across every engine.
+    ///
+    /// # Engine contract
+    ///
+    /// An [`HttpEngine`](crate::transport::http::core::engine::HttpEngine)
+    /// adapter that wants protected tools/prompts/resources to authorize
+    /// must wrap its decoded claims in `Arc<dyn Claims>` and insert it
+    /// into the inbound request's extensions before calling the
+    /// `dispatch_post` helper:
+    ///
+    /// ```rust,ignore
+    /// use std::sync::Arc;
+    /// use neva::auth::Claims;
+    ///
+    /// // in the engine's POST route, after decoding the bearer token:
+    /// let claims: Arc<dyn Claims> = Arc::new(my_decoded_claims);
+    /// neutral_req.extensions_mut().insert(claims);
+    /// ```
+    pub use crate::transport::http::core::types::Claims;
+
+    /// `DefaultClaims` is a pre-built [`Claims`] impl matching the JWT
+    /// standard claim names. Engine-agnostic — under the Volga adapter
+    /// it additionally implements `volga::auth::AuthClaims` so it can
+    /// be fed straight into Volga's bearer-auth pipeline.
+    pub use crate::transport::http::core::types::DefaultClaims;
+
+    /// `AuthConfig` is the Volga-flavored builder used with
+    /// `HttpServer::with_auth(...)`. Available only under the Volga adapter.
+    #[cfg(feature = "http-server-volga")]
+    pub use crate::transport::http::server::volga::auth_config::AuthConfig;
+
+    /// Volga's claims trait, re-exported for users who need to plug a
+    /// custom claims type into Volga's `Authorizer<C>`. For neva's own
+    /// per-tool checks, implement [`Claims`] instead — that one is
+    /// engine-neutral.
+    #[cfg(feature = "http-server-volga")]
+    pub use volga::auth::AuthClaims;
+
+    // Volga's `Claims` is a derive macro in the macro namespace; re-export
+    // it as `ClaimsDerive` so it doesn't collide with the `Claims` trait
+    // alias above (which lives in the type namespace).
+    #[cfg(feature = "http-server-volga")]
+    pub use volga::auth::{Algorithm, Authorizer, Claims as ClaimsDerive};
 }
 
 pub mod json {
@@ -108,10 +157,17 @@ pub mod prelude {
     pub use crate::json::*;
     pub use crate::types::*;
 
+    #[cfg(feature = "http-server-volga")]
+    pub use crate::auth::AuthConfig;
     #[cfg(feature = "http-server")]
-    pub use crate::transport::HttpServer;
+    pub use crate::auth::{Claims, DefaultClaims};
+
     #[cfg(all(feature = "http-server", feature = "server-tls"))]
     pub use crate::transport::http::{DevCertMode, TlsConfig};
+    #[cfg(feature = "http-server")]
+    pub use crate::transport::{
+        HttpContext, HttpEngine, HttpRequest, HttpResponse, HttpServer, SseResponse, handlers,
+    };
 
     #[cfg(feature = "server")]
     pub use crate::app::{App, context::Context, options};
@@ -127,9 +183,6 @@ pub mod prelude {
     pub use crate::{completion, handler, prompt, resource, resources, tool};
     #[cfg(feature = "client-macros")]
     pub use crate::{elicitation, sampling};
-
-    #[cfg(feature = "http-server")]
-    pub use crate::auth::*;
 
     #[cfg(feature = "di")]
     pub use crate::di::Dc;

@@ -2,12 +2,15 @@
 
 use crate::app::{collection::Collection, handler::RequestHandler};
 #[cfg(feature = "http-server")]
-use crate::transport::HttpServer;
+use crate::transport::{HttpEngine, HttpServer};
 use crate::transport::{StdIoServer, TransportProto};
 use dashmap::{DashMap, DashSet};
 use std::fmt::{Debug, Formatter};
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
+
+#[cfg(feature = "http-server-volga")]
+use crate::transport::http::server::{DefaultClaims, VolgaEngine};
 
 use crate::middleware::{Middleware, Middlewares};
 
@@ -154,16 +157,36 @@ impl McpOptions {
         self
     }
 
-    /// Sets Streamable HTTP as a transport protocol
+    /// Sets Streamable HTTP as a transport protocol.
+    ///
+    /// Accepts any `HttpServer<C, E>` for any engine `E: HttpEngine`. When
+    /// no engine is specified (using the default `HttpServer::new(...)`),
+    /// the Volga engine is used.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Default (Volga):
+    /// let opts = McpOptions::default().set_http(HttpServer::new("127.0.0.1:3000"));
+    /// ```
     #[cfg(feature = "http-server")]
-    pub fn set_http(mut self, http: HttpServer) -> Self {
+    pub fn set_http<C, E>(mut self, http: HttpServer<C, E>) -> Self
+    where
+        C: Send + Sync + 'static,
+        E: HttpEngine,
+    {
         self.proto = Some(TransportProto::HttpServer(Box::new(http)));
         self
     }
 
-    /// Sets Streamable HTTP as a transport protocol
-    #[cfg(feature = "http-server")]
-    pub fn with_http<F: FnOnce(HttpServer) -> HttpServer>(mut self, config: F) -> Self {
+    /// Sets Streamable HTTP as a transport protocol, using the default
+    /// Volga engine. The closure receives the default-constructed server
+    /// for fluent configuration.
+    #[cfg(feature = "http-server-volga")]
+    pub fn with_http<F>(mut self, config: F) -> Self
+    where
+        F: FnOnce(HttpServer<DefaultClaims, VolgaEngine>) -> HttpServer<DefaultClaims, VolgaEngine>,
+    {
         self.proto = Some(TransportProto::HttpServer(Box::new(config(
             HttpServer::default(),
         ))));
@@ -176,7 +199,7 @@ impl McpOptions {
     /// * __IP__: 127.0.0.1
     /// * __PORT__: 3000
     /// * __ENDPOINT__: /mcp
-    #[cfg(feature = "http-server")]
+    #[cfg(feature = "http-server-volga")]
     pub fn with_default_http(self) -> Self {
         self.with_http(|http| http)
     }
@@ -246,7 +269,7 @@ impl McpOptions {
         self
     }
 
-    /// Configures [`LogLevelHandle`] that allow to change the [`LoggingLevel`] in runtime
+    /// Configures a `tracing_subscriber::reload::Handle` that allows changing the [`LoggingLevel`] at runtime
     #[cfg(feature = "tracing")]
     pub fn with_logging(mut self, log_handle: Handle<LevelFilter, Registry>) -> Self {
         self.log_level = Some(log_handle);
@@ -883,7 +906,7 @@ mod tests {
         assert_eq!(options.transport_label(), "(none)");
     }
 
-    #[cfg(feature = "http-server")]
+    #[cfg(feature = "http-server-volga")]
     #[test]
     fn it_returns_http_label_when_http_transport() {
         let options = McpOptions::default().with_default_http();

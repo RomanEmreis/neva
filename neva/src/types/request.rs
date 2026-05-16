@@ -9,7 +9,7 @@ use std::fmt::{Debug, Formatter};
 use crate::Context;
 
 #[cfg(feature = "http-server")]
-use {crate::auth::DefaultClaims, volga::headers::HeaderMap};
+use {crate::auth::Claims, http::HeaderMap, std::sync::Arc};
 
 #[cfg(feature = "tasks")]
 use crate::types::RelatedTaskMetadata;
@@ -49,10 +49,12 @@ pub struct Request {
     #[cfg(feature = "http-server")]
     pub headers: HeaderMap,
 
-    /// Authentication and Authorization claims
+    /// Authentication and Authorization claims attached to this request by
+    /// the HTTP engine. Type-erased so any engine can supply its own
+    /// [`Claims`]-implementing type.
     #[serde(skip)]
     #[cfg(feature = "http-server")]
-    pub claims: Option<Box<DefaultClaims>>,
+    pub claims: Option<Arc<dyn Claims>>,
 }
 
 /// Provides metadata related to the request that provides additional protocol-level information.

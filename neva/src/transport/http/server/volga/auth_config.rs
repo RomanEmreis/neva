@@ -1,57 +1,14 @@
 //! Authentication and Authorization configuration tools
 
-use crate::error::{Error, ErrorCode};
-use serde::Deserialize;
+use crate::transport::http::core::types::DefaultClaims;
 use std::fmt::Debug;
 use volga::auth::{Algorithm, AuthClaims, Authorizer, BearerAuthConfig, DecodingKey, predicate};
 
-const ERR_NO_CLAIMS: &str = "Claims are not provided";
-const ERR_UNAUTHORIZED: &str = "Subject is not authorized to invoke this";
-
-/// Represents default claims
-#[derive(Default, Clone, Debug, Deserialize)]
-pub struct DefaultClaims {
-    /// Subject
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sub: Option<String>,
-
-    /// Issuer
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub iss: Option<String>,
-
-    /// Audience
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub aud: Option<String>,
-
-    /// Expiration time
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub exp: Option<i64>,
-
-    /// Not before time
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub nbf: Option<i64>,
-
-    /// Issued at time
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub iat: Option<i64>,
-
-    /// JWT ID
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub jti: Option<String>,
-
-    /// Role
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
-
-    /// List of Roles
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub roles: Option<Vec<String>>,
-
-    /// List of Permissions
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub permissions: Option<Vec<String>>,
-}
-
+// Bridge Volga's `AuthClaims` onto neva's canonical, engine-agnostic
+// `DefaultClaims`. The type itself lives in `core::types` and already
+// implements neva's neutral `Claims` trait, so the same struct flows
+// through every engine's request pipeline; this impl is what lets it
+// also feed Volga's bearer-auth pipeline when the Volga adapter is on.
 impl AuthClaims for DefaultClaims {
     #[inline]
     fn role(&self) -> Option<&str> {
@@ -237,54 +194,6 @@ impl<C: AuthClaims> AuthConfig<C> {
     pub(crate) fn into_parts(self) -> (BearerAuthConfig, Authorizer<C>) {
         (self.inner, self.authorizer)
     }
-}
-
-/// Validates JWT claims against required permissions
-#[inline]
-pub(crate) fn validate_permissions<C: AuthClaims>(
-    claims: Option<&C>,
-    required: Option<&[String]>,
-) -> Result<(), Error> {
-    required.map_or(Ok(()), |req| {
-        let claims = claims.ok_or_else(claims_missing)?;
-        contains_any(claims.permissions(), req)
-            .then_some(())
-            .ok_or_else(unauthorized)
-    })
-}
-
-/// Validates JWT claims against required roles
-#[inline]
-pub(crate) fn validate_roles<C: AuthClaims>(
-    claims: Option<&C>,
-    required: Option<&[String]>,
-) -> Result<(), Error> {
-    required.map_or(Ok(()), |req| {
-        let claims = claims.ok_or_else(claims_missing)?;
-        (contains(claims.role(), req) || contains_any(claims.roles(), req))
-            .then_some(())
-            .ok_or_else(unauthorized)
-    })
-}
-
-#[inline]
-fn contains_any(have: Option<&[String]>, required: &[String]) -> bool {
-    have.is_some_and(|vals| vals.iter().any(|v| required.contains(v)))
-}
-
-#[inline]
-fn contains(have: Option<&str>, required: &[String]) -> bool {
-    have.is_some_and(|val| required.iter().any(|r| r == val))
-}
-
-#[inline]
-fn unauthorized() -> Error {
-    Error::new(ErrorCode::InvalidParams, ERR_UNAUTHORIZED)
-}
-
-#[inline]
-fn claims_missing() -> Error {
-    Error::new(ErrorCode::InvalidParams, ERR_NO_CLAIMS)
 }
 
 /// Creates default authorization and authentication rules

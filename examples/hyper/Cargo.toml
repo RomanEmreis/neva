@@ -1,0 +1,18 @@
+[package]
+name = "example-hyper"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+neva = { path = "../../neva", features = ["http-server", "server-macros", "tracing", "di"] }
+bytes = "1.11"
+http = "1.4"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+serde_json = "1"
+tokio = { version = "1.47", features = ["full"] }
+tokio-util = "0.7"
+tracing = "0.1"
+tracing-subscriber = "0.3"

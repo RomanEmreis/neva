@@ -74,7 +74,7 @@ pub struct Tool {
     pub input_schema: ToolSchema,
 
     /// An optional JSON Schema object defining the structure of the tool's output returned in
-    /// the `structuredContent` field of a [`CallToolResult`].
+    /// the `structuredContent` field of a [`crate::types::CallToolResponse`].
     ///
     /// > Note: Needs to a valid JSON schema object that additionally is of a type object.
     #[serde(rename = "outputSchema", skip_serializing_if = "Option::is_none")]
@@ -198,7 +198,7 @@ pub struct CallToolRequestParams {
     pub args: Option<HashMap<String, Value>>,
 
     /// If specified, the caller is requesting task-augmented execution for this request.
-    /// The request will return a [`CreateTaskResult`] immediately, and the actual result can be
+    /// The request will return a [`crate::types::CreateTaskResult`] immediately, and the actual result can be
     /// retrieved later via `tasks/result`.
     ///
     /// **Note:** Task augmentation is subject to capability negotiation - receivers **MUST** declare support

@@ -1,7 +1,7 @@
 //! Run with:
 //!
 //! ```no_rust
-//! npx @modelcontextprotocol/inspector cargo run -p middlewares
+//! npx @modelcontextprotocol/inspector cargo run -p example-middlewares
 //! ```
 
 use neva::prelude::*;

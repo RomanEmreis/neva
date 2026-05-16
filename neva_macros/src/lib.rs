@@ -110,7 +110,7 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```ignore
 /// use neva::prelude::*;
 ///
-/// #[resource(uri = "res://{name}"]
+/// #[resource(uri = "res://{name}")]
 /// async fn get_res(name: String) -> TextResourceContents {
 ///     TextResourceContents::new(
 ///         format!("res://{name}"),
@@ -179,7 +179,7 @@ pub fn resources(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```ignore
 /// use neva::prelude::*;
 ///
-/// #[prompt(descr = "Analyze code for potential improvements"]
+/// #[prompt(descr = "Analyze code for potential improvements")]
 /// async fn analyze_code(lang: String) -> PromptMessage {
 ///     PromptMessage::user()
 ///         .with(format!("Language: {lang}"))
