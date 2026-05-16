@@ -8,13 +8,11 @@
 //!
 //! This example shows how to plug a non-default HTTP stack — here, axum —
 //! into neva's Streamable HTTP transport. It pulls in `neva` with only the
-//! engine-agnostic `http-server` feature (no Volga in deps), implements
+//! engine-agnostic `http-server` feature, implements
 //! the [`HttpEngine`] contract for an `AxumEngine`, and wires it into
 //! `HttpServer::from_engine`. All adapter surfaces — HTTP request /
 //! response conversion *and* SSE event construction — live on the
 //! engine, so route handlers are one-liners.
-
-use std::{convert::Infallible, sync::Arc};
 
 use axum::{
     Router,
@@ -27,18 +25,8 @@ use axum::{
     routing::post,
 };
 use http_body_util::BodyExt;
-use neva::{
-    error::{Error, ErrorCode},
-    prelude::*,
-    transport::HttpServer,
-    transport::http::core::{
-        context::HttpContext,
-        engine::HttpEngine,
-        handlers,
-        types::{HttpRequest, HttpResponse, SseResponse},
-    },
-    types::Message,
-};
+use neva::prelude::*;
+use std::convert::Infallible;
 use tokio_util::sync::CancellationToken;
 
 /// HTTP engine backed by [axum](https://docs.rs/axum).
@@ -46,7 +34,7 @@ use tokio_util::sync::CancellationToken;
 struct AxumEngine;
 
 impl HttpEngine for AxumEngine {
-    type Request = axum::http::Request<Body>;
+    type Request = http::Request<Body>;
     type Response = Response;
     type SseEvent = Result<Event, Infallible>;
 
@@ -97,9 +85,6 @@ impl HttpEngine for AxumEngine {
     async fn run(self, ctx: HttpContext, token: CancellationToken) -> Result<(), Error> {
         let addr = ctx.addr().to_owned();
         let endpoint = ctx.endpoint().to_owned();
-        // axum's `State` extractor wants a cheaply-clonable handle;
-        // wrap the (already cheap) context in `Arc` once for sharing.
-        let ctx = Arc::new(ctx);
 
         let app = Router::new()
             .route(
@@ -119,24 +104,15 @@ impl HttpEngine for AxumEngine {
     }
 }
 
-async fn post_handler(
-    State(ctx): State<Arc<HttpContext>>,
-    req: axum::http::Request<Body>,
-) -> Response {
+async fn post_handler(State(ctx): State<HttpContext>, req: axum::http::Request<Body>) -> Response {
     handlers::dispatch_post::<AxumEngine>(req, &ctx).await
 }
 
-async fn delete_handler(
-    State(ctx): State<Arc<HttpContext>>,
-    req: axum::http::Request<Body>,
-) -> Response {
+async fn delete_handler(State(ctx): State<HttpContext>, req: http::Request<Body>) -> Response {
     handlers::dispatch_delete::<AxumEngine>(req, &ctx).await
 }
 
-async fn get_handler(
-    State(ctx): State<Arc<HttpContext>>,
-    req: axum::http::Request<Body>,
-) -> Response {
+async fn get_handler(State(ctx): State<HttpContext>, req: http::Request<Body>) -> Response {
     match handlers::dispatch_get_sse::<AxumEngine>(req, &ctx).await {
         SseResponse::Stream { headers, stream } => {
             let sse = Sse::new(stream).keep_alive(KeepAlive::default());

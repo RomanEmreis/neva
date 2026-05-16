@@ -6,7 +6,10 @@ use std::future::Future;
 use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "http-server")]
-pub use http::HttpServer;
+pub use http::{
+    HttpContext, HttpEngine, HttpRequest, HttpResponse, HttpServer, SseResponse, handlers,
+};
+
 #[cfg(feature = "server")]
 pub(crate) use stdio::StdIoServer;
 

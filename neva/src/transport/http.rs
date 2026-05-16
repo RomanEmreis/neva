@@ -18,12 +18,20 @@ use std::time::Duration;
 
 use super::{Receiver as TransportReceiver, Sender as TransportSender, Transport};
 
-#[cfg(all(feature = "http-server-volga", feature = "server-tls"))]
-pub use volga::tls::{DevCertMode, TlsConfig};
-
 #[cfg(all(feature = "http-client", feature = "client-tls"))]
 use crate::transport::http::client::tls_config::{
     ClientTlsConfig, TlsConfig as McpClientTlsConfig,
+};
+
+#[cfg(all(feature = "http-server-volga", feature = "server-tls"))]
+pub use volga::tls::{DevCertMode, TlsConfig};
+
+#[cfg(feature = "http-server")]
+pub use core::{
+    context::HttpContext,
+    engine::HttpEngine,
+    handlers,
+    types::{HttpRequest, HttpResponse, SseResponse},
 };
 
 #[cfg(feature = "http-client")]

@@ -4,7 +4,7 @@
 //! ## Dependencies
 //! ```toml
 //! [dependencies]
-//! neva = { version = "0.2.1", features = ["full"] }
+//! neva = { version = "0.3.3", features = ["full"] }
 //! tokio = { version = "1", features = ["full"] }
 //! ```
 //!
@@ -158,11 +158,16 @@ pub mod prelude {
     pub use crate::types::*;
 
     #[cfg(feature = "http-server")]
-    pub use crate::auth::Claims;
-    #[cfg(feature = "http-server")]
-    pub use crate::transport::HttpServer;
+    pub use crate::auth::{Claims, DefaultClaims};
+    #[cfg(feature = "http-server-volga")]
+    pub use crate::auth::AuthConfig;
+    
     #[cfg(all(feature = "http-server", feature = "server-tls"))]
     pub use crate::transport::http::{DevCertMode, TlsConfig};
+    #[cfg(feature = "http-server")]
+    pub use crate::transport::{
+        HttpContext, HttpEngine, HttpRequest, HttpResponse, HttpServer, SseResponse, handlers,
+    };
 
     #[cfg(feature = "server")]
     pub use crate::app::{App, context::Context, options};
@@ -178,9 +183,6 @@ pub mod prelude {
     pub use crate::{completion, handler, prompt, resource, resources, tool};
     #[cfg(feature = "client-macros")]
     pub use crate::{elicitation, sampling};
-
-    #[cfg(feature = "http-server")]
-    pub use crate::auth::*;
 
     #[cfg(feature = "di")]
     pub use crate::di::Dc;
