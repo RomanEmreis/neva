@@ -3,7 +3,7 @@
 //! ```no_rust
 //! npx @modelcontextprotocol/inspector
 //!
-//! JWT_SECRET=a-string-secret-at-least-256-bits-long cargo run -p protected-server
+//! JWT_SECRET=a-string-secret-at-least-256-bits-long cargo run -p example-protected-server
 //! ```
 use neva::prelude::*;
 use tracing_subscriber::{filter, prelude::*, reload};
