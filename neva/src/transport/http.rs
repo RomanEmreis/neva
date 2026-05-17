@@ -292,7 +292,7 @@ impl HttpReceiver {
 #[cfg(feature = "http-server")]
 impl<E> HttpServer<crate::auth::DefaultClaims, E>
 where
-    E: crate::transport::http::core::engine::HttpEngine,
+    E: HttpEngine,
 {
     /// Creates a new [`HttpServer`] bound to `addr`, running the supplied
     /// engine. This is the engine-agnostic constructor — use it when
