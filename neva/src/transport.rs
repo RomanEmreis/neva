@@ -54,7 +54,7 @@ pub(crate) enum TransportProto {
     #[cfg(feature = "server")]
     StdIoServer(StdIoServer),
     #[cfg(feature = "http-server")]
-    HttpServer(Box<dyn crate::transport::http::core::engine::HttpTransport>),
+    HttpServer(Box<dyn http::core::engine::HttpTransport>),
     #[cfg(feature = "http-client")]
     HttpClient(HttpClient),
     //Ws(Websocket),

@@ -67,8 +67,8 @@ use super::{
 pub trait HttpEngine: Send + Sync + 'static {
     /// Engine-native inbound request type (e.g. `axum::Request<Body>`).
     ///
-    /// `Send` is intentionally not required here so engines whose native
-    /// request type holds non-`Send` state (actix-web's `HttpRequest`
+    /// `Send` is intentionally not required here, so engines whose native
+    /// request type holds a non-`Send` state (actix-web's `HttpRequest`
     /// holds `Rc<…>` internally) can still implement this trait. For
     /// engines whose request type is `Send`, [`dispatch_post`] /
     /// [`dispatch_delete`] / [`dispatch_get_sse`] produce `Send` futures
@@ -79,19 +79,19 @@ pub trait HttpEngine: Send + Sync + 'static {
     /// [`dispatch_post`]: super::handlers::dispatch_post
     /// [`dispatch_delete`]: super::handlers::dispatch_delete
     /// [`dispatch_get_sse`]: super::handlers::dispatch_get_sse
-    type Request: 'static;
+    type Request;
 
     /// Engine-native outbound response type (e.g. `axum::Response`).
     ///
     /// Same `Send` story as [`Self::Request`].
-    type Response: 'static;
+    type Response;
 
     /// Engine-native SSE event type (e.g. `volga::http::sse::Message`).
     ///
     /// `Send` is required because SSE events are yielded by an
     /// engine-agnostic `impl Stream<Item = Self::SseEvent> + Send`
     /// returned from [`super::handlers::handle_get_sse`].
-    type SseEvent: Send + 'static;
+    type SseEvent: Send;
 
     /// Convert an engine-native request into neva's neutral
     /// [`HttpRequest`]. The body must be fully buffered before return.
