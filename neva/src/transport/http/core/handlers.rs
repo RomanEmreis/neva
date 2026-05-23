@@ -160,11 +160,19 @@ pub async fn handle_post(req: HttpRequest, ctx: &HttpContext) -> HttpResponse {
     }
 }
 
-/// Parse the body into a `Message`. Two-step decode per JSON-RPC 2.0 §5.1.
+/// Parse the body into a [`Message`].
+///
+/// Single-step decode: `serde_json::Error::classify()` distinguishes
+/// JSON-RPC 2.0 §5.1 ParseError (`Category::Syntax` / `Category::Eof` —
+/// the body is not valid JSON) from InvalidRequest (`Category::Data` —
+/// the body is valid JSON but does not match any [`Message`] variant).
 fn parse_message(body: &Bytes) -> Result<Message, ErrorCode> {
-    let value: serde_json::Value =
-        serde_json::from_slice(body).map_err(|_| ErrorCode::ParseError)?;
-    serde_json::from_value::<Message>(value).map_err(|_| ErrorCode::InvalidRequest)
+    serde_json::from_slice::<Message>(body).map_err(|e| match e.classify() {
+        serde_json::error::Category::Syntax | serde_json::error::Category::Eof => {
+            ErrorCode::ParseError
+        }
+        _ => ErrorCode::InvalidRequest,
+    })
 }
 
 fn get_or_create_mcp_session(headers: &HeaderMap) -> uuid::Uuid {

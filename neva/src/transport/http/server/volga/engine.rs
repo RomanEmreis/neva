@@ -62,11 +62,13 @@ impl HttpEngine for VolgaEngine {
             .method(req.method().clone())
             .uri(req.uri().clone())
             .version(req.version());
+        
         if let Some(headers_mut) = builder.headers_mut() {
             for (k, v) in req.headers().iter() {
                 headers_mut.append(k, v.clone());
             }
         }
+        
         let body = read_body(req.into_body()).await.unwrap_or_default();
         builder.body(body).expect("valid request")
     }
@@ -74,10 +76,7 @@ impl HttpEngine for VolgaEngine {
     fn adapt_response(resp: NeutralResponse) -> Self::Response {
         let (parts, body) = resp.into_parts();
         let status = parts.status.as_u16();
-
-        let mut buf = BytesMut::with_capacity(body.len());
-        buf.extend_from_slice(&body);
-        let http_body = HttpBody::full(buf.freeze());
+        let http_body = HttpBody::full(body);
 
         let mut builder = ::volga::builder!(status);
         for (name, value) in parts.headers.iter() {
