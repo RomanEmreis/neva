@@ -40,16 +40,16 @@ impl HttpEngine for ActixEngine {
     /// in `Ok` because neva never produces SSE errors.
     type SseEvent = Result<Bytes, std::convert::Infallible>;
 
-    async fn adapt_request(req: Self::Request) -> HttpRequest {
+    async fn adapt_request(req: Self::Request) -> Result<HttpRequest, Error> {
         let (req, body) = req;
 
         let method = http::Method::from_bytes(req.method().as_str().as_bytes())
-            .unwrap_or(http::Method::POST);
+            .map_err(|e| Error::new(ErrorCode::InternalError, e.to_string()))?;
         let uri = req
             .uri()
             .to_string()
             .parse::<http::Uri>()
-            .unwrap_or_default();
+            .map_err(|e| Error::new(ErrorCode::InternalError, e.to_string()))?;
 
         let mut builder = http::Request::builder().method(method).uri(uri);
         if let Some(headers) = builder.headers_mut() {
@@ -64,7 +64,7 @@ impl HttpEngine for ActixEngine {
         }
         builder
             .body(Bytes::copy_from_slice(&body))
-            .expect("valid request")
+            .map_err(|e| Error::new(ErrorCode::InternalError, e.to_string()))
     }
 
     fn adapt_response(resp: HttpResponse) -> Self::Response {
@@ -129,7 +129,9 @@ async fn post_handler(
     req: ActixHttpRequest,
     body: ActixBytes,
 ) -> ActixHttpResponse {
-    handlers::dispatch_post::<ActixEngine>((req, body), &ctx).await
+    handlers::dispatch_post::<ActixEngine>((req, body), &ctx)
+        .await
+        .unwrap_or_else(internal_error)
 }
 
 async fn delete_handler(
@@ -137,7 +139,9 @@ async fn delete_handler(
     req: ActixHttpRequest,
     body: ActixBytes,
 ) -> ActixHttpResponse {
-    handlers::dispatch_delete::<ActixEngine>((req, body), &ctx).await
+    handlers::dispatch_delete::<ActixEngine>((req, body), &ctx)
+        .await
+        .unwrap_or_else(internal_error)
 }
 
 async fn get_handler(
@@ -145,7 +149,11 @@ async fn get_handler(
     req: ActixHttpRequest,
     body: ActixBytes,
 ) -> ActixHttpResponse {
-    match handlers::dispatch_get_sse::<ActixEngine>((req, body), &ctx).await {
+    let outcome = match handlers::dispatch_get_sse::<ActixEngine>((req, body), &ctx).await {
+        Ok(outcome) => outcome,
+        Err(e) => return internal_error(e),
+    };
+    match outcome {
         SseResponse::Stream { headers, stream } => {
             let mut builder = ActixHttpResponse::Ok();
             builder.content_type("text/event-stream");
@@ -161,6 +169,11 @@ async fn get_handler(
         }
         SseResponse::Status(resp) => ActixEngine::adapt_response(resp),
     }
+}
+
+/// Translate a neva engine-adapter `Error` into a 500 actix response.
+fn internal_error(err: Error) -> ActixHttpResponse {
+    ActixHttpResponse::InternalServerError().body(err.to_string())
 }
 
 #[tool]

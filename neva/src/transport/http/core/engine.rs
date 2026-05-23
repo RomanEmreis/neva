@@ -54,7 +54,7 @@ use super::{
 ///     type Response = framework::Response;
 ///     type SseEvent = framework::sse::Event;
 ///
-///     async fn adapt_request(req: Self::Request) -> HttpRequest { ... }
+///     async fn adapt_request(req: Self::Request) -> Result<HttpRequest, Error> { ... }
 ///     fn adapt_response(resp: HttpResponse) -> Self::Response { ... }
 ///
 ///     fn tracked_event(seq: u64, msg: &Message) -> Self::SseEvent { ... }
@@ -95,7 +95,17 @@ pub trait HttpEngine: Send + Sync + 'static {
 
     /// Convert an engine-native request into neva's neutral
     /// [`HttpRequest`]. The body must be fully buffered before return.
-    fn adapt_request(req: Self::Request) -> impl Future<Output = HttpRequest>;
+    ///
+    /// Returns [`Err`] when the body cannot be read or the neutral request
+    /// cannot be constructed (e.g. an invalid URI / method emitted by the
+    /// underlying stack). The error is propagated through
+    /// [`super::handlers::dispatch_post`] / [`dispatch_delete`] /
+    /// [`dispatch_get_sse`] so the engine can map it onto its native
+    /// failure mode without ever needing to `unwrap` / `expect`.
+    ///
+    /// [`dispatch_delete`]: super::handlers::dispatch_delete
+    /// [`dispatch_get_sse`]: super::handlers::dispatch_get_sse
+    fn adapt_request(req: Self::Request) -> impl Future<Output = Result<HttpRequest, Error>>;
 
     /// Build an engine-native response from neva's neutral
     /// [`HttpResponse`].

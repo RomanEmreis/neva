@@ -38,13 +38,13 @@ impl HttpEngine for AxumEngine {
     type Response = Response;
     type SseEvent = Result<Event, Infallible>;
 
-    async fn adapt_request(req: Self::Request) -> HttpRequest {
+    async fn adapt_request(req: Self::Request) -> Result<HttpRequest, Error> {
         let (parts, body) = req.into_parts();
         let bytes = body
             .collect()
             .await
             .map(|c| c.to_bytes())
-            .unwrap_or_default();
+            .map_err(|e| Error::new(ErrorCode::InternalError, e.to_string()))?;
 
         let mut builder = http::Request::builder()
             .method(parts.method)
@@ -55,7 +55,9 @@ impl HttpEngine for AxumEngine {
                 headers.append(name, value.clone());
             }
         }
-        builder.body(bytes).expect("valid request")
+        builder
+            .body(bytes)
+            .map_err(|e| Error::new(ErrorCode::InternalError, e.to_string()))
     }
 
     fn adapt_response(resp: HttpResponse) -> Self::Response {
@@ -105,15 +107,23 @@ impl HttpEngine for AxumEngine {
 }
 
 async fn post_handler(State(ctx): State<HttpContext>, req: axum::http::Request<Body>) -> Response {
-    handlers::dispatch_post::<AxumEngine>(req, &ctx).await
+    handlers::dispatch_post::<AxumEngine>(req, &ctx)
+        .await
+        .unwrap_or_else(internal_error)
 }
 
 async fn delete_handler(State(ctx): State<HttpContext>, req: http::Request<Body>) -> Response {
-    handlers::dispatch_delete::<AxumEngine>(req, &ctx).await
+    handlers::dispatch_delete::<AxumEngine>(req, &ctx)
+        .await
+        .unwrap_or_else(internal_error)
 }
 
 async fn get_handler(State(ctx): State<HttpContext>, req: http::Request<Body>) -> Response {
-    match handlers::dispatch_get_sse::<AxumEngine>(req, &ctx).await {
+    let outcome = match handlers::dispatch_get_sse::<AxumEngine>(req, &ctx).await {
+        Ok(outcome) => outcome,
+        Err(e) => return internal_error(e),
+    };
+    match outcome {
         SseResponse::Stream { headers, stream } => {
             let sse = Sse::new(stream).keep_alive(KeepAlive::default());
             let mut response: Response = sse.into_response();
@@ -124,6 +134,15 @@ async fn get_handler(State(ctx): State<HttpContext>, req: http::Request<Body>) -
         }
         SseResponse::Status(resp) => AxumEngine::adapt_response(resp),
     }
+}
+
+/// Translate a neva engine-adapter `Error` into a 500 axum response.
+fn internal_error(err: Error) -> Response {
+    (
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        err.to_string(),
+    )
+        .into_response()
 }
 
 #[tool]

@@ -57,27 +57,30 @@ impl HttpEngine for VolgaEngine {
     type Response = HttpResult;
     type SseEvent = SseMessage;
 
-    async fn adapt_request(req: Self::Request) -> NeutralRequest {
+    async fn adapt_request(req: Self::Request) -> Result<NeutralRequest, Error> {
         let mut builder = http::Request::builder()
             .method(req.method().clone())
             .uri(req.uri().clone())
             .version(req.version());
+
         if let Some(headers_mut) = builder.headers_mut() {
             for (k, v) in req.headers().iter() {
                 headers_mut.append(k, v.clone());
             }
         }
-        let body = read_body(req.into_body()).await.unwrap_or_default();
-        builder.body(body).expect("valid request")
+
+        let body = read_body(req.into_body())
+            .await
+            .map_err(|e| Error::new(ErrorCode::InternalError, e.to_string()))?;
+        builder
+            .body(body)
+            .map_err(|e| Error::new(ErrorCode::InternalError, e.to_string()))
     }
 
     fn adapt_response(resp: NeutralResponse) -> Self::Response {
         let (parts, body) = resp.into_parts();
         let status = parts.status.as_u16();
-
-        let mut buf = BytesMut::with_capacity(body.len());
-        buf.extend_from_slice(&body);
-        let http_body = HttpBody::full(buf.freeze());
+        let http_body = HttpBody::full(body);
 
         let mut builder = ::volga::builder!(status);
         for (name, value) in parts.headers.iter() {
