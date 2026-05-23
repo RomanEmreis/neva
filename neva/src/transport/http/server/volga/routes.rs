@@ -42,7 +42,9 @@ pub(crate) async fn post(req: HttpRequest) -> HttpResult {
     let manager: Dc<Arc<HttpContext>> = req.extract()?;
     let bts: Option<BearerTokenService> = req.extract()?;
 
-    let mut neutral = VolgaEngine::adapt_request(req).await;
+    let mut neutral = VolgaEngine::adapt_request(req)
+        .await
+        .map_err(to_volga_err)?;
 
     // Stash claims (if any) in the neutral request's extensions so the
     // engine-agnostic handler can attach them to the outgoing message.
@@ -62,7 +64,9 @@ pub(crate) async fn post(req: HttpRequest) -> HttpResult {
 /// `DELETE /<endpoint>` — explicit session termination.
 pub(crate) async fn delete(req: HttpRequest) -> HttpResult {
     let manager: Dc<Arc<HttpContext>> = req.extract()?;
-    let neutral = VolgaEngine::adapt_request(req).await;
+    let neutral = VolgaEngine::adapt_request(req)
+        .await
+        .map_err(to_volga_err)?;
     let resp = handlers::handle_delete(neutral, &manager).await;
     VolgaEngine::adapt_response(resp)
 }
@@ -70,7 +74,9 @@ pub(crate) async fn delete(req: HttpRequest) -> HttpResult {
 /// `GET /<endpoint>` — SSE subscribe.
 pub(crate) async fn get(req: HttpRequest) -> HttpResult {
     let manager: Dc<Arc<HttpContext>> = req.extract()?;
-    let outcome = handlers::dispatch_get_sse::<VolgaEngine>(req, &manager).await;
+    let outcome = handlers::dispatch_get_sse::<VolgaEngine>(req, &manager)
+        .await
+        .map_err(to_volga_err)?;
     match outcome {
         SseResponse::Stream { headers, stream } => {
             let session_id = headers
@@ -86,4 +92,10 @@ pub(crate) async fn get(req: HttpRequest) -> HttpResult {
         }
         SseResponse::Status(resp) => VolgaEngine::adapt_response(resp),
     }
+}
+
+/// Map a neva `Error` raised by engine-agnostic helpers onto a Volga
+/// server-error so the route can short-circuit with `?` into `HttpResult`.
+fn to_volga_err(err: crate::error::Error) -> VolgaError {
+    VolgaError::server_error(err.to_string())
 }

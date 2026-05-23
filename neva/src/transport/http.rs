@@ -754,8 +754,8 @@ mod engine_smoke_tests {
         type Response = HttpResponse;
         type SseEvent = ();
 
-        async fn adapt_request(req: Self::Request) -> HttpRequest {
-            req
+        async fn adapt_request(req: Self::Request) -> Result<HttpRequest, Error> {
+            Ok(req)
         }
 
         fn adapt_response(resp: HttpResponse) -> Self::Response {

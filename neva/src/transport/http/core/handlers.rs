@@ -30,14 +30,21 @@ pub(crate) const MCP_SESSION_ID: &str = "Mcp-Session-Id";
 /// run the JSON-RPC dispatch via [`handle_post`], then convert the
 /// neutral response back via [`HttpEngine::adapt_response`].
 ///
+/// Returns [`Err`] when [`HttpEngine::adapt_request`] fails. Engines whose
+/// native response type is itself a `Result` can integrate with `?`;
+/// engines whose response type is infallible can map the error onto an
+/// HTTP 500 of their choosing.
+///
 /// Lets a route handler collapse to a single line, e.g. (axum):
 ///
 /// ```rust,ignore
 /// async fn post_handler(
-///     State(ctx): State<Arc<HttpContext>>,
+///     State(ctx): State<HttpContext>,
 ///     req: axum::Request<Body>,
-/// ) -> axum::Response {
-///     handlers::dispatch_post::<MyEngine>(req, &ctx).await
+/// ) -> Result<axum::Response, MyError> {
+///     handlers::dispatch_post::<MyEngine>(req, &ctx)
+///         .await
+///         .map_err(MyError::from)
 /// }
 /// ```
 ///
@@ -47,17 +54,23 @@ pub(crate) const MCP_SESSION_ID: &str = "Mcp-Session-Id";
 /// `adapt_request` returns (typically inside `HttpEngine::adapt_request`
 /// or in the engine's route handler just before this call). See the
 /// [`HttpEngine`] doc comment for the full contract.
-pub async fn dispatch_post<E: HttpEngine>(req: E::Request, ctx: &HttpContext) -> E::Response {
-    let neutral = E::adapt_request(req).await;
+pub async fn dispatch_post<E: HttpEngine>(
+    req: E::Request,
+    ctx: &HttpContext,
+) -> Result<E::Response, Error> {
+    let neutral = E::adapt_request(req).await?;
     let resp = handle_post(neutral, ctx).await;
-    E::adapt_response(resp)
+    Ok(E::adapt_response(resp))
 }
 
 /// One-call DELETE pipeline for engine adapters. See [`dispatch_post`].
-pub async fn dispatch_delete<E: HttpEngine>(req: E::Request, ctx: &HttpContext) -> E::Response {
-    let neutral = E::adapt_request(req).await;
+pub async fn dispatch_delete<E: HttpEngine>(
+    req: E::Request,
+    ctx: &HttpContext,
+) -> Result<E::Response, Error> {
+    let neutral = E::adapt_request(req).await?;
     let resp = handle_delete(neutral, ctx).await;
-    E::adapt_response(resp)
+    Ok(E::adapt_response(resp))
 }
 
 /// One-call GET-SSE pipeline for engine adapters: converts the
@@ -67,12 +80,15 @@ pub async fn dispatch_delete<E: HttpEngine>(req: E::Request, ctx: &HttpContext) 
 /// matches `Stream { headers, stream }` (wrapping the stream in its
 /// native SSE response type) vs `Status(resp)` (passing `resp` through
 /// [`HttpEngine::adapt_response`]).
+///
+/// Returns [`Err`] when [`HttpEngine::adapt_request`] fails — same
+/// rationale as [`dispatch_post`].
 pub async fn dispatch_get_sse<E: HttpEngine>(
     req: E::Request,
     ctx: &HttpContext,
-) -> SseResponse<impl Stream<Item = E::SseEvent> + Send + 'static> {
-    let neutral = E::adapt_request(req).await;
-    handle_get_sse::<E>(neutral, ctx).await
+) -> Result<SseResponse<impl Stream<Item = E::SseEvent> + Send + 'static>, Error> {
+    let neutral = E::adapt_request(req).await?;
+    Ok(handle_get_sse::<E>(neutral, ctx).await)
 }
 
 /// Handle a POST `/{endpoint}` request — the JSON-RPC message ingress.
@@ -498,7 +514,7 @@ mod tests {
         type Response = HttpResponse;
         type SseEvent = (Option<u64>, String);
 
-        async fn adapt_request(_req: Self::Request) -> HttpRequest {
+        async fn adapt_request(_req: Self::Request) -> Result<HttpRequest, crate::error::Error> {
             unreachable!()
         }
         fn adapt_response(_resp: HttpResponse) -> Self::Response {
