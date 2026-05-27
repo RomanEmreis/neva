@@ -46,6 +46,18 @@ pub(crate) mod server;
 
 #[cfg(feature = "http-client")]
 pub(super) const MCP_SESSION_ID: &str = "Mcp-Session-Id";
+
+/// JSON-RPC method name carried on every outbound HTTP request under
+/// `proto-2026-07-28-rc`. Allows reverse proxies and load balancers to
+/// route without parsing the request body.
+#[cfg(all(feature = "http-client", feature = "proto-2026-07-28-rc"))]
+pub(super) const MCP_METHOD: &str = "Mcp-Method";
+
+/// Entity name (today: tool name for `tools/call`) carried on every
+/// outbound HTTP request under `proto-2026-07-28-rc`.
+#[cfg(all(feature = "http-client", feature = "proto-2026-07-28-rc"))]
+pub(super) const MCP_NAME: &str = "Mcp-Name";
+
 const DEFAULT_ADDR: &str = "127.0.0.1:3000";
 const DEFAULT_MCP_ENDPOINT: &str = "/mcp";
 

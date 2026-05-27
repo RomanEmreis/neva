@@ -21,12 +21,17 @@ pub use request::FromRequest;
 #[cfg(feature = "http-server")]
 use {crate::auth::Claims, http::HeaderMap, std::sync::Arc};
 
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+pub use capabilities::LoggingCapability;
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+pub use capabilities::RootsCapability;
 pub use capabilities::{
     ClientCapabilities, CompletionsCapability, ElicitationCapability, ElicitationFormCapability,
-    ElicitationUrlCapability, LoggingCapability, PromptsCapability, ResourcesCapability,
-    RootsCapability, SamplingCapability, SamplingContextCapability, SamplingToolsCapability,
-    ServerCapabilities, ToolsCapability,
+    ElicitationUrlCapability, PromptsCapability, ResourcesCapability, ServerCapabilities,
+    ToolsCapability,
 };
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+pub use capabilities::{SamplingCapability, SamplingContextCapability, SamplingToolsCapability};
 pub use completion::{Argument, CompleteRequestParams, CompleteResult, Completion};
 pub use content::{
     AudioContent, Content, EmbeddedResource, ImageContent, ResourceLink, TextContent, ToolResult,
@@ -41,18 +46,64 @@ pub use response::{ErrorDetails, IntoResponse, Response};
 #[cfg(feature = "tasks")]
 pub use capabilities::{
     ClientTaskRequestsCapability, ClientTasksCapability, ElicitationCreateTaskCapability,
-    ElicitationTaskCapability, SamplingCreateMessageTaskCapability, SamplingTaskCapability,
-    ServerTaskRequestsCapability, ServerTasksCapability, TaskCancellationCapability,
-    TaskListCapability, ToolsCallTaskCapability, ToolsTaskCapability,
+    ElicitationTaskCapability, ServerTaskRequestsCapability, ServerTasksCapability,
+    TaskCancellationCapability, TaskListCapability, ToolsCallTaskCapability, ToolsTaskCapability,
 };
+#[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
+pub use capabilities::{SamplingCreateMessageTaskCapability, SamplingTaskCapability};
 
 pub use tool::{
     CallToolRequestParams, CallToolResponse, ListToolsRequestParams, ListToolsResult, Tool,
-    ToolAnnotations, ToolSchema,
+    ToolAnnotations,
 };
+
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+pub use tool::ToolSchema;
 
 #[cfg(feature = "server")]
 pub use tool::ToolHandler;
+
+/// The MCP schema type for tool input and output schemas.
+///
+/// Under the legacy default feature set this resolves to the typed
+/// [`tool::ToolSchema`] struct (a small Draft 7-ish subset).
+///
+/// Under feature `proto-2026-07-28-rc` it resolves to
+/// [`schema_2020::InputSchema`] (a Value-shaped JSON Schema 2020-12 wrapper),
+/// matching the MCP 2026-07-28 RC requirement that tool schemas carry
+/// full JSON Schema 2020-12 documents.
+///
+/// Use this alias in code that constructs or accepts tool schemas — it lets
+/// the same call site compile on both feature sets. Both backing types
+/// implement [`Default`], serde derive, and the relevant
+/// `From<serde_json::Value>` / `From<schemars::Schema>` conversions, so a
+/// single call path works under either flag.
+///
+/// # Examples
+///
+/// ```
+/// # use neva::types::ToolInputSchema;
+/// let schema = ToolInputSchema::default();
+/// # let _ = schema;
+/// ```
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+pub type ToolInputSchema = tool::ToolSchema;
+
+/// The MCP schema type for tool input and output schemas.
+///
+/// See the legacy-flag definition above for the full doc — under the
+/// `proto-2026-07-28-rc` feature this alias resolves to
+/// [`schema_2020::InputSchema`].
+///
+/// # Examples
+///
+/// ```
+/// # use neva::types::ToolInputSchema;
+/// let schema = ToolInputSchema::default();
+/// # let _ = schema;
+/// ```
+#[cfg(feature = "proto-2026-07-28-rc")]
+pub type ToolInputSchema = schema_2020::InputSchema;
 
 pub use elicitation::{
     ElicitRequestFormParams, ElicitRequestParams, ElicitRequestUrlParams, ElicitResult,
@@ -68,6 +119,7 @@ pub use resource::{
     Resource, ResourceContents, ResourceTemplate, SubscribeRequestParams, TextResourceContents,
     UnsubscribeRequestParams, Uri,
 };
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 pub use sampling::{
     CreateMessageRequestParams, CreateMessageResult, SamplingMessage, StopReason, ToolChoice,
     ToolChoiceMode,
@@ -91,8 +143,14 @@ pub use task::{
 pub use prompt::PromptHandler;
 
 pub use progress::ProgressToken;
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 pub use root::Root;
 
+#[cfg(feature = "proto-2026-07-28-rc")]
+pub use cache::CacheScope;
+
+#[cfg(feature = "proto-2026-07-28-rc")]
+pub mod cache;
 mod capabilities;
 pub mod completion;
 mod content;
@@ -107,9 +165,12 @@ mod reference;
 mod request;
 pub mod resource;
 mod response;
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 pub mod root;
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 pub mod sampling;
 mod schema;
+pub mod schema_2020;
 #[cfg(feature = "tasks")]
 pub mod task;
 pub mod tool;
@@ -659,6 +720,7 @@ impl InitializeResult {
                 tools: options.tools_capability(),
                 resources: options.resources_capability(),
                 prompts: options.prompts_capability(),
+                #[cfg(not(feature = "proto-2026-07-28-rc"))]
                 logging: Some(LoggingCapability::default()),
                 completions: Some(CompletionsCapability::default()),
                 #[cfg(feature = "tasks")]

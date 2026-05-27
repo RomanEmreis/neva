@@ -3,7 +3,7 @@
 #[cfg(any(feature = "server", feature = "client"))]
 use tokio_util::sync::CancellationToken;
 
-#[cfg(feature = "tracing")]
+#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
 pub(crate) use message_registry::MessageRegistry;
 #[cfg(any(feature = "server", feature = "client"))]
 pub(crate) use requests_queue::PendingResponse;
@@ -31,7 +31,7 @@ mod arc_str;
 mod either;
 mod into_args;
 mod memchr;
-#[cfg(feature = "tracing")]
+#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
 mod message_registry;
 #[cfg(feature = "http-client")]
 pub mod mt;

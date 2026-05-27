@@ -3,19 +3,21 @@
 use crate::error::{Error, ErrorCode};
 use crate::shared;
 use crate::transport::Transport;
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+use crate::types::Root;
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+use crate::types::sampling::{CreateMessageRequestParams, CreateMessageResult, SamplingHandler};
 use crate::types::{
     CallToolRequestParams, CallToolResponse, ClientCapabilities, GetPromptRequestParams,
     GetPromptResult, Implementation, InitializeRequestParams, InitializeResult,
     ListPromptsRequestParams, ListPromptsResult, ListResourceTemplatesRequestParams,
     ListResourceTemplatesResult, ListResourcesRequestParams, ListResourcesResult,
     ListToolsRequestParams, ListToolsResult, MessageEnvelope, ReadResourceRequestParams,
-    ReadResourceResult, Request, RequestId, RequestParamsMeta, Response, Root, ServerCapabilities,
-    Uri,
+    ReadResourceResult, Request, RequestId, RequestParamsMeta, Response, ServerCapabilities, Uri,
     cursor::Cursor,
     elicitation::{ElicitRequestParams, ElicitResult, ElicitationHandler},
     notification::Notification,
     resource::{SubscribeRequestParams, UnsubscribeRequestParams},
-    sampling::{CreateMessageRequestParams, CreateMessageResult, SamplingHandler},
 };
 use handler::RequestHandler;
 use options::McpOptions;
@@ -115,7 +117,12 @@ impl Client {
     /// client.add_root("file:///home/user/projects/my_project", "My Project");
     /// # client.disconnect().await
     /// # }
-    /// ```    
+    /// ```
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[deprecated(
+        note = "Roots are removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
+    )]
+    #[allow(deprecated)]
     pub fn add_root(&mut self, uri: impl Into<Uri>, name: impl Into<String>) -> &mut Self {
         self.options.add_root(Root::new(uri, name));
         self.publish_roots_changed();
@@ -138,7 +145,12 @@ impl Client {
     /// ]);
     /// # client.disconnect().await
     /// # }
-    /// ```    
+    /// ```
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[deprecated(
+        note = "Roots are removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
+    )]
+    #[allow(deprecated)]
     pub fn add_roots<T, I>(&mut self, roots: I) -> &mut Self
     where
         T: Into<Root>,
@@ -150,6 +162,10 @@ impl Client {
     }
 
     /// Sends the "notifications/roots/list_changed" notification to the server
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[deprecated(
+        note = "Roots are removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
+    )]
     pub fn publish_roots_changed(&mut self) {
         if let Some(handler) = self.handler.as_mut() {
             let roots = self.options.roots();
@@ -158,6 +174,10 @@ impl Client {
     }
 
     /// Registers a handler that will be running when a "sampling/createMessage" request is received
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[deprecated(
+        note = "Sampling are removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
+    )]
     pub fn map_sampling<F, R>(&mut self, handler: F) -> &mut Self
     where
         F: Fn(CreateMessageRequestParams) -> R + Clone + Send + Sync + 'static,
@@ -206,7 +226,7 @@ impl Client {
         let mut transport = self.options.transport();
         let token = transport.start();
 
-        #[cfg(feature = "tracing")]
+        #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
         self.register_tracing_notification_handlers();
 
         self.cancellation_token = Some(token);
@@ -250,7 +270,9 @@ impl Client {
             protocol_ver: self.options.protocol_ver().to_string(),
             client_info: Some(self.options.implementation.clone()),
             capabilities: Some(ClientCapabilities {
+                #[cfg(not(feature = "proto-2026-07-28-rc"))]
                 roots: self.options.roots_capability(),
+                #[cfg(not(feature = "proto-2026-07-28-rc"))]
                 sampling: self.options.sampling_capability(),
                 elicitation: self.options.elicitation_capability(),
                 #[cfg(feature = "tasks")]
@@ -1045,7 +1067,7 @@ impl Client {
             .await
     }
 
-    #[cfg(feature = "tracing")]
+    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
     fn register_tracing_notification_handlers(&mut self) {
         use crate::types::notification::commands::*;
 
@@ -1054,7 +1076,7 @@ impl Client {
         self.subscribe(PROGRESS, Self::default_notification_handler);
     }
 
-    #[cfg(feature = "tracing")]
+    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
     async fn default_notification_handler(notification: Notification) {
         notification.write();
     }

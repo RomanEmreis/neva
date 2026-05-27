@@ -105,6 +105,16 @@ pub struct ListResourceTemplatesResult {
     /// will be `None`.
     #[serde(rename = "nextCursor", skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<Cursor>,
+
+    /// Suggested TTL in milliseconds for caching this list result, when set by the server.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[serde(rename = "ttlMs", skip_serializing_if = "Option::is_none")]
+    pub ttl_ms: Option<u64>,
+
+    /// Suggested cache scope for this list result, when set by the server.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[serde(rename = "cacheScope", skip_serializing_if = "Option::is_none")]
+    pub cache_scope: Option<crate::types::CacheScope>,
 }
 
 impl IntoResponse for ListResourceTemplatesResult {
@@ -119,20 +129,24 @@ impl IntoResponse for ListResourceTemplatesResult {
 
 impl From<Vec<ResourceTemplate>> for ListResourceTemplatesResult {
     #[inline]
+    #[cfg_attr(not(feature = "proto-2026-07-28-rc"), allow(clippy::needless_update))]
     fn from(templates: Vec<ResourceTemplate>) -> Self {
         Self {
             next_cursor: None,
             templates,
+            ..Default::default()
         }
     }
 }
 
 impl From<Page<'_, ResourceTemplate>> for ListResourceTemplatesResult {
     #[inline]
+    #[cfg_attr(not(feature = "proto-2026-07-28-rc"), allow(clippy::needless_update))]
     fn from(page: Page<'_, ResourceTemplate>) -> Self {
         Self {
             next_cursor: page.next_cursor,
             templates: page.items.to_vec(),
+            ..Default::default()
         }
     }
 }

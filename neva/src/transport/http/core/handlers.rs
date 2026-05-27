@@ -125,6 +125,27 @@ pub async fn handle_post(req: HttpRequest, ctx: &HttpContext) -> HttpResponse {
         }
     };
 
+    // Passive W3C Trace Context recorder: when both `proto-2026-07-28-rc`
+    // and `tracing` are enabled, record any `_meta.traceparent` /
+    // `_meta.tracestate` on the active span. `Span::current().record(...)`
+    // is a no-op unless the caller's span declares these fields via
+    // `#[instrument(fields(traceparent, tracestate))]`.
+    #[cfg(all(feature = "proto-2026-07-28-rc", feature = "tracing"))]
+    if let Message::Request(ref r) = msg
+        && let Some(meta) = r
+            .params
+            .as_ref()
+            .and_then(|p| p.get("_meta"))
+            .and_then(|m| m.as_object())
+    {
+        if let Some(tp) = meta.get("traceparent").and_then(|v| v.as_str()) {
+            tracing::Span::current().record("traceparent", tp);
+        }
+        if let Some(ts) = meta.get("tracestate").and_then(|v| v.as_str()) {
+            tracing::Span::current().record("tracestate", ts);
+        }
+    }
+
     // Pre-register on the initialize handshake so the server can emit
     // events between the init POST response and the SSE GET.
     if let Message::Request(ref r) = msg
@@ -240,7 +261,7 @@ pub async fn handle_delete(req: HttpRequest, ctx: &HttpContext) -> HttpResponse 
             .unwrap_or_default();
     };
 
-    #[cfg(feature = "tracing")]
+    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
     crate::types::notification::fmt::LOG_REGISTRY.unregister(&id);
     ctx.sse_registry.terminate(&id);
 
@@ -270,7 +291,7 @@ struct SseConnectionCleanup {
 
 impl Drop for SseConnectionCleanup {
     fn drop(&mut self) {
-        #[cfg(feature = "tracing")]
+        #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
         crate::types::notification::fmt::LOG_REGISTRY
             .unregister_if_generation(&self.id, self.generation);
         self.registry.unregister(&self.id, self.generation);
@@ -307,7 +328,7 @@ pub async fn handle_get_sse<E: HttpEngine>(
     let (_log_tx, log_rx) = tokio::sync::mpsc::channel::<Message>(ctx.sse_log_queue_capacity);
 
     let generation = ctx.sse_registry.register(id, msg_tx);
-    #[cfg(feature = "tracing")]
+    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
     crate::types::notification::fmt::LOG_REGISTRY.register(id, generation, _log_tx);
 
     let last_seq: Option<u64> = req

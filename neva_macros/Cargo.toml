@@ -27,3 +27,7 @@ proc-macro2 = "1.0.106"
 default = []
 server = []
 client = []
+
+# Forwarded from neva. The macros crate does not currently emit any
+# version-dependent code, so the flag is a passthrough placeholder.
+proto-2026-07-28-rc = []

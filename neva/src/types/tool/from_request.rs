@@ -82,6 +82,8 @@ mod tests {
             name: "tool".into(),
             meta: Some(RequestParamsMeta {
                 progress_token: None,
+                traceparent: None,
+                tracestate: None,
                 context: None,
                 #[cfg(feature = "tasks")]
                 task: None,
@@ -102,6 +104,8 @@ mod tests {
             name: "tool".into(),
             meta: Some(RequestParamsMeta {
                 progress_token: Some(ProgressToken::Number(5)),
+                traceparent: None,
+                tracestate: None,
                 context: None,
                 #[cfg(feature = "tasks")]
                 task: None,

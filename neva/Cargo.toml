@@ -81,5 +81,9 @@ client-tls = ["reqwest?/rustls"]
 http-client = ["client", "dep:reqwest", "dep:sse-stream", "dep:tokio-stream", "dep:once_cell"]
 client = ["dep:windows", "dep:nix", "dep:jsonschema", "tokio/process", "tokio/signal"]
 
+# Opt-in MCP 2026-07-28 Release Candidate support. Mutually exclusive
+# with any future `proto-*` generation flag — see lib.rs guard.
+proto-2026-07-28-rc = ["neva_macros?/proto-2026-07-28-rc"]
+
 [package.metadata.docs.rs]
 all-features = true

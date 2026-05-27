@@ -6,6 +6,10 @@ use super::{
 };
 use crate::error::{Error, ErrorCode};
 use crate::transport::Sender;
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+use crate::types::root::{ListRootsRequestParams, ListRootsResult};
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+use crate::types::sampling::{CreateMessageRequestParams, CreateMessageResult};
 use crate::{
     middleware::{MwContext, Next},
     shared::{IntoArgs, RequestQueue},
@@ -17,8 +21,6 @@ use crate::{
         elicitation::{ElicitRequestParams, ElicitResult, ElicitationCompleteParams},
         notification::Notification,
         resource::SubscribeRequestParams,
-        root::{ListRootsRequestParams, ListRootsResult},
-        sampling::{CreateMessageRequestParams, CreateMessageResult},
     },
 };
 use std::{
@@ -242,14 +244,14 @@ impl Context {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(feature = "server-macros")] {
+    /// # #[cfg(all(feature = "server-macros", not(feature = "proto-2026-07-28-rc")))] {
     /// use neva::prelude::*;
     ///
     /// #[tool]
     /// async fn analyze_weather(ctx: Context, city: String) -> Result<(), Error> {
     ///     let args = ("city", city);
     ///     let weather = ctx.use_tool(ToolUse::new("get_weather", args)).await;
-    ///     
+    ///
     ///     // do something with the weather result
     ///
     /// # Ok(())
@@ -305,13 +307,13 @@ impl Context {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(feature = "server-macros")] {
+    /// # #[cfg(all(feature = "server-macros", not(feature = "proto-2026-07-28-rc")))] {
     /// use neva::prelude::*;
     ///
     /// #[tool]
     /// async fn analyze_weather(ctx: Context, city: String) -> Result<(), Error> {
     ///     let prompt = ctx.prompt("get_weather", ("city", city)).await?;
-    ///     
+    ///
     ///     // do something with the prompt
     ///
     /// # Ok(())
@@ -341,13 +343,13 @@ impl Context {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(feature = "server-macros")] {
+    /// # #[cfg(all(feature = "server-macros", not(feature = "proto-2026-07-28-rc")))] {
     /// use neva::prelude::*;
     ///
     /// #[tool]
     /// async fn summarize_document(ctx: Context, doc_uri: Uri) -> Result<(), Error> {
     ///     let doc = ctx.resource(doc_uri).await?;
-    ///     
+    ///
     ///     // do something with the doc
     ///
     /// # Ok(())
@@ -503,7 +505,7 @@ impl Context {
                     .call(params.with_args(args).with_context(self).into())
                     .await
             }
-            _ => Err(Error::from(ErrorCode::ResourceNotFound)),
+            _ => Err(Error::from(ErrorCode::RESOURCE_NOT_FOUND)),
         }
     }
 
@@ -598,7 +600,7 @@ impl Context {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(feature = "server-macros")] {
+    /// # #[cfg(all(feature = "server-macros", not(feature = "proto-2026-07-28-rc")))] {
     /// use neva::{Context, error::Error, tool};
     ///
     /// #[tool]
@@ -611,6 +613,7 @@ impl Context {
     /// }
     /// # }
     /// ```
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     pub async fn list_roots(&mut self) -> Result<ListRootsResult, Error> {
         let method = crate::types::root::commands::LIST;
         let req = Request::new(
@@ -645,7 +648,7 @@ impl Context {
     /// }
     /// # }
     /// ```
-    #[cfg(not(feature = "tasks"))]
+    #[cfg(all(not(feature = "tasks"), not(feature = "proto-2026-07-28-rc")))]
     pub async fn sample(
         &mut self,
         params: CreateMessageRequestParams,
@@ -683,7 +686,7 @@ impl Context {
     /// }
     /// # }
     /// ```
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
     pub async fn sample(
         &mut self,
         params: CreateMessageRequestParams,
@@ -1036,5 +1039,20 @@ impl crate::shared::TaskApi for Context {
         // Reserved, there are no cases so far, for the server
         // to handle input requests from client.
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "server")]
+mod missing_resource_error_tests {
+    use crate::error::ErrorCode;
+
+    #[test]
+    fn missing_resource_uses_spec_version_code() {
+        // The constant the emitters use must match the spec.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        assert_eq!(i32::from(ErrorCode::RESOURCE_NOT_FOUND), -32602);
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        assert_eq!(i32::from(ErrorCode::RESOURCE_NOT_FOUND), -32002);
     }
 }

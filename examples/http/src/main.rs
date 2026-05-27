@@ -23,6 +23,7 @@ async fn main() {
         .with(notification::fmt::layer())
         .init();
 
+    #[allow(deprecated)]
     App::new()
         .with_options(|opt| {
             opt.with_http(|http| http.bind("127.0.0.1:3000").with_endpoint("/mcp"))

@@ -23,17 +23,20 @@ use crate::types::{
 
 #[cfg(feature = "tasks")]
 use crate::shared::{TaskHandle, TaskTracker};
-#[cfg(feature = "tracing")]
+#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
 use crate::types::notification::LoggingLevel;
 #[cfg(feature = "tasks")]
 use crate::types::{ServerTasksCapability, Task, TaskPayload};
 
-#[cfg(feature = "tracing")]
+#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
 use tracing_subscriber::{Registry, filter::LevelFilter, reload::Handle};
 
-#[cfg(any(feature = "tracing", feature = "tasks"))]
+#[cfg(any(
+    feature = "tasks",
+    all(feature = "tracing", not(feature = "proto-2026-07-28-rc"))
+))]
 use crate::error::Error;
-#[cfg(feature = "tracing")]
+#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
 use crate::error::ErrorCode;
 
 /// Represents MCP server options that are available in runtime
@@ -79,7 +82,7 @@ pub struct McpOptions {
     tasks_capability: Option<ServerTasksCapability>,
 
     /// The last logging level set by the client
-    #[cfg(feature = "tracing")]
+    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
     log_level: Option<Handle<LevelFilter, Registry>>,
 
     /// An MCP version that server supports
@@ -114,7 +117,7 @@ impl Debug for McpOptions {
         #[cfg(feature = "tasks")]
         dbg.field("tasks_capability", &self.tasks_capability);
 
-        #[cfg(feature = "tracing")]
+        #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
         dbg.field("log_level", &self.log_level);
 
         dbg.finish()
@@ -142,7 +145,7 @@ impl Default for McpOptions {
             requests: Default::default(),
             resource_subscriptions: Default::default(),
             middlewares: None,
-            #[cfg(feature = "tracing")]
+            #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
             log_level: Default::default(),
             #[cfg(feature = "tasks")]
             tasks: TaskTracker::new(),
@@ -270,14 +273,26 @@ impl McpOptions {
     }
 
     /// Configures a `tracing_subscriber::reload::Handle` that allows changing the [`LoggingLevel`] at runtime
-    #[cfg(feature = "tracing")]
+    #[cfg_attr(
+        not(feature = "proto-2026-07-28-rc"),
+        deprecated(
+            note = "MCP server-side logging is removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
+        )
+    )]
+    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
     pub fn with_logging(mut self, log_handle: Handle<LevelFilter, Registry>) -> Self {
         self.log_level = Some(log_handle);
         self
     }
 
     /// Sets the [`LoggingLevel`]
-    #[cfg(feature = "tracing")]
+    #[cfg_attr(
+        not(feature = "proto-2026-07-28-rc"),
+        deprecated(
+            note = "MCP server-side logging is removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
+        )
+    )]
+    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
     pub fn set_log_level(&self, level: LoggingLevel) -> Result<(), Error> {
         if let Some(handle) = &self.log_level {
             handle
@@ -288,7 +303,7 @@ impl McpOptions {
     }
 
     /// Returns current log level
-    #[cfg(feature = "tracing")]
+    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
     pub(crate) fn log_level(&self) -> Option<LoggingLevel> {
         match &self.log_level {
             None => None,
@@ -702,7 +717,7 @@ mod tests {
         let mut options = McpOptions::default();
 
         let handler = |_: Uri| async move {
-            Err::<ResourceContents, _>(Error::from(ErrorCode::ResourceNotFound))
+            Err::<ResourceContents, _>(Error::from(ErrorCode::RESOURCE_NOT_FOUND))
         };
 
         options.add_resource_template(
@@ -846,7 +861,7 @@ mod tests {
         let mut options = McpOptions::default();
 
         let handler = |_: Uri| async move {
-            Err::<ResourceContents, _>(Error::from(ErrorCode::ResourceNotFound))
+            Err::<ResourceContents, _>(Error::from(ErrorCode::RESOURCE_NOT_FOUND))
         };
 
         options.add_resource_template(

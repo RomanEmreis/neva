@@ -26,6 +26,23 @@ pub(crate) mod tls_config;
 const LAST_EVENT_ID: HeaderName = HeaderName::from_static("last-event-id");
 const SSE_RECONNECT_DELAY: Duration = Duration::from_secs(3);
 
+#[cfg(feature = "proto-2026-07-28-rc")]
+fn routing_hints(msg: &Message) -> Option<(&str, Option<&str>)> {
+    match msg {
+        Message::Request(r) => Some((r.method.as_str(), name_param(r))),
+        Message::Notification(n) => Some((n.method.as_str(), None)),
+        Message::Batch(_) | Message::Response(_) => None,
+    }
+}
+
+#[cfg(feature = "proto-2026-07-28-rc")]
+fn name_param(req: &crate::types::Request) -> Option<&str> {
+    if req.method != crate::types::tool::commands::CALL {
+        return None;
+    }
+    req.params.as_ref()?.as_object()?.get("name")?.as_str()
+}
+
 pub(super) async fn connect(rt: ClientRuntimeContext, token: CancellationToken) {
     let session = Arc::new(McpSession::new(rt.url, token));
     let access_token: Option<Arc<[u8]>> = rt.access_token.map(|t| t.into());
@@ -94,6 +111,17 @@ async fn handle_connection(
 
                 if let Some(session_id) = session.session_id() {
                     resp = resp.header(MCP_SESSION_ID, session_id.to_string())
+                }
+
+                // Routing headers are exercised end-to-end via the trace-context
+                // integration in Task 2.4. Unit-level hint extraction is tested in
+                // `routing_hints_tests`.
+                #[cfg(feature = "proto-2026-07-28-rc")]
+                if let Some((method, name)) = routing_hints(&req) {
+                    resp = resp.header(crate::transport::http::MCP_METHOD, method);
+                    if let Some(n) = name {
+                        resp = resp.header(crate::transport::http::MCP_NAME, n);
+                    }
                 }
 
                 if let Some(access_token) = &access_token {
@@ -439,5 +467,45 @@ mod tests {
         handle_event(event, &session, &tx).await;
 
         assert!(session.last_event_id().is_none());
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "proto-2026-07-28-rc")]
+mod routing_hints_tests {
+    use super::routing_hints;
+    use crate::types::notification::Notification;
+    use crate::types::{Message, Request, RequestId};
+    use serde_json::json;
+
+    #[test]
+    fn request_yields_method_and_no_name() {
+        let req = Request::new::<()>(Some(RequestId::Number(1)), "tools/list", None);
+        let msg = Message::Request(req);
+        let hints = routing_hints(&msg).unwrap();
+        assert_eq!(hints.0, "tools/list");
+        assert!(hints.1.is_none());
+    }
+
+    #[test]
+    fn tools_call_yields_method_and_tool_name() {
+        let req = Request::new(
+            Some(RequestId::Number(1)),
+            "tools/call",
+            Some(json!({"name": "echo", "arguments": {}})),
+        );
+        let msg = Message::Request(req);
+        let hints = routing_hints(&msg).unwrap();
+        assert_eq!(hints.0, "tools/call");
+        assert_eq!(hints.1, Some("echo"));
+    }
+
+    #[test]
+    fn notification_yields_method_only() {
+        let n = Notification::new("notifications/cancelled", None);
+        let msg = Message::Notification(n);
+        let hints = routing_hints(&msg).unwrap();
+        assert_eq!(hints.0, "notifications/cancelled");
+        assert!(hints.1.is_none());
     }
 }

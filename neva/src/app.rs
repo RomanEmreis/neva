@@ -40,10 +40,12 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+use crate::types::notification::SetLevelRequestParams;
+#[cfg(feature = "tracing")]
+use tracing::Instrument;
 #[cfg(feature = "di")]
 use volga_di::{Container, ContainerBuilder};
-#[cfg(feature = "tracing")]
-use {crate::types::notification::SetLevelRequestParams, tracing::Instrument};
 
 mod collection;
 pub mod context;
@@ -133,7 +135,7 @@ impl App {
 
         app.map_handler(crate::commands::PING, Self::ping);
 
-        #[cfg(feature = "tracing")]
+        #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
         app.map_handler(
             crate::types::notification::commands::SET_LOG_LEVEL,
             Self::set_log_level,
@@ -524,14 +526,20 @@ impl App {
     }
 
     /// Tools request handler
+    #[cfg_attr(not(feature = "proto-2026-07-28-rc"), allow(clippy::needless_update))]
     async fn tools(options: RuntimeMcpOptions, params: ListToolsRequestParams) -> ListToolsResult {
         let (tools, next_cursor) = options
             .list_tools_page(params.cursor, DEFAULT_PAGE_SIZE)
             .await;
-        ListToolsResult { tools, next_cursor }
+        ListToolsResult {
+            tools,
+            next_cursor,
+            ..Default::default()
+        }
     }
 
     /// Resources request handler
+    #[cfg_attr(not(feature = "proto-2026-07-28-rc"), allow(clippy::needless_update))]
     async fn resources(
         options: RuntimeMcpOptions,
         params: ListResourcesRequestParams,
@@ -542,10 +550,12 @@ impl App {
         ListResourcesResult {
             resources,
             next_cursor,
+            ..Default::default()
         }
     }
 
     /// Resource templates request handler
+    #[cfg_attr(not(feature = "proto-2026-07-28-rc"), allow(clippy::needless_update))]
     async fn resource_templates(
         options: RuntimeMcpOptions,
         params: ListResourceTemplatesRequestParams,
@@ -556,10 +566,12 @@ impl App {
         ListResourceTemplatesResult {
             templates: resource_templates,
             next_cursor,
+            ..Default::default()
         }
     }
 
     /// Prompts request handler
+    #[cfg_attr(not(feature = "proto-2026-07-28-rc"), allow(clippy::needless_update))]
     async fn prompts(
         options: RuntimeMcpOptions,
         params: ListPromptsRequestParams,
@@ -570,6 +582,7 @@ impl App {
         ListPromptsResult {
             prompts,
             next_cursor,
+            ..Default::default()
         }
     }
 
@@ -667,7 +680,8 @@ impl App {
     }
 
     /// Sets the logging level
-    #[cfg(feature = "tracing")]
+    #[allow(deprecated)]
+    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
     async fn set_log_level(
         options: RuntimeMcpOptions,
         params: SetLevelRequestParams,
@@ -988,6 +1002,7 @@ impl App {
                     runtime.options().cancel_request(&params.request_id);
                 }
             }
+            #[cfg(not(feature = "proto-2026-07-28-rc"))]
             crate::types::notification::commands::MESSAGE => {
                 #[cfg(feature = "tracing")]
                 notification.write();
