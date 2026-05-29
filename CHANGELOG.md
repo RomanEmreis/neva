@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * RC-only routing headers (`Mcp-Session-Id` / routing hints) injected into the HTTP POST send loop, plus a `routing_hints` helper on the client transport.
 * `traceparent` / `tracestate` fields on `RequestParamsMeta` and a client-side `TraceContextProvider` hook (RC only), with matching server-side span `record`.
 * `ErrorCode::RESOURCE_NOT_FOUND` constant — emits `-32002` (legacy `ResourceNotFound`) or `-32602` (`InvalidParams`) per the active spec version. All in-tree emitters of "resource not found" route through this constant so the wire code automatically follows the active flag.
+* The `#[tool]` proc-macro now emits JSON Schema 2020-12 `inputSchema` / `outputSchema` under `proto-2026-07-28-rc`: primitive arguments map to inline primitive schemas, structured `Json<T>` arguments derive a rich, inlined schema when the inner `T` implements `JsonSchema` (graceful `{"type":"object"}` fallback otherwise), and the return type drives `outputSchema`. Explicit `input_schema` / `output_schema` string literals are now validated at compile time (on every feature configuration). `schemars` need not be a direct dependency of the user crate — it is re-exported by neva.
 
 ### Changed
 
@@ -44,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Known limitations
 
-* The `#[tool]` proc-macro (in `neva_macros`) still emits legacy `ToolSchema::from_json_str` and `ToolAnnotations::from_json_str` calls. User code annotated with `#[tool]` will not compile under `proto-2026-07-28-rc`. A macro-side migration is planned for a follow-up PR; for now, build `#[tool]`-using code under the default (legacy) feature set and switch on the RC flag once the macro migration lands.
+* The `#[tool]` macro's `annotations = "…"` attribute (and the `#[prompt]` / `#[resource]` JSON-string attributes) still parse at runtime via `from_json_str` and panic on malformed JSON; compile-time validation there is a planned follow-up. The `#[tool]` `input_schema` / `output_schema` literals are already validated at compile time.
 * `cargo check --no-default-features --features client` (without `--all-targets`) still fails on `tokio::task::block_in_place` because the `client` feature alone does not pull in `tokio/rt-multi-thread`. This is a pre-existing tokio-features issue (independent of this changeset). CI runs the `--all-targets` variant — which pulls dev-deps and therefore `rt-multi-thread` — and remains green.
 
 ## 0.3.4

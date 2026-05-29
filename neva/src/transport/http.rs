@@ -9,7 +9,7 @@ use crate::{
     types::Message,
 };
 use futures_util::TryFutureExt;
-use std::{borrow::Cow, fmt::Display};
+use std::fmt::Display;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 
@@ -136,11 +136,11 @@ pub struct HttpClient {
     receiver: HttpReceiver,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct ServiceUrl {
     proto: HttpProto,
-    addr: &'static str,
-    endpoint: &'static str,
+    addr: String,
+    endpoint: String,
 }
 
 #[cfg(feature = "http-client")]
@@ -228,9 +228,14 @@ impl std::fmt::Debug for HttpClient {
 }
 
 impl ServiceUrl {
+    /// Builds the full request URL (`proto://addr/endpoint`).
+    ///
+    /// Note: this **allocates** a fresh `String` — it is not a cheap borrow
+    /// despite reading stored fields. Assemble it once and cache the result
+    /// (as `McpSession` does) rather than calling it per request.
     #[inline]
-    pub(crate) fn as_str<'a>(&self) -> Cow<'a, str> {
-        Cow::Owned(format!("{}://{}{}", self.proto, self.addr, self.endpoint))
+    pub(crate) fn to_url(&self) -> String {
+        format!("{}://{}{}", self.proto, self.addr, self.endpoint)
     }
 }
 
@@ -250,8 +255,8 @@ impl Default for ServiceUrl {
     fn default() -> Self {
         Self {
             proto: HttpProto::Http,
-            addr: DEFAULT_ADDR,
-            endpoint: DEFAULT_MCP_ENDPOINT,
+            addr: DEFAULT_ADDR.to_string(),
+            endpoint: DEFAULT_MCP_ENDPOINT.to_string(),
         }
     }
 }
@@ -259,18 +264,18 @@ impl Default for ServiceUrl {
 impl Display for ServiceUrl {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.as_str().fmt(f)
+        write!(f, "{}://{}{}", self.proto, self.addr, self.endpoint)
     }
 }
 
-impl From<&'static str> for ServiceUrl {
+impl From<&str> for ServiceUrl {
     #[inline]
-    fn from(url: &'static str) -> Self {
+    fn from(url: &str) -> Self {
         let mut parts = MemChr::split(url, b'/');
         Self {
             proto: HttpProto::Http,
-            addr: parts.nth(0).unwrap_or(DEFAULT_ADDR),
-            endpoint: parts.nth(1).unwrap_or(DEFAULT_MCP_ENDPOINT),
+            addr: parts.nth(0).unwrap_or(DEFAULT_ADDR).to_string(),
+            endpoint: parts.nth(1).unwrap_or(DEFAULT_MCP_ENDPOINT).to_string(),
         }
     }
 }
@@ -318,9 +323,9 @@ where
     /// ```rust,ignore
     /// let server = HttpServer::from_engine("127.0.0.1:3000", MyAxumEngine::new());
     /// ```
-    pub fn from_engine(addr: &'static str, engine: E) -> Self {
+    pub fn from_engine(addr: impl AsRef<str>, engine: E) -> Self {
         let url = ServiceUrl {
-            addr,
+            addr: addr.as_ref().to_owned(),
             ..ServiceUrl::default()
         };
         Self {
@@ -344,16 +349,16 @@ where
     E: HttpEngine,
 {
     /// Binds HTTP serve to address and port
-    pub fn bind(mut self, addr: &'static str) -> Self {
-        self.url.addr = addr;
+    pub fn bind(mut self, addr: impl AsRef<str>) -> Self {
+        self.url.addr = addr.as_ref().to_owned();
         self
     }
 
     /// Sets the MCP endpoint
     ///
     /// Default: `/mcp`
-    pub fn with_endpoint(mut self, prefix: &'static str) -> Self {
-        self.url.endpoint = prefix;
+    pub fn with_endpoint(mut self, prefix: impl AsRef<str>) -> Self {
+        self.url.endpoint = prefix.as_ref().to_owned();
         self
     }
 
@@ -481,8 +486,8 @@ where
             self.sse_buffer_capacity,
         ));
         let ctx = HttpContext {
-            addr: self.url.addr.into(),
-            endpoint: self.url.endpoint.into(),
+            addr: self.url.addr.as_str().into(),
+            endpoint: self.url.endpoint.as_str().into(),
             pending,
             sse_registry,
             inbound_tx: self.receiver.tx.clone(),
@@ -504,9 +509,9 @@ impl HttpServer<server::DefaultClaims, VolgaEngine> {
     ///
     /// let _ = HttpServer::new("127.0.0.1:3000");
     /// ```
-    pub fn new(addr: &'static str) -> Self {
+    pub fn new(addr: impl AsRef<str>) -> Self {
         let url = ServiceUrl {
-            addr,
+            addr: addr.as_ref().to_owned(),
             ..ServiceUrl::default()
         };
         Self {
@@ -555,16 +560,16 @@ impl HttpServer<server::DefaultClaims, VolgaEngine> {
 #[cfg(feature = "http-client")]
 impl HttpClient {
     /// Binds HTTP serve to address and port    
-    pub fn bind(mut self, addr: &'static str) -> Self {
-        self.url.addr = addr;
+    pub fn bind(mut self, addr: impl AsRef<str>) -> Self {
+        self.url.addr = addr.as_ref().to_owned();
         self
     }
 
     /// Sets the MCP endpoint
     ///
     /// Default: `/mcp`
-    pub fn with_endpoint(mut self, prefix: &'static str) -> Self {
-        self.url.endpoint = prefix;
+    pub fn with_endpoint(mut self, prefix: impl AsRef<str>) -> Self {
+        self.url.endpoint = prefix.as_ref().to_owned();
         self
     }
 
@@ -599,7 +604,7 @@ impl HttpClient {
         let tls_config = self.tls_config.take().map(|tls| tls.build()).transpose()?;
 
         Ok(ClientRuntimeContext {
-            url: self.url,
+            url: self.url.clone(),
             tx: self.receiver.tx.clone(),
             rx: sender_rx,
             access_token: self.access_token.take(),

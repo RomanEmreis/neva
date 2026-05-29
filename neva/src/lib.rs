@@ -170,6 +170,15 @@ pub mod json {
     pub use schemars::JsonSchema;
 }
 
+/// Internal re-exports used by `neva_macros`-generated code. Not public API.
+#[cfg(feature = "proto-2026-07-28-rc")]
+#[doc(hidden)]
+pub mod __macro_support {
+    pub use crate::types::schema_2020::{
+        SchemaProbe, ViaFallback, ViaJsonSchema, object_schema, primitive_subschema,
+    };
+}
+
 pub mod prelude {
     //! Prelude with commonly used items
 

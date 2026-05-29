@@ -211,6 +211,131 @@ impl From<schemars::Schema> for InputSchema {
     }
 }
 
+// --- `#[tool]` macro support (RC only) -------------------------------------
+//
+// These items back the `#[tool]` macro's JSON Schema 2020-12 emission under
+// `proto-2026-07-28-rc`. The `schema_2020` module itself is always compiled
+// (the `InputSchema` type exists on every config), so the macro-support items
+// are individually gated on the RC flag — they are unused on the legacy path.
+
+/// Autoref-specialization probe used by the `#[tool]` macro to build a
+/// per-argument JSON Schema 2020-12 subschema.
+///
+/// Resolves to a `schemars`-derived (inlined, self-contained) subschema when
+/// the argument type implements [`schemars::JsonSchema`], and to an opaque
+/// `{"type":"object"}` otherwise — chosen at the call site without requiring a
+/// trait bound the macro cannot enforce.
+#[cfg(feature = "proto-2026-07-28-rc")]
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct SchemaProbe<T>(std::marker::PhantomData<T>);
+
+#[cfg(feature = "proto-2026-07-28-rc")]
+#[doc(hidden)]
+impl<T> SchemaProbe<T> {
+    /// Creates a new probe.
+    #[inline]
+    pub fn new() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+#[cfg(feature = "proto-2026-07-28-rc")]
+#[doc(hidden)]
+impl<T> Default for SchemaProbe<T> {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Preferred specialization: exists only when `T: JsonSchema`.
+#[cfg(feature = "proto-2026-07-28-rc")]
+#[doc(hidden)]
+pub trait ViaJsonSchema {
+    /// Builds an inlined, self-contained subschema for `T`.
+    fn neva_subschema(&self) -> Value;
+}
+
+#[cfg(feature = "proto-2026-07-28-rc")]
+#[doc(hidden)]
+impl<T: schemars::JsonSchema> ViaJsonSchema for &SchemaProbe<T> {
+    #[inline]
+    fn neva_subschema(&self) -> Value {
+        let settings =
+            schemars::generate::SchemaSettings::draft2020_12().with(|s| s.inline_subschemas = true);
+        schemars::SchemaGenerator::new(settings)
+            .into_root_schema_for::<T>()
+            .to_value()
+    }
+}
+
+/// Fallback specialization: available for any `T`.
+#[cfg(feature = "proto-2026-07-28-rc")]
+#[doc(hidden)]
+pub trait ViaFallback {
+    /// Builds an opaque object subschema.
+    fn neva_subschema(&self) -> Value;
+}
+
+#[cfg(feature = "proto-2026-07-28-rc")]
+#[doc(hidden)]
+impl<T> ViaFallback for SchemaProbe<T> {
+    #[inline]
+    fn neva_subschema(&self) -> Value {
+        json!({ "type": "object" })
+    }
+}
+
+/// Builds an inline primitive subschema `{"type": ty}` for a tool argument.
+/// Used by the `#[tool]` macro for arguments mapping to a JSON primitive,
+/// keeping `serde_json` entirely inside neva (generated code never names it).
+#[cfg(feature = "proto-2026-07-28-rc")]
+#[doc(hidden)]
+#[inline]
+pub fn primitive_subschema(ty: &str) -> Value {
+    json!({ "type": ty })
+}
+
+/// Assembles a JSON Schema 2020-12 object schema from `(name, subschema)`
+/// property pairs and a list of required property names. Used by the `#[tool]`
+/// macro so generated code only ever names `neva::` paths. Uses the
+/// unconditional `From<Value>` (no `server` feature required).
+#[cfg(feature = "proto-2026-07-28-rc")]
+#[doc(hidden)]
+pub fn object_schema(properties: Vec<(String, Value)>, required: Vec<String>) -> InputSchema {
+    let mut props = serde_json::Map::with_capacity(properties.len());
+    for (name, schema) in properties {
+        props.insert(name, schema);
+    }
+    let mut root = serde_json::Map::with_capacity(3);
+    root.insert("type".to_string(), Value::String("object".to_string()));
+    root.insert("properties".to_string(), Value::Object(props));
+    root.insert(
+        "required".to_string(),
+        Value::Array(required.into_iter().map(Value::String).collect()),
+    );
+    InputSchema::from(Value::Object(root))
+}
+
+/// Builds a JSON Schema 2020-12 subschema for a type, used by the generated
+/// `#[tool]` registration code. Yields a `schemars`-derived inlined schema when
+/// the type implements [`schemars::JsonSchema`], otherwise `{"type":"object"}`.
+///
+/// The `&&` double-reference makes the `ViaJsonSchema for &SchemaProbe<T>`
+/// candidate be tried first; when its `T: JsonSchema` bound is unmet it is not a
+/// candidate and method resolution falls through to `ViaFallback`.
+#[cfg(feature = "proto-2026-07-28-rc")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __tool_arg_subschema {
+    ($t:ty) => {{
+        #[allow(unused_imports)]
+        use $crate::__macro_support::{ViaFallback as _, ViaJsonSchema as _};
+        (&&$crate::__macro_support::SchemaProbe::<$t>::new()).neva_subschema()
+    }};
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,5 +452,72 @@ mod tests {
         let raw = json!({ "type": "null" });
         let schema: InputSchema = raw.clone().into();
         assert_eq!(schema.as_value(), &raw);
+    }
+
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[test]
+    fn probe_uses_schemars_when_type_derives_json_schema() {
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Point {
+            x: i32,
+            y: i32,
+        }
+
+        let v = crate::__tool_arg_subschema!(Point);
+        assert_eq!(v["type"], json!("object"));
+        assert!(v["properties"].is_object(), "expected rich properties");
+        assert!(v["properties"]["x"].is_object());
+        // Inlined: a self-contained subschema must not carry `$defs`.
+        assert!(v.get("$defs").is_none(), "subschema must be inlined (no $defs)");
+    }
+
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[test]
+    fn probe_falls_back_for_type_without_json_schema() {
+        struct Opaque;
+        let v = crate::__tool_arg_subschema!(Opaque);
+        assert_eq!(v, json!({ "type": "object" }));
+    }
+
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[test]
+    fn probe_inlines_nested_struct_without_refs() {
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Inner {
+            label: String,
+        }
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Outer {
+            inner: Inner,
+        }
+
+        let v = crate::__tool_arg_subschema!(Outer);
+        let s = serde_json::to_string(&v).unwrap();
+        assert!(!s.contains("$ref"), "inlined schema must not contain $ref: {s}");
+        assert!(!s.contains("$defs"), "inlined schema must not contain $defs: {s}");
+        assert!(v["properties"]["inner"]["properties"]["label"].is_object());
+    }
+
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[test]
+    fn object_schema_assembles_properties_and_required() {
+        use crate::__macro_support::{object_schema, primitive_subschema};
+        let s = object_schema(
+            vec![
+                ("a".to_string(), primitive_subschema("number")),
+                ("b".to_string(), primitive_subschema("string")),
+            ],
+            vec!["a".to_string(), "b".to_string()],
+        );
+        let v = s.into_value();
+        assert_eq!(v["type"], json!("object"));
+        assert_eq!(v["properties"]["a"]["type"], json!("number"));
+        assert_eq!(v["properties"]["b"]["type"], json!("string"));
+        let mut req: Vec<String> = serde_json::from_value(v["required"].clone()).unwrap();
+        req.sort();
+        assert_eq!(req, vec!["a".to_string(), "b".to_string()]);
     }
 }

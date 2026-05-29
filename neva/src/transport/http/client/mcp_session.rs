@@ -2,7 +2,7 @@
 
 use crate::transport::http::ServiceUrl;
 use once_cell::sync::OnceCell;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -10,14 +10,19 @@ use tokio_util::sync::CancellationToken;
 pub(super) struct McpSession {
     initialized: Notify,
     sse_ready: Notify,
-    url: ServiceUrl,
+    url: Arc<str>,
     session_id: OnceCell<uuid::Uuid>,
     last_event_id: RwLock<Option<String>>,
     cancellation_token: CancellationToken,
 }
 
 impl McpSession {
-    /// Creates a new [`McpSession`]
+    /// Creates a new [`McpSession`].
+    ///
+    /// The request URL is assembled once here (after all client configuration,
+    /// including TLS, has settled in [`ServiceUrl`]) and cached as an
+    /// [`Arc<str>`], so the per-request POST/GET paths borrow it directly
+    /// instead of re-formatting the URL on every call.
     pub(super) fn new(url: ServiceUrl, token: CancellationToken) -> Self {
         Self {
             initialized: Notify::new(),
@@ -25,12 +30,12 @@ impl McpSession {
             session_id: OnceCell::new(),
             last_event_id: RwLock::new(None),
             cancellation_token: token,
-            url,
+            url: Arc::from(url.to_url()),
         }
     }
 
-    /// Returns a reference to the current MCP Session's [`ServiceUrl`]
-    pub(super) fn url(&self) -> &ServiceUrl {
+    /// Returns the pre-assembled request URL for this session.
+    pub(super) fn url(&self) -> &str {
         &self.url
     }
 
@@ -106,8 +111,8 @@ mod tests {
     fn create_session() -> McpSession {
         let url = ServiceUrl {
             proto: HttpProto::Http,
-            addr: "localhost",
-            endpoint: "init",
+            addr: "localhost".to_string(),
+            endpoint: "init".to_string(),
         };
         let token = CancellationToken::new();
         McpSession::new(url, token)
@@ -116,8 +121,8 @@ mod tests {
     #[tokio::test]
     async fn it_has_url() {
         let session = create_session();
-        assert_eq!(session.url().addr, "localhost");
-        assert_eq!(session.url().endpoint, "init");
+        // The full URL is assembled once and cached: proto://addr + endpoint.
+        assert_eq!(session.url(), "http://localhostinit");
     }
 
     #[tokio::test]

@@ -1,4 +1,24 @@
-//! Macros for MCP server tools
+//! Macros for MCP server tools.
+//!
+//! # JSON Schema 2020-12 (`proto-2026-07-28-rc`)
+//!
+//! Under the `proto-2026-07-28-rc` feature the generated `inputSchema` /
+//! `outputSchema` are full JSON Schema 2020-12 documents:
+//!
+//! - **Primitive arguments** (`String`, integers, `bool`, `Vec<_>`, …) become
+//!   inline primitive property schemas, exactly as before.
+//! - **Structured arguments** passed as `Json<T>` produce a rich, self-contained
+//!   subschema when the inner `T` derives `JsonSchema` (via
+//!   `#[derive(neva::json_schema)]` or `schemars::JsonSchema`). An inner type
+//!   that does **not** derive it degrades gracefully to `{"type":"object"}`.
+//!   Deriving is therefore recommended for structured argument and return types.
+//!   No `schemars` dependency is required in your crate — it is re-exported by
+//!   neva.
+//! - **Recursive types cannot be inlined**; model them with an explicit
+//!   `input_schema = "…"` instead.
+//! - **Explicit `input_schema` / `output_schema` string literals** are validated
+//!   at compile time; malformed JSON is a compile error (on every feature
+//!   configuration).
 
 use super::{
     get_arg_type, get_bool_param, get_exprs_arr, get_inner_type_from_generic, get_params_arr,
@@ -42,9 +62,15 @@ pub(crate) fn expand(
                         }
                         "input_schema" => {
                             input_schema = get_str_param(&nv.value);
+                            if let Some(ref js) = input_schema {
+                                super::validate_schema_json(js, &nv.value, "input_schema")?;
+                            }
                         }
                         "output_schema" => {
                             output_schema = get_str_param(&nv.value);
+                            if let Some(ref js) = output_schema {
+                                super::validate_schema_json(js, &nv.value, "output_schema")?;
+                            }
                         }
                         "annotations" => {
                             annotations = get_str_param(&nv.value);
@@ -81,77 +107,135 @@ pub(crate) fn expand(
         quote! { .with_title(#title) }
     });
 
-    // If no schema is provided, generate it automatically from function arguments
+    // If no schema is provided, generate it automatically from function arguments.
     let input_schema_code = if let Some(schema_json) = input_schema {
-        quote! {
-            .with_input_schema(|_| {
-                neva::types::tool::ToolSchema::from_json_str(#schema_json)
-            })
-        }
-    } else if !no_schema {
-        let mut schema_entries = Vec::new();
-
-        for arg in &function.sig.inputs {
-            if let FnArg::Typed(pat_type) = arg
-                && let Pat::Ident(pat_ident) = &*pat_type.pat
-            {
-                let arg_name = pat_ident.ident.to_string();
-                let arg_type = get_arg_type(&pat_type.ty);
-                if !arg_type.eq("none") {
-                    schema_entries.push(quote! {
-                        .with_required(#arg_name, #arg_type, #arg_type)
-                    });
-                }
-            }
-        }
-        if !schema_entries.is_empty() {
+        if cfg!(feature = "proto-2026-07-28-rc") {
             quote! {
-                .with_input_schema(|schema| {
-                    schema
-                    #(#schema_entries)*
+                .with_input_schema(|_| {
+                    neva::types::schema_2020::InputSchema::from_json_str(#schema_json).unwrap_or_default()
                 })
             }
         } else {
-            quote! {}
+            quote! {
+                .with_input_schema(|_| {
+                    neva::types::tool::ToolSchema::from_json_str(#schema_json)
+                })
+            }
+        }
+    } else if !no_schema {
+        if cfg!(feature = "proto-2026-07-28-rc") {
+            // RC: assemble a JSON Schema 2020-12 object schema via neva helpers
+            // so generated code never names `serde_json`. Primitive args use
+            // `primitive_subschema`; object/custom args use
+            // `__tool_arg_subschema!` (rich-or-fallback).
+            let mut prop_pairs = Vec::new();
+            let mut required = Vec::new();
+            for arg in &function.sig.inputs {
+                if let FnArg::Typed(pat_type) = arg
+                    && let Pat::Ident(pat_ident) = &*pat_type.pat
+                {
+                    let arg_name = pat_ident.ident.to_string();
+                    let cat = get_arg_type(&pat_type.ty);
+                    if cat == "none" {
+                        continue;
+                    }
+                    let ty = &*pat_type.ty;
+                    let prop_value = if cat == "object" {
+                        // Structured args arrive wrapped (e.g. `Json<T>`); probe
+                        // the inner type so a `JsonSchema`-deriving `T` yields a
+                        // rich schema. Bare `Value` (no inner) probes itself.
+                        let probe_ty = get_inner_type_from_generic(ty).unwrap_or(ty);
+                        quote! { neva::__tool_arg_subschema!(#probe_ty) }
+                    } else {
+                        let json_type = if cat == "slice" { "array" } else { cat };
+                        quote! { neva::__macro_support::primitive_subschema(#json_type) }
+                    };
+                    prop_pairs.push(quote! { (#arg_name.to_string(), #prop_value) });
+                    required.push(arg_name);
+                }
+            }
+            if prop_pairs.is_empty() {
+                quote! {}
+            } else {
+                quote! {
+                    .with_input_schema(|_| {
+                        neva::__macro_support::object_schema(
+                            ::std::vec![ #(#prop_pairs),* ],
+                            ::std::vec![ #(#required.to_string()),* ],
+                        )
+                    })
+                }
+            }
+        } else {
+            let mut schema_entries = Vec::new();
+            for arg in &function.sig.inputs {
+                if let FnArg::Typed(pat_type) = arg
+                    && let Pat::Ident(pat_ident) = &*pat_type.pat
+                {
+                    let arg_name = pat_ident.ident.to_string();
+                    let arg_type = get_arg_type(&pat_type.ty);
+                    if !arg_type.eq("none") {
+                        schema_entries.push(quote! {
+                            .with_required(#arg_name, #arg_type, #arg_type)
+                        });
+                    }
+                }
+            }
+            if !schema_entries.is_empty() {
+                quote! {
+                    .with_input_schema(|schema| {
+                        schema
+                        #(#schema_entries)*
+                    })
+                }
+            } else {
+                quote! {}
+            }
         }
     } else {
         quote! {}
     };
 
-    // If no schema is provided, generate it automatically from function arguments
+    // If no schema is provided, generate it automatically from the return type.
     let output_schema_code = if let Some(output_schema_json) = output_schema {
-        quote! {
-            .with_output_schema(|_| {
-                neva::types::tool::ToolSchema::from_json_str(#output_schema_json)
-            })
+        if cfg!(feature = "proto-2026-07-28-rc") {
+            quote! {
+                .with_output_schema(|_| {
+                    neva::types::schema_2020::InputSchema::from_json_str(#output_schema_json).unwrap_or_default()
+                })
+            }
+        } else {
+            quote! {
+                .with_output_schema(|_| {
+                    neva::types::tool::ToolSchema::from_json_str(#output_schema_json)
+                })
+            }
         }
     } else if !no_schema {
-        // Extract return type from a function signature
         match &function.sig.output {
-            ReturnType::Default => {
-                // Function returns () - no schema needed
-                quote! {}
-            }
+            ReturnType::Default => quote! {},
             ReturnType::Type(_, return_type) => {
                 let type_str = get_arg_type(return_type);
                 if type_str == "object" {
-                    match get_inner_type_from_generic(return_type) {
-                        Some(inner_type) => quote! {
-                            .with_output_schema(|schema| {
-                                schema.with_schema::<#inner_type>()
+                    let target = match get_inner_type_from_generic(return_type) {
+                        Some(inner_type) => quote! { #inner_type },
+                        None => quote! { #return_type },
+                    };
+                    if cfg!(feature = "proto-2026-07-28-rc") {
+                        quote! {
+                            .with_output_schema(|_| {
+                                neva::types::schema_2020::InputSchema::from_schema::<#target>()
                             })
-                        },
-                        None => quote! {
+                        }
+                    } else {
+                        quote! {
                             .with_output_schema(|schema| {
-                                schema.with_schema::<#return_type>()
+                                schema.with_schema::<#target>()
                             })
-                        },
+                        }
                     }
-                } else if type_str == "array" {
-                    // For array types
-                    quote! {}
                 } else {
-                    // For primitive types
+                    // array / primitive return types: no output schema (parity).
                     quote! {}
                 }
             }

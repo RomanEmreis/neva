@@ -104,7 +104,7 @@ async fn handle_connection(
                     break;
                 };
                 let mut resp = client
-                    .post(session.url().as_str().as_ref())
+                    .post(session.url())
                     .json(&req)
                     .header(CONTENT_TYPE, "application/json")
                     .header(ACCEPT, "application/json, text/event-stream");
@@ -247,7 +247,7 @@ async fn handle_sse_connection(
     let token = session.cancellation_token();
     loop {
         let mut req = client
-            .get(session.url().as_str().as_ref())
+            .get(session.url())
             .header(ACCEPT, "application/json, text/event-stream")
             .header(CACHE_CONTROL, "no-cache");
 
