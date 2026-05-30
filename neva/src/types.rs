@@ -158,6 +158,8 @@ pub mod cursor;
 pub mod elicitation;
 pub(crate) mod helpers;
 mod icon;
+#[cfg(feature = "proto-2026-07-28-rc")]
+pub mod mrtr;
 pub mod notification;
 mod progress;
 pub mod prompt;

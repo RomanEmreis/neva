@@ -55,6 +55,39 @@ pub(crate) type ToolOrTaskResponse = Either<CreateTaskResult, CallToolResponse>;
 
 type RequestHandlers = HashMap<String, RequestHandler<Response>>;
 
+/// Per-dispatch MRTR state: the replay log of answers available to the
+/// handler this round, plus the single input the handler newly requested.
+#[cfg(feature = "proto-2026-07-28-rc")]
+#[derive(Debug, Default)]
+pub(crate) struct MrtrCtx {
+    /// Answers available this round (prior answers decoded from
+    /// `requestState`, merged with this round's `inputResponses`).
+    pub(crate) answers: std::collections::HashMap<String, crate::types::elicitation::ElicitResult>,
+    /// The newly-requested input (v1: at most one), recorded on a cache miss.
+    pub(crate) pending: std::sync::Mutex<Option<(String, ElicitRequestParams)>>,
+    /// Whether the client declared elicitation support this round.
+    pub(crate) elicitation_allowed: bool,
+}
+
+#[cfg(feature = "proto-2026-07-28-rc")]
+impl MrtrCtx {
+    /// Returns the cached answer for `key`, or records the request and returns
+    /// the MRTR "input required" sentinel error to unwind the handler.
+    pub(crate) fn resolve(
+        &self,
+        key: String,
+        params: ElicitRequestParams,
+    ) -> Result<ElicitResult, Error> {
+        if let Some(answer) = self.answers.get(&key) {
+            return Ok(answer.clone());
+        }
+        if let Ok(mut pending) = self.pending.lock() {
+            *pending = Some((key, params));
+        }
+        Err(Error::input_required())
+    }
+}
+
 /// Represents a Server runtime
 #[derive(Clone)]
 pub(crate) struct ServerRuntime {
@@ -107,6 +140,11 @@ pub struct Context {
 
     /// Represents a timeout for the current request
     timeout: Duration,
+
+    /// MRTR per-dispatch state (set by the server dispatch layer for the
+    /// supported methods; `None` otherwise).
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) mrtr: Option<Arc<MrtrCtx>>,
 
     /// Represents a DI scope
     #[cfg(feature = "di")]
@@ -177,6 +215,8 @@ impl ServerRuntime {
             sender: self.sender.clone(),
             options: self.options.clone(),
             timeout: self.options.request_timeout,
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            mrtr: None,
             #[cfg(feature = "di")]
             scope: None,
         }
@@ -198,6 +238,8 @@ impl ServerRuntime {
             sender: self.sender.clone(),
             options: self.options.clone(),
             timeout: self.options.request_timeout,
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            mrtr: None,
             #[cfg(feature = "di")]
             scope: None,
         }
@@ -725,7 +767,7 @@ impl Context {
     /// }
     /// # }
     /// ```
-    #[cfg(not(feature = "tasks"))]
+    #[cfg(all(not(feature = "tasks"), not(feature = "proto-2026-07-28-rc")))]
     pub async fn elicit(&mut self, params: ElicitRequestParams) -> Result<ElicitResult, Error> {
         let method = crate::types::elicitation::commands::CREATE;
         let req = Request::new(
@@ -735,6 +777,46 @@ impl Context {
         );
 
         self.send_request(req).await?.into_result()
+    }
+
+    /// Requests elicitation input from the client (MRTR, `proto-2026-07-28-rc`).
+    ///
+    /// On the first dispatch the answer for `key` is absent: the request is
+    /// recorded and an internal sentinel error is returned, which the server
+    /// converts into an `InputRequiredResult`. When the client retries with
+    /// the answer, this handler re-runs and the call returns the cached
+    /// [`ElicitResult`].
+    ///
+    /// **Important:** code before an `elicit` point re-executes on every
+    /// round-trip — keep it side-effect-free.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(all(feature = "server-macros", feature = "proto-2026-07-28-rc"))] {
+    /// use neva::{Context, error::Error, types::elicitation::ElicitRequestParams, tool};
+    /// #[tool]
+    /// async fn greet(mut ctx: Context) -> Result<String, Error> {
+    ///     let params = ElicitRequestParams::form("Your name?")
+    ///         .with_required("name", "string")
+    ///         .into();
+    ///     let res = ctx.elicit("name", params).await?;
+    ///     Ok(format!("{:?}", res.content))
+    /// }
+    /// # }
+    /// ```
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub async fn elicit(
+        &mut self,
+        key: impl Into<String>,
+        params: ElicitRequestParams,
+    ) -> Result<ElicitResult, Error> {
+        match self.mrtr.as_ref() {
+            Some(mrtr) => mrtr.resolve(key.into(), params),
+            None => Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "elicitation is not available for this request",
+            )),
+        }
     }
 
     /// Sends the elicitation request to the client
@@ -758,7 +840,7 @@ impl Context {
     /// }
     /// # }
     /// ```
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
     pub async fn elicit(&mut self, params: ElicitRequestParams) -> Result<ElicitResult, Error> {
         let related_task = params.related_task();
 
@@ -905,6 +987,7 @@ impl Context {
 
     #[inline]
     #[cfg(feature = "tasks")]
+    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
     async fn send_maybe_task_augmented_request<T: DeserializeOwned>(
         &mut self,
         req: Request,
@@ -1069,5 +1152,44 @@ mod missing_resource_error_tests {
         assert_eq!(i32::from(ErrorCode::RESOURCE_NOT_FOUND), -32602);
         #[cfg(not(feature = "proto-2026-07-28-rc"))]
         assert_eq!(i32::from(ErrorCode::RESOURCE_NOT_FOUND), -32002);
+    }
+}
+
+#[cfg(all(test, feature = "proto-2026-07-28-rc"))]
+mod mrtr_tests {
+    use super::*;
+    use crate::types::elicitation::{ElicitRequestParams, ElicitResult, ElicitationAction};
+
+    fn params() -> ElicitRequestParams {
+        ElicitRequestParams::form("m")
+            .with_required("x", "string")
+            .into()
+    }
+
+    #[test]
+    fn resolve_replays_cached_answer_and_records_pending_on_miss() {
+        let mut answers = std::collections::HashMap::new();
+        answers.insert(
+            "known".to_string(),
+            ElicitResult {
+                action: ElicitationAction::Accept,
+                content: Some(serde_json::json!({ "x": 1 })),
+                meta: None,
+            },
+        );
+        let mrtr = MrtrCtx {
+            answers,
+            pending: Default::default(),
+            elicitation_allowed: true,
+        };
+
+        // Hit: returns the cached answer.
+        let got = mrtr.resolve("known".into(), params()).expect("cached");
+        assert_eq!(got.action, ElicitationAction::Accept);
+
+        // Miss: returns the sentinel and records pending.
+        let miss = mrtr.resolve("unknown".into(), params());
+        assert_eq!(miss.unwrap_err().code, ErrorCode::InputRequired);
+        assert!(mrtr.pending.lock().unwrap().is_some());
     }
 }

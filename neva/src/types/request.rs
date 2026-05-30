@@ -98,6 +98,23 @@ pub struct RequestParamsMeta {
     )]
     pub(crate) client_info: Option<super::Implementation>,
 
+    /// MRTR: the client's results for a prior `InputRequiredResult`.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[serde(rename = "inputResponses", skip_serializing_if = "Option::is_none")]
+    pub(crate) input_responses: Option<crate::types::mrtr::InputResponses>,
+
+    /// MRTR: the opaque `requestState` echoed back from `InputRequiredResult`.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[serde(rename = "requestState", skip_serializing_if = "Option::is_none")]
+    pub(crate) request_state: Option<String>,
+
+    /// MRTR/stateless: client capabilities declared per-request (v1: a single
+    /// `elicitation` flag) so the server can honor "MUST NOT send an input
+    /// type the client didn't declare".
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[serde(rename = "clientCapabilities", skip_serializing_if = "Option::is_none")]
+    pub(crate) client_capabilities: Option<crate::types::mrtr::ClientMrtrCapabilities>,
+
     /// Represents metadata for associating messages with a task.
     ///
     /// > **Note:** Include this in the _meta field under the key `io.modelcontextprotocol/related-task`.
@@ -260,6 +277,9 @@ mod tests {
         let got = req.meta().expect("meta present");
         assert_eq!(got.traceparent.as_deref(), Some("tp"));
         assert_eq!(got.client_info.expect("client_info present").name, "c");
+        // MRTR meta fields default to None and survive set/get.
+        assert!(got.input_responses.is_none());
+        assert!(got.request_state.is_none());
         // pre-existing params keys are untouched.
         assert_eq!(req.params.expect("params present")["x"], json!(1));
     }

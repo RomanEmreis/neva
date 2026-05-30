@@ -100,6 +100,16 @@ pub struct McpOptions {
     /// Currently running tasks
     #[cfg(feature = "tasks")]
     pub(super) tasks: TaskTracker,
+
+    /// HMAC key signing MRTR `requestState`. Defaults to an ephemeral random
+    /// key; multi-instance stateless deployments must set a shared secret via
+    /// [`crate::App::with_request_state_secret`].
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    request_state_secret: Arc<[u8]>,
+
+    /// TTL (seconds) embedded into MRTR `requestState`.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    request_state_ttl_secs: u64,
 }
 
 impl Debug for McpOptions {
@@ -149,6 +159,17 @@ impl Default for McpOptions {
             log_level: Default::default(),
             #[cfg(feature = "tasks")]
             tasks: TaskTracker::new(),
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            request_state_secret: {
+                // Ephemeral random key from two v4 UUIDs (16 bytes each).
+                // Non-panicking; sufficient for single-instance/dev.
+                let mut key = [0u8; 32];
+                key[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+                key[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+                Arc::from(&key[..])
+            },
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            request_state_ttl_secs: 300,
         }
     }
 }
@@ -586,6 +607,24 @@ impl McpOptions {
             .and_then(|tasks| tasks.requests.as_ref())
             .and_then(|req| req.tools.as_ref())
             .is_some_and(|tools| tools.call.is_some())
+    }
+
+    /// Sets the shared secret used to sign MRTR `requestState`.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) fn set_request_state_secret(&mut self, key: &[u8]) {
+        self.request_state_secret = Arc::from(key);
+    }
+
+    /// Returns the MRTR `requestState` signing key.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) fn request_state_secret(&self) -> &[u8] {
+        &self.request_state_secret
+    }
+
+    /// Returns the MRTR `requestState` TTL in seconds.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) fn request_state_ttl_secs(&self) -> u64 {
+        self.request_state_ttl_secs
     }
 
     /// Turns [`McpOptions`] into [`RuntimeMcpOptions`]

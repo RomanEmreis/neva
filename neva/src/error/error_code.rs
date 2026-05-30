@@ -35,6 +35,12 @@ pub enum ErrorCode {
 
     /// [Internal code] The request has been timed out
     Timeout = -99998,
+
+    /// [Internal code] A handler requested additional input via MRTR. Never
+    /// sent on the wire as an error — intercepted by the server dispatch layer
+    /// and converted into an `InputRequiredResult`.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    InputRequired = -99997,
 }
 
 impl From<ErrorCode> for i32 {
@@ -59,6 +65,8 @@ impl TryFrom<i32> for ErrorCode {
             -32042 => Ok(ErrorCode::UrlElicitationRequiredError),
             -99999 => Ok(ErrorCode::RequestCancelled),
             -99998 => Ok(ErrorCode::Timeout),
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            -99997 => Ok(ErrorCode::InputRequired),
             _ => Err(()),
         }
     }
@@ -101,6 +109,8 @@ impl Display for ErrorCode {
             ErrorCode::UrlElicitationRequiredError => write!(f, "URL elicitation required error"),
             ErrorCode::RequestCancelled => write!(f, "Request cancelled"),
             ErrorCode::Timeout => write!(f, "Request timed out"),
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            ErrorCode::InputRequired => write!(f, "Input required"),
         }
     }
 }
@@ -133,6 +143,8 @@ impl ErrorCode {
     pub fn wire_code(self) -> Self {
         match self {
             Self::RequestCancelled | Self::Timeout => Self::InternalError,
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            Self::InputRequired => Self::InternalError,
             other => other,
         }
     }

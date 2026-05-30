@@ -284,6 +284,27 @@ impl App {
         }
     }
 
+    /// Sets the shared secret used to sign MRTR `requestState`
+    /// (`proto-2026-07-28-rc`).
+    ///
+    /// **Multi-instance stateless deployments MUST set this to a shared
+    /// secret** — otherwise a retry that lands on a different instance fails
+    /// `requestState` verification. If unset, an ephemeral per-process key is
+    /// used (fine for single-instance / development).
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(feature = "proto-2026-07-28-rc")] {
+    /// use neva::App;
+    /// let app = App::new().with_request_state_secret(b"shared-secret");
+    /// # }
+    /// ```
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub fn with_request_state_secret(mut self, secret: impl AsRef<[u8]>) -> Self {
+        self.options.set_request_state_secret(secret.as_ref());
+        self
+    }
+
     /// Enable the greeting banner on startup (forced on, even in release builds).
     ///
     /// # Example
@@ -947,6 +968,19 @@ impl App {
         let req_id = req.id();
         let session_id = req.session_id;
         let full_id = req.full_id();
+        
+        // MRTR pre-capture: method + salient params (params minus `_meta`),
+        // needed after `req`/`context` are moved into `handler.call`.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let mrtr_method = shared::is_mrtr_method(&req.method);
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let req_method = req.method.clone();
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let salient_params = req
+            .params
+            .as_ref()
+            .map(strip_meta)
+            .unwrap_or(serde_json::Value::Null);
 
         #[cfg(not(feature = "http-server"))]
         let context = runtime.context(session_id);
@@ -964,6 +998,44 @@ impl App {
         let options = runtime.options();
         let handlers = runtime.request_handlers();
         let token = options.track_request(&full_id);
+
+        // MRTR seed: decode/verify any incoming `requestState`, merge this
+        // round's `inputResponses`, and attach the replay state to the context.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let mut context = context;
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let (mrtr_arc, mrtr_principal) = if mrtr_method {
+            #[cfg(feature = "http-server")]
+            let principal = context
+                .claims
+                .as_ref()
+                .and_then(|c| c.subject().map(|s| s.to_owned()));
+            #[cfg(not(feature = "http-server"))]
+            let principal: Option<String> = None;
+
+            match seed_mrtr_ctx(
+                &req,
+                &req_method,
+                &salient_params,
+                &options,
+                principal.as_deref(),
+            ) {
+                Ok(arc) => {
+                    context.mrtr = Some(arc.clone());
+                    (Some(arc), principal)
+                }
+                Err(e) => {
+                    options.complete_request(&full_id);
+                    let mut resp = Err::<Response, _>(e).into_response(req_id);
+                    if let Some(session_id) = session_id {
+                        resp = resp.set_session_id(session_id);
+                    }
+                    return resp;
+                }
+            }
+        } else {
+            (None, None)
+        };
 
         #[cfg(feature = "tracing")]
         tracing::trace!(logger = "neva", "Received: {:?}", req);
@@ -983,6 +1055,31 @@ impl App {
             }
         } else {
             Err(Error::from(ErrorCode::MethodNotFound))
+        };
+
+        // MRTR interception: if the handler requested input (recorded in the
+        // shared `MrtrCtx`), convert to an `InputRequiredResult` regardless of
+        // what the handler returned. The pending flag — not the sentinel error
+        // — is the reliable signal, because tool/prompt/resource wrappers fold
+        // a handler `Err` into an in-band error result before we see it.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let resp = match (mrtr_method, mrtr_arc) {
+            (true, Some(arc)) => {
+                let has_pending = arc.pending.lock().map(|p| p.is_some()).unwrap_or(false);
+                if has_pending {
+                    build_input_required(
+                        &arc,
+                        &req_method,
+                        &salient_params,
+                        &options,
+                        mrtr_principal,
+                    )
+                    .map(|ir| ir.into_response(req_id.clone()))
+                } else {
+                    resp
+                }
+            }
+            _ => resp,
         };
 
         let mut resp = resp.into_response(req_id);
@@ -1038,6 +1135,105 @@ fn create_tracing_span(session_id: Option<uuid::Uuid>) -> tracing::Span {
     } else {
         tracing::info_span!("request")
     }
+}
+
+/// Returns a clone of `params` with the `_meta` key removed, so the MRTR
+/// request-binding digest is stable across round-trips.
+#[cfg(feature = "proto-2026-07-28-rc")]
+fn strip_meta(params: &serde_json::Value) -> serde_json::Value {
+    match params {
+        serde_json::Value::Object(map) => {
+            let mut cloned = map.clone();
+            cloned.remove("_meta");
+            serde_json::Value::Object(cloned)
+        }
+        other => other.clone(),
+    }
+}
+
+/// Decodes/verifies any incoming `requestState` and merges this round's
+/// `inputResponses` into the replay log, producing the per-dispatch MRTR state.
+#[cfg(feature = "proto-2026-07-28-rc")]
+fn seed_mrtr_ctx(
+    req: &Request,
+    method: &str,
+    salient: &serde_json::Value,
+    options: &crate::app::options::RuntimeMcpOptions,
+    principal: Option<&str>,
+) -> Result<std::sync::Arc<crate::app::context::MrtrCtx>, Error> {
+    use crate::types::mrtr::state::{StateCodec, now_secs, request_binding};
+
+    let meta = req.meta();
+    let elicitation_allowed = meta
+        .as_ref()
+        .and_then(|m| m.client_capabilities)
+        .map(|c| c.elicitation)
+        .unwrap_or(false);
+
+    let mut answers = std::collections::HashMap::new();
+    if let Some(state) = meta.as_ref().and_then(|m| m.request_state.clone()) {
+        let payload = StateCodec::new(options.request_state_secret()).decode(&state)?;
+        if payload.exp < now_secs() {
+            return Err(Error::new(ErrorCode::InvalidParams, "requestState expired"));
+        }
+        if payload.req != request_binding(method, salient) {
+            return Err(Error::new(
+                ErrorCode::InvalidParams,
+                "requestState does not match this request",
+            ));
+        }
+        if payload.principal.as_deref() != principal {
+            return Err(Error::new(
+                ErrorCode::InvalidParams,
+                "requestState principal mismatch",
+            ));
+        }
+        answers = payload.answers;
+    }
+    if let Some(responses) = meta.and_then(|m| m.input_responses) {
+        answers.extend(responses);
+    }
+
+    Ok(std::sync::Arc::new(crate::app::context::MrtrCtx {
+        answers,
+        pending: Default::default(),
+        elicitation_allowed,
+    }))
+}
+
+/// Builds the `InputRequiredResult` for the input the handler requested,
+/// encoding a fresh signed `requestState`.
+#[cfg(feature = "proto-2026-07-28-rc")]
+fn build_input_required(
+    arc: &std::sync::Arc<crate::app::context::MrtrCtx>,
+    method: &str,
+    salient: &serde_json::Value,
+    options: &crate::app::options::RuntimeMcpOptions,
+    principal: Option<String>,
+) -> Result<crate::types::mrtr::InputRequiredResult, Error> {
+    use crate::types::mrtr::InputRequiredResult;
+    use crate::types::mrtr::state::{StateCodec, StatePayload, now_secs, request_binding};
+
+    if !arc.elicitation_allowed {
+        return Err(Error::new(
+            ErrorCode::InvalidRequest,
+            "server requested elicitation but the client did not declare support",
+        ));
+    }
+    let (key, params) = arc
+        .pending
+        .lock()
+        .ok()
+        .and_then(|mut p| p.take())
+        .ok_or_else(|| Error::new(ErrorCode::InternalError, "missing pending MRTR input"))?;
+    let payload = StatePayload {
+        answers: arc.answers.clone(),
+        exp: now_secs() + options.request_state_ttl_secs(),
+        req: request_binding(method, salient),
+        principal,
+    };
+    let state = StateCodec::new(options.request_state_secret()).encode(&payload)?;
+    Ok(InputRequiredResult::elicitation(key, params, state))
 }
 
 #[cfg(test)]

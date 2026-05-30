@@ -85,6 +85,12 @@ mod tests {
                 traceparent: None,
                 tracestate: None,
                 client_info: None,
+                #[cfg(feature = "proto-2026-07-28-rc")]
+                input_responses: None,
+                #[cfg(feature = "proto-2026-07-28-rc")]
+                request_state: None,
+                #[cfg(feature = "proto-2026-07-28-rc")]
+                client_capabilities: None,
                 context: None,
                 #[cfg(feature = "tasks")]
                 task: None,
@@ -108,6 +114,12 @@ mod tests {
                 traceparent: None,
                 tracestate: None,
                 client_info: None,
+                #[cfg(feature = "proto-2026-07-28-rc")]
+                input_responses: None,
+                #[cfg(feature = "proto-2026-07-28-rc")]
+                request_state: None,
+                #[cfg(feature = "proto-2026-07-28-rc")]
+                client_capabilities: None,
                 context: None,
                 #[cfg(feature = "tasks")]
                 task: None,

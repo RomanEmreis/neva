@@ -103,3 +103,15 @@ async fn wait_for_shutdown_signal_impl() -> std::io::Result<()> {
         }
     }
 }
+
+/// MRTR-eligible client requests (the only ones that may receive an
+/// `InputRequiredResult`).
+#[cfg(feature = "proto-2026-07-28-rc")]
+pub(crate) fn is_mrtr_method(method: &str) -> bool {
+    matches!(
+        method,
+        crate::types::tool::commands::CALL
+            | crate::types::prompt::commands::GET
+            | crate::types::resource::commands::READ
+    )
+}

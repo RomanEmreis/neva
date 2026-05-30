@@ -950,21 +950,115 @@ impl Client {
     /// Sends a request to the MCP server
     #[inline]
     async fn send_request(&mut self, req: Request) -> Result<Response, Error> {
-        // Stateless RC transport carries `clientInfo` in `_meta` on every
-        // request (there is no `initialize` handshake to advertise it once).
         #[cfg(feature = "proto-2026-07-28-rc")]
-        let req = {
-            let mut req = req;
-            let mut meta = req.meta().unwrap_or_default();
-            meta.client_info = Some(self.options.implementation.clone());
-            req.set_meta(meta);
-            req
-        };
-        self.handler
-            .as_mut()
-            .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?
-            .send_request(req)
-            .await
+        {
+            self.run_with_mrtr(req).await
+        }
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        {
+            self.handler
+                .as_mut()
+                .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?
+                .send_request(req)
+                .await
+        }
+    }
+
+    /// Sends a request and transparently drives the MRTR loop: while the
+    /// server responds with an `input_required` result, fulfil each
+    /// elicitation via the configured handler and re-issue the original
+    /// request (new id) with `inputResponses` + the echoed `requestState`.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    async fn run_with_mrtr(&mut self, req: Request) -> Result<Response, Error> {
+        const MAX_ROUNDS: usize = 8;
+        let method = req.method.clone();
+        let original_params = req.params.clone();
+        let mrtr_method = shared::is_mrtr_method(method.as_str());
+
+        let mut req = req;
+        self.apply_client_meta(&mut req, None, None);
+
+        for _ in 0..MAX_ROUNDS {
+            let resp = self
+                .handler
+                .as_mut()
+                .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?
+                .send_request(req)
+                .await?;
+
+            // MRTR only applies to success results carrying the
+            // `input_required` discriminator; anything else is final.
+            let input_required_result = match &resp {
+                Response::Ok(ok)
+                    if mrtr_method
+                        && ok.result.get("resultType")
+                            == Some(&serde_json::json!("input_required")) =>
+                {
+                    serde_json::from_value::<crate::types::mrtr::InputRequiredResult>(
+                        ok.result.clone(),
+                    )
+                    .map_err(Error::from)?
+                }
+                _ => return Ok(resp),
+            };
+            let ir = input_required_result;
+
+            let mut input_responses = crate::types::mrtr::InputResponses::new();
+            if let Some(reqs) = ir.input_requests {
+                for (key, envelope) in reqs {
+                    let result = self.fulfil_elicitation(envelope.params).await?;
+                    input_responses.insert(key, result);
+                }
+            }
+
+            let new_id = self.generate_id()?;
+            let mut retry = Request::new(Some(new_id), method.clone(), original_params.clone());
+            self.apply_client_meta(&mut retry, Some(input_responses), ir.request_state);
+            req = retry;
+        }
+
+        Err(Error::new(
+            ErrorCode::InternalError,
+            "MRTR exceeded the maximum number of rounds",
+        ))
+    }
+
+    /// Sets `clientInfo` + MRTR capability `_meta` on a request, and optionally
+    /// the MRTR `inputResponses` / `requestState`, preserving existing `_meta`.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    fn apply_client_meta(
+        &self,
+        req: &mut Request,
+        input_responses: Option<crate::types::mrtr::InputResponses>,
+        request_state: Option<String>,
+    ) {
+        let mut meta = req.meta().unwrap_or_default();
+        meta.client_info = Some(self.options.implementation.clone());
+        meta.client_capabilities = Some(crate::types::mrtr::ClientMrtrCapabilities {
+            elicitation: self.options.elicitation_handler.is_some(),
+        });
+        if input_responses.is_some() {
+            meta.input_responses = input_responses;
+        }
+        if request_state.is_some() {
+            meta.request_state = request_state;
+        }
+        req.set_meta(meta);
+    }
+
+    /// Fulfils a server-requested elicitation via the configured handler.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    async fn fulfil_elicitation(
+        &self,
+        params: crate::types::elicitation::ElicitRequestParams,
+    ) -> Result<crate::types::elicitation::ElicitResult, Error> {
+        match self.options.elicitation_handler.clone() {
+            Some(handler) => Ok(handler(params).await),
+            None => Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "server requested elicitation but no handler is configured",
+            )),
+        }
     }
 
     /// Creates a [`BatchBuilder`] for sending multiple requests in a single batch.
