@@ -196,7 +196,7 @@ impl Default for HttpServer<server::DefaultClaims, server::VolgaEngine> {
     fn default() -> Self {
         Self {
             url: ServiceUrl::default(),
-            engine: Some(server::VolgaEngine::default()),
+            engine: Some(VolgaEngine::default()),
             sse_buffer_capacity: DEFAULT_SSE_BUFFER_CAPACITY,
             sse_live_queue_capacity: DEFAULT_SSE_LIVE_QUEUE_CAPACITY,
             sse_log_queue_capacity: DEFAULT_SSE_LOG_QUEUE_CAPACITY,
@@ -234,6 +234,7 @@ impl std::fmt::Debug for HttpClient {
     }
 }
 
+#[cfg(feature = "http-client")]
 impl ServiceUrl {
     /// Builds the full request URL (`proto://addr/endpoint`).
     ///
