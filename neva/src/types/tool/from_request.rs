@@ -84,6 +84,7 @@ mod tests {
                 progress_token: None,
                 traceparent: None,
                 tracestate: None,
+                client_info: None,
                 context: None,
                 #[cfg(feature = "tasks")]
                 task: None,
@@ -106,6 +107,7 @@ mod tests {
                 progress_token: Some(ProgressToken::Number(5)),
                 traceparent: None,
                 tracestate: None,
+                client_info: None,
                 context: None,
                 #[cfg(feature = "tasks")]
                 task: None,

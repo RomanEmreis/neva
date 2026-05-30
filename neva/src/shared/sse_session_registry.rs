@@ -233,6 +233,9 @@ impl SseSessionRegistry {
     /// this is a no-op — the existing buffer and sequence counter are preserved.
     ///
     /// Has no effect when `capacity == 0` (buffering disabled).
+    // Stateless RC transport skips pre-registration (no SSE GET); the method
+    // stays compiled for the non-RC build.
+    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
     pub(crate) fn pre_register(&self, id: Uuid) {
         if self.capacity == 0 {
             return;

@@ -7,6 +7,8 @@ use super::{
 use crate::error::{Error, ErrorCode};
 use crate::transport::Sender;
 #[cfg(not(feature = "proto-2026-07-28-rc"))]
+use crate::types::notification::Notification;
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 use crate::types::root::{ListRootsRequestParams, ListRootsResult};
 #[cfg(not(feature = "proto-2026-07-28-rc"))]
 use crate::types::sampling::{CreateMessageRequestParams, CreateMessageResult};
@@ -19,7 +21,6 @@ use crate::{
         Prompt, ReadResourceRequestParams, ReadResourceResult, Request, RequestId, Resource,
         Response, Tool, ToolResult, ToolUse, Uri,
         elicitation::{ElicitRequestParams, ElicitResult, ElicitationCompleteParams},
-        notification::Notification,
         resource::SubscribeRequestParams,
     },
 };
@@ -397,7 +398,7 @@ impl Context {
         Ok(removed)
     }
 
-    /// Sends a [`Notification`] that the resource with the `uri` has been updated
+    /// Sends a notification that the resource with the `uri` has been updated
     pub async fn resource_updated(&mut self, uri: impl Into<Uri>) -> Result<(), Error> {
         if !self.options.is_resource_subscription_supported() {
             return Err(Error::new(
@@ -949,18 +950,32 @@ impl Context {
         }
     }
 
-    /// Sends a notification to a client
+    /// Sends a notification to a client.
+    ///
+    /// Under the stateless `proto-2026-07-28-rc` transport there is no
+    /// out-of-band server→client channel, so this is a no-op: progress,
+    /// list-changed, resource-updated, task-status and elicitation
+    /// notifications are inert and clients poll instead.
     #[inline]
     async fn send_notification(
         &mut self,
-        method: &str,
-        params: Option<serde_json::Value>,
+        #[cfg_attr(feature = "proto-2026-07-28-rc", allow(unused_variables))] method: &str,
+        #[cfg_attr(feature = "proto-2026-07-28-rc", allow(unused_variables))] params: Option<
+            serde_json::Value,
+        >,
     ) -> Result<(), Error> {
-        let mut notification = Notification::new(method, params);
-        if let Some(session_id) = self.session_id {
-            notification.session_id = Some(session_id);
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        {
+            Ok(())
         }
-        self.sender.send(notification.into()).await
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        {
+            let mut notification = Notification::new(method, params);
+            if let Some(session_id) = self.session_id {
+                notification.session_id = Some(session_id);
+            }
+            self.sender.send(notification.into()).await
+        }
     }
 }
 

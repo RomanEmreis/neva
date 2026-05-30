@@ -6,12 +6,17 @@ use crate::{
     transport::http::{ClientRuntimeContext, MCP_SESSION_ID, get_mcp_session_id},
     types::Message,
 };
+// SSE-stream imports — used only by the non-RC GET stream path.
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 use futures_util::{StreamExt, TryStreamExt};
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+use reqwest::header::{CACHE_CONTROL, HeaderName};
 use reqwest::{
     RequestBuilder,
-    header::{ACCEPT, CACHE_CONTROL, CONTENT_TYPE, HeaderName},
+    header::{ACCEPT, CONTENT_TYPE},
 };
 use std::sync::Arc;
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 use std::time::Duration;
 
 #[cfg(feature = "client-tls")]
@@ -23,7 +28,11 @@ pub(super) mod mcp_session;
 #[cfg(feature = "client-tls")]
 pub(crate) mod tls_config;
 
+// SSE-only constants — the standalone GET stream does not exist under the
+// stateless RC transport.
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 const LAST_EVENT_ID: HeaderName = HeaderName::from_static("last-event-id");
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 const SSE_RECONNECT_DELAY: Duration = Duration::from_secs(3);
 
 #[cfg(feature = "proto-2026-07-28-rc")]
@@ -46,6 +55,20 @@ fn name_param(req: &crate::types::Request) -> Option<&str> {
 pub(super) async fn connect(rt: ClientRuntimeContext, token: CancellationToken) {
     let session = Arc::new(McpSession::new(rt.url, token));
     let access_token: Option<Arc<[u8]>> = rt.access_token.map(|t| t.into());
+
+    // Stateless RC transport issues only POSTs — no standalone SSE GET stream.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    handle_connection(
+        session.clone(),
+        rt.rx,
+        rt.tx.clone(),
+        access_token,
+        #[cfg(feature = "client-tls")]
+        rt.tls_config.clone(),
+    )
+    .await;
+
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     tokio::join!(
         handle_connection(
             session.clone(),
@@ -124,6 +147,14 @@ async fn handle_connection(
                     }
                 }
 
+                #[cfg(feature = "proto-2026-07-28-rc")]
+                {
+                    resp = resp.header(
+                        crate::transport::http::MCP_PROTOCOL_VERSION,
+                        crate::PROTOCOL_VERSIONS.last().copied().unwrap_or("2026-07-28"),
+                    );
+                }
+
                 if let Some(access_token) = &access_token {
                     resp = resp.bearer_auth(String::from_utf8_lossy(access_token))
                 }
@@ -196,6 +227,7 @@ async fn send_request(
     }
 }
 
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 async fn start_sse_connection(
     session: Arc<McpSession>,
     resp_tx: mpsc::Sender<Result<Message, Error>>,
@@ -218,6 +250,7 @@ async fn start_sse_connection(
     }
 }
 
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 async fn handle_sse_connection(
     session: Arc<McpSession>,
     resp_tx: mpsc::Sender<Result<Message, Error>>,
@@ -317,6 +350,7 @@ async fn handle_sse_connection(
     }
 }
 
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 async fn handle_event(
     event: sse_stream::Sse,
     session: &Arc<McpSession>,
@@ -338,12 +372,14 @@ async fn handle_event(
 }
 
 #[inline]
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 fn handle_error(_err: sse_stream::Error) {
     #[cfg(feature = "tracing")]
     tracing::error!(logger = "neva", "SSE Error: {}", _err);
 }
 
 // Returns true if the message was successfully parsed and delivered.
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 async fn handle_msg(
     event: sse_stream::Sse,
     resp_tx: &mpsc::Sender<Result<Message, Error>>,
@@ -390,7 +426,9 @@ impl From<reqwest::Error> for Error {
     }
 }
 
-#[cfg(test)]
+// These tests exercise the SSE GET stream path, which does not exist under
+// the stateless RC transport.
+#[cfg(all(test, not(feature = "proto-2026-07-28-rc")))]
 mod tests {
     use super::*;
     use crate::transport::http::ServiceUrl;

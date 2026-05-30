@@ -81,34 +81,8 @@ async fn tool_macro_emits_json_schema_2020() {
     let client = reqwest::Client::new();
     let url = format!("http://{addr}/mcp");
 
-    let init_body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2026-07-28",
-            "capabilities": {},
-            "clientInfo": { "name": "test", "version": "0" }
-        }
-    });
-    let resp = client
-        .post(&url)
-        .json(&init_body)
-        .send()
-        .await
-        .expect("init failed");
-    assert!(
-        resp.status().is_success(),
-        "init returned {}",
-        resp.status()
-    );
-    let session_id = resp
-        .headers()
-        .get("Mcp-Session-Id")
-        .and_then(|v| v.to_str().ok())
-        .expect("Mcp-Session-Id header missing")
-        .to_string();
-
+    // Stateless RC transport: no handshake/session — a single `tools/list`
+    // POST carrying the required `MCP-Protocol-Version` header is enough.
     let list_body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 2,
@@ -117,7 +91,7 @@ async fn tool_macro_emits_json_schema_2020() {
     });
     let resp = client
         .post(&url)
-        .header("Mcp-Session-Id", &session_id)
+        .header("MCP-Protocol-Version", "2026-07-28")
         .json(&list_body)
         .send()
         .await

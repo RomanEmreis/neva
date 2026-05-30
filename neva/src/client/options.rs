@@ -334,6 +334,7 @@ impl McpOptions {
     /// Returns [`ElicitationCapability`] if configured.
     /// If not configured but an elicitation handler exists, it returns [`Default`].
     /// Otherwise, returns `None`.
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     pub(crate) fn elicitation_capability(&self) -> Option<ElicitationCapability> {
         self.elicitation_capability
             .clone()
@@ -343,7 +344,7 @@ impl McpOptions {
     /// Returns [`ClientTasksCapability`] if configured.
     ///
     /// Otherwise, returns `None`.
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
     pub(crate) fn tasks_capability(&self) -> Option<ClientTasksCapability> {
         self.tasks_capability.clone()
     }

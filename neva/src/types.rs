@@ -447,6 +447,68 @@ pub struct InitializeResult {
     pub instructions: Option<String>,
 }
 
+/// Parameters for a `server/discover` request (MCP 2026-07-28 RC).
+///
+/// Discovery takes no required input; any client metadata rides in the
+/// request's `_meta` like every other request.
+///
+/// # Example
+/// ```
+/// # #[cfg(feature = "proto-2026-07-28-rc")]
+/// # {
+/// use neva::types::DiscoverRequestParams;
+/// let _p = DiscoverRequestParams::default();
+/// # }
+/// ```
+#[cfg(feature = "proto-2026-07-28-rc")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DiscoverRequestParams {}
+
+/// Result of a `server/discover` request (MCP 2026-07-28 RC).
+///
+/// Structurally mirrors [`InitializeResult`] but is a distinct type so the
+/// stateless discovery path is explicit at every call site.
+///
+/// # Example
+/// ```
+/// # #[cfg(feature = "proto-2026-07-28-rc")]
+/// # {
+/// use neva::types::DiscoverResult;
+/// let json = r#"{"protocolVersion":"2026-07-28","capabilities":{},"serverInfo":{"name":"s","version":"1"}}"#;
+/// let r: DiscoverResult = serde_json::from_str(json).unwrap();
+/// assert_eq!(r.protocol_ver, "2026-07-28");
+/// # }
+/// ```
+#[cfg(feature = "proto-2026-07-28-rc")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoverResult {
+    /// The protocol version the server speaks.
+    #[serde(rename = "protocolVersion")]
+    pub protocol_ver: String,
+
+    /// The server's capabilities.
+    pub capabilities: ServerCapabilities,
+
+    /// Information about the server implementation.
+    #[serde(rename = "serverInfo")]
+    pub server_info: Implementation,
+
+    /// Optional instructions for using the server and its features.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+}
+
+#[cfg(feature = "proto-2026-07-28-rc")]
+impl IntoResponse for DiscoverResult {
+    #[inline]
+    fn into_response(self, req_id: RequestId) -> Response {
+        match serde_json::to_value(self) {
+            Ok(v) => Response::success(req_id, v),
+            Err(err) => Response::error(req_id, err.into()),
+        }
+    }
+}
+
 /// Describes the name and version of an MCP implementation.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
@@ -567,6 +629,14 @@ impl FromHandlerParams for InitializeRequestParams {
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
         let req = Request::from_params(params)?;
         Self::from_request(req)
+    }
+}
+
+#[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+impl FromHandlerParams for DiscoverRequestParams {
+    #[inline]
+    fn from_params(_params: &HandlerParams) -> Result<Self, Error> {
+        Ok(Self::default())
     }
 }
 
@@ -711,7 +781,7 @@ impl Implementation {
     }
 }
 
-#[cfg(feature = "server")]
+#[cfg(all(feature = "server", not(feature = "proto-2026-07-28-rc")))]
 impl InitializeResult {
     pub(crate) fn new(options: &McpOptions) -> Self {
         Self {
@@ -733,9 +803,41 @@ impl InitializeResult {
     }
 }
 
+#[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+impl DiscoverResult {
+    pub(crate) fn new(options: &McpOptions) -> Self {
+        Self {
+            protocol_ver: options.protocol_ver().into(),
+            capabilities: ServerCapabilities {
+                tools: options.tools_capability(),
+                resources: options.resources_capability(),
+                prompts: options.prompts_capability(),
+                completions: Some(CompletionsCapability::default()),
+                #[cfg(feature = "tasks")]
+                tasks: options.tasks_capability(),
+                experimental: None,
+            },
+            server_info: options.implementation.clone(),
+            instructions: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[test]
+    fn discover_result_roundtrips() {
+        let json = r#"{"protocolVersion":"2026-07-28","capabilities":{},"serverInfo":{"name":"s","version":"1"}}"#;
+        let parsed: DiscoverResult = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.protocol_ver, "2026-07-28");
+        assert_eq!(parsed.server_info.name, "s");
+        let back = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(back["protocolVersion"], serde_json::json!("2026-07-28"));
+        assert_eq!(back["serverInfo"]["name"], serde_json::json!("s"));
+    }
 
     #[test]
     fn message_envelope_deserializes_request() {

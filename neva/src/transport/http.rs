@@ -58,6 +58,13 @@ pub(super) const MCP_METHOD: &str = "Mcp-Method";
 #[cfg(all(feature = "http-client", feature = "proto-2026-07-28-rc"))]
 pub(super) const MCP_NAME: &str = "Mcp-Name";
 
+/// Protocol-version routing header, required on every POST under
+/// `proto-2026-07-28-rc`. Lets proxies route and lets the server reject
+/// mismatched clients. Visible to both client (sends it) and server
+/// (validates it), so it is not gated on `http-client`.
+#[cfg(feature = "proto-2026-07-28-rc")]
+pub(crate) const MCP_PROTOCOL_VERSION: &str = "MCP-Protocol-Version";
+
 const DEFAULT_ADDR: &str = "127.0.0.1:3000";
 const DEFAULT_MCP_ENDPOINT: &str = "/mcp";
 

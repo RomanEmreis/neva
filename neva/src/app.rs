@@ -14,16 +14,17 @@ use crate::shared;
 use crate::transport::{Receiver, Sender, Transport};
 use crate::types::{
     CallToolRequestParams, CallToolResponse, CompleteResult, GetPromptRequestParams,
-    GetPromptResult, InitializeRequestParams, InitializeResult, IntoResponse,
-    ListPromptsRequestParams, ListPromptsResult, ListResourceTemplatesRequestParams,
-    ListResourceTemplatesResult, ListResourcesRequestParams, ListResourcesResult,
-    ListToolsRequestParams, ListToolsResult, Message, MessageBatch, MessageEnvelope, Prompt,
-    PromptHandler, ReadResourceRequestParams, ReadResourceResult, Request, Resource,
-    ResourceTemplate, Response, SubscribeRequestParams, Tool, ToolHandler,
+    GetPromptResult, IntoResponse, ListPromptsRequestParams, ListPromptsResult,
+    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ListResourcesRequestParams,
+    ListResourcesResult, ListToolsRequestParams, ListToolsResult, Message, MessageBatch,
+    MessageEnvelope, Prompt, PromptHandler, ReadResourceRequestParams, ReadResourceResult, Request,
+    Resource, ResourceTemplate, Response, SubscribeRequestParams, Tool, ToolHandler,
     UnsubscribeRequestParams, Uri,
     notification::{CancelledNotificationParams, Notification},
     resource::template::ResourceFunc,
 };
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+use crate::types::{InitializeRequestParams, InitializeResult};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "tasks")]
@@ -98,7 +99,10 @@ impl App {
             container: ContainerBuilder::new(),
         };
 
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
         app.map_handler(crate::commands::INIT, Self::init);
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        app.map_handler(crate::commands::DISCOVER, Self::discover);
         app.map_handler(
             crate::types::completion::commands::COMPLETE,
             Self::completion,
@@ -511,12 +515,22 @@ impl App {
         self
     }
 
-    /// Connection initialization handler
+    /// Connection initialization handler (pre-RC handshake).
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     async fn init(
         options: RuntimeMcpOptions,
         _params: InitializeRequestParams,
     ) -> Result<InitializeResult, Error> {
         Ok(InitializeResult::new(&options))
+    }
+
+    /// Stateless capability discovery handler (MCP 2026-07-28 RC).
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    async fn discover(
+        options: RuntimeMcpOptions,
+        _params: crate::types::DiscoverRequestParams,
+    ) -> Result<crate::types::DiscoverResult, Error> {
+        Ok(crate::types::DiscoverResult::new(&options))
     }
 
     /// Completion request handler
@@ -1035,6 +1049,21 @@ mod tests {
     fn it_enables_greeting_with_with_greeting() {
         let app = App::new().with_greeting();
         assert!(app.greeting);
+    }
+
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[test]
+    fn rc_registers_discover_not_initialize() {
+        let app = App::new();
+        assert!(app.handlers.contains_key(crate::commands::DISCOVER));
+        assert!(!app.handlers.contains_key(crate::commands::INIT));
+    }
+
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[test]
+    fn default_registers_initialize() {
+        let app = App::new();
+        assert!(app.handlers.contains_key(crate::commands::INIT));
     }
 
     #[test]

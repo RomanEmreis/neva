@@ -8,17 +8,19 @@ use crate::types::Root;
 #[cfg(not(feature = "proto-2026-07-28-rc"))]
 use crate::types::sampling::{CreateMessageRequestParams, CreateMessageResult, SamplingHandler};
 use crate::types::{
-    CallToolRequestParams, CallToolResponse, ClientCapabilities, GetPromptRequestParams,
-    GetPromptResult, Implementation, InitializeRequestParams, InitializeResult,
-    ListPromptsRequestParams, ListPromptsResult, ListResourceTemplatesRequestParams,
-    ListResourceTemplatesResult, ListResourcesRequestParams, ListResourcesResult,
-    ListToolsRequestParams, ListToolsResult, MessageEnvelope, ReadResourceRequestParams,
-    ReadResourceResult, Request, RequestId, RequestParamsMeta, Response, ServerCapabilities, Uri,
+    CallToolRequestParams, CallToolResponse, GetPromptRequestParams, GetPromptResult,
+    Implementation, ListPromptsRequestParams, ListPromptsResult,
+    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ListResourcesRequestParams,
+    ListResourcesResult, ListToolsRequestParams, ListToolsResult, MessageEnvelope,
+    ReadResourceRequestParams, ReadResourceResult, Request, RequestId, RequestParamsMeta, Response,
+    ServerCapabilities, Uri,
     cursor::Cursor,
     elicitation::{ElicitRequestParams, ElicitResult, ElicitationHandler},
     notification::Notification,
     resource::{SubscribeRequestParams, UnsubscribeRequestParams},
 };
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+use crate::types::{ClientCapabilities, InitializeRequestParams, InitializeResult};
 use handler::RequestHandler;
 use options::McpOptions;
 use serde::Serialize;
@@ -264,15 +266,37 @@ impl Client {
         Ok(())
     }
 
-    /// Sends `initialize` request to an MCP server
+    /// Validates a server-reported protocol version against what this client
+    /// negotiated, cancelling the transport on mismatch.
+    fn validate_server_version(&mut self, server_ver: &str) -> Result<(), Error> {
+        if !crate::PROTOCOL_VERSIONS.contains(&server_ver) {
+            self.cancel_transport();
+            return Err(Error::new(
+                ErrorCode::InvalidRequest,
+                format!("Unsupported server protocol version: {server_ver}"),
+            ));
+        }
+        if server_ver != self.options.protocol_ver() {
+            self.cancel_transport();
+            return Err(Error::new(
+                ErrorCode::InvalidRequest,
+                format!(
+                    "Server protocol version mismatch: expected {}, got {server_ver}",
+                    self.options.protocol_ver()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Sends `initialize` request to an MCP server (pre-RC handshake).
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     pub async fn init(&mut self) -> Result<(), Error> {
         let params = InitializeRequestParams {
             protocol_ver: self.options.protocol_ver().to_string(),
             client_info: Some(self.options.implementation.clone()),
             capabilities: Some(ClientCapabilities {
-                #[cfg(not(feature = "proto-2026-07-28-rc"))]
                 roots: self.options.roots_capability(),
-                #[cfg(not(feature = "proto-2026-07-28-rc"))]
                 sampling: self.options.sampling_capability(),
                 elicitation: self.options.elicitation_capability(),
                 #[cfg(feature = "tasks")]
@@ -291,34 +315,44 @@ impl Client {
 
         let init_result = resp.into_result::<InitializeResult>()?;
 
-        let server_ver = init_result.protocol_ver.as_str();
-        if !crate::PROTOCOL_VERSIONS.contains(&server_ver) {
-            self.cancel_transport();
-            return Err(Error::new(
-                ErrorCode::InvalidRequest,
-                format!(
-                    "Unsupported server protocol version: {}",
-                    init_result.protocol_ver
-                ),
-            ));
-        }
-        if server_ver != self.options.protocol_ver() {
-            self.cancel_transport();
-            return Err(Error::new(
-                ErrorCode::InvalidRequest,
-                format!(
-                    "Server protocol version mismatch: expected {}, got {}",
-                    self.options.protocol_ver(),
-                    init_result.protocol_ver
-                ),
-            ));
-        }
+        self.validate_server_version(init_result.protocol_ver.as_str())?;
 
         self.server_capabilities = Some(init_result.capabilities);
         self.server_info = Some(init_result.server_info);
 
         self.send_notification(crate::types::notification::commands::INITIALIZED, None)
             .await
+    }
+
+    /// Discovers server capabilities via `server/discover` (MCP 2026-07-28 RC).
+    ///
+    /// Replaces the `initialize`/`initialized` handshake. No `initialized`
+    /// notification is sent — the transport is stateless.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub async fn discover(&mut self) -> Result<(), Error> {
+        let req = Request::new(
+            Some(RequestId::Uuid(uuid::Uuid::new_v4())),
+            crate::commands::DISCOVER,
+            Some(crate::types::DiscoverRequestParams::default()),
+        );
+
+        let resp = self.send_request(req).await?;
+
+        let result = resp.into_result::<crate::types::DiscoverResult>()?;
+
+        self.validate_server_version(result.protocol_ver.as_str())?;
+
+        self.server_capabilities = Some(result.capabilities);
+        self.server_info = Some(result.server_info);
+
+        Ok(())
+    }
+
+    /// Back-compat alias for [`discover`](Self::discover) so existing
+    /// `connect()` flows keep working under the RC flag.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub async fn init(&mut self) -> Result<(), Error> {
+        self.discover().await
     }
 
     /// Sends a ping to the MCP server
@@ -916,6 +950,16 @@ impl Client {
     /// Sends a request to the MCP server
     #[inline]
     async fn send_request(&mut self, req: Request) -> Result<Response, Error> {
+        // Stateless RC transport carries `clientInfo` in `_meta` on every
+        // request (there is no `initialize` handshake to advertise it once).
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let req = {
+            let mut req = req;
+            let mut meta = req.meta().unwrap_or_default();
+            meta.client_info = Some(self.options.implementation.clone());
+            req.set_meta(meta);
+            req
+        };
         self.handler
             .as_mut()
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?

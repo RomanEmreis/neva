@@ -3,7 +3,14 @@
 //! bound to an ephemeral port. Asserts session-id round-trip and basic
 //! response shape.
 
-#![cfg(all(feature = "http-server-volga", feature = "http-client"))]
+// Exercises the stateful session model (init handshake, Mcp-Session-Id
+// round-trip, DELETE termination), which is replaced by the stateless
+// transport under `proto-2026-07-28-rc` (see `stateless_http_rc.rs`).
+#![cfg(all(
+    feature = "http-server-volga",
+    feature = "http-client",
+    not(feature = "proto-2026-07-28-rc")
+))]
 
 use neva::App;
 

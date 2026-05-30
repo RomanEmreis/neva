@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * `traceparent` / `tracestate` fields on `RequestParamsMeta` and a client-side `TraceContextProvider` hook (RC only), with matching server-side span `record`.
 * `ErrorCode::RESOURCE_NOT_FOUND` constant — emits `-32002` (legacy `ResourceNotFound`) or `-32602` (`InvalidParams`) per the active spec version. All in-tree emitters of "resource not found" route through this constant so the wire code automatically follows the active flag.
 * The `#[tool]` proc-macro now emits JSON Schema 2020-12 `inputSchema` / `outputSchema` under `proto-2026-07-28-rc`: primitive arguments map to inline primitive schemas, structured `Json<T>` arguments derive a rich, inlined schema when the inner `T` implements `JsonSchema` (graceful `{"type":"object"}` fallback otherwise), and the return type drives `outputSchema`. Explicit `input_schema` / `output_schema` string literals are now validated at compile time (on every feature configuration). `schemars` need not be a direct dependency of the user crate — it is re-exported by neva.
+* Stateless HTTP transport (RC only): the `initialize` / `initialized` handshake is replaced by a new `server/discover` request returning `neva::types::DiscoverResult`. The client gains `Client::discover()` (with `Client::init()` kept as a back-compat alias so existing `connect()` flows keep working).
+* A required `MCP-Protocol-Version` request header (RC only) on every HTTP POST. The client injects it automatically; the server rejects a missing or unsupported value with JSON-RPC `InvalidRequest`.
+* Client implementation info is now carried in each request's `_meta` under `io.modelcontextprotocol/clientInfo` (RC only), merged non-destructively with any existing `_meta` (e.g. `traceparent`).
 
 ### Changed
 
@@ -28,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * Server completion logic now walks Value-shaped schemas under RC (no compile-time field access on a typed struct).
 * `PROTOCOL_VERSIONS` advertises `"2026-07-28"` only when the RC flag is enabled; the stable versions remain unconditionally listed.
 * CI matrix extended with `proto-2026-07-28-rc` paired with `server-full client-full`, covered by clippy, doc, and test jobs.
+* Under `proto-2026-07-28-rc` the HTTP transport is request/response only: no `Mcp-Session-Id` is emitted or required on the wire, the GET (SSE) and DELETE routes are not registered, and server-initiated notifications (progress, resource-updated, list-changed, task-status, elicitation) are inert — `Context` notification helpers become no-ops, so clients poll (`tools/list`, `resources/read`, `server/discover`) instead. The session id is still minted internally to keep the per-request correlation key collision-free.
 
 ### Deprecated
 

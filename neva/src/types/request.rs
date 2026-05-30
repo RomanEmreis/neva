@@ -86,6 +86,18 @@ pub struct RequestParamsMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tracestate: Option<String>,
 
+    /// Client implementation info carried on every request under MCP
+    /// 2026-07-28 (replaces the `initialize` handshake's `clientInfo`).
+    ///
+    /// Always present in the struct for source-compatibility across feature
+    /// configurations, like the trace fields; only populated (and meaningful)
+    /// under `proto-2026-07-28-rc`. Older peers ignore it.
+    #[serde(
+        rename = "io.modelcontextprotocol/clientInfo",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) client_info: Option<super::Implementation>,
+
     /// Represents metadata for associating messages with a task.
     ///
     /// > **Note:** Include this in the _meta field under the key `io.modelcontextprotocol/related-task`.
@@ -175,6 +187,26 @@ impl Request {
             .cloned()
             .and_then(|meta| serde_json::from_value(meta).ok())
     }
+
+    /// Writes `_meta` into the request `params`, creating the params object
+    /// when none exists. Symmetric counterpart to [`Self::meta`]; existing
+    /// (non-`_meta`) params keys are preserved.
+    #[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+    pub(crate) fn set_meta(&mut self, meta: RequestParamsMeta) {
+        let Ok(meta) = serde_json::to_value(meta) else {
+            return;
+        };
+        match self.params {
+            Some(serde_json::Value::Object(ref mut map)) => {
+                map.insert("_meta".to_owned(), meta);
+            }
+            _ => {
+                let mut map = serde_json::Map::new();
+                map.insert("_meta".to_owned(), meta);
+                self.params = Some(serde_json::Value::Object(map));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -206,5 +238,29 @@ mod tests {
         let v = serde_json::to_value(&meta).unwrap();
         assert!(v.get("traceparent").is_none());
         assert!(v.get("tracestate").is_none());
+    }
+
+    #[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+    #[test]
+    fn set_meta_writes_meta_and_preserves_params() {
+        use serde_json::json;
+        let mut req = Request::new(Some(RequestId::Number(1)), "ping", Some(json!({ "x": 1 })));
+        let meta = RequestParamsMeta {
+            traceparent: Some("tp".into()),
+            client_info: Some(crate::types::Implementation {
+                name: "c".into(),
+                version: "9".into(),
+                icons: None,
+            }),
+            ..Default::default()
+        };
+        req.set_meta(meta);
+
+        // _meta round-trips through the typed struct, preserving siblings.
+        let got = req.meta().expect("meta present");
+        assert_eq!(got.traceparent.as_deref(), Some("tp"));
+        assert_eq!(got.client_info.expect("client_info present").name, "c");
+        // pre-existing params keys are untouched.
+        assert_eq!(req.params.expect("params present")["x"], json!(1));
     }
 }
