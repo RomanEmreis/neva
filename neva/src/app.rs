@@ -968,7 +968,7 @@ impl App {
         let req_id = req.id();
         let session_id = req.session_id;
         let full_id = req.full_id();
-        
+
         // MRTR pre-capture: method + salient params (params minus `_meta`),
         // needed after `req`/`context` are moved into `handler.call`.
         #[cfg(feature = "proto-2026-07-28-rc")]
