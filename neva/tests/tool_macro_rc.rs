@@ -53,7 +53,9 @@ async fn store(payload: Json<Opaque>) -> String {
 }
 
 // Explicit input schema string (valid JSON).
-#[neva::tool(input_schema = r#"{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}"#)]
+#[neva::tool(
+    input_schema = r#"{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}"#
+)]
 async fn search(q: String) -> String {
     q
 }
@@ -61,7 +63,9 @@ async fn search(q: String) -> String {
 // Struct return via `Json<T>` -> output schema derived from the return type.
 #[neva::tool]
 async fn make_greeting(name: String) -> Json<Greeting> {
-    Json(Greeting { message: format!("hi {name}") })
+    Json(Greeting {
+        message: format!("hi {name}"),
+    })
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -69,8 +73,8 @@ async fn tool_macro_emits_json_schema_2020() {
     let port = pick_free_port();
     let addr = format!("127.0.0.1:{port}");
 
-    let app = App::new()
-        .with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")));
+    let app =
+        App::new().with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")));
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
@@ -87,8 +91,17 @@ async fn tool_macro_emits_json_schema_2020() {
             "clientInfo": { "name": "test", "version": "0" }
         }
     });
-    let resp = client.post(&url).json(&init_body).send().await.expect("init failed");
-    assert!(resp.status().is_success(), "init returned {}", resp.status());
+    let resp = client
+        .post(&url)
+        .json(&init_body)
+        .send()
+        .await
+        .expect("init failed");
+    assert!(
+        resp.status().is_success(),
+        "init returned {}",
+        resp.status()
+    );
     let session_id = resp
         .headers()
         .get("Mcp-Session-Id")
@@ -127,10 +140,15 @@ async fn tool_macro_emits_json_schema_2020() {
     // 1. Primitive args -> object schema with primitive properties + required.
     let add = by_name("add");
     assert_eq!(add["inputSchema"]["type"], serde_json::json!("object"));
-    assert_eq!(add["inputSchema"]["properties"]["a"]["type"], serde_json::json!("number"));
-    assert_eq!(add["inputSchema"]["properties"]["b"]["type"], serde_json::json!("number"));
-    let req: Vec<String> =
-        serde_json::from_value(add["inputSchema"]["required"].clone()).unwrap();
+    assert_eq!(
+        add["inputSchema"]["properties"]["a"]["type"],
+        serde_json::json!("number")
+    );
+    assert_eq!(
+        add["inputSchema"]["properties"]["b"]["type"],
+        serde_json::json!("number")
+    );
+    let req: Vec<String> = serde_json::from_value(add["inputSchema"]["required"].clone()).unwrap();
     assert!(req.contains(&"a".to_string()) && req.contains(&"b".to_string()));
 
     // 2. Custom arg deriving JsonSchema -> rich, inlined (no $defs/$ref).
@@ -152,7 +170,10 @@ async fn tool_macro_emits_json_schema_2020() {
 
     // 4. Explicit input schema string round-trips.
     let search = by_name("search");
-    assert_eq!(search["inputSchema"]["properties"]["q"]["type"], serde_json::json!("string"));
+    assert_eq!(
+        search["inputSchema"]["properties"]["q"]["type"],
+        serde_json::json!("string")
+    );
     let req: Vec<String> =
         serde_json::from_value(search["inputSchema"]["required"].clone()).unwrap();
     assert_eq!(req, vec!["q".to_string()]);

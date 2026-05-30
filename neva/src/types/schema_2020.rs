@@ -469,7 +469,10 @@ mod tests {
         assert!(v["properties"].is_object(), "expected rich properties");
         assert!(v["properties"]["x"].is_object());
         // Inlined: a self-contained subschema must not carry `$defs`.
-        assert!(v.get("$defs").is_none(), "subschema must be inlined (no $defs)");
+        assert!(
+            v.get("$defs").is_none(),
+            "subschema must be inlined (no $defs)"
+        );
     }
 
     #[cfg(feature = "proto-2026-07-28-rc")]
@@ -496,8 +499,14 @@ mod tests {
 
         let v = crate::__tool_arg_subschema!(Outer);
         let s = serde_json::to_string(&v).unwrap();
-        assert!(!s.contains("$ref"), "inlined schema must not contain $ref: {s}");
-        assert!(!s.contains("$defs"), "inlined schema must not contain $defs: {s}");
+        assert!(
+            !s.contains("$ref"),
+            "inlined schema must not contain $ref: {s}"
+        );
+        assert!(
+            !s.contains("$defs"),
+            "inlined schema must not contain $defs: {s}"
+        );
         assert!(v["properties"]["inner"]["properties"]["label"].is_object());
     }
 
