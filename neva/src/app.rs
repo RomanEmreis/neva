@@ -305,6 +305,27 @@ impl App {
         self
     }
 
+    /// Sets the maximum encoded `requestState` size (bytes). When a round-trip
+    /// would emit a larger blob, the server returns an error result instead
+    /// (`proto-2026-07-28-rc`).
+    ///
+    /// Defaults to 8 KiB. Lower it to push handlers toward [`crate::Context::once`]
+    /// (key-only) over [`crate::Context::memo`] (serialized value); raise it for
+    /// memo-heavy flows.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(feature = "proto-2026-07-28-rc")] {
+    /// use neva::App;
+    /// let app = App::new().with_max_state_bytes(16 * 1024);
+    /// # }
+    /// ```
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub fn with_max_state_bytes(mut self, bytes: usize) -> Self {
+        self.options.set_max_state_bytes(bytes);
+        self
+    }
+
     /// Enable the greeting banner on startup (forced on, even in release builds).
     ///
     /// # Example
@@ -1075,6 +1096,25 @@ impl App {
                         mrtr_principal,
                     )
                     .map(|ir| ir.into_response(req_id.clone()))
+                } else if resp.is_ok() {
+                    // Final round: run deferred commits in registration order.
+                    // The first Err becomes the response error.
+                    let commits = arc
+                        .commits
+                        .lock()
+                        .map(|mut c| std::mem::take(&mut *c))
+                        .unwrap_or_default();
+                    let mut commit_err = None;
+                    for fut in commits {
+                        if let Err(e) = fut.await {
+                            commit_err = Some(e);
+                            break;
+                        }
+                    }
+                    match commit_err {
+                        Some(e) => Err(e),
+                        None => resp,
+                    }
                 } else {
                     resp
                 }
@@ -1171,6 +1211,8 @@ fn seed_mrtr_ctx(
         .unwrap_or(false);
 
     let mut answers = std::collections::HashMap::new();
+    let mut memos = std::collections::HashMap::new();
+    let mut effects = std::collections::HashSet::new();
     if let Some(state) = meta.as_ref().and_then(|m| m.request_state.clone()) {
         let payload = StateCodec::new(options.request_state_secret()).decode(&state)?;
         if payload.exp < now_secs() {
@@ -1189,6 +1231,8 @@ fn seed_mrtr_ctx(
             ));
         }
         answers = payload.answers;
+        memos = payload.memos;
+        effects = payload.effects;
     }
     if let Some(responses) = meta.and_then(|m| m.input_responses) {
         answers.extend(responses);
@@ -1198,6 +1242,9 @@ fn seed_mrtr_ctx(
         answers,
         pending: Default::default(),
         elicitation_allowed,
+        memos: std::sync::Mutex::new(memos),
+        effects: std::sync::Mutex::new(effects),
+        commits: Default::default(),
     }))
 }
 
@@ -1226,13 +1273,23 @@ fn build_input_required(
         .ok()
         .and_then(|mut p| p.take())
         .ok_or_else(|| Error::new(ErrorCode::InternalError, "missing pending MRTR input"))?;
+    let memos = arc.memos.lock().map(|m| m.clone()).unwrap_or_default();
+    let effects = arc.effects.lock().map(|e| e.clone()).unwrap_or_default();
     let payload = StatePayload {
         answers: arc.answers.clone(),
+        memos,
+        effects,
         exp: now_secs() + options.request_state_ttl_secs(),
         req: request_binding(method, salient),
         principal,
     };
     let state = StateCodec::new(options.request_state_secret()).encode(&payload)?;
+    if state.len() > options.max_state_bytes() {
+        return Err(Error::new(
+            ErrorCode::InternalError,
+            "requestState too large",
+        ));
+    }
     Ok(InputRequiredResult::elicitation(key, params, state))
 }
 
@@ -1245,6 +1302,13 @@ mod tests {
     fn it_enables_greeting_with_with_greeting() {
         let app = App::new().with_greeting();
         assert!(app.greeting);
+    }
+
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[test]
+    fn with_max_state_bytes_sets_the_option() {
+        let app = App::new().with_max_state_bytes(4096);
+        assert_eq!(app.options.max_state_bytes(), 4096);
     }
 
     #[cfg(feature = "proto-2026-07-28-rc")]

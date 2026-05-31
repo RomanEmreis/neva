@@ -16,6 +16,12 @@ type HmacSha256 = Hmac<Sha256>;
 pub(crate) struct StatePayload {
     /// Monotonically-growing replay log of answered inputs.
     pub answers: InputResponses,
+    /// Cached `ctx.memo` values, keyed by memo key.
+    #[serde(default)]
+    pub memos: std::collections::HashMap<String, serde_json::Value>,
+    /// Executed `ctx.once` effect keys.
+    #[serde(default)]
+    pub effects: std::collections::HashSet<String>,
     /// Unix-seconds expiry.
     pub exp: u64,
     /// Request binding: `"{method}:{hex(sha256(salient_params))}"`.
@@ -101,10 +107,56 @@ mod tests {
     fn payload() -> StatePayload {
         StatePayload {
             answers: HashMap::new(),
+            memos: HashMap::new(),
+            effects: std::collections::HashSet::new(),
             exp: now_secs() + 300,
             req: request_binding("tools/call", &serde_json::json!({"name":"t"})),
             principal: Some("alice".into()),
         }
+    }
+
+    #[test]
+    fn memos_and_effects_roundtrip() {
+        let codec = StateCodec::new(b"secret-key");
+        let mut p = payload();
+        p.memos
+            .insert("quote".into(), serde_json::json!({"price": 42}));
+        p.effects.insert("charge".into());
+        let blob = codec.encode(&p).unwrap();
+        let got = codec.decode(&blob).unwrap();
+        assert_eq!(
+            got.memos.get("quote"),
+            Some(&serde_json::json!({"price": 42}))
+        );
+        assert!(got.effects.contains("charge"));
+    }
+
+    #[test]
+    fn old_blob_without_memos_or_effects_still_decodes() {
+        // A payload serialized before memos/effects existed: omit both keys.
+        let json = serde_json::json!({
+            "answers": {},
+            "exp": now_secs() + 300,
+            "req": request_binding("tools/call", &serde_json::json!({"name":"t"})),
+            "principal": serde_json::Value::Null,
+        });
+        let codec = StateCodec::new(b"secret-key");
+        let bytes = serde_json::to_vec(&json).unwrap();
+        // Re-sign so the HMAC matches the legacy bytes. `Hmac`, `Sha256`, `Mac`
+        // and `KeyInit` are already in scope via `use super::*`.
+        let blob = {
+            use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
+            let mut mac = <Hmac<Sha256>>::new_from_slice(b"secret-key").unwrap();
+            mac.update(&bytes);
+            format!(
+                "{}.{}",
+                B64.encode(&bytes),
+                B64.encode(mac.finalize().into_bytes())
+            )
+        };
+        let got = codec.decode(&blob).unwrap();
+        assert!(got.memos.is_empty());
+        assert!(got.effects.is_empty());
     }
 
     #[test]

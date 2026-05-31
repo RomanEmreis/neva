@@ -55,10 +55,16 @@ pub(crate) type ToolOrTaskResponse = Either<CreateTaskResult, CallToolResponse>;
 
 type RequestHandlers = HashMap<String, RequestHandler<Response>>;
 
-/// Per-dispatch MRTR state: the replay log of answers available to the
-/// handler this round, plus the single input the handler newly requested.
+/// Boxed deferred-commit future (see [`Context::on_commit`]).
 #[cfg(feature = "proto-2026-07-28-rc")]
-#[derive(Debug, Default)]
+pub(crate) type CommitFut =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + Send>>;
+
+/// Per-dispatch MRTR state: the replay log of answers available to the
+/// handler this round, the single input it newly requested, plus the
+/// `once`/`memo`/`on_commit` bookkeeping.
+#[cfg(feature = "proto-2026-07-28-rc")]
+#[derive(Default)]
 pub(crate) struct MrtrCtx {
     /// Answers available this round (prior answers decoded from
     /// `requestState`, merged with this round's `inputResponses`).
@@ -67,6 +73,26 @@ pub(crate) struct MrtrCtx {
     pub(crate) pending: std::sync::Mutex<Option<(String, ElicitRequestParams)>>,
     /// Whether the client declared elicitation support this round.
     pub(crate) elicitation_allowed: bool,
+    /// Cached `ctx.memo` values (seeded from `requestState`, grown on miss).
+    pub(crate) memos: std::sync::Mutex<std::collections::HashMap<String, serde_json::Value>>,
+    /// Executed `ctx.once` keys (seeded from `requestState`, grown on run).
+    pub(crate) effects: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Deferred `ctx.on_commit` futures, rebuilt each round, drained on the
+    /// final (non-`input_required`) round. Never serialized.
+    pub(crate) commits: std::sync::Mutex<Vec<CommitFut>>,
+}
+
+#[cfg(feature = "proto-2026-07-28-rc")]
+impl std::fmt::Debug for MrtrCtx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MrtrCtx")
+            .field("answers", &self.answers)
+            .field("pending", &self.pending)
+            .field("elicitation_allowed", &self.elicitation_allowed)
+            .field("memos", &self.memos)
+            .field("effects", &self.effects)
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(feature = "proto-2026-07-28-rc")]
@@ -85,6 +111,40 @@ impl MrtrCtx {
             *pending = Some((key, params));
         }
         Err(Error::input_required())
+    }
+
+    /// Returns whether a `once` effect key has already run this chain.
+    pub(crate) fn effect_seen(&self, key: &str) -> bool {
+        self.effects
+            .lock()
+            .map(|e| e.contains(key))
+            .unwrap_or(false)
+    }
+
+    /// Records a `once` effect key as run.
+    pub(crate) fn record_effect(&self, key: String) {
+        if let Ok(mut e) = self.effects.lock() {
+            e.insert(key);
+        }
+    }
+
+    /// Returns the cached `memo` value for `key`, if present.
+    pub(crate) fn cached_memo(&self, key: &str) -> Option<serde_json::Value> {
+        self.memos.lock().ok().and_then(|m| m.get(key).cloned())
+    }
+
+    /// Stores a `memo` value.
+    pub(crate) fn store_memo(&self, key: String, value: serde_json::Value) {
+        if let Ok(mut m) = self.memos.lock() {
+            m.insert(key, value);
+        }
+    }
+
+    /// Registers a deferred commit future.
+    pub(crate) fn push_commit(&self, fut: CommitFut) {
+        if let Ok(mut c) = self.commits.lock() {
+            c.push(fut);
+        }
     }
 }
 
@@ -819,6 +879,133 @@ impl Context {
         }
     }
 
+    /// Runs `effect` at most once across MRTR rounds (`proto-2026-07-28-rc`).
+    ///
+    /// On a replay (the key was recorded in a prior round) the future is
+    /// dropped unpolled and `Ok(false)` is returned. On a miss the future is
+    /// awaited; on success the key is recorded and `Ok(true)` is returned, on
+    /// failure the error propagates and the key is **not** recorded (so the
+    /// next round retries).
+    ///
+    /// Sync work lives inside a non-awaiting `async {}` block.
+    ///
+    /// # Durability
+    /// The effect runs *before* the `requestState` recording it is durably
+    /// acknowledged by the client — it is at-most-once within a single
+    /// `requestState` chain, **not** globally exactly-once. For non-idempotent
+    /// side effects, pass a stable idempotency key to the downstream system.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(all(feature = "server-macros", feature = "proto-2026-07-28-rc"))] {
+    /// # use neva::{Context, error::Error};
+    /// # async fn f(ctx: Context) -> Result<(), Error> {
+    /// ctx.once("emit_metric", async { Ok(()) }).await?;
+    /// # Ok(()) }
+    /// # }
+    /// ```
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub async fn once<F>(&self, key: impl Into<String>, effect: F) -> Result<bool, Error>
+    where
+        F: std::future::Future<Output = Result<(), Error>>,
+    {
+        let key = key.into();
+        match self.mrtr.as_ref() {
+            None => {
+                effect.await?;
+                Ok(true)
+            }
+            Some(mrtr) => {
+                if mrtr.effect_seen(&key) {
+                    return Ok(false);
+                }
+                effect.await?;
+                mrtr.record_effect(key);
+                Ok(true)
+            }
+        }
+    }
+
+    /// Computes `compute` at most once across MRTR rounds and caches the
+    /// serialized value in `requestState` (`proto-2026-07-28-rc`).
+    ///
+    /// On a replay the cached value is deserialized and returned (the future is
+    /// dropped unpolled). On a miss the future is awaited, the value serialized
+    /// and stored, and returned. A failed compute is not cached.
+    ///
+    /// Caching a value grows `requestState`; prefer [`Context::once`] when the
+    /// result isn't needed later. See [`crate::App::with_max_state_bytes`].
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(all(feature = "server-macros", feature = "proto-2026-07-28-rc"))] {
+    /// # use neva::{Context, error::Error};
+    /// # async fn f(ctx: Context) -> Result<(), Error> {
+    /// let n: i32 = ctx.memo("answer", async { Ok(42) }).await?;
+    /// # let _ = n; Ok(()) }
+    /// # }
+    /// ```
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub async fn memo<T, F>(&self, key: impl Into<String>, compute: F) -> Result<T, Error>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+        F: std::future::Future<Output = Result<T, Error>>,
+    {
+        let key = key.into();
+        match self.mrtr.as_ref() {
+            None => compute.await,
+            Some(mrtr) => {
+                if let Some(value) = mrtr.cached_memo(&key) {
+                    return serde_json::from_value(value).map_err(Error::from);
+                }
+                let value = compute.await?;
+                mrtr.store_memo(key, serde_json::to_value(&value).map_err(Error::from)?);
+                Ok(value)
+            }
+        }
+    }
+
+    /// Registers `effect` to run **exactly once**, when the handler reaches its
+    /// final (non-`input_required`) result (`proto-2026-07-28-rc`).
+    ///
+    /// Commits are awaited in registration order before the final response is
+    /// sent; the first `Err` becomes the response error. They do **not** run on
+    /// intermediate `input_required` rounds, nor when the handler errors.
+    ///
+    /// The future is stored in the shared dispatch state, so it must be
+    /// `Send + 'static` — capture by `move`. Called outside an MRTR dispatch,
+    /// it is a no-op.
+    ///
+    /// # Durability
+    /// "Exactly once" means once per successfully-completed flow, not globally
+    /// idempotent — a client that abandons and restarts the flow runs it again.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(all(feature = "server-macros", feature = "proto-2026-07-28-rc"))] {
+    /// # use neva::{Context, error::Error};
+    /// # async fn f(ctx: Context) {
+    /// ctx.on_commit(async move { Ok(()) });
+    /// # }
+    /// # }
+    /// ```
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub fn on_commit<F>(&self, effect: F)
+    where
+        F: std::future::Future<Output = Result<(), Error>> + Send + 'static,
+    {
+        match self.mrtr.as_ref() {
+            Some(mrtr) => mrtr.push_commit(Box::pin(effect)),
+            None => {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    logger = "neva",
+                    "on_commit called outside an MRTR dispatch; ignored"
+                );
+            }
+        }
+    }
+
     /// Sends the elicitation request to the client
     ///
     /// # Example
@@ -1181,6 +1368,7 @@ mod mrtr_tests {
             answers,
             pending: Default::default(),
             elicitation_allowed: true,
+            ..Default::default()
         };
 
         // Hit: returns the cached answer.
@@ -1191,5 +1379,32 @@ mod mrtr_tests {
         let miss = mrtr.resolve("unknown".into(), params());
         assert_eq!(miss.unwrap_err().code, ErrorCode::InputRequired);
         assert!(mrtr.pending.lock().unwrap().is_some());
+    }
+
+    #[test]
+    fn effect_seen_and_record() {
+        let m = MrtrCtx::default();
+        assert!(!m.effect_seen("charge"));
+        m.record_effect("charge".into());
+        assert!(m.effect_seen("charge"));
+    }
+
+    #[test]
+    fn cached_memo_store_and_fetch() {
+        let m = MrtrCtx::default();
+        assert!(m.cached_memo("quote").is_none());
+        m.store_memo("quote".into(), serde_json::json!({"price": 42}));
+        assert_eq!(
+            m.cached_memo("quote"),
+            Some(serde_json::json!({"price": 42}))
+        );
+    }
+
+    #[test]
+    fn push_commit_accumulates() {
+        let m = MrtrCtx::default();
+        m.push_commit(Box::pin(async { Ok(()) }));
+        m.push_commit(Box::pin(async { Ok(()) }));
+        assert_eq!(m.commits.lock().unwrap().len(), 2);
     }
 }
