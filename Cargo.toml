@@ -6,7 +6,8 @@ exclude = [
     "examples/batch",
     "examples/roots", 
     "examples/sampling", 
-    "examples/elicitation", 
+    "examples/elicitation",
+    "examples/mrtr",
     "examples/tasks"
 ]
 
