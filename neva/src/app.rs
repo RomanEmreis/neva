@@ -1311,6 +1311,82 @@ mod tests {
         assert_eq!(app.options.max_state_bytes(), 4096);
     }
 
+    /// Security guards in [`super::seed_mrtr_ctx`] that the e2e happy path never
+    /// exercises: an expired `requestState` and a principal-bound state replayed
+    /// under a different principal. Driven deterministically (no clock advance,
+    /// no auth harness) by hand-encoding the signed blob.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    mod mrtr_seed_guards {
+        use crate::app::App;
+        use crate::error::ErrorCode;
+        use crate::types::mrtr::state::{StateCodec, StatePayload, now_secs, request_binding};
+        use crate::types::{Request, RequestId};
+
+        const SECRET: &[u8] = b"unit-secret";
+        const METHOD: &str = "tools/call";
+
+        fn options() -> crate::app::options::RuntimeMcpOptions {
+            App::new()
+                .with_request_state_secret(SECRET)
+                .options
+                .into_runtime()
+        }
+
+        fn salient() -> serde_json::Value {
+            serde_json::json!({ "name": "greet", "arguments": {} })
+        }
+
+        fn request_with_state(state: &str) -> Request {
+            let mut params = salient();
+            params["_meta"] = serde_json::json!({
+                "requestState": state,
+                "clientCapabilities": { "elicitation": true }
+            });
+            Request::new(Some(RequestId::Number(1)), METHOD, Some(params))
+        }
+
+        fn encode(payload: &StatePayload) -> String {
+            StateCodec::new(SECRET).encode(payload).expect("encode")
+        }
+
+        #[test]
+        fn expired_request_state_is_rejected() {
+            let payload = StatePayload {
+                answers: Default::default(),
+                memos: Default::default(),
+                effects: Default::default(),
+                exp: now_secs().saturating_sub(1), // already in the past
+                req: request_binding(METHOD, &salient()),
+                principal: None,
+            };
+            let req = request_with_state(&encode(&payload));
+            let err = super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), None)
+                .expect_err("expired state must be rejected");
+            assert_eq!(err.code, ErrorCode::InvalidParams);
+            assert!(format!("{err}").contains("expired"), "{err}");
+        }
+
+        #[test]
+        fn principal_mismatch_is_rejected() {
+            // State minted for "alice" (valid, unexpired, correctly bound)...
+            let payload = StatePayload {
+                answers: Default::default(),
+                memos: Default::default(),
+                effects: Default::default(),
+                exp: now_secs() + 300,
+                req: request_binding(METHOD, &salient()),
+                principal: Some("alice".into()),
+            };
+            let req = request_with_state(&encode(&payload));
+            // ...replayed by "bob".
+            let err =
+                super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), Some("bob"))
+                    .expect_err("principal mismatch must be rejected");
+            assert_eq!(err.code, ErrorCode::InvalidParams);
+            assert!(format!("{err}").contains("principal mismatch"), "{err}");
+        }
+    }
+
     #[cfg(feature = "proto-2026-07-28-rc")]
     #[test]
     fn rc_registers_discover_not_initialize() {

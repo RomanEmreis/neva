@@ -44,7 +44,13 @@ use serde_json::{Value, json};
 #[serde(transparent)]
 pub struct InputSchema(
     /// The underlying JSON Schema document.
-    pub Value,
+    ///
+    /// Kept `pub(crate)` so the type stays closed to arbitrary external
+    /// mutation — construct via [`InputSchema::from_value`] and read via
+    /// [`InputSchema::as_value`]/[`InputSchema::into_value`]. This leaves room
+    /// to attach a lazily-compiled validator beside the schema later without a
+    /// breaking change.
+    pub(crate) Value,
 );
 
 impl Default for InputSchema {

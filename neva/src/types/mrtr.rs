@@ -32,6 +32,12 @@ pub struct InputRequiredResult {
     pub result_type: InputRequiredTag,
 
     /// Server-assigned-key → elicitation request the client must fulfil.
+    ///
+    /// `None` is **reserved** for a future async/streaming semantic where the
+    /// server is making progress on its own and the client should simply retry
+    /// with the echoed [`Self::request_state`] (no new inputs to gather). That
+    /// path is not implemented yet; today this is always `Some(..)`. Because the
+    /// field is already `Option`, adding that behavior later is non-breaking.
     #[serde(rename = "inputRequests", skip_serializing_if = "Option::is_none")]
     pub input_requests: Option<InputRequests>,
 
