@@ -66,6 +66,7 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer().event_format(notification::NotificationFormatter))
         .init();
 
+    #[allow(deprecated)]
     App::new()
         .with_options(|opt| {
             opt.with_name("Middleware Example Server")

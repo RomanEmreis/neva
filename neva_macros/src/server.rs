@@ -159,6 +159,27 @@ pub(super) fn get_inner_type_from_generic(ty: &Type) -> Option<&Type> {
     None
 }
 
+/// Returns `Ok(())` when `json` is well-formed JSON, otherwise the parser's
+/// error message. Used to validate explicit schema-string attributes at
+/// macro-expansion time. Validation checks well-formedness only, not JSON
+/// Schema shape.
+#[inline]
+pub(super) fn check_json(json: &str) -> Result<(), String> {
+    serde_json::from_str::<serde_json::Value>(json)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Validates an explicit schema-string literal, mapping a parse failure to a
+/// [`syn::Error`] pointed at `spanned` so the build fails with a
+/// `compile_error!` at the attribute. `field` is the attribute name (e.g.
+/// `"input_schema"`) used in the message.
+#[inline]
+pub(super) fn validate_schema_json(json: &str, spanned: &Expr, field: &str) -> syn::Result<()> {
+    check_json(json)
+        .map_err(|e| syn::Error::new_spanned(spanned, format!("invalid JSON in `{field}`: {e}")))
+}
+
 #[inline]
 pub(super) fn get_str_param(value: &Expr) -> Option<String> {
     if let Expr::Lit(syn::ExprLit {
@@ -224,5 +245,31 @@ pub(super) fn get_exprs_arr(value: &Expr) -> Option<Vec<Expr>> {
             if !exprs.is_empty() { Some(exprs) } else { None }
         }
         expr => Some(vec![expr.clone()]),
+    }
+}
+
+#[cfg(test)]
+mod json_validation_tests {
+    use super::check_json;
+
+    #[test]
+    fn accepts_valid_object_schema() {
+        assert!(check_json(r#"{"type":"object","properties":{"a":{"type":"string"}}}"#).is_ok());
+    }
+
+    #[test]
+    fn accepts_valid_non_object_json() {
+        // Validation only checks well-formedness, not schema shape.
+        assert!(check_json(r#"[1,2,3]"#).is_ok());
+    }
+
+    #[test]
+    fn rejects_malformed_json() {
+        assert!(check_json("{not valid").is_err());
+    }
+
+    #[test]
+    fn rejects_empty_string() {
+        assert!(check_json("").is_err());
     }
 }

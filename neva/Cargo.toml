@@ -18,23 +18,25 @@ workspace = true
 [dependencies]
 base64 = "0.22.1"
 bytes = "1.11.1"
+hmac = { version = "0.13.0", optional = true }
+sha2 = { version = "0.11.0", optional = true }
 chrono = { version = "0.4.44", features = ["serde"] }
 dashmap = "6.1.0"
 futures-util = { version = "0.3.32", default-features = false, features = ["alloc"] }
-http = "1.4.0"
-memchr = "2.8.0"
+http = "1.4.1"
+memchr = "2.8.1"
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+serde_json = "1.0.150"
 schemars = { version = "1.2.1" }
 tokio = { version = "1.52.3", features = ["sync", "io-std", "io-util", "rt", "time", "macros"] }
 tokio-util = "0.7.18"
-uuid = { version = "1.23.1", features = ["v4", "serde"] }
+uuid = { version = "1.23.2", features = ["v4", "serde"] }
 
 # optional
 inventory = { version = "0.3.24", optional = true }
 jsonschema = { version = "0.46.5", optional = true }
 once_cell = { version = "1.21.4", features = ["std"], optional = true }
-reqwest = { version = "0.13.3", features = ["stream", "json"], optional = true }
+reqwest = { version = "0.13.4", features = ["stream", "json"], optional = true }
 sse-stream = { version = "0.2.3", optional = true }
 tokio-stream = { version = "0.1.18", optional = true }
 tracing = { version = "0.1.44", optional = true }
@@ -80,6 +82,10 @@ client-macros = ["client", "macros", "neva_macros?/client"]
 client-tls = ["reqwest?/rustls"]
 http-client = ["client", "dep:reqwest", "dep:sse-stream", "dep:tokio-stream", "dep:once_cell"]
 client = ["dep:windows", "dep:nix", "dep:jsonschema", "tokio/process", "tokio/signal"]
+
+# Opt-in MCP 2026-07-28 Release Candidate support. Mutually exclusive
+# with any future `proto-*` generation flag — see lib.rs guard.
+proto-2026-07-28-rc = ["neva_macros?/proto-2026-07-28-rc", "dep:hmac", "dep:sha2"]
 
 [package.metadata.docs.rs]
 all-features = true

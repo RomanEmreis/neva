@@ -108,6 +108,26 @@ pub async fn dispatch_get_sse<E: HttpEngine>(
 pub async fn handle_post(req: HttpRequest, ctx: &HttpContext) -> HttpResponse {
     let mut headers = req.headers().clone();
     let id = get_or_create_mcp_session(&headers);
+
+    // Stateless RC transport requires every POST to carry a supported
+    // `MCP-Protocol-Version` header; reject before body dispatch otherwise.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    {
+        let ok = headers
+            .get(crate::transport::http::MCP_PROTOCOL_VERSION)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| crate::PROTOCOL_VERSIONS.contains(&v));
+        if !ok {
+            let resp = Response::error(
+                RequestId::Null,
+                Error::new(
+                    ErrorCode::InvalidRequest,
+                    "Missing or unsupported MCP-Protocol-Version header",
+                ),
+            );
+            return build_json_response(http::StatusCode::OK, id, &Message::Response(resp));
+        }
+    }
     // Engine-neutral claims pickup: any engine that decoded auth claims
     // for this request is expected to insert them as
     // `Arc<dyn neva::auth::Claims>` into `req.extensions_mut()` before
@@ -125,8 +145,31 @@ pub async fn handle_post(req: HttpRequest, ctx: &HttpContext) -> HttpResponse {
         }
     };
 
+    // Passive W3C Trace Context recorder: when both `proto-2026-07-28-rc`
+    // and `tracing` are enabled, record any `_meta.traceparent` /
+    // `_meta.tracestate` on the active span. `Span::current().record(...)`
+    // is a no-op unless the caller's span declares these fields via
+    // `#[instrument(fields(traceparent, tracestate))]`.
+    #[cfg(all(feature = "proto-2026-07-28-rc", feature = "tracing"))]
+    if let Message::Request(ref r) = msg
+        && let Some(meta) = r
+            .params
+            .as_ref()
+            .and_then(|p| p.get("_meta"))
+            .and_then(|m| m.as_object())
+    {
+        if let Some(tp) = meta.get("traceparent").and_then(|v| v.as_str()) {
+            tracing::Span::current().record("traceparent", tp);
+        }
+        if let Some(ts) = meta.get("tracestate").and_then(|v| v.as_str()) {
+            tracing::Span::current().record("tracestate", ts);
+        }
+    }
+
     // Pre-register on the initialize handshake so the server can emit
-    // events between the init POST response and the SSE GET.
+    // events between the init POST response and the SSE GET. Stateless RC
+    // transport has no SSE GET, so this is skipped under the flag.
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     if let Message::Request(ref r) = msg
         && r.method == crate::commands::INIT
     {
@@ -201,26 +244,35 @@ fn get_or_create_mcp_session(headers: &HeaderMap) -> uuid::Uuid {
 
 fn build_json_response(
     status: http::StatusCode,
-    session: uuid::Uuid,
+    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(unused_variables))] session: uuid::Uuid,
     body: &Message,
 ) -> HttpResponse {
     let json = serde_json::to_vec(body).unwrap_or_default();
+    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(unused_mut))]
     let mut resp = http::Response::builder()
         .status(status)
         .header(http::header::CONTENT_TYPE, "application/json")
         .body(Bytes::from(json))
         .unwrap_or_default();
+    // Stateless RC transport never puts the session id on the wire.
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     if let Ok(v) = HeaderValue::from_str(&session.to_string()) {
         resp.headers_mut().insert(MCP_SESSION_ID, v);
     }
     resp
 }
 
-fn status_response(status: http::StatusCode, session: uuid::Uuid) -> HttpResponse {
+fn status_response(
+    status: http::StatusCode,
+    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(unused_variables))] session: uuid::Uuid,
+) -> HttpResponse {
+    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(unused_mut))]
     let mut resp = http::Response::builder()
         .status(status)
         .body(Bytes::new())
         .unwrap_or_default();
+    // Stateless RC transport never puts the session id on the wire.
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     if let Ok(v) = HeaderValue::from_str(&session.to_string()) {
         resp.headers_mut().insert(MCP_SESSION_ID, v);
     }
@@ -240,7 +292,7 @@ pub async fn handle_delete(req: HttpRequest, ctx: &HttpContext) -> HttpResponse 
             .unwrap_or_default();
     };
 
-    #[cfg(feature = "tracing")]
+    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
     crate::types::notification::fmt::LOG_REGISTRY.unregister(&id);
     ctx.sse_registry.terminate(&id);
 
@@ -270,7 +322,7 @@ struct SseConnectionCleanup {
 
 impl Drop for SseConnectionCleanup {
     fn drop(&mut self) {
-        #[cfg(feature = "tracing")]
+        #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
         crate::types::notification::fmt::LOG_REGISTRY
             .unregister_if_generation(&self.id, self.generation);
         self.registry.unregister(&self.id, self.generation);
@@ -307,7 +359,7 @@ pub async fn handle_get_sse<E: HttpEngine>(
     let (_log_tx, log_rx) = tokio::sync::mpsc::channel::<Message>(ctx.sse_log_queue_capacity);
 
     let generation = ctx.sse_registry.register(id, msg_tx);
-    #[cfg(feature = "tracing")]
+    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
     crate::types::notification::fmt::LOG_REGISTRY.register(id, generation, _log_tx);
 
     let last_seq: Option<u64> = req
@@ -408,12 +460,50 @@ mod tests {
         Bytes::from(serde_json::to_vec(&body).unwrap())
     }
 
+    /// A POST request builder that, under the RC flag, carries the required
+    /// `MCP-Protocol-Version` header so it passes the stateless gate.
+    fn post_builder() -> http::request::Builder {
+        let b = http::Request::builder().method("POST").uri("/mcp");
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let b = b.header(crate::transport::http::MCP_PROTOCOL_VERSION, "2026-07-28");
+        b
+    }
+
+    #[cfg(feature = "proto-2026-07-28-rc")]
     #[tokio::test]
-    async fn notification_returns_202_without_pending_entry() {
-        let (ctx, mut _rx) = make_ctx();
+    async fn rejects_missing_protocol_version() {
+        let (ctx, _rx) = make_ctx();
         let req = http::Request::builder()
             .method("POST")
             .uri("/mcp")
+            .body(make_request_body("ping"))
+            .unwrap();
+        let resp = handle_post(req, &ctx).await;
+        assert_eq!(resp.status(), http::StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+        assert_eq!(body["error"]["code"], -32600);
+    }
+
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[tokio::test]
+    async fn rejects_unsupported_protocol_version() {
+        let (ctx, _rx) = make_ctx();
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(crate::transport::http::MCP_PROTOCOL_VERSION, "1999-01-01")
+            .body(make_request_body("ping"))
+            .unwrap();
+        let resp = handle_post(req, &ctx).await;
+        assert_eq!(resp.status(), http::StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+        assert_eq!(body["error"]["code"], -32600);
+    }
+
+    #[tokio::test]
+    async fn notification_returns_202_without_pending_entry() {
+        let (ctx, mut _rx) = make_ctx();
+        let req = post_builder()
             .body(make_notification_body("notifications/cancelled"))
             .unwrap();
         let resp = handle_post(req, &ctx).await;
@@ -427,9 +517,7 @@ mod tests {
     #[tokio::test]
     async fn malformed_json_returns_parse_error_response() {
         let (ctx, _rx) = make_ctx();
-        let req = http::Request::builder()
-            .method("POST")
-            .uri("/mcp")
+        let req = post_builder()
             .body(Bytes::from_static(b"not json"))
             .unwrap();
         let resp = handle_post(req, &ctx).await;
@@ -441,9 +529,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_message_shape_returns_invalid_request() {
         let (ctx, _rx) = make_ctx();
-        let req = http::Request::builder()
-            .method("POST")
-            .uri("/mcp")
+        let req = post_builder()
             .body(Bytes::from_static(b"{\"valid_json\": true}"))
             .unwrap();
         let resp = handle_post(req, &ctx).await;
@@ -455,9 +541,7 @@ mod tests {
     #[tokio::test]
     async fn init_request_pre_registers_session() {
         let (ctx, _rx) = make_ctx();
-        let req = http::Request::builder()
-            .method("POST")
-            .uri("/mcp")
+        let req = post_builder()
             .body(make_request_body(crate::commands::INIT))
             .unwrap();
         let ctx_arc = std::sync::Arc::new(ctx);
@@ -484,6 +568,8 @@ mod tests {
         assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
     }
 
+    // Session-id echo is intentionally removed under the stateless RC transport.
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     #[tokio::test]
     async fn delete_with_session_id_echoes_it_back() {
         let (ctx, _rx) = make_ctx();

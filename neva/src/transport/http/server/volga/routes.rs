@@ -62,6 +62,10 @@ pub(crate) async fn post(req: HttpRequest) -> HttpResult {
 }
 
 /// `DELETE /<endpoint>` — explicit session termination.
+///
+/// Not routed under `proto-2026-07-28-rc` (stateless: no sessions); kept
+/// compiled for the non-RC build.
+#[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
 pub(crate) async fn delete(req: HttpRequest) -> HttpResult {
     let manager: Dc<Arc<HttpContext>> = req.extract()?;
     let neutral = VolgaEngine::adapt_request(req)
@@ -72,6 +76,10 @@ pub(crate) async fn delete(req: HttpRequest) -> HttpResult {
 }
 
 /// `GET /<endpoint>` — SSE subscribe.
+///
+/// Not routed under `proto-2026-07-28-rc` (stateless: no SSE GET stream);
+/// kept compiled for the non-RC build.
+#[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
 pub(crate) async fn get(req: HttpRequest) -> HttpResult {
     let manager: Dc<Arc<HttpContext>> = req.extract()?;
     let outcome = handlers::dispatch_get_sse::<VolgaEngine>(req, &manager)

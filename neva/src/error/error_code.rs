@@ -24,6 +24,7 @@ pub enum ErrorCode {
     InternalError = -32603,
 
     /// The resource does not exist / is not available.
+    #[deprecated(note = "use InvalidParams")]
     ResourceNotFound = -32002,
 
     /// The URL mode elicitation is required.
@@ -34,6 +35,12 @@ pub enum ErrorCode {
 
     /// [Internal code] The request has been timed out
     Timeout = -99998,
+
+    /// [Internal code] A handler requested additional input via MRTR. Never
+    /// sent on the wire as an error — intercepted by the server dispatch layer
+    /// and converted into an `InputRequiredResult`.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    InputRequired = -99997,
 }
 
 impl From<ErrorCode> for i32 {
@@ -53,10 +60,13 @@ impl TryFrom<i32> for ErrorCode {
             -32601 => Ok(ErrorCode::MethodNotFound),
             -32602 => Ok(ErrorCode::InvalidParams),
             -32603 => Ok(ErrorCode::InternalError),
+            #[allow(deprecated)]
             -32002 => Ok(ErrorCode::ResourceNotFound),
             -32042 => Ok(ErrorCode::UrlElicitationRequiredError),
             -99999 => Ok(ErrorCode::RequestCancelled),
             -99998 => Ok(ErrorCode::Timeout),
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            -99997 => Ok(ErrorCode::InputRequired),
             _ => Err(()),
         }
     }
@@ -94,10 +104,13 @@ impl Display for ErrorCode {
             ErrorCode::MethodNotFound => write!(f, "Method not found"),
             ErrorCode::InvalidParams => write!(f, "Invalid parameters"),
             ErrorCode::InternalError => write!(f, "Internal error"),
+            #[allow(deprecated)]
             ErrorCode::ResourceNotFound => write!(f, "Resource not found"),
             ErrorCode::UrlElicitationRequiredError => write!(f, "URL elicitation required error"),
             ErrorCode::RequestCancelled => write!(f, "Request cancelled"),
             ErrorCode::Timeout => write!(f, "Request timed out"),
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            ErrorCode::InputRequired => write!(f, "Input required"),
         }
     }
 }
@@ -130,9 +143,32 @@ impl ErrorCode {
     pub fn wire_code(self) -> Self {
         match self {
             Self::RequestCancelled | Self::Timeout => Self::InternalError,
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            Self::InputRequired => Self::InternalError,
             other => other,
         }
     }
+
+    /// Code emitted for "resource not found" — spec-version dependent.
+    ///
+    /// - Default build (pre-2026 spec): [`Self::ResourceNotFound`] (`-32002`).
+    /// - `proto-2026-07-28-rc`: [`Self::InvalidParams`] (`-32602`), per the RC.
+    ///
+    /// All in-tree emitters should reference this constant instead of using
+    /// `Self::ResourceNotFound` directly, so the wire code follows the active
+    /// spec version automatically.
+    #[allow(dead_code)] // emitters live under `server`/`client` features
+    pub(crate) const RESOURCE_NOT_FOUND: Self = {
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        {
+            Self::InvalidParams
+        }
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        {
+            #[allow(deprecated)]
+            Self::ResourceNotFound
+        }
+    };
 }
 
 #[cfg(test)]
@@ -140,6 +176,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(deprecated)]
     fn it_converts_to_i32() {
         let codes = [
             (-32700, ErrorCode::ParseError),
@@ -163,6 +200,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn it_serializes_error_codes() {
         let codes = [
             ("-32700", ErrorCode::ParseError),
@@ -195,6 +233,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn standard_codes_are_unchanged_on_wire() {
         let standard = [
             ErrorCode::ParseError,
@@ -206,6 +245,19 @@ mod tests {
         ];
         for code in standard {
             assert_eq!(code.wire_code(), code);
+        }
+    }
+
+    #[test]
+    fn resource_not_found_alias_matches_spec_version() {
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        assert_eq!(ErrorCode::RESOURCE_NOT_FOUND, ErrorCode::InvalidParams);
+
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        {
+            #[allow(deprecated)]
+            let expected = ErrorCode::ResourceNotFound;
+            assert_eq!(ErrorCode::RESOURCE_NOT_FOUND, expected);
         }
     }
 }

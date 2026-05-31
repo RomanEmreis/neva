@@ -22,6 +22,7 @@ async fn main() -> Result<(), Error> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    #[allow(deprecated)]
     let mut client = Client::new().with_options(|opt| {
         opt.with_stdio("npx", ["-y", "@modelcontextprotocol/server-everything"])
             .with_roots(|roots| roots.with_list_changed())

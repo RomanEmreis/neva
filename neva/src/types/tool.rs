@@ -11,7 +11,6 @@ use std::fmt::{Debug, Formatter};
 #[cfg(feature = "server")]
 use {
     super::helpers::TypeCategory,
-    crate::json::JsonSchema,
     crate::types::{FromRequest, IntoResponse, Page, Request, RequestId, Response},
     crate::{
         Context,
@@ -20,6 +19,9 @@ use {
     futures_util::future::BoxFuture,
     std::{future::Future, sync::Arc},
 };
+
+#[cfg(all(feature = "server", not(feature = "proto-2026-07-28-rc")))]
+use crate::json::JsonSchema;
 
 #[cfg(all(feature = "server", feature = "tasks"))]
 use crate::types::RelatedTaskMetadata;
@@ -70,15 +72,23 @@ pub struct Tool {
     /// A JSON Schema object defining the expected parameters for the tool.
     ///
     /// > Note: Needs to a valid JSON schema object that additionally is of a type object.
+    ///
+    /// The concrete type is selected by the [`crate::types::ToolInputSchema`]
+    /// alias: the legacy typed `ToolSchema` under the default feature set,
+    /// or [`crate::types::schema_2020::InputSchema`] (a Value-shaped JSON
+    /// Schema 2020-12 wrapper) under the `proto-2026-07-28-rc` feature.
     #[serde(rename = "inputSchema")]
-    pub input_schema: ToolSchema,
+    pub input_schema: crate::types::ToolInputSchema,
 
     /// An optional JSON Schema object defining the structure of the tool's output returned in
     /// the `structuredContent` field of a [`crate::types::CallToolResponse`].
     ///
     /// > Note: Needs to a valid JSON schema object that additionally is of a type object.
+    ///
+    /// See [`Self::input_schema`] for a note on which concrete schema type
+    /// backs this alias under each feature set.
     #[serde(rename = "outputSchema", skip_serializing_if = "Option::is_none")]
-    pub output_schema: Option<ToolSchema>,
+    pub output_schema: Option<crate::types::ToolInputSchema>,
 
     /// Optional additional tool information.
     ///
@@ -183,6 +193,16 @@ pub struct ListToolsResult {
     /// will be `None`.
     #[serde(rename = "nextCursor", skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<Cursor>,
+
+    /// Suggested TTL in milliseconds for caching this list result, when set by the server.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[serde(rename = "ttlMs", skip_serializing_if = "Option::is_none")]
+    pub ttl_ms: Option<u64>,
+
+    /// Suggested cache scope for this list result, when set by the server.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[serde(rename = "cacheScope", skip_serializing_if = "Option::is_none")]
+    pub cache_scope: Option<crate::types::CacheScope>,
 }
 
 /// Used by the client to invoke a tool provided by the server.
@@ -216,6 +236,7 @@ pub struct CallToolRequestParams {
 }
 
 /// Represents an input schema
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ToolSchema {
     /// Schema object type
@@ -307,10 +328,12 @@ impl IntoResponse for ListToolsResult {
 #[cfg(feature = "server")]
 impl From<Vec<Tool>> for ListToolsResult {
     #[inline]
+    #[cfg_attr(not(feature = "proto-2026-07-28-rc"), allow(clippy::needless_update))]
     fn from(tools: Vec<Tool>) -> Self {
         Self {
             next_cursor: None,
             tools,
+            ..Default::default()
         }
     }
 }
@@ -318,10 +341,12 @@ impl From<Vec<Tool>> for ListToolsResult {
 #[cfg(feature = "server")]
 impl From<Page<'_, Tool>> for ListToolsResult {
     #[inline]
+    #[cfg_attr(not(feature = "proto-2026-07-28-rc"), allow(clippy::needless_update))]
     fn from(page: Page<'_, Tool>) -> Self {
         Self {
             next_cursor: page.next_cursor,
             tools: page.items.to_vec(),
+            ..Default::default()
         }
     }
 }
@@ -353,6 +378,7 @@ impl ListToolsResult {
     }
 }
 
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 impl Default for ToolSchema {
     #[inline]
     fn default() -> Self {
@@ -398,7 +424,7 @@ impl From<String> for TaskSupport {
     }
 }
 
-#[cfg(feature = "server")]
+#[cfg(all(feature = "server", not(feature = "proto-2026-07-28-rc")))]
 impl ToolSchema {
     /// Creates a new [`ToolSchema`] object
     #[inline]
@@ -410,10 +436,47 @@ impl ToolSchema {
         }
     }
 
-    /// Deserializes a new [`ToolSchema`] from a JSON string
+    /// Deserializes a new [`ToolSchema`] from a JSON string.
+    ///
+    /// > **Panics:** This constructor panics on malformed JSON and is kept
+    /// > with its existing signature for backwards compatibility. Prefer
+    /// > [`ToolSchema::from_value`] when the input is already a parsed
+    /// > [`serde_json::Value`] and you want fallible deserialization.
     #[inline]
     pub fn from_json_str(json: &str) -> Self {
         serde_json::from_str(json).expect("InputSchema: Incorrect JSON string provided")
+    }
+
+    /// Builds a [`ToolSchema`] from a [`serde_json::Value`].
+    ///
+    /// Unlike [`crate::types::schema_2020::InputSchema::from_value`], which
+    /// is infallible because the RC schema type is a transparent
+    /// [`serde_json::Value`] newtype, this constructor is **fallible**:
+    /// the legacy [`ToolSchema`] is a typed subset of JSON Schema and the
+    /// supplied value must deserialize into that typed shape. Any
+    /// deserialization error is returned through [`crate::error::Error`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::Error`] when `value` cannot be deserialized
+    /// into a [`ToolSchema`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use neva::types::tool::ToolSchema;
+    /// use serde_json::json;
+    ///
+    /// let schema = ToolSchema::from_value(json!({
+    ///     "type": "object",
+    ///     "properties": { "name": { "type": "string" } }
+    /// })).expect("valid schema");
+    /// assert!(schema.properties.is_some());
+    /// ```
+    #[inline]
+    pub fn from_value(value: Value) -> Result<Self, crate::error::Error> {
+        let schema = serde_json::from_value(value)?;
+        Ok(schema)
     }
 
     /// Adds a new property into the schema.
@@ -438,15 +501,83 @@ impl ToolSchema {
         self.add_required_property_impl(name, descr, property_type.into())
     }
 
-    /// Creates a new [`ToolSchema`] from a [`JsonSchema`] object
+    /// Builder-style: extend `self` with the properties of a
+    /// [`schemars`]-generated [`JsonSchema`] type.
+    ///
+    /// Note that this is distinct from the static [`ToolSchema::from_schema`]
+    /// — `with_schema` is a chainable instance method, while `from_schema` is
+    /// a static constructor.
     pub fn with_schema<T: JsonSchema>(self) -> Self {
         let json_schema = schemars::schema_for!(T);
         self.with_schema_impl(json_schema)
     }
 
-    /// Creates a new [`ToolSchema`] from a [`schemars::Schema`]
-    pub fn from_schema(json_schema: schemars::Schema) -> Self {
+    /// Creates a new [`ToolSchema`] from a type that implements
+    /// [`schemars::JsonSchema`].
+    ///
+    /// Mirrors [`crate::types::schema_2020::InputSchema::from_schema`] so
+    /// that both schema flavours expose the same generic-constructor API
+    /// surface: `Foo::from_schema::<T>()`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use neva::types::tool::ToolSchema;
+    /// use schemars::JsonSchema;
+    /// use serde::Deserialize;
+    ///
+    /// #[derive(Deserialize, JsonSchema)]
+    /// struct Args { name: String }
+    ///
+    /// let schema = ToolSchema::from_schema::<Args>();
+    /// assert!(schema.properties.is_some());
+    /// ```
+    #[inline]
+    pub fn from_schema<T: JsonSchema>() -> Self {
+        let json_schema = schemars::schema_for!(T);
+        Self::from_schemars(json_schema)
+    }
+
+    /// Creates a new [`ToolSchema`] from an already-built
+    /// [`schemars::Schema`].
+    ///
+    /// Mirrors [`crate::types::schema_2020::InputSchema::from_schemars`].
+    /// Use this when you have a hand-built [`schemars::Schema`] (or one
+    /// produced by a `SchemaSettings` builder) and want to attach it to a
+    /// tool without going through the [`schemars::schema_for!`] macro.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use neva::types::tool::ToolSchema;
+    /// use schemars::JsonSchema;
+    /// use serde::Deserialize;
+    ///
+    /// #[derive(Deserialize, JsonSchema)]
+    /// struct Args { name: String }
+    ///
+    /// let schema = ToolSchema::from_schemars(schemars::schema_for!(Args));
+    /// assert!(schema.properties.is_some());
+    /// ```
+    #[inline]
+    pub fn from_schemars(json_schema: schemars::Schema) -> Self {
         Self::default().with_schema_impl(json_schema)
+    }
+
+    // Deprecated: renamed to `from_schemars` for symmetry with
+    // `InputSchema::from_schemars`. The new generic static
+    // `ToolSchema::from_schema::<T>()` matches `InputSchema::from_schema::<T>()`,
+    // freeing the `from_schema(schemars::Schema)` name for the generic form.
+    /// Creates a new [`ToolSchema`] from a [`schemars::Schema`].
+    ///
+    /// **Deprecated:** renamed to [`ToolSchema::from_schemars`] for symmetry
+    /// with [`crate::types::schema_2020::InputSchema::from_schemars`]. The
+    /// `from_schema` name is now occupied by the generic static constructor
+    /// [`ToolSchema::from_schema::<T>()`].
+    #[deprecated(note = "renamed to from_schemars for symmetry with InputSchema")]
+    #[inline]
+    pub fn from_schema_legacy(json_schema: schemars::Schema) -> Self {
+        Self::from_schemars(json_schema)
     }
 
     #[inline]
@@ -644,6 +775,46 @@ impl Debug for Tool {
     }
 }
 
+/// Builds a [`crate::types::ToolInputSchema`] from the typed argument map
+/// produced by [`ToolHandler::args`].
+///
+/// Under the default feature set this returns the typed legacy
+/// `ToolSchema` verbatim. Under `proto-2026-07-28-rc` the legacy
+/// `ToolSchema` struct is absent, so this constructs an
+/// [`crate::types::schema_2020::InputSchema`] directly from the
+/// `Option<HashMap<String, SchemaProperty>>` by serializing each
+/// [`SchemaProperty`] into a `serde_json::Value` and wrapping the result
+/// as a JSON Schema 2020-12 object schema. The same call site at
+/// [`Tool::new`] compiles under either feature set.
+#[cfg(feature = "server")]
+#[inline]
+fn build_input_schema_from_args(
+    args: Option<HashMap<String, SchemaProperty>>,
+) -> crate::types::ToolInputSchema {
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    {
+        ToolSchema::new(args)
+    }
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    {
+        use serde_json::{Map, Value, json};
+        let properties = args
+            .as_ref()
+            .map(|m| {
+                let mut obj = Map::with_capacity(m.len());
+                for (k, v) in m {
+                    let v_json =
+                        serde_json::to_value(v).unwrap_or_else(|_| Value::Object(Map::new()));
+                    obj.insert(k.clone(), v_json);
+                }
+                Value::Object(obj)
+            })
+            .unwrap_or_else(|| Value::Object(Map::new()));
+        let value = json!({ "type": "object", "properties": properties });
+        crate::types::schema_2020::InputSchema::from(value)
+    }
+}
+
 #[cfg(feature = "server")]
 impl Tool {
     /// Initializes a new [`Tool`]
@@ -654,7 +825,7 @@ impl Tool {
         Args: TryFrom<CallToolRequestParams, Error = Error> + Send + Sync + 'static,
     {
         let handler = ToolFunc::new(handler);
-        let input_schema = ToolSchema::new(F::args());
+        let input_schema = build_input_schema_from_args(F::args());
         Self {
             name: name.into(),
             title: None,
@@ -689,9 +860,18 @@ impl Tool {
     /// Sets an input schema for the tool.
     ///
     /// > **Note:** Automatically generated schema will be overwritten
+    ///
+    /// The closure receives and returns a [`crate::types::ToolInputSchema`].
+    /// Under the default feature set this is the typed `ToolSchema`
+    /// (with builder methods like `with_prop`/`with_required`); under
+    /// `proto-2026-07-28-rc` it is
+    /// [`crate::types::schema_2020::InputSchema`] (a Value-shaped JSON
+    /// Schema 2020-12 wrapper). The schema model differs between flags,
+    /// so closure bodies that rely on the typed builder API are RC-incompatible
+    /// by design.
     pub fn with_input_schema<F>(&mut self, config: F) -> &mut Self
     where
-        F: FnOnce(ToolSchema) -> ToolSchema,
+        F: FnOnce(crate::types::ToolInputSchema) -> crate::types::ToolInputSchema,
     {
         self.input_schema = config(Default::default());
         self
@@ -700,9 +880,12 @@ impl Tool {
     /// Sets an output schema for the tool.
     ///
     /// > **Note:** Automatically generated schema will be overwritten
+    ///
+    /// See [`Self::with_input_schema`] for the closure-type note that
+    /// applies under each feature flag.
     pub fn with_output_schema<F>(&mut self, config: F) -> &mut Self
     where
-        F: FnOnce(ToolSchema) -> ToolSchema,
+        F: FnOnce(crate::types::ToolInputSchema) -> crate::types::ToolInputSchema,
     {
         self.output_schema = Some(config(Default::default()));
         self
@@ -767,17 +950,26 @@ impl Tool {
 
 #[cfg(feature = "client")]
 impl Tool {
-    /// Validates [`CallToolResponse`] against this tool output schema
+    /// Validates [`CallToolResponse`] against this tool output schema.
+    ///
+    /// Under the legacy feature set the schema is the typed `ToolSchema`
+    /// struct and is materialized via [`serde_json::to_value`]. Under
+    /// `proto-2026-07-28-rc` the schema is already a [`serde_json::Value`]
+    /// (wrapped by [`crate::types::schema_2020::InputSchema`]), so we borrow
+    /// it directly via [`crate::types::schema_2020::InputSchema::as_value`]
+    /// — no re-serialization is needed.
     pub fn validate<'a>(&self, resp: &'a CallToolResponse) -> Result<&'a CallToolResponse, Error> {
-        let schema = self.output_schema.as_ref().map_or_else(
-            || {
-                Err(Error::new(
-                    ErrorCode::ParseError,
-                    "Tool: Output schema not specified",
-                ))
-            },
-            |s| serde_json::to_value(s.clone()).map_err(Into::into),
-        )?;
+        let Some(schema_ref) = self.output_schema.as_ref() else {
+            return Err(Error::new(
+                ErrorCode::ParseError,
+                "Tool: Output schema not specified",
+            ));
+        };
+
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        let schema = serde_json::to_value(schema_ref).map_err(Into::<Error>::into)?;
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let schema = schema_ref.as_value().clone();
 
         let validator =
             validator_for(&schema).map_err(|err| Error::new(ErrorCode::ParseError, err))?;
@@ -928,10 +1120,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     fn it_deserializes_input_schema() {
-        let json = r#"{ 
+        let json = r#"{
             "properties": {
-                "name": { 
+                "name": {
                     "type": "string",
                     "description": "A name to whom say hello"
                 }
@@ -942,5 +1135,92 @@ mod tests {
 
         assert_eq!(schema.r#type, PropertyType::Object);
         assert!(schema.properties.is_some());
+    }
+
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[derive(serde::Deserialize, schemars::JsonSchema)]
+    #[allow(dead_code)]
+    struct MyT {
+        name: String,
+    }
+
+    #[test]
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[allow(deprecated)]
+    fn from_schemars_matches_from_schema_legacy_name() {
+        // The deprecated wrapper `from_schema_legacy` must delegate to
+        // `from_schemars`, so their outputs for the same input schema
+        // must be identical. The wrapper retains the old behaviour
+        // (non-generic, takes a `schemars::Schema`) under a renamed
+        // identifier — see deviation note for why we did not keep the
+        // exact `from_schema` name.
+        let a = ToolSchema::from_schemars(schemars::schema_for!(MyT));
+        let b = ToolSchema::from_schema_legacy(schemars::schema_for!(MyT));
+
+        // ToolSchema does not derive PartialEq, so compare via
+        // serde_json::Value canonicalisation.
+        let av = serde_json::to_value(&a).unwrap();
+        let bv = serde_json::to_value(&b).unwrap();
+        assert_eq!(av, bv);
+    }
+
+    #[test]
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    fn from_schema_generic_constructor_works() {
+        let s: ToolSchema = ToolSchema::from_schema::<MyT>();
+        let props = s.properties.expect("properties should be set");
+        assert!(!props.is_empty(), "expected at least one property");
+        assert!(props.contains_key("name"));
+    }
+
+    #[test]
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    fn from_value_round_trip() {
+        let original = ToolSchema::default().with_prop("name", "a name", PropertyType::String);
+        let value = serde_json::to_value(&original).expect("serializes");
+        let round_tripped = ToolSchema::from_value(value).expect("round trips");
+
+        // Compare via Value since ToolSchema does not derive PartialEq.
+        let a = serde_json::to_value(&original).expect("serializes original");
+        let b = serde_json::to_value(&round_tripped).expect("serializes round trip");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    fn from_value_invalid_returns_error() {
+        // A bare JSON string is not a valid ToolSchema (which expects
+        // an object with a `type` discriminator). Deserialization must
+        // fail, not panic.
+        let result = ToolSchema::from_value(serde_json::Value::String("not a schema".into()));
+        assert!(result.is_err(), "expected Err for non-object value");
+    }
+
+    #[test]
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    fn list_tools_result_serializes_cache_hints() {
+        use crate::types::CacheScope;
+        let r = ListToolsResult {
+            tools: vec![],
+            next_cursor: None,
+            ttl_ms: Some(60_000),
+            cache_scope: Some(CacheScope::Session),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["ttlMs"], serde_json::json!(60_000));
+        assert_eq!(v["cacheScope"], serde_json::json!("session"));
+
+        let back: ListToolsResult = serde_json::from_value(v).unwrap();
+        assert_eq!(back.ttl_ms, Some(60_000));
+        assert_eq!(back.cache_scope, Some(CacheScope::Session));
+    }
+
+    #[test]
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    fn list_tools_result_omits_cache_hints_when_none() {
+        let r = ListToolsResult::default();
+        let v = serde_json::to_value(&r).unwrap();
+        assert!(v.get("ttlMs").is_none());
+        assert!(v.get("cacheScope").is_none());
     }
 }

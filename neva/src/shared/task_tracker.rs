@@ -28,7 +28,10 @@ pub(crate) type MaybePayload = Option<TaskPayload>;
 pub(crate) struct TaskEntry {
     task: Task,
     token: CancellationToken,
+    // Unused under `proto-2026-07-28-rc`: the task-coupled elicit path that
+    // fed results through `tx` is replaced by MRTR.
     #[cfg(feature = "server")]
+    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
     tx: Sender<MaybePayload>,
     rx: Receiver<MaybePayload>,
 }
@@ -151,6 +154,7 @@ impl TaskTracker {
 
     /// Sets the task into `input_required` status
     #[cfg(feature = "server")]
+    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
     pub(crate) fn require_input(&self, id: &str) {
         self.cleanup_expired();
 
@@ -161,6 +165,7 @@ impl TaskTracker {
 
     /// Sets the task into `working` status
     #[cfg(feature = "server")]
+    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
     pub(crate) fn reset(&self, id: &str) {
         self.cleanup_expired();
 
@@ -172,6 +177,7 @@ impl TaskTracker {
 
     /// Sets the result of the [`Task`].
     #[cfg(feature = "server")]
+    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
     pub(crate) fn set_result<T: Serialize>(&self, id: &str, result: T) {
         self.cleanup_expired();
 

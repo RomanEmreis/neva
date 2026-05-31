@@ -6,6 +6,12 @@ use super::{
 };
 use crate::error::{Error, ErrorCode};
 use crate::transport::Sender;
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+use crate::types::notification::Notification;
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+use crate::types::root::{ListRootsRequestParams, ListRootsResult};
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+use crate::types::sampling::{CreateMessageRequestParams, CreateMessageResult};
 use crate::{
     middleware::{MwContext, Next},
     shared::{IntoArgs, RequestQueue},
@@ -15,10 +21,7 @@ use crate::{
         Prompt, ReadResourceRequestParams, ReadResourceResult, Request, RequestId, Resource,
         Response, Tool, ToolResult, ToolUse, Uri,
         elicitation::{ElicitRequestParams, ElicitResult, ElicitationCompleteParams},
-        notification::Notification,
         resource::SubscribeRequestParams,
-        root::{ListRootsRequestParams, ListRootsResult},
-        sampling::{CreateMessageRequestParams, CreateMessageResult},
     },
 };
 use std::{
@@ -51,6 +54,99 @@ use {crate::auth::Claims, http::HeaderMap};
 pub(crate) type ToolOrTaskResponse = Either<CreateTaskResult, CallToolResponse>;
 
 type RequestHandlers = HashMap<String, RequestHandler<Response>>;
+
+/// Boxed deferred-commit future (see [`Context::on_commit`]).
+#[cfg(feature = "proto-2026-07-28-rc")]
+pub(crate) type CommitFut =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + Send>>;
+
+/// Per-dispatch MRTR state: the replay log of answers available to the
+/// handler this round, the single input it newly requested, plus the
+/// `once`/`memo`/`on_commit` bookkeeping.
+#[cfg(feature = "proto-2026-07-28-rc")]
+#[derive(Default)]
+pub(crate) struct MrtrCtx {
+    /// Answers available this round (prior answers decoded from
+    /// `requestState`, merged with this round's `inputResponses`).
+    pub(crate) answers: std::collections::HashMap<String, crate::types::elicitation::ElicitResult>,
+    /// The newly-requested input (v1: at most one), recorded on a cache miss.
+    pub(crate) pending: std::sync::Mutex<Option<(String, ElicitRequestParams)>>,
+    /// Whether the client declared elicitation support this round.
+    pub(crate) elicitation_allowed: bool,
+    /// Cached `ctx.memo` values (seeded from `requestState`, grown on miss).
+    pub(crate) memos: std::sync::Mutex<std::collections::HashMap<String, serde_json::Value>>,
+    /// Executed `ctx.once` keys (seeded from `requestState`, grown on run).
+    pub(crate) effects: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Deferred `ctx.on_commit` futures, rebuilt each round, drained on the
+    /// final (non-`input_required`) round. Never serialized.
+    pub(crate) commits: std::sync::Mutex<Vec<CommitFut>>,
+}
+
+#[cfg(feature = "proto-2026-07-28-rc")]
+impl std::fmt::Debug for MrtrCtx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MrtrCtx")
+            .field("answers", &self.answers)
+            .field("pending", &self.pending)
+            .field("elicitation_allowed", &self.elicitation_allowed)
+            .field("memos", &self.memos)
+            .field("effects", &self.effects)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "proto-2026-07-28-rc")]
+impl MrtrCtx {
+    /// Returns the cached answer for `key`, or records the request and returns
+    /// the MRTR "input required" sentinel error to unwind the handler.
+    pub(crate) fn resolve(
+        &self,
+        key: String,
+        params: ElicitRequestParams,
+    ) -> Result<ElicitResult, Error> {
+        if let Some(answer) = self.answers.get(&key) {
+            return Ok(answer.clone());
+        }
+        if let Ok(mut pending) = self.pending.lock() {
+            *pending = Some((key, params));
+        }
+        Err(Error::input_required())
+    }
+
+    /// Returns whether a `once` effect key has already run this chain.
+    pub(crate) fn effect_seen(&self, key: &str) -> bool {
+        self.effects
+            .lock()
+            .map(|e| e.contains(key))
+            .unwrap_or(false)
+    }
+
+    /// Records a `once` effect key as run.
+    pub(crate) fn record_effect(&self, key: String) {
+        if let Ok(mut e) = self.effects.lock() {
+            e.insert(key);
+        }
+    }
+
+    /// Returns the cached `memo` value for `key`, if present.
+    pub(crate) fn cached_memo(&self, key: &str) -> Option<serde_json::Value> {
+        self.memos.lock().ok().and_then(|m| m.get(key).cloned())
+    }
+
+    /// Stores a `memo` value.
+    pub(crate) fn store_memo(&self, key: String, value: serde_json::Value) {
+        if let Ok(mut m) = self.memos.lock() {
+            m.insert(key, value);
+        }
+    }
+
+    /// Registers a deferred commit future.
+    pub(crate) fn push_commit(&self, fut: CommitFut) {
+        if let Ok(mut c) = self.commits.lock() {
+            c.push(fut);
+        }
+    }
+}
 
 /// Represents a Server runtime
 #[derive(Clone)]
@@ -104,6 +200,11 @@ pub struct Context {
 
     /// Represents a timeout for the current request
     timeout: Duration,
+
+    /// MRTR per-dispatch state (set by the server dispatch layer for the
+    /// supported methods; `None` otherwise).
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) mrtr: Option<Arc<MrtrCtx>>,
 
     /// Represents a DI scope
     #[cfg(feature = "di")]
@@ -174,6 +275,8 @@ impl ServerRuntime {
             sender: self.sender.clone(),
             options: self.options.clone(),
             timeout: self.options.request_timeout,
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            mrtr: None,
             #[cfg(feature = "di")]
             scope: None,
         }
@@ -195,6 +298,8 @@ impl ServerRuntime {
             sender: self.sender.clone(),
             options: self.options.clone(),
             timeout: self.options.request_timeout,
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            mrtr: None,
             #[cfg(feature = "di")]
             scope: None,
         }
@@ -242,14 +347,14 @@ impl Context {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(feature = "server-macros")] {
+    /// # #[cfg(all(feature = "server-macros", not(feature = "proto-2026-07-28-rc")))] {
     /// use neva::prelude::*;
     ///
     /// #[tool]
     /// async fn analyze_weather(ctx: Context, city: String) -> Result<(), Error> {
     ///     let args = ("city", city);
     ///     let weather = ctx.use_tool(ToolUse::new("get_weather", args)).await;
-    ///     
+    ///
     ///     // do something with the weather result
     ///
     /// # Ok(())
@@ -305,13 +410,13 @@ impl Context {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(feature = "server-macros")] {
+    /// # #[cfg(all(feature = "server-macros", not(feature = "proto-2026-07-28-rc")))] {
     /// use neva::prelude::*;
     ///
     /// #[tool]
     /// async fn analyze_weather(ctx: Context, city: String) -> Result<(), Error> {
     ///     let prompt = ctx.prompt("get_weather", ("city", city)).await?;
-    ///     
+    ///
     ///     // do something with the prompt
     ///
     /// # Ok(())
@@ -341,13 +446,13 @@ impl Context {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(feature = "server-macros")] {
+    /// # #[cfg(all(feature = "server-macros", not(feature = "proto-2026-07-28-rc")))] {
     /// use neva::prelude::*;
     ///
     /// #[tool]
     /// async fn summarize_document(ctx: Context, doc_uri: Uri) -> Result<(), Error> {
     ///     let doc = ctx.resource(doc_uri).await?;
-    ///     
+    ///
     ///     // do something with the doc
     ///
     /// # Ok(())
@@ -395,7 +500,7 @@ impl Context {
         Ok(removed)
     }
 
-    /// Sends a [`Notification`] that the resource with the `uri` has been updated
+    /// Sends a notification that the resource with the `uri` has been updated
     pub async fn resource_updated(&mut self, uri: impl Into<Uri>) -> Result<(), Error> {
         if !self.options.is_resource_subscription_supported() {
             return Err(Error::new(
@@ -503,7 +608,7 @@ impl Context {
                     .call(params.with_args(args).with_context(self).into())
                     .await
             }
-            _ => Err(Error::from(ErrorCode::ResourceNotFound)),
+            _ => Err(Error::from(ErrorCode::RESOURCE_NOT_FOUND)),
         }
     }
 
@@ -598,7 +703,7 @@ impl Context {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(feature = "server-macros")] {
+    /// # #[cfg(all(feature = "server-macros", not(feature = "proto-2026-07-28-rc")))] {
     /// use neva::{Context, error::Error, tool};
     ///
     /// #[tool]
@@ -611,6 +716,7 @@ impl Context {
     /// }
     /// # }
     /// ```
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     pub async fn list_roots(&mut self) -> Result<ListRootsResult, Error> {
         let method = crate::types::root::commands::LIST;
         let req = Request::new(
@@ -645,7 +751,7 @@ impl Context {
     /// }
     /// # }
     /// ```
-    #[cfg(not(feature = "tasks"))]
+    #[cfg(all(not(feature = "tasks"), not(feature = "proto-2026-07-28-rc")))]
     pub async fn sample(
         &mut self,
         params: CreateMessageRequestParams,
@@ -683,7 +789,7 @@ impl Context {
     /// }
     /// # }
     /// ```
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
     pub async fn sample(
         &mut self,
         params: CreateMessageRequestParams,
@@ -721,7 +827,7 @@ impl Context {
     /// }
     /// # }
     /// ```
-    #[cfg(not(feature = "tasks"))]
+    #[cfg(all(not(feature = "tasks"), not(feature = "proto-2026-07-28-rc")))]
     pub async fn elicit(&mut self, params: ElicitRequestParams) -> Result<ElicitResult, Error> {
         let method = crate::types::elicitation::commands::CREATE;
         let req = Request::new(
@@ -731,6 +837,173 @@ impl Context {
         );
 
         self.send_request(req).await?.into_result()
+    }
+
+    /// Requests elicitation input from the client (MRTR, `proto-2026-07-28-rc`).
+    ///
+    /// On the first dispatch the answer for `key` is absent: the request is
+    /// recorded and an internal sentinel error is returned, which the server
+    /// converts into an `InputRequiredResult`. When the client retries with
+    /// the answer, this handler re-runs and the call returns the cached
+    /// [`ElicitResult`].
+    ///
+    /// **Important:** code before an `elicit` point re-executes on every
+    /// round-trip — keep it side-effect-free.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(all(feature = "server-macros", feature = "proto-2026-07-28-rc"))] {
+    /// use neva::{Context, error::Error, types::elicitation::ElicitRequestParams, tool};
+    /// #[tool]
+    /// async fn greet(mut ctx: Context) -> Result<String, Error> {
+    ///     let params = ElicitRequestParams::form("Your name?")
+    ///         .with_required("name", "string")
+    ///         .into();
+    ///     let res = ctx.elicit("name", params).await?;
+    ///     Ok(format!("{:?}", res.content))
+    /// }
+    /// # }
+    /// ```
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub async fn elicit(
+        &mut self,
+        key: impl Into<String>,
+        params: ElicitRequestParams,
+    ) -> Result<ElicitResult, Error> {
+        match self.mrtr.as_ref() {
+            Some(mrtr) => mrtr.resolve(key.into(), params),
+            None => Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "elicitation is not available for this request",
+            )),
+        }
+    }
+
+    /// Runs `effect` at most once across MRTR rounds (`proto-2026-07-28-rc`).
+    ///
+    /// On a replay (the key was recorded in a prior round) the future is
+    /// dropped unpolled and `Ok(false)` is returned. On a miss the future is
+    /// awaited; on success the key is recorded and `Ok(true)` is returned, on
+    /// failure the error propagates and the key is **not** recorded (so the
+    /// next round retries).
+    ///
+    /// Sync work lives inside a non-awaiting `async {}` block.
+    ///
+    /// # Durability
+    /// The effect runs *before* the `requestState` recording it is durably
+    /// acknowledged by the client — it is at-most-once within a single
+    /// `requestState` chain, **not** globally exactly-once. For non-idempotent
+    /// side effects, pass a stable idempotency key to the downstream system.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(all(feature = "server-macros", feature = "proto-2026-07-28-rc"))] {
+    /// # use neva::{Context, error::Error};
+    /// # async fn f(ctx: Context) -> Result<(), Error> {
+    /// ctx.once("emit_metric", async { Ok(()) }).await?;
+    /// # Ok(()) }
+    /// # }
+    /// ```
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub async fn once<F>(&self, key: impl Into<String>, effect: F) -> Result<bool, Error>
+    where
+        F: std::future::Future<Output = Result<(), Error>>,
+    {
+        let key = key.into();
+        match self.mrtr.as_ref() {
+            None => {
+                effect.await?;
+                Ok(true)
+            }
+            Some(mrtr) => {
+                if mrtr.effect_seen(&key) {
+                    return Ok(false);
+                }
+                effect.await?;
+                mrtr.record_effect(key);
+                Ok(true)
+            }
+        }
+    }
+
+    /// Computes `compute` at most once across MRTR rounds and caches the
+    /// serialized value in `requestState` (`proto-2026-07-28-rc`).
+    ///
+    /// On a replay the cached value is deserialized and returned (the future is
+    /// dropped unpolled). On a miss the future is awaited, the value serialized
+    /// and stored, and returned. A failed compute is not cached.
+    ///
+    /// Caching a value grows `requestState`; prefer [`Context::once`] when the
+    /// result isn't needed later. See [`crate::App::with_max_state_bytes`].
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(all(feature = "server-macros", feature = "proto-2026-07-28-rc"))] {
+    /// # use neva::{Context, error::Error};
+    /// # async fn f(ctx: Context) -> Result<(), Error> {
+    /// let n: i32 = ctx.memo("answer", async { Ok(42) }).await?;
+    /// # let _ = n; Ok(()) }
+    /// # }
+    /// ```
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub async fn memo<T, F>(&self, key: impl Into<String>, compute: F) -> Result<T, Error>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+        F: std::future::Future<Output = Result<T, Error>>,
+    {
+        let key = key.into();
+        match self.mrtr.as_ref() {
+            None => compute.await,
+            Some(mrtr) => {
+                if let Some(value) = mrtr.cached_memo(&key) {
+                    return serde_json::from_value(value).map_err(Error::from);
+                }
+                let value = compute.await?;
+                mrtr.store_memo(key, serde_json::to_value(&value).map_err(Error::from)?);
+                Ok(value)
+            }
+        }
+    }
+
+    /// Registers `effect` to run **exactly once**, when the handler reaches its
+    /// final (non-`input_required`) result (`proto-2026-07-28-rc`).
+    ///
+    /// Commits are awaited in registration order before the final response is
+    /// sent; the first `Err` becomes the response error. They do **not** run on
+    /// intermediate `input_required` rounds, nor when the handler errors.
+    ///
+    /// The future is stored in the shared dispatch state, so it must be
+    /// `Send + 'static` — capture by `move`. Called outside an MRTR dispatch,
+    /// it is a no-op.
+    ///
+    /// # Durability
+    /// "Exactly once" means once per successfully-completed flow, not globally
+    /// idempotent — a client that abandons and restarts the flow runs it again.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(all(feature = "server-macros", feature = "proto-2026-07-28-rc"))] {
+    /// # use neva::{Context, error::Error};
+    /// # async fn f(ctx: Context) {
+    /// ctx.on_commit(async move { Ok(()) });
+    /// # }
+    /// # }
+    /// ```
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub fn on_commit<F>(&self, effect: F)
+    where
+        F: std::future::Future<Output = Result<(), Error>> + Send + 'static,
+    {
+        match self.mrtr.as_ref() {
+            Some(mrtr) => mrtr.push_commit(Box::pin(effect)),
+            None => {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    logger = "neva",
+                    "on_commit called outside an MRTR dispatch; ignored"
+                );
+            }
+        }
     }
 
     /// Sends the elicitation request to the client
@@ -754,7 +1027,7 @@ impl Context {
     /// }
     /// # }
     /// ```
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
     pub async fn elicit(&mut self, params: ElicitRequestParams) -> Result<ElicitResult, Error> {
         let related_task = params.related_task();
 
@@ -901,6 +1174,7 @@ impl Context {
 
     #[inline]
     #[cfg(feature = "tasks")]
+    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
     async fn send_maybe_task_augmented_request<T: DeserializeOwned>(
         &mut self,
         req: Request,
@@ -946,18 +1220,32 @@ impl Context {
         }
     }
 
-    /// Sends a notification to a client
+    /// Sends a notification to a client.
+    ///
+    /// Under the stateless `proto-2026-07-28-rc` transport there is no
+    /// out-of-band server→client channel, so this is a no-op: progress,
+    /// list-changed, resource-updated, task-status and elicitation
+    /// notifications are inert and clients poll instead.
     #[inline]
     async fn send_notification(
         &mut self,
-        method: &str,
-        params: Option<serde_json::Value>,
+        #[cfg_attr(feature = "proto-2026-07-28-rc", allow(unused_variables))] method: &str,
+        #[cfg_attr(feature = "proto-2026-07-28-rc", allow(unused_variables))] params: Option<
+            serde_json::Value,
+        >,
     ) -> Result<(), Error> {
-        let mut notification = Notification::new(method, params);
-        if let Some(session_id) = self.session_id {
-            notification.session_id = Some(session_id);
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        {
+            Ok(())
         }
-        self.sender.send(notification.into()).await
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        {
+            let mut notification = Notification::new(method, params);
+            if let Some(session_id) = self.session_id {
+                notification.session_id = Some(session_id);
+            }
+            self.sender.send(notification.into()).await
+        }
     }
 }
 
@@ -1036,5 +1324,87 @@ impl crate::shared::TaskApi for Context {
         // Reserved, there are no cases so far, for the server
         // to handle input requests from client.
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "server")]
+mod missing_resource_error_tests {
+    use crate::error::ErrorCode;
+
+    #[test]
+    fn missing_resource_uses_spec_version_code() {
+        // The constant the emitters use must match the spec.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        assert_eq!(i32::from(ErrorCode::RESOURCE_NOT_FOUND), -32602);
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        assert_eq!(i32::from(ErrorCode::RESOURCE_NOT_FOUND), -32002);
+    }
+}
+
+#[cfg(all(test, feature = "proto-2026-07-28-rc"))]
+mod mrtr_tests {
+    use super::*;
+    use crate::types::elicitation::{ElicitRequestParams, ElicitResult, ElicitationAction};
+
+    fn params() -> ElicitRequestParams {
+        ElicitRequestParams::form("m")
+            .with_required("x", "string")
+            .into()
+    }
+
+    #[test]
+    fn resolve_replays_cached_answer_and_records_pending_on_miss() {
+        let mut answers = std::collections::HashMap::new();
+        answers.insert(
+            "known".to_string(),
+            ElicitResult {
+                action: ElicitationAction::Accept,
+                content: Some(serde_json::json!({ "x": 1 })),
+                meta: None,
+            },
+        );
+        let mrtr = MrtrCtx {
+            answers,
+            pending: Default::default(),
+            elicitation_allowed: true,
+            ..Default::default()
+        };
+
+        // Hit: returns the cached answer.
+        let got = mrtr.resolve("known".into(), params()).expect("cached");
+        assert_eq!(got.action, ElicitationAction::Accept);
+
+        // Miss: returns the sentinel and records pending.
+        let miss = mrtr.resolve("unknown".into(), params());
+        assert_eq!(miss.unwrap_err().code, ErrorCode::InputRequired);
+        assert!(mrtr.pending.lock().unwrap().is_some());
+    }
+
+    #[test]
+    fn effect_seen_and_record() {
+        let m = MrtrCtx::default();
+        assert!(!m.effect_seen("charge"));
+        m.record_effect("charge".into());
+        assert!(m.effect_seen("charge"));
+    }
+
+    #[test]
+    fn cached_memo_store_and_fetch() {
+        let m = MrtrCtx::default();
+        assert!(m.cached_memo("quote").is_none());
+        m.store_memo("quote".into(), serde_json::json!({"price": 42}));
+        assert_eq!(
+            m.cached_memo("quote"),
+            Some(serde_json::json!({"price": 42}))
+        );
+    }
+
+    #[test]
+    fn push_commit_accumulates() {
+        let m = MrtrCtx::default();
+        m.push_commit(Box::pin(async { Ok(()) }));
+        m.push_commit(Box::pin(async { Ok(()) }));
+        assert_eq!(m.commits.lock().unwrap().len(), 2);
     }
 }

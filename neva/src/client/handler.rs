@@ -1,6 +1,10 @@
 //! Request handling utilities
 
 use crate::client::notification_handler::NotificationsHandler;
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+use crate::types::sampling::SamplingHandler;
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+use crate::types::{Root, root::ListRootsResult};
 use crate::{
     client::options::McpOptions,
     error::{Error, ErrorCode},
@@ -9,9 +13,8 @@ use crate::{
         Receiver, Sender, Transport, TransportProto, TransportProtoReceiver, TransportProtoSender,
     },
     types::{
-        IntoResponse, Message, MessageBatch, MessageEnvelope, Request, RequestId, Response, Root,
-        elicitation::ElicitationHandler, notification::Notification, root::ListRootsResult,
-        sampling::SamplingHandler,
+        IntoResponse, Message, MessageBatch, MessageEnvelope, Request, RequestId, Response,
+        elicitation::ElicitationHandler, notification::Notification,
     },
 };
 use std::sync::Arc;
@@ -19,13 +22,17 @@ use std::{
     sync::atomic::{AtomicI64, Ordering},
     time::Duration,
 };
-use tokio::{sync::RwLock, time::timeout};
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+use tokio::sync::RwLock;
+use tokio::time::timeout;
 
+#[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
+use crate::types::CreateMessageRequestParams;
 #[cfg(feature = "tasks")]
 use crate::{
     shared::TaskTracker,
     types::{
-        CancelTaskRequestParams, CreateMessageRequestParams, CreateTaskResult, ElicitRequestParams,
+        CancelTaskRequestParams, CreateTaskResult, ElicitRequestParams,
         GetTaskPayloadRequestParams, GetTaskRequestParams, ListTasksRequestParams, ListTasksResult,
         Pagination, Task,
     },
@@ -34,6 +41,7 @@ use crate::{
 #[cfg(feature = "tasks")]
 const DEFAULT_PAGE_SIZE: usize = 10;
 
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 struct Roots {
     /// Cached list of [`Root`]
     inner: Arc<RwLock<Vec<Root>>>,
@@ -56,9 +64,11 @@ pub(super) struct RequestHandler {
     sender: TransportProtoSender,
 
     /// Cached list of [`Root`]
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     roots: Roots,
 
     /// Represents a handler function that runs when received a "sampling/createMessage" request
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     sampling_handler: Option<SamplingHandler>,
 
     /// Represents a handler function that runs when received an "elicitation/create" request
@@ -67,11 +77,17 @@ pub(super) struct RequestHandler {
     /// Represents a hash map of notification handlers
     notification_handler: Option<Arc<NotificationsHandler>>,
 
+    /// Optional W3C Trace Context provider, invoked before each outbound
+    /// request to populate `_meta.traceparent`/`_meta.tracestate`.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    trace_context_provider: Option<crate::client::options::TraceContextProvider>,
+
     /// Task tracker for client sampling tasks.
     #[cfg(feature = "tasks")]
     tasks: Arc<TaskTracker>,
 }
 
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 impl Roots {
     fn new(options: &McpOptions, notifications_sender: &TransportProtoSender) -> Self {
         let mut roots = Self {
@@ -124,14 +140,18 @@ impl RequestHandler {
         let (tx, rx) = transport.split();
 
         let handler = Self {
+            #[cfg(not(feature = "proto-2026-07-28-rc"))]
             roots: Roots::new(options, &tx),
             counter: AtomicI64::new(1),
             pending: RequestQueue::new(options.timeout),
             sender: tx,
             timeout: options.timeout,
+            #[cfg(not(feature = "proto-2026-07-28-rc"))]
             sampling_handler: options.sampling_handler.clone(),
             elicitation_handler: options.elicitation_handler.clone(),
             notification_handler: options.notification_handler.clone(),
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            trace_context_provider: options.trace_context_provider.clone(),
             #[cfg(feature = "tasks")]
             tasks: Arc::new(TaskTracker::new()),
         };
@@ -161,6 +181,14 @@ impl RequestHandler {
     /// Sends a request to MCP server
     #[inline]
     pub(super) async fn send_request(&mut self, request: Request) -> Result<Response, Error> {
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let mut request = request;
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        if let Some(provider) = self.trace_context_provider.as_ref()
+            && let Some(tc) = provider()
+        {
+            inject_trace_context(&mut request, tc.traceparent, tc.tracestate);
+        }
         let id = request.id();
         let receiver = self.pending.push(&id);
         if let Err(err) = self.sender.send(request.into()).await {
@@ -191,6 +219,10 @@ impl RequestHandler {
     /// `Message::Batch` in a single transport write, and returns a receiver
     /// per request (in input order). [`MessageEnvelope::Notification`] items
     /// are included in the wire payload but produce no receiver slot.
+    ///
+    /// > **Note:** under `proto-2026-07-28-rc`, batched requests are not
+    /// > yet routed through the trace-context provider. Only single-request
+    /// > sends inject `_meta.traceparent`/`tracestate`.
     ///
     /// # Errors
     /// - [`ErrorCode::InvalidRequest`] if `items` is empty (enforced by [`MessageBatch`])
@@ -245,6 +277,7 @@ impl RequestHandler {
     }
 
     /// Updates [`Root`] cache
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     pub(super) fn notify_roots_changed(&mut self, roots: Vec<Root>) {
         self.roots.update(roots);
     }
@@ -253,7 +286,9 @@ impl RequestHandler {
     fn start(self, mut rx: TransportProtoReceiver) -> Self {
         let pending = self.pending.clone();
         let mut sender = self.sender.clone();
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
         let roots = self.roots.inner.clone();
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
         let sampling_handler = self.sampling_handler.clone();
         let elicitation_handler = self.elicitation_handler.clone();
         let notification_handler = self.notification_handler.clone();
@@ -268,7 +303,9 @@ impl RequestHandler {
                     Message::Request(req) => {
                         let resp = dispatch_request(
                             req,
+                            #[cfg(not(feature = "proto-2026-07-28-rc"))]
                             &roots,
+                            #[cfg(not(feature = "proto-2026-07-28-rc"))]
                             &sampling_handler,
                             &elicitation_handler,
                             #[cfg(feature = "tasks")]
@@ -303,7 +340,9 @@ impl RequestHandler {
                         // individual messages.
                         let responses = dispatch_batch_deferred(
                             deferred,
+                            #[cfg(not(feature = "proto-2026-07-28-rc"))]
                             &roots,
+                            #[cfg(not(feature = "proto-2026-07-28-rc"))]
                             &sampling_handler,
                             &elicitation_handler,
                             &notification_handler,
@@ -331,8 +370,8 @@ impl RequestHandler {
 #[inline]
 async fn dispatch_batch_deferred(
     deferred: Vec<MessageEnvelope>,
-    roots: &Arc<RwLock<Vec<Root>>>,
-    sampling_handler: &Option<SamplingHandler>,
+    #[cfg(not(feature = "proto-2026-07-28-rc"))] roots: &Arc<RwLock<Vec<Root>>>,
+    #[cfg(not(feature = "proto-2026-07-28-rc"))] sampling_handler: &Option<SamplingHandler>,
     elicitation_handler: &Option<ElicitationHandler>,
     notification_handler: &Option<Arc<NotificationsHandler>>,
     #[cfg(feature = "tasks")] tasks: &Arc<TaskTracker>,
@@ -345,7 +384,9 @@ async fn dispatch_batch_deferred(
             MessageEnvelope::Request(req) => Some(MessageEnvelope::Response(
                 dispatch_request(
                     req,
+                    #[cfg(not(feature = "proto-2026-07-28-rc"))]
                     roots,
+                    #[cfg(not(feature = "proto-2026-07-28-rc"))]
                     sampling_handler,
                     elicitation_handler,
                     #[cfg(feature = "tasks")]
@@ -378,13 +419,14 @@ async fn send_response_impl(sender: &mut TransportProtoSender, resp: Response) {
 #[inline]
 async fn dispatch_request(
     req: Request,
-    roots: &Arc<RwLock<Vec<Root>>>,
-    sampling_handler: &Option<SamplingHandler>,
+    #[cfg(not(feature = "proto-2026-07-28-rc"))] roots: &Arc<RwLock<Vec<Root>>>,
+    #[cfg(not(feature = "proto-2026-07-28-rc"))] sampling_handler: &Option<SamplingHandler>,
     elicitation_handler: &Option<ElicitationHandler>,
     #[cfg(feature = "tasks")] tasks: &Arc<TaskTracker>,
 ) -> Response {
     let req_id = req.id();
     match req.method.as_str() {
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
         crate::types::sampling::commands::CREATE => {
             handle_sampling(
                 req,
@@ -403,6 +445,7 @@ async fn dispatch_request(
             )
             .await
         }
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
         crate::types::root::commands::LIST => handle_roots(req, roots).await,
         #[cfg(feature = "tasks")]
         crate::types::task::commands::RESULT => get_task_result(req, tasks).await,
@@ -426,11 +469,12 @@ async fn dispatch_notification(
     if let Some(h) = handler {
         h.notify(notification).await
     } else {
-        #[cfg(feature = "tracing")]
+        #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
         notification.write();
     }
 }
 
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 #[inline]
 async fn handle_roots(req: Request, roots: &Arc<RwLock<Vec<Root>>>) -> Response {
     let roots = {
@@ -441,7 +485,7 @@ async fn handle_roots(req: Request, roots: &Arc<RwLock<Vec<Root>>>) -> Response 
 }
 
 #[inline]
-#[cfg(not(feature = "tasks"))]
+#[cfg(all(not(feature = "tasks"), not(feature = "proto-2026-07-28-rc")))]
 async fn handle_sampling(req: Request, handler: &Option<SamplingHandler>) -> Response {
     let id = req.id();
     if let Some(handler) = &handler {
@@ -465,7 +509,7 @@ async fn handle_sampling(req: Request, handler: &Option<SamplingHandler>) -> Res
 }
 
 #[inline]
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
 async fn handle_sampling(
     req: Request,
     handler: &Option<SamplingHandler>,
@@ -670,10 +714,32 @@ fn validate_batch_ids(items: &[MessageEnvelope]) -> Result<(), Error> {
     Ok(())
 }
 
+/// Injects W3C Trace Context headers (`traceparent`, optional `tracestate`)
+/// into the request's `_meta` object. Silently no-ops when `params` is
+/// non-object (e.g., a raw scalar/array — MCP requests use objects).
+#[cfg(feature = "proto-2026-07-28-rc")]
+fn inject_trace_context(request: &mut Request, traceparent: String, tracestate: Option<String>) {
+    use serde_json::{Value, json};
+    let params = request.params.get_or_insert_with(|| json!({}));
+    let Some(obj) = params.as_object_mut() else {
+        return;
+    };
+    let meta = obj.entry("_meta").or_insert_with(|| json!({}));
+    let Some(meta_obj) = meta.as_object_mut() else {
+        return;
+    };
+    meta_obj.insert("traceparent".into(), Value::String(traceparent));
+    if let Some(ts) = tracestate {
+        meta_obj.insert("tracestate".into(), Value::String(ts));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     use std::pin::Pin;
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     use tokio::time::Instant;
 
     #[tokio::test]
@@ -720,6 +786,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     async fn batch_requests_are_dispatched_concurrently() {
         use crate::types::sampling::{CreateMessageRequestParams, CreateMessageResult};
         use tokio::time::Duration;
@@ -846,6 +913,46 @@ mod tests {
             panic!("expected error response")
         };
         assert_eq!(err.error.code, ErrorCode::InvalidParams);
+    }
+
+    #[test]
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    fn inject_trace_context_writes_to_meta() {
+        use serde_json::json;
+        let mut req = Request::new(
+            Some(RequestId::Number(1)),
+            "tools/call",
+            Some(json!({"name": "echo"})),
+        );
+        super::inject_trace_context(&mut req, "tp".into(), Some("ts".into()));
+        let params = req.params.as_ref().unwrap();
+        let meta = params.get("_meta").unwrap();
+        assert_eq!(meta["traceparent"], json!("tp"));
+        assert_eq!(meta["tracestate"], json!("ts"));
+    }
+
+    #[test]
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    fn inject_trace_context_omits_tracestate_when_none() {
+        use serde_json::json;
+        let mut req = Request::new(Some(RequestId::Number(1)), "ping", None::<()>);
+        super::inject_trace_context(&mut req, "tp".into(), None);
+        let meta = req.params.as_ref().unwrap().get("_meta").unwrap();
+        assert_eq!(meta["traceparent"], json!("tp"));
+        assert!(meta.get("tracestate").is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    fn inject_trace_context_noop_on_non_object_params() {
+        use serde_json::json;
+        let mut req = Request::new(
+            Some(RequestId::Number(1)),
+            "tools/call",
+            Some(json!([1, 2, 3])),
+        );
+        super::inject_trace_context(&mut req, "tp".into(), None);
+        assert_eq!(req.params.as_ref().unwrap(), &json!([1, 2, 3]));
     }
 
     #[test]

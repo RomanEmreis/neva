@@ -23,17 +23,20 @@ use crate::types::{
 
 #[cfg(feature = "tasks")]
 use crate::shared::{TaskHandle, TaskTracker};
-#[cfg(feature = "tracing")]
+#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
 use crate::types::notification::LoggingLevel;
 #[cfg(feature = "tasks")]
 use crate::types::{ServerTasksCapability, Task, TaskPayload};
 
-#[cfg(feature = "tracing")]
+#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
 use tracing_subscriber::{Registry, filter::LevelFilter, reload::Handle};
 
-#[cfg(any(feature = "tracing", feature = "tasks"))]
+#[cfg(any(
+    feature = "tasks",
+    all(feature = "tracing", not(feature = "proto-2026-07-28-rc"))
+))]
 use crate::error::Error;
-#[cfg(feature = "tracing")]
+#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
 use crate::error::ErrorCode;
 
 /// Represents MCP server options that are available in runtime
@@ -79,7 +82,7 @@ pub struct McpOptions {
     tasks_capability: Option<ServerTasksCapability>,
 
     /// The last logging level set by the client
-    #[cfg(feature = "tracing")]
+    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
     log_level: Option<Handle<LevelFilter, Registry>>,
 
     /// An MCP version that server supports
@@ -97,6 +100,21 @@ pub struct McpOptions {
     /// Currently running tasks
     #[cfg(feature = "tasks")]
     pub(super) tasks: TaskTracker,
+
+    /// HMAC key signing MRTR `requestState`. Defaults to an ephemeral random
+    /// key; multi-instance stateless deployments must set a shared secret via
+    /// [`crate::App::with_request_state_secret`].
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    request_state_secret: Arc<[u8]>,
+
+    /// TTL (seconds) embedded into MRTR `requestState`.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    request_state_ttl_secs: u64,
+
+    /// Max encoded `requestState` blob length (bytes) before the server
+    /// rejects the round-trip with "requestState too large".
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    max_state_bytes: usize,
 }
 
 impl Debug for McpOptions {
@@ -114,7 +132,7 @@ impl Debug for McpOptions {
         #[cfg(feature = "tasks")]
         dbg.field("tasks_capability", &self.tasks_capability);
 
-        #[cfg(feature = "tracing")]
+        #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
         dbg.field("log_level", &self.log_level);
 
         dbg.finish()
@@ -142,10 +160,23 @@ impl Default for McpOptions {
             requests: Default::default(),
             resource_subscriptions: Default::default(),
             middlewares: None,
-            #[cfg(feature = "tracing")]
+            #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
             log_level: Default::default(),
             #[cfg(feature = "tasks")]
             tasks: TaskTracker::new(),
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            request_state_secret: {
+                // Ephemeral random key from two v4 UUIDs (16 bytes each).
+                // Non-panicking; sufficient for single-instance/dev.
+                let mut key = [0u8; 32];
+                key[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+                key[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+                Arc::from(&key[..])
+            },
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            request_state_ttl_secs: 300,
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            max_state_bytes: 8 * 1024,
         }
     }
 }
@@ -270,14 +301,26 @@ impl McpOptions {
     }
 
     /// Configures a `tracing_subscriber::reload::Handle` that allows changing the [`LoggingLevel`] at runtime
-    #[cfg(feature = "tracing")]
+    #[cfg_attr(
+        not(feature = "proto-2026-07-28-rc"),
+        deprecated(
+            note = "MCP server-side logging is removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
+        )
+    )]
+    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
     pub fn with_logging(mut self, log_handle: Handle<LevelFilter, Registry>) -> Self {
         self.log_level = Some(log_handle);
         self
     }
 
     /// Sets the [`LoggingLevel`]
-    #[cfg(feature = "tracing")]
+    #[cfg_attr(
+        not(feature = "proto-2026-07-28-rc"),
+        deprecated(
+            note = "MCP server-side logging is removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
+        )
+    )]
+    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
     pub fn set_log_level(&self, level: LoggingLevel) -> Result<(), Error> {
         if let Some(handle) = &self.log_level {
             handle
@@ -288,7 +331,7 @@ impl McpOptions {
     }
 
     /// Returns current log level
-    #[cfg(feature = "tracing")]
+    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
     pub(crate) fn log_level(&self) -> Option<LoggingLevel> {
         match &self.log_level {
             None => None,
@@ -573,6 +616,36 @@ impl McpOptions {
             .is_some_and(|tools| tools.call.is_some())
     }
 
+    /// Sets the shared secret used to sign MRTR `requestState`.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) fn set_request_state_secret(&mut self, key: &[u8]) {
+        self.request_state_secret = Arc::from(key);
+    }
+
+    /// Returns the MRTR `requestState` signing key.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) fn request_state_secret(&self) -> &[u8] {
+        &self.request_state_secret
+    }
+
+    /// Returns the MRTR `requestState` TTL in seconds.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) fn request_state_ttl_secs(&self) -> u64 {
+        self.request_state_ttl_secs
+    }
+
+    /// Sets the max encoded `requestState` size in bytes.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) fn set_max_state_bytes(&mut self, bytes: usize) {
+        self.max_state_bytes = bytes;
+    }
+
+    /// Returns the max encoded `requestState` size in bytes.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) fn max_state_bytes(&self) -> usize {
+        self.max_state_bytes
+    }
+
     /// Turns [`McpOptions`] into [`RuntimeMcpOptions`]
     pub(crate) fn into_runtime(mut self) -> RuntimeMcpOptions {
         self.tools = self.tools.into_runtime();
@@ -702,7 +775,7 @@ mod tests {
         let mut options = McpOptions::default();
 
         let handler = |_: Uri| async move {
-            Err::<ResourceContents, _>(Error::from(ErrorCode::ResourceNotFound))
+            Err::<ResourceContents, _>(Error::from(ErrorCode::RESOURCE_NOT_FOUND))
         };
 
         options.add_resource_template(
@@ -846,7 +919,7 @@ mod tests {
         let mut options = McpOptions::default();
 
         let handler = |_: Uri| async move {
-            Err::<ResourceContents, _>(Error::from(ErrorCode::ResourceNotFound))
+            Err::<ResourceContents, _>(Error::from(ErrorCode::RESOURCE_NOT_FOUND))
         };
 
         options.add_resource_template(

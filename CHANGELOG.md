@@ -5,6 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+* New compile-time feature flag `proto-2026-07-28-rc` enabling the MCP Release Candidate spec 2026-07-28 wire format. Opt-in only; the legacy spec remains the default.
+* `neva::types::schema_2020::InputSchema` — `#[serde(transparent)]` newtype around `serde_json::Value`, holding full JSON Schema 2020-12 documents verbatim. Ships with `from_value`, `from_json_str`, `from_schema::<T>()`, `from_schemars`, `as_value`, and `into_value`.
+* `neva::types::ToolInputSchema` — per-flag type alias that resolves to `tool::ToolSchema` under the legacy spec and to `schema_2020::InputSchema` under `proto-2026-07-28-rc`. Use this alias in code that constructs or accepts tool schemas so the same call site compiles under either flag.
+* `ToolSchema::from_value(Value) -> Result<Self, Error>` — fallible Value constructor, mirroring `InputSchema::from_value`.
+* `ToolSchema::from_schema::<T: JsonSchema>()` — generic constructor symmetric with `InputSchema::from_schema::<T>()`.
+* `ToolSchema::from_schemars(schemars::Schema)` — non-generic constructor renamed for symmetry with `InputSchema::from_schemars`.
+* `neva::types::CacheScope` and `ttlMs` / `cacheScope` fields on the four MCP list results (tools / prompts / resources / resource templates), per the RC spec's caching hints.
+* RC-only routing headers (`Mcp-Session-Id` / routing hints) injected into the HTTP POST send loop, plus a `routing_hints` helper on the client transport.
+* `traceparent` / `tracestate` fields on `RequestParamsMeta` and a client-side `TraceContextProvider` hook (RC only), with matching server-side span `record`.
+* `ErrorCode::RESOURCE_NOT_FOUND` constant — emits `-32002` (legacy `ResourceNotFound`) or `-32602` (`InvalidParams`) per the active spec version. All in-tree emitters of "resource not found" route through this constant so the wire code automatically follows the active flag.
+* The `#[tool]` proc-macro now emits JSON Schema 2020-12 `inputSchema` / `outputSchema` under `proto-2026-07-28-rc`: primitive arguments map to inline primitive schemas, structured `Json<T>` arguments derive a rich, inlined schema when the inner `T` implements `JsonSchema` (graceful `{"type":"object"}` fallback otherwise), and the return type drives `outputSchema`. Explicit `input_schema` / `output_schema` string literals are now validated at compile time (on every feature configuration). `schemars` need not be a direct dependency of the user crate — it is re-exported by neva.
+* Stateless HTTP transport (RC only): the `initialize` / `initialized` handshake is replaced by a new `server/discover` request returning `neva::types::DiscoverResult`. The client gains `Client::discover()` (with `Client::init()` kept as a back-compat alias so existing `connect()` flows keep working).
+* A required `MCP-Protocol-Version` request header (RC only) on every HTTP POST. The client injects it automatically; the server rejects a missing or unsupported value with JSON-RPC `InvalidRequest`.
+* Client implementation info is now carried in each request's `_meta` under `io.modelcontextprotocol/clientInfo` (RC only), merged non-destructively with any existing `_meta` (e.g. `traceparent`).
+* Multi Round-Trip Requests (MRTR) for elicitation under `proto-2026-07-28-rc`: a server handler can call `ctx.elicit(key, params).await?`; the framework returns an `InputRequiredResult` (`neva::types::mrtr`) carrying an HMAC-SHA256-signed `requestState`, and the client — driving its configured elicitation handler — re-issues the original request with `inputResponses` until the call completes, fully statelessly. `requestState` is integrity-protected and bound to a TTL, the originating request, and the authenticated principal (`Claims::subject`). Configure the signing key via `App::with_request_state_secret`; an ephemeral key is generated otherwise (multi-instance deployments MUST set a shared one). New (RC-only) dependencies: `hmac`, `sha2`.
+* Replay-aware effect helpers on `Context` for MRTR handlers (`proto-2026-07-28-rc`): `ctx.once(key, fut)` runs a side effect at most once across rounds; `ctx.memo(key, fut)` computes-and-caches a value into the signed `requestState`; `ctx.on_commit(fut)` registers an effect that runs exactly once when the handler reaches its final (non-`input_required`) result. These are at-most-once within a single `requestState` chain — not durable or globally exactly-once — so pair non-idempotent effects with a downstream idempotency key (see the `once`/`on_commit` docs).
+* `App::with_max_state_bytes` / `McpOptions::max_state_bytes` (`proto-2026-07-28-rc`): caps the encoded `requestState` size (default 8 KiB); a round-trip that would exceed it returns a "requestState too large" error instead of emitting an oversized blob.
+
+### Changed
+
+* Under `proto-2026-07-28-rc`, `Context::elicit` takes a stable `key` argument (`ctx.elicit(key, params)`) and follows the MRTR re-run/replay model instead of blocking on a push channel; handlers must be side-effect-free up to each elicit point. `Claims` gains an additive `subject()` accessor (default `None`) used to bind MRTR `requestState` to the authenticated principal.
+* `Tool.input_schema` and `Tool.output_schema` now use the per-flag `ToolInputSchema` alias instead of the typed `ToolSchema` directly. Under `proto-2026-07-28-rc` these fields carry a Value-shaped `InputSchema`; under the legacy spec they continue to carry `ToolSchema`.
+* `Tool::validate(&CallToolResponse)` now extracts the schema as `serde_json::Value` (via `as_value()` under RC, `serde_json::to_value(&...)` under legacy) before invoking the JSON Schema validator, so the same validator path covers both spec flavours.
+* Server completion logic now walks Value-shaped schemas under RC (no compile-time field access on a typed struct).
+* `PROTOCOL_VERSIONS` advertises `"2026-07-28"` only when the RC flag is enabled; the stable versions remain unconditionally listed.
+* CI matrix extended with `proto-2026-07-28-rc` paired with `server-full client-full`, covered by clippy, doc, and test jobs.
+* Under `proto-2026-07-28-rc` the HTTP transport is request/response only: no `Mcp-Session-Id` is emitted or required on the wire, the GET (SSE) and DELETE routes are not registered, and server-initiated notifications (progress, resource-updated, list-changed, task-status, elicitation) are inert — `Context` notification helpers become no-ops, so clients poll (`tools/list`, `resources/read`, `server/discover`) instead. The session id is still minted internally to keep the per-request correlation key collision-free.
+
+### Deprecated
+
+* `ErrorCode::ResourceNotFound` — use the helper constant `ErrorCode::RESOURCE_NOT_FOUND` instead. Under RC this maps to `InvalidParams` per the spec; under the legacy spec it maps to `-32002` for backwards compatibility.
+* `Client::add_root`, `Client::add_roots`, `Client::publish_roots_changed`, `Client::map_sampling` — `roots/list`, `notifications/roots/list_changed`, and `sampling/createMessage` are removed in MCP 2026-07-28. The methods remain available under the legacy spec and are completely absent (cfg-gated out) under `proto-2026-07-28-rc`.
+* `McpOptions::with_logging` and the server-emitted `notifications/message` / `logging/setLevel` handlers — server-side logging is removed in MCP 2026-07-28. Available under the legacy spec; absent under `proto-2026-07-28-rc`.
+* `ToolSchema::from_schema(schemars::Schema)` — renamed to `from_schemars` for symmetry with `InputSchema::from_schemars`. The previous name remains available as `from_schema_legacy` with `#[deprecated]` so legacy code keeps compiling during the transition.
+
+### Removed under `proto-2026-07-28-rc`
+
+* `roots/list` request, `notifications/roots/list_changed` notification, and the `Root` / `Roots` types.
+* `sampling/createMessage` request, the `SamplingHandler` / `SamplingTaskCapability` types, and the `sampling!` proc-macro re-export.
+* `logging/setLevel` request, `notifications/message` notification, `LoggingLevel` / `LogMessage` / `SetLevelRequestParams` types, and the `NotificationFormatter` helper.
+* The typed `ToolSchema` struct (and its `from_json_str` / `with_required` builder methods) — replaced by the Value-shaped `InputSchema`.
+
+### Known limitations
+
+* The `#[tool]` macro's `annotations = "…"` attribute (and the `#[prompt]` / `#[resource]` JSON-string attributes) still parse at runtime via `from_json_str` and panic on malformed JSON; compile-time validation there is a planned follow-up. The `#[tool]` `input_schema` / `output_schema` literals are already validated at compile time.
+* `cargo check --no-default-features --features client` (without `--all-targets`) still fails on `tokio::task::block_in_place` because the `client` feature alone does not pull in `tokio/rt-multi-thread`. This is a pre-existing tokio-features issue (independent of this changeset). CI runs the `--all-targets` variant — which pulls dev-deps and therefore `rt-multi-thread` — and remains green.
+
 ## 0.3.4
 
 ### Changed

@@ -2,6 +2,8 @@
 
 use crate::transport::http::ServiceUrl;
 use once_cell::sync::OnceCell;
+use std::sync::Arc;
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 use std::sync::RwLock;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -10,27 +12,34 @@ use tokio_util::sync::CancellationToken;
 pub(super) struct McpSession {
     initialized: Notify,
     sse_ready: Notify,
-    url: ServiceUrl,
+    url: Arc<str>,
     session_id: OnceCell<uuid::Uuid>,
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     last_event_id: RwLock<Option<String>>,
     cancellation_token: CancellationToken,
 }
 
 impl McpSession {
-    /// Creates a new [`McpSession`]
+    /// Creates a new [`McpSession`].
+    ///
+    /// The request URL is assembled once here (after all client configuration,
+    /// including TLS, has settled in [`ServiceUrl`]) and cached as an
+    /// [`Arc<str>`], so the per-request POST/GET paths borrow it directly
+    /// instead of re-formatting the URL on every call.
     pub(super) fn new(url: ServiceUrl, token: CancellationToken) -> Self {
         Self {
             initialized: Notify::new(),
             sse_ready: Notify::new(),
             session_id: OnceCell::new(),
+            #[cfg(not(feature = "proto-2026-07-28-rc"))]
             last_event_id: RwLock::new(None),
             cancellation_token: token,
-            url,
+            url: Arc::from(url.to_url()),
         }
     }
 
-    /// Returns a reference to the current MCP Session's [`ServiceUrl`]
-    pub(super) fn url(&self) -> &ServiceUrl {
+    /// Returns the pre-assembled request URL for this session.
+    pub(super) fn url(&self) -> &str {
         &self.url
     }
 
@@ -58,11 +67,13 @@ impl McpSession {
     }
 
     /// Returns the last received SSE event ID, if any
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     pub(super) fn last_event_id(&self) -> Option<String> {
         self.last_event_id.read().ok().and_then(|g| g.clone())
     }
 
     /// Updates the last received SSE event ID
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     pub(super) fn set_last_event_id(&self, id: String) {
         if let Ok(mut guard) = self.last_event_id.write() {
             *guard = Some(id);
@@ -76,12 +87,14 @@ impl McpSession {
     }
 
     /// Sends a signal that the SSE-connection has been initialized
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     #[inline]
     pub(super) fn notify_sse_initialized(&self) {
         self.sse_ready.notify_one();
     }
 
     /// Waits for MCP Session to be initialized
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     #[inline]
     pub(super) async fn initialized(&self) {
         self.initialized.notified().await;
@@ -98,7 +111,9 @@ impl McpSession {
 mod tests {
     use super::*;
     use crate::transport::http::HttpProto;
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     use std::sync::Arc;
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     use tokio::time::{Duration, timeout};
     use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
@@ -106,8 +121,8 @@ mod tests {
     fn create_session() -> McpSession {
         let url = ServiceUrl {
             proto: HttpProto::Http,
-            addr: "localhost",
-            endpoint: "init",
+            addr: "localhost".to_string(),
+            endpoint: "init".to_string(),
         };
         let token = CancellationToken::new();
         McpSession::new(url, token)
@@ -116,8 +131,8 @@ mod tests {
     #[tokio::test]
     async fn it_has_url() {
         let session = create_session();
-        assert_eq!(session.url().addr, "localhost");
-        assert_eq!(session.url().endpoint, "init");
+        // The full URL is assembled once and cached: proto://addr + endpoint.
+        assert_eq!(session.url(), "http://localhostinit");
     }
 
     #[tokio::test]
@@ -140,12 +155,14 @@ mod tests {
         assert_eq!(session.session_id(), Some(&id));
     }
 
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     #[test]
     fn it_returns_none_last_event_id_by_default() {
         let session = create_session();
         assert!(session.last_event_id().is_none());
     }
 
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     #[test]
     fn it_sets_and_gets_last_event_id() {
         let session = create_session();
@@ -153,6 +170,7 @@ mod tests {
         assert_eq!(session.last_event_id(), Some("abc-123".to_string()));
     }
 
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     #[test]
     fn it_overwrites_last_event_id_on_each_set() {
         let session = create_session();
@@ -174,6 +192,7 @@ mod tests {
         assert_ne!(session.session_id(), Some(&id2));
     }
 
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     #[tokio::test]
     async fn it_notifies_and_initialized() {
         let session = Arc::new(create_session());

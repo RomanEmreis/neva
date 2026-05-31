@@ -73,17 +73,37 @@ pub mod shared;
 pub mod transport;
 pub mod types;
 
+#[cfg(feature = "client-macros")]
+pub use neva_macros::elicitation;
 #[cfg(feature = "macros")]
 pub use neva_macros::json_schema;
+#[cfg(all(feature = "client-macros", not(feature = "proto-2026-07-28-rc")))]
+pub use neva_macros::sampling;
 #[cfg(feature = "server-macros")]
 pub use neva_macros::{completion, handler, prompt, resource, resources, tool};
-#[cfg(feature = "client-macros")]
-pub use neva_macros::{elicitation, sampling};
 
 pub(crate) const SDK_NAME: &str = "neva";
 #[cfg(any(feature = "server", feature = "client"))]
-pub(crate) const PROTOCOL_VERSIONS: [&str; 4] =
-    ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"];
+pub(crate) const PROTOCOL_VERSIONS: &[&str] = &[
+    "2024-11-05",
+    "2025-03-26",
+    "2025-06-18",
+    "2025-11-25",
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    "2026-07-28",
+];
+
+// Mutual-exclusion guard for `proto-*` generation flags.
+//
+// One pairwise `all(...)` lives in the `any(...)` body for every pair of
+// `proto-*` flags. Today only one such flag exists, so the body is empty
+// and the guard is dormant (`cfg(any())` with no operands evaluates to
+// `false`). When a second `proto-*` flag is introduced, append
+// `all(feature = "proto-A", feature = "proto-B")` to the list.
+#[cfg(any(
+    // all(feature = "proto-2026-07-28-rc", feature = "proto-2027-XX-XX-rc"),
+))]
+compile_error!("Only one `proto-*` feature flag may be enabled per build");
 
 #[cfg(feature = "http-server")]
 pub mod auth {
@@ -150,6 +170,15 @@ pub mod json {
     pub use schemars::JsonSchema;
 }
 
+/// Internal re-exports used by `neva_macros`-generated code. Not public API.
+#[cfg(feature = "proto-2026-07-28-rc")]
+#[doc(hidden)]
+pub mod __macro_support {
+    pub use crate::types::schema_2020::{
+        SchemaProbe, ViaFallback, ViaJsonSchema, object_schema, primitive_subschema,
+    };
+}
+
 pub mod prelude {
     //! Prelude with commonly used items
 
@@ -177,16 +206,55 @@ pub mod prelude {
     #[cfg(feature = "client")]
     pub use crate::client::Client;
 
+    #[cfg(feature = "client-macros")]
+    pub use crate::elicitation;
     #[cfg(feature = "macros")]
     pub use crate::json_schema;
+    #[cfg(all(feature = "client-macros", not(feature = "proto-2026-07-28-rc")))]
+    pub use crate::sampling;
     #[cfg(feature = "server-macros")]
     pub use crate::{completion, handler, prompt, resource, resources, tool};
-    #[cfg(feature = "client-macros")]
-    pub use crate::{elicitation, sampling};
 
     #[cfg(feature = "di")]
     pub use crate::di::Dc;
 
     #[cfg(feature = "tasks")]
     pub use crate::shared::TaskApi;
+}
+
+#[cfg(test)]
+#[cfg(any(feature = "server", feature = "client"))]
+mod proto_versions_tests {
+    use super::PROTOCOL_VERSIONS;
+
+    #[test]
+    fn rc_version_listed_only_under_flag() {
+        let has_rc = PROTOCOL_VERSIONS.contains(&"2026-07-28");
+        let flag_on = cfg!(feature = "proto-2026-07-28-rc");
+        assert_eq!(has_rc, flag_on, "RC version listing must match the flag");
+    }
+
+    #[test]
+    fn stable_versions_always_listed() {
+        // Stable versions are PROTOCOL_VERSIONS minus the RC entry (when enabled).
+        // Future stable additions land in PROTOCOL_VERSIONS and are automatically
+        // covered by this test — no need to update the test when new versions
+        // are advertised.
+        let stable: Vec<_> = PROTOCOL_VERSIONS
+            .iter()
+            .filter(|v| **v != "2026-07-28")
+            .copied()
+            .collect();
+        assert!(
+            !stable.is_empty(),
+            "PROTOCOL_VERSIONS must always advertise at least one stable version"
+        );
+        // The set must include 2024-11-05 (the inaugural MCP version) — this is
+        // a stronger invariant: even if we ever retire intermediate versions,
+        // the original SHOULD remain for backwards compatibility.
+        assert!(
+            stable.contains(&"2024-11-05"),
+            "PROTOCOL_VERSIONS must always advertise the inaugural MCP version 2024-11-05"
+        );
+    }
 }

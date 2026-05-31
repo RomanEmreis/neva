@@ -3,17 +3,24 @@
 //! bound to an ephemeral port. Asserts session-id round-trip and basic
 //! response shape.
 
-#![cfg(all(feature = "http-server-volga", feature = "http-client"))]
+// Exercises the stateful session model (init handshake, Mcp-Session-Id
+// round-trip, DELETE termination), which is replaced by the stateless
+// transport under `proto-2026-07-28-rc` (see `stateless_http_rc.rs`).
+#![cfg(all(
+    feature = "http-server-volga",
+    feature = "http-client",
+    not(feature = "proto-2026-07-28-rc")
+))]
 
 use neva::App;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn volga_engine_round_trip() {
     let port = pick_free_port();
-    let addr = Box::leak(format!("127.0.0.1:{port}").into_boxed_str()) as &'static str;
+    let addr = format!("127.0.0.1:{port}");
 
     let mut app =
-        App::new().with_options(|opt| opt.with_http(|http| http.bind(addr).with_endpoint("/mcp")));
+        App::new().with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")));
 
     app.map_tool("ping", || async move { "pong".to_string() });
 

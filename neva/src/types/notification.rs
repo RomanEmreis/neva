@@ -9,6 +9,7 @@ use crate::{
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 pub use log_message::{LogMessage, LoggingLevel, SetLevelRequestParams};
 
 #[cfg(feature = "server")]
@@ -16,13 +17,14 @@ use crate::app::handler::{FromHandlerParams, HandlerParams};
 
 pub use progress::ProgressNotification;
 
-#[cfg(feature = "tracing")]
+#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
 pub use formatter::NotificationFormatter;
 
-#[cfg(feature = "tracing")]
+#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
 pub mod fmt;
-#[cfg(feature = "tracing")]
+#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
 mod formatter;
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 mod log_message;
 mod progress;
 
@@ -35,6 +37,7 @@ pub mod commands {
     pub const CANCELLED: &str = "notifications/cancelled";
 
     /// Notification name that indicates that a new log message has been received.
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     pub const MESSAGE: &str = "notifications/message";
 
     /// Notification name that indicates that a progress notification has been received.
@@ -44,6 +47,7 @@ pub mod commands {
     pub const STDERR: &str = "notifications/stderr";
 
     /// Command name that sets the log level.
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     pub const SET_LOG_LEVEL: &str = "logging/setLevel";
 }
 
@@ -140,7 +144,7 @@ impl Notification {
 
     /// Writes the [`Notification`]
     #[inline]
-    #[cfg(feature = "tracing")]
+    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
     pub fn write(self) {
         let is_stderr = self.is_stderr();
         let Some(params) = self.params else {
@@ -162,7 +166,7 @@ impl Notification {
         self.method.as_str() == commands::STDERR
     }
 
-    /// Writes the [`Notification`] as [`LoggingLevel::Error`]
+    /// Writes the [`Notification`] as an error-level log entry.
     #[inline]
     #[cfg(feature = "tracing")]
     pub fn write_err(self) {

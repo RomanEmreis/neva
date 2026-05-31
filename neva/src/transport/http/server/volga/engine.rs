@@ -125,8 +125,13 @@ impl HttpEngine for VolgaEngine {
             .map_err(handle_http_error)
             .group(endpoint.as_str(), |mcp| {
                 mcp.map_post("/", routes::post);
-                mcp.map_get("/", routes::get);
-                mcp.map_delete("/", routes::delete);
+                // Stateless RC transport has no SSE GET stream and no
+                // session-termination DELETE — only POST is routed.
+                #[cfg(not(feature = "proto-2026-07-28-rc"))]
+                {
+                    mcp.map_get("/", routes::get);
+                    mcp.map_delete("/", routes::delete);
+                }
             });
 
         if let Err(e) = server.run().await {
