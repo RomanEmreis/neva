@@ -9,7 +9,12 @@
     feature = "http-client"
 ))]
 
-use neva::{App, Context, error::Error, types::elicitation::ElicitRequestParams};
+use neva::{
+    App, Context,
+    client::Client,
+    error::Error,
+    types::elicitation::{ElicitRequestParams, ElicitResult},
+};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_elicits_then_completes_over_two_rounds() {
@@ -414,6 +419,93 @@ async fn eliciting_without_declared_capability_is_rejected() {
         "elicitation without declared capability must be rejected: {r1}"
     );
 
+    handle.abort();
+}
+
+// Separate counters from the reqwest `effectful` tool so the two tests can run
+// in parallel without racing on shared process-global state.
+static C_FETCHES: AtomicUsize = AtomicUsize::new(0);
+static C_CHARGES: AtomicUsize = AtomicUsize::new(0);
+static C_RECEIPTS: AtomicUsize = AtomicUsize::new(0);
+
+/// Real end-to-end: the neva MCP **client** (not raw reqwest) drives the whole
+/// MRTR loop — `connect()` runs `server/discover`, `call_tool` enters
+/// `run_with_mrtr`, and the registered elicitation handler answers the
+/// server's request transparently across the round-trip.
+#[tokio::test(flavor = "multi_thread")]
+async fn client_drives_mrtr_elicitation_end_to_end() {
+    C_FETCHES.store(0, Ordering::SeqCst);
+    C_CHARGES.store(0, Ordering::SeqCst);
+    C_RECEIPTS.store(0, Ordering::SeqCst);
+
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("client_effectful", |mut ctx: Context| async move {
+        let price: i32 = ctx
+            .memo("quote", async {
+                C_FETCHES.fetch_add(1, Ordering::SeqCst);
+                Ok(42)
+            })
+            .await?;
+        ctx.once("charge", async {
+            C_CHARGES.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await?;
+        ctx.on_commit(async {
+            C_RECEIPTS.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
+            .with_required("name", "string")
+            .into();
+        let res = ctx.elicit("name", params).await?;
+        let name = res
+            .content
+            .and_then(|c| c.get("name").and_then(|v| v.as_str().map(str::to_owned)))
+            .unwrap_or_else(|| "stranger".into());
+        Ok::<String, Error>(format!("hello {name}, charged at {price}"))
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // The client declares `clientCapabilities.elicitation` automatically because
+    // an elicitation handler is registered; the handler answers every prompt.
+    let mut client = Client::new()
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+    client.map_elicitation(|_params: ElicitRequestParams| async move {
+        ElicitResult::accept().with_content(serde_json::json!({ "name": "octocat" }))
+    });
+    client.connect().await.expect("client connects");
+
+    let resp = client
+        .call_tool("client_effectful", ())
+        .await
+        .expect("tool call completes through the MRTR loop");
+
+    let text = resp
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.as_str());
+    assert_eq!(
+        text,
+        Some("hello octocat, charged at 42"),
+        "client should receive the final, memoized result"
+    );
+    assert!(!resp.is_error, "final result must not be an error");
+
+    // The whole loop ran once front-to-back: effect once, memo once, commit once.
+    assert_eq!(C_FETCHES.load(Ordering::SeqCst), 1, "memo computed once");
+    assert_eq!(C_CHARGES.load(Ordering::SeqCst), 1, "once ran once");
+    assert_eq!(C_RECEIPTS.load(Ordering::SeqCst), 1, "commit fired once");
+
+    client.disconnect().await.ok();
     handle.abort();
 }
 
