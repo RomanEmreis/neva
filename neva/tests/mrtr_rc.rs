@@ -476,8 +476,8 @@ async fn client_drives_mrtr_elicitation_end_to_end() {
 
     // The client declares `clientCapabilities.elicitation` automatically because
     // an elicitation handler is registered; the handler answers every prompt.
-    let mut client = Client::new()
-        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+    let mut client =
+        Client::new().with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
     client.map_elicitation(|_params: ElicitRequestParams| async move {
         ElicitResult::accept().with_content(serde_json::json!({ "name": "octocat" }))
     });

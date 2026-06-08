@@ -194,7 +194,7 @@ impl StdIoClient {
             windows::Job::new(options.command, &options.args).expect("Failed to handshake");
         #[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
         let mut child = tokio::process::Command::new(options.command)
-            .args(options.args)
+            .args(&options.args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
