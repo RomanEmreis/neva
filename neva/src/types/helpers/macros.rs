@@ -63,5 +63,18 @@ impl_type_category!(GetPromptRequestParams, PropertyType::None);
 impl_type_category!(Meta<T>, T, PropertyType::None);
 impl_type_category!(crate::Context, PropertyType::None);
 
+// DI extractor: injected from the request context, never a tool/prompt argument.
+// Implemented manually (not via `impl_type_category!`) because `Dc<T>` carries a
+// `T: Send + Sync` bound the macro form cannot express.
+#[cfg(feature = "di")]
+impl<T: Send + Sync> super::sealed::TypeCategorySealed for crate::di::Dc<T> {}
+#[cfg(feature = "di")]
+impl<T: Send + Sync> TypeCategory for crate::di::Dc<T> {
+    #[inline]
+    fn category() -> PropertyType {
+        PropertyType::None
+    }
+}
+
 impl_type_category!(Value, PropertyType::Object);
 impl_type_category!(Json<T>, T, PropertyType::Object);

@@ -129,6 +129,7 @@ pub(super) fn get_arg_type(t: &Type) -> &str {
                 "Vec" => "array",
                 "Context" => "none",
                 "Meta" => "none",
+                "Dc" => "none",
                 "Result" => "none",
                 "Option" => "none",
                 "Uri" => "string",

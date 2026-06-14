@@ -53,6 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * `logging/setLevel` request, `notifications/message` notification, `LoggingLevel` / `LogMessage` / `SetLevelRequestParams` types, and the `NotificationFormatter` helper.
 * The typed `ToolSchema` struct (and its `from_json_str` / `with_required` builder methods) — replaced by the Value-shaped `InputSchema`.
 
+### Fixed
+
+* `Dc<T>` dependency-injection extractors now work as handler arguments for tools and prompts (previously they only worked for resources). The injected dependency was classified as an unknown `"object"` type, so it failed the `TypeCategory` bound on `map_tool` / `map_prompt` (or, via the macros, was advertised as a required input argument). `Dc<_>` is now treated like `Context` / `Meta<_>` — injected from the request context and never listed as an argument.
+
 ### Known limitations
 
 * The `#[tool]` macro's `annotations = "…"` attribute (and the `#[prompt]` / `#[resource]` JSON-string attributes) still parse at runtime via `from_json_str` and panic on malformed JSON; compile-time validation there is a planned follow-up. The `#[tool]` `input_schema` / `output_schema` literals are already validated at compile time.
