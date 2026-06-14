@@ -17,6 +17,11 @@ use crate::{
 
 pub(crate) const RELATED_TASK_KEY: &str = "io.modelcontextprotocol/related-task";
 
+/// Reverse-DNS id of the Tasks extension (MCP 2026-07-28 RC). Under the RC flag
+/// the tasks capability is advertised under `capabilities.extensions[this id]`.
+#[cfg(feature = "proto-2026-07-28-rc")]
+pub(crate) const TASKS_EXTENSION_ID: &str = "io.modelcontextprotocol/tasks";
+
 const DEFAULT_TTL: usize = 30000;
 
 /// List of commands for Tasks

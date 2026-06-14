@@ -886,13 +886,33 @@ impl Client {
         self.options.tasks_capability.as_ref().is_some()
     }
 
+    /// Resolves the server's tasks capability from the negotiated server
+    /// capabilities. Pre-RC it is the top-level `tasks` field; under
+    /// `proto-2026-07-28-rc` tasks are an extension, so it is read from
+    /// `capabilities.extensions["io.modelcontextprotocol/tasks"]`.
+    #[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
+    fn server_tasks_capability(&self) -> Option<crate::types::ServerTasksCapability> {
+        self.server_capabilities
+            .as_ref()
+            .and_then(|c| c.tasks.clone())
+    }
+
+    /// Resolves the server's tasks capability from the negotiated server
+    /// capabilities (extension form, MCP 2026-07-28 RC).
+    #[cfg(all(feature = "tasks", feature = "proto-2026-07-28-rc"))]
+    fn server_tasks_capability(&self) -> Option<crate::types::ServerTasksCapability> {
+        self.server_capabilities
+            .as_ref()
+            .and_then(|c| c.extensions.as_ref())
+            .and_then(|ext| ext.get(crate::types::task::TASKS_EXTENSION_ID))
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+
     /// Returns whether the server has task augmentation capabilities
     #[inline]
     #[cfg(feature = "tasks")]
     fn is_server_supports_tasks(&self) -> bool {
-        self.server_capabilities
-            .as_ref()
-            .is_some_and(|c| c.tasks.is_some())
+        self.server_tasks_capability().is_some()
     }
 
     /// Returns whether the client supports cancelling tasks
@@ -909,9 +929,7 @@ impl Client {
     #[inline]
     #[cfg(feature = "tasks")]
     fn is_server_support_cancelling_tasks(&self) -> bool {
-        self.server_capabilities
-            .as_ref()
-            .and_then(|c| c.tasks.as_ref())
+        self.server_tasks_capability()
             .is_some_and(|c| c.cancel.is_some())
     }
 
@@ -919,9 +937,7 @@ impl Client {
     #[inline]
     #[cfg(feature = "tasks")]
     fn is_server_support_task_list(&self) -> bool {
-        self.server_capabilities
-            .as_ref()
-            .and_then(|c| c.tasks.as_ref())
+        self.server_tasks_capability()
             .is_some_and(|c| c.list.is_some())
     }
 
@@ -939,11 +955,9 @@ impl Client {
     #[inline]
     #[cfg(feature = "tasks")]
     fn is_server_support_call_tool_with_tasks(&self) -> bool {
-        self.server_capabilities
-            .as_ref()
-            .and_then(|c| c.tasks.as_ref())
-            .and_then(|c| c.requests.as_ref())
-            .and_then(|r| r.tools.as_ref())
+        self.server_tasks_capability()
+            .and_then(|c| c.requests)
+            .and_then(|r| r.tools)
             .is_some_and(|t| t.call.is_some())
     }
 

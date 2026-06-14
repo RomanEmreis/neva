@@ -31,9 +31,22 @@ pub struct ClientCapabilities {
     pub elicitation: Option<ElicitationCapability>,
 
     /// Present if the client supports task-augmented requests.
-    #[cfg(feature = "tasks")]
+    ///
+    /// Under `proto-2026-07-28-rc`, tasks become an extension; this top-level
+    /// field is replaced by an entry in [`Self::extensions`] keyed by
+    /// `io.modelcontextprotocol/tasks`.
+    #[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tasks: Option<ClientTasksCapability>,
+
+    /// Protocol extensions the client supports (MCP 2026-07-28 RC).
+    ///
+    /// Keyed by reverse-DNS extension id (e.g. `io.modelcontextprotocol/tasks`)
+    /// mapping to that extension's capability value. Replaces the former
+    /// top-level `tasks` capability under the RC flag.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<HashMap<String, serde_json::Value>>,
 
     /// Gets or sets experimental, non-standard capabilities that the client supports.
     ///
@@ -173,9 +186,22 @@ pub struct ServerCapabilities {
     pub completions: Option<CompletionsCapability>,
 
     /// Present if the server supports task-augmented requests.
-    #[cfg(feature = "tasks")]
+    ///
+    /// Under `proto-2026-07-28-rc`, tasks become an extension; this top-level
+    /// field is replaced by an entry in [`Self::extensions`] keyed by
+    /// `io.modelcontextprotocol/tasks`.
+    #[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tasks: Option<ServerTasksCapability>,
+
+    /// Protocol extensions the server supports (MCP 2026-07-28 RC).
+    ///
+    /// Keyed by reverse-DNS extension id (e.g. `io.modelcontextprotocol/tasks`)
+    /// mapping to that extension's capability value. Replaces the former
+    /// top-level `tasks` capability under the RC flag.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<HashMap<String, serde_json::Value>>,
 
     /// Indicates experimental, non-standard capabilities that the server supports.
     ///

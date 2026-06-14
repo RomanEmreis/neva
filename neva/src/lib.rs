@@ -51,6 +51,10 @@
 //! # }
 //! ```
 
+#[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+pub use app::extension::Extension;
+#[cfg(all(feature = "server", feature = "proto-2026-07-28-rc", feature = "tasks"))]
+pub use app::extension::TasksExtension;
 #[cfg(feature = "server")]
 pub use app::{App, context::Context};
 #[cfg(feature = "client")]
@@ -198,6 +202,10 @@ pub mod prelude {
         HttpContext, HttpEngine, HttpRequest, HttpResponse, HttpServer, SseResponse, handlers,
     };
 
+    #[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+    pub use crate::app::extension::Extension;
+    #[cfg(all(feature = "server", feature = "proto-2026-07-28-rc", feature = "tasks"))]
+    pub use crate::app::extension::TasksExtension;
     #[cfg(feature = "server")]
     pub use crate::app::{App, context::Context, options};
     #[cfg(feature = "server")]

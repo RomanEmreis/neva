@@ -815,8 +815,7 @@ impl DiscoverResult {
                 resources: options.resources_capability(),
                 prompts: options.prompts_capability(),
                 completions: Some(CompletionsCapability::default()),
-                #[cfg(feature = "tasks")]
-                tasks: options.tasks_capability(),
+                extensions: options.extensions(),
                 experimental: None,
             },
             server_info: options.implementation.clone(),

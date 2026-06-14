@@ -81,6 +81,12 @@ pub struct McpOptions {
     #[cfg(feature = "tasks")]
     tasks_capability: Option<ServerTasksCapability>,
 
+    /// Registered protocol extensions (MCP 2026-07-28 RC), keyed by reverse-DNS
+    /// id mapping to the extension's advertised capability value. Surfaced in
+    /// `DiscoverResult` under `capabilities.extensions`.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    extensions: std::collections::HashMap<String, serde_json::Value>,
+
     /// The last logging level set by the client
     #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
     log_level: Option<Handle<LevelFilter, Registry>>,
@@ -156,6 +162,8 @@ impl Default for McpOptions {
             prompts_capability: Default::default(),
             #[cfg(feature = "tasks")]
             tasks_capability: Default::default(),
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            extensions: Default::default(),
             resource_routes: Default::default(),
             requests: Default::default(),
             resource_subscriptions: Default::default(),
@@ -283,13 +291,46 @@ impl McpOptions {
     }
 
     /// Configures tasks capability
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
     pub fn with_tasks<F>(mut self, config: F) -> Self
     where
         F: FnOnce(ServerTasksCapability) -> ServerTasksCapability,
     {
         self.tasks_capability = Some(config(Default::default()));
         self
+    }
+
+    /// Configures tasks capability.
+    ///
+    /// Under `proto-2026-07-28-rc` tasks are an extension: this thin wrapper
+    /// keeps the existing ergonomics while registering the capability through
+    /// [`crate::app::extension::TasksExtension`] so it surfaces under
+    /// `capabilities.extensions["io.modelcontextprotocol/tasks"]`.
+    #[cfg(all(feature = "tasks", feature = "proto-2026-07-28-rc"))]
+    pub fn with_tasks<F>(mut self, config: F) -> Self
+    where
+        F: FnOnce(ServerTasksCapability) -> ServerTasksCapability,
+    {
+        use crate::app::extension::{Extension, TasksExtension};
+        let capability = config(Default::default());
+        self.tasks_capability = Some(capability.clone());
+        let ext = TasksExtension::new(capability);
+        self.register_extension(ext.id(), ext.capability());
+        self
+    }
+
+    /// Records an extension's advertised capability under its reverse-DNS id
+    /// (MCP 2026-07-28 RC). Used by [`crate::App::with_extension`] and by the
+    /// `with_tasks` thin wrapper.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) fn register_extension(&mut self, id: &str, capability: serde_json::Value) {
+        self.extensions.insert(id.into(), capability);
+    }
+
+    /// Sets the server tasks capability directly (used by the extension path).
+    #[cfg(all(feature = "tasks", feature = "proto-2026-07-28-rc"))]
+    pub(crate) fn set_tasks_capability(&mut self, capability: ServerTasksCapability) {
+        self.tasks_capability = Some(capability);
     }
 
     /// Specifies request timeout
@@ -550,9 +591,23 @@ impl McpOptions {
     /// Returns [`ServerTasksCapability`] if configured.
     ///
     /// Otherwise, returns `None`.
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
     pub(crate) fn tasks_capability(&self) -> Option<ServerTasksCapability> {
         self.tasks_capability.clone()
+    }
+
+    /// Returns the registered protocol extensions as a capability map
+    /// (MCP 2026-07-28 RC), or `None` when no extension is registered so the
+    /// `capabilities.extensions` field is omitted on the wire.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) fn extensions(
+        &self,
+    ) -> Option<std::collections::HashMap<String, serde_json::Value>> {
+        if self.extensions.is_empty() {
+            None
+        } else {
+            Some(self.extensions.clone())
+        }
     }
 
     /// Returns whether the server is configured to send the "notifications/resources/updated"

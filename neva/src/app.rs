@@ -50,6 +50,8 @@ use volga_di::{Container, ContainerBuilder};
 
 mod collection;
 pub mod context;
+#[cfg(feature = "proto-2026-07-28-rc")]
+pub mod extension;
 mod greeter;
 pub(crate) mod handler;
 pub mod options;
@@ -323,6 +325,31 @@ impl App {
     #[cfg(feature = "proto-2026-07-28-rc")]
     pub fn with_max_state_bytes(mut self, bytes: usize) -> Self {
         self.options.set_max_state_bytes(bytes);
+        self
+    }
+
+    /// Registers a protocol [`Extension`](crate::app::extension::Extension)
+    /// (MCP 2026-07-28 RC).
+    ///
+    /// Records the extension's capability under its reverse-DNS id (surfaced by
+    /// `server/discover` under `capabilities.extensions`) and lets it register
+    /// its request handlers. This is the generic entry point for extensions;
+    /// the built-in Tasks extension is also reachable through `with_tasks`.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(all(feature = "proto-2026-07-28-rc", feature = "tasks"))] {
+    /// use neva::App;
+    /// use neva::app::extension::TasksExtension;
+    /// use neva::types::ServerTasksCapability;
+    /// let app = App::new()
+    ///     .with_extension(TasksExtension::new(ServerTasksCapability::default()));
+    /// # }
+    /// ```
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub fn with_extension<E: crate::app::extension::Extension>(mut self, ext: E) -> Self {
+        self.options.register_extension(ext.id(), ext.capability());
+        ext.register(&mut self);
         self
     }
 
