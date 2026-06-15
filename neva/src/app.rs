@@ -1123,7 +1123,7 @@ impl App {
                         mrtr_principal,
                     )
                     .map(|ir| ir.into_response(req_id.clone()))
-                } else if resp.is_ok() {
+                } else if mrtr_should_commit(&resp) {
                     // Final round: run deferred commits in registration order.
                     // The first Err becomes the response error.
                     let commits = arc
@@ -1320,6 +1320,23 @@ fn build_input_required(
     Ok(InputRequiredResult::elicitation(key, params, state))
 }
 
+/// Returns `true` only when `resp` is a genuine success that should trigger the
+/// final round's deferred MRTR commits.
+///
+/// A protocol-level failure (`Err`, or an `Ok(Response::Err(..))`) is excluded
+/// by construction. Crucially, so is an *in-band* tool error: tool/prompt
+/// wrappers fold a handler `Err` into `Ok(CallToolResponse { isError: true })`,
+/// so a plain `resp.is_ok()` check would still run commits on a failed call —
+/// applying irreversible side effects (DB writes, charges) registered via
+/// `ctx.on_commit(..)` even though the tool ultimately reported failure.
+#[cfg(feature = "proto-2026-07-28-rc")]
+fn mrtr_should_commit(resp: &Result<Response, Error>) -> bool {
+    match resp {
+        Ok(Response::Ok(ok)) => ok.result.get("isError") != Some(&serde_json::Value::Bool(true)),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::App;
@@ -1336,6 +1353,45 @@ mod tests {
     fn with_max_state_bytes_sets_the_option() {
         let app = App::new().with_max_state_bytes(4096);
         assert_eq!(app.options.max_state_bytes(), 4096);
+    }
+
+    /// Deferred MRTR commits must run only for a genuine success — never for a
+    /// protocol-level error nor for an in-band tool error (`isError: true`),
+    /// which tool wrappers fold a handler `Err` into.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[test]
+    fn mrtr_should_commit_excludes_errors() {
+        use crate::error::Error;
+        use crate::types::{RequestId, Response};
+        use serde_json::json;
+
+        let id = RequestId::Number(1);
+
+        // Genuine success → commit.
+        let ok = Ok(Response::success(
+            id.clone(),
+            json!({ "content": [], "isError": false }),
+        ));
+        assert!(super::mrtr_should_commit(&ok));
+
+        // Success with no `isError` field at all (e.g. a non-tool result) → commit.
+        let plain = Ok(Response::success(id.clone(), json!({ "ok": true })));
+        assert!(super::mrtr_should_commit(&plain));
+
+        // In-band tool error folded into Ok → do NOT commit.
+        let tool_err = Ok(Response::success(
+            id.clone(),
+            json!({ "content": [], "isError": true }),
+        ));
+        assert!(!super::mrtr_should_commit(&tool_err));
+
+        // Protocol-level error response → do NOT commit.
+        let proto_err = Ok(Response::error(id.clone(), Error::new(-32603, "boom")));
+        assert!(!super::mrtr_should_commit(&proto_err));
+
+        // Handler `Err` → do NOT commit.
+        let hard_err: Result<Response, Error> = Err(Error::new(-32603, "boom"));
+        assert!(!super::mrtr_should_commit(&hard_err));
     }
 
     /// Security guards in [`super::seed_mrtr_ctx`] that the e2e happy path never
