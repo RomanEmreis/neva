@@ -55,6 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* Under `proto-2026-07-28-rc`, applying client metadata to a request no longer drops custom `_meta` entries. The client previously round-tripped `_meta` through the typed `RequestParamsMeta` (which ignores unknown keys) and replaced the whole object, so caller-supplied extension keys (e.g. `com.example/foo`) were silently lost; the client fields are now merged into the existing `_meta` object instead.
+* Under `proto-2026-07-28-rc`, batched requests now carry per-request client metadata (`clientInfo` / `clientCapabilities`). Previously only single sends declared these, so a batched `tools/call` to a tool that elicits reached the server without `_meta.clientCapabilities.elicitation` and was rejected as if the client lacked elicitation support even with a handler registered.
 * `Dc<T>` dependency-injection extractors now work as handler arguments for tools and prompts (previously they only worked for resources). The injected dependency was classified as an unknown `"object"` type, so it failed the `TypeCategory` bound on `map_tool` / `map_prompt` (or, via the macros, was advertised as a required input argument). `Dc<_>` is now treated like `Context` / `Meta<_>` — injected from the request context and never listed as an argument.
 
 ### Known limitations

@@ -1060,6 +1060,19 @@ impl Client {
         req.set_meta(meta);
     }
 
+    /// Applies per-request RC client metadata (`clientInfo` /
+    /// `clientCapabilities`) to every [`Request`] in a batch. The MRTR re-run
+    /// fields (`inputResponses` / `requestState`) stay `None`: the batch path
+    /// does not drive the MRTR loop. Notifications are left untouched.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    fn apply_client_meta_to_batch(&self, items: &mut [MessageEnvelope]) {
+        for envelope in items {
+            if let MessageEnvelope::Request(req) = envelope {
+                self.apply_client_meta(req, None, None);
+            }
+        }
+    }
+
     /// Fulfils a server-requested elicitation via the configured handler.
     #[cfg(feature = "proto-2026-07-28-rc")]
     async fn fulfil_elicitation(
@@ -1154,6 +1167,19 @@ impl Client {
         items: Vec<MessageEnvelope>,
     ) -> Result<Vec<Response>, Error> {
         use futures_util::future::join_all;
+
+        // Under the RC, single sends route through `apply_client_meta`, which
+        // declares `clientInfo` + `clientCapabilities` (e.g. elicitation
+        // support) per request. Batched requests bypass that path, so a
+        // batched `tools/call` to a tool that elicits would otherwise reach the
+        // server without `_meta.clientCapabilities` and be rejected. Apply the
+        // same per-request injection here.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let items = {
+            let mut items = items;
+            self.apply_client_meta_to_batch(&mut items);
+            items
+        };
 
         let handler = self
             .handler
@@ -1382,5 +1408,44 @@ mod tests {
             result.is_err(),
             "disconnected client should return an error"
         );
+    }
+
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[test]
+    fn batch_injects_rc_client_meta_per_request() {
+        use serde_json::json;
+
+        let mut client = Client::new();
+        // Registering an elicitation handler makes the client declare
+        // `clientCapabilities.elicitation = true`.
+        client.map_elicitation(|_params: ElicitRequestParams| async { ElicitResult::accept() });
+
+        let req = Request::new(
+            Some(RequestId::Number(1)),
+            "tools/call",
+            Some(json!({ "name": "greet", "arguments": {} })),
+        );
+        let mut items = vec![
+            MessageEnvelope::Request(req),
+            // Notifications must be left untouched.
+            MessageEnvelope::Notification(Notification::new("notifications/progress", None)),
+        ];
+
+        client.apply_client_meta_to_batch(&mut items);
+
+        let MessageEnvelope::Request(req) = &items[0] else {
+            panic!("first item must be a request");
+        };
+        let meta = &req.params.as_ref().expect("params present")["_meta"];
+        // Without this injection a batched eliciting tools/call is rejected as
+        // if the client did not support elicitation.
+        assert_eq!(meta["clientCapabilities"]["elicitation"], json!(true));
+        assert!(meta["io.modelcontextprotocol/clientInfo"].is_object());
+
+        // The notification carries no params/_meta.
+        let MessageEnvelope::Notification(notif) = &items[1] else {
+            panic!("second item must be a notification");
+        };
+        assert!(notif.params.is_none());
     }
 }

@@ -205,21 +205,28 @@ impl Request {
             .and_then(|meta| serde_json::from_value(meta).ok())
     }
 
-    /// Writes `_meta` into the request `params`, creating the params object
-    /// when none exists. Symmetric counterpart to [`Self::meta`]; existing
-    /// (non-`_meta`) params keys are preserved.
+    /// Merges `meta` into the request's `_meta`, creating the params/`_meta`
+    /// objects when none exist. Symmetric counterpart to [`Self::meta`];
+    /// existing (non-`_meta`) params keys are preserved, as are any `_meta`
+    /// entries the typed [`RequestParamsMeta`] does not model — e.g. custom
+    /// extension keys such as `com.example/foo` — which a full replacement
+    /// would silently drop. Only the fields populated on `meta` are written;
+    /// unset (`None`) fields leave any existing entry untouched.
     #[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
     pub(crate) fn set_meta(&mut self, meta: RequestParamsMeta) {
-        let Ok(meta) = serde_json::to_value(meta) else {
+        let Ok(serde_json::Value::Object(fields)) = serde_json::to_value(meta) else {
             return;
         };
         match self.params {
-            Some(serde_json::Value::Object(ref mut map)) => {
-                map.insert("_meta".to_owned(), meta);
-            }
+            Some(serde_json::Value::Object(ref mut map)) => match map.get_mut("_meta") {
+                Some(serde_json::Value::Object(existing)) => existing.extend(fields),
+                _ => {
+                    map.insert("_meta".to_owned(), serde_json::Value::Object(fields));
+                }
+            },
             _ => {
                 let mut map = serde_json::Map::new();
-                map.insert("_meta".to_owned(), meta);
+                map.insert("_meta".to_owned(), serde_json::Value::Object(fields));
                 self.params = Some(serde_json::Value::Object(map));
             }
         }
@@ -282,5 +289,38 @@ mod tests {
         assert!(got.request_state.is_none());
         // pre-existing params keys are untouched.
         assert_eq!(req.params.expect("params present")["x"], json!(1));
+    }
+
+    #[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+    #[test]
+    fn set_meta_preserves_unknown_meta_entries() {
+        use serde_json::json;
+        // A caller-supplied `_meta` carrying a custom extension key the typed
+        // `RequestParamsMeta` does not model.
+        let mut req = Request::new(
+            Some(RequestId::Number(1)),
+            "tools/call",
+            Some(json!({ "name": "echo", "_meta": { "com.example/foo": 1 } })),
+        );
+        let meta = RequestParamsMeta {
+            client_info: Some(crate::types::Implementation {
+                name: "c".into(),
+                version: "9".into(),
+                icons: None,
+            }),
+            ..Default::default()
+        };
+        req.set_meta(meta);
+
+        let params = req.params.expect("params present");
+        // Custom extension key survives the merge.
+        assert_eq!(params["_meta"]["com.example/foo"], json!(1));
+        // Newly applied client field is present alongside it.
+        assert_eq!(
+            params["_meta"]["io.modelcontextprotocol/clientInfo"]["name"],
+            json!("c")
+        );
+        // Sibling params keys are untouched.
+        assert_eq!(params["name"], json!("echo"));
     }
 }

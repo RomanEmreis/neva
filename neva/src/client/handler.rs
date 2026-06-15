@@ -220,8 +220,11 @@ impl RequestHandler {
     /// per request (in input order). [`MessageEnvelope::Notification`] items
     /// are included in the wire payload but produce no receiver slot.
     ///
-    /// > **Note:** under `proto-2026-07-28-rc`, batched requests are not
-    /// > yet routed through the trace-context provider. Only single-request
+    /// > **Note:** under `proto-2026-07-28-rc`, per-request client metadata
+    /// > (`clientInfo` / `clientCapabilities`) is injected upstream by
+    /// > [`Client::call_batch`](crate::client::Client::call_batch). Trace
+    /// > context is not: batched requests are
+    /// > not routed through the trace-context provider, so only single-request
     /// > sends inject `_meta.traceparent`/`tracestate`.
     ///
     /// # Errors
