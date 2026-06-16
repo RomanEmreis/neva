@@ -77,11 +77,6 @@ pub(super) struct RequestHandler {
     /// Represents a hash map of notification handlers
     notification_handler: Option<Arc<NotificationsHandler>>,
 
-    /// Optional W3C Trace Context provider, invoked before each outbound
-    /// request to populate `_meta.traceparent`/`_meta.tracestate`.
-    #[cfg(feature = "proto-2026-07-28-rc")]
-    trace_context_provider: Option<crate::client::options::TraceContextProvider>,
-
     /// Task tracker for client sampling tasks.
     #[cfg(feature = "tasks")]
     tasks: Arc<TaskTracker>,
@@ -150,8 +145,6 @@ impl RequestHandler {
             sampling_handler: options.sampling_handler.clone(),
             elicitation_handler: options.elicitation_handler.clone(),
             notification_handler: options.notification_handler.clone(),
-            #[cfg(feature = "proto-2026-07-28-rc")]
-            trace_context_provider: options.trace_context_provider.clone(),
             #[cfg(feature = "tasks")]
             tasks: Arc::new(TaskTracker::new()),
         };
@@ -181,14 +174,6 @@ impl RequestHandler {
     /// Sends a request to MCP server
     #[inline]
     pub(super) async fn send_request(&mut self, request: Request) -> Result<Response, Error> {
-        #[cfg(feature = "proto-2026-07-28-rc")]
-        let mut request = request;
-        #[cfg(feature = "proto-2026-07-28-rc")]
-        if let Some(provider) = self.trace_context_provider.as_ref()
-            && let Some(tc) = provider()
-        {
-            inject_trace_context(&mut request, tc.traceparent, tc.tracestate);
-        }
         let id = request.id();
         let receiver = self.pending.push(&id);
         if let Err(err) = self.sender.send(request.into()).await {
@@ -221,11 +206,12 @@ impl RequestHandler {
     /// are included in the wire payload but produce no receiver slot.
     ///
     /// > **Note:** under `proto-2026-07-28-rc`, per-request client metadata
-    /// > (`clientInfo` / `clientCapabilities`) is injected upstream by
-    /// > [`Client::call_batch`](crate::client::Client::call_batch). Trace
-    /// > context is not: batched requests are
-    /// > not routed through the trace-context provider, so only single-request
-    /// > sends inject `_meta.traceparent`/`tracestate`.
+    /// > (`clientInfo` / `clientCapabilities`, plus `_meta.traceparent` /
+    /// > `tracestate` when a trace-context provider is installed) is injected
+    /// > upstream by
+    /// > [`Client::call_batch`](crate::client::Client::call_batch) via the same
+    /// > assembly path single sends use, so batched requests carry the same
+    /// > metadata.
     ///
     /// # Errors
     /// - [`ErrorCode::InvalidRequest`] if `items` is empty (enforced by [`MessageBatch`])
@@ -717,26 +703,6 @@ fn validate_batch_ids(items: &[MessageEnvelope]) -> Result<(), Error> {
     Ok(())
 }
 
-/// Injects W3C Trace Context headers (`traceparent`, optional `tracestate`)
-/// into the request's `_meta` object. Silently no-ops when `params` is
-/// non-object (e.g., a raw scalar/array — MCP requests use objects).
-#[cfg(feature = "proto-2026-07-28-rc")]
-fn inject_trace_context(request: &mut Request, traceparent: String, tracestate: Option<String>) {
-    use serde_json::{Value, json};
-    let params = request.params.get_or_insert_with(|| json!({}));
-    let Some(obj) = params.as_object_mut() else {
-        return;
-    };
-    let meta = obj.entry("_meta").or_insert_with(|| json!({}));
-    let Some(meta_obj) = meta.as_object_mut() else {
-        return;
-    };
-    meta_obj.insert("traceparent".into(), Value::String(traceparent));
-    if let Some(ts) = tracestate {
-        meta_obj.insert("tracestate".into(), Value::String(ts));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -916,46 +882,6 @@ mod tests {
             panic!("expected error response")
         };
         assert_eq!(err.error.code, ErrorCode::InvalidParams);
-    }
-
-    #[test]
-    #[cfg(feature = "proto-2026-07-28-rc")]
-    fn inject_trace_context_writes_to_meta() {
-        use serde_json::json;
-        let mut req = Request::new(
-            Some(RequestId::Number(1)),
-            "tools/call",
-            Some(json!({"name": "echo"})),
-        );
-        super::inject_trace_context(&mut req, "tp".into(), Some("ts".into()));
-        let params = req.params.as_ref().unwrap();
-        let meta = params.get("_meta").unwrap();
-        assert_eq!(meta["traceparent"], json!("tp"));
-        assert_eq!(meta["tracestate"], json!("ts"));
-    }
-
-    #[test]
-    #[cfg(feature = "proto-2026-07-28-rc")]
-    fn inject_trace_context_omits_tracestate_when_none() {
-        use serde_json::json;
-        let mut req = Request::new(Some(RequestId::Number(1)), "ping", None::<()>);
-        super::inject_trace_context(&mut req, "tp".into(), None);
-        let meta = req.params.as_ref().unwrap().get("_meta").unwrap();
-        assert_eq!(meta["traceparent"], json!("tp"));
-        assert!(meta.get("tracestate").is_none());
-    }
-
-    #[test]
-    #[cfg(feature = "proto-2026-07-28-rc")]
-    fn inject_trace_context_noop_on_non_object_params() {
-        use serde_json::json;
-        let mut req = Request::new(
-            Some(RequestId::Number(1)),
-            "tools/call",
-            Some(json!([1, 2, 3])),
-        );
-        super::inject_trace_context(&mut req, "tp".into(), None);
-        assert_eq!(req.params.as_ref().unwrap(), &json!([1, 2, 3]));
     }
 
     #[test]

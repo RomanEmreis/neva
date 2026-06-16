@@ -1039,6 +1039,12 @@ impl Client {
 
     /// Sets `clientInfo` + MRTR capability `_meta` on a request, and optionally
     /// the MRTR `inputResponses` / `requestState`, preserving existing `_meta`.
+    ///
+    /// Also populates W3C Trace Context (`traceparent` / `tracestate`) from the
+    /// configured [`trace_context_provider`](crate::client::options::McpOptions::with_trace_context_provider),
+    /// when installed. This is the single assembly point for outbound RC `_meta`,
+    /// so both single sends (via [`Self::run_with_mrtr`]) and batched requests
+    /// (via [`Self::apply_client_meta_to_batch`]) carry trace context.
     #[cfg(feature = "proto-2026-07-28-rc")]
     fn apply_client_meta(
         &self,
@@ -1056,6 +1062,12 @@ impl Client {
         }
         if request_state.is_some() {
             meta.request_state = request_state;
+        }
+        if let Some(provider) = self.options.trace_context_provider.as_ref()
+            && let Some(tc) = provider()
+        {
+            meta.traceparent = Some(tc.traceparent);
+            meta.tracestate = tc.tracestate;
         }
         req.set_meta(meta);
     }
@@ -1447,5 +1459,56 @@ mod tests {
             panic!("second item must be a notification");
         };
         assert!(notif.params.is_none());
+    }
+
+    /// A configured trace-context provider is invoked during RC metadata
+    /// assembly, so `_meta.traceparent`/`tracestate` reach the wire alongside
+    /// `clientInfo` — for both single sends and (via the same path) batches.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[test]
+    fn apply_client_meta_injects_trace_context() {
+        use crate::client::options::TraceContext;
+        use serde_json::json;
+
+        let client = Client::new().with_options(|o| {
+            o.with_trace_context_provider(|| {
+                Some(TraceContext {
+                    traceparent: "tp".into(),
+                    tracestate: Some("ts".into()),
+                })
+            })
+        });
+
+        let mut req = Request::new(
+            Some(RequestId::Number(1)),
+            "tools/call",
+            Some(json!({ "name": "greet", "arguments": {} })),
+        );
+        client.apply_client_meta(&mut req, None, None);
+
+        let meta = &req.params.as_ref().expect("params present")["_meta"];
+        assert_eq!(meta["traceparent"], json!("tp"));
+        assert_eq!(meta["tracestate"], json!("ts"));
+        // Trace context is assembled alongside the rest of the RC metadata.
+        assert!(meta["io.modelcontextprotocol/clientInfo"].is_object());
+    }
+
+    /// With no provider installed, no trace fields are emitted.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[test]
+    fn apply_client_meta_omits_trace_context_without_provider() {
+        use serde_json::json;
+
+        let client = Client::new();
+        let mut req = Request::new(
+            Some(RequestId::Number(1)),
+            "tools/call",
+            Some(json!({ "name": "greet", "arguments": {} })),
+        );
+        client.apply_client_meta(&mut req, None, None);
+
+        let meta = &req.params.as_ref().expect("params present")["_meta"];
+        assert!(meta.get("traceparent").is_none());
+        assert!(meta.get("tracestate").is_none());
     }
 }

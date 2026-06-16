@@ -5,12 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.4.0
 
 ### Added
 
 * New compile-time feature flag `proto-2026-07-28-rc` enabling the MCP Release Candidate spec 2026-07-28 wire format. Opt-in only; the legacy spec remains the default.
-* `neva::types::schema_2020::InputSchema` — `#[serde(transparent)]` newtype around `serde_json::Value`, holding full JSON Schema 2020-12 documents verbatim. Ships with `from_value`, `from_json_str`, `from_schema::<T>()`, `from_schemars`, `as_value`, and `into_value`.
+* `neva::types::schema_2020::InputSchema` — `#[serde(transparent)]` new type around `serde_json::Value`, holding full JSON Schema 2020-12 documents verbatim. Ships with `from_value`, `from_json_str`, `from_schema::<T>()`, `from_schemars`, `as_value`, and `into_value`.
 * `neva::types::ToolInputSchema` — per-flag type alias that resolves to `tool::ToolSchema` under the legacy spec and to `schema_2020::InputSchema` under `proto-2026-07-28-rc`. Use this alias in code that constructs or accepts tool schemas so the same call site compiles under either flag.
 * `ToolSchema::from_value(Value) -> Result<Self, Error>` — fallible Value constructor, mirroring `InputSchema::from_value`.
 * `ToolSchema::from_schema::<T: JsonSchema>()` — generic constructor symmetric with `InputSchema::from_schema::<T>()`.
@@ -55,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* Under `proto-2026-07-28-rc`, outbound client requests now populate W3C Trace Context (`_meta.traceparent` / `tracestate`) from the configured trace-context provider as part of the same `_meta` assembly that writes `clientInfo` / `clientCapabilities`. Trace-context injection was consolidated into that single path, so batched requests now carry trace context too (previously only single sends did), and the provider is invoked exactly once per request.
 * Under `proto-2026-07-28-rc`, deferred MRTR commits (`ctx.on_commit(…)`) no longer run when the final tool result is an error. Tool/prompt wrappers fold a handler `Err` into an in-band `CallToolResponse { isError: true }`, which the previous `resp.is_ok()` check treated as success — so commits (e.g. a DB write or charge) ran even for a failed call. Commits now run only for a genuine success, excluding in-band tool errors and protocol-level errors.
 * Under `proto-2026-07-28-rc`, applying client metadata to a request no longer drops custom `_meta` entries. The client previously round-tripped `_meta` through the typed `RequestParamsMeta` (which ignores unknown keys) and replaced the whole object, so caller-supplied extension keys (e.g. `com.example/foo`) were silently lost; the client fields are now merged into the existing `_meta` object instead.
 * Under `proto-2026-07-28-rc`, batched requests now carry per-request client metadata (`clientInfo` / `clientCapabilities`). Previously only single sends declared these, so a batched `tools/call` to a tool that elicits reached the server without `_meta.clientCapabilities.elicitation` and was rejected as if the client lacked elicitation support even with a handler registered.
