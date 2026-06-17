@@ -18,12 +18,17 @@ use crate::{
     transport::TransportProtoSender,
     types::{
         CallToolRequestParams, CallToolResponse, GetPromptRequestParams, GetPromptResult, Message,
-        Prompt, ReadResourceRequestParams, ReadResourceResult, Request, RequestId, Resource,
+        Prompt, ReadResourceRequestParams, ReadResourceResult, Request, Resource,
         Response, Tool, ToolResult, ToolUse, Uri,
         elicitation::{ElicitRequestParams, ElicitResult, ElicitationCompleteParams},
         resource::SubscribeRequestParams,
     },
 };
+// `RequestId` is only referenced by the server→client request paths (non-RC
+// elicitation/sampling) and the task API; under the stateless RC build without
+// tasks it is unused.
+#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "tasks", test))]
+use crate::types::RequestId;
 use std::{
     collections::HashMap,
     fmt::{Debug, Formatter},
@@ -193,9 +198,16 @@ pub struct Context {
     pub(crate) options: RuntimeMcpOptions,
 
     /// Represents a queue of pending requests
+    ///
+    /// Only read by [`Context::send_request`] (server→client requests), which
+    /// the stateless RC build does not use.
+    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
     pending: RequestQueue,
 
     /// Represents a sender that depends on selected transport protocol
+    ///
+    /// See [`Self::pending`] for why this is dead under the RC.
+    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
     sender: TransportProtoSender,
 
     /// Represents a timeout for the current request
@@ -1190,7 +1202,12 @@ impl Context {
     }
 
     /// Sends a [`Request`] to a client
+    ///
+    /// Server→client requests (non-RC elicitation/sampling/roots and the task
+    /// API). The stateless RC transport has no out-of-band server→client
+    /// channel, so this is unused there.
     #[inline]
+    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
     async fn send_request(&mut self, mut req: Request) -> Result<Response, Error> {
         if let Some(session_id) = self.session_id {
             req.session_id = Some(session_id);

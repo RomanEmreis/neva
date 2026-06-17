@@ -16,6 +16,14 @@ type HmacSha256 = Hmac<Sha256>;
 pub(crate) struct StatePayload {
     /// Monotonically-growing replay log of answered inputs.
     pub answers: InputResponses,
+    /// Keys the server requested in the round that minted this state. The next
+    /// round's `inputResponses` may only answer these keys (and only ones not
+    /// already present in [`StatePayload::answers`]); anything else is unsolicited and
+    /// must be rejected, otherwise a client could pre-seed/overwrite answers
+    /// for inputs the server never asked for. Defaults to empty so legacy blobs
+    /// decode — and, by design, reject any `inputResponses` paired with them.
+    #[serde(default)]
+    pub requested: Vec<String>,
     /// Cached `ctx.memo` values, keyed by memo key.
     #[serde(default)]
     pub memos: std::collections::HashMap<String, serde_json::Value>,
@@ -107,6 +115,7 @@ mod tests {
     fn payload() -> StatePayload {
         StatePayload {
             answers: HashMap::new(),
+            requested: Vec::new(),
             memos: HashMap::new(),
             effects: std::collections::HashSet::new(),
             exp: now_secs() + 300,

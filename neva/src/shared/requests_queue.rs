@@ -27,6 +27,11 @@ const DEFAULT_REQUEST_TTL: Duration = Duration::from_secs(10);
 #[derive(Debug)]
 pub(crate) enum PendingResponse {
     /// A regular JSON-RPC response received from the peer.
+    ///
+    /// The inner `Response` is read by the client handler and by the server's
+    /// `Context::send_request`; the latter is unused under the stateless RC, so
+    /// in an RC server build without the client this field is only written.
+    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
     Response(Response),
     /// A locally generated timeout for an expired pending request.
     Timeout,
@@ -53,7 +58,12 @@ pub(crate) struct RequestHandle {
 pub(crate) struct RequestQueue {
     pending: Arc<DashMap<RequestId, RequestHandle>>,
     expirations: Arc<Mutex<BinaryHeap<RequestExpiry>>>,
+    // `next_expiry_seq` / `ttl` drive the TTL countdown started by `activate`,
+    // which only runs for outbound requests (client, or non-RC server callbacks).
+    // An RC server build without the client never activates, leaving them unread.
+    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
     next_expiry_seq: Arc<AtomicU64>,
+    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
     ttl: Duration,
 }
 
@@ -91,6 +101,7 @@ impl Ord for RequestExpiry {
 
 impl RequestHandle {
     /// Creates a new [`RequestHandle`]
+    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
     pub(super) fn new(sender: oneshot::Sender<PendingResponse>, ttl: Duration) -> Self {
         Self {
             sender,
@@ -145,7 +156,11 @@ impl RequestQueue {
 
     /// Pushes a request with [`RequestId`] to the "queue"
     /// and returns a [`oneshot::Receiver`] for the response.
+    ///
+    /// Outbound-request path (client, or non-RC server callbacks); unused by an
+    /// RC server build without the client.
     #[inline]
+    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
     pub(crate) fn push(&self, id: &RequestId) -> oneshot::Receiver<PendingResponse> {
         let (sender, receiver) = oneshot::channel();
         let mut handle = RequestHandle::new(sender, self.ttl);
@@ -155,7 +170,11 @@ impl RequestQueue {
     }
 
     /// Starts the TTL countdown for a queued request after it has been sent.
+    ///
+    /// Companion to [`Self::push`]; see it for why this is unused by an RC
+    /// server build without the client.
     #[inline]
+    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
     pub(crate) fn activate(&self, id: &RequestId) {
         if let Some(mut handle) = self.pending.get_mut(id) {
             let Some(expires_at) = (!self.ttl.is_zero()).then_some(Instant::now() + self.ttl)

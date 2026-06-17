@@ -13,3 +13,8 @@
 
 # Generated dev-certs
 cert/
+
+# Example workspaces resolve their own lock files locally. The workspace-root
+# Cargo.lock is committed for reproducible CI builds, but example lock files are
+# not tracked.
+examples/**/Cargo.lock

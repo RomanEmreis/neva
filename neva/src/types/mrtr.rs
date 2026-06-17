@@ -5,6 +5,9 @@
 //! elicitation only) before completing. See
 //! `docs/specs/2026-05-30-mrtr-design.md`.
 
+// The signed `requestState` codec is server-only: the client treats
+// `requestState` as opaque and never encodes/decodes it.
+#[cfg(feature = "server")]
 pub(crate) mod state;
 
 use serde::{Deserialize, Serialize};
@@ -90,6 +93,9 @@ pub enum ElicitationCreateMethod {
     ElicitationCreate,
 }
 
+// Server-only: only the server constructs `InputRequiredResult`; the client
+// deserializes it from the wire.
+#[cfg(feature = "server")]
 impl InputRequiredResult {
     /// Builds an `InputRequiredResult` for a single elicitation request.
     pub(crate) fn elicitation(key: String, params: ElicitRequestParams, state: String) -> Self {

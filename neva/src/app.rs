@@ -1240,6 +1240,9 @@ fn seed_mrtr_ctx(
     let mut answers = std::collections::HashMap::new();
     let mut memos = std::collections::HashMap::new();
     let mut effects = std::collections::HashSet::new();
+    // Keys the server requested in the prior round, decoded from the verified
+    // state. `None` means no valid state was supplied, so no input was solicited.
+    let mut requested: Option<Vec<String>> = None;
     if let Some(state) = meta.as_ref().and_then(|m| m.request_state.clone()) {
         let payload = StateCodec::new(options.request_state_secret()).decode(&state)?;
         if payload.exp < now_secs() {
@@ -1260,9 +1263,36 @@ fn seed_mrtr_ctx(
         answers = payload.answers;
         memos = payload.memos;
         effects = payload.effects;
+        requested = Some(payload.requested);
     }
     if let Some(responses) = meta.and_then(|m| m.input_responses) {
-        answers.extend(responses);
+        // `inputResponses` are answers to inputs the server requested in a
+        // prior round; that request set lives in the signed `requestState`.
+        // Without a verified state there is nothing to bind them to, so accept
+        // only solicited, non-duplicate keys — otherwise a client could
+        // pre-seed answers for a later `ctx.elicit` key (skipping the intended
+        // `InputRequiredResult`) or overwrite an already-resolved answer.
+        let Some(requested) = requested.as_ref() else {
+            return Err(Error::new(
+                ErrorCode::InvalidParams,
+                "inputResponses supplied without a requestState",
+            ));
+        };
+        for (key, value) in responses {
+            if answers.contains_key(&key) {
+                return Err(Error::new(
+                    ErrorCode::InvalidParams,
+                    "inputResponses re-answers an already-resolved input",
+                ));
+            }
+            if !requested.contains(&key) {
+                return Err(Error::new(
+                    ErrorCode::InvalidParams,
+                    "inputResponses contains a key the server did not request",
+                ));
+            }
+            answers.insert(key, value);
+        }
     }
 
     Ok(std::sync::Arc::new(crate::app::context::MrtrCtx {
@@ -1304,6 +1334,9 @@ fn build_input_required(
     let effects = arc.effects.lock().map(|e| e.clone()).unwrap_or_default();
     let payload = StatePayload {
         answers: arc.answers.clone(),
+        // Bind the key we are requesting into the signed state so the next
+        // round can verify the client only answers what we actually asked for.
+        requested: vec![key.clone()],
         memos,
         effects,
         exp: now_secs() + options.request_state_ttl_secs(),
@@ -1436,6 +1469,7 @@ mod tests {
         fn expired_request_state_is_rejected() {
             let payload = StatePayload {
                 answers: Default::default(),
+                requested: Default::default(),
                 memos: Default::default(),
                 effects: Default::default(),
                 exp: now_secs().saturating_sub(1), // already in the past
@@ -1454,6 +1488,7 @@ mod tests {
             // State minted for "alice" (valid, unexpired, correctly bound)...
             let payload = StatePayload {
                 answers: Default::default(),
+                requested: Default::default(),
                 memos: Default::default(),
                 effects: Default::default(),
                 exp: now_secs() + 300,
@@ -1467,6 +1502,92 @@ mod tests {
                     .expect_err("principal mismatch must be rejected");
             assert_eq!(err.code, ErrorCode::InvalidParams);
             assert!(format!("{err}").contains("principal mismatch"), "{err}");
+        }
+
+        /// Builds the `_meta` JSON with the given request state (if any) and
+        /// `inputResponses` map of key → accepted [`ElicitResult`].
+        fn request_with_responses(state: Option<&str>, response_keys: &[&str]) -> Request {
+            use crate::types::elicitation::ElicitResult;
+            let responses: serde_json::Map<String, serde_json::Value> = response_keys
+                .iter()
+                .map(|k| {
+                    (
+                        (*k).to_owned(),
+                        serde_json::to_value(ElicitResult::accept()).expect("serialize result"),
+                    )
+                })
+                .collect();
+            let mut meta = serde_json::json!({
+                "clientCapabilities": { "elicitation": true },
+                "inputResponses": responses,
+            });
+            if let Some(state) = state {
+                meta["requestState"] = serde_json::json!(state);
+            }
+            let mut params = salient();
+            params["_meta"] = meta;
+            Request::new(Some(RequestId::Number(1)), METHOD, Some(params))
+        }
+
+        fn state_with(answers: &[&str], requested: &[&str]) -> String {
+            use crate::types::elicitation::ElicitResult;
+            let answers = answers
+                .iter()
+                .map(|k| ((*k).to_owned(), ElicitResult::accept()))
+                .collect();
+            let payload = StatePayload {
+                answers,
+                requested: requested.iter().map(|k| (*k).to_owned()).collect(),
+                memos: Default::default(),
+                effects: Default::default(),
+                exp: now_secs() + 300,
+                req: request_binding(METHOD, &salient()),
+                principal: None,
+            };
+            encode(&payload)
+        }
+
+        #[test]
+        fn input_responses_without_request_state_are_rejected() {
+            // No validated state: nothing solicited these answers.
+            let req = request_with_responses(None, &["ask_name"]);
+            let err = super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), None)
+                .expect_err("unbound inputResponses must be rejected");
+            assert_eq!(err.code, ErrorCode::InvalidParams);
+            assert!(format!("{err}").contains("without a requestState"), "{err}");
+        }
+
+        #[test]
+        fn unsolicited_input_response_key_is_rejected() {
+            // State requested `ask_name`; client answers an unrelated key.
+            let state = state_with(&[], &["ask_name"]);
+            let req = request_with_responses(Some(&state), &["ask_age"]);
+            let err = super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), None)
+                .expect_err("unsolicited key must be rejected");
+            assert_eq!(err.code, ErrorCode::InvalidParams);
+            assert!(format!("{err}").contains("did not request"), "{err}");
+        }
+
+        #[test]
+        fn re_answering_a_resolved_input_is_rejected() {
+            // `ask_name` already resolved in the signed answers log; the client
+            // tries to overwrite it (even though it is also in `requested`).
+            let state = state_with(&["ask_name"], &["ask_name"]);
+            let req = request_with_responses(Some(&state), &["ask_name"]);
+            let err = super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), None)
+                .expect_err("re-answering must be rejected");
+            assert_eq!(err.code, ErrorCode::InvalidParams);
+            assert!(format!("{err}").contains("already-resolved"), "{err}");
+        }
+
+        #[test]
+        fn solicited_input_response_is_accepted() {
+            // The happy path: client answers exactly the requested key.
+            let state = state_with(&[], &["ask_name"]);
+            let req = request_with_responses(Some(&state), &["ask_name"]);
+            let ctx = super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), None)
+                .expect("solicited response must be accepted");
+            assert!(ctx.answers.contains_key("ask_name"));
         }
     }
 
