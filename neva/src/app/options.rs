@@ -258,6 +258,13 @@ impl McpOptions {
     /// Specifies Model Context Protocol version
     ///
     /// Default: last available protocol version
+    ///
+    /// Not available under `proto-2026-07-28-rc`: that flag compiles the server
+    /// as a pure 2026-07-28 RC peer (sampling/roots removed, stateless transport,
+    /// MRTR), so advertising an older version would claim a protocol the build
+    /// cannot actually serve. The RC version is fixed. When the RC graduates and
+    /// the flags invert, version selection returns under the legacy flag.
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     pub fn with_mcp_version(mut self, ver: &'static str) -> Self {
         self.protocol_ver = Some(ver);
         self

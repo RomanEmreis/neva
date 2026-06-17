@@ -33,7 +33,7 @@ pub struct ClientCapabilities {
     /// Present if the client supports task-augmented requests.
     ///
     /// Under `proto-2026-07-28-rc`, tasks become an extension; this top-level
-    /// field is replaced by an entry in [`Self::extensions`] keyed by
+    /// field is replaced by an entry in the `extensions` map keyed by
     /// `io.modelcontextprotocol/tasks`.
     #[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -188,7 +188,7 @@ pub struct ServerCapabilities {
     /// Present if the server supports task-augmented requests.
     ///
     /// Under `proto-2026-07-28-rc`, tasks become an extension; this top-level
-    /// field is replaced by an entry in [`Self::extensions`] keyed by
+    /// field is replaced by an entry in the `extensions` map keyed by
     /// `io.modelcontextprotocol/tasks`.
     #[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
     #[serde(skip_serializing_if = "Option::is_none")]

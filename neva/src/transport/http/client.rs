@@ -147,6 +147,10 @@ async fn handle_connection(
                     }
                 }
 
+                // Under the RC the protocol version is fixed: `with_mcp_version`
+                // is compiled out, so the client can only ever speak the latest
+                // (RC) version. Sending the last compiled version is therefore
+                // exactly the configured version on every request.
                 #[cfg(feature = "proto-2026-07-28-rc")]
                 {
                     resp = resp.header(

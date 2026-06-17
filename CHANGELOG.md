@@ -52,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * `sampling/createMessage` request, the `SamplingHandler` / `SamplingTaskCapability` types, and the `sampling!` proc-macro re-export.
 * `logging/setLevel` request, `notifications/message` notification, `LoggingLevel` / `LogMessage` / `SetLevelRequestParams` types, and the `NotificationFormatter` helper.
 * The typed `ToolSchema` struct (and its `from_json_str` / `with_required` builder methods) — replaced by the Value-shaped `InputSchema`.
+* `McpOptions::with_mcp_version` on both the server and client builders — the RC build is a pure 2026-07-28 peer, so the protocol version is fixed and cannot be negotiated down to a version the build cannot actually speak. Version selection returns under the legacy flag once the RC graduates.
 
 ### Security
 
@@ -59,6 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+* Under `proto-2026-07-28-rc`, the HTTP client now advertises the correct `MCP-Protocol-Version` on every POST. Previously a client could be configured (via the now-removed `with_mcp_version`) for an older version that passed discovery validation, yet every subsequent request still hardcoded the latest compiled version in the header — so any server or proxy routing/enforcing on `MCP-Protocol-Version` saw a mismatched version. With version selection fixed to the RC version under the flag, the header is the configured version by construction.
 * Under `proto-2026-07-28-rc`, building a client-only or server-only configuration no longer emits dead-code warnings. The server-only MRTR machinery (`requestState` codec, `InputRequiredResult` constructor, the input-required sentinel) is now gated on the `server` feature, and the server's client-callback request plumbing (`Context::send_request` and the request queue's outbound-request methods) is marked unused under the stateless RC where it has no caller.
 * Under `proto-2026-07-28-rc`, outbound client requests now populate W3C Trace Context (`_meta.traceparent` / `tracestate`) from the configured trace-context provider as part of the same `_meta` assembly that writes `clientInfo` / `clientCapabilities`. Trace-context injection was consolidated into that single path, so batched requests now carry trace context too (previously only single sends did), and the provider is invoked exactly once per request.
 * Under `proto-2026-07-28-rc`, deferred MRTR commits (`ctx.on_commit(…)`) no longer run when the final tool result is an error. Tool/prompt wrappers fold a handler `Err` into an in-band `CallToolResponse { isError: true }`, which the previous `resp.is_ok()` check treated as success — so commits (e.g. a DB write or charge) ran even for a failed call. Commits now run only for a genuine success, excluding in-band tool errors and protocol-level errors.
