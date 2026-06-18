@@ -212,6 +212,11 @@ impl Request {
     /// extension keys such as `com.example/foo` — which a full replacement
     /// would silently drop. Only the fields populated on `meta` are written;
     /// unset (`None`) fields leave any existing entry untouched.
+    ///
+    /// Non-object params (a scalar or array payload, e.g. from
+    /// `command("x", Some(vec![1, 2]))`) are left untouched: `_meta` has no
+    /// place on a non-object JSON-RPC params value, and replacing it would
+    /// silently drop the caller's payload, so metadata injection is skipped.
     #[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
     pub(crate) fn set_meta(&mut self, meta: RequestParamsMeta) {
         let Ok(serde_json::Value::Object(fields)) = serde_json::to_value(meta) else {
@@ -224,10 +229,20 @@ impl Request {
                     map.insert("_meta".to_owned(), serde_json::Value::Object(fields));
                 }
             },
-            _ => {
+            // No params yet: create the params object carrying just `_meta`.
+            None => {
                 let mut map = serde_json::Map::new();
                 map.insert("_meta".to_owned(), serde_json::Value::Object(fields));
                 self.params = Some(serde_json::Value::Object(map));
+            }
+            // Non-object params: preserve the caller's payload rather than
+            // overwriting it; `_meta` cannot be attached to a scalar/array.
+            Some(_) => {
+                #[cfg(feature = "tracing")]
+                tracing::debug!(
+                    logger = "neva",
+                    "skipping client _meta injection: request params are not a JSON object"
+                );
             }
         }
     }
@@ -322,5 +337,48 @@ mod tests {
         );
         // Sibling params keys are untouched.
         assert_eq!(params["name"], json!("echo"));
+    }
+
+    #[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+    #[test]
+    fn set_meta_preserves_non_object_params() {
+        use serde_json::json;
+        // A custom command with an array payload, e.g. command("x", Some(vec![1, 2])).
+        let mut req = Request::new(Some(RequestId::Number(1)), "x", Some(json!([1, 2])));
+        let meta = RequestParamsMeta {
+            client_info: Some(crate::types::Implementation {
+                name: "c".into(),
+                version: "9".into(),
+                icons: None,
+            }),
+            ..Default::default()
+        };
+        req.set_meta(meta);
+
+        // The array payload is preserved verbatim; no `_meta` object is grafted on.
+        assert_eq!(req.params, Some(json!([1, 2])));
+
+        // Same for a scalar payload.
+        let mut req = Request::new(Some(RequestId::Number(2)), "x", Some(json!("id")));
+        req.set_meta(RequestParamsMeta::default());
+        assert_eq!(req.params, Some(json!("id")));
+    }
+
+    #[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+    #[test]
+    fn set_meta_creates_params_when_absent() {
+        let mut req = Request::new(Some(RequestId::Number(1)), "x", None::<serde_json::Value>);
+        let meta = RequestParamsMeta {
+            client_info: Some(crate::types::Implementation {
+                name: "c".into(),
+                version: "9".into(),
+                icons: None,
+            }),
+            ..Default::default()
+        };
+        req.set_meta(meta);
+
+        let got = req.meta().expect("meta present");
+        assert_eq!(got.client_info.expect("client_info present").name, "c");
     }
 }

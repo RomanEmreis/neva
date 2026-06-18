@@ -55,6 +55,8 @@
 pub use app::extension::Extension;
 #[cfg(all(feature = "server", feature = "proto-2026-07-28-rc", feature = "tasks"))]
 pub use app::extension::TasksExtension;
+#[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+pub use app::mrtr_store::{InMemoryStateStore, RequestStateStore};
 #[cfg(feature = "server")]
 pub use app::{App, context::Context};
 #[cfg(feature = "client")]

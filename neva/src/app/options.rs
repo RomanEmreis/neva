@@ -133,6 +133,12 @@ pub struct McpOptions {
     /// rejects the round-trip with "requestState too large".
     #[cfg(feature = "proto-2026-07-28-rc")]
     max_state_bytes: usize,
+
+    /// Store backing MRTR final-round idempotency. Defaults to a per-process
+    /// in-memory cache; multi-instance deployments should set a shared store
+    /// via [`crate::App::with_request_state_store`].
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    request_state_store: Arc<dyn crate::app::mrtr_store::RequestStateStore>,
 }
 
 impl Debug for McpOptions {
@@ -199,6 +205,8 @@ impl Default for McpOptions {
             request_state_ttl_secs: 300,
             #[cfg(feature = "proto-2026-07-28-rc")]
             max_state_bytes: 8 * 1024,
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            request_state_store: Arc::new(crate::app::mrtr_store::InMemoryStateStore::new()),
         }
     }
 }
@@ -776,6 +784,21 @@ impl McpOptions {
     #[cfg(feature = "proto-2026-07-28-rc")]
     pub(crate) fn max_state_bytes(&self) -> usize {
         self.max_state_bytes
+    }
+
+    /// Sets the MRTR final-round idempotency store.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) fn set_request_state_store(
+        &mut self,
+        store: Arc<dyn crate::app::mrtr_store::RequestStateStore>,
+    ) {
+        self.request_state_store = store;
+    }
+
+    /// Returns the MRTR final-round idempotency store.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) fn request_state_store(&self) -> &dyn crate::app::mrtr_store::RequestStateStore {
+        self.request_state_store.as_ref()
     }
 
     /// Turns [`McpOptions`] into [`RuntimeMcpOptions`]

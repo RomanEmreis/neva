@@ -110,6 +110,136 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 static FETCHES: AtomicUsize = AtomicUsize::new(0);
 static CHARGES: AtomicUsize = AtomicUsize::new(0);
 static RECEIPTS: AtomicUsize = AtomicUsize::new(0);
+static LOST_RESPONSE_COMMITS: AtomicUsize = AtomicUsize::new(0);
+
+#[tokio::test(flavor = "multi_thread")]
+async fn final_round_replay_is_idempotent_after_a_lost_response() {
+    // The final POST commits and produces a result, but its HTTP response is
+    // "lost"; the client retries the SAME requestState + inputResponses. The
+    // server must serve the cached result without re-running the handler — so
+    // the on_commit side effect fires exactly once across both finals.
+    LOST_RESPONSE_COMMITS.store(0, Ordering::SeqCst);
+
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("greet", |mut ctx: Context| async move {
+        let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
+            .with_required("name", "string")
+            .into();
+        let res = ctx.elicit("name", params).await?;
+        let name = res
+            .content
+            .and_then(|c| c.get("name").and_then(|v| v.as_str().map(str::to_owned)))
+            .unwrap_or_else(|| "stranger".into());
+        ctx.on_commit(async move {
+            LOST_RESPONSE_COMMITS.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        Ok::<String, Error>(format!("hello {name}"))
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{addr}/mcp");
+
+    // Round 1: tools/call → input_required.
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "greet", "arguments": {},
+            "_meta": { "clientCapabilities": { "elicitation": true } } }
+    });
+    let r1: serde_json::Value = client
+        .post(&url)
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .json(&call)
+        .send()
+        .await
+        .expect("round 1 send")
+        .json()
+        .await
+        .expect("round 1 json");
+    let state = r1["result"]["requestState"]
+        .as_str()
+        .expect("requestState present")
+        .to_string();
+    let key = r1["result"]["inputRequests"]
+        .as_object()
+        .expect("inputRequests object")
+        .keys()
+        .next()
+        .expect("one input request")
+        .clone();
+
+    // The final retry, reused verbatim for both the "lost" send and the replay.
+    let retry = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": { "name": "greet", "arguments": {},
+            "_meta": {
+                "clientCapabilities": { "elicitation": true },
+                "requestState": state,
+                "inputResponses": { key: { "action": "accept", "content": { "name": "octocat" } } }
+            } }
+    });
+
+    // Round 2 (final): completes and runs the commit. Pretend the response is lost.
+    let r2: serde_json::Value = client
+        .post(&url)
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .json(&retry)
+        .send()
+        .await
+        .expect("final send")
+        .json()
+        .await
+        .expect("final json");
+    assert_eq!(
+        r2.pointer("/result/content/0/text")
+            .and_then(|v| v.as_str()),
+        Some("hello octocat"),
+        "final round must complete: {r2}"
+    );
+    assert_eq!(LOST_RESPONSE_COMMITS.load(Ordering::SeqCst), 1);
+
+    // Lost-response retry: identical requestState + inputResponses, new id.
+    let mut replay = retry.clone();
+    replay["id"] = serde_json::json!(3);
+    let r3: serde_json::Value = client
+        .post(&url)
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .json(&replay)
+        .send()
+        .await
+        .expect("replay send")
+        .json()
+        .await
+        .expect("replay json");
+
+    // Same result, the retry's own id, and the commit did NOT fire again.
+    assert_eq!(
+        r3.pointer("/result/content/0/text")
+            .and_then(|v| v.as_str()),
+        Some("hello octocat"),
+        "replay must return the cached result: {r3}"
+    );
+    assert_eq!(
+        r3["id"],
+        serde_json::json!(3),
+        "cached response adopts the retry id"
+    );
+    assert_eq!(
+        LOST_RESPONSE_COMMITS.load(Ordering::SeqCst),
+        1,
+        "on_commit must not fire again on a lost-response retry"
+    );
+
+    handle.abort();
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn effects_run_once_memo_caches_commit_fires_on_final_round() {

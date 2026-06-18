@@ -58,6 +58,8 @@ pub mod context;
 pub mod extension;
 mod greeter;
 pub(crate) mod handler;
+#[cfg(feature = "proto-2026-07-28-rc")]
+pub mod mrtr_store;
 pub mod options;
 
 const DEFAULT_PAGE_SIZE: usize = 10;
@@ -358,6 +360,40 @@ impl App {
     #[cfg(feature = "proto-2026-07-28-rc")]
     pub fn with_max_state_bytes(mut self, bytes: usize) -> Self {
         self.options.set_max_state_bytes(bytes);
+        self
+    }
+
+    /// Sets the store backing MRTR final-round idempotency
+    /// (`proto-2026-07-28-rc`).
+    ///
+    /// When the final round of an MRTR flow commits but its HTTP response is
+    /// lost, the client retries the same `requestState`; the store lets the
+    /// server return the already-computed response instead of re-running the
+    /// handler (and its [`Context::on_commit`](crate::Context::on_commit) /
+    /// [`Context::once`](crate::Context::once) side effects) a second time.
+    ///
+    /// Defaults to a per-process
+    /// [`InMemoryStateStore`](crate::app::mrtr_store::InMemoryStateStore).
+    /// **Multi-instance stateless deployments should set a shared store** (e.g.
+    /// Redis) so a retry routed to another instance still sees the committed
+    /// result — the same constraint as
+    /// [`with_request_state_secret`](Self::with_request_state_secret).
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(feature = "proto-2026-07-28-rc")] {
+    /// use neva::App;
+    /// use neva::app::mrtr_store::InMemoryStateStore;
+    /// let app = App::new().with_request_state_store(InMemoryStateStore::new());
+    /// # }
+    /// ```
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub fn with_request_state_store(
+        mut self,
+        store: impl crate::app::mrtr_store::RequestStateStore + 'static,
+    ) -> Self {
+        self.options
+            .set_request_state_store(std::sync::Arc::new(store));
         self
     }
 
@@ -1126,6 +1162,32 @@ impl App {
             (None, None)
         };
 
+        // MRTR idempotency: the incoming state's integrity tag (the segment
+        // after the `.`) keys the final-round response cache. A lost-response
+        // retry echoes the same verified blob, so a cache hit lets us return the
+        // committed result without re-running the handler (and its commits /
+        // `once` / `memo` side effects). Only committed *final* rounds are ever
+        // cached, so a hit here is by construction a replay of one.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let state_tag: Option<String> = if mrtr_method {
+            req.meta()
+                .and_then(|m| m.request_state)
+                .and_then(|blob| blob.rsplit_once('.').map(|(_, tag)| tag.to_owned()))
+        } else {
+            None
+        };
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        if let Some(tag) = state_tag.as_deref()
+            && let Some(cached) = options.request_state_store().get(tag).await
+        {
+            options.complete_request(&full_id);
+            let mut resp = cached.set_id(req_id.clone());
+            if let Some(session_id) = session_id {
+                resp = resp.set_session_id(session_id);
+            }
+            return resp;
+        }
+
         #[cfg(feature = "tracing")]
         tracing::trace!(logger = "neva", "Received: {:?}", req);
         let resp = if let Some(handler) = handlers.get(&req.method) {
@@ -1151,6 +1213,8 @@ impl App {
         // what the handler returned. The pending flag — not the sentinel error
         // — is the reliable signal, because tool/prompt/resource wrappers fold
         // a handler `Err` into an in-band error result before we see it.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let mut cache_final = false;
         #[cfg(feature = "proto-2026-07-28-rc")]
         let resp = match (mrtr_method, mrtr_arc) {
             (true, Some(arc)) => {
@@ -1181,7 +1245,13 @@ impl App {
                     }
                     match commit_err {
                         Some(e) => Err(e),
-                        None => resp,
+                        None => {
+                            // Final round committed successfully: cache its
+                            // response (below, once the id is final) so a
+                            // lost-response retry is served idempotently.
+                            cache_final = true;
+                            resp
+                        }
                     }
                 } else {
                     resp
@@ -1193,6 +1263,18 @@ impl App {
         let mut resp = resp.into_response(req_id);
         if let Some(session_id) = session_id {
             resp = resp.set_session_id(session_id);
+        }
+        // Record the committed final response under the incoming state's tag.
+        // Retained until the state's own expiry window (`now + ttl`, an upper
+        // bound on its remaining life), after which a retry is rejected as
+        // expired before reaching the store.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        if cache_final && let Some(tag) = state_tag.as_deref() {
+            let exp = crate::types::mrtr::state::now_secs() + options.request_state_ttl_secs();
+            options
+                .request_state_store()
+                .put(tag, resp.clone(), exp)
+                .await;
         }
         resp
     }
