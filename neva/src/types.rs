@@ -840,6 +840,26 @@ mod tests {
         assert_eq!(back["serverInfo"]["name"], serde_json::json!("s"));
     }
 
+    #[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+    #[test]
+    fn discover_masks_push_capabilities_under_stateless_rc() {
+        // Even when the server explicitly configures listChanged + subscribe,
+        // the stateless RC transport cannot push, so `DiscoverResult` must not
+        // advertise capabilities clients can never rely on.
+        let options = McpOptions::default()
+            .with_tools(|t| t.with_list_changed())
+            .with_resources(|r| r.with_subscribe().with_list_changed())
+            .with_prompts(|p| p.with_list_changed());
+
+        let discover = DiscoverResult::new(&options);
+        let caps = serde_json::to_value(&discover.capabilities).unwrap();
+
+        assert_eq!(caps["tools"]["listChanged"], serde_json::json!(false));
+        assert_eq!(caps["resources"]["subscribe"], serde_json::json!(false));
+        assert_eq!(caps["resources"]["listChanged"], serde_json::json!(false));
+        assert_eq!(caps["prompts"]["listChanged"], serde_json::json!(false));
+    }
+
     #[test]
     fn message_envelope_deserializes_request() {
         let json = r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":null}"#;

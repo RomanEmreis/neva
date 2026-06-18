@@ -18,13 +18,17 @@ use crate::types::{
     ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ListResourcesRequestParams,
     ListResourcesResult, ListToolsRequestParams, ListToolsResult, Message, MessageBatch,
     MessageEnvelope, Prompt, PromptHandler, ReadResourceRequestParams, ReadResourceResult, Request,
-    Resource, ResourceTemplate, Response, SubscribeRequestParams, Tool, ToolHandler,
-    UnsubscribeRequestParams, Uri,
+    Resource, ResourceTemplate, Response, Tool, ToolHandler, Uri,
     notification::{CancelledNotificationParams, Notification},
     resource::template::ResourceFunc,
 };
+// Subscribe/unsubscribe handlers exist only under the non-RC transport, which
+// can push `notifications/resources/updated`; the RC stateless build masks the
+// capability and skips the handlers, so these params are unused there.
 #[cfg(not(feature = "proto-2026-07-28-rc"))]
 use crate::types::{InitializeRequestParams, InitializeResult};
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+use crate::types::{SubscribeRequestParams, UnsubscribeRequestParams};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "tasks")]
@@ -119,14 +123,23 @@ impl App {
             Self::resource_templates,
         );
         app.map_handler(crate::types::resource::commands::READ, Self::resource);
-        app.map_handler(
-            crate::types::resource::commands::SUBSCRIBE,
-            Self::resource_subscribe,
-        );
-        app.map_handler(
-            crate::types::resource::commands::UNSUBSCRIBE,
-            Self::resource_unsubscribe,
-        );
+        // The stateless `proto-2026-07-28-rc` transport cannot push
+        // `notifications/resources/updated`, so the `resources.subscribe`
+        // capability is masked off (see `McpOptions::resources_capability`).
+        // Don't register subscribe/unsubscribe handlers under RC either, so the
+        // advertised surface and the accepted methods stay in sync — the server
+        // won't accept a subscription it never announces.
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        {
+            app.map_handler(
+                crate::types::resource::commands::SUBSCRIBE,
+                Self::resource_subscribe,
+            );
+            app.map_handler(
+                crate::types::resource::commands::UNSUBSCRIBE,
+                Self::resource_unsubscribe,
+            );
+        }
 
         app.map_handler(crate::types::prompt::commands::LIST, Self::prompts);
         app.map_handler(crate::types::prompt::commands::GET, Self::prompt);
@@ -704,11 +717,19 @@ impl App {
     async fn ping() {}
 
     /// A subscription to a resource change request handler
+    ///
+    /// Not registered under `proto-2026-07-28-rc`: the stateless transport
+    /// cannot push `notifications/resources/updated`, so subscriptions are not
+    /// advertised and the method is not accepted.
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     async fn resource_subscribe(mut ctx: Context, params: SubscribeRequestParams) {
         ctx.subscribe_to_resource(params.uri);
     }
 
     /// An unsubscription to from resource change request handler
+    ///
+    /// Not registered under `proto-2026-07-28-rc`; see [`Self::resource_subscribe`].
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     async fn resource_unsubscribe(mut ctx: Context, params: UnsubscribeRequestParams) {
         ctx.unsubscribe_from_resource(&params.uri);
     }

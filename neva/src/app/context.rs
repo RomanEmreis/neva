@@ -1253,6 +1253,16 @@ impl Context {
     ) -> Result<(), Error> {
         #[cfg(feature = "proto-2026-07-28-rc")]
         {
+            // No out-of-band server→client channel on the stateless transport,
+            // so this is an intentional no-op. Surface it once at debug so a
+            // server author who calls e.g. `resource_updated`/`add_tool` and
+            // expects a push isn't silently misled — the masked capabilities
+            // already tell clients to poll instead.
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                method,
+                "notifications are not delivered on the stateless proto-2026-07-28-rc transport; clients poll instead"
+            );
             Ok(())
         }
         #[cfg(not(feature = "proto-2026-07-28-rc"))]

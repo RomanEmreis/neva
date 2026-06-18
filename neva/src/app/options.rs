@@ -578,21 +578,52 @@ impl McpOptions {
     /// If not configured but at least one [`Tool`] exists, returns [`Default`].
     /// Otherwise, returns `None`.
     pub(crate) fn tools_capability(&self) -> Option<ToolsCapability> {
-        self.tools_capability.clone()
+        #[allow(unused_mut)]
+        let mut cap = self.tools_capability.clone();
+        // The stateless `proto-2026-07-28-rc` transport cannot push
+        // `notifications/tools/list_changed`, so never advertise `listChanged`
+        // under RC — clients refresh on cache-TTL / the next `tools/list`
+        // instead of relying on a push that will never arrive.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        if let Some(c) = cap.as_mut() {
+            c.list_changed = false;
+        }
+        cap
     }
 
     /// Returns [`ResourcesCapability`] if configured.
     /// If not configured but at least one [`Resource`] or [`ResourceTemplate`] exists, returns [`Default`].
     /// Otherwise, returns `None`.
     pub(crate) fn resources_capability(&self) -> Option<ResourcesCapability> {
-        self.resources_capability.clone()
+        #[allow(unused_mut)]
+        let mut cap = self.resources_capability.clone();
+        // The stateless `proto-2026-07-28-rc` transport cannot push
+        // `notifications/resources/updated` or `.../list_changed`, so mask both
+        // `subscribe` and `listChanged` under RC. Subscribe handlers are also
+        // not registered (see `App::new`), keeping the advertised surface and
+        // the accepted methods in sync.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        if let Some(c) = cap.as_mut() {
+            c.subscribe = false;
+            c.list_changed = false;
+        }
+        cap
     }
 
     /// Returns [`PromptsCapability`] if configured.
     /// If not configured but at least one [`Prompt`] exists, returns [`Default`].
     /// Otherwise, returns `None`.
     pub(crate) fn prompts_capability(&self) -> Option<PromptsCapability> {
-        self.prompts_capability.clone()
+        #[allow(unused_mut)]
+        let mut cap = self.prompts_capability.clone();
+        // The stateless `proto-2026-07-28-rc` transport cannot push
+        // `notifications/prompts/list_changed`, so never advertise `listChanged`
+        // under RC — see `tools_capability` for the rationale.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        if let Some(c) = cap.as_mut() {
+            c.list_changed = false;
+        }
+        cap
     }
 
     /// Returns [`ServerTasksCapability`] if configured.
@@ -937,7 +968,12 @@ mod tests {
 
         let tools_capability = options.tools_capability().unwrap();
 
+        // Under the stateless RC transport `listChanged` is masked off because
+        // the server cannot push it; otherwise it round-trips the config.
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
         assert!(tools_capability.list_changed);
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        assert!(!tools_capability.list_changed);
     }
 
     #[test]
@@ -963,7 +999,11 @@ mod tests {
 
         let resources_capability = options.resources_capability().unwrap();
 
+        // Masked off under the stateless RC transport (see `tools` test above).
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
         assert!(resources_capability.list_changed);
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        assert!(!resources_capability.list_changed);
     }
 
     #[test]
@@ -1007,7 +1047,11 @@ mod tests {
 
         let prompts_capability = options.prompts_capability().unwrap();
 
+        // Masked off under the stateless RC transport (see `tools` test above).
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
         assert!(prompts_capability.list_changed);
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        assert!(!prompts_capability.list_changed);
     }
 
     #[test]

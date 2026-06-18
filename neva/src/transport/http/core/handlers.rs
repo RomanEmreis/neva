@@ -109,14 +109,21 @@ pub async fn handle_post(req: HttpRequest, ctx: &HttpContext) -> HttpResponse {
     let mut headers = req.headers().clone();
     let id = get_or_create_mcp_session(&headers);
 
-    // Stateless RC transport requires every POST to carry a supported
+    // Stateless RC transport requires every POST to carry the exact RC
     // `MCP-Protocol-Version` header; reject before body dispatch otherwise.
+    // `PROTOCOL_VERSIONS` still lists legacy versions (e.g. 2025-06-18) for
+    // the non-RC build, but this build has removed the legacy initialize/SSE
+    // behavior and only speaks RC stateless semantics — so a client/proxy
+    // advertising a legacy version must be rejected, not silently served
+    // under RC. Compare against the fixed RC version (the last/only RC entry)
+    // rather than the whole compatibility list.
     #[cfg(feature = "proto-2026-07-28-rc")]
     {
+        let rc_version = crate::PROTOCOL_VERSIONS.last().copied();
         let ok = headers
             .get(crate::transport::http::MCP_PROTOCOL_VERSION)
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| crate::PROTOCOL_VERSIONS.contains(&v));
+            .is_some_and(|v| Some(v) == rc_version);
         if !ok {
             let resp = Response::error(
                 RequestId::Null,
@@ -492,6 +499,25 @@ mod tests {
             .method("POST")
             .uri("/mcp")
             .header(crate::transport::http::MCP_PROTOCOL_VERSION, "1999-01-01")
+            .body(make_request_body("ping"))
+            .unwrap();
+        let resp = handle_post(req, &ctx).await;
+        assert_eq!(resp.status(), http::StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+        assert_eq!(body["error"]["code"], -32600);
+    }
+
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[tokio::test]
+    async fn rejects_legacy_protocol_version() {
+        // A legacy version that IS in `PROTOCOL_VERSIONS` but is not the RC
+        // version: the old `.contains()` gate accepted it even though this build
+        // only speaks RC stateless semantics. It must be rejected.
+        let (ctx, _rx) = make_ctx();
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(crate::transport::http::MCP_PROTOCOL_VERSION, "2025-06-18")
             .body(make_request_body("ping"))
             .unwrap();
         let resp = handle_post(req, &ctx).await;
