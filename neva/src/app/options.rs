@@ -113,6 +113,18 @@ pub struct McpOptions {
     #[cfg(feature = "proto-2026-07-28-rc")]
     request_state_secret: Arc<[u8]>,
 
+    /// Whether [`Self::request_state_secret`] was set explicitly (vs the
+    /// ephemeral per-process default). Used to warn on startup about the
+    /// multi-instance deployment footgun. Read only by the (tracing-gated)
+    /// startup warning, so it is write-only in builds without an HTTP server
+    /// or `tracing`.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg_attr(
+        not(all(feature = "http-server", feature = "tracing")),
+        allow(dead_code)
+    )]
+    request_state_secret_explicit: bool,
+
     /// TTL (seconds) embedded into MRTR `requestState`.
     #[cfg(feature = "proto-2026-07-28-rc")]
     request_state_ttl_secs: u64,
@@ -181,6 +193,8 @@ impl Default for McpOptions {
                 key[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
                 Arc::from(&key[..])
             },
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            request_state_secret_explicit: false,
             #[cfg(feature = "proto-2026-07-28-rc")]
             request_state_ttl_secs: 300,
             #[cfg(feature = "proto-2026-07-28-rc")]
@@ -713,12 +727,37 @@ impl McpOptions {
     #[cfg(feature = "proto-2026-07-28-rc")]
     pub(crate) fn set_request_state_secret(&mut self, key: &[u8]) {
         self.request_state_secret = Arc::from(key);
+        self.request_state_secret_explicit = true;
     }
 
     /// Returns the MRTR `requestState` signing key.
     #[cfg(feature = "proto-2026-07-28-rc")]
     pub(crate) fn request_state_secret(&self) -> &[u8] {
         &self.request_state_secret
+    }
+
+    /// Returns whether the MRTR `requestState` signing key was set explicitly
+    /// (vs the ephemeral per-process default).
+    ///
+    /// Only compiled with `tracing`, where it backs the startup deployment
+    /// warning in [`crate::App::run`]; without it the field has no reader.
+    #[cfg(all(
+        feature = "proto-2026-07-28-rc",
+        feature = "http-server",
+        feature = "tracing"
+    ))]
+    pub(crate) fn request_state_secret_is_explicit(&self) -> bool {
+        self.request_state_secret_explicit
+    }
+
+    /// Returns whether the configured transport is the HTTP server transport.
+    #[cfg(all(
+        feature = "proto-2026-07-28-rc",
+        feature = "http-server",
+        feature = "tracing"
+    ))]
+    pub(crate) fn is_http_transport(&self) -> bool {
+        matches!(self.proto, Some(TransportProto::HttpServer(_)))
     }
 
     /// Returns the MRTR `requestState` TTL in seconds.
@@ -1039,6 +1078,29 @@ mod tests {
         let options = McpOptions::default();
 
         assert!(options.resources_capability().is_none());
+    }
+
+    #[cfg(all(
+        feature = "proto-2026-07-28-rc",
+        feature = "http-server",
+        feature = "tracing"
+    ))]
+    #[test]
+    fn request_state_secret_is_not_explicit_by_default() {
+        let options = McpOptions::default();
+        assert!(!options.request_state_secret_is_explicit());
+    }
+
+    #[cfg(all(
+        feature = "proto-2026-07-28-rc",
+        feature = "http-server",
+        feature = "tracing"
+    ))]
+    #[test]
+    fn request_state_secret_is_explicit_once_set() {
+        let mut options = McpOptions::default();
+        options.set_request_state_secret(b"shared-secret");
+        assert!(options.request_state_secret_is_explicit());
     }
 
     #[test]

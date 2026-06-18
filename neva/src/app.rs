@@ -256,6 +256,26 @@ impl App {
             .print();
         }
 
+        // Multi-instance footgun guard: under the stateless RC HTTP transport an
+        // MRTR retry can land on a different instance than the one that issued
+        // the `requestState`. With the default ephemeral per-process signing key
+        // that retry fails `requestState` verification, which is a silent prod
+        // failure. Warn at startup unless a shared secret was set explicitly.
+        #[cfg(all(
+            feature = "proto-2026-07-28-rc",
+            feature = "http-server",
+            feature = "tracing"
+        ))]
+        if self.options.is_http_transport() && !self.options.request_state_secret_is_explicit() {
+            tracing::warn!(
+                "MRTR requestState is signed with an ephemeral per-process key. \
+                 Multi-instance HTTP deployments MUST call \
+                 App::with_request_state_secret(...) with a shared secret, or a \
+                 retry routed to another instance will fail requestState \
+                 verification."
+            );
+        }
+
         #[cfg(feature = "tracing")]
         self.options
             .add_middleware(make_mw(Self::tracing_middleware));
