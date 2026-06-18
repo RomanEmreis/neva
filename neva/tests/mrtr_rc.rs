@@ -299,6 +299,65 @@ async fn oversized_request_state_is_rejected() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn oversized_inbound_request_state_is_rejected_before_decoding() {
+    // An untrusted client supplies a bogus `requestState` far larger than the
+    // configured cap. It must be rejected on size *before* base64 decoding and
+    // HMAC verification run, so the cap protects inbound retries — not just the
+    // outbound states the server mints.
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_max_state_bytes(256)
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("greet", |mut ctx: Context| async move {
+        let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
+            .with_required("name", "string")
+            .into();
+        let _ = ctx.elicit("name", params).await?;
+        Ok::<String, Error>("ok".into())
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{addr}/mcp");
+
+    // A 4 KiB blob — well over the 256-byte cap and never a valid signed state.
+    let bogus_state = "A".repeat(4096);
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "greet", "arguments": {},
+            "_meta": {
+                "clientCapabilities": { "elicitation": true },
+                "requestState": bogus_state
+            } }
+    });
+    let r1: serde_json::Value = client
+        .post(&url)
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .json(&call)
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+    let msg = r1
+        .pointer("/error/message")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        msg.contains("exceeds the configured maximum size"),
+        "oversized inbound state must be rejected before decoding: {r1}"
+    );
+
+    handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn replaying_request_state_against_a_different_request_is_rejected() {
     let port = pick_free_port();
     let addr = format!("127.0.0.1:{port}");

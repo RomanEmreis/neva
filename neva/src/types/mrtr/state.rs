@@ -102,9 +102,36 @@ pub(crate) fn now_secs() -> u64 {
 pub(crate) fn request_binding(method: &str, salient_params: &serde_json::Value) -> String {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
     use sha2::Digest;
-    let bytes = serde_json::to_vec(salient_params).unwrap_or_default();
+    // Canonicalize object keys before hashing. `serde_json::to_vec` follows the
+    // map's iteration order, which is lexicographic for the default `BTreeMap`
+    // backing but *insertion* order when any dependency in the build enables
+    // serde_json's `preserve_order` feature. Without canonicalization an MRTR
+    // retry carrying semantically identical params with a different key order
+    // would hash differently and be rejected as not matching the request.
+    let bytes = serde_json::to_vec(&canonicalize(salient_params)).unwrap_or_default();
     let digest = Sha256::digest(&bytes);
     format!("{method}:{}", B64.encode(digest))
+}
+
+/// Returns a copy of `value` with every object's keys ordered lexicographically,
+/// recursively, so its serialization is stable regardless of serde_json's
+/// `preserve_order` feature. Arrays keep their order (significant in JSON).
+fn canonicalize(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort_unstable();
+            let mut out = serde_json::Map::with_capacity(keys.len());
+            for key in keys {
+                out.insert(key.clone(), canonicalize(&map[key]));
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(canonicalize).collect())
+        }
+        other => other.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -201,5 +228,31 @@ mod tests {
         let c = request_binding("tools/call", &serde_json::json!({"name":"u"}));
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn request_binding_is_independent_of_object_key_order() {
+        // Two semantically identical params differing only in key order, nested
+        // inside an object and an array. With serde_json's `preserve_order`
+        // feature these would serialize differently; canonicalization makes the
+        // binding stable so an MRTR retry is not spuriously rejected.
+        let mut first = serde_json::Map::new();
+        first.insert("name".into(), serde_json::json!("t"));
+        first.insert(
+            "args".into(),
+            serde_json::json!([{"a": 1, "b": 2}, {"c": 3}]),
+        );
+
+        let mut second = serde_json::Map::new();
+        second.insert(
+            "args".into(),
+            serde_json::json!([{"b": 2, "a": 1}, {"c": 3}]),
+        );
+        second.insert("name".into(), serde_json::json!("t"));
+
+        assert_eq!(
+            request_binding("tools/call", &serde_json::Value::Object(first)),
+            request_binding("tools/call", &serde_json::Value::Object(second)),
+        );
     }
 }

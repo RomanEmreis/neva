@@ -1285,6 +1285,19 @@ fn seed_mrtr_ctx(
     // state. `None` means no valid state was supplied, so no input was solicited.
     let mut requested: Option<Vec<String>> = None;
     if let Some(state) = meta.as_ref().and_then(|m| m.request_state.clone()) {
+        // Reject an oversized inbound state before decoding it. Base64 decoding
+        // and HMAC verification in `StateCodec::decode` both allocate/compute in
+        // proportion to the blob size, so without this guard `with_max_state_bytes`
+        // would only bound the states we *mint* and a bogus oversized
+        // `requestState` from an untrusted client could force that work before
+        // failing. The cap is the same encoded-length bound enforced on the
+        // outbound path in `build_input_required`.
+        if state.len() > options.max_state_bytes() {
+            return Err(Error::new(
+                ErrorCode::InvalidParams,
+                "requestState exceeds the configured maximum size",
+            ));
+        }
         let payload = StateCodec::new(options.request_state_secret()).decode(&state)?;
         if payload.exp < now_secs() {
             return Err(Error::new(ErrorCode::InvalidParams, "requestState expired"));
