@@ -242,6 +242,112 @@ async fn final_round_replay_is_idempotent_after_a_lost_response() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn distinct_answers_to_the_same_state_do_not_collide_in_the_cache() {
+    // Two flows reach the SAME pre-answer requestState (same method/params/
+    // principal, no nonce) but supply DIFFERENT inputResponses. The final cache
+    // is keyed by the state tag plus the answers digest, so the second flow must
+    // see its own answer reflected — never the first flow's cached result.
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("greet", |mut ctx: Context| async move {
+        let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
+            .with_required("name", "string")
+            .into();
+        let res = ctx.elicit("name", params).await?;
+        let name = res
+            .content
+            .and_then(|c| c.get("name").and_then(|v| v.as_str().map(str::to_owned)))
+            .unwrap_or_else(|| "stranger".into());
+        Ok::<String, Error>(format!("hello {name}"))
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{addr}/mcp");
+
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "greet", "arguments": {},
+            "_meta": { "clientCapabilities": { "elicitation": true } } }
+    });
+    let r1: serde_json::Value = client
+        .post(&url)
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .json(&call)
+        .send()
+        .await
+        .expect("round 1 send")
+        .json()
+        .await
+        .expect("round 1 json");
+    let state = r1["result"]["requestState"]
+        .as_str()
+        .expect("requestState present")
+        .to_string();
+    let key = r1["result"]["inputRequests"]
+        .as_object()
+        .expect("inputRequests object")
+        .keys()
+        .next()
+        .expect("one input request")
+        .clone();
+
+    // Two finals share the same state but answer with different names.
+    let final_with = |id: i64, name: &str| {
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": { "name": "greet", "arguments": {},
+                "_meta": {
+                    "clientCapabilities": { "elicitation": true },
+                    "requestState": state,
+                    "inputResponses": { key.clone(): { "action": "accept", "content": { "name": name } } }
+                } }
+        })
+    };
+
+    let post = |body: serde_json::Value| {
+        let client = client.clone();
+        let url = url.clone();
+        async move {
+            client
+                .post(&url)
+                .header("MCP-Protocol-Version", "2026-07-28")
+                .json(&body)
+                .send()
+                .await
+                .expect("send")
+                .json::<serde_json::Value>()
+                .await
+                .expect("json")
+        }
+    };
+
+    let r_a = post(final_with(2, "octocat")).await;
+    let r_b = post(final_with(3, "monalisa")).await;
+
+    assert_eq!(
+        r_a.pointer("/result/content/0/text")
+            .and_then(|v| v.as_str()),
+        Some("hello octocat"),
+        "first flow gets its own answer: {r_a}"
+    );
+    assert_eq!(
+        r_b.pointer("/result/content/0/text")
+            .and_then(|v| v.as_str()),
+        Some("hello monalisa"),
+        "second flow must NOT receive the first flow's cached result: {r_b}"
+    );
+
+    handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn effects_run_once_memo_caches_commit_fires_on_final_round() {
     FETCHES.store(0, Ordering::SeqCst);
     CHARGES.store(0, Ordering::SeqCst);

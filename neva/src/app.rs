@@ -1162,17 +1162,32 @@ impl App {
             (None, None)
         };
 
-        // MRTR idempotency: the incoming state's integrity tag (the segment
-        // after the `.`) keys the final-round response cache. A lost-response
-        // retry echoes the same verified blob, so a cache hit lets us return the
-        // committed result without re-running the handler (and its commits /
-        // `once` / `memo` side effects). Only committed *final* rounds are ever
-        // cached, so a hit here is by construction a replay of one.
+        // MRTR idempotency: the final-round response cache is keyed by the
+        // incoming state's integrity tag (the segment after the `.`) *plus* a
+        // digest of this round's `inputResponses`. The tag alone is not unique
+        // per flow — the signed payload carries no nonce, so two concurrent
+        // flows that reach the same pre-answer state (identical method / params /
+        // principal, minted in the same second) share a tag while supplying
+        // different answers; keying on the tag alone would let the second flow
+        // receive the first flow's result (or a result without sending any
+        // answers at all). Folding in the answers' digest keeps distinct flows
+        // apart, while a genuine lost-response retry — same state *and* same
+        // answers — still hits. Only committed *final* rounds are ever cached,
+        // so a hit here is by construction a replay of one.
         #[cfg(feature = "proto-2026-07-28-rc")]
         let state_tag: Option<String> = if mrtr_method {
-            req.meta()
-                .and_then(|m| m.request_state)
-                .and_then(|blob| blob.rsplit_once('.').map(|(_, tag)| tag.to_owned()))
+            req.meta().and_then(|m| {
+                let tag = m
+                    .request_state
+                    .as_deref()
+                    .and_then(|blob| blob.rsplit_once('.').map(|(_, tag)| tag))?;
+                let answers = m
+                    .input_responses
+                    .as_ref()
+                    .map(crate::types::mrtr::state::input_responses_digest)
+                    .unwrap_or_default();
+                Some(format!("{tag}.{answers}"))
+            })
         } else {
             None
         };
@@ -1264,10 +1279,11 @@ impl App {
         if let Some(session_id) = session_id {
             resp = resp.set_session_id(session_id);
         }
-        // Record the committed final response under the incoming state's tag.
-        // Retained until the state's own expiry window (`now + ttl`, an upper
-        // bound on its remaining life), after which a retry is rejected as
-        // expired before reaching the store.
+        // Record the committed final response under the incoming state's tag
+        // plus this round's answers digest (see `state_tag` above). Retained
+        // until the state's own expiry window (`now + ttl`, an upper bound on
+        // its remaining life), after which a retry is rejected as expired before
+        // reaching the store.
         #[cfg(feature = "proto-2026-07-28-rc")]
         if cache_final && let Some(tag) = state_tag.as_deref() {
             let exp = crate::types::mrtr::state::now_secs() + options.request_state_ttl_secs();

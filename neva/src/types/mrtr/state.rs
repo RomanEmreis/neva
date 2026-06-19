@@ -113,6 +113,24 @@ pub(crate) fn request_binding(method: &str, salient_params: &serde_json::Value) 
     format!("{method}:{}", B64.encode(digest))
 }
 
+/// Stable digest of a round's `inputResponses`, used as part of the MRTR
+/// final-response cache key (`b64(sha256(canonical(responses)))`).
+///
+/// Two concurrent flows can reach the same pre-answer `requestState` — the
+/// payload carries no nonce, so identical method/params/principal minted in the
+/// same second produce the same integrity tag — yet supply different answers.
+/// Folding this digest into the cache key keeps those flows from colliding,
+/// while a genuine lost-response retry (same state *and* same answers) still
+/// hits. Object keys are canonicalized so the digest is independent of map
+/// iteration order.
+pub(crate) fn input_responses_digest(responses: &InputResponses) -> String {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
+    use sha2::Digest;
+    let value = serde_json::to_value(responses).unwrap_or_default();
+    let bytes = serde_json::to_vec(&canonicalize(&value)).unwrap_or_default();
+    B64.encode(Sha256::digest(&bytes))
+}
+
 /// Returns a copy of `value` with every object's keys ordered lexicographically,
 /// recursively, so its serialization is stable regardless of serde_json's
 /// `preserve_order` feature. Arrays keep their order (significant in JSON).
@@ -253,6 +271,44 @@ mod tests {
         assert_eq!(
             request_binding("tools/call", &serde_json::Value::Object(first)),
             request_binding("tools/call", &serde_json::Value::Object(second)),
+        );
+    }
+
+    fn answer(content: serde_json::Value) -> crate::types::elicitation::ElicitResult {
+        crate::types::elicitation::ElicitResult {
+            action: crate::types::elicitation::ElicitationAction::Accept,
+            content: Some(content),
+            meta: None,
+        }
+    }
+
+    #[test]
+    fn input_responses_digest_distinguishes_distinct_answers() {
+        let mut a = InputResponses::new();
+        a.insert("k".into(), answer(serde_json::json!({"v": 1})));
+        let mut b = InputResponses::new();
+        b.insert("k".into(), answer(serde_json::json!({"v": 2})));
+
+        assert_ne!(input_responses_digest(&a), input_responses_digest(&b));
+        // Same answers digest the same (stable across constructions).
+        let mut a2 = InputResponses::new();
+        a2.insert("k".into(), answer(serde_json::json!({"v": 1})));
+        assert_eq!(input_responses_digest(&a), input_responses_digest(&a2));
+    }
+
+    #[test]
+    fn input_responses_digest_is_independent_of_key_order() {
+        let mut first = InputResponses::new();
+        first.insert("a".into(), answer(serde_json::json!({"x": 1, "y": 2})));
+        first.insert("b".into(), answer(serde_json::json!(null)));
+
+        let mut second = InputResponses::new();
+        second.insert("b".into(), answer(serde_json::json!(null)));
+        second.insert("a".into(), answer(serde_json::json!({"y": 2, "x": 1})));
+
+        assert_eq!(
+            input_responses_digest(&first),
+            input_responses_digest(&second)
         );
     }
 }
