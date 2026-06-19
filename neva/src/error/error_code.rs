@@ -129,7 +129,12 @@ impl ErrorCode {
     /// payload. This method maps them to [`ErrorCode::InternalError`] so callers can
     /// always serialise a spec-compliant code.
     ///
-    /// All standard codes are returned unchanged.
+    /// Under `proto-2026-07-28-rc` the deprecated [`Self::ResourceNotFound`]
+    /// (`-32002`) is additionally remapped to [`Self::InvalidParams`] (`-32602`)
+    /// per the RC, so a user handler returning the old variant still serialises
+    /// the spec-current code (mirrors [`Self::RESOURCE_NOT_FOUND`]).
+    ///
+    /// All other standard codes are returned unchanged.
     ///
     /// # Example
     /// ```
@@ -145,6 +150,9 @@ impl ErrorCode {
             Self::RequestCancelled | Self::Timeout => Self::InternalError,
             #[cfg(feature = "proto-2026-07-28-rc")]
             Self::InputRequired => Self::InternalError,
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[allow(deprecated)]
+            Self::ResourceNotFound => Self::InvalidParams,
             other => other,
         }
     }
@@ -233,7 +241,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
     fn standard_codes_are_unchanged_on_wire() {
         let standard = [
             ErrorCode::ParseError,
@@ -241,11 +248,26 @@ mod tests {
             ErrorCode::MethodNotFound,
             ErrorCode::InvalidParams,
             ErrorCode::InternalError,
-            ErrorCode::ResourceNotFound,
         ];
         for code in standard {
             assert_eq!(code.wire_code(), code);
         }
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn resource_not_found_wire_code_matches_spec_version() {
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        assert_eq!(
+            ErrorCode::ResourceNotFound.wire_code(),
+            ErrorCode::InvalidParams
+        );
+
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        assert_eq!(
+            ErrorCode::ResourceNotFound.wire_code(),
+            ErrorCode::ResourceNotFound
+        );
     }
 
     #[test]
