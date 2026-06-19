@@ -132,7 +132,7 @@ impl ErrorCode {
     /// Under `proto-2026-07-28-rc` the deprecated [`Self::ResourceNotFound`]
     /// (`-32002`) is additionally remapped to [`Self::InvalidParams`] (`-32602`)
     /// per the RC, so a user handler returning the old variant still serialises
-    /// the spec-current code (mirrors [`Self::RESOURCE_NOT_FOUND`]).
+    /// the spec-current code.
     ///
     /// All other standard codes are returned unchanged.
     ///
