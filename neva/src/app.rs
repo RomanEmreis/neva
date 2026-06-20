@@ -260,9 +260,9 @@ impl App {
 
         // Multi-instance footgun guard: under the stateless RC HTTP transport an
         // MRTR retry can land on a different instance than the one that issued
-        // the `requestState`. With the default ephemeral per-process signing key
-        // that retry fails `requestState` verification, which is a silent prod
-        // failure. Warn at startup unless a shared secret was set explicitly.
+        // the `requestState`. With the default ephemeral per-process secret that
+        // retry fails `requestState` decryption/verification, which is a silent
+        // prod failure. Warn at startup unless a shared secret was set explicitly.
         #[cfg(all(
             feature = "proto-2026-07-28-rc",
             feature = "http-server",
@@ -270,7 +270,7 @@ impl App {
         ))]
         if self.options.is_http_transport() && !self.options.request_state_secret_is_explicit() {
             tracing::warn!(
-                "MRTR requestState is signed with an ephemeral per-process key. \
+                "MRTR requestState is encrypted with an ephemeral per-process key. \
                  Multi-instance HTTP deployments MUST call \
                  App::with_request_state_secret(...) with a shared secret, or a \
                  retry routed to another instance will fail requestState \
@@ -321,19 +321,26 @@ impl App {
         }
     }
 
-    /// Sets the shared secret used to sign MRTR `requestState`
-    /// (`proto-2026-07-28-rc`).
+    /// Sets the shared secret used to encrypt and authenticate MRTR
+    /// `requestState` (`proto-2026-07-28-rc`).
+    ///
+    /// The blob is sealed with ChaCha20-Poly1305 (AEAD) using a key derived from
+    /// this secret, so the payload — including any values a handler caches via
+    /// [`Context::memo`](crate::Context::memo) — is confidential as well as
+    /// tamper-evident.
     ///
     /// **Multi-instance stateless deployments MUST set this to a shared
-    /// secret** — otherwise a retry that lands on a different instance fails
-    /// `requestState` verification. If unset, an ephemeral per-process key is
+    /// secret** — otherwise a retry that lands on a different instance fails to
+    /// decrypt the `requestState`. If unset, an ephemeral per-process key is
     /// used (fine for single-instance / development).
     ///
     /// # Example
     /// ```no_run
     /// # #[cfg(feature = "proto-2026-07-28-rc")] {
     /// use neva::App;
-    /// let app = App::new().with_request_state_secret(b"shared-secret");
+    ///
+    /// let app = App::new()
+    ///     .with_request_state_secret(b"shared-secret");
     /// # }
     /// ```
     #[cfg(feature = "proto-2026-07-28-rc")]
@@ -354,7 +361,9 @@ impl App {
     /// ```no_run
     /// # #[cfg(feature = "proto-2026-07-28-rc")] {
     /// use neva::App;
-    /// let app = App::new().with_max_state_bytes(16 * 1024);
+    ///
+    /// let app = App::new()
+    ///     .with_max_state_bytes(16 * 1024);
     /// # }
     /// ```
     #[cfg(feature = "proto-2026-07-28-rc")]
@@ -384,7 +393,9 @@ impl App {
     /// # #[cfg(feature = "proto-2026-07-28-rc")] {
     /// use neva::App;
     /// use neva::app::mrtr_store::InMemoryStateStore;
-    /// let app = App::new().with_request_state_store(InMemoryStateStore::new());
+    ///
+    /// let app = App::new()
+    ///     .with_request_state_store(InMemoryStateStore::new());
     /// # }
     /// ```
     #[cfg(feature = "proto-2026-07-28-rc")]
@@ -1146,7 +1157,7 @@ impl App {
                 principal.as_deref(),
             ) {
                 Ok(arc) => {
-                    context.mrtr = Some(arc.clone());
+                    context.exec = crate::app::context::ExecMode::Mrtr(arc.clone());
                     (Some(arc), principal)
                 }
                 Err(e) => {
@@ -1163,17 +1174,16 @@ impl App {
         };
 
         // MRTR idempotency: the final-round response cache is keyed by the
-        // incoming state's integrity tag (the segment after the `.`) *plus* a
-        // digest of this round's `inputResponses`. The tag alone is not unique
-        // per flow — the signed payload carries no nonce, so two concurrent
-        // flows that reach the same pre-answer state (identical method / params /
-        // principal, minted in the same second) share a tag while supplying
-        // different answers; keying on the tag alone would let the second flow
-        // receive the first flow's result (or a result without sending any
-        // answers at all). Folding in the answers' digest keeps distinct flows
-        // apart, while a genuine lost-response retry — same state *and* same
-        // answers — still hits. Only committed *final* rounds are ever cached,
-        // so a hit here is by construction a replay of one.
+        // incoming state's sealed segment (the ciphertext+tag after the `.`,
+        // unique per minted state thanks to the random AEAD nonce) *plus* a
+        // digest of this round's `inputResponses`. The answers digest matters
+        // because the *same* minted state can be echoed with *different*
+        // answers — a client (or attacker) replaying one round-1 blob with two
+        // different `inputResponses` would otherwise hit the first answer's
+        // cached result for the second. Folding in the answers' digest keeps
+        // those apart, while a genuine lost-response retry — same state *and*
+        // same answers — still hits. Only committed *final* rounds are ever
+        // cached, so a hit here is by construction a replay of one.
         #[cfg(feature = "proto-2026-07-28-rc")]
         let state_tag: Option<String> = if mrtr_method {
             req.meta().and_then(|m| {
@@ -1279,6 +1289,7 @@ impl App {
         if let Some(session_id) = session_id {
             resp = resp.set_session_id(session_id);
         }
+
         // Record the committed final response under the incoming state's tag
         // plus this round's answers digest (see `state_tag` above). Retained
         // until the state's own expiry window (`now + ttl`, an upper bound on
@@ -1298,6 +1309,29 @@ impl App {
     async fn handle_response(resp: Response, runtime: ServerRuntime) -> Response {
         let resp_id = resp.id().clone();
         let session_id = resp.session_id().cloned();
+
+        // RC task-elicit resume: an answer to a suspended task `ctx.elicit` is
+        // correlated by the server-generated task id (the bare response id),
+        // *not* the session — the stateless transport mints a fresh session per
+        // POST, so the session-keyed request queue could never match the
+        // suspend round. Try delivering to a parked task first; `provide_input`
+        // hands the response back when no task elicit is waiting, so non-task
+        // responses fall through to the request queue unchanged.
+        #[cfg(all(feature = "proto-2026-07-28-rc", feature = "tasks"))]
+        let resp = match runtime
+            .options()
+            .tasks
+            .provide_input(&resp_id.to_string(), resp)
+        {
+            Ok(()) => {
+                let mut resp = Response::empty(resp_id);
+                if let Some(session_id) = session_id {
+                    resp = resp.set_session_id(session_id);
+                }
+                return resp;
+            }
+            Err(resp) => *resp,
+        };
 
         runtime.pending_requests().complete(resp);
 
@@ -1384,7 +1418,7 @@ fn seed_mrtr_ctx(
     let mut requested: Option<Vec<String>> = None;
     if let Some(state) = meta.as_ref().and_then(|m| m.request_state.clone()) {
         // Reject an oversized inbound state before decoding it. Base64 decoding
-        // and HMAC verification in `StateCodec::decode` both allocate/compute in
+        // and AEAD decryption in `StateCodec::decode` both allocate/compute in
         // proportion to the blob size, so without this guard `with_max_state_bytes`
         // would only bound the states we *mint* and a bogus oversized
         // `requestState` from an untrusted client could force that work before
@@ -1419,7 +1453,7 @@ fn seed_mrtr_ctx(
     }
     if let Some(responses) = meta.and_then(|m| m.input_responses) {
         // `inputResponses` are answers to inputs the server requested in a
-        // prior round; that request set lives in the signed `requestState`.
+        // prior round; that request set lives in the encrypted `requestState`.
         // Without a verified state there is nothing to bind them to, so accept
         // only solicited, non-duplicate keys — otherwise a client could
         // pre-seed answers for a later `ctx.elicit` key (skipping the intended
@@ -1458,7 +1492,7 @@ fn seed_mrtr_ctx(
 }
 
 /// Builds the `InputRequiredResult` for the input the handler requested,
-/// encoding a fresh signed `requestState`.
+/// encoding a fresh encrypted `requestState`.
 #[cfg(feature = "proto-2026-07-28-rc")]
 fn build_input_required(
     arc: &std::sync::Arc<crate::app::context::MrtrCtx>,

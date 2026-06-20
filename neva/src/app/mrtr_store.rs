@@ -13,15 +13,16 @@
 //! `once`/`memo` effects — would run a second time.
 //!
 //! This module's [`RequestStateStore`] closes that gap by caching the final
-//! response of a committed round, keyed by the incoming state's integrity tag.
-//! On a lost-response retry the client echoes the same blob (same tag), so the
-//! cached response is returned verbatim and the handler never re-executes.
+//! response of a committed round, keyed by the incoming state's sealed segment
+//! plus a digest of that round's answers. On a lost-response retry the client
+//! echoes the same blob and answers (same key), so the cached response is
+//! returned verbatim and the handler never re-executes.
 //!
 //! The default [`InMemoryStateStore`] is per-process. A multi-instance
 //! deployment should supply a shared implementation (e.g. Redis) via
 //! [`App::with_request_state_store`](crate::App::with_request_state_store) — for
-//! the same reason such a deployment must share the MRTR signing secret (a
-//! retry routed to a different instance must see the same committed state).
+//! the same reason such a deployment must share the MRTR secret (a retry routed
+//! to a different instance must see the same committed state).
 
 use crate::types::Response;
 use crate::types::mrtr::state::now_secs;
@@ -32,8 +33,9 @@ use futures_util::future::BoxFuture;
 /// handler (`proto-2026-07-28-rc`).
 ///
 /// Implement this to back MRTR idempotency with a shared store across a
-/// multi-instance deployment; the entry key is the `requestState` integrity tag
-/// (the base64 segment after the `.`), which is unique per minted state.
+/// multi-instance deployment; the entry key is the `requestState` sealed segment
+/// (the base64 ciphertext after the `.`) combined with a digest of the round's
+/// answers, unique per minted state and round.
 ///
 /// See the [module docs](self) for the full rationale.
 pub trait RequestStateStore: Send + Sync {

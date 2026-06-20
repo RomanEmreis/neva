@@ -1,7 +1,13 @@
-//! Encode/verify the opaque, HMAC-protected `requestState` blob.
+//! Encode/verify the opaque, encrypted `requestState` blob.
+//!
+//! The blob is sealed with ChaCha20-Poly1305 (AEAD): the AEAD tag provides
+//! integrity (replacing the former HMAC) *and* the payload is encrypted, so
+//! server-side values a handler caches via [`crate::Context::memo`] — API
+//! responses, PII, tokens — are confidential rather than merely signed and
+//! readable by the client that echoes the blob.
 
-use hmac::digest::KeyInit;
-use hmac::{Hmac, Mac};
+use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng};
+use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -9,9 +15,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::error::{Error, ErrorCode};
 use crate::types::mrtr::InputResponses;
 
-type HmacSha256 = Hmac<Sha256>;
+/// ChaCha20-Poly1305 nonce length (96 bits).
+const NONCE_LEN: usize = 12;
 
-/// The signed contents of a `requestState` blob.
+/// Derives the 32-byte AEAD key from the configured secret (which may be any
+/// length). Domain-separated so the key is specific to this use and version.
+fn derive_key(secret: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+    let mut h = Sha256::new();
+    h.update(b"neva:mrtr:requestState:v1");
+    h.update(secret);
+    h.finalize().into()
+}
+
+/// The encrypted contents of a `requestState` blob.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct StatePayload {
     /// Monotonically-growing replay log of answered inputs.
@@ -20,8 +37,9 @@ pub(crate) struct StatePayload {
     /// round's `inputResponses` may only answer these keys (and only ones not
     /// already present in [`StatePayload::answers`]); anything else is unsolicited and
     /// must be rejected, otherwise a client could pre-seed/overwrite answers
-    /// for inputs the server never asked for. Defaults to empty so legacy blobs
-    /// decode — and, by design, reject any `inputResponses` paired with them.
+    /// for inputs the server never asked for. Defaults to empty so an older
+    /// payload schema still decodes — and, by design, rejects any
+    /// `inputResponses` paired with it.
     #[serde(default)]
     pub requested: Vec<String>,
     /// Cached `ctx.memo` values, keyed by memo key.
@@ -38,54 +56,62 @@ pub(crate) struct StatePayload {
     pub principal: Option<String>,
 }
 
-/// Encodes/decodes [`StatePayload`] as `b64(payload).b64(hmac)`.
+/// Encodes/decodes [`StatePayload`] as `b64(nonce).b64(ciphertext+tag)`, sealed
+/// with ChaCha20-Poly1305. The trailing segment (the ciphertext with its AEAD
+/// tag) is unique per minted state and is what the dispatch layer uses as the
+/// per-state identity for the idempotency cache.
 pub(crate) struct StateCodec<'a> {
     key: &'a [u8],
 }
 
 impl<'a> StateCodec<'a> {
-    /// Creates a codec bound to a signing key.
+    /// Creates a codec bound to an encryption secret.
     pub(crate) fn new(key: &'a [u8]) -> Self {
         Self { key }
     }
 
-    fn mac(&self, bytes: &[u8]) -> Result<Vec<u8>, Error> {
-        let mut mac = HmacSha256::new_from_slice(self.key)
-            .map_err(|_| Error::new(ErrorCode::InternalError, "bad hmac key"))?;
-        mac.update(bytes);
-        Ok(mac.finalize().into_bytes().to_vec())
+    fn cipher(&self) -> Result<ChaCha20Poly1305, Error> {
+        ChaCha20Poly1305::new_from_slice(&derive_key(self.key))
+            .map_err(|_| Error::new(ErrorCode::InternalError, "bad state key"))
     }
 
-    /// Encodes a payload into the opaque wire string.
+    /// Encrypts a payload into the opaque wire string.
     pub(crate) fn encode(&self, payload: &StatePayload) -> Result<String, Error> {
         use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
         let json = serde_json::to_vec(payload).map_err(Error::from)?;
-        let tag = self.mac(&json)?;
-        Ok(format!("{}.{}", B64.encode(&json), B64.encode(&tag)))
+        let cipher = self.cipher()?;
+        let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let sealed = cipher
+            .encrypt(&nonce, json.as_slice())
+            .map_err(|_| Error::new(ErrorCode::InternalError, "requestState encryption failed"))?;
+        Ok(format!("{}.{}", B64.encode(nonce), B64.encode(sealed)))
     }
 
-    /// Decodes and verifies integrity. Does NOT check `exp`/`req`/`principal` —
+    /// Decrypts and verifies integrity. Does NOT check `exp`/`req`/`principal` —
     /// callers do that against the returned [`StatePayload`].
     pub(crate) fn decode(&self, blob: &str) -> Result<StatePayload, Error> {
         use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
-        let (p_b64, t_b64) = blob
+        let (n_b64, c_b64) = blob
             .split_once('.')
             .ok_or_else(|| Error::new(ErrorCode::InvalidParams, "malformed requestState"))?;
-        let json = B64
-            .decode(p_b64)
+        let nonce = B64
+            .decode(n_b64)
+            .map_err(|_| Error::new(ErrorCode::InvalidParams, "bad requestState nonce"))?;
+        let sealed = B64
+            .decode(c_b64)
             .map_err(|_| Error::new(ErrorCode::InvalidParams, "bad requestState payload"))?;
-        let tag = B64
-            .decode(t_b64)
-            .map_err(|_| Error::new(ErrorCode::InvalidParams, "bad requestState tag"))?;
-        let mut mac = HmacSha256::new_from_slice(self.key)
-            .map_err(|_| Error::new(ErrorCode::InternalError, "bad hmac key"))?;
-        mac.update(&json);
-        mac.verify_slice(&tag).map_err(|_| {
-            Error::new(
-                ErrorCode::InvalidParams,
-                "requestState integrity check failed",
-            )
-        })?;
+        let nonce: [u8; NONCE_LEN] = nonce
+            .try_into()
+            .map_err(|_| Error::new(ErrorCode::InvalidParams, "bad requestState nonce"))?;
+        let json = self
+            .cipher()?
+            .decrypt(&Nonce::from(nonce), sealed.as_slice())
+            .map_err(|_| {
+                Error::new(
+                    ErrorCode::InvalidParams,
+                    "requestState integrity check failed",
+                )
+            })?;
         serde_json::from_slice(&json).map_err(Error::from)
     }
 }
@@ -116,13 +142,11 @@ pub(crate) fn request_binding(method: &str, salient_params: &serde_json::Value) 
 /// Stable digest of a round's `inputResponses`, used as part of the MRTR
 /// final-response cache key (`b64(sha256(canonical(responses)))`).
 ///
-/// Two concurrent flows can reach the same pre-answer `requestState` — the
-/// payload carries no nonce, so identical method/params/principal minted in the
-/// same second produce the same integrity tag — yet supply different answers.
-/// Folding this digest into the cache key keeps those flows from colliding,
-/// while a genuine lost-response retry (same state *and* same answers) still
-/// hits. Object keys are canonicalized so the digest is independent of map
-/// iteration order.
+/// The same minted `requestState` can be echoed with different answers (a client
+/// replaying one round-1 blob with two different `inputResponses`), so the cache
+/// key folds in this digest to keep those apart while a genuine lost-response
+/// retry (same state *and* same answers) still hits. Object keys are
+/// canonicalized so the digest is independent of map iteration order.
 pub(crate) fn input_responses_digest(responses: &InputResponses) -> String {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
     use sha2::Digest;
@@ -186,8 +210,11 @@ mod tests {
     }
 
     #[test]
-    fn old_blob_without_memos_or_effects_still_decodes() {
-        // A payload serialized before memos/effects existed: omit both keys.
+    fn payload_without_memos_or_effects_decodes_with_defaults() {
+        // A payload schema that omits memos/effects/requested (e.g. minted by an
+        // older neva): sealed with the codec's own cipher so only the serde
+        // `#[serde(default)]` behavior is under test. `memos`/`effects` default
+        // to empty and any paired `inputResponses` are rejected by design.
         let json = serde_json::json!({
             "answers": {},
             "exp": now_secs() + 300,
@@ -195,22 +222,45 @@ mod tests {
             "principal": serde_json::Value::Null,
         });
         let codec = StateCodec::new(b"secret-key");
-        let bytes = serde_json::to_vec(&json).unwrap();
-        // Re-sign so the HMAC matches the legacy bytes. `Hmac`, `Sha256`, `Mac`
-        // and `KeyInit` are already in scope via `use super::*`.
         let blob = {
             use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
-            let mut mac = <Hmac<Sha256>>::new_from_slice(b"secret-key").unwrap();
-            mac.update(&bytes);
-            format!(
-                "{}.{}",
-                B64.encode(&bytes),
-                B64.encode(mac.finalize().into_bytes())
-            )
+            let bytes = serde_json::to_vec(&json).unwrap();
+            let cipher = codec.cipher().unwrap();
+            let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+            let sealed = cipher.encrypt(&nonce, bytes.as_slice()).unwrap();
+            format!("{}.{}", B64.encode(nonce), B64.encode(sealed))
         };
         let got = codec.decode(&blob).unwrap();
         assert!(got.memos.is_empty());
         assert!(got.effects.is_empty());
+        assert!(got.requested.is_empty());
+    }
+
+    #[test]
+    fn memo_values_are_not_readable_from_the_wire_blob() {
+        // Confidentiality: a secret cached via `ctx.memo` must not be recoverable
+        // by decoding the opaque blob without the key.
+        let codec = StateCodec::new(b"secret-key");
+        let mut p = payload();
+        p.memos
+            .insert("token".into(), serde_json::json!("super-secret-value"));
+        let blob = codec.encode(&p).unwrap();
+
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
+        for segment in blob.split('.') {
+            let bytes = B64.decode(segment).unwrap_or_default();
+            assert!(
+                !bytes
+                    .windows(b"super-secret-value".len())
+                    .any(|w| w == b"super-secret-value"),
+                "memo value leaked in plaintext within the blob"
+            );
+        }
+        // The holder of the key still recovers it.
+        assert_eq!(
+            codec.decode(&blob).unwrap().memos.get("token"),
+            Some(&serde_json::json!("super-secret-value"))
+        );
     }
 
     #[test]

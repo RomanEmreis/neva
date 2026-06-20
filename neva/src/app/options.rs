@@ -107,8 +107,9 @@ pub struct McpOptions {
     #[cfg(feature = "tasks")]
     pub(super) tasks: TaskTracker,
 
-    /// HMAC key signing MRTR `requestState`. Defaults to an ephemeral random
-    /// key; multi-instance stateless deployments must set a shared secret via
+    /// Secret used to encrypt and authenticate MRTR `requestState` (the AEAD key
+    /// is derived from it). Defaults to an ephemeral random key; multi-instance
+    /// stateless deployments must set a shared secret via
     /// [`crate::App::with_request_state_secret`].
     #[cfg(feature = "proto-2026-07-28-rc")]
     request_state_secret: Arc<[u8]>,
@@ -731,20 +732,20 @@ impl McpOptions {
             .is_some_and(|tools| tools.call.is_some())
     }
 
-    /// Sets the shared secret used to sign MRTR `requestState`.
+    /// Sets the shared secret used to encrypt/authenticate MRTR `requestState`.
     #[cfg(feature = "proto-2026-07-28-rc")]
     pub(crate) fn set_request_state_secret(&mut self, key: &[u8]) {
         self.request_state_secret = Arc::from(key);
         self.request_state_secret_explicit = true;
     }
 
-    /// Returns the MRTR `requestState` signing key.
+    /// Returns the MRTR `requestState` secret (AEAD key material).
     #[cfg(feature = "proto-2026-07-28-rc")]
     pub(crate) fn request_state_secret(&self) -> &[u8] {
         &self.request_state_secret
     }
 
-    /// Returns whether the MRTR `requestState` signing key was set explicitly
+    /// Returns whether the MRTR `requestState` secret was set explicitly
     /// (vs the ephemeral per-process default).
     ///
     /// Only compiled with `tracing`, where it backs the startup deployment

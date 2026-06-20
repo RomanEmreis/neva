@@ -74,14 +74,19 @@ pub(crate) struct MrtrCtx {
     /// Answers available this round (prior answers decoded from
     /// `requestState`, merged with this round's `inputResponses`).
     pub(crate) answers: std::collections::HashMap<String, crate::types::elicitation::ElicitResult>,
+
     /// The newly-requested input (v1: at most one), recorded on a cache miss.
     pub(crate) pending: std::sync::Mutex<Option<(String, ElicitRequestParams)>>,
+
     /// Whether the client declared elicitation support this round.
     pub(crate) elicitation_allowed: bool,
+
     /// Cached `ctx.memo` values (seeded from `requestState`, grown on miss).
     pub(crate) memos: std::sync::Mutex<std::collections::HashMap<String, serde_json::Value>>,
+
     /// Executed `ctx.once` keys (seeded from `requestState`, grown on run).
     pub(crate) effects: std::sync::Mutex<std::collections::HashSet<String>>,
+
     /// Deferred `ctx.on_commit` futures, rebuilt each round, drained on the
     /// final (non-`input_required`) round. Never serialized.
     pub(crate) commits: std::sync::Mutex<Vec<CommitFut>>,
@@ -153,6 +158,99 @@ impl MrtrCtx {
     }
 }
 
+/// The execution substrate the current RC dispatch is running on. Elicitation
+/// and the `once`/`memo`/`on_commit` helpers dispatch on this so the stateless
+/// MRTR machinery and the stateful task machinery never mix: a bare call uses
+/// `requestState` re-run, a task-augmented call suspends a live background
+/// future. The two are different substrates, not one with a flag.
+#[cfg(feature = "proto-2026-07-28-rc")]
+#[derive(Clone, Default)]
+pub(crate) enum ExecMode {
+    /// Not an elicitable dispatch (or no special execution context).
+    #[default]
+    None,
+
+    /// Stateless MRTR call: progress lives in the encrypted `requestState` and
+    /// the handler re-runs each round.
+    Mrtr(Arc<MrtrCtx>),
+
+    /// Stateful task-augmented call: the tool runs in a background future that
+    /// genuinely suspends on the task tracker. Carries no MRTR key /
+    /// `requestState` / replay log — the task tracker is the held state.
+    #[cfg(feature = "tasks")]
+    Task(Arc<TaskExec>),
+}
+
+/// Per-dispatch state for a background, task-augmented tool call
+/// (`proto-2026-07-28-rc` + `tasks`): just the task id (also the
+/// session-independent resume key) and whether the tool's task support is
+/// `Required`. No MRTR key, `requestState`, or replay log — tasks run on the
+/// stateful substrate, not MRTR, so the MRTR effect helpers do not apply here.
+#[cfg(all(feature = "proto-2026-07-28-rc", feature = "tasks"))]
+#[derive(Default)]
+pub(crate) struct TaskExec {
+    /// The server-generated task id (also the session-independent resume key).
+    pub(crate) id: String,
+    /// Whether the tool declared `TaskSupport::Required`. A required-task tool is
+    /// *only* ever a task, so calling an MRTR helper there is a clear mistake and
+    /// is rejected; an optional-task tool may carry MRTR helpers for its bare
+    /// path, so they degrade quietly when it happens to run as a task.
+    pub(crate) required: bool,
+}
+
+#[cfg(all(feature = "proto-2026-07-28-rc", feature = "tasks"))]
+impl TaskExec {
+    /// Creates a task execution context for `id`.
+    pub(crate) fn new(id: String, required: bool) -> Self {
+        Self { id, required }
+    }
+}
+
+/// Task-scoped API for a task-augmented call (`proto-2026-07-28-rc` + `tasks`).
+///
+/// Obtained via [`Context::task`]; mirrors the client's `Client::task()` builder.
+/// Its methods operate on the stateful task substrate (suspend/resume) and error
+/// when the current dispatch is not task-augmented — keeping the task and MRTR
+/// substrates explicitly separate.
+#[cfg(all(feature = "proto-2026-07-28-rc", feature = "tasks"))]
+#[derive(Debug)]
+pub struct TaskContext<'a> {
+    ctx: &'a mut Context,
+}
+
+#[cfg(all(feature = "proto-2026-07-28-rc", feature = "tasks"))]
+impl TaskContext<'_> {
+    /// Requests input from the client and suspends the background task until the
+    /// answer arrives.
+    ///
+    /// Unlike the MRTR [`Context::elicit`], this takes no replay `key`: a task
+    /// does not re-run, it genuinely awaits. Errors when the current dispatch is
+    /// not a task-augmented call (use [`Context::elicit`] there instead).
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(all(feature = "server-macros", feature = "proto-2026-07-28-rc", feature = "tasks"))] {
+    /// # use neva::{Context, error::Error, types::elicitation::ElicitRequestParams};
+    ///
+    /// # async fn f(mut ctx: Context, params: ElicitRequestParams) -> Result<(), Error> {
+    /// let _ans = ctx.task().elicit(params).await?;
+    /// # Ok(()) }
+    /// # }
+    /// ```
+    pub async fn elicit(self, params: ElicitRequestParams) -> Result<ElicitResult, Error> {
+        let task_id = match &self.ctx.exec {
+            ExecMode::Task(task) => task.id.clone(),
+            _ => {
+                return Err(Error::new(
+                    ErrorCode::InvalidRequest,
+                    "not a task-augmented call; use ctx.elicit(key, params)",
+                ));
+            }
+        };
+        self.ctx.task_elicit(task_id, params).await
+    }
+}
+
 /// Represents a Server runtime
 #[derive(Clone)]
 pub(crate) struct ServerRuntime {
@@ -213,10 +311,11 @@ pub struct Context {
     /// Represents a timeout for the current request
     timeout: Duration,
 
-    /// MRTR per-dispatch state (set by the server dispatch layer for the
-    /// supported methods; `None` otherwise).
+    /// Execution substrate for this dispatch (set by the server dispatch layer:
+    /// `Mrtr` for a stateless elicitable call, `Task` for a background
+    /// task-augmented call, `None` otherwise).
     #[cfg(feature = "proto-2026-07-28-rc")]
-    pub(crate) mrtr: Option<Arc<MrtrCtx>>,
+    pub(crate) exec: ExecMode,
 
     /// Represents a DI scope
     #[cfg(feature = "di")]
@@ -288,7 +387,7 @@ impl ServerRuntime {
             options: self.options.clone(),
             timeout: self.options.request_timeout,
             #[cfg(feature = "proto-2026-07-28-rc")]
-            mrtr: None,
+            exec: ExecMode::None,
             #[cfg(feature = "di")]
             scope: None,
         }
@@ -311,7 +410,7 @@ impl ServerRuntime {
             options: self.options.clone(),
             timeout: self.options.request_timeout,
             #[cfg(feature = "proto-2026-07-28-rc")]
-            mrtr: None,
+            exec: ExecMode::None,
             #[cfg(feature = "di")]
             scope: None,
         }
@@ -675,11 +774,32 @@ impl Context {
 
                     let opt = self.options.clone();
                     let task_id = task.id.clone();
+
+                    // The tool runs in this spawned task on the *stateful* task
+                    // substrate — not MRTR. Under the RC it gets a `Task`
+                    // execution context (no MRTR key / `requestState`): elicitation
+                    // goes through `ctx.task().elicit(...)`, which suspends on the
+                    // task tracker (resumed by a client answer keyed by the task
+                    // id). The MRTR effect helpers (`once`/`memo`/`on_commit`) do
+                    // not apply on this substrate (see their docs).
+                    #[cfg(all(feature = "proto-2026-07-28-rc", feature = "tasks"))]
+                    let required = task_support.is_some_and(|ts| ts == TaskSupport::Required);
+                    #[cfg(all(feature = "proto-2026-07-28-rc", feature = "tasks"))]
+                    let ctx = Context {
+                        exec: ExecMode::Task(std::sync::Arc::new(TaskExec::new(
+                            task_id.clone(),
+                            required,
+                        ))),
+                        ..self
+                    };
+                    #[cfg(not(all(feature = "proto-2026-07-28-rc", feature = "tasks")))]
+                    let ctx = self;
+
                     tokio::spawn(async move {
                         tokio::select! {
                             result = tool.call(params
                                 .with_task(&task_id)
-                                .with_context(self).into()) => {
+                                .with_context(ctx).into()) => {
                                 let resp = match result {
                                     Ok(result) => {
                                         opt.tasks.complete(&task_id);
@@ -882,13 +1002,115 @@ impl Context {
         key: impl Into<String>,
         params: ElicitRequestParams,
     ) -> Result<ElicitResult, Error> {
-        match self.mrtr.as_ref() {
-            Some(mrtr) => mrtr.resolve(key.into(), params),
-            None => Err(Error::new(
+        // `ctx.elicit` is the *MRTR* (stateless re-run) entry point. A
+        // task-augmented call runs on the stateful task substrate and must use
+        // the explicit `ctx.task().elicit(...)` builder instead — the two never
+        // mix (see [`ExecMode`]).
+        match &self.exec {
+            ExecMode::Mrtr(mrtr) => mrtr.resolve(key.into(), params),
+            #[cfg(feature = "tasks")]
+            ExecMode::Task(_) => Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "this is a task-augmented call; use ctx.task().elicit(params)",
+            )),
+            _ => Err(Error::new(
                 ErrorCode::InvalidRequest,
                 "elicitation is not available for this request",
             )),
         }
+    }
+
+    /// Returns whether the current dispatch is a task-augmented call
+    /// (`proto-2026-07-28-rc`).
+    ///
+    /// Use this to branch in a `TaskSupport::Optional` tool that wants to elicit
+    /// on both substrates: `ctx.task().elicit(params)` when `true`, the MRTR
+    /// `ctx.elicit(key, params)` otherwise.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(all(feature = "server-macros", feature = "proto-2026-07-28-rc", feature = "tasks"))] {
+    /// # use neva::{Context, error::Error, types::elicitation::ElicitRequestParams};
+    /// # async fn f(mut ctx: Context, params: ElicitRequestParams) -> Result<(), Error> {
+    /// let _ans = if ctx.is_task() {
+    ///     ctx.task().elicit(params).await?
+    /// } else {
+    ///     ctx.elicit("name", params).await?
+    /// };
+    /// # Ok(()) }
+    /// # }
+    /// ```
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub fn is_task(&self) -> bool {
+        #[cfg(feature = "tasks")]
+        {
+            matches!(self.exec, ExecMode::Task(_))
+        }
+        #[cfg(not(feature = "tasks"))]
+        {
+            false
+        }
+    }
+
+    /// Returns the task-scoped API for a task-augmented call
+    /// (`proto-2026-07-28-rc` + `tasks`).
+    ///
+    /// Mirrors the client's `Client::task()` builder. Its methods operate on the
+    /// stateful task substrate and error when the current dispatch is *not*
+    /// task-augmented (check with [`Context::is_task`]).
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(all(feature = "server-macros", feature = "proto-2026-07-28-rc", feature = "tasks"))] {
+    /// # use neva::{Context, error::Error, types::elicitation::ElicitRequestParams};
+    /// # async fn f(mut ctx: Context, params: ElicitRequestParams) -> Result<(), Error> {
+    /// let _ans = ctx.task().elicit(params).await?;
+    /// # Ok(()) }
+    /// # }
+    /// ```
+    #[cfg(all(feature = "proto-2026-07-28-rc", feature = "tasks"))]
+    pub fn task(&mut self) -> TaskContext<'_> {
+        TaskContext { ctx: self }
+    }
+
+    /// Suspends a task-augmented elicit until the client posts an answer.
+    ///
+    /// Parks a resume slot keyed by the **task id** (not the session — the
+    /// stateless transport mints a fresh session per POST), exposes the prompt
+    /// via `tasks/result`, and flips the task to `input_required`. The live
+    /// background future then awaits the answer, which the dispatch layer routes
+    /// to `TaskTracker::provide_input` when the client posts a `Response` whose
+    /// id is this task id.
+    #[cfg(all(feature = "proto-2026-07-28-rc", feature = "tasks"))]
+    async fn task_elicit(
+        &mut self,
+        task_id: String,
+        params: ElicitRequestParams,
+    ) -> Result<ElicitResult, Error> {
+        let receiver = self.options.tasks.park_input(&task_id).ok_or_else(|| {
+            Error::new(ErrorCode::InternalError, "task not found for elicitation")
+        })?;
+        self.options.tasks.set_result(&task_id, params);
+        self.options.tasks.require_input(&task_id);
+
+        let resp = match timeout(self.timeout, receiver).await {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(_)) => {
+                self.options.tasks.fail(&task_id);
+                return Err(Error::new(
+                    ErrorCode::InternalError,
+                    "elicitation channel closed",
+                ));
+            }
+            Err(_) => {
+                self.options.tasks.fail(&task_id);
+                return Err(Error::new(ErrorCode::Timeout, "Request timed out"));
+            }
+        };
+
+        // Answer received: resume working and return the elicited result.
+        self.options.tasks.reset(&task_id);
+        resp.into_result()
     }
 
     /// Runs `effect` at most once across MRTR rounds (`proto-2026-07-28-rc`).
@@ -922,17 +1144,27 @@ impl Context {
         F: std::future::Future<Output = Result<(), Error>>,
     {
         let key = key.into();
-        match self.mrtr.as_ref() {
-            None => {
-                effect.await?;
-                Ok(true)
-            }
-            Some(mrtr) => {
+        match &self.exec {
+            ExecMode::Mrtr(mrtr) => {
                 if mrtr.effect_seen(&key) {
                     return Ok(false);
                 }
                 effect.await?;
                 mrtr.record_effect(key);
+                Ok(true)
+            }
+            // `once` is an MRTR helper (it dedups across re-runs). A required-task
+            // tool never re-runs, so using it there is a mistake — reject it.
+            #[cfg(feature = "tasks")]
+            ExecMode::Task(task) if task.required => Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "ctx.once is an MRTR helper and is not available in a required-task tool; run the effect inline",
+            )),
+            // Optional-task / None: there is no re-run, so the effect simply runs
+            // once (the inline behavior).
+            _ => {
+                let _ = key;
+                effect.await?;
                 Ok(true)
             }
         }
@@ -964,15 +1196,27 @@ impl Context {
         F: std::future::Future<Output = Result<T, Error>>,
     {
         let key = key.into();
-        match self.mrtr.as_ref() {
-            None => compute.await,
-            Some(mrtr) => {
+        match &self.exec {
+            ExecMode::Mrtr(mrtr) => {
                 if let Some(value) = mrtr.cached_memo(&key) {
                     return serde_json::from_value(value).map_err(Error::from);
                 }
                 let value = compute.await?;
                 mrtr.store_memo(key, serde_json::to_value(&value).map_err(Error::from)?);
                 Ok(value)
+            }
+            // `memo` is an MRTR helper (it caches across re-runs). A required-task
+            // tool never re-runs, so using it there is a mistake — reject it.
+            #[cfg(feature = "tasks")]
+            ExecMode::Task(task) if task.required => Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "ctx.memo is an MRTR helper and is not available in a required-task tool; compute the value inline",
+            )),
+            // Optional-task / None: no re-run, so there is nothing to cache
+            // against — just compute the value.
+            _ => {
+                let _ = key;
+                compute.await
             }
         }
     }
@@ -985,8 +1229,11 @@ impl Context {
     /// intermediate `input_required` rounds, nor when the handler errors.
     ///
     /// The future is stored in the shared dispatch state, so it must be
-    /// `Send + 'static` — capture by `move`. Called outside an MRTR dispatch,
-    /// it is a no-op.
+    /// `Send + 'static` — capture by `move`. This is an **MRTR-only** helper:
+    /// a task runs on the stateful substrate and never re-runs, so in a
+    /// task-augmented call `on_commit` is ignored (run the effect inline
+    /// instead) — it warns for a `Required` tool and logs at `debug` for an
+    /// `Optional` one. Called outside an elicitable dispatch, it is a no-op.
     ///
     /// # Durability
     /// "Exactly once" means once per successfully-completed flow, not globally
@@ -1006,13 +1253,34 @@ impl Context {
     where
         F: std::future::Future<Output = Result<(), Error>> + Send + 'static,
     {
-        match self.mrtr.as_ref() {
-            Some(mrtr) => mrtr.push_commit(Box::pin(effect)),
-            None => {
+        match &self.exec {
+            ExecMode::Mrtr(mrtr) => mrtr.push_commit(Box::pin(effect)),
+            // `on_commit` is an MRTR helper (it defers a side effect across
+            // re-runs to the final round). A task never re-runs, so the effect
+            // should just be run inline; the registration is ignored here. A
+            // required-task tool warns (clear mistake); an optional-task tool
+            // logs at debug (it may carry `on_commit` for its bare-MRTR path).
+            #[cfg(feature = "tasks")]
+            ExecMode::Task(_task) =>
+            {
+                #[cfg(feature = "tracing")]
+                if _task.required {
+                    tracing::warn!(
+                        logger = "neva",
+                        "on_commit is an MRTR helper and is ignored in a required-task tool; run the effect inline"
+                    );
+                } else {
+                    tracing::debug!(
+                        logger = "neva",
+                        "on_commit ignored in a task; run the effect inline"
+                    );
+                }
+            }
+            ExecMode::None => {
                 #[cfg(feature = "tracing")]
                 tracing::warn!(
                     logger = "neva",
-                    "on_commit called outside an MRTR dispatch; ignored"
+                    "on_commit called outside an elicitable dispatch; ignored"
                 );
             }
         }

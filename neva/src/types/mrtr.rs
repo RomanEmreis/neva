@@ -5,7 +5,7 @@
 //! elicitation only) before completing. See
 //! `docs/specs/2026-05-30-mrtr-design.md`.
 
-// The signed `requestState` codec is server-only: the client treats
+// The encrypted `requestState` codec is server-only: the client treats
 // `requestState` as opaque and never encodes/decodes it.
 #[cfg(feature = "server")]
 pub(crate) mod state;
@@ -18,16 +18,6 @@ use crate::types::{IntoResponse, RequestId, Response};
 
 /// A result indicating the server needs more input before it can complete the
 /// request. Recognized for `tools/call`, `prompts/get`, `resources/read`.
-///
-/// # Example
-/// ```
-/// # #[cfg(feature = "proto-2026-07-28-rc")] {
-/// use neva::types::mrtr::InputRequiredResult;
-/// let j = r#"{"resultType":"input_required","requestState":"s"}"#;
-/// let r: InputRequiredResult = serde_json::from_str(j).unwrap();
-/// assert_eq!(r.request_state.as_deref(), Some("s"));
-/// # }
-/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputRequiredResult {
     /// Discriminator, always `"input_required"`.
