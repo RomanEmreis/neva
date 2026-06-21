@@ -25,6 +25,10 @@ use crate::transport::http::HttpClient;
 
 const DEFAULT_REQUEST_TIMEOUT: u64 = 10; // 10 seconds
 
+/// Default cap on MRTR re-issue rounds for a single request or a batched one.
+#[cfg(feature = "proto-2026-07-28-rc")]
+const DEFAULT_MAX_MRTR_ROUNDS: usize = 8;
+
 /// W3C Trace Context payload supplied by [`TraceContextProvider`] and
 /// injected into the outbound request's `_meta`.
 #[cfg(feature = "proto-2026-07-28-rc")]
@@ -90,6 +94,11 @@ pub struct McpOptions {
     /// request; the returned tuple is injected into the request's `_meta`.
     #[cfg(feature = "proto-2026-07-28-rc")]
     pub(crate) trace_context_provider: Option<TraceContextProvider>,
+
+    /// Cap on MRTR re-issue rounds before the client gives up on a request
+    /// (guards against a server that never converges).
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) max_mrtr_rounds: usize,
 }
 
 impl Debug for McpOptions {
@@ -140,6 +149,8 @@ impl Default for McpOptions {
             notification_handler: None,
             #[cfg(feature = "proto-2026-07-28-rc")]
             trace_context_provider: None,
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            max_mrtr_rounds: DEFAULT_MAX_MRTR_ROUNDS,
         }
     }
 }
@@ -252,6 +263,26 @@ impl McpOptions {
     /// Default: 10 seconds
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Sets the maximum number of MRTR re-issue rounds the client drives for a
+    /// single request (and per request across a batch) before giving up with an
+    /// error. Guards against a server that keeps requesting input without ever
+    /// converging.
+    ///
+    /// Default: 8.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::client::Client;
+    ///
+    /// let client = Client::new()
+    ///     .with_options(|o| o.with_max_mrtr_rounds(16));
+    /// ```
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub fn with_max_mrtr_rounds(mut self, rounds: usize) -> Self {
+        self.max_mrtr_rounds = rounds;
         self
     }
 

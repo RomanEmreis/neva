@@ -984,7 +984,7 @@ impl Client {
     /// request (new id) with `inputResponses` + the echoed `requestState`.
     #[cfg(feature = "proto-2026-07-28-rc")]
     async fn run_with_mrtr(&mut self, req: Request) -> Result<Response, Error> {
-        const MAX_ROUNDS: usize = 8;
+        let max_rounds = self.options.max_mrtr_rounds;
         let method = req.method.clone();
         let original_params = req.params.clone();
         let mrtr_method = shared::is_mrtr_method(method.as_str());
@@ -992,7 +992,7 @@ impl Client {
         let mut req = req;
         self.apply_client_meta(&mut req, None, None);
 
-        for _ in 0..MAX_ROUNDS {
+        for _ in 0..max_rounds {
             let resp = self
                 .handler
                 .as_mut()
@@ -1044,7 +1044,7 @@ impl Client {
     /// configured [`trace_context_provider`](crate::client::options::McpOptions::with_trace_context_provider),
     /// when installed. This is the single assembly point for outbound RC `_meta`,
     /// so both single sends (via [`Self::run_with_mrtr`]) and batched requests
-    /// (via [`Self::apply_client_meta_to_batch`]) carry trace context.
+    /// (via [`Self::run_batch_with_mrtr`]) carry trace context.
     #[cfg(feature = "proto-2026-07-28-rc")]
     fn apply_client_meta(
         &self,
@@ -1072,10 +1072,11 @@ impl Client {
         req.set_meta(meta);
     }
 
-    /// Applies per-request RC client metadata (`clientInfo` /
-    /// `clientCapabilities`) to every [`Request`] in a batch. The MRTR re-run
-    /// fields (`inputResponses` / `requestState`) stay `None`: the batch path
-    /// does not drive the MRTR loop. Notifications are left untouched.
+    /// Applies the initial per-request RC client metadata (`clientInfo` /
+    /// `clientCapabilities`, plus trace context) to every [`Request`] in a
+    /// batch. The MRTR re-run fields (`inputResponses` / `requestState`) stay
+    /// `None` here — they are filled per request on each retry round by
+    /// [`Self::run_batch_with_mrtr`]. Notifications are left untouched.
     #[cfg(feature = "proto-2026-07-28-rc")]
     fn apply_client_meta_to_batch(&self, items: &mut [MessageEnvelope]) {
         for envelope in items {
@@ -1178,56 +1179,193 @@ impl Client {
         &mut self,
         items: Vec<MessageEnvelope>,
     ) -> Result<Vec<Response>, Error> {
-        use futures_util::future::join_all;
-
-        // Under the RC, single sends route through `apply_client_meta`, which
-        // declares `clientInfo` + `clientCapabilities` (e.g. elicitation
-        // support) per request. Batched requests bypass that path, so a
-        // batched `tools/call` to a tool that elicits would otherwise reach the
-        // server without `_meta.clientCapabilities` and be rejected. Apply the
-        // same per-request injection here.
+        // Under the RC a batched request may elicit just like a single send, so
+        // the batch is driven through the same MRTR retry loop (see
+        // `run_batch_with_mrtr`) rather than returning the protocol-intermediate
+        // `input_required` result as final.
         #[cfg(feature = "proto-2026-07-28-rc")]
-        let items = {
-            let mut items = items;
-            self.apply_client_meta_to_batch(&mut items);
-            items
-        };
+        {
+            self.run_batch_with_mrtr(items).await
+        }
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        {
+            let handler = self
+                .handler
+                .as_mut()
+                .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
 
-        let handler = self
-            .handler
-            .as_mut()
-            .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
+            let request_timeout = handler.timeout();
+            let pending = handler.pending().clone();
+            let receivers = handler.send_batch(items).await?;
 
-        let request_timeout = handler.timeout();
-        let pending = handler.pending().clone();
-        let receivers = handler.send_batch(items).await?;
+            collect_batch_responses(receivers, &pending, request_timeout)
+                .await
+                .into_iter()
+                .collect()
+        }
+    }
 
-        let futures = receivers.into_iter().map(|(id, rx)| {
-            let pending = pending.clone();
-            async move {
-                match tokio::time::timeout(request_timeout, rx).await {
-                    Ok(Ok(crate::shared::PendingResponse::Response(resp))) => Ok(resp),
-                    Ok(Ok(crate::shared::PendingResponse::Timeout)) => {
-                        Err(Error::new(ErrorCode::Timeout, "Batch request timed out"))
-                    }
-                    Ok(Err(_)) => Err(Error::new(
-                        ErrorCode::InternalError,
-                        "Response channel closed",
-                    )),
-                    Err(_) => {
-                        let _ = pending.pop(&id);
-                        Err(Error::new(ErrorCode::Timeout, "Batch request timed out"))
-                    }
+    /// Drives the MRTR retry loop across an entire batch.
+    ///
+    /// Each batched [`Request`] that elicits — the server replies with an
+    /// `input_required` result — is fulfilled via the configured elicitation
+    /// handler and re-issued (carrying `inputResponses` + the echoed
+    /// `requestState`) alongside any other still-eliciting requests, so the
+    /// whole batch is driven to completion in lock-step rounds. One transport
+    /// write per round preserves the batching benefit; final
+    /// (non-`input_required`) responses are retained and not re-sent. Each
+    /// request keeps its slot in the returned `Vec`, in input order;
+    /// notifications (and any non-request envelopes) are sent once, in the
+    /// first round, and produce no slot.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    async fn run_batch_with_mrtr(
+        &mut self,
+        items: Vec<MessageEnvelope>,
+    ) -> Result<Vec<Response>, Error> {
+        let max_rounds = self.options.max_mrtr_rounds;
+
+        // A per-request slot: either still eliciting (carrying what is needed to
+        // re-issue) or resolved to its final response.
+        enum Slot {
+            Pending {
+                method: String,
+                original_params: Option<serde_json::Value>,
+                req: Option<Request>,
+            },
+            Done(Response),
+        }
+
+        // Seed round-0 metadata (`clientInfo` / `clientCapabilities` / trace
+        // context) on every request via the shared assembly path, then split
+        // requests (which get ordered slots) from fire-and-forget extras
+        // (notifications) sent only in the first round.
+        let mut items = items;
+        self.apply_client_meta_to_batch(&mut items);
+
+        let mut slots: Vec<Slot> = Vec::new();
+        let mut extras: Vec<MessageEnvelope> = Vec::new();
+        for envelope in items {
+            match envelope {
+                MessageEnvelope::Request(req) => slots.push(Slot::Pending {
+                    method: req.method.clone(),
+                    original_params: req.params.clone(),
+                    req: Some(req),
+                }),
+                other => extras.push(other),
+            }
+        }
+
+        // No requests to drive through MRTR: send any extras (notifications)
+        // once and let `send_batch` surface the same connection-closed /
+        // empty-batch errors a non-eliciting batch would.
+        if slots.is_empty() {
+            let handler = self
+                .handler
+                .as_mut()
+                .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
+            let request_timeout = handler.timeout();
+            let pending = handler.pending().clone();
+            let receivers = handler.send_batch(extras).await?;
+            return collect_batch_responses(receivers, &pending, request_timeout)
+                .await
+                .into_iter()
+                .collect();
+        }
+
+        for round in 0..max_rounds {
+            // Collect this round's outgoing requests; notifications ride along once.
+            let mut envelopes: Vec<MessageEnvelope> = Vec::new();
+            if round == 0 {
+                envelopes.append(&mut extras);
+            }
+            let mut round_slots: Vec<usize> = Vec::new();
+            for (i, slot) in slots.iter_mut().enumerate() {
+                if let Slot::Pending { req, .. } = slot
+                    && let Some(request) = req.take()
+                {
+                    round_slots.push(i);
+                    envelopes.push(MessageEnvelope::Request(request));
                 }
             }
-        });
+            if round_slots.is_empty() {
+                break;
+            }
 
-        // join_all (not try_join_all) ensures every future runs to completion.
-        // This guarantees the timeout cleanup branch (pending.pop) executes for
-        // any request that times out, even when another request in the same
-        // batch has already failed.
-        let results = join_all(futures).await;
-        results.into_iter().collect()
+            // One transport write; await this round's replies concurrently.
+            let handler = self
+                .handler
+                .as_mut()
+                .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
+            let request_timeout = handler.timeout();
+            let pending = handler.pending().clone();
+            let receivers = handler.send_batch(envelopes).await?;
+            let responses = collect_batch_responses(receivers, &pending, request_timeout).await;
+
+            // `responses` aligns with `round_slots`: `send_batch` preserves
+            // request order and extras produce no receiver. Final responses fill
+            // their slot; `input_required` ones are fulfilled and re-issued.
+            for (slot_i, resp) in round_slots.into_iter().zip(responses) {
+                let resp = resp?;
+                let (method, original_params) = match &slots[slot_i] {
+                    Slot::Pending {
+                        method,
+                        original_params,
+                        ..
+                    } => (method.clone(), original_params.clone()),
+                    Slot::Done(_) => unreachable!("a round slot is always pending"),
+                };
+
+                let is_input_required = shared::is_mrtr_method(method.as_str())
+                    && matches!(
+                        &resp,
+                        Response::Ok(ok)
+                            if ok.result.get("resultType")
+                                == Some(&serde_json::json!("input_required"))
+                    );
+                if !is_input_required {
+                    slots[slot_i] = Slot::Done(resp);
+                    continue;
+                }
+
+                let ir = match &resp {
+                    Response::Ok(ok) => serde_json::from_value::<
+                        crate::types::mrtr::InputRequiredResult,
+                    >(ok.result.clone())
+                    .map_err(Error::from)?,
+                    Response::Err(_) => unreachable!("input_required is a success result"),
+                };
+
+                let mut input_responses = crate::types::mrtr::InputResponses::new();
+                if let Some(reqs) = ir.input_requests {
+                    for (key, envelope) in reqs {
+                        let result = self.fulfil_elicitation(envelope.params).await?;
+                        input_responses.insert(key, result);
+                    }
+                }
+
+                let new_id = self.generate_id()?;
+                let mut retry = Request::new(Some(new_id), method, original_params);
+                self.apply_client_meta(&mut retry, Some(input_responses), ir.request_state);
+                if let Slot::Pending { req, .. } = &mut slots[slot_i] {
+                    *req = Some(retry);
+                }
+            }
+        }
+
+        // Assemble in slot order; a slot still pending exhausted the rounds.
+        let mut out = Vec::with_capacity(slots.len());
+        for slot in slots {
+            match slot {
+                Slot::Done(resp) => out.push(resp),
+                Slot::Pending { .. } => {
+                    return Err(Error::new(
+                        ErrorCode::InternalError,
+                        "MRTR exceeded the maximum number of rounds",
+                    ));
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Sends a request to the MCP server
@@ -1388,6 +1526,46 @@ impl shared::TaskApi for Client {
         }
         Ok(())
     }
+}
+
+/// Awaits a batch's per-request receivers concurrently, returning one result
+/// per receiver in input order, with the same per-request timeout and pending
+/// cleanup as a single [`RequestHandler::send_request`].
+///
+/// Uses `join_all` (not `try_join_all`) so every future runs to completion: the
+/// timeout-cleanup branch (`pending.pop`) executes for each timed-out request
+/// even when another request in the same batch has already failed.
+async fn collect_batch_responses(
+    receivers: Vec<(
+        RequestId,
+        tokio::sync::oneshot::Receiver<crate::shared::PendingResponse>,
+    )>,
+    pending: &crate::shared::RequestQueue,
+    request_timeout: std::time::Duration,
+) -> Vec<Result<Response, Error>> {
+    use futures_util::future::join_all;
+
+    let futures = receivers.into_iter().map(|(id, rx)| {
+        let pending = pending.clone();
+        async move {
+            match tokio::time::timeout(request_timeout, rx).await {
+                Ok(Ok(crate::shared::PendingResponse::Response(resp))) => Ok(resp),
+                Ok(Ok(crate::shared::PendingResponse::Timeout)) => {
+                    Err(Error::new(ErrorCode::Timeout, "Batch request timed out"))
+                }
+                Ok(Err(_)) => Err(Error::new(
+                    ErrorCode::InternalError,
+                    "Response channel closed",
+                )),
+                Err(_) => {
+                    let _ = pending.pop(&id);
+                    Err(Error::new(ErrorCode::Timeout, "Batch request timed out"))
+                }
+            }
+        }
+    });
+
+    join_all(futures).await
 }
 
 #[inline]

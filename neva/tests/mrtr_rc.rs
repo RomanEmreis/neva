@@ -804,6 +804,139 @@ async fn client_drives_mrtr_elicitation_end_to_end() {
     handle.abort();
 }
 
+/// A batch whose requests elicit must be driven through the MRTR loop just like
+/// single sends: each eliciting `tools/call` is fulfilled and re-issued (with
+/// `inputResponses` + the echoed `requestState`) until it produces a final
+/// result, never leaving the protocol-intermediate `input_required` as the
+/// batch's answer. Non-eliciting requests and notifications ride the same batch,
+/// keep their slots in order, and notifications produce no slot.
+#[tokio::test(flavor = "multi_thread")]
+async fn client_drives_mrtr_across_a_batch_end_to_end() {
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("greet", |mut ctx: Context| async move {
+        let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
+            .with_required("name", "string")
+            .into();
+        let res = ctx.elicit("name", params).await?;
+        let name = res
+            .content
+            .and_then(|c| c.get("name").and_then(|v| v.as_str().map(str::to_owned)))
+            .unwrap_or_else(|| "stranger".into());
+        Ok::<String, Error>(format!("hello {name}"))
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let mut client =
+        Client::new().with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+    client.map_elicitation(|_params: ElicitRequestParams| async move {
+        ElicitResult::accept().with_content(serde_json::json!({ "name": "octocat" }))
+    });
+    client.connect().await.expect("client connects");
+
+    // A mixed batch: a non-eliciting list, two eliciting tool calls, and a
+    // fire-and-forget notification interleaved between them.
+    let responses = client
+        .batch()
+        .list_tools()
+        .call_tool("greet", ())
+        .notify("notifications/progress", None)
+        .call_tool("greet", ())
+        .send()
+        .await
+        .expect("batch completes through the MRTR loop");
+
+    // Three slots (the notification produces none), in request order.
+    assert_eq!(
+        responses.len(),
+        3,
+        "one slot per request, notifications none"
+    );
+
+    // Slot 0: the non-eliciting tools/list result.
+    let tools = responses[0]
+        .clone()
+        .into_result::<neva::types::ListToolsResult>()
+        .expect("tools/list result");
+    assert!(
+        tools.tools.iter().any(|t| t.name == "greet"),
+        "first slot is the tools/list result"
+    );
+
+    // Slots 1 & 2: both eliciting calls were driven to their final results,
+    // never returning `input_required`.
+    for (slot, resp) in [(1usize, &responses[1]), (2, &responses[2])] {
+        let result = resp
+            .clone()
+            .into_result::<neva::types::CallToolResponse>()
+            .unwrap_or_else(|e| panic!("slot {slot} is a final tools/call result: {e}"));
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.as_str());
+        assert_eq!(
+            text,
+            Some("hello octocat"),
+            "slot {slot} must carry the elicited final result"
+        );
+        assert!(!result.is_error, "slot {slot} must not be an error");
+    }
+
+    client.disconnect().await.ok();
+    handle.abort();
+}
+
+/// The MRTR round cap is configurable via `with_max_mrtr_rounds`. With a cap of
+/// 1, a tool that elicits never converges within the budget, so the client gives
+/// up with the max-rounds error instead of looping the default 8 times.
+#[tokio::test(flavor = "multi_thread")]
+async fn configurable_max_rounds_caps_the_mrtr_loop() {
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("greet", |mut ctx: Context| async move {
+        let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
+            .with_required("name", "string")
+            .into();
+        let _ = ctx.elicit("name", params).await?;
+        Ok::<String, Error>("done".into())
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let mut client = Client::new().with_options(|o| {
+        o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
+            .with_max_mrtr_rounds(1)
+    });
+    client.map_elicitation(|_params: ElicitRequestParams| async move {
+        ElicitResult::accept().with_content(serde_json::json!({ "name": "octocat" }))
+    });
+    client.connect().await.expect("client connects");
+
+    let err = client
+        .call_tool("greet", ())
+        .await
+        .expect_err("a 1-round cap must not let the elicitation converge");
+    assert!(
+        err.to_string().contains("maximum number of rounds"),
+        "expected the max-rounds error, got: {err}"
+    );
+
+    client.disconnect().await.ok();
+    handle.abort();
+}
+
 fn pick_free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
