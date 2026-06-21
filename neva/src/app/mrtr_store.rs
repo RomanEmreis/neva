@@ -27,6 +27,7 @@
 use crate::types::Response;
 use crate::types::mrtr::state::now_secs;
 use futures_util::future::BoxFuture;
+use std::sync::Arc;
 
 /// A store that remembers the final response of a committed MRTR `requestState`
 /// so a lost-response retry returns the cached result instead of re-running the
@@ -47,6 +48,34 @@ pub trait RequestStateStore: Send + Sync {
     /// until the unix-seconds `exp` (the originating state's own expiry, after
     /// which a retry is rejected as expired before reaching the store).
     fn put<'a>(&'a self, tag: &'a str, response: Response, exp: u64) -> BoxFuture<'a, ()>;
+
+    /// Atomically claims `tag` for an in-flight final round, returning a guard
+    /// the caller holds across the [`get`](Self::get) check, handler execution
+    /// and the committing [`put`](Self::put).
+    ///
+    /// This closes a race the cache alone cannot: two identical final-round
+    /// retries for the same state (for example, an HTTP client that timed out
+    /// and re-sent while the first round is still executing) can both miss
+    /// [`get`](Self::get) before either reaches [`put`](Self::put), so both
+    /// re-run the handler and re-drain its
+    /// [`on_commit`](crate::Context::on_commit) effects — duplicating side
+    /// effects such as charges. Holding a per-`tag` reservation across the whole
+    /// section serialises them: the loser blocks until the winner has committed,
+    /// then sees the cached response on its own [`get`](Self::get) and never
+    /// re-executes.
+    ///
+    /// The returned guard releases the reservation on drop. The default
+    /// implementation is a no-op (returns a guard that reserves nothing) so
+    /// existing stores keep compiling; the default
+    /// [`InMemoryStateStore`] overrides it with an in-process per-`tag` lock,
+    /// sufficient for a single instance. **A shared store backing a
+    /// multi-instance deployment must override this with a distributed lock**,
+    /// for the same reason it must share the MRTR secret: a retry routed to a
+    /// different instance must serialise against the round still committing
+    /// elsewhere.
+    fn reserve<'a>(&'a self, _tag: &'a str) -> BoxFuture<'a, Box<dyn Send>> {
+        Box::pin(async { Box::new(()) as Box<dyn Send> })
+    }
 }
 
 /// The default per-process [`RequestStateStore`], backed by a concurrent map
@@ -60,6 +89,10 @@ pub trait RequestStateStore: Send + Sync {
 #[derive(Debug, Default)]
 pub struct InMemoryStateStore {
     entries: dashmap::DashMap<String, (Response, u64)>,
+    /// Per-`tag` reservation locks (see [`RequestStateStore::reserve`]). Swept
+    /// in [`put`](Self::put) once no task holds or awaits an entry, so the map
+    /// tracks only in-flight final rounds.
+    locks: dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>,
 }
 
 impl InMemoryStateStore {
@@ -92,7 +125,28 @@ impl RequestStateStore for InMemoryStateStore {
             let now = now_secs();
             // Opportunistically drop expired entries so the map stays bounded.
             self.entries.retain(|_, (_, e)| *e > now);
+            // Drop reservation locks no task holds or awaits — only the map's
+            // own reference remains (`strong_count == 1`). The tag committing
+            // here is still held by the live guard (`>= 2`), so it survives.
+            self.locks.retain(|_, m| Arc::strong_count(m) > 1);
             self.entries.insert(tag.to_owned(), (response, exp));
+        })
+    }
+
+    fn reserve<'a>(&'a self, tag: &'a str) -> BoxFuture<'a, Box<dyn Send>> {
+        Box::pin(async move {
+            // Get-or-create the per-tag mutex, then take it. `lock_owned`
+            // consumes a clone of the `Arc` and the returned guard keeps it, so
+            // the guard is `'static`. While any task holds or awaits the lock
+            // the `Arc`'s strong count stays above 1, keeping it out of `put`'s
+            // sweep until the last user is gone.
+            let mutex = self
+                .locks
+                .entry(tag.to_owned())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone();
+            let guard = mutex.lock_owned().await;
+            Box::new(guard) as Box<dyn Send>
         })
     }
 }
@@ -136,5 +190,50 @@ mod tests {
         // The expired entry was swept by the second put.
         assert_eq!(store.entries.len(), 1);
         assert!(store.entries.contains_key("new"));
+    }
+
+    #[tokio::test]
+    async fn reserve_serialises_concurrent_final_rounds() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let store = Arc::new(InMemoryStateStore::new());
+        let runs = Arc::new(AtomicUsize::new(0));
+
+        // Mirrors the dispatch critical section: reserve, then cache-check, then
+        // (on a miss) run the "handler" side effect and cache the result.
+        async fn round(store: Arc<InMemoryStateStore>, runs: Arc<AtomicUsize>) {
+            let _guard = store.reserve("tag").await;
+            if store.get("tag").await.is_none() {
+                runs.fetch_add(1, Ordering::SeqCst);
+                // Force the holder across an await point so the other retry is
+                // made to wait on the reservation rather than racing the cache.
+                tokio::task::yield_now().await;
+                store.put("tag", resp(1), now_secs() + 300).await;
+            }
+        }
+
+        let a = tokio::spawn(round(store.clone(), runs.clone()));
+        let b = tokio::spawn(round(store.clone(), runs.clone()));
+        a.await.expect("task a");
+        b.await.expect("task b");
+
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "the final-round handler must run exactly once across identical retries"
+        );
+        assert!(store.get("tag").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn put_sweeps_released_reservation_locks() {
+        let store = InMemoryStateStore::new();
+        {
+            let _guard = store.reserve("tag").await;
+            assert_eq!(store.locks.len(), 1);
+        }
+        // The guard is dropped; the next put sweeps the now-idle lock entry.
+        store.put("other", resp(1), now_secs() + 300).await;
+        assert!(store.locks.is_empty());
     }
 }

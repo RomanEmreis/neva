@@ -111,6 +111,7 @@ static FETCHES: AtomicUsize = AtomicUsize::new(0);
 static CHARGES: AtomicUsize = AtomicUsize::new(0);
 static RECEIPTS: AtomicUsize = AtomicUsize::new(0);
 static LOST_RESPONSE_COMMITS: AtomicUsize = AtomicUsize::new(0);
+static CONCURRENT_FINAL_COMMITS: AtomicUsize = AtomicUsize::new(0);
 
 #[tokio::test(flavor = "multi_thread")]
 async fn final_round_replay_is_idempotent_after_a_lost_response() {
@@ -236,6 +237,122 @@ async fn final_round_replay_is_idempotent_after_a_lost_response() {
         LOST_RESPONSE_COMMITS.load(Ordering::SeqCst),
         1,
         "on_commit must not fire again on a lost-response retry"
+    );
+
+    handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_final_round_retries_commit_exactly_once() {
+    // Two IDENTICAL final-round retries arrive at the same time (the client
+    // timed out and re-sent while the first is still executing). Without a
+    // per-state reservation both miss the idempotency cache and re-run the
+    // handler + on_commit. The handler sleeps to widen that window; the
+    // reservation must still serialise them so the commit fires exactly once.
+    CONCURRENT_FINAL_COMMITS.store(0, Ordering::SeqCst);
+
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("greet", |mut ctx: Context| async move {
+        let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
+            .with_required("name", "string")
+            .into();
+        let res = ctx.elicit("name", params).await?;
+        let name = res
+            .content
+            .and_then(|c| c.get("name").and_then(|v| v.as_str().map(str::to_owned)))
+            .unwrap_or_else(|| "stranger".into());
+        // Widen the get-miss → put window so both retries would overlap absent
+        // the reservation.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        ctx.on_commit(async move {
+            CONCURRENT_FINAL_COMMITS.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        Ok::<String, Error>(format!("hello {name}"))
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{addr}/mcp");
+
+    // Round 1: tools/call → input_required.
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "greet", "arguments": {},
+            "_meta": { "clientCapabilities": { "elicitation": true } } }
+    });
+    let r1: serde_json::Value = client
+        .post(&url)
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .json(&call)
+        .send()
+        .await
+        .expect("round 1 send")
+        .json()
+        .await
+        .expect("round 1 json");
+    let state = r1["result"]["requestState"]
+        .as_str()
+        .expect("requestState present")
+        .to_string();
+    let key = r1["result"]["inputRequests"]
+        .as_object()
+        .expect("inputRequests object")
+        .keys()
+        .next()
+        .expect("one input request")
+        .clone();
+
+    // Two identical final retries, distinct ids, fired concurrently.
+    let retry = |id: i64| {
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": { "name": "greet", "arguments": {},
+                "_meta": {
+                    "clientCapabilities": { "elicitation": true },
+                    "requestState": state,
+                    "inputResponses": { key.clone(): { "action": "accept", "content": { "name": "octocat" } } }
+                } }
+        })
+    };
+    let send = |body: serde_json::Value| {
+        let client = client.clone();
+        let url = url.clone();
+        async move {
+            client
+                .post(&url)
+                .header("MCP-Protocol-Version", "2026-07-28")
+                .json(&body)
+                .send()
+                .await
+                .expect("final send")
+                .json::<serde_json::Value>()
+                .await
+                .expect("final json")
+        }
+    };
+
+    let (ra, rb) = tokio::join!(send(retry(2)), send(retry(3)));
+
+    // Both retries succeed with the same result; the commit fired only once.
+    for r in [&ra, &rb] {
+        assert_eq!(
+            r.pointer("/result/content/0/text").and_then(|v| v.as_str()),
+            Some("hello octocat"),
+            "both concurrent finals must return the result: {r}"
+        );
+    }
+    assert_eq!(
+        CONCURRENT_FINAL_COMMITS.load(Ordering::SeqCst),
+        1,
+        "on_commit must fire exactly once across concurrent identical retries"
     );
 
     handle.abort();

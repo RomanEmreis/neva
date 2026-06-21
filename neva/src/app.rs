@@ -1201,6 +1201,17 @@ impl App {
         } else {
             None
         };
+        // Claim the per-state reservation *before* the cache lookup and hold it
+        // through the handler, commits and the final `put`. Two identical
+        // final-round retries (e.g. a client that timed out and re-sent while
+        // the first round is still committing) would otherwise both miss the
+        // cache below and re-run the handler + `on_commit` effects. The loser
+        // blocks here until the winner has cached, then hits it instead.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let _state_reservation = match state_tag.as_deref() {
+            Some(tag) => Some(options.request_state_store().reserve(tag).await),
+            None => None,
+        };
         #[cfg(feature = "proto-2026-07-28-rc")]
         if let Some(tag) = state_tag.as_deref()
             && let Some(cached) = options.request_state_store().get(tag).await
