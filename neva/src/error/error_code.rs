@@ -157,16 +157,25 @@ impl ErrorCode {
         }
     }
 
-    /// Code emitted for "resource not found" — spec-version dependent.
+    /// Code to use for "resource not found" — spec-version dependent.
     ///
     /// - Default build (pre-2026 spec): [`Self::ResourceNotFound`] (`-32002`).
     /// - `proto-2026-07-28-rc`: [`Self::InvalidParams`] (`-32602`), per the RC.
     ///
-    /// All in-tree emitters should reference this constant instead of using
-    /// `Self::ResourceNotFound` directly, so the wire code follows the active
-    /// spec version automatically.
-    #[allow(dead_code)] // emitters live under `server`/`client` features
-    pub(crate) const RESOURCE_NOT_FOUND: Self = {
+    /// This is the migration path for the now-deprecated
+    /// [`Self::ResourceNotFound`] variant: reference this constant instead of
+    /// naming the variant (or hard-coding [`Self::InvalidParams`]) so the wire
+    /// code follows the active spec version automatically. All in-tree emitters
+    /// use it; downstream handlers should too.
+    ///
+    /// # Example
+    /// ```
+    /// use neva::error::{Error, ErrorCode};
+    ///
+    /// // Prefer this over the deprecated `ErrorCode::ResourceNotFound`.
+    /// let err = Error::new(ErrorCode::RESOURCE_NOT_FOUND, "no such resource");
+    /// ```
+    pub const RESOURCE_NOT_FOUND: Self = {
         #[cfg(feature = "proto-2026-07-28-rc")]
         {
             Self::InvalidParams
