@@ -1228,6 +1228,12 @@ impl Context {
     /// sent; the first `Err` becomes the response error. They do **not** run on
     /// intermediate `input_required` rounds, nor when the handler errors.
     ///
+    /// Commits run whenever the tool returns a success response.
+    /// If your tool encodes failure in content rather than returning `Err` or
+    /// setting `isError: true`, commits will still run — return `Err`
+    /// (folded into `isError: true` by the wrapper) or set the flag explicitly
+    /// to suppress them.
+    ///
     /// The future is stored in the shared dispatch state, so it must be
     /// `Send + 'static` — capture by `move`. This is an **MRTR-only** helper:
     /// a task runs on the stateful substrate and never re-runs, so in a

@@ -7,87 +7,174 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## 0.4.0
 
+This release adds opt-in support for the **MCP 2026-07-28 Release Candidate**
+spec behind the compile-time `proto-2026-07-28-rc` flag. The legacy spec
+remains the default and is unchanged for users who don't opt in. Once the RC
+graduates the flag will invert: the RC path becomes the default and the
+current default moves under a `legacy-spec` flag — a deliberate breaking
+change, mirroring the spec itself.
+
 ### Added
 
-* New compile-time feature flag `proto-2026-07-28-rc` enabling the MCP Release Candidate spec 2026-07-28 wire format. Opt-in only; the legacy spec remains the default.
-* `neva::types::schema_2020::InputSchema` — `#[serde(transparent)]` new type around `serde_json::Value`, holding full JSON Schema 2020-12 documents verbatim. Ships with `from_value`, `from_json_str`, `from_schema::<T>()`, `from_schemars`, `as_value`, and `into_value`.
-* `neva::types::ToolInputSchema` — per-flag type alias that resolves to `tool::ToolSchema` under the legacy spec and to `schema_2020::InputSchema` under `proto-2026-07-28-rc`. Use this alias in code that constructs or accepts tool schemas so the same call site compiles under either flag.
-* `ToolSchema::from_value(Value) -> Result<Self, Error>` — fallible Value constructor, mirroring `InputSchema::from_value`.
-* `ToolSchema::from_schema::<T: JsonSchema>()` — generic constructor symmetric with `InputSchema::from_schema::<T>()`.
-* `ToolSchema::from_schemars(schemars::Schema)` — non-generic constructor renamed for symmetry with `InputSchema::from_schemars`.
-* `neva::types::CacheScope` and `ttlMs` / `cacheScope` fields on the four MCP list results (tools / prompts / resources / resource templates), per the RC spec's caching hints.
-* RC-only routing headers (`Mcp-Session-Id` / routing hints) injected into the HTTP POST send loop, plus a `routing_hints` helper on the client transport.
-* `traceparent` / `tracestate` fields on `RequestParamsMeta` and a client-side `TraceContextProvider` hook (RC only), with matching server-side span `record`.
-* `ErrorCode::RESOURCE_NOT_FOUND` public constant — emits `-32002` (legacy `ResourceNotFound`) or `-32602` (`InvalidParams`) per the active spec version. All in-tree emitters of "resource not found" route through this constant so the wire code automatically follows the active flag; it is also the supported migration path for downstream handlers off the deprecated `ErrorCode::ResourceNotFound` variant (reference the constant rather than hard-coding `InvalidParams`, which would otherwise change legacy-wire behavior).
-* The `#[tool]` proc-macro now emits JSON Schema 2020-12 `inputSchema` / `outputSchema` under `proto-2026-07-28-rc`: primitive arguments map to inline primitive schemas, structured `Json<T>` arguments derive a rich, inlined schema when the inner `T` implements `JsonSchema` (graceful `{"type":"object"}` fallback otherwise), and the return type drives `outputSchema`. Explicit `input_schema` / `output_schema` string literals are now validated at compile time (on every feature configuration). `schemars` need not be a direct dependency of the user crate — it is re-exported by neva.
-* Stateless HTTP transport (RC only): the `initialize` / `initialized` handshake is replaced by a new `server/discover` request returning `neva::types::DiscoverResult`. The client gains `Client::discover()` (with `Client::init()` kept as a back-compat alias so existing `connect()` flows keep working).
-* A required `MCP-Protocol-Version` request header (RC only) on every HTTP POST. The client injects it automatically; the server rejects a missing or unsupported value with JSON-RPC `InvalidRequest`.
-* Client implementation info is now carried in each request's `_meta` under `io.modelcontextprotocol/clientInfo` (RC only), merged non-destructively with any existing `_meta` (e.g. `traceparent`).
-* Multi Round-Trip Requests (MRTR) for elicitation under `proto-2026-07-28-rc`: a server handler can call `ctx.elicit(key, params).await?`; the framework returns an `InputRequiredResult` (`neva::types::mrtr`) carrying an encrypted `requestState`, and the client — driving its configured elicitation handler — re-issues the original request with `inputResponses` until the call completes, fully statelessly. `requestState` is sealed with ChaCha20-Poly1305 (AEAD) so it is both confidential and tamper-evident, and is bound to a TTL, the originating request, and the authenticated principal (`Claims::subject`). Configure the secret via `App::with_request_state_secret`; an ephemeral key is generated otherwise (multi-instance deployments MUST set a shared one). New (RC-only) dependencies: `chacha20poly1305`, `sha2`.
-* Replay-aware effect helpers on `Context` for MRTR handlers (`proto-2026-07-28-rc`): `ctx.once(key, fut)` runs a side effect at most once across rounds; `ctx.memo(key, fut)` computes-and-caches a value into the encrypted `requestState` (so cached values stay confidential on the wire); `ctx.on_commit(fut)` registers an effect that runs exactly once when the handler reaches its final (non-`input_required`) result. These are at-most-once within a single `requestState` chain — not durable or globally exactly-once — so pair non-idempotent effects with a downstream idempotency key (see the `once`/`on_commit` docs).
-* `App::with_max_state_bytes` / `McpOptions::max_state_bytes` (`proto-2026-07-28-rc`): caps the encoded `requestState` size (default 8 KiB); a round-trip that would exceed it returns a "requestState too large" error instead of emitting an oversized blob.
-* Client `McpOptions::with_max_mrtr_rounds` (`proto-2026-07-28-rc`): caps the number of MRTR re-issue rounds the client drives for a single request — and per request across a batch — before giving up with the max-rounds error (default 8, previously a hardcoded constant). Guards against a server that keeps requesting input without ever converging.
-* Startup deployment warning (`proto-2026-07-28-rc` + `http-server` + `tracing`): `App::run` now logs a `tracing::warn!` when the HTTP transport is used with the default ephemeral per-process MRTR secret (i.e. `with_request_state_secret` was never called). On a multi-instance deployment a retry routed to another instance would otherwise silently fail to decrypt the `requestState` — this surfaces the misconfiguration at boot instead.
-* Protocol extensions framework (`proto-2026-07-28-rc`): a new `neva::Extension` trait (`neva::app::extension`) lets a feature advertise a capability under its reverse-DNS id (surfaced by `server/discover` under `capabilities.extensions`) and register its own request handlers, wired in via `App::with_extension`. Tasks is the first built-in consumer (`neva::TasksExtension`, id `io.modelcontextprotocol/tasks`).
-* MRTR final-round idempotency store (`proto-2026-07-28-rc`): a new `neva::RequestStateStore` trait (`neva::app::mrtr_store`) with a per-process `neva::InMemoryStateStore` default, configurable via `App::with_request_state_store`. The server caches the response of a committed final round keyed by the incoming `requestState`'s integrity tag, so a lost-response retry (the client re-issuing the same state) returns the cached result instead of re-running the handler. Implement the trait over a shared backend (e.g. Redis) for multi-instance deployments — the same constraint as a shared `with_request_state_secret`.
-* Elicitation inside task-augmented tools under `proto-2026-07-28-rc` + `tasks`, via a new explicit `ctx.task()` builder (mirroring the client's `Client::task()`). The dispatch now runs on one of two *execution substrates* and they never mix: a bare stateless call uses MRTR re-run (`ctx.elicit(key, params)` → `requestState`), while a task-augmented call — already stateful — *suspends* the live background future (`ctx.task().elicit(params)`, no replay key). A task elicit flips its task to `input_required` and exposes the prompt via `tasks/result`; the client posts the answer as a JSON-RPC `Response` whose id is the task id, which the server routes to the parked elicit keyed by the server-generated task id (**not** the session — the stateless POST transport mints a fresh session per request). New helpers: `ctx.task()` and `ctx.is_task()` (to branch in a `TaskSupport::Optional` tool that elicits on both substrates). Resuming a parked task-elicit requires the answer to reach the instance running the task — the same instance-affinity tasks already have.
+#### MCP 2026-07-28 RC (opt-in via `proto-2026-07-28-rc`)
+
+* **Stateless HTTP transport.** The `initialize`/`initialized` handshake is
+  replaced by a single `server/discover` request returning `DiscoverResult`
+  (with `Client::discover()`; `Client::init()` kept as a back-compat alias).
+  No `Mcp-Session-Id` on the wire; the GET (SSE) and DELETE routes are not
+  registered. Every POST carries a required `MCP-Protocol-Version` header —
+  the client injects automatically; the server rejects missing/unsupported
+  values with `InvalidRequest`.
+* **JSON Schema 2020-12 for tools.** New `schema_2020::InputSchema` —
+  `#[serde(transparent)]` newtype over `serde_json::Value` — and a per-flag
+  `ToolInputSchema` alias on `Tool.input_schema`/`output_schema`. The
+  `#[tool]` macro now emits full 2020-12 documents: primitive args become
+  inline primitive schemas, structured `Json<T>` args derive a rich inlined
+  schema when `T: JsonSchema` (graceful `{"type":"object"}` fallback
+  otherwise), and the return type drives `outputSchema`.
+  `input_schema`/`output_schema` string literals are validated at compile
+  time on every feature configuration. `schemars` is re-exported by neva —
+  user crates don't need a direct dep.
+* **Multi Round-Trip Requests (MRTR) for elicitation.** Handlers call
+  `ctx.elicit(key, params).await?`; on a miss the framework returns an
+  `InputRequiredResult` carrying an AEAD-sealed `requestState`, and the
+  client re-issues with `inputResponses` until completion. State is bound to
+  a TTL, the originating request, and the authenticated principal
+  (`Claims::subject`). Configure the secret via
+  `App::with_request_state_secret`; an ephemeral key is generated otherwise
+  (multi-instance deployments **must** set a shared one).
+* **Replay-aware effect helpers** on `Context`: `ctx.once(key, fut)`
+  (run-at-most-once side effect), `ctx.memo(key, fut)` (computed-and-cached
+  value, written into the sealed `requestState`), `ctx.on_commit(fut)` (runs
+  exactly once when the handler reaches its final result). At-most-once
+  *within a single chain* — pair non-idempotent effects with a downstream
+  idempotency key.
+* **MRTR final-round idempotency store.** `RequestStateStore` trait
+  (`neva::app::mrtr_store`) with a default per-process `InMemoryStateStore`,
+  wired via `App::with_request_state_store`. Caches the final response keyed
+  by the incoming state's integrity tag + answers digest, so a lost-response
+  retry returns the cached result instead of re-running the handler. Implement
+  over a shared backend (e.g. Redis) for multi-instance — same constraint as
+  a shared signing secret.
+* **Task-augmented elicit.** Two execution substrates that never mix: a bare
+  call uses MRTR re-run (`ctx.elicit(key, params)`); a task-augmented call
+  genuinely suspends (`ctx.task().elicit(params)`, no replay key). New
+  `ctx.task()` builder and `ctx.is_task()` switch for `TaskSupport::Optional`
+  tools that elicit on both substrates. Resuming a parked task-elicit requires
+  the answer to reach the instance running the task — same instance-affinity
+  tasks already have.
+* **Protocol extensions framework.** `Extension` trait
+  (`neva::app::extension`) registered via `App::with_extension`; extensions
+  advertise a capability under their reverse-DNS id (surfaced in
+  `server/discover` under `capabilities.extensions`) and register their own
+  handlers. **Tasks** is the first built-in consumer (`TasksExtension`, id
+  `io.modelcontextprotocol/tasks`).
+* **Cache hints.** `CacheScope` enum and `ttlMs`/`cacheScope` fields on the
+  four list results (tools, prompts, resources, resource templates).
+* **Routing & tracing.** RC-only `Mcp-Method`/`Mcp-Name` routing headers on
+  HTTP POSTs; `traceparent`/`tracestate` on `RequestParamsMeta` with a
+  client-side `TraceContextProvider` hook and matching server-side span
+  recording.
+* **Configuration knobs.** `App::with_max_state_bytes` (default 8 KiB) caps
+  encoded `requestState`; client `McpOptions::with_max_mrtr_rounds` (default
+    8) caps MRTR re-issue rounds — counted as retries, the initial send is
+       always made on top.
+* **Startup deployment warn.** When `http-server` + `tracing` are enabled and
+  `with_request_state_secret` was never called, `App::run` logs at
+  `tracing::warn!` so multi-instance deployments don't silently fail to
+  decrypt `requestState` on cross-instance retries.
+
+#### Spec-neutral
+
+* `ErrorCode::RESOURCE_NOT_FOUND` — helper constant emitting `-32002` under
+  the legacy spec and `-32602` (`InvalidParams`) under RC. In-tree emitters
+  route through it; recommended migration path off
+  `ErrorCode::ResourceNotFound`.
+* `ToolSchema::from_value`, `from_schema::<T>`, `from_schemars` — legacy-side
+  constructors symmetric with `InputSchema`.
 
 ### Changed
 
-* Under `proto-2026-07-28-rc`, `Context::elicit` takes a stable `key` argument (`ctx.elicit(key, params)`) and follows the MRTR re-run/replay model instead of blocking on a push channel; handlers must be side-effect-free up to each elicit point. `Claims` gains an additive `subject()` accessor (default `None`) used to bind MRTR `requestState` to the authenticated principal.
-* Under `proto-2026-07-28-rc` the tasks capability is advertised as an extension: the top-level `capabilities.tasks` field is replaced by an entry under `capabilities.extensions["io.modelcontextprotocol/tasks"]`. The `with_tasks` configuration API and the `tasks/*` wire methods are unchanged — `with_tasks` is now a thin wrapper that registers the tasks extension. The default (legacy) build keeps the top-level `tasks` capability field.
-* `Tool.input_schema` and `Tool.output_schema` now use the per-flag `ToolInputSchema` alias instead of the typed `ToolSchema` directly. Under `proto-2026-07-28-rc` these fields carry a Value-shaped `InputSchema`; under the legacy spec they continue to carry `ToolSchema`.
-* `Tool::validate(&CallToolResponse)` now extracts the schema as `serde_json::Value` (via `as_value()` under RC, `serde_json::to_value(&...)` under legacy) before invoking the JSON Schema validator, so the same validator path covers both spec flavours.
-* Server completion logic now walks Value-shaped schemas under RC (no compile-time field access on a typed struct).
-* `PROTOCOL_VERSIONS` advertises `"2026-07-28"` only when the RC flag is enabled; the stable versions remain unconditionally listed.
-* CI matrix extended with `proto-2026-07-28-rc` paired with `server-full client-full`, covered by clippy, doc, and test jobs.
-* Under `proto-2026-07-28-rc` the HTTP transport is request/response only: no `Mcp-Session-Id` is emitted or required on the wire, the GET (SSE) and DELETE routes are not registered, and server-initiated notifications (progress, resource-updated, list-changed, task-status, elicitation) are inert — `Context` notification helpers become no-ops, so clients poll (`tools/list`, `resources/read`, `server/discover`) instead. The session id is still minted internally to keep the per-request correlation key collision-free.
+* `Tool.input_schema`/`output_schema` use the per-flag `ToolInputSchema`
+  alias. `Tool::validate` extracts the schema as `serde_json::Value` before
+  invoking the validator, so the same validator path covers both flavours.
+* `PROTOCOL_VERSIONS` advertises `"2026-07-28"` only when the RC flag is
+  enabled.
+* CI matrix extended with `proto-2026-07-28-rc` × `server-full,client-full`
+  under clippy, doc, and test jobs.
 
-### Deprecated
+#### Under `proto-2026-07-28-rc` only
 
-* `ErrorCode::ResourceNotFound` — use the helper constant `ErrorCode::RESOURCE_NOT_FOUND` instead. Under RC this maps to `InvalidParams` per the spec; under the legacy spec it maps to `-32002` for backwards compatibility.
-* `Client::add_root`, `Client::add_roots`, `Client::publish_roots_changed`, `Client::map_sampling` — `roots/list`, `notifications/roots/list_changed`, and `sampling/createMessage` are removed in MCP 2026-07-28. The methods remain available under the legacy spec and are completely absent (cfg-gated out) under `proto-2026-07-28-rc`.
-* `McpOptions::with_logging` and the server-emitted `notifications/message` / `logging/setLevel` handlers — server-side logging is removed in MCP 2026-07-28. Available under the legacy spec; absent under `proto-2026-07-28-rc`.
-* `ToolSchema::from_schema(schemars::Schema)` — renamed to `from_schemars` for symmetry with `InputSchema::from_schemars`. The previous name remains available as `from_schema_legacy` with `#[deprecated]` so legacy code keeps compiling during the transition.
+* **`Context::elicit`** now takes a stable `key` argument and follows MRTR
+  re-run/replay. Handlers must be side-effect-free up to each elicit point
+  (use `once`/`memo`/`on_commit` for effects). `Claims` gains an additive
+  `subject()` accessor (default `None`) for principal-binding.
+* **Tasks capability** is advertised under
+  `capabilities.extensions["io.modelcontextprotocol/tasks"]` instead of the
+  top-level `capabilities.tasks`. The `with_tasks` API and `tasks/*` wire
+  methods are unchanged — `with_tasks` now thinly wraps the extension
+  registration. Legacy builds keep the top-level field.
+* **HTTP transport is request/response only.** Server-initiated notifications
+  (progress, resource-updated, list-changed, task-status, elicitation) are
+  inert; `Context` notification helpers become no-ops. Clients poll
+  (`tools/list`, `resources/read`, `server/discover`) instead.
+* **Client request `_meta`** carries implementation info under
+  `io.modelcontextprotocol/clientInfo`, merged non-destructively with any
+  existing `_meta`.
 
 ### Removed under `proto-2026-07-28-rc`
 
-* `roots/list` request, `notifications/roots/list_changed` notification, and the `Root` / `Roots` types.
-* `sampling/createMessage` request, the `SamplingHandler` / `SamplingTaskCapability` types, and the `sampling!` proc-macro re-export.
-* `logging/setLevel` request, `notifications/message` notification, `LoggingLevel` / `LogMessage` / `SetLevelRequestParams` types, and the `NotificationFormatter` helper.
-* The typed `ToolSchema` struct (and its `from_json_str` / `with_required` builder methods) — replaced by the Value-shaped `InputSchema`.
-* `McpOptions::with_mcp_version` on both the server and client builders — the RC build is a pure 2026-07-28 peer, so the protocol version is fixed and cannot be negotiated down to a version the build cannot actually speak. Version selection returns under the legacy flag once the RC graduates.
+* `roots/list`, `notifications/roots/list_changed`, `Root`/`Roots` types.
+* `sampling/createMessage`, the `SamplingHandler`/`SamplingTaskCapability`
+  types, and the `sampling!` macro re-export.
+* `logging/setLevel`, `notifications/message`,
+  `LoggingLevel`/`LogMessage`/`SetLevelRequestParams`, and
+  `NotificationFormatter`.
+* The typed `ToolSchema` (with `from_json_str` / `with_required`) — replaced
+  by `InputSchema`.
+* `McpOptions::with_mcp_version` on both server and client builders — the RC
+  build is a pure 2026-07-28 peer, so the version is fixed. Version selection
+  returns under the legacy flag once the RC graduates.
+
+### Deprecated
+
+* `ErrorCode::ResourceNotFound` — use `ErrorCode::RESOURCE_NOT_FOUND` for
+  per-flag wire mapping.
+* `Client::add_root`, `add_roots`, `publish_roots_changed`, `map_sampling`,
+  and `McpOptions::with_logging` — removed in MCP 2026-07-28. Available under
+  the legacy spec; cfg-gated out under RC.
+* `ToolSchema::from_schema(schemars::Schema)` — renamed to `from_schemars`
+  for symmetry. Previous name kept as `from_schema_legacy` for a transition
+  window.
 
 ### Security
 
-* Under `proto-2026-07-28-rc`, the MRTR server now rejects unbound `_meta.inputResponses`. Previously the server blindly merged every supplied answer into its replay log, even when no verified `requestState` accompanied them and even for keys it never requested — letting a client pre-seed or overwrite answers for a later `ctx.elicit` key and skip the intended `InputRequiredResult`. The signed `requestState` now records the requested key(s), and `inputResponses` are accepted only when paired with a valid state and only for solicited, not-yet-resolved keys; anything else is rejected with `InvalidParams`.
+* MRTR (RC): the server no longer accepts unbound `_meta.inputResponses`. The
+  signed `requestState` records the requested key(s), and answers are
+  accepted only when paired with a valid state and only for solicited,
+  not-yet-resolved keys; anything else is `InvalidParams`. Previously a
+  client could pre-seed or overwrite answers for a future `ctx.elicit` key
+  and skip the intended `InputRequiredResult`.
 
 ### Fixed
 
-* Under `proto-2026-07-28-rc`, an MRTR final round is now idempotent across a lost-response retry. The final round mints no new `requestState`, so when its HTTP response was lost and the client retried the same state + `inputResponses`, the handler re-ran — re-firing `ctx.on_commit` commits and any `ctx.once` / `ctx.memo` effects recorded after the last elicit (e.g. the example charge/receipt), violating the once/exactly-once contract. The server now caches the committed final response (keyed by the incoming state's sealed ciphertext segment *plus* a canonicalized digest of that round's `inputResponses`) in a `RequestStateStore` and serves it verbatim on a replay without re-running the handler. The answers digest is part of the key because the *same* minted state can be echoed with *different* answers — a client (or attacker) replaying one round-1 blob with two different `inputResponses` would otherwise receive the first answer's cached result for the second. The default store is per-process; multi-instance deployments should supply a shared one (see the new `App::with_request_state_store`).
-* Under `proto-2026-07-28-rc`, the MRTR final-round idempotency now also holds when two identical retries run *concurrently*, not just sequentially. The cache lookup and the committing write are separate steps, so two finals for the same `requestState` (a client that timed out and re-sent while the first round was still executing) could both miss the cache before either wrote it, re-running the handler and re-draining its `on_commit` effects — duplicating side effects such as charges. `RequestStateStore` gains a `reserve(tag)` method that the dispatcher now holds across the whole lookup → handler → commit → cache section, serialising same-state finals: the loser blocks until the winner has committed, then serves the cached result. The default `InMemoryStateStore` implements it with an in-process per-`tag` lock (swept once idle); a shared multi-instance store should override it with a distributed lock, the same constraint already noted for the secret and the store backend.
-* Under `proto-2026-07-28-rc`, the MRTR `requestState` blob is now encrypted, not just signed, so server-side values are no longer exposed on the wire. Previously the codec base64-encoded the payload and appended an HMAC — integrity only — so any client receiving a `requestState` could decode the first segment and read whatever a handler had cached via `ctx.memo` (API responses, PII, tokens). The blob is now sealed with ChaCha20-Poly1305 (AEAD), with the key derived from the configured `with_request_state_secret` (an ephemeral per-process key otherwise); the AEAD tag subsumes the former HMAC for integrity. The wire shape changes from `b64(payload).b64(hmac)` to `b64(nonce).b64(ciphertext+tag)`, which invalidates any in-flight blob across the upgrade (they are short-lived and the client simply restarts the flow). The RC-only `hmac` dependency is replaced by `chacha20poly1305`.
-* Under `proto-2026-07-28-rc`, the MRTR server now rejects an oversized inbound `requestState` before decoding it. `with_max_state_bytes` previously bounded only the states the server *minted*; an inbound `_meta.requestState` was base64-decoded and AEAD-decrypted (both allocating/computing in proportion to its size) before any size check, so an untrusted client could force that work with a bogus oversized blob. The encoded length is now checked against `max_state_bytes` first and rejected with `InvalidParams`, so the same cap protects inbound retries.
-* Under `proto-2026-07-28-rc`, the client no longer drops non-object request params when injecting `_meta`. `apply_client_meta` runs for every outbound request and previously replaced scalar or array params with an object holding only `_meta`, so a custom `command("x", Some(vec![1, 2]))` or `command("x", Some("id"))` silently lost its payload. Non-object params are now left untouched (metadata injection is skipped, since `_meta` has no place on a non-object JSON-RPC params value); object and absent params behave as before.
-* Under `proto-2026-07-28-rc`, the MRTR request-binding digest now canonicalizes object keys before hashing. The binding serialized params via `serde_json::to_vec`, which follows the map's iteration order — lexicographic for the default `BTreeMap` backing, but *insertion* order when any dependency in the build enables serde_json's `preserve_order` feature. In a `preserve_order` build a retry carrying semantically identical params with a different key order would hash differently and be rejected as not matching the request. Object keys are now sorted recursively before hashing, so the binding is stable regardless of the active serde_json map ordering.
-* Under `proto-2026-07-28-rc` with `tasks`, the MRTR effect helpers (`ctx.once` / `ctx.memo` / `ctx.on_commit`) no longer silently misbehave when called from a task-augmented tool. Previously a background tool's `on_commit` was queued into a context nobody drained again — silently lost, or non-deterministically racing the dispatcher's drain. These helpers exist only for MRTR's stateless re-run model (dedup/defer across re-runs); a task never re-runs, so they don't apply. They are now substrate-aware: in a `TaskSupport::Required` tool (which is *only* ever a task) `once`/`memo` return an error and `on_commit` warns — guiding the author to run the effect inline; in a `TaskSupport::Optional` tool (which may carry them for its bare-MRTR path) they degrade quietly (`once`/`memo` run/compute inline, `on_commit` logs at `debug`). See the new elicitation-in-tasks support under Added.
-* Under `proto-2026-07-28-rc`, the deprecated `ErrorCode::ResourceNotFound` (`-32002`) is now remapped to `InvalidParams` (`-32602`) on the wire. Previously only in-tree emitters routing through `ErrorCode::RESOURCE_NOT_FOUND` followed the RC code; a user handler returning the still-public `ResourceNotFound` variant fell through `wire_code` unchanged and serialized the pre-RC `-32002`. `wire_code` now normalizes it to `InvalidParams` under the flag (the single point all errors pass through on serialization), so the RC code is emitted regardless of how the variant reached the response.
-* Under `proto-2026-07-28-rc`, the server no longer advertises push capabilities it can never deliver. The stateless transport has no server→client channel, yet `server/discover` still echoed `tools.listChanged`, `resources.listChanged`, `resources.subscribe`, and `prompts.listChanged` when configured — so a client would wait for `notifications/.../list_changed` or `resources/updated` pushes that never arrive instead of polling. These flags are now masked off in the advertised capabilities under the flag (the `with_tools`/`with_resources`/`with_prompts` configuration API is unchanged), and the `resources/subscribe` / `resources/unsubscribe` handlers are not registered so the accepted method surface matches what is advertised. `Context::send_notification` remains a no-op but now logs once at `debug` so a server author calling e.g. `resource_updated` isn't silently misled. Known limitation: the gate is the protocol flag, not the runtime transport, so an stdio server built with the RC flag also masks these — a persistent stdio pipe could in principle still push; transport-aware behavior is deferred until there is a need for push over stdio under RC.
-* Under `proto-2026-07-28-rc`, the stateless HTTP server now rejects legacy `MCP-Protocol-Version` headers. The POST gate validated the header against the whole `PROTOCOL_VERSIONS` compatibility list, which still includes legacy versions (e.g. `2025-06-18`) for the non-RC build — so a client or proxy sending a legacy version passed the gate even though this build has removed the legacy initialize/SSE behavior and would process the request with RC stateless semantics. The header is now compared against the fixed RC version, so mismatched clients are rejected as the header is meant to guarantee.
-* Under `proto-2026-07-28-rc`, the HTTP client now advertises the correct `MCP-Protocol-Version` on every POST. Previously a client could be configured (via the now-removed `with_mcp_version`) for an older version that passed discovery validation, yet every subsequent request still hardcoded the latest compiled version in the header — so any server or proxy routing/enforcing on `MCP-Protocol-Version` saw a mismatched version. With version selection fixed to the RC version under the flag, the header is the configured version by construction.
-* Under `proto-2026-07-28-rc`, building a client-only or server-only configuration no longer emits dead-code warnings. The server-only MRTR machinery (`requestState` codec, `InputRequiredResult` constructor, the input-required sentinel) is now gated on the `server` feature, and the server's client-callback request plumbing (`Context::send_request` and the request queue's outbound-request methods) is marked unused under the stateless RC where it has no caller.
-* Under `proto-2026-07-28-rc`, outbound client requests now populate W3C Trace Context (`_meta.traceparent` / `tracestate`) from the configured trace-context provider as part of the same `_meta` assembly that writes `clientInfo` / `clientCapabilities`. Trace-context injection was consolidated into that single path, so batched requests now carry trace context too (previously only single sends did), and the provider is invoked exactly once per request.
-* Under `proto-2026-07-28-rc`, deferred MRTR commits (`ctx.on_commit(…)`) no longer run when the final tool result is an error. Tool/prompt wrappers fold a handler `Err` into an in-band `CallToolResponse { isError: true }`, which the previous `resp.is_ok()` check treated as success — so commits (e.g. a DB write or charge) ran even for a failed call. Commits now run only for a genuine success, excluding in-band tool errors and protocol-level errors.
-* Under `proto-2026-07-28-rc`, applying client metadata to a request no longer drops custom `_meta` entries. The client previously round-tripped `_meta` through the typed `RequestParamsMeta` (which ignores unknown keys) and replaced the whole object, so caller-supplied extension keys (e.g. `com.example/foo`) were silently lost; the client fields are now merged into the existing `_meta` object instead.
-* Under `proto-2026-07-28-rc`, batched requests now carry per-request client metadata (`clientInfo` / `clientCapabilities`). Previously only single sends declared these, so a batched `tools/call` to a tool that elicits reached the server without `_meta.clientCapabilities.elicitation` and was rejected as if the client lacked elicitation support even with a handler registered.
-* Under `proto-2026-07-28-rc`, a batch whose requests elicit is now driven through the MRTR retry loop, not just left advertising elicitation support. The client declared `clientCapabilities.elicitation` per batched request but `call_batch` only awaited the first response per id, so a batched `tools/call` (or `prompts/get` / `resources/read`) whose handler called `ctx.elicit` returned the protocol-intermediate `input_required` result as final — the operation never completed through the batch API. `call_batch` now runs the same MRTR loop single sends use, in lock-step rounds across the whole batch: each still-eliciting request is fulfilled via the configured handler and re-issued (carrying `inputResponses` + the echoed `requestState`) alongside the others, one transport write per round, until every request reaches a final result. Non-eliciting requests and notifications ride the same batch and keep their slots in input order.
-* Under `proto-2026-07-28-rc`, `McpOptions::with_max_mrtr_rounds` no longer counts the initial send against the retry budget. The MRTR loops (`run_with_mrtr` and the batch `run_batch_with_mrtr`) iterated `0..max_rounds`, spending the first iteration on the initial request, so `with_max_mrtr_rounds(1)` received `input_required`, built the retry, then exited with "MRTR exceeded the maximum number of rounds" without ever sending it (and `0` skipped the request entirely). The option is documented as capping *re-issue* rounds, so the loops now run the initial attempt plus `max_rounds` retries (`0..=max_rounds`): `1` lets a normal one-question flow converge, and `0` sends once and fails the moment it elicits.
-* `Dc<T>` dependency-injection extractors now work as handler arguments for tools and prompts (previously they only worked for resources). The injected dependency was classified as an unknown `"object"` type, so it failed the `TypeCategory` bound on `map_tool` / `map_prompt` (or, via the macros, was advertised as a required input argument). `Dc<_>` is now treated like `Context` / `Meta<_>` — injected from the request context and never listed as an argument.
+* `Dc<T>` dependency-injection extractors now work as handler arguments for
+  tools and prompts (previously resources only). They were classified as
+  unknown `"object"` types and failed the `TypeCategory` bound; now treated
+  like `Context`/`Meta<_>` — injected from request context, never listed as
+  an argument.
 
 ### Known limitations
 
-* The `#[tool]` macro's `annotations = "…"` attribute (and the `#[prompt]` / `#[resource]` JSON-string attributes) still parse at runtime via `from_json_str` and panic on malformed JSON; compile-time validation there is a planned follow-up. The `#[tool]` `input_schema` / `output_schema` literals are already validated at compile time.
-* `cargo check --no-default-features --features client` (without `--all-targets`) still fails on `tokio::task::block_in_place` because the `client` feature alone does not pull in `tokio/rt-multi-thread`. This is a pre-existing tokio-features issue (independent of this changeset). CI runs the `--all-targets` variant — which pulls dev-deps and therefore `rt-multi-thread` — and remains green.
+* `#[tool]`'s `annotations = "…"` (and `#[prompt]`/`#[resource]` JSON-string
+  attributes) still parse at runtime and panic on malformed JSON; compile-time
+  validation there is a planned follow-up. `input_schema`/`output_schema`
+  literals are already validated at compile time.
+* `cargo check --no-default-features --features client` (without
+  `--all-targets`) fails on `tokio::task::block_in_place` because the
+  `client` feature alone doesn't pull `tokio/rt-multi-thread`. Pre-existing
+  tokio-features issue. CI runs the `--all-targets` variant (pulls dev-deps
+  → `rt-multi-thread`) and remains green.
 
 ## 0.3.4
 

@@ -1010,6 +1010,99 @@ async fn client_drives_mrtr_across_a_batch_end_to_end() {
     handle.abort();
 }
 
+/// One slot failing mid-batch must not roll back the rest of the batch. Here a
+/// three-request batch elicits on every slot; after the round-2 retry one tool
+/// returns `Err` (surfaced as an `is_error` `CallToolResponse`, not a JSON-RPC
+/// error), while the other two complete normally. The batch still resolves to
+/// `Ok` with all three slots filled in order — the failing slot carries the
+/// error result, its neighbours carry their final answers. This locks down that
+/// a per-slot tool failure is isolated, not fatal to the whole batch.
+#[tokio::test(flavor = "multi_thread")]
+async fn batch_isolates_a_single_slot_failure_after_elicitation() {
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("greet", |mut ctx: Context| async move {
+        let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
+            .with_required("name", "string")
+            .into();
+        let res = ctx.elicit("name", params).await?;
+        let name = res
+            .content
+            .and_then(|c| c.get("name").and_then(|v| v.as_str().map(str::to_owned)))
+            .unwrap_or_else(|| "stranger".into());
+        Ok::<String, Error>(format!("hello {name}"))
+    });
+
+    // Same elicitation shape, but fails *after* the round-2 input arrives.
+    app.map_tool("boom", |mut ctx: Context| async move {
+        let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
+            .with_required("name", "string")
+            .into();
+        let _ = ctx.elicit("name", params).await?;
+        Err::<String, Error>(Error::new(
+            neva::error::ErrorCode::InternalError,
+            "boom failed after elicitation",
+        ))
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let mut client =
+        Client::new().with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+    client.map_elicitation(|_params: ElicitRequestParams| async move {
+        ElicitResult::accept().with_content(serde_json::json!({ "name": "octocat" }))
+    });
+    client.connect().await.expect("client connects");
+
+    let responses = client
+        .batch()
+        .call_tool("greet", ())
+        .call_tool("boom", ())
+        .call_tool("greet", ())
+        .send()
+        .await
+        .expect("batch resolves even though one slot's tool failed");
+
+    assert_eq!(responses.len(), 3, "one slot per request, all preserved");
+
+    // Slots 0 and 2 completed normally through the MRTR loop.
+    for slot in [0usize, 2] {
+        let result = responses[slot]
+            .clone()
+            .into_result::<neva::types::CallToolResponse>()
+            .unwrap_or_else(|e| panic!("slot {slot} is a final tools/call result: {e}"));
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.as_str());
+        assert_eq!(
+            text,
+            Some("hello octocat"),
+            "slot {slot} completed normally"
+        );
+        assert!(!result.is_error, "slot {slot} must not be an error");
+    }
+
+    // Slot 1 carries the isolated failure as an `is_error` result.
+    let failed = responses[1]
+        .clone()
+        .into_result::<neva::types::CallToolResponse>()
+        .expect("a failed tool still yields an is_error CallToolResponse, not a dropped slot");
+    assert!(
+        failed.is_error,
+        "the failing slot must surface its error result"
+    );
+
+    client.disconnect().await.ok();
+    handle.abort();
+}
+
 /// The MRTR round cap is configurable via `with_max_mrtr_rounds`, and counts
 /// *re-issues* — not the initial send. A cap of 0 sends the request once and
 /// fails the moment it elicits, so the client gives up with the max-rounds error

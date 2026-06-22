@@ -83,9 +83,11 @@ pub trait RequestStateStore: Send + Sync {
 ///
 /// Entries are bounded by their TTL (the state's `exp`, ≤ the configured
 /// `requestState` TTL, 300s by default) and evicted opportunistically on access,
-/// so the map's footprint tracks the number of in-flight MRTR flows. Adequate
-/// for single-instance and development; multi-instance deployments should
-/// provide a shared store (see the [module docs](self)).
+/// so the map's footprint tracks the number of in-flight MRTR flows. Each
+/// [`put`](Self::put) sweeps expired entries (and released reservation locks),
+/// which is `O(n)` in the live set — fine for single-instance and development,
+/// but high-QPS deployments should provide a shared store with background
+/// eviction instead (see the [module docs](self)).
 #[derive(Debug, Default)]
 pub struct InMemoryStateStore {
     entries: dashmap::DashMap<String, (Response, u64)>,

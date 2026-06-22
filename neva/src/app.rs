@@ -1207,8 +1207,13 @@ impl App {
         // the first round is still committing) would otherwise both miss the
         // cache below and re-run the handler + `on_commit` effects. The loser
         // blocks here until the winner has cached, then hits it instead.
+        //
+        // NOTE: this guard MUST stay live until after the final `put` below.
+        // Dropping it early (e.g. rewriting to `let _ = ...reserve().await;`)
+        // releases the lock immediately and reopens the concurrent-retry race;
+        // the explicit, self-describing name guards against that refactor.
         #[cfg(feature = "proto-2026-07-28-rc")]
-        let _state_reservation = match state_tag.as_deref() {
+        let _reservation_guard_held_through_commit = match state_tag.as_deref() {
             Some(tag) => Some(options.request_state_store().reserve(tag).await),
             None => None,
         };
