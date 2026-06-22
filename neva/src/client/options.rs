@@ -271,6 +271,11 @@ impl McpOptions {
     /// error. Guards against a server that keeps requesting input without ever
     /// converging.
     ///
+    /// This counts *re-issues* only — the initial send is always made on top of
+    /// this budget. So `1` permits a normal one-question flow (initial send →
+    /// `input_required` → one retry → final), and `0` sends the request once and
+    /// fails if it elicits at all.
+    ///
     /// Default: 8.
     ///
     /// # Example

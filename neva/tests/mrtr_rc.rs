@@ -1010,9 +1010,10 @@ async fn client_drives_mrtr_across_a_batch_end_to_end() {
     handle.abort();
 }
 
-/// The MRTR round cap is configurable via `with_max_mrtr_rounds`. With a cap of
-/// 1, a tool that elicits never converges within the budget, so the client gives
-/// up with the max-rounds error instead of looping the default 8 times.
+/// The MRTR round cap is configurable via `with_max_mrtr_rounds`, and counts
+/// *re-issues* — not the initial send. A cap of 0 sends the request once and
+/// fails the moment it elicits, so the client gives up with the max-rounds error
+/// instead of looping the default 8 times.
 #[tokio::test(flavor = "multi_thread")]
 async fn configurable_max_rounds_caps_the_mrtr_loop() {
     let port = pick_free_port();
@@ -1034,7 +1035,7 @@ async fn configurable_max_rounds_caps_the_mrtr_loop() {
 
     let mut client = Client::new().with_options(|o| {
         o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
-            .with_max_mrtr_rounds(1)
+            .with_max_mrtr_rounds(0)
     });
     client.map_elicitation(|_params: ElicitRequestParams| async move {
         ElicitResult::accept().with_content(serde_json::json!({ "name": "octocat" }))
@@ -1044,11 +1045,63 @@ async fn configurable_max_rounds_caps_the_mrtr_loop() {
     let err = client
         .call_tool("greet", ())
         .await
-        .expect_err("a 1-round cap must not let the elicitation converge");
+        .expect_err("a 0-retry cap must not let the elicitation converge");
     assert!(
         err.to_string().contains("maximum number of rounds"),
         "expected the max-rounds error, got: {err}"
     );
+
+    client.disconnect().await.ok();
+    handle.abort();
+}
+
+/// The cap counts re-issues, not the initial send: `with_max_mrtr_rounds(1)`
+/// must let a normal one-question flow converge (initial send → `input_required`
+/// → one retry → final), rather than spending its only iteration on the first
+/// send and erroring before it can retry.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_retry_budget_completes_a_single_question_flow() {
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("greet", |mut ctx: Context| async move {
+        let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
+            .with_required("name", "string")
+            .into();
+        let res = ctx.elicit("name", params).await?;
+        let name = res
+            .content
+            .and_then(|c| c.get("name").and_then(|v| v.as_str().map(str::to_owned)))
+            .unwrap_or_else(|| "stranger".into());
+        Ok::<String, Error>(format!("hello {name}"))
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let mut client = Client::new().with_options(|o| {
+        o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
+            .with_max_mrtr_rounds(1)
+    });
+    client.map_elicitation(|_params: ElicitRequestParams| async move {
+        ElicitResult::accept().with_content(serde_json::json!({ "name": "octocat" }))
+    });
+    client.connect().await.expect("client connects");
+
+    let res = client
+        .call_tool("greet", ())
+        .await
+        .expect("a 1-retry budget must let a one-question flow converge");
+    let text = res
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.as_str());
+    assert_eq!(text, Some("hello octocat"));
+    assert!(!res.is_error, "final result must not be an error");
 
     client.disconnect().await.ok();
     handle.abort();

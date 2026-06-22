@@ -992,7 +992,10 @@ impl Client {
         let mut req = req;
         self.apply_client_meta(&mut req, None, None);
 
-        for _ in 0..max_rounds {
+        // The budget counts re-issue rounds, not the initial send, so allow the
+        // first attempt plus `max_rounds` retries. `0..=max_rounds` (vs.
+        // `max_rounds + 1`) also avoids overflow at `usize::MAX`.
+        for _ in 0..=max_rounds {
             let resp = self
                 .handler
                 .as_mut()
@@ -1272,7 +1275,10 @@ impl Client {
                 .collect();
         }
 
-        for round in 0..max_rounds {
+        // Round 0 is the initial batch send; rounds `1..=max_rounds` are the
+        // re-issues the budget allows (the cap counts retries, not the first
+        // send). `0..=max_rounds` also avoids overflow at `usize::MAX`.
+        for round in 0..=max_rounds {
             // Collect this round's outgoing requests; notifications ride along once.
             let mut envelopes: Vec<MessageEnvelope> = Vec::new();
             if round == 0 {
