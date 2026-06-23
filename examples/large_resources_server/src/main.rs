@@ -28,10 +28,12 @@ async fn resource_data(uri: Uri, name: String) -> ResourceContents {
 #[tool]
 async fn get_file_info(ctx: Context, name: String) -> Result<Content, Error> {
     let res = ctx.resource(format!("meta://{name}")).await?;
+    #[allow(deprecated)]
+    let missing = || Error::from(ErrorCode::ResourceNotFound);
     res.contents
         .into_iter()
         .next()
-        .ok_or_else(|| Error::from(ErrorCode::ResourceNotFound))
+        .ok_or_else(missing)
         .and_then(|r| r.json::<Resource>())
         .map(|r| Content::link(r))
 }

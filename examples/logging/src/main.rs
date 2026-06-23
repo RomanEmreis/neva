@@ -25,6 +25,7 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer().event_format(notification::NotificationFormatter)) // Specify the MCP notification formatter
         .init();
 
+    #[allow(deprecated)]
     App::new()
         .with_options(|opt| {
             opt.with_stdio()

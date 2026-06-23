@@ -23,17 +23,20 @@ use crate::types::{
 
 #[cfg(feature = "tasks")]
 use crate::shared::{TaskHandle, TaskTracker};
-#[cfg(feature = "tracing")]
+#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
 use crate::types::notification::LoggingLevel;
 #[cfg(feature = "tasks")]
 use crate::types::{ServerTasksCapability, Task, TaskPayload};
 
-#[cfg(feature = "tracing")]
+#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
 use tracing_subscriber::{Registry, filter::LevelFilter, reload::Handle};
 
-#[cfg(any(feature = "tracing", feature = "tasks"))]
+#[cfg(any(
+    feature = "tasks",
+    all(feature = "tracing", not(feature = "proto-2026-07-28-rc"))
+))]
 use crate::error::Error;
-#[cfg(feature = "tracing")]
+#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
 use crate::error::ErrorCode;
 
 /// Represents MCP server options that are available in runtime
@@ -78,8 +81,14 @@ pub struct McpOptions {
     #[cfg(feature = "tasks")]
     tasks_capability: Option<ServerTasksCapability>,
 
+    /// Registered protocol extensions (MCP 2026-07-28 RC), keyed by reverse-DNS
+    /// id mapping to the extension's advertised capability value. Surfaced in
+    /// `DiscoverResult` under `capabilities.extensions`.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    extensions: std::collections::HashMap<String, serde_json::Value>,
+
     /// The last logging level set by the client
-    #[cfg(feature = "tracing")]
+    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
     log_level: Option<Handle<LevelFilter, Registry>>,
 
     /// An MCP version that server supports
@@ -97,6 +106,40 @@ pub struct McpOptions {
     /// Currently running tasks
     #[cfg(feature = "tasks")]
     pub(super) tasks: TaskTracker,
+
+    /// Secret used to encrypt and authenticate MRTR `requestState` (the AEAD key
+    /// is derived from it). Defaults to an ephemeral random key; multi-instance
+    /// stateless deployments must set a shared secret via
+    /// [`crate::App::with_request_state_secret`].
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    request_state_secret: Arc<[u8]>,
+
+    /// Whether [`Self::request_state_secret`] was set explicitly (vs the
+    /// ephemeral per-process default). Used to warn on startup about the
+    /// multi-instance deployment footgun. Read only by the (tracing-gated)
+    /// startup warning, so it is write-only in builds without an HTTP server
+    /// or `tracing`.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg_attr(
+        not(all(feature = "http-server", feature = "tracing")),
+        allow(dead_code)
+    )]
+    request_state_secret_explicit: bool,
+
+    /// TTL (seconds) embedded into MRTR `requestState`.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    request_state_ttl_secs: u64,
+
+    /// Max encoded `requestState` blob length (bytes) before the server
+    /// rejects the round-trip with "requestState too large".
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    max_state_bytes: usize,
+
+    /// Store backing MRTR final-round idempotency. Defaults to a per-process
+    /// in-memory cache; multi-instance deployments should set a shared store
+    /// via [`crate::App::with_request_state_store`].
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    request_state_store: Arc<dyn crate::app::mrtr_store::RequestStateStore>,
 }
 
 impl Debug for McpOptions {
@@ -114,7 +157,7 @@ impl Debug for McpOptions {
         #[cfg(feature = "tasks")]
         dbg.field("tasks_capability", &self.tasks_capability);
 
-        #[cfg(feature = "tracing")]
+        #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
         dbg.field("log_level", &self.log_level);
 
         dbg.finish()
@@ -138,14 +181,33 @@ impl Default for McpOptions {
             prompts_capability: Default::default(),
             #[cfg(feature = "tasks")]
             tasks_capability: Default::default(),
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            extensions: Default::default(),
             resource_routes: Default::default(),
             requests: Default::default(),
             resource_subscriptions: Default::default(),
             middlewares: None,
-            #[cfg(feature = "tracing")]
+            #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
             log_level: Default::default(),
             #[cfg(feature = "tasks")]
             tasks: TaskTracker::new(),
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            request_state_secret: {
+                // Ephemeral random key from two v4 UUIDs (16 bytes each).
+                // Non-panicking; sufficient for single-instance/dev.
+                let mut key = [0u8; 32];
+                key[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+                key[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+                Arc::from(&key[..])
+            },
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            request_state_secret_explicit: false,
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            request_state_ttl_secs: 300,
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            max_state_bytes: 8 * 1024,
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            request_state_store: Arc::new(crate::app::mrtr_store::InMemoryStateStore::new()),
         }
     }
 }
@@ -219,6 +281,13 @@ impl McpOptions {
     /// Specifies Model Context Protocol version
     ///
     /// Default: last available protocol version
+    ///
+    /// Not available under `proto-2026-07-28-rc`: that flag compiles the server
+    /// as a pure 2026-07-28 RC peer (sampling/roots removed, stateless transport,
+    /// MRTR), so advertising an older version would claim a protocol the build
+    /// cannot actually serve. The RC version is fixed. When the RC graduates and
+    /// the flags invert, version selection returns under the legacy flag.
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     pub fn with_mcp_version(mut self, ver: &'static str) -> Self {
         self.protocol_ver = Some(ver);
         self
@@ -252,13 +321,46 @@ impl McpOptions {
     }
 
     /// Configures tasks capability
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
     pub fn with_tasks<F>(mut self, config: F) -> Self
     where
         F: FnOnce(ServerTasksCapability) -> ServerTasksCapability,
     {
         self.tasks_capability = Some(config(Default::default()));
         self
+    }
+
+    /// Configures tasks capability.
+    ///
+    /// Under `proto-2026-07-28-rc` tasks are an extension: this thin wrapper
+    /// keeps the existing ergonomics while registering the capability through
+    /// [`crate::app::extension::TasksExtension`] so it surfaces under
+    /// `capabilities.extensions["io.modelcontextprotocol/tasks"]`.
+    #[cfg(all(feature = "tasks", feature = "proto-2026-07-28-rc"))]
+    pub fn with_tasks<F>(mut self, config: F) -> Self
+    where
+        F: FnOnce(ServerTasksCapability) -> ServerTasksCapability,
+    {
+        use crate::app::extension::{Extension, TasksExtension};
+        let capability = config(Default::default());
+        self.tasks_capability = Some(capability.clone());
+        let ext = TasksExtension::new(capability);
+        self.register_extension(ext.id(), ext.capability());
+        self
+    }
+
+    /// Records an extension's advertised capability under its reverse-DNS id
+    /// (MCP 2026-07-28 RC). Used by [`crate::App::with_extension`] and by the
+    /// `with_tasks` thin wrapper.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) fn register_extension(&mut self, id: &str, capability: serde_json::Value) {
+        self.extensions.insert(id.into(), capability);
+    }
+
+    /// Sets the server tasks capability directly (used by the extension path).
+    #[cfg(all(feature = "tasks", feature = "proto-2026-07-28-rc"))]
+    pub(crate) fn set_tasks_capability(&mut self, capability: ServerTasksCapability) {
+        self.tasks_capability = Some(capability);
     }
 
     /// Specifies request timeout
@@ -270,14 +372,26 @@ impl McpOptions {
     }
 
     /// Configures a `tracing_subscriber::reload::Handle` that allows changing the [`LoggingLevel`] at runtime
-    #[cfg(feature = "tracing")]
+    #[cfg_attr(
+        not(feature = "proto-2026-07-28-rc"),
+        deprecated(
+            note = "MCP server-side logging is removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
+        )
+    )]
+    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
     pub fn with_logging(mut self, log_handle: Handle<LevelFilter, Registry>) -> Self {
         self.log_level = Some(log_handle);
         self
     }
 
     /// Sets the [`LoggingLevel`]
-    #[cfg(feature = "tracing")]
+    #[cfg_attr(
+        not(feature = "proto-2026-07-28-rc"),
+        deprecated(
+            note = "MCP server-side logging is removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
+        )
+    )]
+    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
     pub fn set_log_level(&self, level: LoggingLevel) -> Result<(), Error> {
         if let Some(handle) = &self.log_level {
             handle
@@ -288,7 +402,7 @@ impl McpOptions {
     }
 
     /// Returns current log level
-    #[cfg(feature = "tracing")]
+    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
     pub(crate) fn log_level(&self) -> Option<LoggingLevel> {
         match &self.log_level {
             None => None,
@@ -487,29 +601,74 @@ impl McpOptions {
     /// If not configured but at least one [`Tool`] exists, returns [`Default`].
     /// Otherwise, returns `None`.
     pub(crate) fn tools_capability(&self) -> Option<ToolsCapability> {
-        self.tools_capability.clone()
+        #[allow(unused_mut)]
+        let mut cap = self.tools_capability.clone();
+        // The stateless `proto-2026-07-28-rc` transport cannot push
+        // `notifications/tools/list_changed`, so never advertise `listChanged`
+        // under RC — clients refresh on cache-TTL / the next `tools/list`
+        // instead of relying on a push that will never arrive.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        if let Some(c) = cap.as_mut() {
+            c.list_changed = false;
+        }
+        cap
     }
 
     /// Returns [`ResourcesCapability`] if configured.
     /// If not configured but at least one [`Resource`] or [`ResourceTemplate`] exists, returns [`Default`].
     /// Otherwise, returns `None`.
     pub(crate) fn resources_capability(&self) -> Option<ResourcesCapability> {
-        self.resources_capability.clone()
+        #[allow(unused_mut)]
+        let mut cap = self.resources_capability.clone();
+        // The stateless `proto-2026-07-28-rc` transport cannot push
+        // `notifications/resources/updated` or `.../list_changed`, so mask both
+        // `subscribe` and `listChanged` under RC. Subscribe handlers are also
+        // not registered (see `App::new`), keeping the advertised surface and
+        // the accepted methods in sync.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        if let Some(c) = cap.as_mut() {
+            c.subscribe = false;
+            c.list_changed = false;
+        }
+        cap
     }
 
     /// Returns [`PromptsCapability`] if configured.
     /// If not configured but at least one [`Prompt`] exists, returns [`Default`].
     /// Otherwise, returns `None`.
     pub(crate) fn prompts_capability(&self) -> Option<PromptsCapability> {
-        self.prompts_capability.clone()
+        #[allow(unused_mut)]
+        let mut cap = self.prompts_capability.clone();
+        // The stateless `proto-2026-07-28-rc` transport cannot push
+        // `notifications/prompts/list_changed`, so never advertise `listChanged`
+        // under RC — see `tools_capability` for the rationale.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        if let Some(c) = cap.as_mut() {
+            c.list_changed = false;
+        }
+        cap
     }
 
     /// Returns [`ServerTasksCapability`] if configured.
     ///
     /// Otherwise, returns `None`.
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
     pub(crate) fn tasks_capability(&self) -> Option<ServerTasksCapability> {
         self.tasks_capability.clone()
+    }
+
+    /// Returns the registered protocol extensions as a capability map
+    /// (MCP 2026-07-28 RC), or `None` when no extension is registered so the
+    /// `capabilities.extensions` field is omitted on the wire.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) fn extensions(
+        &self,
+    ) -> Option<std::collections::HashMap<String, serde_json::Value>> {
+        if self.extensions.is_empty() {
+            None
+        } else {
+            Some(self.extensions.clone())
+        }
     }
 
     /// Returns whether the server is configured to send the "notifications/resources/updated"
@@ -571,6 +730,76 @@ impl McpOptions {
             .and_then(|tasks| tasks.requests.as_ref())
             .and_then(|req| req.tools.as_ref())
             .is_some_and(|tools| tools.call.is_some())
+    }
+
+    /// Sets the shared secret used to encrypt/authenticate MRTR `requestState`.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) fn set_request_state_secret(&mut self, key: &[u8]) {
+        self.request_state_secret = Arc::from(key);
+        self.request_state_secret_explicit = true;
+    }
+
+    /// Returns the MRTR `requestState` secret (AEAD key material).
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) fn request_state_secret(&self) -> &[u8] {
+        &self.request_state_secret
+    }
+
+    /// Returns whether the MRTR `requestState` secret was set explicitly
+    /// (vs the ephemeral per-process default).
+    ///
+    /// Only compiled with `tracing`, where it backs the startup deployment
+    /// warning in [`crate::App::run`]; without it the field has no reader.
+    #[cfg(all(
+        feature = "proto-2026-07-28-rc",
+        feature = "http-server",
+        feature = "tracing"
+    ))]
+    pub(crate) fn request_state_secret_is_explicit(&self) -> bool {
+        self.request_state_secret_explicit
+    }
+
+    /// Returns whether the configured transport is the HTTP server transport.
+    #[cfg(all(
+        feature = "proto-2026-07-28-rc",
+        feature = "http-server",
+        feature = "tracing"
+    ))]
+    pub(crate) fn is_http_transport(&self) -> bool {
+        matches!(self.proto, Some(TransportProto::HttpServer(_)))
+    }
+
+    /// Returns the MRTR `requestState` TTL in seconds.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) fn request_state_ttl_secs(&self) -> u64 {
+        self.request_state_ttl_secs
+    }
+
+    /// Sets the max encoded `requestState` size in bytes.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) fn set_max_state_bytes(&mut self, bytes: usize) {
+        self.max_state_bytes = bytes;
+    }
+
+    /// Returns the max encoded `requestState` size in bytes.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) fn max_state_bytes(&self) -> usize {
+        self.max_state_bytes
+    }
+
+    /// Sets the MRTR final-round idempotency store.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) fn set_request_state_store(
+        &mut self,
+        store: Arc<dyn crate::app::mrtr_store::RequestStateStore>,
+    ) {
+        self.request_state_store = store;
+    }
+
+    /// Returns the MRTR final-round idempotency store.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) fn request_state_store(&self) -> &dyn crate::app::mrtr_store::RequestStateStore {
+        self.request_state_store.as_ref()
     }
 
     /// Turns [`McpOptions`] into [`RuntimeMcpOptions`]
@@ -702,7 +931,7 @@ mod tests {
         let mut options = McpOptions::default();
 
         let handler = |_: Uri| async move {
-            Err::<ResourceContents, _>(Error::from(ErrorCode::ResourceNotFound))
+            Err::<ResourceContents, _>(Error::from(ErrorCode::RESOURCE_NOT_FOUND))
         };
 
         options.add_resource_template(
@@ -802,7 +1031,12 @@ mod tests {
 
         let tools_capability = options.tools_capability().unwrap();
 
+        // Under the stateless RC transport `listChanged` is masked off because
+        // the server cannot push it; otherwise it round-trips the config.
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
         assert!(tools_capability.list_changed);
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        assert!(!tools_capability.list_changed);
     }
 
     #[test]
@@ -828,7 +1062,11 @@ mod tests {
 
         let resources_capability = options.resources_capability().unwrap();
 
+        // Masked off under the stateless RC transport (see `tools` test above).
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
         assert!(resources_capability.list_changed);
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        assert!(!resources_capability.list_changed);
     }
 
     #[test]
@@ -846,7 +1084,7 @@ mod tests {
         let mut options = McpOptions::default();
 
         let handler = |_: Uri| async move {
-            Err::<ResourceContents, _>(Error::from(ErrorCode::ResourceNotFound))
+            Err::<ResourceContents, _>(Error::from(ErrorCode::RESOURCE_NOT_FOUND))
         };
 
         options.add_resource_template(
@@ -866,13 +1104,40 @@ mod tests {
         assert!(options.resources_capability().is_none());
     }
 
+    #[cfg(all(
+        feature = "proto-2026-07-28-rc",
+        feature = "http-server",
+        feature = "tracing"
+    ))]
+    #[test]
+    fn request_state_secret_is_not_explicit_by_default() {
+        let options = McpOptions::default();
+        assert!(!options.request_state_secret_is_explicit());
+    }
+
+    #[cfg(all(
+        feature = "proto-2026-07-28-rc",
+        feature = "http-server",
+        feature = "tracing"
+    ))]
+    #[test]
+    fn request_state_secret_is_explicit_once_set() {
+        let mut options = McpOptions::default();
+        options.set_request_state_secret(b"shared-secret");
+        assert!(options.request_state_secret_is_explicit());
+    }
+
     #[test]
     fn it_returns_some_prompts_capability_if_configured() {
         let options = McpOptions::default().with_prompts(|prompts| prompts.with_list_changed());
 
         let prompts_capability = options.prompts_capability().unwrap();
 
+        // Masked off under the stateless RC transport (see `tools` test above).
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
         assert!(prompts_capability.list_changed);
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        assert!(!prompts_capability.list_changed);
     }
 
     #[test]

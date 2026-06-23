@@ -33,5 +33,6 @@ async fn get_res(name: String) -> TextResourceContents {
 
 #[resource(uri = "res://err/{uri}")]
 async fn err_resource(_uri: Uri) -> Result<ResourceContents, Error> {
+    #[allow(deprecated)]
     Err(Error::from(ErrorCode::ResourceNotFound))
 }

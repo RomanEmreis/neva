@@ -44,6 +44,7 @@ async fn main() {
         .with(notification::fmt::layer())
         .init();
 
+    #[allow(deprecated)]
     App::new()
         .with_options(|opt| {
             opt.with_name("Protected Server Example")

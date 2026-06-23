@@ -69,6 +69,52 @@ pub struct RequestParamsMeta {
     #[serde(rename = "progressToken", skip_serializing_if = "Option::is_none")]
     pub progress_token: Option<ProgressToken>,
 
+    /// W3C Trace Context `traceparent` carrier, when set by the sender.
+    ///
+    /// Always present in the struct for source-compatibility across feature
+    /// configurations. The semantic interpretation (W3C Trace Context, MCP
+    /// 2026-07-28) is meaningful under `proto-2026-07-28-rc`; older peers
+    /// silently ignore the field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub traceparent: Option<String>,
+
+    /// W3C Trace Context `tracestate` carrier, when set by the sender.
+    ///
+    /// Companion to [`Self::traceparent`]; carries vendor-specific state
+    /// alongside the parent identifier. Same source-compatibility rationale
+    /// applies — the field is unconditional and older peers ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracestate: Option<String>,
+
+    /// Client implementation info carried on every request under MCP
+    /// 2026-07-28 (replaces the `initialize` handshake's `clientInfo`).
+    ///
+    /// Always present in the struct for source-compatibility across feature
+    /// configurations, like the trace fields; only populated (and meaningful)
+    /// under `proto-2026-07-28-rc`. Older peers ignore it.
+    #[serde(
+        rename = "io.modelcontextprotocol/clientInfo",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) client_info: Option<super::Implementation>,
+
+    /// MRTR: the client's results for a prior `InputRequiredResult`.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[serde(rename = "inputResponses", skip_serializing_if = "Option::is_none")]
+    pub(crate) input_responses: Option<crate::types::mrtr::InputResponses>,
+
+    /// MRTR: the opaque `requestState` echoed back from `InputRequiredResult`.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[serde(rename = "requestState", skip_serializing_if = "Option::is_none")]
+    pub(crate) request_state: Option<String>,
+
+    /// MRTR/stateless: client capabilities declared per-request (v1: a single
+    /// `elicitation` flag) so the server can honor "MUST NOT send an input
+    /// type the client didn't declare".
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[serde(rename = "clientCapabilities", skip_serializing_if = "Option::is_none")]
+    pub(crate) client_capabilities: Option<crate::types::mrtr::ClientMrtrCapabilities>,
+
     /// Represents metadata for associating messages with a task.
     ///
     /// > **Note:** Include this in the _meta field under the key `io.modelcontextprotocol/related-task`.
@@ -90,6 +136,8 @@ impl Debug for RequestParamsMeta {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("RequestParamsMeta")
             .field("progress_token", &self.progress_token)
+            .field("traceparent", &self.traceparent)
+            .field("tracestate", &self.tracestate)
             .finish()
     }
 }
@@ -106,10 +154,7 @@ impl RequestParamsMeta {
     pub fn new(id: &RequestId) -> Self {
         Self {
             progress_token: Some(ProgressToken::from(id)),
-            #[cfg(feature = "tasks")]
-            task: None,
-            #[cfg(feature = "server")]
-            context: None,
+            ..Default::default()
         }
     }
 }
@@ -159,7 +204,181 @@ impl Request {
             .cloned()
             .and_then(|meta| serde_json::from_value(meta).ok())
     }
+
+    /// Merges `meta` into the request's `_meta`, creating the params/`_meta`
+    /// objects when none exist. Symmetric counterpart to [`Self::meta`];
+    /// existing (non-`_meta`) params keys are preserved, as are any `_meta`
+    /// entries the typed [`RequestParamsMeta`] does not model — e.g. custom
+    /// extension keys such as `com.example/foo` — which a full replacement
+    /// would silently drop. Only the fields populated on `meta` are written;
+    /// unset (`None`) fields leave any existing entry untouched.
+    ///
+    /// Non-object params (a scalar or array payload, e.g. from
+    /// `command("x", Some(vec![1, 2]))`) are left untouched: `_meta` has no
+    /// place on a non-object JSON-RPC params value, and replacing it would
+    /// silently drop the caller's payload, so metadata injection is skipped.
+    #[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+    pub(crate) fn set_meta(&mut self, meta: RequestParamsMeta) {
+        let Ok(serde_json::Value::Object(fields)) = serde_json::to_value(meta) else {
+            return;
+        };
+        match self.params {
+            Some(serde_json::Value::Object(ref mut map)) => match map.get_mut("_meta") {
+                Some(serde_json::Value::Object(existing)) => existing.extend(fields),
+                _ => {
+                    map.insert("_meta".to_owned(), serde_json::Value::Object(fields));
+                }
+            },
+            // No params yet: create the params object carrying just `_meta`.
+            None => {
+                let mut map = serde_json::Map::new();
+                map.insert("_meta".to_owned(), serde_json::Value::Object(fields));
+                self.params = Some(serde_json::Value::Object(map));
+            }
+            // Non-object params: preserve the caller's payload rather than
+            // overwriting it; `_meta` cannot be attached to a scalar/array.
+            Some(_) => {
+                #[cfg(feature = "tracing")]
+                tracing::debug!(
+                    logger = "neva",
+                    "skipping client _meta injection: request params are not a JSON object"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trace_context_roundtrips_through_meta() {
+        use serde_json::json;
+        let meta = RequestParamsMeta {
+            traceparent: Some("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01".into()),
+            tracestate: Some("congo=t61rcWkgMzE".into()),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&meta).unwrap();
+        assert_eq!(
+            v["traceparent"],
+            json!("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
+        );
+        assert_eq!(v["tracestate"], json!("congo=t61rcWkgMzE"));
+        let back: RequestParamsMeta = serde_json::from_value(v).unwrap();
+        assert_eq!(back.traceparent.as_deref(), meta.traceparent.as_deref());
+        assert_eq!(back.tracestate.as_deref(), meta.tracestate.as_deref());
+    }
+
+    #[test]
+    fn meta_without_trace_context_omits_fields() {
+        let meta = RequestParamsMeta::default();
+        let v = serde_json::to_value(&meta).unwrap();
+        assert!(v.get("traceparent").is_none());
+        assert!(v.get("tracestate").is_none());
+    }
+
+    #[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+    #[test]
+    fn set_meta_writes_meta_and_preserves_params() {
+        use serde_json::json;
+        let mut req = Request::new(Some(RequestId::Number(1)), "ping", Some(json!({ "x": 1 })));
+        let meta = RequestParamsMeta {
+            traceparent: Some("tp".into()),
+            client_info: Some(crate::types::Implementation {
+                name: "c".into(),
+                version: "9".into(),
+                icons: None,
+            }),
+            ..Default::default()
+        };
+        req.set_meta(meta);
+
+        // _meta round-trips through the typed struct, preserving siblings.
+        let got = req.meta().expect("meta present");
+        assert_eq!(got.traceparent.as_deref(), Some("tp"));
+        assert_eq!(got.client_info.expect("client_info present").name, "c");
+        // MRTR meta fields default to None and survive set/get.
+        assert!(got.input_responses.is_none());
+        assert!(got.request_state.is_none());
+        // pre-existing params keys are untouched.
+        assert_eq!(req.params.expect("params present")["x"], json!(1));
+    }
+
+    #[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+    #[test]
+    fn set_meta_preserves_unknown_meta_entries() {
+        use serde_json::json;
+        // A caller-supplied `_meta` carrying a custom extension key the typed
+        // `RequestParamsMeta` does not model.
+        let mut req = Request::new(
+            Some(RequestId::Number(1)),
+            "tools/call",
+            Some(json!({ "name": "echo", "_meta": { "com.example/foo": 1 } })),
+        );
+        let meta = RequestParamsMeta {
+            client_info: Some(crate::types::Implementation {
+                name: "c".into(),
+                version: "9".into(),
+                icons: None,
+            }),
+            ..Default::default()
+        };
+        req.set_meta(meta);
+
+        let params = req.params.expect("params present");
+        // Custom extension key survives the merge.
+        assert_eq!(params["_meta"]["com.example/foo"], json!(1));
+        // Newly applied client field is present alongside it.
+        assert_eq!(
+            params["_meta"]["io.modelcontextprotocol/clientInfo"]["name"],
+            json!("c")
+        );
+        // Sibling params keys are untouched.
+        assert_eq!(params["name"], json!("echo"));
+    }
+
+    #[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+    #[test]
+    fn set_meta_preserves_non_object_params() {
+        use serde_json::json;
+        // A custom command with an array payload, e.g. command("x", Some(vec![1, 2])).
+        let mut req = Request::new(Some(RequestId::Number(1)), "x", Some(json!([1, 2])));
+        let meta = RequestParamsMeta {
+            client_info: Some(crate::types::Implementation {
+                name: "c".into(),
+                version: "9".into(),
+                icons: None,
+            }),
+            ..Default::default()
+        };
+        req.set_meta(meta);
+
+        // The array payload is preserved verbatim; no `_meta` object is grafted on.
+        assert_eq!(req.params, Some(json!([1, 2])));
+
+        // Same for a scalar payload.
+        let mut req = Request::new(Some(RequestId::Number(2)), "x", Some(json!("id")));
+        req.set_meta(RequestParamsMeta::default());
+        assert_eq!(req.params, Some(json!("id")));
+    }
+
+    #[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+    #[test]
+    fn set_meta_creates_params_when_absent() {
+        let mut req = Request::new(Some(RequestId::Number(1)), "x", None::<serde_json::Value>);
+        let meta = RequestParamsMeta {
+            client_info: Some(crate::types::Implementation {
+                name: "c".into(),
+                version: "9".into(),
+                icons: None,
+            }),
+            ..Default::default()
+        };
+        req.set_meta(meta);
+
+        let got = req.meta().expect("meta present");
+        assert_eq!(got.client_info.expect("client_info present").name, "c");
+    }
+}

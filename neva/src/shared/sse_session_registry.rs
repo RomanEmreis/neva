@@ -160,6 +160,7 @@ impl SseSessionRegistry {
                 session.sender = Self::disconnected_sender();
                 #[cfg(feature = "tracing")]
                 {
+                    #[cfg(not(feature = "proto-2026-07-28-rc"))]
                     crate::types::notification::fmt::LOG_REGISTRY.unregister(&session_id);
                     tracing::warn!(
                         logger = "neva",
@@ -173,6 +174,7 @@ impl SseSessionRegistry {
                 session.sender = Self::disconnected_sender();
                 #[cfg(feature = "tracing")]
                 {
+                    #[cfg(not(feature = "proto-2026-07-28-rc"))]
                     crate::types::notification::fmt::LOG_REGISTRY.unregister(&session_id);
                     tracing::warn!(
                         logger = "neva",
@@ -231,6 +233,9 @@ impl SseSessionRegistry {
     /// this is a no-op — the existing buffer and sequence counter are preserved.
     ///
     /// Has no effect when `capacity == 0` (buffering disabled).
+    // Stateless RC transport skips pre-registration (no SSE GET); the method
+    // stays compiled for the non-RC build.
+    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
     pub(crate) fn pre_register(&self, id: Uuid) {
         if self.capacity == 0 {
             return;
@@ -269,7 +274,7 @@ impl SseSessionRegistry {
                     .unwrap_or_else(|e| e.into_inner());
                 session.sender.is_closed() && now.saturating_duration_since(last_activity) >= ttl
             });
-            #[cfg(feature = "tracing")]
+            #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
             if _removed.is_some() {
                 crate::types::notification::fmt::LOG_REGISTRY.unregister(&id);
             }

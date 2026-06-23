@@ -3,20 +3,24 @@
 use crate::error::{Error, ErrorCode};
 use crate::shared;
 use crate::transport::Transport;
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+use crate::types::Root;
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+use crate::types::sampling::{CreateMessageRequestParams, CreateMessageResult, SamplingHandler};
 use crate::types::{
-    CallToolRequestParams, CallToolResponse, ClientCapabilities, GetPromptRequestParams,
-    GetPromptResult, Implementation, InitializeRequestParams, InitializeResult,
-    ListPromptsRequestParams, ListPromptsResult, ListResourceTemplatesRequestParams,
-    ListResourceTemplatesResult, ListResourcesRequestParams, ListResourcesResult,
-    ListToolsRequestParams, ListToolsResult, MessageEnvelope, ReadResourceRequestParams,
-    ReadResourceResult, Request, RequestId, RequestParamsMeta, Response, Root, ServerCapabilities,
-    Uri,
+    CallToolRequestParams, CallToolResponse, GetPromptRequestParams, GetPromptResult,
+    Implementation, ListPromptsRequestParams, ListPromptsResult,
+    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ListResourcesRequestParams,
+    ListResourcesResult, ListToolsRequestParams, ListToolsResult, MessageEnvelope,
+    ReadResourceRequestParams, ReadResourceResult, Request, RequestId, RequestParamsMeta, Response,
+    ServerCapabilities, Uri,
     cursor::Cursor,
     elicitation::{ElicitRequestParams, ElicitResult, ElicitationHandler},
     notification::Notification,
     resource::{SubscribeRequestParams, UnsubscribeRequestParams},
-    sampling::{CreateMessageRequestParams, CreateMessageResult, SamplingHandler},
 };
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+use crate::types::{ClientCapabilities, InitializeRequestParams, InitializeResult};
 use handler::RequestHandler;
 use options::McpOptions;
 use serde::Serialize;
@@ -115,7 +119,12 @@ impl Client {
     /// client.add_root("file:///home/user/projects/my_project", "My Project");
     /// # client.disconnect().await
     /// # }
-    /// ```    
+    /// ```
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[deprecated(
+        note = "Roots are removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
+    )]
+    #[allow(deprecated)]
     pub fn add_root(&mut self, uri: impl Into<Uri>, name: impl Into<String>) -> &mut Self {
         self.options.add_root(Root::new(uri, name));
         self.publish_roots_changed();
@@ -138,7 +147,12 @@ impl Client {
     /// ]);
     /// # client.disconnect().await
     /// # }
-    /// ```    
+    /// ```
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[deprecated(
+        note = "Roots are removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
+    )]
+    #[allow(deprecated)]
     pub fn add_roots<T, I>(&mut self, roots: I) -> &mut Self
     where
         T: Into<Root>,
@@ -150,6 +164,10 @@ impl Client {
     }
 
     /// Sends the "notifications/roots/list_changed" notification to the server
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[deprecated(
+        note = "Roots are removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
+    )]
     pub fn publish_roots_changed(&mut self) {
         if let Some(handler) = self.handler.as_mut() {
             let roots = self.options.roots();
@@ -158,6 +176,10 @@ impl Client {
     }
 
     /// Registers a handler that will be running when a "sampling/createMessage" request is received
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[deprecated(
+        note = "Sampling are removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
+    )]
     pub fn map_sampling<F, R>(&mut self, handler: F) -> &mut Self
     where
         F: Fn(CreateMessageRequestParams) -> R + Clone + Send + Sync + 'static,
@@ -206,7 +228,7 @@ impl Client {
         let mut transport = self.options.transport();
         let token = transport.start();
 
-        #[cfg(feature = "tracing")]
+        #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
         self.register_tracing_notification_handlers();
 
         self.cancellation_token = Some(token);
@@ -244,7 +266,31 @@ impl Client {
         Ok(())
     }
 
-    /// Sends `initialize` request to an MCP server
+    /// Validates a server-reported protocol version against what this client
+    /// negotiated, cancelling the transport on mismatch.
+    fn validate_server_version(&mut self, server_ver: &str) -> Result<(), Error> {
+        if !crate::PROTOCOL_VERSIONS.contains(&server_ver) {
+            self.cancel_transport();
+            return Err(Error::new(
+                ErrorCode::InvalidRequest,
+                format!("Unsupported server protocol version: {server_ver}"),
+            ));
+        }
+        if server_ver != self.options.protocol_ver() {
+            self.cancel_transport();
+            return Err(Error::new(
+                ErrorCode::InvalidRequest,
+                format!(
+                    "Server protocol version mismatch: expected {}, got {server_ver}",
+                    self.options.protocol_ver()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Sends `initialize` request to an MCP server (pre-RC handshake).
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     pub async fn init(&mut self) -> Result<(), Error> {
         let params = InitializeRequestParams {
             protocol_ver: self.options.protocol_ver().to_string(),
@@ -269,34 +315,44 @@ impl Client {
 
         let init_result = resp.into_result::<InitializeResult>()?;
 
-        let server_ver = init_result.protocol_ver.as_str();
-        if !crate::PROTOCOL_VERSIONS.contains(&server_ver) {
-            self.cancel_transport();
-            return Err(Error::new(
-                ErrorCode::InvalidRequest,
-                format!(
-                    "Unsupported server protocol version: {}",
-                    init_result.protocol_ver
-                ),
-            ));
-        }
-        if server_ver != self.options.protocol_ver() {
-            self.cancel_transport();
-            return Err(Error::new(
-                ErrorCode::InvalidRequest,
-                format!(
-                    "Server protocol version mismatch: expected {}, got {}",
-                    self.options.protocol_ver(),
-                    init_result.protocol_ver
-                ),
-            ));
-        }
+        self.validate_server_version(init_result.protocol_ver.as_str())?;
 
         self.server_capabilities = Some(init_result.capabilities);
         self.server_info = Some(init_result.server_info);
 
         self.send_notification(crate::types::notification::commands::INITIALIZED, None)
             .await
+    }
+
+    /// Discovers server capabilities via `server/discover` (MCP 2026-07-28 RC).
+    ///
+    /// Replaces the `initialize`/`initialized` handshake. No `initialized`
+    /// notification is sent — the transport is stateless.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub async fn discover(&mut self) -> Result<(), Error> {
+        let req = Request::new(
+            Some(RequestId::Uuid(uuid::Uuid::new_v4())),
+            crate::commands::DISCOVER,
+            Some(crate::types::DiscoverRequestParams::default()),
+        );
+
+        let resp = self.send_request(req).await?;
+
+        let result = resp.into_result::<crate::types::DiscoverResult>()?;
+
+        self.validate_server_version(result.protocol_ver.as_str())?;
+
+        self.server_capabilities = Some(result.capabilities);
+        self.server_info = Some(result.server_info);
+
+        Ok(())
+    }
+
+    /// Back-compat alias for [`discover`](Self::discover) so existing
+    /// `connect()` flows keep working under the RC flag.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub async fn init(&mut self) -> Result<(), Error> {
+        self.discover().await
     }
 
     /// Sends a ping to the MCP server
@@ -830,13 +886,33 @@ impl Client {
         self.options.tasks_capability.as_ref().is_some()
     }
 
+    /// Resolves the server's tasks capability from the negotiated server
+    /// capabilities. Pre-RC it is the top-level `tasks` field; under
+    /// `proto-2026-07-28-rc` tasks are an extension, so it is read from
+    /// `capabilities.extensions["io.modelcontextprotocol/tasks"]`.
+    #[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
+    fn server_tasks_capability(&self) -> Option<crate::types::ServerTasksCapability> {
+        self.server_capabilities
+            .as_ref()
+            .and_then(|c| c.tasks.clone())
+    }
+
+    /// Resolves the server's tasks capability from the negotiated server
+    /// capabilities (extension form, MCP 2026-07-28 RC).
+    #[cfg(all(feature = "tasks", feature = "proto-2026-07-28-rc"))]
+    fn server_tasks_capability(&self) -> Option<crate::types::ServerTasksCapability> {
+        self.server_capabilities
+            .as_ref()
+            .and_then(|c| c.extensions.as_ref())
+            .and_then(|ext| ext.get(crate::types::task::TASKS_EXTENSION_ID))
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+
     /// Returns whether the server has task augmentation capabilities
     #[inline]
     #[cfg(feature = "tasks")]
     fn is_server_supports_tasks(&self) -> bool {
-        self.server_capabilities
-            .as_ref()
-            .is_some_and(|c| c.tasks.is_some())
+        self.server_tasks_capability().is_some()
     }
 
     /// Returns whether the client supports cancelling tasks
@@ -853,9 +929,7 @@ impl Client {
     #[inline]
     #[cfg(feature = "tasks")]
     fn is_server_support_cancelling_tasks(&self) -> bool {
-        self.server_capabilities
-            .as_ref()
-            .and_then(|c| c.tasks.as_ref())
+        self.server_tasks_capability()
             .is_some_and(|c| c.cancel.is_some())
     }
 
@@ -863,9 +937,7 @@ impl Client {
     #[inline]
     #[cfg(feature = "tasks")]
     fn is_server_support_task_list(&self) -> bool {
-        self.server_capabilities
-            .as_ref()
-            .and_then(|c| c.tasks.as_ref())
+        self.server_tasks_capability()
             .is_some_and(|c| c.list.is_some())
     }
 
@@ -883,22 +955,153 @@ impl Client {
     #[inline]
     #[cfg(feature = "tasks")]
     fn is_server_support_call_tool_with_tasks(&self) -> bool {
-        self.server_capabilities
-            .as_ref()
-            .and_then(|c| c.tasks.as_ref())
-            .and_then(|c| c.requests.as_ref())
-            .and_then(|r| r.tools.as_ref())
+        self.server_tasks_capability()
+            .and_then(|c| c.requests)
+            .and_then(|r| r.tools)
             .is_some_and(|t| t.call.is_some())
     }
 
     /// Sends a request to the MCP server
     #[inline]
     async fn send_request(&mut self, req: Request) -> Result<Response, Error> {
-        self.handler
-            .as_mut()
-            .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?
-            .send_request(req)
-            .await
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        {
+            self.run_with_mrtr(req).await
+        }
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        {
+            self.handler
+                .as_mut()
+                .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?
+                .send_request(req)
+                .await
+        }
+    }
+
+    /// Sends a request and transparently drives the MRTR loop: while the
+    /// server responds with an `input_required` result, fulfil each
+    /// elicitation via the configured handler and re-issue the original
+    /// request (new id) with `inputResponses` + the echoed `requestState`.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    async fn run_with_mrtr(&mut self, req: Request) -> Result<Response, Error> {
+        let max_rounds = self.options.max_mrtr_rounds;
+        let method = req.method.clone();
+        let original_params = req.params.clone();
+        let mrtr_method = shared::is_mrtr_method(method.as_str());
+
+        let mut req = req;
+        self.apply_client_meta(&mut req, None, None);
+
+        // The budget counts re-issue rounds, not the initial send, so allow the
+        // first attempt plus `max_rounds` retries. `0..=max_rounds` (vs.
+        // `max_rounds + 1`) also avoids overflow at `usize::MAX`.
+        for _ in 0..=max_rounds {
+            let resp = self
+                .handler
+                .as_mut()
+                .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?
+                .send_request(req)
+                .await?;
+
+            // MRTR only applies to success results carrying the
+            // `input_required` discriminator; anything else is final.
+            let input_required_result = match &resp {
+                Response::Ok(ok)
+                    if mrtr_method
+                        && ok.result.get("resultType")
+                            == Some(&serde_json::json!("input_required")) =>
+                {
+                    serde_json::from_value::<crate::types::mrtr::InputRequiredResult>(
+                        ok.result.clone(),
+                    )
+                    .map_err(Error::from)?
+                }
+                _ => return Ok(resp),
+            };
+            let ir = input_required_result;
+
+            let mut input_responses = crate::types::mrtr::InputResponses::new();
+            if let Some(reqs) = ir.input_requests {
+                for (key, envelope) in reqs {
+                    let result = self.fulfil_elicitation(envelope.params).await?;
+                    input_responses.insert(key, result);
+                }
+            }
+
+            let new_id = self.generate_id()?;
+            let mut retry = Request::new(Some(new_id), method.clone(), original_params.clone());
+            self.apply_client_meta(&mut retry, Some(input_responses), ir.request_state);
+            req = retry;
+        }
+
+        Err(Error::new(
+            ErrorCode::InternalError,
+            "MRTR exceeded the maximum number of rounds",
+        ))
+    }
+
+    /// Sets `clientInfo` + MRTR capability `_meta` on a request, and optionally
+    /// the MRTR `inputResponses` / `requestState`, preserving existing `_meta`.
+    ///
+    /// Also populates W3C Trace Context (`traceparent` / `tracestate`) from the
+    /// configured [`trace_context_provider`](crate::client::options::McpOptions::with_trace_context_provider),
+    /// when installed. This is the single assembly point for outbound RC `_meta`,
+    /// so both single sends (via [`Self::run_with_mrtr`]) and batched requests
+    /// (via [`Self::run_batch_with_mrtr`]) carry trace context.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    fn apply_client_meta(
+        &self,
+        req: &mut Request,
+        input_responses: Option<crate::types::mrtr::InputResponses>,
+        request_state: Option<String>,
+    ) {
+        let mut meta = req.meta().unwrap_or_default();
+        meta.client_info = Some(self.options.implementation.clone());
+        meta.client_capabilities = Some(crate::types::mrtr::ClientMrtrCapabilities {
+            elicitation: self.options.elicitation_handler.is_some(),
+        });
+        if input_responses.is_some() {
+            meta.input_responses = input_responses;
+        }
+        if request_state.is_some() {
+            meta.request_state = request_state;
+        }
+        if let Some(provider) = self.options.trace_context_provider.as_ref()
+            && let Some(tc) = provider()
+        {
+            meta.traceparent = Some(tc.traceparent);
+            meta.tracestate = tc.tracestate;
+        }
+        req.set_meta(meta);
+    }
+
+    /// Applies the initial per-request RC client metadata (`clientInfo` /
+    /// `clientCapabilities`, plus trace context) to every [`Request`] in a
+    /// batch. The MRTR re-run fields (`inputResponses` / `requestState`) stay
+    /// `None` here — they are filled per request on each retry round by
+    /// [`Self::run_batch_with_mrtr`]. Notifications are left untouched.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    fn apply_client_meta_to_batch(&self, items: &mut [MessageEnvelope]) {
+        for envelope in items {
+            if let MessageEnvelope::Request(req) = envelope {
+                self.apply_client_meta(req, None, None);
+            }
+        }
+    }
+
+    /// Fulfils a server-requested elicitation via the configured handler.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    async fn fulfil_elicitation(
+        &self,
+        params: crate::types::elicitation::ElicitRequestParams,
+    ) -> Result<crate::types::elicitation::ElicitResult, Error> {
+        match self.options.elicitation_handler.clone() {
+            Some(handler) => Ok(handler(params).await),
+            None => Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "server requested elicitation but no handler is configured",
+            )),
+        }
     }
 
     /// Creates a [`BatchBuilder`] for sending multiple requests in a single batch.
@@ -979,43 +1182,196 @@ impl Client {
         &mut self,
         items: Vec<MessageEnvelope>,
     ) -> Result<Vec<Response>, Error> {
-        use futures_util::future::join_all;
+        // Under the RC a batched request may elicit just like a single send, so
+        // the batch is driven through the same MRTR retry loop (see
+        // `run_batch_with_mrtr`) rather than returning the protocol-intermediate
+        // `input_required` result as final.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        {
+            self.run_batch_with_mrtr(items).await
+        }
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        {
+            let handler = self
+                .handler
+                .as_mut()
+                .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
 
-        let handler = self
-            .handler
-            .as_mut()
-            .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
+            let request_timeout = handler.timeout();
+            let pending = handler.pending().clone();
+            let receivers = handler.send_batch(items).await?;
 
-        let request_timeout = handler.timeout();
-        let pending = handler.pending().clone();
-        let receivers = handler.send_batch(items).await?;
+            collect_batch_responses(receivers, &pending, request_timeout)
+                .await
+                .into_iter()
+                .collect()
+        }
+    }
 
-        let futures = receivers.into_iter().map(|(id, rx)| {
-            let pending = pending.clone();
-            async move {
-                match tokio::time::timeout(request_timeout, rx).await {
-                    Ok(Ok(crate::shared::PendingResponse::Response(resp))) => Ok(resp),
-                    Ok(Ok(crate::shared::PendingResponse::Timeout)) => {
-                        Err(Error::new(ErrorCode::Timeout, "Batch request timed out"))
-                    }
-                    Ok(Err(_)) => Err(Error::new(
-                        ErrorCode::InternalError,
-                        "Response channel closed",
-                    )),
-                    Err(_) => {
-                        let _ = pending.pop(&id);
-                        Err(Error::new(ErrorCode::Timeout, "Batch request timed out"))
-                    }
+    /// Drives the MRTR retry loop across an entire batch.
+    ///
+    /// Each batched [`Request`] that elicits — the server replies with an
+    /// `input_required` result — is fulfilled via the configured elicitation
+    /// handler and re-issued (carrying `inputResponses` + the echoed
+    /// `requestState`) alongside any other still-eliciting requests, so the
+    /// whole batch is driven to completion in lock-step rounds. One transport
+    /// write per round preserves the batching benefit; final
+    /// (non-`input_required`) responses are retained and not re-sent. Each
+    /// request keeps its slot in the returned `Vec`, in input order;
+    /// notifications (and any non-request envelopes) are sent once, in the
+    /// first round, and produce no slot.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    async fn run_batch_with_mrtr(
+        &mut self,
+        items: Vec<MessageEnvelope>,
+    ) -> Result<Vec<Response>, Error> {
+        let max_rounds = self.options.max_mrtr_rounds;
+
+        // A per-request slot: either still eliciting (carrying what is needed to
+        // re-issue) or resolved to its final response.
+        enum Slot {
+            Pending {
+                method: String,
+                original_params: Option<serde_json::Value>,
+                req: Option<Request>,
+            },
+            Done(Response),
+        }
+
+        // Seed round-0 metadata (`clientInfo` / `clientCapabilities` / trace
+        // context) on every request via the shared assembly path, then split
+        // requests (which get ordered slots) from fire-and-forget extras
+        // (notifications) sent only in the first round.
+        let mut items = items;
+        self.apply_client_meta_to_batch(&mut items);
+
+        let mut slots: Vec<Slot> = Vec::new();
+        let mut extras: Vec<MessageEnvelope> = Vec::new();
+        for envelope in items {
+            match envelope {
+                MessageEnvelope::Request(req) => slots.push(Slot::Pending {
+                    method: req.method.clone(),
+                    original_params: req.params.clone(),
+                    req: Some(req),
+                }),
+                other => extras.push(other),
+            }
+        }
+
+        // No requests to drive through MRTR: send any extras (notifications)
+        // once and let `send_batch` surface the same connection-closed /
+        // empty-batch errors a non-eliciting batch would.
+        if slots.is_empty() {
+            let handler = self
+                .handler
+                .as_mut()
+                .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
+            let request_timeout = handler.timeout();
+            let pending = handler.pending().clone();
+            let receivers = handler.send_batch(extras).await?;
+            return collect_batch_responses(receivers, &pending, request_timeout)
+                .await
+                .into_iter()
+                .collect();
+        }
+
+        // Round 0 is the initial batch send; rounds `1..=max_rounds` are the
+        // re-issues the budget allows (the cap counts retries, not the first
+        // send). `0..=max_rounds` also avoids overflow at `usize::MAX`.
+        for round in 0..=max_rounds {
+            // Collect this round's outgoing requests; notifications ride along once.
+            let mut envelopes: Vec<MessageEnvelope> = Vec::new();
+            if round == 0 {
+                envelopes.append(&mut extras);
+            }
+            let mut round_slots: Vec<usize> = Vec::new();
+            for (i, slot) in slots.iter_mut().enumerate() {
+                if let Slot::Pending { req, .. } = slot
+                    && let Some(request) = req.take()
+                {
+                    round_slots.push(i);
+                    envelopes.push(MessageEnvelope::Request(request));
                 }
             }
-        });
+            if round_slots.is_empty() {
+                break;
+            }
 
-        // join_all (not try_join_all) ensures every future runs to completion.
-        // This guarantees the timeout cleanup branch (pending.pop) executes for
-        // any request that times out, even when another request in the same
-        // batch has already failed.
-        let results = join_all(futures).await;
-        results.into_iter().collect()
+            // One transport write; await this round's replies concurrently.
+            let handler = self
+                .handler
+                .as_mut()
+                .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
+            let request_timeout = handler.timeout();
+            let pending = handler.pending().clone();
+            let receivers = handler.send_batch(envelopes).await?;
+            let responses = collect_batch_responses(receivers, &pending, request_timeout).await;
+
+            // `responses` aligns with `round_slots`: `send_batch` preserves
+            // request order and extras produce no receiver. Final responses fill
+            // their slot; `input_required` ones are fulfilled and re-issued.
+            for (slot_i, resp) in round_slots.into_iter().zip(responses) {
+                let resp = resp?;
+                let (method, original_params) = match &slots[slot_i] {
+                    Slot::Pending {
+                        method,
+                        original_params,
+                        ..
+                    } => (method.clone(), original_params.clone()),
+                    Slot::Done(_) => unreachable!("a round slot is always pending"),
+                };
+
+                let is_input_required = shared::is_mrtr_method(method.as_str())
+                    && matches!(
+                        &resp,
+                        Response::Ok(ok)
+                            if ok.result.get("resultType")
+                                == Some(&serde_json::json!("input_required"))
+                    );
+                if !is_input_required {
+                    slots[slot_i] = Slot::Done(resp);
+                    continue;
+                }
+
+                let ir = match &resp {
+                    Response::Ok(ok) => serde_json::from_value::<
+                        crate::types::mrtr::InputRequiredResult,
+                    >(ok.result.clone())
+                    .map_err(Error::from)?,
+                    Response::Err(_) => unreachable!("input_required is a success result"),
+                };
+
+                let mut input_responses = crate::types::mrtr::InputResponses::new();
+                if let Some(reqs) = ir.input_requests {
+                    for (key, envelope) in reqs {
+                        let result = self.fulfil_elicitation(envelope.params).await?;
+                        input_responses.insert(key, result);
+                    }
+                }
+
+                let new_id = self.generate_id()?;
+                let mut retry = Request::new(Some(new_id), method, original_params);
+                self.apply_client_meta(&mut retry, Some(input_responses), ir.request_state);
+                if let Slot::Pending { req, .. } = &mut slots[slot_i] {
+                    *req = Some(retry);
+                }
+            }
+        }
+
+        // Assemble in slot order; a slot still pending exhausted the rounds.
+        let mut out = Vec::with_capacity(slots.len());
+        for slot in slots {
+            match slot {
+                Slot::Done(resp) => out.push(resp),
+                Slot::Pending { .. } => {
+                    return Err(Error::new(
+                        ErrorCode::InternalError,
+                        "MRTR exceeded the maximum number of rounds",
+                    ));
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Sends a request to the MCP server
@@ -1045,7 +1401,7 @@ impl Client {
             .await
     }
 
-    #[cfg(feature = "tracing")]
+    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
     fn register_tracing_notification_handlers(&mut self) {
         use crate::types::notification::commands::*;
 
@@ -1054,7 +1410,7 @@ impl Client {
         self.subscribe(PROGRESS, Self::default_notification_handler);
     }
 
-    #[cfg(feature = "tracing")]
+    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
     async fn default_notification_handler(notification: Notification) {
         notification.write();
     }
@@ -1178,6 +1534,46 @@ impl shared::TaskApi for Client {
     }
 }
 
+/// Awaits a batch's per-request receivers concurrently, returning one result
+/// per receiver in input order, with the same per-request timeout and pending
+/// cleanup as a single [`RequestHandler::send_request`].
+///
+/// Uses `join_all` (not `try_join_all`) so every future runs to completion: the
+/// timeout-cleanup branch (`pending.pop`) executes for each timed-out request
+/// even when another request in the same batch has already failed.
+async fn collect_batch_responses(
+    receivers: Vec<(
+        RequestId,
+        tokio::sync::oneshot::Receiver<crate::shared::PendingResponse>,
+    )>,
+    pending: &crate::shared::RequestQueue,
+    request_timeout: std::time::Duration,
+) -> Vec<Result<Response, Error>> {
+    use futures_util::future::join_all;
+
+    let futures = receivers.into_iter().map(|(id, rx)| {
+        let pending = pending.clone();
+        async move {
+            match tokio::time::timeout(request_timeout, rx).await {
+                Ok(Ok(crate::shared::PendingResponse::Response(resp))) => Ok(resp),
+                Ok(Ok(crate::shared::PendingResponse::Timeout)) => {
+                    Err(Error::new(ErrorCode::Timeout, "Batch request timed out"))
+                }
+                Ok(Err(_)) => Err(Error::new(
+                    ErrorCode::InternalError,
+                    "Response channel closed",
+                )),
+                Err(_) => {
+                    let _ = pending.pop(&id);
+                    Err(Error::new(ErrorCode::Timeout, "Batch request timed out"))
+                }
+            }
+        }
+    });
+
+    join_all(futures).await
+}
+
 #[inline]
 fn make_handler<F, R, P, O>(handler: F) -> Handler<P, O>
 where
@@ -1208,5 +1604,95 @@ mod tests {
             result.is_err(),
             "disconnected client should return an error"
         );
+    }
+
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[test]
+    fn batch_injects_rc_client_meta_per_request() {
+        use serde_json::json;
+
+        let mut client = Client::new();
+        // Registering an elicitation handler makes the client declare
+        // `clientCapabilities.elicitation = true`.
+        client.map_elicitation(|_params: ElicitRequestParams| async { ElicitResult::accept() });
+
+        let req = Request::new(
+            Some(RequestId::Number(1)),
+            "tools/call",
+            Some(json!({ "name": "greet", "arguments": {} })),
+        );
+        let mut items = vec![
+            MessageEnvelope::Request(req),
+            // Notifications must be left untouched.
+            MessageEnvelope::Notification(Notification::new("notifications/progress", None)),
+        ];
+
+        client.apply_client_meta_to_batch(&mut items);
+
+        let MessageEnvelope::Request(req) = &items[0] else {
+            panic!("first item must be a request");
+        };
+        let meta = &req.params.as_ref().expect("params present")["_meta"];
+        // Without this injection a batched eliciting tools/call is rejected as
+        // if the client did not support elicitation.
+        assert_eq!(meta["clientCapabilities"]["elicitation"], json!(true));
+        assert!(meta["io.modelcontextprotocol/clientInfo"].is_object());
+
+        // The notification carries no params/_meta.
+        let MessageEnvelope::Notification(notif) = &items[1] else {
+            panic!("second item must be a notification");
+        };
+        assert!(notif.params.is_none());
+    }
+
+    /// A configured trace-context provider is invoked during RC metadata
+    /// assembly, so `_meta.traceparent`/`tracestate` reach the wire alongside
+    /// `clientInfo` — for both single sends and (via the same path) batches.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[test]
+    fn apply_client_meta_injects_trace_context() {
+        use crate::client::options::TraceContext;
+        use serde_json::json;
+
+        let client = Client::new().with_options(|o| {
+            o.with_trace_context_provider(|| {
+                Some(TraceContext {
+                    traceparent: "tp".into(),
+                    tracestate: Some("ts".into()),
+                })
+            })
+        });
+
+        let mut req = Request::new(
+            Some(RequestId::Number(1)),
+            "tools/call",
+            Some(json!({ "name": "greet", "arguments": {} })),
+        );
+        client.apply_client_meta(&mut req, None, None);
+
+        let meta = &req.params.as_ref().expect("params present")["_meta"];
+        assert_eq!(meta["traceparent"], json!("tp"));
+        assert_eq!(meta["tracestate"], json!("ts"));
+        // Trace context is assembled alongside the rest of the RC metadata.
+        assert!(meta["io.modelcontextprotocol/clientInfo"].is_object());
+    }
+
+    /// With no provider installed, no trace fields are emitted.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[test]
+    fn apply_client_meta_omits_trace_context_without_provider() {
+        use serde_json::json;
+
+        let client = Client::new();
+        let mut req = Request::new(
+            Some(RequestId::Number(1)),
+            "tools/call",
+            Some(json!({ "name": "greet", "arguments": {} })),
+        );
+        client.apply_client_meta(&mut req, None, None);
+
+        let meta = &req.params.as_ref().expect("params present")["_meta"];
+        assert!(meta.get("traceparent").is_none());
+        assert!(meta.get("tracestate").is_none());
     }
 }

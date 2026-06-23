@@ -82,6 +82,13 @@ pub enum SseResponse<S> {
 /// `Debug` is required so that `Request` (which derives `Debug`) can
 /// hold an `Arc<dyn Claims>`.
 pub trait Claims: std::fmt::Debug + Send + Sync + 'static {
+    /// Authenticated subject (principal) for this request, if any.
+    ///
+    /// Used to bind MRTR `requestState` to the principal that produced it
+    /// under `proto-2026-07-28-rc`. Defaults to `None`.
+    fn subject(&self) -> Option<&str> {
+        None
+    }
     /// Single role for this subject, if any.
     fn role(&self) -> Option<&str> {
         None
@@ -135,6 +142,9 @@ pub struct DefaultClaims {
 }
 
 impl Claims for DefaultClaims {
+    fn subject(&self) -> Option<&str> {
+        self.sub.as_deref()
+    }
     fn role(&self) -> Option<&str> {
         self.role.as_deref()
     }

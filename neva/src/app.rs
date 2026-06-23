@@ -14,16 +14,21 @@ use crate::shared;
 use crate::transport::{Receiver, Sender, Transport};
 use crate::types::{
     CallToolRequestParams, CallToolResponse, CompleteResult, GetPromptRequestParams,
-    GetPromptResult, InitializeRequestParams, InitializeResult, IntoResponse,
-    ListPromptsRequestParams, ListPromptsResult, ListResourceTemplatesRequestParams,
-    ListResourceTemplatesResult, ListResourcesRequestParams, ListResourcesResult,
-    ListToolsRequestParams, ListToolsResult, Message, MessageBatch, MessageEnvelope, Prompt,
-    PromptHandler, ReadResourceRequestParams, ReadResourceResult, Request, Resource,
-    ResourceTemplate, Response, SubscribeRequestParams, Tool, ToolHandler,
-    UnsubscribeRequestParams, Uri,
+    GetPromptResult, IntoResponse, ListPromptsRequestParams, ListPromptsResult,
+    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ListResourcesRequestParams,
+    ListResourcesResult, ListToolsRequestParams, ListToolsResult, Message, MessageBatch,
+    MessageEnvelope, Prompt, PromptHandler, ReadResourceRequestParams, ReadResourceResult, Request,
+    Resource, ResourceTemplate, Response, Tool, ToolHandler, Uri,
     notification::{CancelledNotificationParams, Notification},
     resource::template::ResourceFunc,
 };
+// Subscribe/unsubscribe handlers exist only under the non-RC transport, which
+// can push `notifications/resources/updated`; the RC stateless build masks the
+// capability and skips the handlers, so these params are unused there.
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+use crate::types::{InitializeRequestParams, InitializeResult};
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+use crate::types::{SubscribeRequestParams, UnsubscribeRequestParams};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "tasks")]
@@ -40,15 +45,21 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+use crate::types::notification::SetLevelRequestParams;
+#[cfg(feature = "tracing")]
+use tracing::Instrument;
 #[cfg(feature = "di")]
 use volga_di::{Container, ContainerBuilder};
-#[cfg(feature = "tracing")]
-use {crate::types::notification::SetLevelRequestParams, tracing::Instrument};
 
 mod collection;
 pub mod context;
+#[cfg(feature = "proto-2026-07-28-rc")]
+pub mod extension;
 mod greeter;
 pub(crate) mod handler;
+#[cfg(feature = "proto-2026-07-28-rc")]
+pub mod mrtr_store;
 pub mod options;
 
 const DEFAULT_PAGE_SIZE: usize = 10;
@@ -96,7 +107,10 @@ impl App {
             container: ContainerBuilder::new(),
         };
 
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
         app.map_handler(crate::commands::INIT, Self::init);
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        app.map_handler(crate::commands::DISCOVER, Self::discover);
         app.map_handler(
             crate::types::completion::commands::COMPLETE,
             Self::completion,
@@ -111,14 +125,23 @@ impl App {
             Self::resource_templates,
         );
         app.map_handler(crate::types::resource::commands::READ, Self::resource);
-        app.map_handler(
-            crate::types::resource::commands::SUBSCRIBE,
-            Self::resource_subscribe,
-        );
-        app.map_handler(
-            crate::types::resource::commands::UNSUBSCRIBE,
-            Self::resource_unsubscribe,
-        );
+        // The stateless `proto-2026-07-28-rc` transport cannot push
+        // `notifications/resources/updated`, so the `resources.subscribe`
+        // capability is masked off (see `McpOptions::resources_capability`).
+        // Don't register subscribe/unsubscribe handlers under RC either, so the
+        // advertised surface and the accepted methods stay in sync — the server
+        // won't accept a subscription it never announces.
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        {
+            app.map_handler(
+                crate::types::resource::commands::SUBSCRIBE,
+                Self::resource_subscribe,
+            );
+            app.map_handler(
+                crate::types::resource::commands::UNSUBSCRIBE,
+                Self::resource_unsubscribe,
+            );
+        }
 
         app.map_handler(crate::types::prompt::commands::LIST, Self::prompts);
         app.map_handler(crate::types::prompt::commands::GET, Self::prompt);
@@ -133,7 +156,7 @@ impl App {
 
         app.map_handler(crate::commands::PING, Self::ping);
 
-        #[cfg(feature = "tracing")]
+        #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
         app.map_handler(
             crate::types::notification::commands::SET_LOG_LEVEL,
             Self::set_log_level,
@@ -235,6 +258,26 @@ impl App {
             .print();
         }
 
+        // Multi-instance footgun guard: under the stateless RC HTTP transport an
+        // MRTR retry can land on a different instance than the one that issued
+        // the `requestState`. With the default ephemeral per-process secret that
+        // retry fails `requestState` decryption/verification, which is a silent
+        // prod failure. Warn at startup unless a shared secret was set explicitly.
+        #[cfg(all(
+            feature = "proto-2026-07-28-rc",
+            feature = "http-server",
+            feature = "tracing"
+        ))]
+        if self.options.is_http_transport() && !self.options.request_state_secret_is_explicit() {
+            tracing::warn!(
+                "MRTR requestState is encrypted with an ephemeral per-process key. \
+                 Multi-instance HTTP deployments MUST call \
+                 App::with_request_state_secret(...) with a shared secret, or a \
+                 retry routed to another instance will fail requestState \
+                 verification."
+            );
+        }
+
         #[cfg(feature = "tracing")]
         self.options
             .add_middleware(make_mw(Self::tracing_middleware));
@@ -276,6 +319,118 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Sets the shared secret used to encrypt and authenticate MRTR
+    /// `requestState` (`proto-2026-07-28-rc`).
+    ///
+    /// The blob is sealed with ChaCha20-Poly1305 (AEAD) using a key derived from
+    /// this secret, so the payload — including any values a handler caches via
+    /// [`Context::memo`](crate::Context::memo) — is confidential as well as
+    /// tamper-evident.
+    ///
+    /// **Multi-instance stateless deployments MUST set this to a shared
+    /// secret** — otherwise a retry that lands on a different instance fails to
+    /// decrypt the `requestState`. If unset, an ephemeral per-process key is
+    /// used (fine for single-instance / development).
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(feature = "proto-2026-07-28-rc")] {
+    /// use neva::App;
+    ///
+    /// let app = App::new()
+    ///     .with_request_state_secret(b"shared-secret");
+    /// # }
+    /// ```
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub fn with_request_state_secret(mut self, secret: impl AsRef<[u8]>) -> Self {
+        self.options.set_request_state_secret(secret.as_ref());
+        self
+    }
+
+    /// Sets the maximum encoded `requestState` size (bytes). When a round-trip
+    /// would emit a larger blob, the server returns an error result instead
+    /// (`proto-2026-07-28-rc`).
+    ///
+    /// Defaults to 8 KiB. Lower it to push handlers toward [`crate::Context::once`]
+    /// (key-only) over [`crate::Context::memo`] (serialized value); raise it for
+    /// memo-heavy flows.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(feature = "proto-2026-07-28-rc")] {
+    /// use neva::App;
+    ///
+    /// let app = App::new()
+    ///     .with_max_state_bytes(16 * 1024);
+    /// # }
+    /// ```
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub fn with_max_state_bytes(mut self, bytes: usize) -> Self {
+        self.options.set_max_state_bytes(bytes);
+        self
+    }
+
+    /// Sets the store backing MRTR final-round idempotency
+    /// (`proto-2026-07-28-rc`).
+    ///
+    /// When the final round of an MRTR flow commits but its HTTP response is
+    /// lost, the client retries the same `requestState`; the store lets the
+    /// server return the already-computed response instead of re-running the
+    /// handler (and its [`Context::on_commit`](crate::Context::on_commit) /
+    /// [`Context::once`](crate::Context::once) side effects) a second time.
+    ///
+    /// Defaults to a per-process
+    /// [`InMemoryStateStore`](crate::app::mrtr_store::InMemoryStateStore).
+    /// **Multi-instance stateless deployments should set a shared store** (e.g.
+    /// Redis) so a retry routed to another instance still sees the committed
+    /// result — the same constraint as
+    /// [`with_request_state_secret`](Self::with_request_state_secret).
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(feature = "proto-2026-07-28-rc")] {
+    /// use neva::App;
+    /// use neva::app::mrtr_store::InMemoryStateStore;
+    ///
+    /// let app = App::new()
+    ///     .with_request_state_store(InMemoryStateStore::new());
+    /// # }
+    /// ```
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub fn with_request_state_store(
+        mut self,
+        store: impl crate::app::mrtr_store::RequestStateStore + 'static,
+    ) -> Self {
+        self.options
+            .set_request_state_store(std::sync::Arc::new(store));
+        self
+    }
+
+    /// Registers a protocol [`Extension`](crate::app::extension::Extension)
+    /// (MCP 2026-07-28 RC).
+    ///
+    /// Records the extension's capability under its reverse-DNS id (surfaced by
+    /// `server/discover` under `capabilities.extensions`) and lets it register
+    /// its request handlers. This is the generic entry point for extensions;
+    /// the built-in Tasks extension is also reachable through `with_tasks`.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(all(feature = "proto-2026-07-28-rc", feature = "tasks"))] {
+    /// use neva::App;
+    /// use neva::app::extension::TasksExtension;
+    /// use neva::types::ServerTasksCapability;
+    /// let app = App::new()
+    ///     .with_extension(TasksExtension::new(ServerTasksCapability::default()));
+    /// # }
+    /// ```
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub fn with_extension<E: crate::app::extension::Extension>(mut self, ext: E) -> Self {
+        self.options.register_extension(ext.id(), ext.capability());
+        ext.register(&mut self);
+        self
     }
 
     /// Enable the greeting banner on startup (forced on, even in release builds).
@@ -509,12 +664,22 @@ impl App {
         self
     }
 
-    /// Connection initialization handler
+    /// Connection initialization handler (pre-RC handshake).
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     async fn init(
         options: RuntimeMcpOptions,
         _params: InitializeRequestParams,
     ) -> Result<InitializeResult, Error> {
         Ok(InitializeResult::new(&options))
+    }
+
+    /// Stateless capability discovery handler (MCP 2026-07-28 RC).
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    async fn discover(
+        options: RuntimeMcpOptions,
+        _params: crate::types::DiscoverRequestParams,
+    ) -> Result<crate::types::DiscoverResult, Error> {
+        Ok(crate::types::DiscoverResult::new(&options))
     }
 
     /// Completion request handler
@@ -524,14 +689,20 @@ impl App {
     }
 
     /// Tools request handler
+    #[cfg_attr(not(feature = "proto-2026-07-28-rc"), allow(clippy::needless_update))]
     async fn tools(options: RuntimeMcpOptions, params: ListToolsRequestParams) -> ListToolsResult {
         let (tools, next_cursor) = options
             .list_tools_page(params.cursor, DEFAULT_PAGE_SIZE)
             .await;
-        ListToolsResult { tools, next_cursor }
+        ListToolsResult {
+            tools,
+            next_cursor,
+            ..Default::default()
+        }
     }
 
     /// Resources request handler
+    #[cfg_attr(not(feature = "proto-2026-07-28-rc"), allow(clippy::needless_update))]
     async fn resources(
         options: RuntimeMcpOptions,
         params: ListResourcesRequestParams,
@@ -542,10 +713,12 @@ impl App {
         ListResourcesResult {
             resources,
             next_cursor,
+            ..Default::default()
         }
     }
 
     /// Resource templates request handler
+    #[cfg_attr(not(feature = "proto-2026-07-28-rc"), allow(clippy::needless_update))]
     async fn resource_templates(
         options: RuntimeMcpOptions,
         params: ListResourceTemplatesRequestParams,
@@ -556,10 +729,12 @@ impl App {
         ListResourceTemplatesResult {
             templates: resource_templates,
             next_cursor,
+            ..Default::default()
         }
     }
 
     /// Prompts request handler
+    #[cfg_attr(not(feature = "proto-2026-07-28-rc"), allow(clippy::needless_update))]
     async fn prompts(
         options: RuntimeMcpOptions,
         params: ListPromptsRequestParams,
@@ -570,6 +745,7 @@ impl App {
         ListPromptsResult {
             prompts,
             next_cursor,
+            ..Default::default()
         }
     }
 
@@ -608,11 +784,19 @@ impl App {
     async fn ping() {}
 
     /// A subscription to a resource change request handler
+    ///
+    /// Not registered under `proto-2026-07-28-rc`: the stateless transport
+    /// cannot push `notifications/resources/updated`, so subscriptions are not
+    /// advertised and the method is not accepted.
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     async fn resource_subscribe(mut ctx: Context, params: SubscribeRequestParams) {
         ctx.subscribe_to_resource(params.uri);
     }
 
     /// An unsubscription to from resource change request handler
+    ///
+    /// Not registered under `proto-2026-07-28-rc`; see [`Self::resource_subscribe`].
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     async fn resource_unsubscribe(mut ctx: Context, params: UnsubscribeRequestParams) {
         ctx.unsubscribe_from_resource(&params.uri);
     }
@@ -667,7 +851,8 @@ impl App {
     }
 
     /// Sets the logging level
-    #[cfg(feature = "tracing")]
+    #[allow(deprecated)]
+    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
     async fn set_log_level(
         options: RuntimeMcpOptions,
         params: SetLevelRequestParams,
@@ -920,6 +1105,19 @@ impl App {
         let session_id = req.session_id;
         let full_id = req.full_id();
 
+        // MRTR pre-capture: method + salient params (params minus `_meta`),
+        // needed after `req`/`context` are moved into `handler.call`.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let mrtr_method = shared::is_mrtr_method(&req.method);
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let req_method = req.method.clone();
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let salient_params = req
+            .params
+            .as_ref()
+            .map(strip_meta)
+            .unwrap_or(serde_json::Value::Null);
+
         #[cfg(not(feature = "http-server"))]
         let context = runtime.context(session_id);
 
@@ -936,6 +1134,100 @@ impl App {
         let options = runtime.options();
         let handlers = runtime.request_handlers();
         let token = options.track_request(&full_id);
+
+        // MRTR seed: decode/verify any incoming `requestState`, merge this
+        // round's `inputResponses`, and attach the replay state to the context.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let mut context = context;
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let (mrtr_arc, mrtr_principal) = if mrtr_method {
+            #[cfg(feature = "http-server")]
+            let principal = context
+                .claims
+                .as_ref()
+                .and_then(|c| c.subject().map(|s| s.to_owned()));
+            #[cfg(not(feature = "http-server"))]
+            let principal: Option<String> = None;
+
+            match seed_mrtr_ctx(
+                &req,
+                &req_method,
+                &salient_params,
+                &options,
+                principal.as_deref(),
+            ) {
+                Ok(arc) => {
+                    context.exec = crate::app::context::ExecMode::Mrtr(arc.clone());
+                    (Some(arc), principal)
+                }
+                Err(e) => {
+                    options.complete_request(&full_id);
+                    let mut resp = Err::<Response, _>(e).into_response(req_id);
+                    if let Some(session_id) = session_id {
+                        resp = resp.set_session_id(session_id);
+                    }
+                    return resp;
+                }
+            }
+        } else {
+            (None, None)
+        };
+
+        // MRTR idempotency: the final-round response cache is keyed by the
+        // incoming state's sealed segment (the ciphertext+tag after the `.`,
+        // unique per minted state thanks to the random AEAD nonce) *plus* a
+        // digest of this round's `inputResponses`. The answers digest matters
+        // because the *same* minted state can be echoed with *different*
+        // answers — a client (or attacker) replaying one round-1 blob with two
+        // different `inputResponses` would otherwise hit the first answer's
+        // cached result for the second. Folding in the answers' digest keeps
+        // those apart, while a genuine lost-response retry — same state *and*
+        // same answers — still hits. Only committed *final* rounds are ever
+        // cached, so a hit here is by construction a replay of one.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let state_tag: Option<String> = if mrtr_method {
+            req.meta().and_then(|m| {
+                let tag = m
+                    .request_state
+                    .as_deref()
+                    .and_then(|blob| blob.rsplit_once('.').map(|(_, tag)| tag))?;
+                let answers = m
+                    .input_responses
+                    .as_ref()
+                    .map(crate::types::mrtr::state::input_responses_digest)
+                    .unwrap_or_default();
+                Some(format!("{tag}.{answers}"))
+            })
+        } else {
+            None
+        };
+        // Claim the per-state reservation *before* the cache lookup and hold it
+        // through the handler, commits and the final `put`. Two identical
+        // final-round retries (e.g. a client that timed out and re-sent while
+        // the first round is still committing) would otherwise both miss the
+        // cache below and re-run the handler + `on_commit` effects. The loser
+        // blocks here until the winner has cached, then hits it instead.
+        //
+        // NOTE: this guard MUST stay live until after the final `put` below.
+        // Dropping it early (e.g. rewriting to `let _ = ...reserve().await;`)
+        // releases the lock immediately and reopens the concurrent-retry race;
+        // the explicit, self-describing name guards against that refactor.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let _reservation_guard_held_through_commit = match state_tag.as_deref() {
+            Some(tag) => Some(options.request_state_store().reserve(tag).await),
+            None => None,
+        };
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        if let Some(tag) = state_tag.as_deref()
+            && let Some(cached) = options.request_state_store().get(tag).await
+        {
+            options.complete_request(&full_id);
+            let mut resp = cached.set_id(req_id.clone());
+            if let Some(session_id) = session_id {
+                resp = resp.set_session_id(session_id);
+            }
+            return resp;
+        }
 
         #[cfg(feature = "tracing")]
         tracing::trace!(logger = "neva", "Received: {:?}", req);
@@ -957,9 +1249,75 @@ impl App {
             Err(Error::from(ErrorCode::MethodNotFound))
         };
 
+        // MRTR interception: if the handler requested input (recorded in the
+        // shared `MrtrCtx`), convert to an `InputRequiredResult` regardless of
+        // what the handler returned. The pending flag — not the sentinel error
+        // — is the reliable signal, because tool/prompt/resource wrappers fold
+        // a handler `Err` into an in-band error result before we see it.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let mut cache_final = false;
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let resp = match (mrtr_method, mrtr_arc) {
+            (true, Some(arc)) => {
+                let has_pending = arc.pending.lock().map(|p| p.is_some()).unwrap_or(false);
+                if has_pending {
+                    build_input_required(
+                        &arc,
+                        &req_method,
+                        &salient_params,
+                        &options,
+                        mrtr_principal,
+                    )
+                    .map(|ir| ir.into_response(req_id.clone()))
+                } else if mrtr_should_commit(&resp) {
+                    // Final round: run deferred commits in registration order.
+                    // The first Err becomes the response error.
+                    let commits = arc
+                        .commits
+                        .lock()
+                        .map(|mut c| std::mem::take(&mut *c))
+                        .unwrap_or_default();
+                    let mut commit_err = None;
+                    for fut in commits {
+                        if let Err(e) = fut.await {
+                            commit_err = Some(e);
+                            break;
+                        }
+                    }
+                    match commit_err {
+                        Some(e) => Err(e),
+                        None => {
+                            // Final round committed successfully: cache its
+                            // response (below, once the id is final) so a
+                            // lost-response retry is served idempotently.
+                            cache_final = true;
+                            resp
+                        }
+                    }
+                } else {
+                    resp
+                }
+            }
+            _ => resp,
+        };
+
         let mut resp = resp.into_response(req_id);
         if let Some(session_id) = session_id {
             resp = resp.set_session_id(session_id);
+        }
+
+        // Record the committed final response under the incoming state's tag
+        // plus this round's answers digest (see `state_tag` above). Retained
+        // until the state's own expiry window (`now + ttl`, an upper bound on
+        // its remaining life), after which a retry is rejected as expired before
+        // reaching the store.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        if cache_final && let Some(tag) = state_tag.as_deref() {
+            let exp = crate::types::mrtr::state::now_secs() + options.request_state_ttl_secs();
+            options
+                .request_state_store()
+                .put(tag, resp.clone(), exp)
+                .await;
         }
         resp
     }
@@ -967,6 +1325,29 @@ impl App {
     async fn handle_response(resp: Response, runtime: ServerRuntime) -> Response {
         let resp_id = resp.id().clone();
         let session_id = resp.session_id().cloned();
+
+        // RC task-elicit resume: an answer to a suspended task `ctx.elicit` is
+        // correlated by the server-generated task id (the bare response id),
+        // *not* the session — the stateless transport mints a fresh session per
+        // POST, so the session-keyed request queue could never match the
+        // suspend round. Try delivering to a parked task first; `provide_input`
+        // hands the response back when no task elicit is waiting, so non-task
+        // responses fall through to the request queue unchanged.
+        #[cfg(all(feature = "proto-2026-07-28-rc", feature = "tasks"))]
+        let resp = match runtime
+            .options()
+            .tasks
+            .provide_input(&resp_id.to_string(), resp)
+        {
+            Ok(()) => {
+                let mut resp = Response::empty(resp_id);
+                if let Some(session_id) = session_id {
+                    resp = resp.set_session_id(session_id);
+                }
+                return resp;
+            }
+            Err(resp) => *resp,
+        };
 
         runtime.pending_requests().complete(resp);
 
@@ -988,6 +1369,7 @@ impl App {
                     runtime.options().cancel_request(&params.request_id);
                 }
             }
+            #[cfg(not(feature = "proto-2026-07-28-rc"))]
             crate::types::notification::commands::MESSAGE => {
                 #[cfg(feature = "tracing")]
                 notification.write();
@@ -1011,6 +1393,185 @@ fn create_tracing_span(session_id: Option<uuid::Uuid>) -> tracing::Span {
     }
 }
 
+/// Returns a clone of `params` with the `_meta` key removed, so the MRTR
+/// request-binding digest is stable across round-trips.
+#[cfg(feature = "proto-2026-07-28-rc")]
+fn strip_meta(params: &serde_json::Value) -> serde_json::Value {
+    match params {
+        serde_json::Value::Object(map) => {
+            let mut cloned = map.clone();
+            cloned.remove("_meta");
+            serde_json::Value::Object(cloned)
+        }
+        other => other.clone(),
+    }
+}
+
+/// Decodes/verifies any incoming `requestState` and merges this round's
+/// `inputResponses` into the replay log, producing the per-dispatch MRTR state.
+#[cfg(feature = "proto-2026-07-28-rc")]
+fn seed_mrtr_ctx(
+    req: &Request,
+    method: &str,
+    salient: &serde_json::Value,
+    options: &crate::app::options::RuntimeMcpOptions,
+    principal: Option<&str>,
+) -> Result<std::sync::Arc<crate::app::context::MrtrCtx>, Error> {
+    use crate::types::mrtr::state::{StateCodec, now_secs, request_binding};
+
+    let meta = req.meta();
+    let elicitation_allowed = meta
+        .as_ref()
+        .and_then(|m| m.client_capabilities)
+        .map(|c| c.elicitation)
+        .unwrap_or(false);
+
+    let mut answers = std::collections::HashMap::new();
+    let mut memos = std::collections::HashMap::new();
+    let mut effects = std::collections::HashSet::new();
+    // Keys the server requested in the prior round, decoded from the verified
+    // state. `None` means no valid state was supplied, so no input was solicited.
+    let mut requested: Option<Vec<String>> = None;
+    if let Some(state) = meta.as_ref().and_then(|m| m.request_state.clone()) {
+        // Reject an oversized inbound state before decoding it. Base64 decoding
+        // and AEAD decryption in `StateCodec::decode` both allocate/compute in
+        // proportion to the blob size, so without this guard `with_max_state_bytes`
+        // would only bound the states we *mint* and a bogus oversized
+        // `requestState` from an untrusted client could force that work before
+        // failing. The cap is the same encoded-length bound enforced on the
+        // outbound path in `build_input_required`.
+        if state.len() > options.max_state_bytes() {
+            return Err(Error::new(
+                ErrorCode::InvalidParams,
+                "requestState exceeds the configured maximum size",
+            ));
+        }
+        let payload = StateCodec::new(options.request_state_secret()).decode(&state)?;
+        if payload.exp < now_secs() {
+            return Err(Error::new(ErrorCode::InvalidParams, "requestState expired"));
+        }
+        if payload.req != request_binding(method, salient) {
+            return Err(Error::new(
+                ErrorCode::InvalidParams,
+                "requestState does not match this request",
+            ));
+        }
+        if payload.principal.as_deref() != principal {
+            return Err(Error::new(
+                ErrorCode::InvalidParams,
+                "requestState principal mismatch",
+            ));
+        }
+        answers = payload.answers;
+        memos = payload.memos;
+        effects = payload.effects;
+        requested = Some(payload.requested);
+    }
+    if let Some(responses) = meta.and_then(|m| m.input_responses) {
+        // `inputResponses` are answers to inputs the server requested in a
+        // prior round; that request set lives in the encrypted `requestState`.
+        // Without a verified state there is nothing to bind them to, so accept
+        // only solicited, non-duplicate keys — otherwise a client could
+        // pre-seed answers for a later `ctx.elicit` key (skipping the intended
+        // `InputRequiredResult`) or overwrite an already-resolved answer.
+        let Some(requested) = requested.as_ref() else {
+            return Err(Error::new(
+                ErrorCode::InvalidParams,
+                "inputResponses supplied without a requestState",
+            ));
+        };
+        for (key, value) in responses {
+            if answers.contains_key(&key) {
+                return Err(Error::new(
+                    ErrorCode::InvalidParams,
+                    "inputResponses re-answers an already-resolved input",
+                ));
+            }
+            if !requested.contains(&key) {
+                return Err(Error::new(
+                    ErrorCode::InvalidParams,
+                    "inputResponses contains a key the server did not request",
+                ));
+            }
+            answers.insert(key, value);
+        }
+    }
+
+    Ok(std::sync::Arc::new(crate::app::context::MrtrCtx {
+        answers,
+        pending: Default::default(),
+        elicitation_allowed,
+        memos: std::sync::Mutex::new(memos),
+        effects: std::sync::Mutex::new(effects),
+        commits: Default::default(),
+    }))
+}
+
+/// Builds the `InputRequiredResult` for the input the handler requested,
+/// encoding a fresh encrypted `requestState`.
+#[cfg(feature = "proto-2026-07-28-rc")]
+fn build_input_required(
+    arc: &std::sync::Arc<crate::app::context::MrtrCtx>,
+    method: &str,
+    salient: &serde_json::Value,
+    options: &crate::app::options::RuntimeMcpOptions,
+    principal: Option<String>,
+) -> Result<crate::types::mrtr::InputRequiredResult, Error> {
+    use crate::types::mrtr::InputRequiredResult;
+    use crate::types::mrtr::state::{StateCodec, StatePayload, now_secs, request_binding};
+
+    if !arc.elicitation_allowed {
+        return Err(Error::new(
+            ErrorCode::InvalidRequest,
+            "server requested elicitation but the client did not declare support",
+        ));
+    }
+    let (key, params) = arc
+        .pending
+        .lock()
+        .ok()
+        .and_then(|mut p| p.take())
+        .ok_or_else(|| Error::new(ErrorCode::InternalError, "missing pending MRTR input"))?;
+    let memos = arc.memos.lock().map(|m| m.clone()).unwrap_or_default();
+    let effects = arc.effects.lock().map(|e| e.clone()).unwrap_or_default();
+    let payload = StatePayload {
+        answers: arc.answers.clone(),
+        // Bind the key we are requesting into the signed state so the next
+        // round can verify the client only answers what we actually asked for.
+        requested: vec![key.clone()],
+        memos,
+        effects,
+        exp: now_secs() + options.request_state_ttl_secs(),
+        req: request_binding(method, salient),
+        principal,
+    };
+    let state = StateCodec::new(options.request_state_secret()).encode(&payload)?;
+    if state.len() > options.max_state_bytes() {
+        return Err(Error::new(
+            ErrorCode::InternalError,
+            "requestState too large",
+        ));
+    }
+    Ok(InputRequiredResult::elicitation(key, params, state))
+}
+
+/// Returns `true` only when `resp` is a genuine success that should trigger the
+/// final round's deferred MRTR commits.
+///
+/// A protocol-level failure (`Err`, or an `Ok(Response::Err(..))`) is excluded
+/// by construction. Crucially, so is an *in-band* tool error: tool/prompt
+/// wrappers fold a handler `Err` into `Ok(CallToolResponse { isError: true })`,
+/// so a plain `resp.is_ok()` check would still run commits on a failed call —
+/// applying irreversible side effects (DB writes, charges) registered via
+/// `ctx.on_commit(..)` even though the tool ultimately reported failure.
+#[cfg(feature = "proto-2026-07-28-rc")]
+fn mrtr_should_commit(resp: &Result<Response, Error>) -> bool {
+    match resp {
+        Ok(Response::Ok(ok)) => ok.result.get("isError") != Some(&serde_json::Value::Bool(true)),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::App;
@@ -1020,6 +1581,231 @@ mod tests {
     fn it_enables_greeting_with_with_greeting() {
         let app = App::new().with_greeting();
         assert!(app.greeting);
+    }
+
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[test]
+    fn with_max_state_bytes_sets_the_option() {
+        let app = App::new().with_max_state_bytes(4096);
+        assert_eq!(app.options.max_state_bytes(), 4096);
+    }
+
+    /// Deferred MRTR commits must run only for a genuine success — never for a
+    /// protocol-level error nor for an in-band tool error (`isError: true`),
+    /// which tool wrappers fold a handler `Err` into.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[test]
+    fn mrtr_should_commit_excludes_errors() {
+        use crate::error::Error;
+        use crate::types::{RequestId, Response};
+        use serde_json::json;
+
+        let id = RequestId::Number(1);
+
+        // Genuine success → commit.
+        let ok = Ok(Response::success(
+            id.clone(),
+            json!({ "content": [], "isError": false }),
+        ));
+        assert!(super::mrtr_should_commit(&ok));
+
+        // Success with no `isError` field at all (e.g. a non-tool result) → commit.
+        let plain = Ok(Response::success(id.clone(), json!({ "ok": true })));
+        assert!(super::mrtr_should_commit(&plain));
+
+        // In-band tool error folded into Ok → do NOT commit.
+        let tool_err = Ok(Response::success(
+            id.clone(),
+            json!({ "content": [], "isError": true }),
+        ));
+        assert!(!super::mrtr_should_commit(&tool_err));
+
+        // Protocol-level error response → do NOT commit.
+        let proto_err = Ok(Response::error(id.clone(), Error::new(-32603, "boom")));
+        assert!(!super::mrtr_should_commit(&proto_err));
+
+        // Handler `Err` → do NOT commit.
+        let hard_err: Result<Response, Error> = Err(Error::new(-32603, "boom"));
+        assert!(!super::mrtr_should_commit(&hard_err));
+    }
+
+    /// Security guards in [`super::seed_mrtr_ctx`] that the e2e happy path never
+    /// exercises: an expired `requestState` and a principal-bound state replayed
+    /// under a different principal. Driven deterministically (no clock advance,
+    /// no auth harness) by hand-encoding the signed blob.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    mod mrtr_seed_guards {
+        use crate::app::App;
+        use crate::error::ErrorCode;
+        use crate::types::mrtr::state::{StateCodec, StatePayload, now_secs, request_binding};
+        use crate::types::{Request, RequestId};
+
+        const SECRET: &[u8] = b"unit-secret";
+        const METHOD: &str = "tools/call";
+
+        fn options() -> crate::app::options::RuntimeMcpOptions {
+            App::new()
+                .with_request_state_secret(SECRET)
+                .options
+                .into_runtime()
+        }
+
+        fn salient() -> serde_json::Value {
+            serde_json::json!({ "name": "greet", "arguments": {} })
+        }
+
+        fn request_with_state(state: &str) -> Request {
+            let mut params = salient();
+            params["_meta"] = serde_json::json!({
+                "requestState": state,
+                "clientCapabilities": { "elicitation": true }
+            });
+            Request::new(Some(RequestId::Number(1)), METHOD, Some(params))
+        }
+
+        fn encode(payload: &StatePayload) -> String {
+            StateCodec::new(SECRET).encode(payload).expect("encode")
+        }
+
+        #[test]
+        fn expired_request_state_is_rejected() {
+            let payload = StatePayload {
+                answers: Default::default(),
+                requested: Default::default(),
+                memos: Default::default(),
+                effects: Default::default(),
+                exp: now_secs().saturating_sub(1), // already in the past
+                req: request_binding(METHOD, &salient()),
+                principal: None,
+            };
+            let req = request_with_state(&encode(&payload));
+            let err = super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), None)
+                .expect_err("expired state must be rejected");
+            assert_eq!(err.code, ErrorCode::InvalidParams);
+            assert!(format!("{err}").contains("expired"), "{err}");
+        }
+
+        #[test]
+        fn principal_mismatch_is_rejected() {
+            // State minted for "alice" (valid, unexpired, correctly bound)...
+            let payload = StatePayload {
+                answers: Default::default(),
+                requested: Default::default(),
+                memos: Default::default(),
+                effects: Default::default(),
+                exp: now_secs() + 300,
+                req: request_binding(METHOD, &salient()),
+                principal: Some("alice".into()),
+            };
+            let req = request_with_state(&encode(&payload));
+            // ...replayed by "bob".
+            let err =
+                super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), Some("bob"))
+                    .expect_err("principal mismatch must be rejected");
+            assert_eq!(err.code, ErrorCode::InvalidParams);
+            assert!(format!("{err}").contains("principal mismatch"), "{err}");
+        }
+
+        /// Builds the `_meta` JSON with the given request state (if any) and
+        /// `inputResponses` map of key → accepted [`ElicitResult`].
+        fn request_with_responses(state: Option<&str>, response_keys: &[&str]) -> Request {
+            use crate::types::elicitation::ElicitResult;
+            let responses: serde_json::Map<String, serde_json::Value> = response_keys
+                .iter()
+                .map(|k| {
+                    (
+                        (*k).to_owned(),
+                        serde_json::to_value(ElicitResult::accept()).expect("serialize result"),
+                    )
+                })
+                .collect();
+            let mut meta = serde_json::json!({
+                "clientCapabilities": { "elicitation": true },
+                "inputResponses": responses,
+            });
+            if let Some(state) = state {
+                meta["requestState"] = serde_json::json!(state);
+            }
+            let mut params = salient();
+            params["_meta"] = meta;
+            Request::new(Some(RequestId::Number(1)), METHOD, Some(params))
+        }
+
+        fn state_with(answers: &[&str], requested: &[&str]) -> String {
+            use crate::types::elicitation::ElicitResult;
+            let answers = answers
+                .iter()
+                .map(|k| ((*k).to_owned(), ElicitResult::accept()))
+                .collect();
+            let payload = StatePayload {
+                answers,
+                requested: requested.iter().map(|k| (*k).to_owned()).collect(),
+                memos: Default::default(),
+                effects: Default::default(),
+                exp: now_secs() + 300,
+                req: request_binding(METHOD, &salient()),
+                principal: None,
+            };
+            encode(&payload)
+        }
+
+        #[test]
+        fn input_responses_without_request_state_are_rejected() {
+            // No validated state: nothing solicited these answers.
+            let req = request_with_responses(None, &["ask_name"]);
+            let err = super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), None)
+                .expect_err("unbound inputResponses must be rejected");
+            assert_eq!(err.code, ErrorCode::InvalidParams);
+            assert!(format!("{err}").contains("without a requestState"), "{err}");
+        }
+
+        #[test]
+        fn unsolicited_input_response_key_is_rejected() {
+            // State requested `ask_name`; client answers an unrelated key.
+            let state = state_with(&[], &["ask_name"]);
+            let req = request_with_responses(Some(&state), &["ask_age"]);
+            let err = super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), None)
+                .expect_err("unsolicited key must be rejected");
+            assert_eq!(err.code, ErrorCode::InvalidParams);
+            assert!(format!("{err}").contains("did not request"), "{err}");
+        }
+
+        #[test]
+        fn re_answering_a_resolved_input_is_rejected() {
+            // `ask_name` already resolved in the signed answers log; the client
+            // tries to overwrite it (even though it is also in `requested`).
+            let state = state_with(&["ask_name"], &["ask_name"]);
+            let req = request_with_responses(Some(&state), &["ask_name"]);
+            let err = super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), None)
+                .expect_err("re-answering must be rejected");
+            assert_eq!(err.code, ErrorCode::InvalidParams);
+            assert!(format!("{err}").contains("already-resolved"), "{err}");
+        }
+
+        #[test]
+        fn solicited_input_response_is_accepted() {
+            // The happy path: client answers exactly the requested key.
+            let state = state_with(&[], &["ask_name"]);
+            let req = request_with_responses(Some(&state), &["ask_name"]);
+            let ctx = super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), None)
+                .expect("solicited response must be accepted");
+            assert!(ctx.answers.contains_key("ask_name"));
+        }
+    }
+
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[test]
+    fn rc_registers_discover_not_initialize() {
+        let app = App::new();
+        assert!(app.handlers.contains_key(crate::commands::DISCOVER));
+        assert!(!app.handlers.contains_key(crate::commands::INIT));
+    }
+
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[test]
+    fn default_registers_initialize() {
+        let app = App::new();
+        assert!(app.handlers.contains_key(crate::commands::INIT));
     }
 
     #[test]

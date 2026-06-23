@@ -21,12 +21,17 @@ pub use request::FromRequest;
 #[cfg(feature = "http-server")]
 use {crate::auth::Claims, http::HeaderMap, std::sync::Arc};
 
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+pub use capabilities::LoggingCapability;
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+pub use capabilities::RootsCapability;
 pub use capabilities::{
     ClientCapabilities, CompletionsCapability, ElicitationCapability, ElicitationFormCapability,
-    ElicitationUrlCapability, LoggingCapability, PromptsCapability, ResourcesCapability,
-    RootsCapability, SamplingCapability, SamplingContextCapability, SamplingToolsCapability,
-    ServerCapabilities, ToolsCapability,
+    ElicitationUrlCapability, PromptsCapability, ResourcesCapability, ServerCapabilities,
+    ToolsCapability,
 };
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+pub use capabilities::{SamplingCapability, SamplingContextCapability, SamplingToolsCapability};
 pub use completion::{Argument, CompleteRequestParams, CompleteResult, Completion};
 pub use content::{
     AudioContent, Content, EmbeddedResource, ImageContent, ResourceLink, TextContent, ToolResult,
@@ -41,18 +46,64 @@ pub use response::{ErrorDetails, IntoResponse, Response};
 #[cfg(feature = "tasks")]
 pub use capabilities::{
     ClientTaskRequestsCapability, ClientTasksCapability, ElicitationCreateTaskCapability,
-    ElicitationTaskCapability, SamplingCreateMessageTaskCapability, SamplingTaskCapability,
-    ServerTaskRequestsCapability, ServerTasksCapability, TaskCancellationCapability,
-    TaskListCapability, ToolsCallTaskCapability, ToolsTaskCapability,
+    ElicitationTaskCapability, ServerTaskRequestsCapability, ServerTasksCapability,
+    TaskCancellationCapability, TaskListCapability, ToolsCallTaskCapability, ToolsTaskCapability,
 };
+#[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
+pub use capabilities::{SamplingCreateMessageTaskCapability, SamplingTaskCapability};
 
 pub use tool::{
     CallToolRequestParams, CallToolResponse, ListToolsRequestParams, ListToolsResult, Tool,
-    ToolAnnotations, ToolSchema,
+    ToolAnnotations,
 };
+
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+pub use tool::ToolSchema;
 
 #[cfg(feature = "server")]
 pub use tool::ToolHandler;
+
+/// The MCP schema type for tool input and output schemas.
+///
+/// Under the legacy default feature set this resolves to the typed
+/// [`tool::ToolSchema`] struct (a small Draft 7-ish subset).
+///
+/// Under feature `proto-2026-07-28-rc` it resolves to
+/// [`schema_2020::InputSchema`] (a Value-shaped JSON Schema 2020-12 wrapper),
+/// matching the MCP 2026-07-28 RC requirement that tool schemas carry
+/// full JSON Schema 2020-12 documents.
+///
+/// Use this alias in code that constructs or accepts tool schemas — it lets
+/// the same call site compile on both feature sets. Both backing types
+/// implement [`Default`], serde derive, and the relevant
+/// `From<serde_json::Value>` / `From<schemars::Schema>` conversions, so a
+/// single call path works under either flag.
+///
+/// # Examples
+///
+/// ```
+/// # use neva::types::ToolInputSchema;
+/// let schema = ToolInputSchema::default();
+/// # let _ = schema;
+/// ```
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+pub type ToolInputSchema = tool::ToolSchema;
+
+/// The MCP schema type for tool input and output schemas.
+///
+/// See the legacy-flag definition above for the full doc — under the
+/// `proto-2026-07-28-rc` feature this alias resolves to
+/// [`schema_2020::InputSchema`].
+///
+/// # Examples
+///
+/// ```
+/// # use neva::types::ToolInputSchema;
+/// let schema = ToolInputSchema::default();
+/// # let _ = schema;
+/// ```
+#[cfg(feature = "proto-2026-07-28-rc")]
+pub type ToolInputSchema = schema_2020::InputSchema;
 
 pub use elicitation::{
     ElicitRequestFormParams, ElicitRequestParams, ElicitRequestUrlParams, ElicitResult,
@@ -68,6 +119,7 @@ pub use resource::{
     Resource, ResourceContents, ResourceTemplate, SubscribeRequestParams, TextResourceContents,
     UnsubscribeRequestParams, Uri,
 };
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 pub use sampling::{
     CreateMessageRequestParams, CreateMessageResult, SamplingMessage, StopReason, ToolChoice,
     ToolChoiceMode,
@@ -91,8 +143,14 @@ pub use task::{
 pub use prompt::PromptHandler;
 
 pub use progress::ProgressToken;
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 pub use root::Root;
 
+#[cfg(feature = "proto-2026-07-28-rc")]
+pub use cache::CacheScope;
+
+#[cfg(feature = "proto-2026-07-28-rc")]
+pub mod cache;
 mod capabilities;
 pub mod completion;
 mod content;
@@ -100,6 +158,8 @@ pub mod cursor;
 pub mod elicitation;
 pub(crate) mod helpers;
 mod icon;
+#[cfg(feature = "proto-2026-07-28-rc")]
+pub mod mrtr;
 pub mod notification;
 mod progress;
 pub mod prompt;
@@ -107,9 +167,12 @@ mod reference;
 mod request;
 pub mod resource;
 mod response;
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 pub mod root;
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 pub mod sampling;
 mod schema;
+pub mod schema_2020;
 #[cfg(feature = "tasks")]
 pub mod task;
 pub mod tool;
@@ -386,6 +449,68 @@ pub struct InitializeResult {
     pub instructions: Option<String>,
 }
 
+/// Parameters for a `server/discover` request (MCP 2026-07-28 RC).
+///
+/// Discovery takes no required input; any client metadata rides in the
+/// request's `_meta` like every other request.
+///
+/// # Example
+/// ```
+/// # #[cfg(feature = "proto-2026-07-28-rc")]
+/// # {
+/// use neva::types::DiscoverRequestParams;
+/// let _p = DiscoverRequestParams::default();
+/// # }
+/// ```
+#[cfg(feature = "proto-2026-07-28-rc")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DiscoverRequestParams {}
+
+/// Result of a `server/discover` request (MCP 2026-07-28 RC).
+///
+/// Structurally mirrors [`InitializeResult`] but is a distinct type so the
+/// stateless discovery path is explicit at every call site.
+///
+/// # Example
+/// ```
+/// # #[cfg(feature = "proto-2026-07-28-rc")]
+/// # {
+/// use neva::types::DiscoverResult;
+/// let json = r#"{"protocolVersion":"2026-07-28","capabilities":{},"serverInfo":{"name":"s","version":"1"}}"#;
+/// let r: DiscoverResult = serde_json::from_str(json).unwrap();
+/// assert_eq!(r.protocol_ver, "2026-07-28");
+/// # }
+/// ```
+#[cfg(feature = "proto-2026-07-28-rc")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoverResult {
+    /// The protocol version the server speaks.
+    #[serde(rename = "protocolVersion")]
+    pub protocol_ver: String,
+
+    /// The server's capabilities.
+    pub capabilities: ServerCapabilities,
+
+    /// Information about the server implementation.
+    #[serde(rename = "serverInfo")]
+    pub server_info: Implementation,
+
+    /// Optional instructions for using the server and its features.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+}
+
+#[cfg(feature = "proto-2026-07-28-rc")]
+impl IntoResponse for DiscoverResult {
+    #[inline]
+    fn into_response(self, req_id: RequestId) -> Response {
+        match serde_json::to_value(self) {
+            Ok(v) => Response::success(req_id, v),
+            Err(err) => Response::error(req_id, err.into()),
+        }
+    }
+}
+
 /// Describes the name and version of an MCP implementation.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
@@ -506,6 +631,14 @@ impl FromHandlerParams for InitializeRequestParams {
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
         let req = Request::from_params(params)?;
         Self::from_request(req)
+    }
+}
+
+#[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+impl FromHandlerParams for DiscoverRequestParams {
+    #[inline]
+    fn from_params(_params: &HandlerParams) -> Result<Self, Error> {
+        Ok(Self::default())
     }
 }
 
@@ -650,7 +783,7 @@ impl Implementation {
     }
 }
 
-#[cfg(feature = "server")]
+#[cfg(all(feature = "server", not(feature = "proto-2026-07-28-rc")))]
 impl InitializeResult {
     pub(crate) fn new(options: &McpOptions) -> Self {
         Self {
@@ -659,6 +792,7 @@ impl InitializeResult {
                 tools: options.tools_capability(),
                 resources: options.resources_capability(),
                 prompts: options.prompts_capability(),
+                #[cfg(not(feature = "proto-2026-07-28-rc"))]
                 logging: Some(LoggingCapability::default()),
                 completions: Some(CompletionsCapability::default()),
                 #[cfg(feature = "tasks")]
@@ -671,9 +805,60 @@ impl InitializeResult {
     }
 }
 
+#[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+impl DiscoverResult {
+    pub(crate) fn new(options: &McpOptions) -> Self {
+        Self {
+            protocol_ver: options.protocol_ver().into(),
+            capabilities: ServerCapabilities {
+                tools: options.tools_capability(),
+                resources: options.resources_capability(),
+                prompts: options.prompts_capability(),
+                completions: Some(CompletionsCapability::default()),
+                extensions: options.extensions(),
+                experimental: None,
+            },
+            server_info: options.implementation.clone(),
+            instructions: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[test]
+    fn discover_result_roundtrips() {
+        let json = r#"{"protocolVersion":"2026-07-28","capabilities":{},"serverInfo":{"name":"s","version":"1"}}"#;
+        let parsed: DiscoverResult = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.protocol_ver, "2026-07-28");
+        assert_eq!(parsed.server_info.name, "s");
+        let back = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(back["protocolVersion"], serde_json::json!("2026-07-28"));
+        assert_eq!(back["serverInfo"]["name"], serde_json::json!("s"));
+    }
+
+    #[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+    #[test]
+    fn discover_masks_push_capabilities_under_stateless_rc() {
+        // Even when the server explicitly configures listChanged + subscribe,
+        // the stateless RC transport cannot push, so `DiscoverResult` must not
+        // advertise capabilities clients can never rely on.
+        let options = McpOptions::default()
+            .with_tools(|t| t.with_list_changed())
+            .with_resources(|r| r.with_subscribe().with_list_changed())
+            .with_prompts(|p| p.with_list_changed());
+
+        let discover = DiscoverResult::new(&options);
+        let caps = serde_json::to_value(&discover.capabilities).unwrap();
+
+        assert_eq!(caps["tools"]["listChanged"], serde_json::json!(false));
+        assert_eq!(caps["resources"]["subscribe"], serde_json::json!(false));
+        assert_eq!(caps["resources"]["listChanged"], serde_json::json!(false));
+        assert_eq!(caps["prompts"]["listChanged"], serde_json::json!(false));
+    }
 
     #[test]
     fn message_envelope_deserializes_request() {

@@ -63,7 +63,26 @@ impl Error {
             code: code.try_into().unwrap_or_default(),
         }
     }
+
+    /// Builds the internal MRTR "input required" sentinel error.
+    ///
+    /// Returned by `Context::elicit` on a cache miss to unwind the handler;
+    /// the actual pending request is carried in the shared MRTR context.
+    /// Server-only: the client never constructs this sentinel.
+    #[cfg(all(feature = "proto-2026-07-28-rc", feature = "server"))]
+    pub(crate) fn input_required() -> Self {
+        Self::new(ErrorCode::InputRequired, "input required")
+    }
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    #[cfg(all(feature = "proto-2026-07-28-rc", feature = "server"))]
+    use super::*;
+
+    #[cfg(all(feature = "proto-2026-07-28-rc", feature = "server"))]
+    #[test]
+    fn input_required_sentinel_carries_the_sentinel_code() {
+        assert_eq!(Error::input_required().code, ErrorCode::InputRequired);
+    }
+}
