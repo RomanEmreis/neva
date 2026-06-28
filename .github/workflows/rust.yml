@@ -44,6 +44,17 @@ jobs:
       - name: Run server+client with proto-2026-07-28-rc
         run: cargo clippy --all-targets --features "server-full client-full proto-2026-07-28-rc" -- -D warnings
 
+  audit:
+    runs-on: ubuntu-latest
+    needs: check_format
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Security audit
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
   doc_check:
     runs-on: ubuntu-latest
     needs: clippy_check

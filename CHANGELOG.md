@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.4.1
+
+### Added
+* Added cargo audit mandatory CI step
+
+### Security
+* Resolved RUSTSEC-2026-0185 vulnerability
+* Resolved RUSTSEC-2023-0071 vulnerability
+
 ## 0.4.0
 
 This release adds opt-in support for the **MCP 2026-07-28 Release Candidate**
