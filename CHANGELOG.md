@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+* **MRTR `requestState` key rotation.** New `App::with_request_state_keys(active_kid, keys)`
+  configures a keyring: new blobs are sealed under the active key id, inbound
+  blobs decrypt with whichever accepted key their kid names — enabling
+  zero-downtime rotation. `with_request_state_secret` remains the single-key
+  shorthand (kid `"0"`). (#81)
+
+### Changed
+* **Breaking (RC wire format):** the sealed MRTR `requestState` blob is now
+  `v1.{kid}.b64(nonce).b64(ciphertext+tag)` (previously
+  `b64(nonce).b64(ciphertext+tag)`). The `v1.{kid}` header is bound into the
+  AEAD associated data, so neither segment can be transplanted; decode rejects
+  unknown versions and key ids with `InvalidParams`. In-flight states minted
+  by an older release fail verification (TTL is 300s, so exposure is
+  transient). (#81)
+
 ## 0.4.1
 
 ### Added
