@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   zero-downtime rotation. `with_request_state_secret` remains the single-key
   shorthand (kid `"0"`). (#81)
 
+### Fixed
+* The legacy `initialize` result no longer advertises the `logging` capability
+  in builds without the `tracing` feature, where the `logging/setLevel`
+  handler is not registered — capability-trusting clients (e.g. newer MCP
+  Inspector) would call it and hit `Method not found`.
+
 ### Changed
 * **Breaking (RC wire format):** the sealed MRTR `requestState` blob is now
   `v1.{kid}.b64(nonce).b64(ciphertext+tag)` (previously
