@@ -792,8 +792,14 @@ impl InitializeResult {
                 tools: options.tools_capability(),
                 resources: options.resources_capability(),
                 prompts: options.prompts_capability(),
-                #[cfg(not(feature = "proto-2026-07-28-rc"))]
+                // The `logging/setLevel` handler is only registered under the
+                // `tracing` feature; advertise the capability only when the
+                // handler exists, otherwise clients that trust capabilities
+                // (e.g. MCP Inspector) call it and hit `MethodNotFound`.
+                #[cfg(all(not(feature = "proto-2026-07-28-rc"), feature = "tracing"))]
                 logging: Some(LoggingCapability::default()),
+                #[cfg(all(not(feature = "proto-2026-07-28-rc"), not(feature = "tracing")))]
+                logging: None,
                 completions: Some(CompletionsCapability::default()),
                 #[cfg(feature = "tasks")]
                 tasks: options.tasks_capability(),
@@ -858,6 +864,21 @@ mod tests {
         assert_eq!(caps["resources"]["subscribe"], serde_json::json!(false));
         assert_eq!(caps["resources"]["listChanged"], serde_json::json!(false));
         assert_eq!(caps["prompts"]["listChanged"], serde_json::json!(false));
+    }
+
+    /// The `logging` capability must be advertised iff the `logging/setLevel`
+    /// handler is compiled in (the `tracing` feature). Advertising it without
+    /// the handler sends capability-trusting clients into `MethodNotFound`
+    /// (caught live by MCP Inspector against `examples/server`).
+    #[cfg(all(feature = "server", not(feature = "proto-2026-07-28-rc")))]
+    #[test]
+    fn logging_capability_is_advertised_iff_handler_compiled() {
+        let init = InitializeResult::new(&McpOptions::default());
+        let caps = serde_json::to_value(&init.capabilities).unwrap();
+        #[cfg(feature = "tracing")]
+        assert!(caps.get("logging").is_some());
+        #[cfg(not(feature = "tracing"))]
+        assert!(caps.get("logging").is_none());
     }
 
     #[test]
