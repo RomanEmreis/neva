@@ -102,6 +102,19 @@ pub(crate) async fn get(req: HttpRequest) -> HttpResult {
     }
 }
 
+/// `GET /.well-known/oauth-protected-resource[/<endpoint>]` — the RFC 9728
+/// Protected Resource Metadata document.
+///
+/// Publicly reachable by design: authorization is scoped to the MCP
+/// endpoint group, and RFC 9728 §3 requires the metadata to be fetchable
+/// without credentials — it is what a client reads to find out *how* to
+/// authenticate.
+#[cfg(feature = "server-oauth")]
+pub(crate) async fn oauth_metadata(req: HttpRequest) -> HttpResult {
+    let manager: Dc<Arc<HttpContext>> = req.extract()?;
+    VolgaEngine::adapt_response(handlers::handle_oauth_metadata(&manager))
+}
+
 /// Map a neva `Error` raised by engine-agnostic helpers onto a Volga
 /// server-error so the route can short-circuit with `?` into `HttpResult`.
 fn to_volga_err(err: crate::error::Error) -> VolgaError {

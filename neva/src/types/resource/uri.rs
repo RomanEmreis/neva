@@ -6,7 +6,7 @@ use std::fmt::{Display, Formatter};
 use std::ops::{Deref, DerefMut};
 
 const PATH_SEPARATOR: char = '/';
-const SCHEME_SEPARATOR: [u8; 3] = [b':', b'/', b'/'];
+const SCHEME_SEPARATOR: [u8; 3] = *b"://";
 
 /// Represents a resource URI
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]

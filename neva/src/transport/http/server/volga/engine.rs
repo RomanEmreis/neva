@@ -103,17 +103,31 @@ impl HttpEngine for VolgaEngine {
         let ctx = Arc::new(ctx);
         let addr = ctx.addr().to_owned();
         let endpoint = ctx.endpoint().to_owned();
+        #[cfg(feature = "server-oauth")]
+        let oauth_metadata_path = ctx.oauth_metadata_path().map(str::to_owned);
+        #[cfg(feature = "server-oauth")]
+        let oauth_metadata_url = ctx.oauth_metadata_url().map(str::to_owned);
 
         let mut server = App::new()
             .bind(addr.as_str())
             .with_no_delay()
             .without_greeter();
 
-        if let Some(auth) = self.auth {
-            let (bearer, rules) = auth.into_parts();
-            server = server.with_bearer_auth(|_| bearer);
-            server.authorize(rules);
-        }
+        let rules = match self.auth {
+            Some(auth) => {
+                let (bearer, rules) = auth.into_parts();
+                // Advertise the RFC 9728 document on Volga's own 401
+                // challenges: `WWW-Authenticate: Bearer resource_metadata="…"`.
+                #[cfg(feature = "server-oauth")]
+                let bearer = match &oauth_metadata_url {
+                    Some(url) => bearer.with_resource_metadata_url(url.as_str()),
+                    None => bearer,
+                };
+                server = server.with_bearer_auth(|_| bearer);
+                Some(rules)
+            }
+            None => None,
+        };
 
         #[cfg(feature = "server-tls")]
         if let Some(tls) = self.tls {
@@ -123,7 +137,13 @@ impl HttpEngine for VolgaEngine {
         server
             .add_singleton(ctx)
             .map_err(handle_http_error)
-            .group(endpoint.as_str(), |mcp| {
+            .group(endpoint.as_str(), move |mcp| {
+                // Token validation and role/permission rules guard only
+                // the MCP endpoint group; the well-known metadata route
+                // below stays outside it.
+                if let Some(rules) = rules {
+                    mcp.authorize(rules);
+                }
                 mcp.map_post("/", routes::post);
                 // Stateless RC transport has no SSE GET stream and no
                 // session-termination DELETE — only POST is routed.
@@ -133,6 +153,13 @@ impl HttpEngine for VolgaEngine {
                     mcp.map_delete("/", routes::delete);
                 }
             });
+
+        // RFC 9728 §3: the Protected Resource Metadata document must be
+        // reachable without credentials.
+        #[cfg(feature = "server-oauth")]
+        if let Some(path) = &oauth_metadata_path {
+            server.map_get(path, routes::oauth_metadata);
+        }
 
         if let Err(e) = server.run().await {
             token.cancel();

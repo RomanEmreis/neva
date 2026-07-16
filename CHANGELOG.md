@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   * `handlers::handle_oauth_metadata` serves the well-known document;
     `handlers::handle_unauthorized` answers 401 with the
     `WWW-Authenticate: Bearer resource_metadata="…"` challenge.
+  * The default Volga engine mounts the document on its well-known path
+    automatically (publicly reachable — auth enforcement is scoped to the
+    MCP endpoint group) and, when bearer auth is configured, advertises it
+    as `resource_metadata` on Volga's own 401 challenges.
   * Protocol types re-exported under `neva::auth::oauth`
     (`ProtectedResourceMetadata`, `BearerChallenge`, `OAuthError`, …).
 * **MRTR `requestState` key rotation.** New `App::with_request_state_keys(active_kid, keys)`
