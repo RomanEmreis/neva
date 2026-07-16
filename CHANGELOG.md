@@ -25,6 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   * Protocol types re-exported under `neva::auth::oauth`
     (`ProtectedResourceMetadata`, `BearerChallenge`, `OAuthError`, …).
 
+### Fixed
+* Migrated `requestState` sealing to the `chacha20poly1305` 0.11 API
+  (nonce generation moved to the fallible `Nonce::try_generate()`; no
+  wire-format change).
+* Replaced the deprecated `sse_stream::SseStream::from_byte_stream` with
+  `from_bytes_stream` (removed upstream in sse-stream 0.3).
+
+### Security
+* Resolved RUSTSEC-2026-0190 (unsoundness in `anyhow::Error::downcast_mut`)
+  by updating the transitive `anyhow` dependency to 1.0.103.
+
 ## 0.4.1
 
 ### Added
