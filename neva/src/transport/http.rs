@@ -519,6 +519,17 @@ where
     }
 
     fn build_context_and_engine(&mut self) -> Result<(HttpContext, Receiver<Message>), Error> {
+        // Resolve the OAuth resource once at startup: canonicalize the
+        // identifier, pre-serialize the RFC 9728 document, pre-render the
+        // challenge. A misconfigured resource URI fails server start.
+        // Resolved from a clone, before any `self` state is consumed, so
+        // a config failure leaves the transport untouched.
+        #[cfg(feature = "server-oauth")]
+        let oauth = self
+            .oauth
+            .clone()
+            .map(|o| o.resolve(&self.url.to_string()))
+            .transpose()?;
         let Some(sender_rx) = self.sender.rx.take() else {
             return Err(Error::new(
                 ErrorCode::InternalError,
@@ -529,15 +540,6 @@ where
         let sse_registry = std::sync::Arc::new(crate::shared::SseSessionRegistry::new(
             self.sse_buffer_capacity,
         ));
-        // Resolve the OAuth resource once at startup: canonicalize the
-        // identifier, pre-serialize the RFC 9728 document, pre-render the
-        // challenge. A misconfigured resource URI fails server start.
-        #[cfg(feature = "server-oauth")]
-        let oauth = self
-            .oauth
-            .take()
-            .map(|o| o.resolve(&self.url.to_string()))
-            .transpose()?;
         let ctx = HttpContext {
             addr: self.url.addr.as_str().into(),
             endpoint: self.url.endpoint.as_str().into(),
@@ -707,6 +709,10 @@ where
             Err(_err) => {
                 #[cfg(feature = "tracing")]
                 tracing::error!(logger = "neva", "Failed to start HTTP server: {}", _err);
+                // Hand back an already-cancelled token so `App::run`'s
+                // receive loop breaks immediately instead of waiting
+                // forever on a server that never bound.
+                token.cancel();
                 return token;
             }
         };
@@ -900,5 +906,22 @@ mod engine_smoke_tests {
             .with_oauth_metadata(|oauth| oauth.with_resource("not a uri"));
 
         assert!(server.build_context_and_engine().is_err());
+        // The config failure must not consume the HTTP writer — it fires
+        // before any transport state is taken.
+        assert!(server.sender.rx.is_some());
+    }
+
+    #[cfg(feature = "server-oauth")]
+    #[tokio::test]
+    async fn invalid_oauth_resource_cancels_startup_token() {
+        let mut server = HttpServer::from_engine("127.0.0.1:3000", MockEngine::default())
+            .with_oauth_metadata(|oauth| oauth.with_resource("not a uri"));
+
+        let token = <HttpServer<_, _> as Transport>::start(&mut server);
+
+        // A cancelled token breaks App::run's receive loop immediately;
+        // an uncancelled one would leave the app waiting forever on a
+        // server that never bound.
+        assert!(token.is_cancelled());
     }
 }
