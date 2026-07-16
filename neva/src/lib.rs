@@ -166,6 +166,25 @@ pub mod auth {
     // alias above (which lives in the type namespace).
     #[cfg(feature = "http-server-volga")]
     pub use volga::auth::{Algorithm, Authorizer, Claims as ClaimsDerive};
+
+    #[cfg(feature = "server-oauth")]
+    pub mod oauth {
+        //! OAuth 2.1 / OIDC resource-server primitives.
+        //!
+        //! [`OAuthResourceOptions`] configures the RFC 9728 Protected
+        //! Resource Metadata document through
+        //! `HttpServer::with_oauth_metadata`; the protocol-level types
+        //! are re-exported from
+        //! [`volga-oauth-core`](https://docs.rs/volga-oauth-core) —
+        //! a crate with no HTTP I/O and no dependency on the Volga
+        //! framework, so they are available to every `HttpEngine`.
+
+        pub use crate::transport::http::core::oauth::{
+            BearerChallenge, OAuthError, OAuthErrorCode, OAuthResourceOptions,
+            ProtectedResourceMetadata, WELL_KNOWN_PROTECTED_RESOURCE, canonicalize_resource_uri,
+            protected_resource_metadata_url,
+        };
+    }
 }
 
 pub mod json {
@@ -194,6 +213,8 @@ pub mod prelude {
 
     #[cfg(feature = "http-server-volga")]
     pub use crate::auth::AuthConfig;
+    #[cfg(feature = "server-oauth")]
+    pub use crate::auth::oauth::OAuthResourceOptions;
     #[cfg(feature = "http-server")]
     pub use crate::auth::{Claims, DefaultClaims};
 

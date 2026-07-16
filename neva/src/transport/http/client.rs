@@ -323,7 +323,7 @@ async fn handle_sse_connection(
             return;
         }
 
-        let mut stream = sse_stream::SseStream::from_byte_stream(resp.bytes_stream())
+        let mut stream = sse_stream::SseStream::from_bytes_stream(resp.bytes_stream())
             .fuse()
             .map_ok(|event| handle_event(event, &session, &resp_tx))
             .map_err(handle_error);

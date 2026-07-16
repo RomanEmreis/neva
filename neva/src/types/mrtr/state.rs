@@ -6,7 +6,7 @@
 //! responses, PII, tokens — are confidential rather than merely signed and
 //! readable by the client that echoes the blob.
 
-use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
+use chacha20poly1305::aead::{Aead, Generate, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -170,7 +170,12 @@ impl<'a> StateCodec<'a> {
         }
         let json = serde_json::to_vec(payload).map_err(Error::from)?;
         let cipher = Self::cipher(secret)?;
-        let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let nonce = Nonce::try_generate().map_err(|_| {
+            Error::new(
+                ErrorCode::InternalError,
+                "requestState nonce generation failed",
+            )
+        })?;
         let header = format!("{STATE_VERSION}.{kid}");
         let sealed = cipher
             .encrypt(
@@ -322,7 +327,7 @@ mod tests {
         use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
         let bytes = serde_json::to_vec(json).unwrap();
         let cipher = StateCodec::cipher(secret).unwrap();
-        let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let nonce = Nonce::try_generate().unwrap();
         let header = format!("{STATE_VERSION}.{kid}");
         let sealed = cipher
             .encrypt(

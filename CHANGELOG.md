@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
+* Engine-neutral OAuth 2.1 resource-server primitives behind the new
+  `server-oauth` feature (included in `server-full`), built on
+  `volga-oauth-core` — protocol types only, no Volga framework dependency,
+  so they work with any `HttpEngine`:
+  * `HttpServer::with_oauth_metadata(...)` configures the RFC 9728
+    Protected Resource Metadata document (`OAuthResourceOptions`:
+    authorization servers, scopes, canonical resource override for
+    reverse proxies, full-document escape hatch). The document is
+    canonicalized (RFC 8707), pre-serialized once at server start, and
+    exposed to engines via `HttpContext::oauth_metadata_path()` /
+    `oauth_metadata_url()`.
+  * `handlers::handle_oauth_metadata` serves the well-known document;
+    `handlers::handle_unauthorized` answers 401 with the
+    `WWW-Authenticate: Bearer resource_metadata="…"` challenge.
+  * The default Volga engine mounts the document on its well-known path
+    automatically (publicly reachable — auth enforcement is scoped to the
+    MCP endpoint group) and, when bearer auth is configured, advertises it
+    as `resource_metadata` on Volga's own 401 challenges.
+  * Protocol types re-exported under `neva::auth::oauth`
+    (`ProtectedResourceMetadata`, `BearerChallenge`, `OAuthError`, …).
 * **MRTR `requestState` key rotation.** New `App::with_request_state_keys(active_kid, keys)`
   configures a keyring: new blobs are sealed under the active key id, inbound
   blobs decrypt with whichever accepted key their kid names — enabling
@@ -28,6 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   unknown versions and key ids with `InvalidParams`. In-flight states minted
   by an older release fail verification (TTL is 300s, so exposure is
   transient). (#81)
+
+### Security
+* Resolved RUSTSEC-2026-0190 (unsoundness in `anyhow::Error::downcast_mut`)
+  by updating the transitive `anyhow` dependency to 1.0.103.
 
 ## 0.4.1
 

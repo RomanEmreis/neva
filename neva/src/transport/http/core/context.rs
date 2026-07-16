@@ -31,6 +31,8 @@ pub struct HttpContext {
     pub(crate) inbound_tx: mpsc::Sender<Result<Message, Error>>,
     pub(crate) sse_live_queue_capacity: usize,
     pub(crate) sse_log_queue_capacity: usize,
+    #[cfg(feature = "server-oauth")]
+    pub(crate) oauth: Option<super::oauth::OAuthResource>,
 }
 
 impl HttpContext {
@@ -42,5 +44,31 @@ impl HttpContext {
     /// The MCP endpoint prefix (e.g. `"/mcp"`).
     pub fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+
+    /// The path of the RFC 9728 Protected Resource Metadata document
+    /// (e.g. `"/.well-known/oauth-protected-resource/mcp"`), when OAuth
+    /// is configured via
+    /// [`HttpServer::with_oauth_metadata`](crate::transport::http::HttpServer::with_oauth_metadata).
+    ///
+    /// An engine mounts a GET route here and serves it with
+    /// [`handlers::handle_oauth_metadata`](super::handlers::handle_oauth_metadata).
+    #[cfg(feature = "server-oauth")]
+    pub fn oauth_metadata_path(&self) -> Option<&str> {
+        self.oauth.as_ref().map(|o| &*o.metadata_path)
+    }
+
+    /// The absolute URL of the RFC 9728 Protected Resource Metadata
+    /// document (e.g.
+    /// `"https://api.example.com/.well-known/oauth-protected-resource/mcp"`),
+    /// when OAuth is configured.
+    ///
+    /// [`handlers::handle_unauthorized`](super::handlers::handle_unauthorized)
+    /// already advertises it on 401s; an engine that emits its own
+    /// `WWW-Authenticate` challenge (through a framework bearer-auth
+    /// pipeline) uses this as the `resource_metadata` parameter.
+    #[cfg(feature = "server-oauth")]
+    pub fn oauth_metadata_url(&self) -> Option<&str> {
+        self.oauth.as_ref().map(|o| &*o.metadata_url)
     }
 }

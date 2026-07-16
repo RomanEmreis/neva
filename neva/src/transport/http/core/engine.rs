@@ -42,6 +42,26 @@ use super::{
 /// `BearerTokenService`. A custom engine adapter wires up the equivalent
 /// step in its own POST route.
 ///
+/// # OAuth resource metadata contract (feature `server-oauth`)
+///
+/// When the transport is configured through
+/// `HttpServer::with_oauth_metadata`, the engine receives the resolved
+/// document via [`HttpContext`] and is responsible for two things:
+///
+/// 1. Mount a GET route on
+///    [`HttpContext::oauth_metadata_path`](super::context::HttpContext::oauth_metadata_path)
+///    and serve it with
+///    [`handlers::handle_oauth_metadata`](super::handlers::handle_oauth_metadata)
+///    — this is the RFC 9728 Protected Resource Metadata document,
+///    reachable without authentication.
+/// 2. Answer requests that fail token validation with
+///    [`handlers::handle_unauthorized`](super::handlers::handle_unauthorized),
+///    so the 401 carries the `WWW-Authenticate` challenge pointing at
+///    that document and clients can start the OAuth discovery flow.
+///
+/// Both helpers return neva's neutral [`HttpResponse`] — pass it
+/// through `adapt_response` like any other reply.
+///
 /// [`dispatch_post`]: super::handlers::dispatch_post
 ///
 /// # Example
