@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.4.2
+
+### Added
+* Engine-neutral OAuth 2.1 resource-server primitives behind the new
+  `server-oauth` feature (included in `server-full`), built on
+  `volga-oauth-core` — protocol types only, no Volga framework dependency,
+  so they work with any `HttpEngine` (Volga, axum, hyper, custom):
+  * `HttpServer::with_oauth_metadata(...)` configures the RFC 9728
+    Protected Resource Metadata document (`OAuthResourceOptions`:
+    authorization servers, scopes, canonical resource override for
+    reverse proxies, full-document escape hatch). The document is
+    canonicalized (RFC 8707), pre-serialized once at server start, and
+    exposed to engines via `HttpContext::oauth_metadata_path()` /
+    `oauth_metadata_url()`.
+  * `handlers::handle_oauth_metadata` serves the well-known document;
+    `handlers::handle_unauthorized` answers 401 with the
+    `WWW-Authenticate: Bearer resource_metadata="…"` challenge.
+  * Protocol types re-exported under `neva::auth::oauth`
+    (`ProtectedResourceMetadata`, `BearerChallenge`, `OAuthError`, …).
+
 ## 0.4.1
 
 ### Added

@@ -7,6 +7,8 @@
 
 pub mod context;
 pub mod engine;
+#[cfg(feature = "server-oauth")]
+pub mod oauth;
 pub mod types;
 
 pub(crate) mod auth;

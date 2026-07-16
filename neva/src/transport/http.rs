@@ -127,6 +127,8 @@ where
     sse_log_queue_capacity: usize,
     sse_cleanup_interval: Duration,
     sse_session_ttl: Duration,
+    #[cfg(feature = "server-oauth")]
+    oauth: Option<core::oauth::OAuthResourceOptions>,
     sender: HttpSender,
     receiver: HttpReceiver,
     _claims: std::marker::PhantomData<fn() -> C>,
@@ -202,6 +204,8 @@ impl Default for HttpServer<server::DefaultClaims, server::VolgaEngine> {
             sse_log_queue_capacity: DEFAULT_SSE_LOG_QUEUE_CAPACITY,
             sse_cleanup_interval: DEFAULT_SSE_CLEANUP_INTERVAL,
             sse_session_ttl: DEFAULT_SSE_SESSION_TTL,
+            #[cfg(feature = "server-oauth")]
+            oauth: None,
             receiver: HttpReceiver::new(),
             sender: HttpSender::new(),
             _claims: std::marker::PhantomData,
@@ -344,6 +348,8 @@ where
             sse_log_queue_capacity: DEFAULT_SSE_LOG_QUEUE_CAPACITY,
             sse_cleanup_interval: DEFAULT_SSE_CLEANUP_INTERVAL,
             sse_session_ttl: DEFAULT_SSE_SESSION_TTL,
+            #[cfg(feature = "server-oauth")]
+            oauth: None,
             receiver: HttpReceiver::new(),
             sender: HttpSender::new(),
             _claims: std::marker::PhantomData,
@@ -384,6 +390,8 @@ where
             sse_log_queue_capacity: self.sse_log_queue_capacity,
             sse_cleanup_interval: self.sse_cleanup_interval,
             sse_session_ttl: self.sse_session_ttl,
+            #[cfg(feature = "server-oauth")]
+            oauth: self.oauth,
             sender: self.sender,
             receiver: self.receiver,
             _claims: std::marker::PhantomData,
@@ -482,6 +490,34 @@ where
         self
     }
 
+    /// Configures the OAuth Protected Resource Metadata document
+    /// (RFC 9728) advertised by this server. Engine-neutral: the resolved
+    /// document reaches the engine through
+    /// [`HttpContext::oauth_metadata_path`] and the
+    /// [`handlers::handle_oauth_metadata`] /
+    /// [`handlers::handle_unauthorized`] helpers.
+    ///
+    /// The resource identifier defaults to this server's own URL; override
+    /// it with
+    /// [`OAuthResourceOptions::with_resource`](core::oauth::OAuthResourceOptions::with_resource)
+    /// when running behind a reverse proxy.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// HttpServer::new("127.0.0.1:3000")
+    ///     .with_oauth_metadata(|oauth| oauth
+    ///         .with_authorization_servers(["https://auth.example.com"])
+    ///         .with_scopes(["mcp:tools"]))
+    /// ```
+    #[cfg(feature = "server-oauth")]
+    pub fn with_oauth_metadata<F>(mut self, config: F) -> Self
+    where
+        F: FnOnce(core::oauth::OAuthResourceOptions) -> core::oauth::OAuthResourceOptions,
+    {
+        self.oauth = Some(config(core::oauth::OAuthResourceOptions::default()));
+        self
+    }
+
     fn build_context_and_engine(&mut self) -> Result<(HttpContext, Receiver<Message>), Error> {
         let Some(sender_rx) = self.sender.rx.take() else {
             return Err(Error::new(
@@ -493,6 +529,15 @@ where
         let sse_registry = std::sync::Arc::new(crate::shared::SseSessionRegistry::new(
             self.sse_buffer_capacity,
         ));
+        // Resolve the OAuth resource once at startup: canonicalize the
+        // identifier, pre-serialize the RFC 9728 document, pre-render the
+        // challenge. A misconfigured resource URI fails server start.
+        #[cfg(feature = "server-oauth")]
+        let oauth = self
+            .oauth
+            .take()
+            .map(|o| o.resolve(&self.url.to_string()))
+            .transpose()?;
         let ctx = HttpContext {
             addr: self.url.addr.as_str().into(),
             endpoint: self.url.endpoint.as_str().into(),
@@ -501,6 +546,8 @@ where
             inbound_tx: self.receiver.tx.clone(),
             sse_live_queue_capacity: self.sse_live_queue_capacity,
             sse_log_queue_capacity: self.sse_log_queue_capacity,
+            #[cfg(feature = "server-oauth")]
+            oauth,
         };
         Ok((ctx, sender_rx))
     }
@@ -530,6 +577,8 @@ impl HttpServer<server::DefaultClaims, VolgaEngine> {
             sse_log_queue_capacity: DEFAULT_SSE_LOG_QUEUE_CAPACITY,
             sse_cleanup_interval: DEFAULT_SSE_CLEANUP_INTERVAL,
             sse_session_ttl: DEFAULT_SSE_SESSION_TTL,
+            #[cfg(feature = "server-oauth")]
+            oauth: None,
             receiver: HttpReceiver::new(),
             sender: HttpSender::new(),
             _claims: std::marker::PhantomData,
@@ -826,5 +875,30 @@ mod engine_smoke_tests {
             exited.load(Ordering::SeqCst),
             "engine did not exit on cancellation"
         );
+    }
+
+    #[cfg(feature = "server-oauth")]
+    #[test]
+    fn oauth_metadata_options_reach_the_engine_context() {
+        let mut server = HttpServer::from_engine("127.0.0.1:3000", MockEngine::default())
+            .with_oauth_metadata(|oauth| {
+                oauth.with_authorization_servers(["https://auth.example.com"])
+            });
+
+        let (ctx, _rx) = server.build_context_and_engine().unwrap();
+
+        assert_eq!(
+            ctx.oauth_metadata_path(),
+            Some("/.well-known/oauth-protected-resource/mcp")
+        );
+    }
+
+    #[cfg(feature = "server-oauth")]
+    #[test]
+    fn invalid_oauth_resource_fails_server_start() {
+        let mut server = HttpServer::from_engine("127.0.0.1:3000", MockEngine::default())
+            .with_oauth_metadata(|oauth| oauth.with_resource("not a uri"));
+
+        assert!(server.build_context_and_engine().is_err());
     }
 }

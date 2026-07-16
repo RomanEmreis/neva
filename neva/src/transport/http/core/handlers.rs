@@ -313,6 +313,62 @@ fn parse_session_id(headers: &HeaderMap) -> Option<uuid::Uuid> {
         .and_then(|s| uuid::Uuid::parse_str(s).ok())
 }
 
+/// Handle a GET on the well-known path — serves the RFC 9728 Protected
+/// Resource Metadata document pre-built at server start.
+///
+/// The engine mounts this on [`HttpContext::oauth_metadata_path`]; if the
+/// route is reachable while OAuth is not configured, it answers 404.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// // in the engine's well-known route:
+/// let resp = E::adapt_response(handlers::handle_oauth_metadata(&ctx));
+/// ```
+#[cfg(feature = "server-oauth")]
+pub fn handle_oauth_metadata(ctx: &HttpContext) -> HttpResponse {
+    let Some(oauth) = &ctx.oauth else {
+        return http::Response::builder()
+            .status(http::StatusCode::NOT_FOUND)
+            .body(Bytes::new())
+            .unwrap_or_default();
+    };
+    http::Response::builder()
+        .status(http::StatusCode::OK)
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .body(oauth.body.clone())
+        .unwrap_or_default()
+}
+
+/// Build the 401 reply for a request that failed (or skipped) token
+/// validation: `WWW-Authenticate: Bearer` with the `resource_metadata`
+/// parameter pointing at the RFC 9728 document, so a client can start
+/// the OAuth discovery flow. Falls back to a bare `Bearer` challenge
+/// when OAuth is not configured.
+///
+/// The default Volga adapter emits its own challenge through Volga's
+/// bearer pipeline — this helper is for custom engines that validate
+/// tokens themselves.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// // in a custom engine, when the bearer token is missing/invalid:
+/// let resp = E::adapt_response(handlers::handle_unauthorized(&ctx));
+/// ```
+#[cfg(feature = "server-oauth")]
+pub fn handle_unauthorized(ctx: &HttpContext) -> HttpResponse {
+    let challenge = ctx
+        .oauth
+        .as_ref()
+        .map_or("Bearer", |oauth| &*oauth.challenge);
+    http::Response::builder()
+        .status(http::StatusCode::UNAUTHORIZED)
+        .header(http::header::WWW_AUTHENTICATE, challenge)
+        .body(Bytes::new())
+        .unwrap_or_default()
+}
+
 /// Internal item type used inside the GET handler — the engine's
 /// `tracked_event` / `ephemeral_event` is invoked exactly once per emitted
 /// event to produce the engine-native representation.
@@ -446,6 +502,8 @@ mod tests {
             inbound_tx,
             sse_live_queue_capacity: 64,
             sse_log_queue_capacity: 64,
+            #[cfg(feature = "server-oauth")]
+            oauth: None,
         };
         (ctx, inbound_rx)
     }
@@ -683,5 +741,83 @@ mod tests {
             }
             SseResponse::Status(_) => panic!("expected Stream, got Status"),
         }
+    }
+
+    #[cfg(feature = "server-oauth")]
+    fn make_oauth_ctx() -> HttpContext {
+        use crate::transport::http::core::oauth::OAuthResourceOptions;
+
+        let (mut ctx, _rx) = make_ctx();
+        let oauth = OAuthResourceOptions::default()
+            .with_authorization_servers(["https://auth.example.com"])
+            .resolve("http://127.0.0.1:3000/mcp")
+            .unwrap();
+        ctx.oauth = Some(oauth);
+        ctx
+    }
+
+    #[cfg(feature = "server-oauth")]
+    #[test]
+    fn oauth_metadata_serves_the_configured_document() {
+        let ctx = make_oauth_ctx();
+
+        let resp = handle_oauth_metadata(&ctx);
+
+        assert_eq!(resp.status(), http::StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        let doc: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+        assert_eq!(doc["resource"], "http://127.0.0.1:3000/mcp");
+        assert_eq!(doc["authorization_servers"][0], "https://auth.example.com");
+    }
+
+    #[cfg(feature = "server-oauth")]
+    #[test]
+    fn oauth_metadata_without_config_returns_404() {
+        let (ctx, _rx) = make_ctx();
+        let resp = handle_oauth_metadata(&ctx);
+        assert_eq!(resp.status(), http::StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(feature = "server-oauth")]
+    #[test]
+    fn unauthorized_challenge_points_at_resource_metadata() {
+        use crate::transport::http::core::oauth::BearerChallenge;
+
+        let ctx = make_oauth_ctx();
+
+        let resp = handle_unauthorized(&ctx);
+
+        assert_eq!(resp.status(), http::StatusCode::UNAUTHORIZED);
+        let header = resp
+            .headers()
+            .get(http::header::WWW_AUTHENTICATE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap();
+        let challenge = BearerChallenge::parse(header).unwrap();
+        assert_eq!(
+            challenge.resource_metadata(),
+            Some("http://127.0.0.1:3000/.well-known/oauth-protected-resource/mcp")
+        );
+    }
+
+    #[cfg(feature = "server-oauth")]
+    #[test]
+    fn unauthorized_without_config_sends_bare_bearer_challenge() {
+        let (ctx, _rx) = make_ctx();
+
+        let resp = handle_unauthorized(&ctx);
+
+        assert_eq!(resp.status(), http::StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.headers()
+                .get(http::header::WWW_AUTHENTICATE)
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer")
+        );
     }
 }

@@ -43,6 +43,7 @@ tracing = { version = "0.1.44", optional = true }
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "json"], optional = true }
 volga = { version = "0.9.5", features = ["di", "jwt-auth-full"], optional = true }
 volga-di = { version = "0.9.5", optional = true }
+volga-oauth-core = { version = "0.9.5", optional = true }
 
 # neva
 neva_macros = { workspace = true, optional = true }
@@ -66,9 +67,13 @@ tasks = []
 tracing = ["dep:tracing", "dep:tracing-subscriber", "dep:once_cell", "volga?/tracing"]
 
 # server
-server-full = ["server-macros", "tracing", "http-server-volga", "server-tls", "di", "tasks"]
+server-full = ["server-macros", "tracing", "http-server-volga", "server-tls", "server-oauth", "di", "tasks"]
 server-macros = ["server", "macros", "neva_macros?/server"]
 server-tls = ["http-server-volga", "volga?/tls", "volga?/dev-cert"]
+# Engine-neutral OAuth 2.1 resource-server primitives: the RFC 9728
+# Protected Resource Metadata document and the WWW-Authenticate bearer
+# challenge, served through any `HttpEngine`. No Volga in deps.
+server-oauth = ["http-server", "dep:volga-oauth-core"]
 # Engine-agnostic Streamable HTTP abstractions. Enable this and implement
 # `HttpEngine` for your own stack (e.g. axum, hyper). No Volga in deps.
 http-server = ["server", "dep:tokio-stream"]
