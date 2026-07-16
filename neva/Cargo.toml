@@ -17,32 +17,32 @@ workspace = true
 
 [dependencies]
 base64 = "0.22.1"
-bytes = "1.12.0"
+bytes = "1.12.1"
 sha2 = { version = "0.11.0", optional = true }
 chrono = { version = "0.4.45", features = ["serde"] }
 dashmap = "6.2.1"
 futures-util = { version = "0.3.32", default-features = false, features = ["alloc"] }
 http = "1.4.2"
-memchr = "2.8.2"
+memchr = "2.8.3"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 schemars = { version = "1.2.1" }
 tokio = { version = "1.52.3", features = ["sync", "io-std", "io-util", "rt", "time", "macros"] }
 tokio-util = "0.7.18"
-uuid = { version = "1.23.4", features = ["v4", "serde"] }
+uuid = { version = "1.24.0", features = ["v4", "serde"] }
 
 # optional
-chacha20poly1305 = { version = "0.10.1", optional = true }
+chacha20poly1305 = { version = "0.11.0", optional = true }
 inventory = { version = "0.3.24", optional = true }
-jsonschema = { version = "0.46.6", optional = true }
+jsonschema = { version = "0.47.0", optional = true }
 once_cell = { version = "1.21.4", features = ["std"], optional = true }
 reqwest = { version = "0.13.4", features = ["stream", "json"], optional = true }
-sse-stream = { version = "0.2.3", optional = true }
+sse-stream = { version = "0.2.4", optional = true }
 tokio-stream = { version = "0.1.18", optional = true }
 tracing = { version = "0.1.44", optional = true }
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "json"], optional = true }
-volga = { version = "0.9.4", features = ["di", "jwt-auth-full"], optional = true }
-volga-di = { version = "0.9.4", optional = true }
+volga = { version = "0.9.5", features = ["di", "jwt-auth-full"], optional = true }
+volga-di = { version = "0.9.5", optional = true }
 
 # neva
 neva_macros = { workspace = true, optional = true }
