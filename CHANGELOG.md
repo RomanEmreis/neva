@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * Engine-neutral OAuth 2.1 resource-server primitives behind the new
   `server-oauth` feature (included in `server-full`), built on
   `volga-oauth-core` — protocol types only, no Volga framework dependency,
-  so they work with any `HttpEngine` (Volga, axum, hyper, custom):
+  so they work with any `HttpEngine`:
   * `HttpServer::with_oauth_metadata(...)` configures the RFC 9728
     Protected Resource Metadata document (`OAuthResourceOptions`:
     authorization servers, scopes, canonical resource override for
@@ -24,13 +24,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     `WWW-Authenticate: Bearer resource_metadata="…"` challenge.
   * Protocol types re-exported under `neva::auth::oauth`
     (`ProtectedResourceMetadata`, `BearerChallenge`, `OAuthError`, …).
-
-### Fixed
-* Migrated `requestState` sealing to the `chacha20poly1305` 0.11 API
-  (nonce generation moved to the fallible `Nonce::try_generate()`; no
-  wire-format change).
-* Replaced the deprecated `sse_stream::SseStream::from_byte_stream` with
-  `from_bytes_stream` (removed upstream in sse-stream 0.3).
 
 ### Security
 * Resolved RUSTSEC-2026-0190 (unsoundness in `anyhow::Error::downcast_mut`)
