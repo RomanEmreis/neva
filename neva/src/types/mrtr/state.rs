@@ -6,10 +6,12 @@
 //! responses, PII, tokens — are confidential rather than merely signed and
 //! readable by the client that echoes the blob.
 
-use chacha20poly1305::aead::{Aead, Generate, KeyInit};
+use chacha20poly1305::aead::{Aead, Generate, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{Error, ErrorCode};
@@ -17,6 +19,16 @@ use crate::types::mrtr::InputResponses;
 
 /// ChaCha20-Poly1305 nonce length (96 bits).
 const NONCE_LEN: usize = 12;
+
+/// Codec version written as the blob's first wire segment and bound into the
+/// AEAD associated data, so a blob minted under one format cannot be
+/// transplanted into a future one. Bump when the wire format or the
+/// [`StatePayload`] semantics change; [`StateCodec::decode`] rejects anything else.
+pub(crate) const STATE_VERSION: &str = "v1";
+
+/// Key id used when a single secret is configured (the
+/// [`crate::App::with_request_state_secret`] path).
+pub(crate) const DEFAULT_KID: &str = "0";
 
 /// Derives the 32-byte AEAD key from the configured secret (which may be any
 /// length). Domain-separated so the key is specific to this use and version.
@@ -56,49 +68,162 @@ pub(crate) struct StatePayload {
     pub principal: Option<String>,
 }
 
-/// Encodes/decodes [`StatePayload`] as `b64(nonce).b64(ciphertext+tag)`, sealed
-/// with ChaCha20-Poly1305. The trailing segment (the ciphertext with its AEAD
-/// tag) is unique per minted state and is what the dispatch layer uses as the
+/// The secrets accepted for `requestState` decryption plus the active one used
+/// for encryption. Enables zero-downtime key rotation: stage the new key as
+/// accepted on every instance, then flip it to active; states minted under the
+/// old kid keep verifying until their TTL lapses.
+pub(crate) struct StateKeyring {
+    /// Kid new blobs are sealed under. Must resolve in [`Self::keys`], or
+    /// [`StateCodec::encode`] fails.
+    active_kid: Box<str>,
+    /// Accepted `kid → secret` map used to select the decryption key by the
+    /// kid segment of the inbound blob.
+    keys: HashMap<Box<str>, Arc<[u8]>>,
+}
+
+impl std::fmt::Debug for StateKeyring {
+    // Manual impl so key material never reaches logs: kids only.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StateKeyring")
+            .field("active_kid", &self.active_kid)
+            .field("kids", &self.keys.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl StateKeyring {
+    /// Single-key ring under [`DEFAULT_KID`] — the
+    /// [`crate::App::with_request_state_secret`] path.
+    pub(crate) fn single(secret: &[u8]) -> Self {
+        Self::new(DEFAULT_KID, [(DEFAULT_KID, secret)])
+    }
+
+    /// Builds a ring that encodes with `active_kid` and accepts every
+    /// `(kid, secret)` in `keys` for decoding.
+    pub(crate) fn new<K, S>(active_kid: &str, keys: impl IntoIterator<Item = (K, S)>) -> Self
+    where
+        K: AsRef<str>,
+        S: AsRef<[u8]>,
+    {
+        Self {
+            active_kid: Box::from(active_kid),
+            keys: keys
+                .into_iter()
+                .map(|(kid, secret)| (Box::from(kid.as_ref()), Arc::from(secret.as_ref())))
+                .collect(),
+        }
+    }
+
+    /// The `(kid, secret)` pair new blobs are sealed under.
+    fn active(&self) -> Result<(&str, &[u8]), Error> {
+        self.keys
+            .get(&*self.active_kid)
+            .map(|secret| (&*self.active_kid, &**secret))
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::InternalError,
+                    "active requestState kid has no key in the keyring",
+                )
+            })
+    }
+
+    /// The secret accepted under `kid`, if any.
+    fn key(&self, kid: &str) -> Option<&[u8]> {
+        self.keys.get(kid).map(|secret| &**secret)
+    }
+}
+
+/// Encodes/decodes [`StatePayload`] as
+/// `{version}.{kid}.b64(nonce).b64(ciphertext+tag)`, sealed with
+/// ChaCha20-Poly1305. The `{version}.{kid}` header is bound into the AEAD
+/// associated data, so neither segment can be swapped on the wire without
+/// failing the tag. The trailing segment (the ciphertext with its AEAD tag) is
+/// unique per minted state and is what the dispatch layer uses as the
 /// per-state identity for the idempotency cache.
 pub(crate) struct StateCodec<'a> {
-    key: &'a [u8],
+    keyring: &'a StateKeyring,
 }
 
 impl<'a> StateCodec<'a> {
-    /// Creates a codec bound to an encryption secret.
-    pub(crate) fn new(key: &'a [u8]) -> Self {
-        Self { key }
+    /// Creates a codec bound to a keyring.
+    pub(crate) fn new(keyring: &'a StateKeyring) -> Self {
+        Self { keyring }
     }
 
-    fn cipher(&self) -> Result<ChaCha20Poly1305, Error> {
-        ChaCha20Poly1305::new_from_slice(&derive_key(self.key))
+    fn cipher(secret: &[u8]) -> Result<ChaCha20Poly1305, Error> {
+        ChaCha20Poly1305::new_from_slice(&derive_key(secret))
             .map_err(|_| Error::new(ErrorCode::InternalError, "bad state key"))
     }
 
-    /// Encrypts a payload into the opaque wire string.
+    /// Encrypts a payload into the opaque wire string using the keyring's
+    /// active key.
     pub(crate) fn encode(&self, payload: &StatePayload) -> Result<String, Error> {
         use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
+        let (kid, secret) = self.keyring.active()?;
+        if kid.is_empty() || kid.contains('.') {
+            // '.' is the segment separator; a kid containing it would shift the
+            // nonce/ciphertext segments and every minted blob would fail decode.
+            return Err(Error::new(
+                ErrorCode::InternalError,
+                "requestState kid must be non-empty and must not contain '.'",
+            ));
+        }
         let json = serde_json::to_vec(payload).map_err(Error::from)?;
-        let cipher = self.cipher()?;
+        let cipher = Self::cipher(secret)?;
         let nonce = Nonce::try_generate().map_err(|_| {
             Error::new(
                 ErrorCode::InternalError,
                 "requestState nonce generation failed",
             )
         })?;
+        let header = format!("{STATE_VERSION}.{kid}");
         let sealed = cipher
-            .encrypt(&nonce, json.as_slice())
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: &json,
+                    aad: header.as_bytes(),
+                },
+            )
             .map_err(|_| Error::new(ErrorCode::InternalError, "requestState encryption failed"))?;
-        Ok(format!("{}.{}", B64.encode(nonce), B64.encode(sealed)))
+        Ok(format!(
+            "{header}.{}.{}",
+            B64.encode(nonce),
+            B64.encode(sealed)
+        ))
     }
 
-    /// Decrypts and verifies integrity. Does NOT check `exp`/`req`/`principal` —
-    /// callers do that against the returned [`StatePayload`].
+    /// Decrypts and verifies integrity, selecting the key by the blob's kid
+    /// segment. Does NOT check `exp`/`req`/`principal` — callers do that
+    /// against the returned [`StatePayload`].
     pub(crate) fn decode(&self, blob: &str) -> Result<StatePayload, Error> {
         use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
-        let (n_b64, c_b64) = blob
-            .split_once('.')
-            .ok_or_else(|| Error::new(ErrorCode::InvalidParams, "malformed requestState"))?;
+        // Parse a fixed segment count. A left-to-right `split_once` would take
+        // the `v1` prefix as the nonce; anything but exactly four segments is
+        // malformed (base64url has no '.', so the count is unambiguous).
+        let mut parts = blob.split('.');
+        let (Some(version), Some(kid), Some(n_b64), Some(c_b64), None) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        ) else {
+            return Err(Error::new(
+                ErrorCode::InvalidParams,
+                "malformed requestState",
+            ));
+        };
+        if version != STATE_VERSION {
+            return Err(Error::new(
+                ErrorCode::InvalidParams,
+                "unsupported requestState version",
+            ));
+        }
+        let secret = self
+            .keyring
+            .key(kid)
+            .ok_or_else(|| Error::new(ErrorCode::InvalidParams, "unknown requestState key id"))?;
         let nonce = B64
             .decode(n_b64)
             .map_err(|_| Error::new(ErrorCode::InvalidParams, "bad requestState nonce"))?;
@@ -108,9 +233,15 @@ impl<'a> StateCodec<'a> {
         let nonce: [u8; NONCE_LEN] = nonce
             .try_into()
             .map_err(|_| Error::new(ErrorCode::InvalidParams, "bad requestState nonce"))?;
-        let json = self
-            .cipher()?
-            .decrypt(&Nonce::from(nonce), sealed.as_slice())
+        let header = format!("{STATE_VERSION}.{kid}");
+        let json = Self::cipher(secret)?
+            .decrypt(
+                &Nonce::from(nonce),
+                Payload {
+                    msg: sealed.as_slice(),
+                    aad: header.as_bytes(),
+                },
+            )
             .map_err(|_| {
                 Error::new(
                     ErrorCode::InvalidParams,
@@ -186,6 +317,30 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    fn ring(secret: &[u8]) -> StateKeyring {
+        StateKeyring::single(secret)
+    }
+
+    /// Seals arbitrary JSON the way `StateCodec::encode` would, so tests can
+    /// mint blobs with non-[`StatePayload`] contents or a custom kid.
+    fn seal_json(secret: &[u8], kid: &str, json: &serde_json::Value) -> String {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
+        let bytes = serde_json::to_vec(json).unwrap();
+        let cipher = StateCodec::cipher(secret).unwrap();
+        let nonce = Nonce::try_generate().unwrap();
+        let header = format!("{STATE_VERSION}.{kid}");
+        let sealed = cipher
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: bytes.as_slice(),
+                    aad: header.as_bytes(),
+                },
+            )
+            .unwrap();
+        format!("{header}.{}.{}", B64.encode(nonce), B64.encode(sealed))
+    }
+
     fn payload() -> StatePayload {
         StatePayload {
             answers: HashMap::new(),
@@ -200,7 +355,8 @@ mod tests {
 
     #[test]
     fn memos_and_effects_roundtrip() {
-        let codec = StateCodec::new(b"secret-key");
+        let ring = ring(b"secret-key");
+        let codec = StateCodec::new(&ring);
         let mut p = payload();
         p.memos
             .insert("quote".into(), serde_json::json!({"price": 42}));
@@ -226,15 +382,9 @@ mod tests {
             "req": request_binding("tools/call", &serde_json::json!({"name":"t"})),
             "principal": serde_json::Value::Null,
         });
-        let codec = StateCodec::new(b"secret-key");
-        let blob = {
-            use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
-            let bytes = serde_json::to_vec(&json).unwrap();
-            let cipher = codec.cipher().unwrap();
-            let nonce = Nonce::try_generate().unwrap();
-            let sealed = cipher.encrypt(&nonce, bytes.as_slice()).unwrap();
-            format!("{}.{}", B64.encode(nonce), B64.encode(sealed))
-        };
+        let ring = ring(b"secret-key");
+        let codec = StateCodec::new(&ring);
+        let blob = seal_json(b"secret-key", DEFAULT_KID, &json);
         let got = codec.decode(&blob).unwrap();
         assert!(got.memos.is_empty());
         assert!(got.effects.is_empty());
@@ -245,7 +395,8 @@ mod tests {
     fn memo_values_are_not_readable_from_the_wire_blob() {
         // Confidentiality: a secret cached via `ctx.memo` must not be recoverable
         // by decoding the opaque blob without the key.
-        let codec = StateCodec::new(b"secret-key");
+        let ring = ring(b"secret-key");
+        let codec = StateCodec::new(&ring);
         let mut p = payload();
         p.memos
             .insert("token".into(), serde_json::json!("super-secret-value"));
@@ -270,7 +421,8 @@ mod tests {
 
     #[test]
     fn encode_decode_roundtrips() {
-        let codec = StateCodec::new(b"secret-key");
+        let ring = ring(b"secret-key");
+        let codec = StateCodec::new(&ring);
         let p = payload();
         let blob = codec.encode(&p).unwrap();
         let got = codec.decode(&blob).unwrap();
@@ -281,8 +433,19 @@ mod tests {
     }
 
     #[test]
+    fn encode_writes_version_and_kid_segments() {
+        let ring = ring(b"secret-key");
+        let blob = StateCodec::new(&ring).encode(&payload()).unwrap();
+        let segments: Vec<&str> = blob.split('.').collect();
+        assert_eq!(segments.len(), 4, "expected v1.kid.nonce.ct, got {blob}");
+        assert_eq!(segments[0], STATE_VERSION);
+        assert_eq!(segments[1], DEFAULT_KID);
+    }
+
+    #[test]
     fn tampered_blob_is_rejected() {
-        let codec = StateCodec::new(b"secret-key");
+        let ring = ring(b"secret-key");
+        let codec = StateCodec::new(&ring);
         let mut blob = codec.encode(&payload()).unwrap();
         blob.push('x'); // corrupt the tag
         assert!(codec.decode(&blob).is_err());
@@ -290,8 +453,107 @@ mod tests {
 
     #[test]
     fn wrong_key_is_rejected() {
-        let blob = StateCodec::new(b"key-a").encode(&payload()).unwrap();
-        assert!(StateCodec::new(b"key-b").decode(&blob).is_err());
+        let ring_a = ring(b"key-a");
+        let ring_b = ring(b"key-b");
+        let blob = StateCodec::new(&ring_a).encode(&payload()).unwrap();
+        assert!(StateCodec::new(&ring_b).decode(&blob).is_err());
+    }
+
+    #[test]
+    fn unknown_version_is_rejected() {
+        let ring = ring(b"secret-key");
+        let codec = StateCodec::new(&ring);
+        let blob = codec.encode(&payload()).unwrap();
+        let transplanted = format!("v9{}", blob.strip_prefix("v1").unwrap());
+        let err = codec.decode(&transplanted).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+        assert!(
+            format!("{err}").contains("unsupported requestState version"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn unknown_kid_is_rejected() {
+        let ring = ring(b"secret-key");
+        let codec = StateCodec::new(&ring);
+        // A blob sealed under a kid the ring does not accept.
+        let blob = seal_json(b"secret-key", "9", &serde_json::json!({}));
+        let err = codec.decode(&blob).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+        assert!(
+            format!("{err}").contains("unknown requestState key id"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn legacy_two_segment_blob_is_rejected_as_malformed() {
+        // The pre-versioning wire format (`b64(nonce).b64(ct)`) must not be
+        // taken for a v1 blob — segment-count parsing rejects it outright.
+        let ring = ring(b"secret-key");
+        let codec = StateCodec::new(&ring);
+        let blob = codec.encode(&payload()).unwrap();
+        let legacy = blob.splitn(3, '.').nth(2).unwrap(); // strip "v1.kid."
+        let err = codec.decode(legacy).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+        assert!(format!("{err}").contains("malformed requestState"), "{err}");
+    }
+
+    #[test]
+    fn kid_transplant_fails_the_aad_binding() {
+        // Two kids sharing one secret: rewriting the wire kid selects the SAME
+        // decryption key, so only the AAD binding of `{version}.{kid}` can
+        // catch the transplant.
+        let ring = StateKeyring::new("a", [("a", b"same-secret"), ("b", b"same-secret")]);
+        let codec = StateCodec::new(&ring);
+        let blob = codec.encode(&payload()).unwrap();
+        let transplanted = format!("v1.b{}", blob.strip_prefix("v1.a").unwrap());
+        let err = codec.decode(&transplanted).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+        assert!(format!("{err}").contains("integrity check failed"), "{err}");
+        // Sanity: the untouched blob still decodes.
+        assert!(codec.decode(&blob).is_ok());
+    }
+
+    #[test]
+    fn rotated_keyring_still_decodes_old_kid() {
+        // Rotation: blobs minted while "1" was active keep verifying after the
+        // ring flips to "2", as long as "1" stays accepted.
+        let old = StateKeyring::new("1", [("1", b"old-secret")]);
+        let blob = StateCodec::new(&old).encode(&payload()).unwrap();
+
+        let rotated = StateKeyring::new(
+            "2",
+            [
+                ("2", b"new-secret".as_slice()),
+                ("1", b"old-secret".as_slice()),
+            ],
+        );
+        let codec = StateCodec::new(&rotated);
+        assert!(codec.decode(&blob).is_ok());
+        // New blobs are sealed under the new active kid.
+        let fresh = codec.encode(&payload()).unwrap();
+        assert!(fresh.starts_with("v1.2."), "{fresh}");
+        // Dropping the old key from the ring retires its blobs.
+        let retired = StateKeyring::new("2", [("2", b"new-secret")]);
+        assert!(StateCodec::new(&retired).decode(&blob).is_err());
+    }
+
+    #[test]
+    fn active_kid_missing_from_ring_fails_encode() {
+        let ring = StateKeyring::new("active", [("other", b"secret")]);
+        let err = StateCodec::new(&ring).encode(&payload()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InternalError);
+    }
+
+    #[test]
+    fn kid_with_separator_fails_encode() {
+        // '.' inside a kid would shift the wire segments; encode refuses to
+        // mint an undecodable blob.
+        let ring = StateKeyring::new("a.b", [("a.b", b"secret")]);
+        let err = StateCodec::new(&ring).encode(&payload()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InternalError);
     }
 
     #[test]

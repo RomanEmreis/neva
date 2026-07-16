@@ -107,14 +107,16 @@ pub struct McpOptions {
     #[cfg(feature = "tasks")]
     pub(super) tasks: TaskTracker,
 
-    /// Secret used to encrypt and authenticate MRTR `requestState` (the AEAD key
-    /// is derived from it). Defaults to an ephemeral random key; multi-instance
-    /// stateless deployments must set a shared secret via
-    /// [`crate::App::with_request_state_secret`].
+    /// Keyring used to encrypt and authenticate MRTR `requestState` (the AEAD
+    /// key is derived from the secret the active kid names). Defaults to an
+    /// ephemeral random single-key ring; multi-instance stateless deployments
+    /// must set shared key material via
+    /// [`crate::App::with_request_state_secret`] or
+    /// [`crate::App::with_request_state_keys`].
     #[cfg(feature = "proto-2026-07-28-rc")]
-    request_state_secret: Arc<[u8]>,
+    request_state_keys: crate::types::mrtr::state::StateKeyring,
 
-    /// Whether [`Self::request_state_secret`] was set explicitly (vs the
+    /// Whether [`Self::request_state_keys`] was set explicitly (vs the
     /// ephemeral per-process default). Used to warn on startup about the
     /// multi-instance deployment footgun. Read only by the (tracing-gated)
     /// startup warning, so it is write-only in builds without an HTTP server
@@ -192,13 +194,13 @@ impl Default for McpOptions {
             #[cfg(feature = "tasks")]
             tasks: TaskTracker::new(),
             #[cfg(feature = "proto-2026-07-28-rc")]
-            request_state_secret: {
+            request_state_keys: {
                 // Ephemeral random key from two v4 UUIDs (16 bytes each).
                 // Non-panicking; sufficient for single-instance/dev.
                 let mut key = [0u8; 32];
                 key[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
                 key[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
-                Arc::from(&key[..])
+                crate::types::mrtr::state::StateKeyring::single(&key)
             },
             #[cfg(feature = "proto-2026-07-28-rc")]
             request_state_secret_explicit: false,
@@ -732,17 +734,34 @@ impl McpOptions {
             .is_some_and(|tools| tools.call.is_some())
     }
 
-    /// Sets the shared secret used to encrypt/authenticate MRTR `requestState`.
+    /// Sets the shared secret used to encrypt/authenticate MRTR `requestState`
+    /// as a single-key ring under the default kid.
     #[cfg(feature = "proto-2026-07-28-rc")]
     pub(crate) fn set_request_state_secret(&mut self, key: &[u8]) {
-        self.request_state_secret = Arc::from(key);
+        self.request_state_keys = crate::types::mrtr::state::StateKeyring::single(key);
         self.request_state_secret_explicit = true;
     }
 
-    /// Returns the MRTR `requestState` secret (AEAD key material).
+    /// Sets the MRTR `requestState` keyring: new blobs are sealed under
+    /// `active_kid`, inbound blobs decrypt with whichever accepted key their
+    /// kid segment names.
     #[cfg(feature = "proto-2026-07-28-rc")]
-    pub(crate) fn request_state_secret(&self) -> &[u8] {
-        &self.request_state_secret
+    pub(crate) fn set_request_state_keys<K, S>(
+        &mut self,
+        active_kid: &str,
+        keys: impl IntoIterator<Item = (K, S)>,
+    ) where
+        K: AsRef<str>,
+        S: AsRef<[u8]>,
+    {
+        self.request_state_keys = crate::types::mrtr::state::StateKeyring::new(active_kid, keys);
+        self.request_state_secret_explicit = true;
+    }
+
+    /// Returns the MRTR `requestState` keyring (AEAD key material).
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) fn request_state_keys(&self) -> &crate::types::mrtr::state::StateKeyring {
+        &self.request_state_keys
     }
 
     /// Returns whether the MRTR `requestState` secret was set explicitly
@@ -1124,6 +1143,18 @@ mod tests {
     fn request_state_secret_is_explicit_once_set() {
         let mut options = McpOptions::default();
         options.set_request_state_secret(b"shared-secret");
+        assert!(options.request_state_secret_is_explicit());
+    }
+
+    #[cfg(all(
+        feature = "proto-2026-07-28-rc",
+        feature = "http-server",
+        feature = "tracing"
+    ))]
+    #[test]
+    fn request_state_keys_are_explicit_once_set() {
+        let mut options = McpOptions::default();
+        options.set_request_state_keys("1", [("1", b"shared-secret")]);
         assert!(options.request_state_secret_is_explicit());
     }
 

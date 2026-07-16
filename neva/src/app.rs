@@ -334,6 +334,9 @@ impl App {
     /// decrypt the `requestState`. If unset, an ephemeral per-process key is
     /// used (fine for single-instance / development).
     ///
+    /// This is the single-key shorthand (kid `"0"`); for key rotation use
+    /// [`with_request_state_keys`](Self::with_request_state_keys).
+    ///
     /// # Example
     /// ```no_run
     /// # #[cfg(feature = "proto-2026-07-28-rc")] {
@@ -346,6 +349,48 @@ impl App {
     #[cfg(feature = "proto-2026-07-28-rc")]
     pub fn with_request_state_secret(mut self, secret: impl AsRef<[u8]>) -> Self {
         self.options.set_request_state_secret(secret.as_ref());
+        self
+    }
+
+    /// Sets the keyring used to encrypt and authenticate MRTR `requestState`,
+    /// enabling zero-downtime key rotation (`proto-2026-07-28-rc`).
+    ///
+    /// New blobs are sealed with the key `active_kid` names and carry the kid
+    /// on the wire (`v1.{kid}.…`); an inbound blob is decrypted with whichever
+    /// accepted key its kid segment names. To rotate: ship the new key as
+    /// *accepted* on every instance first, then flip `active_kid` to it —
+    /// states minted under the old kid keep verifying until their TTL lapses,
+    /// after which the old key can be dropped.
+    ///
+    /// `active_kid` must name one of `keys` (encoding fails otherwise), be
+    /// non-empty and contain no `'.'` (the wire segment separator).
+    /// [`with_request_state_secret`](Self::with_request_state_secret) is the
+    /// single-key shorthand (kid `"0"`).
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(feature = "proto-2026-07-28-rc")] {
+    /// use neva::App;
+    ///
+    /// let app = App::new()
+    ///     .with_request_state_keys("2", [
+    ///         ("2", b"new-shared-secret".as_slice()),
+    ///         ("1", b"old-shared-secret".as_slice()),
+    ///     ]);
+    /// # }
+    /// ```
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub fn with_request_state_keys<K, S>(
+        mut self,
+        active_kid: impl AsRef<str>,
+        keys: impl IntoIterator<Item = (K, S)>,
+    ) -> Self
+    where
+        K: AsRef<str>,
+        S: AsRef<[u8]>,
+    {
+        self.options
+            .set_request_state_keys(active_kid.as_ref(), keys);
         self
     }
 
@@ -1174,8 +1219,10 @@ impl App {
         };
 
         // MRTR idempotency: the final-round response cache is keyed by the
-        // incoming state's sealed segment (the ciphertext+tag after the `.`,
-        // unique per minted state thanks to the random AEAD nonce) *plus* a
+        // incoming state's sealed segment (the ciphertext+tag after the last
+        // `.` — `rsplit_once` keeps grabbing it regardless of the leading
+        // `v1.kid.` header segments — unique per minted state thanks to the
+        // random AEAD nonce) *plus* a
         // digest of this round's `inputResponses`. The answers digest matters
         // because the *same* minted state can be echoed with *different*
         // answers — a client (or attacker) replaying one round-1 blob with two
@@ -1446,7 +1493,7 @@ fn seed_mrtr_ctx(
                 "requestState exceeds the configured maximum size",
             ));
         }
-        let payload = StateCodec::new(options.request_state_secret()).decode(&state)?;
+        let payload = StateCodec::new(options.request_state_keys()).decode(&state)?;
         if payload.exp < now_secs() {
             return Err(Error::new(ErrorCode::InvalidParams, "requestState expired"));
         }
@@ -1545,7 +1592,7 @@ fn build_input_required(
         req: request_binding(method, salient),
         principal,
     };
-    let state = StateCodec::new(options.request_state_secret()).encode(&payload)?;
+    let state = StateCodec::new(options.request_state_keys()).encode(&payload)?;
     if state.len() > options.max_state_bytes() {
         return Err(Error::new(
             ErrorCode::InternalError,
@@ -1664,7 +1711,8 @@ mod tests {
         }
 
         fn encode(payload: &StatePayload) -> String {
-            StateCodec::new(SECRET).encode(payload).expect("encode")
+            let ring = crate::types::mrtr::state::StateKeyring::single(SECRET);
+            StateCodec::new(&ring).encode(payload).expect("encode")
         }
 
         #[test]
