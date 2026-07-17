@@ -72,8 +72,10 @@ server-macros = ["server", "macros", "neva_macros?/server"]
 server-tls = ["http-server-volga", "volga?/tls", "volga?/dev-cert"]
 # Engine-neutral OAuth 2.1 resource-server primitives: the RFC 9728
 # Protected Resource Metadata document and the WWW-Authenticate bearer
-# challenge, served through any `HttpEngine`. No Volga in deps.
-server-oauth = ["http-server", "dep:volga-oauth-core"]
+# challenge, served through any `HttpEngine`. No Volga in deps — but when
+# the Volga engine is enabled too, this additionally unlocks issuer-based
+# JWKS token validation (`AuthConfig::with_oauth`) via Volga.
+server-oauth = ["http-server", "dep:volga-oauth-core", "volga?/oauth-client"]
 # Engine-agnostic Streamable HTTP abstractions. Enable this and implement
 # `HttpEngine` for your own stack (e.g. axum, hyper). No Volga in deps.
 http-server = ["server", "dep:tokio-stream"]

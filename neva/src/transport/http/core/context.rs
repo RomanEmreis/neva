@@ -71,4 +71,16 @@ impl HttpContext {
     pub fn oauth_metadata_url(&self) -> Option<&str> {
         self.oauth.as_ref().map(|o| &*o.metadata_url)
     }
+
+    /// The canonicalized resource identifier (RFC 8707) this server is
+    /// deployed as (e.g. `"https://api.example.com/mcp"`), when OAuth is
+    /// configured.
+    ///
+    /// This is the audience value access tokens must be bound to — the
+    /// default Volga adapter feeds it into bearer validation as a
+    /// required `aud`; a custom engine should enforce the same check.
+    #[cfg(feature = "server-oauth")]
+    pub fn oauth_resource(&self) -> Option<&str> {
+        self.oauth.as_ref().map(|o| &*o.resource)
+    }
 }

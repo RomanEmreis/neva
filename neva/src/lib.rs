@@ -154,6 +154,12 @@ pub mod auth {
     #[cfg(feature = "http-server-volga")]
     pub use crate::transport::http::server::volga::auth_config::AuthConfig;
 
+    /// `OAuthConfig` describes the OAuth 2.1/OIDC issuer whose keys
+    /// validate bearer tokens, used with `AuthConfig::with_oauth(...)`.
+    /// Available only under the Volga adapter with `server-oauth`.
+    #[cfg(all(feature = "http-server-volga", feature = "server-oauth"))]
+    pub use crate::transport::http::server::volga::auth_config::OAuthConfig;
+
     /// Volga's claims trait, re-exported for users who need to plug a
     /// custom claims type into Volga's `Authorizer<C>`. For neva's own
     /// per-tool checks, implement [`Claims`] instead — that one is

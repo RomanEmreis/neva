@@ -592,11 +592,25 @@ impl HttpServer<server::DefaultClaims, VolgaEngine> {
     where
         F: FnOnce(server::AuthConfig) -> server::AuthConfig,
     {
+        let auth = config(server::AuthConfig::default());
+        // Default-flow glue: when OAuth issuer mode is on and no
+        // Protected Resource Metadata was configured explicitly, derive
+        // the document from that issuer — the well-known route and the
+        // 401 challenge then work out of the box. An explicit
+        // `with_oauth_metadata` (before or after this call) wins.
+        #[cfg(feature = "server-oauth")]
+        if self.oauth.is_none()
+            && let Some(issuer) = auth.oauth_issuer()
+        {
+            self.oauth = Some(
+                core::oauth::OAuthResourceOptions::default().with_authorization_servers([issuer]),
+            );
+        }
         let engine = self
             .engine
             .as_mut()
             .expect("HttpServer::with_auth called after start()");
-        engine.auth = Some(config(server::AuthConfig::default()));
+        engine.auth = Some(auth);
         self
     }
 
@@ -909,6 +923,42 @@ mod engine_smoke_tests {
         // The config failure must not consume the HTTP writer — it fires
         // before any transport state is taken.
         assert!(server.sender.rx.is_some());
+    }
+
+    #[cfg(all(feature = "http-server-volga", feature = "server-oauth"))]
+    #[test]
+    fn oauth_issuer_seeds_resource_metadata() {
+        let mut server = HttpServer::new("127.0.0.1:3000").with_auth(|auth| {
+            auth.with_oauth(|oauth| oauth.with_issuer("https://auth.example.com"))
+        });
+
+        let (ctx, _rx) = server.build_context_and_engine().unwrap();
+
+        assert_eq!(
+            ctx.oauth_metadata_path(),
+            Some("/.well-known/oauth-protected-resource/mcp")
+        );
+        let resp = core::handlers::handle_oauth_metadata(&ctx);
+        let doc: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+        assert_eq!(doc["authorization_servers"][0], "https://auth.example.com");
+    }
+
+    #[cfg(all(feature = "http-server-volga", feature = "server-oauth"))]
+    #[test]
+    fn explicit_metadata_wins_over_issuer_seeding() {
+        let mut server = HttpServer::new("127.0.0.1:3000")
+            .with_auth(|auth| {
+                auth.with_oauth(|oauth| oauth.with_issuer("https://auth.example.com"))
+            })
+            .with_oauth_metadata(|oauth| {
+                oauth.with_authorization_servers(["https://other.example.com"])
+            });
+
+        let (ctx, _rx) = server.build_context_and_engine().unwrap();
+
+        let resp = core::handlers::handle_oauth_metadata(&ctx);
+        let doc: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+        assert_eq!(doc["authorization_servers"][0], "https://other.example.com");
     }
 
     #[cfg(feature = "server-oauth")]

@@ -28,6 +28,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     as `resource_metadata` on Volga's own 401 challenges.
   * Protocol types re-exported under `neva::auth::oauth`
     (`ProtectedResourceMetadata`, `BearerChallenge`, `OAuthError`, …).
+* **OAuth 2.1/OIDC issuer mode for the default Volga engine** (#69):
+  `with_auth(|auth| auth.with_oauth(|oauth| oauth.with_issuer(…)))` replaces
+  the static decoding key with issuer-discovered JWKS validation (RFC 8414
+  discovery with OIDC fallback, key rotation, refresh cooldown / max key age
+  via Volga). MCP defaults applied unless overridden: the token's `aud` must
+  contain the server's canonical resource URI (RFC 8707 — `aud` becomes
+  required) and its `iss` must match the configured issuer. The Protected
+  Resource Metadata document is derived from the issuer automatically when
+  `with_oauth_metadata` was not called (#68), so discovery, challenge and
+  validation work out of the box with a single builder call. New
+  `AuthConfig::with_resource`/`with_resources` (RFC 8707 resource
+  indicators) for overriding the audience explicitly.
 * **MRTR `requestState` key rotation.** New `App::with_request_state_keys(active_kid, keys)`
   configures a keyring: new blobs are sealed under the active key id, inbound
   blobs decrypt with whichever accepted key their kid names — enabling
@@ -39,6 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   in builds without the `tracing` feature, where the `logging/setLevel`
   handler is not registered — capability-trusting clients (e.g. newer MCP
   Inspector) would call it and hit `Method not found`.
+* Per-tool/prompt/resource role and permission gates now receive the claims
+  Volga's `authorize` middleware already validated (`Authenticated<…>` from
+  the request) instead of re-decoding the `Authorization` header. With
+  Volga's default `strip_token_from_request = true` the header is removed
+  before the route runs, so the old re-decode lost the claims and protected
+  tools rejected valid tokens.
 
 ### Changed
 * **Breaking (RC wire format):** the sealed MRTR `requestState` blob is now
