@@ -1,0 +1,10 @@
+[package]
+name = "example-oauth-server"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+neva = { path = "../../neva", features = ["server-full"] }
+tokio = { version = "1.47.1", features = ["full"] }
+tracing-subscriber = "0.3.20"

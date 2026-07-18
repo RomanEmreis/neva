@@ -698,7 +698,7 @@ impl OAuthSession {
             client,
             metadata: server_metadata,
         });
-        
+
         let token: Arc<str> = tokens.access_token.into();
         self.set_token(token.clone());
         Ok(token)

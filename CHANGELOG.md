@@ -30,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     authorization — refresh-token rotation and dead-entry pruning
     included. Both paths are non-interactive and single-flight.
   * Everything exported under `neva::auth::oauth`.
+* OAuth examples: `examples/oauth-server` (resource server with explicit
+  RFC 9728 metadata), `examples/oauth-client` (fully automatic flow),
+  `examples/oauth-with-keycloak` (end-to-end walkthrough with a
+  ready-to-import realm), and `examples/oauth-hyper-engine` — a custom
+  `HttpEngine` on bare hyper serving the well-known document, the
+  `WWW-Authenticate` challenge and per-tool role gates through the
+  engine-neutral primitives, without Volga.
 * Engine-neutral OAuth 2.1 resource-server primitives behind the new
   `server-oauth` feature (included in `server-full`), built on
   `volga-oauth-core` — protocol types only, no Volga framework dependency,
@@ -69,6 +76,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   shorthand (kid `"0"`). (#81)
 
 ### Fixed
+* A client whose transport died (e.g. the OAuth flow failed against an
+  unreachable issuer) sat out the full request timeout — and `Ctrl+C`
+  appeared ignored, since the shutdown handler only cancels the
+  transport token. Pending request awaits now race that token and abort
+  with `Connection closed` the moment it fires, so both transport death
+  and shutdown signals interrupt `connect()`/requests immediately.
 * Client-only feature sets (e.g. `http-client` alone) failed to build:
   the client's notification handler uses `tokio::task::block_in_place`,
   but nothing enabled `tokio/rt-multi-thread` — now the `client` feature
