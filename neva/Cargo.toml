@@ -27,14 +27,14 @@ memchr = "2.8.3"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 schemars = { version = "1.2.1" }
-tokio = { version = "1.52.3", features = ["sync", "io-std", "io-util", "rt", "time", "macros"] }
+tokio = { version = "1.53.0", features = ["sync", "io-std", "io-util", "rt", "time", "macros"] }
 tokio-util = "0.7.18"
 uuid = { version = "1.24.0", features = ["v4", "serde"] }
 
 # optional
 chacha20poly1305 = { version = "0.11.0", optional = true }
 inventory = { version = "0.3.24", optional = true }
-jsonschema = { version = "0.47.0", optional = true }
+jsonschema = { version = "0.48.0", optional = true }
 once_cell = { version = "1.21.4", features = ["std"], optional = true }
 reqwest = { version = "0.13.4", features = ["stream", "json"], optional = true }
 sse-stream = { version = "0.2.4", optional = true }
@@ -44,6 +44,7 @@ tracing-subscriber = { version = "0.3.23", features = ["fmt", "json"], optional 
 volga = { version = "0.9.5", features = ["di", "jwt-auth-full"], optional = true }
 volga-di = { version = "0.9.5", optional = true }
 volga-oauth-core = { version = "0.9.5", optional = true }
+volga-oauth-client = { version = "0.9.5", optional = true }
 
 # neva
 neva_macros = { workspace = true, optional = true }
@@ -55,7 +56,7 @@ windows = { version = "0.62.0", features = ["Win32_Foundation", "Win32_System_Jo
 nix = { version = "0.31.1", features = ["signal"], optional = true }
 
 [dev-dependencies]
-tokio = { version = "1.52.3", features = ["rt", "rt-multi-thread", "macros"] }
+tokio = { version = "1.53.0", features = ["rt", "rt-multi-thread", "macros"] }
 tokio-stream = { version = "0.1.18" }
 
 [features]
@@ -70,10 +71,7 @@ tracing = ["dep:tracing", "dep:tracing-subscriber", "dep:once_cell", "volga?/tra
 server-full = ["server-macros", "tracing", "http-server-volga", "server-tls", "server-oauth", "di", "tasks"]
 server-macros = ["server", "macros", "neva_macros?/server"]
 server-tls = ["http-server-volga", "volga?/tls", "volga?/dev-cert"]
-# Engine-neutral OAuth 2.1 resource-server primitives: the RFC 9728
-# Protected Resource Metadata document and the WWW-Authenticate bearer
-# challenge, served through any `HttpEngine`. No Volga in deps.
-server-oauth = ["http-server", "dep:volga-oauth-core"]
+server-oauth = ["http-server", "dep:volga-oauth-core", "volga?/oauth-client"]
 # Engine-agnostic Streamable HTTP abstractions. Enable this and implement
 # `HttpEngine` for your own stack (e.g. axum, hyper). No Volga in deps.
 http-server = ["server", "dep:tokio-stream"]
@@ -82,11 +80,12 @@ http-server-volga = ["http-server", "dep:volga"]
 server = ["tokio/signal", "tokio/rt-multi-thread"]
 
 # client
-client-full = ["client-macros", "tracing", "http-client", "client-tls", "tasks"]
+client-full = ["client-macros", "tracing", "http-client", "client-tls", "client-oauth", "tasks"]
 client-macros = ["client", "macros", "neva_macros?/client"]
+client-oauth = ["http-client", "dep:volga-oauth-client"]
 client-tls = ["reqwest?/rustls"]
 http-client = ["client", "dep:reqwest", "dep:sse-stream", "dep:tokio-stream", "dep:once_cell"]
-client = ["dep:windows", "dep:nix", "dep:jsonschema", "tokio/process", "tokio/signal"]
+client = ["dep:windows", "dep:nix", "dep:jsonschema", "tokio/process", "tokio/signal", "tokio/rt-multi-thread"]
 
 # Opt-in MCP 2026-07-28 Release Candidate support. Mutually exclusive
 # with any future `proto-*` generation flag — see lib.rs guard.

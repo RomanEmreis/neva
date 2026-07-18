@@ -25,6 +25,7 @@ use std::{
 #[cfg(not(feature = "proto-2026-07-28-rc"))]
 use tokio::sync::RwLock;
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 
 #[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
 use crate::types::CreateMessageRequestParams;
@@ -56,6 +57,11 @@ pub(super) struct RequestHandler {
 
     /// Request timeout
     timeout: Duration,
+
+    /// The transport's cancellation token: pending awaits abort as soon
+    /// as the transport dies or a shutdown signal cancels it, instead of
+    /// sitting out the full request timeout.
+    token: CancellationToken,
 
     /// Pending requests
     pending: RequestQueue,
@@ -131,7 +137,11 @@ impl Roots {
 
 impl RequestHandler {
     /// Creates a new [`RequestHandler`]
-    pub(super) fn new(transport: TransportProto, options: &McpOptions) -> Self {
+    pub(super) fn new(
+        transport: TransportProto,
+        options: &McpOptions,
+        token: CancellationToken,
+    ) -> Self {
         let (tx, rx) = transport.split();
 
         let handler = Self {
@@ -141,6 +151,7 @@ impl RequestHandler {
             pending: RequestQueue::new(options.timeout),
             sender: tx,
             timeout: options.timeout,
+            token,
             #[cfg(not(feature = "proto-2026-07-28-rc"))]
             sampling_handler: options.sampling_handler.clone(),
             elicitation_handler: options.elicitation_handler.clone(),
@@ -165,6 +176,12 @@ impl RequestHandler {
         self.timeout
     }
 
+    /// Returns the transport's cancellation token
+    #[inline]
+    pub(super) fn cancellation(&self) -> CancellationToken {
+        self.token.clone()
+    }
+
     /// Returns a reference to the pending request queue
     #[inline]
     pub(super) fn pending(&self) -> &RequestQueue {
@@ -182,18 +199,28 @@ impl RequestHandler {
         }
         self.pending.activate(&id);
 
-        match timeout(self.timeout, receiver).await {
-            Ok(Ok(PendingResponse::Response(resp))) => Ok(resp),
-            Ok(Ok(PendingResponse::Timeout)) => {
-                Err(Error::new(ErrorCode::Timeout, "Request timed out"))
-            }
-            Ok(Err(_)) => Err(Error::new(
-                ErrorCode::InternalError,
-                "Response channel closed",
-            )),
-            Err(_) => {
+        tokio::select! {
+            biased;
+            // The transport died (or a shutdown signal cancelled it) —
+            // no response is coming; fail now rather than after the
+            // full request timeout.
+            _ = self.token.cancelled() => {
                 _ = self.pending.pop(&id);
-                Err(Error::new(ErrorCode::Timeout, "Request timed out"))
+                Err(Error::new(ErrorCode::InternalError, "Connection closed"))
+            }
+            result = timeout(self.timeout, receiver) => match result {
+                Ok(Ok(PendingResponse::Response(resp))) => Ok(resp),
+                Ok(Ok(PendingResponse::Timeout)) => {
+                    Err(Error::new(ErrorCode::Timeout, "Request timed out"))
+                }
+                Ok(Err(_)) => Err(Error::new(
+                    ErrorCode::InternalError,
+                    "Response channel closed",
+                )),
+                Err(_) => {
+                    _ = self.pending.pop(&id);
+                    Err(Error::new(ErrorCode::Timeout, "Request timed out"))
+                }
             }
         }
     }
@@ -710,6 +737,41 @@ mod tests {
     use std::pin::Pin;
     #[cfg(not(feature = "proto-2026-07-28-rc"))]
     use tokio::time::Instant;
+
+    #[tokio::test]
+    #[cfg(feature = "http-client")]
+    async fn cancelled_transport_fails_pending_request_immediately() {
+        use crate::transport::http::HttpClient;
+        use tokio::time::{Duration, timeout};
+
+        let token = CancellationToken::new();
+        let mut handler = RequestHandler::new(
+            TransportProto::HttpClient(HttpClient::default()),
+            &McpOptions::default(),
+            token.clone(),
+        );
+
+        // The transport was never started — nothing will ever answer.
+        let req = Request::new(Some(RequestId::Number(1)), "ping", None::<()>);
+        let pending = handler.send_request(req);
+        tokio::pin!(pending);
+
+        // The await parks (no response, no cancellation)...
+        assert!(
+            timeout(Duration::from_millis(50), pending.as_mut())
+                .await
+                .is_err(),
+            "request should still be pending"
+        );
+
+        // ...and cancelling the transport token unblocks it immediately,
+        // long before the 10s request timeout.
+        token.cancel();
+        let result = timeout(Duration::from_millis(100), pending)
+            .await
+            .expect("cancellation must unblock the pending request");
+        assert!(result.is_err(), "the aborted request must surface an error");
+    }
 
     #[tokio::test]
     async fn batch_responses_are_distributed_individually() {

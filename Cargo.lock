@@ -918,6 +918,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-oauth-client"
+version = "0.1.0"
+dependencies = [
+ "neva",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "example-oauth-hyper-engine"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http 1.4.2",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "jsonwebtoken",
+ "neva",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "example-oauth-server"
+version = "0.1.0"
+dependencies = [
+ "neva",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "example-oauth-with-keycloak"
+version = "0.1.0"
+dependencies = [
+ "neva",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "example-pagination"
 version = "0.1.0"
 dependencies = [
@@ -1606,9 +1652,9 @@ dependencies = [
 
 [[package]]
 name = "jsonschema"
-version = "0.47.0"
+version = "0.48.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "281c43ff06dcb331e9356d30e38853d559ce3d0a3f693e0b0e102667dec14fb1"
+checksum = "9baf521a926fd1e6f94af6922be9686b61c8a89a5fb7e14d6a1e21b79738d4cc"
 dependencies = [
  "ahash",
  "bytecount",
@@ -1635,9 +1681,9 @@ dependencies = [
 
 [[package]]
 name = "jsonschema-regex"
-version = "0.47.0"
+version = "0.48.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee0b351864e7ffbc5db9273daf7fa1b4d5177b0946713d667ca571b83c0b4045"
+checksum = "d668f4775619127513d9a4f190704d20a66d20ccf0efc258f8ed42548e5fd7cd"
 dependencies = [
  "regex-syntax",
 ]
@@ -1829,6 +1875,7 @@ dependencies = [
  "uuid",
  "volga",
  "volga-di",
+ "volga-oauth-client",
  "volga-oauth-core",
  "windows",
 ]
@@ -2267,9 +2314,9 @@ dependencies = [
 
 [[package]]
 name = "referencing"
-version = "0.47.0"
+version = "0.48.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "348e860aeb0b7bd035778fd11dd9cd5290d32e4aed3b8f2274a00287a9fd362b"
+checksum = "df843f41f0cb459649f64a8b6b10579cf454f7a7420dc702767c81a26f23d780"
 dependencies = [
  "ahash",
  "fluent-uri",
@@ -2926,9 +2973,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.52.3"
+version = "1.53.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
+checksum = "d988bcd52dbe076d3d46903332f58c912b87a2c49b1428419a5845154762ffee"
 dependencies = [
  "bytes",
  "libc",

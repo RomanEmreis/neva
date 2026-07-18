@@ -115,6 +115,18 @@ impl HttpEngine for VolgaEngine {
 
         let rules = match self.auth {
             Some(auth) => {
+                #[cfg(feature = "server-oauth")]
+                let mut auth = auth;
+                // In OAuth issuer mode, default the token checks to the
+                // MCP contract: `aud` must contain the canonical resource
+                // URI (RFC 8707) and `iss` must match the issuer.
+                #[cfg(feature = "server-oauth")]
+                auth.apply_mcp_defaults(ctx.oauth_resource());
+                // `with_oauth` without an issuer is a config error —
+                // surface it as a failed start, not a Volga panic.
+                #[cfg(feature = "server-oauth")]
+                let volga_oauth = auth.take_oauth()?;
+
                 let (bearer, rules) = auth.into_parts();
                 // Advertise the RFC 9728 document on Volga's own 401
                 // challenges: `WWW-Authenticate: Bearer resource_metadata="…"`.
@@ -124,6 +136,14 @@ impl HttpEngine for VolgaEngine {
                     None => bearer,
                 };
                 server = server.with_bearer_auth(|_| bearer);
+
+                // Issuer-based JWKS validation: keys are discovered from
+                // the issuer's metadata and rotated by Volga.
+                #[cfg(feature = "server-oauth")]
+                if let Some(oauth) = volga_oauth {
+                    server = server.with_oauth(|_| oauth);
+                    server.use_oauth();
+                }
                 Some(rules)
             }
             None => None,

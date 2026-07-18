@@ -1,0 +1,19 @@
+[package]
+name = "example-oauth-with-keycloak"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "keycloak-server"
+path = "src/server.rs"
+
+[[bin]]
+name = "keycloak-client"
+path = "src/client.rs"
+
+[dependencies]
+neva = { path = "../../neva", features = ["full"] }
+tokio = { version = "1.47.1", features = ["full"] }
+tracing = "0.1.41"
+tracing-subscriber = "0.3.20"

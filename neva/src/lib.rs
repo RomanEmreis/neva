@@ -111,10 +111,12 @@ pub(crate) const PROTOCOL_VERSIONS: &[&str] = &[
 ))]
 compile_error!("Only one `proto-*` feature flag may be enabled per build");
 
-#[cfg(feature = "http-server")]
+#[cfg(any(feature = "http-server", feature = "client-oauth"))]
 pub mod auth {
-    //! Authentication utilities — neva's engine-neutral [`Claims`] trait
-    //! + (under the Volga adapter) the bearer-auth configuration types.
+    //! Authentication utilities: neva's engine-neutral [`Claims`] trait,
+    //! the bearer-auth configuration types (under the Volga adapter),
+    //! and the OAuth 2.1 building blocks for both sides of the
+    //! Streamable HTTP transport (under the OAuth features).
 
     /// `Claims` is neva's engine-neutral trait for typed per-tool
     /// authorization. Implement this for your custom claims type to enable
@@ -141,18 +143,26 @@ pub mod auth {
     /// let claims: Arc<dyn Claims> = Arc::new(my_decoded_claims);
     /// neutral_req.extensions_mut().insert(claims);
     /// ```
+    #[cfg(feature = "http-server")]
     pub use crate::transport::http::core::types::Claims;
 
     /// `DefaultClaims` is a pre-built [`Claims`] impl matching the JWT
     /// standard claim names. Engine-agnostic — under the Volga adapter
     /// it additionally implements `volga::auth::AuthClaims` so it can
     /// be fed straight into Volga's bearer-auth pipeline.
+    #[cfg(feature = "http-server")]
     pub use crate::transport::http::core::types::DefaultClaims;
 
     /// `AuthConfig` is the Volga-flavored builder used with
     /// `HttpServer::with_auth(...)`. Available only under the Volga adapter.
     #[cfg(feature = "http-server-volga")]
     pub use crate::transport::http::server::volga::auth_config::AuthConfig;
+
+    /// `OAuthConfig` describes the OAuth 2.1/OIDC issuer whose keys
+    /// validate bearer tokens, used with `AuthConfig::with_oauth(...)`.
+    /// Available only under the Volga adapter with `server-oauth`.
+    #[cfg(all(feature = "http-server-volga", feature = "server-oauth"))]
+    pub use crate::transport::http::server::volga::auth_config::OAuthConfig;
 
     /// Volga's claims trait, re-exported for users who need to plug a
     /// custom claims type into Volga's `Authorizer<C>`. For neva's own
@@ -167,22 +177,34 @@ pub mod auth {
     #[cfg(feature = "http-server-volga")]
     pub use volga::auth::{Algorithm, Authorizer, Claims as ClaimsDerive};
 
-    #[cfg(feature = "server-oauth")]
+    #[cfg(any(feature = "server-oauth", feature = "client-oauth"))]
     pub mod oauth {
-        //! OAuth 2.1 / OIDC resource-server primitives.
+        //! OAuth 2.1 / OIDC building blocks.
         //!
-        //! [`OAuthResourceOptions`] configures the RFC 9728 Protected
-        //! Resource Metadata document through
-        //! `HttpServer::with_oauth_metadata`; the protocol-level types
-        //! are re-exported from
+        //! Server side (`server-oauth`): [`OAuthResourceOptions`]
+        //! configures the RFC 9728 Protected Resource Metadata document
+        //! through `HttpServer::with_oauth_metadata`; the protocol-level
+        //! types are re-exported from
         //! [`volga-oauth-core`](https://docs.rs/volga-oauth-core) —
         //! a crate with no HTTP I/O and no dependency on the Volga
         //! framework, so they are available to every `HttpEngine`.
+        //!
+        //! Client side (`client-oauth`): the pluggable
+        //! [`AuthorizationHandler`] contract with the default
+        //! [`LoopbackHandler`], plus the [`TokenStore`] persistence
+        //! abstraction — configured through `HttpClient::with_oauth`.
 
+        #[cfg(feature = "server-oauth")]
         pub use crate::transport::http::core::oauth::{
             BearerChallenge, OAuthError, OAuthErrorCode, OAuthResourceOptions,
             ProtectedResourceMetadata, WELL_KNOWN_PROTECTED_RESOURCE, canonicalize_resource_uri,
             protected_resource_metadata_url,
+        };
+
+        #[cfg(feature = "client-oauth")]
+        pub use crate::transport::http::client::oauth::{
+            AuthorizationHandler, CallbackParams, InMemoryTokenStore, LoopbackHandler,
+            OAuthClientConfig, TokenSet, TokenStore,
         };
     }
 }

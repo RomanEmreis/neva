@@ -177,6 +177,7 @@ impl OAuthResourceOptions {
             metadata_path: well_known_path(&metadata_url).into(),
             metadata_url: metadata_url.into(),
             challenge: challenge.into(),
+            resource: metadata.resource.into(),
         })
     }
 }
@@ -198,6 +199,9 @@ pub(crate) struct OAuthResource {
     pub(crate) metadata_path: Arc<str>,
     /// Pre-rendered `WWW-Authenticate` header value.
     pub(crate) challenge: Arc<str>,
+    /// Canonicalized resource identifier (RFC 8707) — the audience value
+    /// access tokens must be bound to.
+    pub(crate) resource: Arc<str>,
 }
 
 /// Strips the scheme and authority off an absolute URL, leaving the path.

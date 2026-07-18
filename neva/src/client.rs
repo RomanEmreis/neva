@@ -231,8 +231,8 @@ impl Client {
         #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
         self.register_tracing_notification_handlers();
 
-        self.cancellation_token = Some(token);
-        self.handler = Some(RequestHandler::new(transport, &self.options));
+        self.cancellation_token = Some(token.clone());
+        self.handler = Some(RequestHandler::new(transport, &self.options, token));
 
         self.wait_for_shutdown_signal();
         self.init().await
@@ -1199,9 +1199,10 @@ impl Client {
 
             let request_timeout = handler.timeout();
             let pending = handler.pending().clone();
+            let token = handler.cancellation();
             let receivers = handler.send_batch(items).await?;
 
-            collect_batch_responses(receivers, &pending, request_timeout)
+            collect_batch_responses(receivers, &pending, request_timeout, token)
                 .await
                 .into_iter()
                 .collect()
@@ -1268,8 +1269,9 @@ impl Client {
                 .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
             let request_timeout = handler.timeout();
             let pending = handler.pending().clone();
+            let token = handler.cancellation();
             let receivers = handler.send_batch(extras).await?;
-            return collect_batch_responses(receivers, &pending, request_timeout)
+            return collect_batch_responses(receivers, &pending, request_timeout, token)
                 .await
                 .into_iter()
                 .collect();
@@ -1304,8 +1306,10 @@ impl Client {
                 .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
             let request_timeout = handler.timeout();
             let pending = handler.pending().clone();
+            let token = handler.cancellation();
             let receivers = handler.send_batch(envelopes).await?;
-            let responses = collect_batch_responses(receivers, &pending, request_timeout).await;
+            let responses =
+                collect_batch_responses(receivers, &pending, request_timeout, token).await;
 
             // `responses` aligns with `round_slots`: `send_batch` preserves
             // request order and extras produce no receiver. Final responses fill
@@ -1548,24 +1552,35 @@ async fn collect_batch_responses(
     )>,
     pending: &crate::shared::RequestQueue,
     request_timeout: std::time::Duration,
+    token: tokio_util::sync::CancellationToken,
 ) -> Vec<Result<Response, Error>> {
     use futures_util::future::join_all;
 
     let futures = receivers.into_iter().map(|(id, rx)| {
         let pending = pending.clone();
+        let token = token.clone();
         async move {
-            match tokio::time::timeout(request_timeout, rx).await {
-                Ok(Ok(crate::shared::PendingResponse::Response(resp))) => Ok(resp),
-                Ok(Ok(crate::shared::PendingResponse::Timeout)) => {
-                    Err(Error::new(ErrorCode::Timeout, "Batch request timed out"))
-                }
-                Ok(Err(_)) => Err(Error::new(
-                    ErrorCode::InternalError,
-                    "Response channel closed",
-                )),
-                Err(_) => {
+            tokio::select! {
+                biased;
+                // The transport died (or a shutdown signal cancelled it)
+                // — no response is coming for any receiver.
+                _ = token.cancelled() => {
                     let _ = pending.pop(&id);
-                    Err(Error::new(ErrorCode::Timeout, "Batch request timed out"))
+                    Err(Error::new(ErrorCode::InternalError, "Connection closed"))
+                }
+                result = tokio::time::timeout(request_timeout, rx) => match result {
+                    Ok(Ok(crate::shared::PendingResponse::Response(resp))) => Ok(resp),
+                    Ok(Ok(crate::shared::PendingResponse::Timeout)) => {
+                        Err(Error::new(ErrorCode::Timeout, "Batch request timed out"))
+                    }
+                    Ok(Err(_)) => Err(Error::new(
+                        ErrorCode::InternalError,
+                        "Response channel closed",
+                    )),
+                    Err(_) => {
+                        let _ = pending.pop(&id);
+                        Err(Error::new(ErrorCode::Timeout, "Batch request timed out"))
+                    }
                 }
             }
         }

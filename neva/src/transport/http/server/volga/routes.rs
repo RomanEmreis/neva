@@ -11,13 +11,8 @@ use crate::transport::http::core::{
     context::HttpContext, engine::HttpEngine, handlers, types::SseResponse,
 };
 use ::volga::{
-    HttpRequest, HttpResult,
-    auth::{Bearer, BearerTokenService},
-    di::Dc,
-    error::Error as VolgaError,
-    headers::AUTHORIZATION,
-    http::sse::Message as SseMessage,
-    sse,
+    HttpRequest, HttpResult, auth::Authenticated, di::Dc, error::Error as VolgaError,
+    http::sse::Message as SseMessage, sse,
 };
 use std::sync::Arc;
 
@@ -25,22 +20,17 @@ use super::engine::VolgaEngine;
 use crate::auth::Claims;
 use crate::transport::http::core::types::DefaultClaims;
 
-/// Extract the `Authorization` header and decode it into [`DefaultClaims`]
-/// using the configured [`BearerTokenService`], if any.
-fn decode_claims(
-    bts: Option<BearerTokenService>,
-    headers: &http::HeaderMap,
-) -> Option<DefaultClaims> {
-    let bts = bts?;
-    let header = headers.get(AUTHORIZATION)?;
-    let bearer = Bearer::try_from(header).ok()?;
-    bts.decode::<DefaultClaims>(bearer).ok()
-}
-
 /// `POST /<endpoint>` — JSON-RPC ingress.
 pub(crate) async fn post(req: HttpRequest) -> HttpResult {
     let manager: Dc<Arc<HttpContext>> = req.extract()?;
-    let bts: Option<BearerTokenService> = req.extract()?;
+
+    // Claims decoded and validated by Volga's `authorize` middleware —
+    // the single decode path for both static-key and OAuth/JWKS modes.
+    // Reading them from the request (rather than re-decoding the
+    // `Authorization` header) also survives Volga's default
+    // `strip_token_from_request`, which removes the header before the
+    // route runs.
+    let claims: Option<Authenticated<DefaultClaims>> = req.extract().ok();
 
     let mut neutral = VolgaEngine::adapt_request(req)
         .await
@@ -52,8 +42,8 @@ pub(crate) async fn post(req: HttpRequest) -> HttpResult {
     // documented on `HttpEngine` — every engine inserts its own
     // `Claims`-implementing type wrapped in `Arc<dyn Claims>` so neva's
     // per-tool/prompt/resource gates run identically across engines.
-    if let Some(claims) = decode_claims(bts, neutral.headers()) {
-        let claims: Arc<dyn Claims> = Arc::new(claims);
+    if let Some(claims) = claims {
+        let claims: Arc<dyn Claims> = Arc::new(claims.into_inner());
         neutral.extensions_mut().insert(claims);
     }
 

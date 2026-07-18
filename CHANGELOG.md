@@ -5,9 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.4.2
 
 ### Added
+* Client-side OAuth 2.1 authorization behind the new `client-oauth`
+  feature (included in `client-full`), built on `volga-oauth-client`:
+  * `HttpClient::with_oauth(...)` enables the automatic flow: a `401`
+    challenge drives RFC 9728/8414 discovery (OIDC fallback), dynamic
+    client registration when no `client_id` is configured (RFC 7591,
+    `application_type: "native"` for loopback redirects), and the
+    authorization-code + PKCE flow with the server's canonical URI as
+    the RFC 8707 resource indicator; the failed request is retried once
+    with the fresh token, concurrent `401`s share a single flow.
+  * The callback is validated for `state` and the RFC 9207 `iss`
+    parameter (required when the server advertises support) before the
+    code exchange — mix-up-attack responses abort the flow.
+  * The interactive step is pluggable via `AuthorizationHandler`; the
+    default `LoopbackHandler` opens the system browser and captures the
+    redirect on a loopback listener. Tokens persist through the
+    re-exported `TokenStore` abstraction (`InMemoryTokenStore` default).
+  * Token lifecycle: an access token about to expire (30s leeway) is
+    refreshed proactively before the next request, and a `401` tries the
+    refresh-token grant before falling back to interactive
+    authorization — refresh-token rotation and dead-entry pruning
+    included. Both paths are non-interactive and single-flight.
+  * Everything exported under `neva::auth::oauth`.
+* OAuth examples: `examples/oauth-server` (resource server with explicit
+  RFC 9728 metadata), `examples/oauth-client` (fully automatic flow),
+  `examples/oauth-with-keycloak` (end-to-end walkthrough with a
+  ready-to-import realm), and `examples/oauth-hyper-engine` — a custom
+  `HttpEngine` on bare hyper serving the well-known document, the
+  `WWW-Authenticate` challenge and per-tool role gates through the
+  engine-neutral primitives, without Volga.
 * Engine-neutral OAuth 2.1 resource-server primitives behind the new
   `server-oauth` feature (included in `server-full`), built on
   `volga-oauth-core` — protocol types only, no Volga framework dependency,
@@ -28,6 +57,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     as `resource_metadata` on Volga's own 401 challenges.
   * Protocol types re-exported under `neva::auth::oauth`
     (`ProtectedResourceMetadata`, `BearerChallenge`, `OAuthError`, …).
+* **OAuth 2.1/OIDC issuer mode for the default Volga engine** (#69):
+  `with_auth(|auth| auth.with_oauth(|oauth| oauth.with_issuer(…)))` replaces
+  the static decoding key with issuer-discovered JWKS validation (RFC 8414
+  discovery with OIDC fallback, key rotation, refresh cooldown / max key age
+  via Volga). MCP defaults applied unless overridden: the token's `aud` must
+  contain the server's canonical resource URI (RFC 8707 — `aud` becomes
+  required) and its `iss` must match the configured issuer. The Protected
+  Resource Metadata document is derived from the issuer automatically when
+  `with_oauth_metadata` was not called (#68), so discovery, challenge and
+  validation work out of the box with a single builder call. New
+  `AuthConfig::with_resource`/`with_resources` (RFC 8707 resource
+  indicators) for overriding the audience explicitly.
 * **MRTR `requestState` key rotation.** New `App::with_request_state_keys(active_kid, keys)`
   configures a keyring: new blobs are sealed under the active key id, inbound
   blobs decrypt with whichever accepted key their kid names — enabling
@@ -35,10 +76,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   shorthand (kid `"0"`). (#81)
 
 ### Fixed
+* A client whose transport died (e.g. the OAuth flow failed against an
+  unreachable issuer) sat out the full request timeout — and `Ctrl+C`
+  appeared ignored, since the shutdown handler only cancels the
+  transport token. Pending request awaits now race that token and abort
+  with `Connection closed` the moment it fires, so both transport death
+  and shutdown signals interrupt `connect()`/requests immediately.
+* Client-only feature sets (e.g. `http-client` alone) failed to build:
+  the client's notification handler uses `tokio::task::block_in_place`,
+  but nothing enabled `tokio/rt-multi-thread` — now the `client` feature
+  does.
 * The legacy `initialize` result no longer advertises the `logging` capability
   in builds without the `tracing` feature, where the `logging/setLevel`
   handler is not registered — capability-trusting clients (e.g. newer MCP
   Inspector) would call it and hit `Method not found`.
+* Per-tool/prompt/resource role and permission gates now receive the claims
+  Volga's `authorize` middleware already validated (`Authenticated<…>` from
+  the request) instead of re-decoding the `Authorization` header. With
+  Volga's default `strip_token_from_request = true` the header is removed
+  before the route runs, so the old re-decode lost the claims and protected
+  tools rejected valid tokens.
 
 ### Changed
 * **Breaking (RC wire format):** the sealed MRTR `requestState` blob is now
