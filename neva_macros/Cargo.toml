@@ -9,6 +9,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 documentation.workspace = true
+homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
