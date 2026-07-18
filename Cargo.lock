@@ -1829,6 +1829,7 @@ dependencies = [
  "uuid",
  "volga",
  "volga-di",
+ "volga-oauth-client",
  "volga-oauth-core",
  "windows",
 ]

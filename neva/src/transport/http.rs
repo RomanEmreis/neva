@@ -139,6 +139,8 @@ where
 pub struct HttpClient {
     url: ServiceUrl,
     access_token: Option<Box<[u8]>>,
+    #[cfg(feature = "client-oauth")]
+    oauth: Option<client::oauth::OAuthClientConfig>,
     #[cfg(feature = "client-tls")]
     tls_config: Option<McpClientTlsConfig>,
     sender: HttpSender,
@@ -158,6 +160,8 @@ pub(super) struct ClientRuntimeContext {
     tx: Sender<Result<Message, Error>>,
     rx: Receiver<Message>,
     access_token: Option<Box<[u8]>>,
+    #[cfg(feature = "client-oauth")]
+    oauth: Option<std::sync::Arc<client::oauth::OAuthSession>>,
     #[cfg(feature = "client-tls")]
     tls_config: Option<ClientTlsConfig>,
 }
@@ -220,6 +224,8 @@ impl Default for HttpClient {
         Self {
             url: ServiceUrl::default(),
             access_token: None,
+            #[cfg(feature = "client-oauth")]
+            oauth: None,
             #[cfg(feature = "client-tls")]
             tls_config: None,
             receiver: HttpReceiver::new(),
@@ -665,7 +671,45 @@ impl HttpClient {
         self
     }
 
+    /// Enables automatic OAuth 2.1 authorization: on a `401` challenge
+    /// the client discovers the server's authorization requirements,
+    /// registers itself when needed, runs the authorization-code + PKCE
+    /// flow and attaches the obtained token to every request.
+    ///
+    /// Takes precedence over a static [`with_auth`](Self::with_auth)
+    /// token.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::Client;
+    ///
+    /// let mut client = Client::new()
+    ///     .with_options(|opt| opt
+    ///         .with_http(|http| http
+    ///             .with_oauth(|oauth| oauth.with_scopes(["mcp:tools"]))
+    ///         )
+    ///     );
+    /// ```
+    #[cfg(feature = "client-oauth")]
+    pub fn with_oauth<F>(mut self, config: F) -> Self
+    where
+        F: FnOnce(client::oauth::OAuthClientConfig) -> client::oauth::OAuthClientConfig,
+    {
+        self.oauth = Some(config(client::oauth::OAuthClientConfig::default()));
+        self
+    }
+
     fn runtime(&mut self) -> Result<ClientRuntimeContext, Error> {
+        // Build the OAuth session before consuming transport state —
+        // same rationale as the server-side OAuth resolve.
+        #[cfg(feature = "client-oauth")]
+        let oauth = self
+            .oauth
+            .take()
+            .map(|config| client::oauth::OAuthSession::new(config, &self.url.to_url()))
+            .transpose()?
+            .map(std::sync::Arc::new);
+
         let Some(sender_rx) = self.sender.rx.take() else {
             return Err(Error::new(
                 ErrorCode::InternalError,
@@ -681,6 +725,8 @@ impl HttpClient {
             tx: self.receiver.tx.clone(),
             rx: sender_rx,
             access_token: self.access_token.take(),
+            #[cfg(feature = "client-oauth")]
+            oauth,
             #[cfg(feature = "client-tls")]
             tls_config,
         })

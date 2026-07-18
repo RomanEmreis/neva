@@ -25,8 +25,44 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 pub(super) mod mcp_session;
+#[cfg(feature = "client-oauth")]
+pub(crate) mod oauth;
 #[cfg(feature = "client-tls")]
 pub(crate) mod tls_config;
+
+/// How outgoing requests are authenticated.
+///
+/// Built once per connection from the runtime context; cheap to clone
+/// into every request task.
+#[derive(Clone)]
+enum ClientAuth {
+    /// No credential attached.
+    None,
+    /// Static bearer token from `HttpClient::with_auth`.
+    Static(Arc<str>),
+    /// Managed OAuth session — the token changes as flows complete.
+    #[cfg(feature = "client-oauth")]
+    OAuth(Arc<oauth::OAuthSession>),
+}
+
+impl ClientAuth {
+    /// The bearer token to attach right now, if any.
+    fn bearer(&self) -> Option<Arc<str>> {
+        match self {
+            ClientAuth::None => None,
+            ClientAuth::Static(token) => Some(token.clone()),
+            #[cfg(feature = "client-oauth")]
+            ClientAuth::OAuth(session) => session.bearer(),
+        }
+    }
+
+    fn from_static(access_token: Option<Box<[u8]>>) -> Self {
+        match access_token {
+            Some(token) => ClientAuth::Static(String::from_utf8_lossy(&token).into()),
+            None => ClientAuth::None,
+        }
+    }
+}
 
 // SSE-only constants — the standalone GET stream does not exist under the
 // stateless RC transport.
@@ -54,7 +90,14 @@ fn name_param(req: &crate::types::Request) -> Option<&str> {
 
 pub(super) async fn connect(rt: ClientRuntimeContext, token: CancellationToken) {
     let session = Arc::new(McpSession::new(rt.url, token));
-    let access_token: Option<Arc<[u8]>> = rt.access_token.map(|t| t.into());
+
+    #[cfg(feature = "client-oauth")]
+    let auth = match rt.oauth {
+        Some(oauth) => ClientAuth::OAuth(oauth),
+        None => ClientAuth::from_static(rt.access_token),
+    };
+    #[cfg(not(feature = "client-oauth"))]
+    let auth = ClientAuth::from_static(rt.access_token);
 
     // Stateless RC transport issues only POSTs — no standalone SSE GET stream.
     #[cfg(feature = "proto-2026-07-28-rc")]
@@ -62,7 +105,7 @@ pub(super) async fn connect(rt: ClientRuntimeContext, token: CancellationToken) 
         session.clone(),
         rt.rx,
         rt.tx.clone(),
-        access_token,
+        auth,
         #[cfg(feature = "client-tls")]
         rt.tls_config.clone(),
     )
@@ -74,14 +117,14 @@ pub(super) async fn connect(rt: ClientRuntimeContext, token: CancellationToken) 
             session.clone(),
             rt.rx,
             rt.tx.clone(),
-            access_token.clone(),
+            auth.clone(),
             #[cfg(feature = "client-tls")]
             rt.tls_config.clone()
         ),
         start_sse_connection(
             session.clone(),
             rt.tx.clone(),
-            access_token.clone(),
+            auth.clone(),
             #[cfg(feature = "client-tls")]
             rt.tls_config.clone()
         )
@@ -92,7 +135,7 @@ async fn handle_connection(
     session: Arc<McpSession>,
     mut sender_rx: mpsc::Receiver<Message>,
     recv_tx: mpsc::Sender<Result<Message, Error>>,
-    access_token: Option<Arc<[u8]>>,
+    auth: ClientAuth,
     #[cfg(feature = "client-tls")] tls_config: Option<ClientTlsConfig>,
 ) {
     #[cfg(not(feature = "client-tls"))]
@@ -126,67 +169,129 @@ async fn handle_connection(
                     tracing::error!(logger = "neva", "Unexpected messaging error");
                     break;
                 };
-                let mut resp = client
-                    .post(session.url())
-                    .json(&req)
-                    .header(CONTENT_TYPE, "application/json")
-                    .header(ACCEPT, "application/json, text/event-stream");
-
-                if let Some(session_id) = session.session_id() {
-                    resp = resp.header(MCP_SESSION_ID, session_id.to_string())
-                }
-
-                // Routing headers are exercised end-to-end via the trace-context
-                // integration in Task 2.4. Unit-level hint extraction is tested in
-                // `routing_hints_tests`.
-                #[cfg(feature = "proto-2026-07-28-rc")]
-                if let Some((method, name)) = routing_hints(&req) {
-                    resp = resp.header(crate::transport::http::MCP_METHOD, method);
-                    if let Some(n) = name {
-                        resp = resp.header(crate::transport::http::MCP_NAME, n);
-                    }
-                }
-
-                // Under the RC the protocol version is fixed: `with_mcp_version`
-                // is compiled out, so the client can only ever speak the latest
-                // (RC) version. Sending the last compiled version is therefore
-                // exactly the configured version on every request.
-                #[cfg(feature = "proto-2026-07-28-rc")]
-                {
-                    resp = resp.header(
-                        crate::transport::http::MCP_PROTOCOL_VERSION,
-                        crate::PROTOCOL_VERSIONS.last().copied().unwrap_or("2026-07-28"),
-                    );
-                }
-
-                if let Some(access_token) = &access_token {
-                    resp = resp.bearer_auth(String::from_utf8_lossy(access_token))
-                }
-
                 crate::spawn_fair!(send_request(
+                    client.clone(),
                     session.clone(),
-                    resp,
                     req,
-                    recv_tx.clone()
+                    recv_tx.clone(),
+                    auth.clone()
                 ));
             }
         }
     }
 }
 
+/// Builds the JSON-RPC POST with all transport headers and the current
+/// bearer credential attached.
+fn build_post(
+    client: &reqwest::Client,
+    session: &McpSession,
+    req: &Message,
+    bearer: Option<&str>,
+) -> RequestBuilder {
+    let mut resp = client
+        .post(session.url())
+        .json(req)
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json, text/event-stream");
+
+    if let Some(session_id) = session.session_id() {
+        resp = resp.header(MCP_SESSION_ID, session_id.to_string())
+    }
+
+    // Routing headers are exercised end-to-end via the trace-context
+    // integration in Task 2.4. Unit-level hint extraction is tested in
+    // `routing_hints_tests`.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    if let Some((method, name)) = routing_hints(req) {
+        resp = resp.header(crate::transport::http::MCP_METHOD, method);
+        if let Some(n) = name {
+            resp = resp.header(crate::transport::http::MCP_NAME, n);
+        }
+    }
+
+    // Under the RC the protocol version is fixed: `with_mcp_version`
+    // is compiled out, so the client can only ever speak the latest
+    // (RC) version. Sending the last compiled version is therefore
+    // exactly the configured version on every request.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    {
+        resp = resp.header(
+            crate::transport::http::MCP_PROTOCOL_VERSION,
+            crate::PROTOCOL_VERSIONS
+                .last()
+                .copied()
+                .unwrap_or("2026-07-28"),
+        );
+    }
+
+    if let Some(bearer) = bearer {
+        resp = resp.bearer_auth(bearer)
+    }
+    resp
+}
+
 async fn send_request(
+    client: reqwest::Client,
     session: Arc<McpSession>,
-    resp: RequestBuilder,
     req: Message,
     resp_tx: mpsc::Sender<Result<Message, Error>>,
+    auth: ClientAuth,
 ) {
-    let resp = match resp.send().await {
+    let bearer = auth.bearer();
+    let resp = match build_post(&client, &session, &req, bearer.as_deref())
+        .send()
+        .await
+    {
         Ok(resp) => resp,
         Err(_err) => {
             #[cfg(feature = "tracing")]
             tracing::error!(logger = "neva", "Failed to send HTTP request: {}", _err);
             return;
         }
+    };
+
+    // A 401 under a managed OAuth session triggers the authorization
+    // flow (single-flight across concurrent requests) and one retry with
+    // the fresh token. On flow failure the original 401 falls through to
+    // the regular response path.
+    #[cfg(feature = "client-oauth")]
+    let resp = match (&auth, resp.status()) {
+        (ClientAuth::OAuth(oauth), reqwest::StatusCode::UNAUTHORIZED) => {
+            let challenge = resp
+                .headers()
+                .get(reqwest::header::WWW_AUTHENTICATE)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            match oauth
+                .authorize(challenge.as_deref(), bearer.as_deref())
+                .await
+            {
+                Ok(fresh) => {
+                    match build_post(&client, &session, &req, Some(&fresh))
+                        .send()
+                        .await
+                    {
+                        Ok(retried) => retried,
+                        Err(_err) => {
+                            #[cfg(feature = "tracing")]
+                            tracing::error!(
+                                logger = "neva",
+                                "Failed to resend HTTP request: {}",
+                                _err
+                            );
+                            return;
+                        }
+                    }
+                }
+                Err(_err) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::error!(logger = "neva", "OAuth authorization failed: {}", _err);
+                    resp
+                }
+            }
+        }
+        _ => resp,
     };
 
     if let Message::Notification(_) = &req {
@@ -235,7 +340,7 @@ async fn send_request(
 async fn start_sse_connection(
     session: Arc<McpSession>,
     resp_tx: mpsc::Sender<Result<Message, Error>>,
-    access_token: Option<Arc<[u8]>>,
+    auth: ClientAuth,
     #[cfg(feature = "client-tls")] tls_config: Option<ClientTlsConfig>,
 ) {
     let token = session.cancellation_token();
@@ -246,7 +351,7 @@ async fn start_sse_connection(
             tokio::spawn(handle_sse_connection(
                 session.clone(),
                 resp_tx,
-                access_token,
+                auth,
                 #[cfg(feature = "client-tls")]
                 tls_config
             ));
@@ -258,7 +363,7 @@ async fn start_sse_connection(
 async fn handle_sse_connection(
     session: Arc<McpSession>,
     resp_tx: mpsc::Sender<Result<Message, Error>>,
-    access_token: Option<Arc<[u8]>>,
+    auth: ClientAuth,
     #[cfg(feature = "client-tls")] tls_config: Option<ClientTlsConfig>,
 ) {
     #[cfg(not(feature = "client-tls"))]
@@ -282,14 +387,20 @@ async fn handle_sse_connection(
     };
 
     let token = session.cancellation_token();
+    // At most one interactive re-authorization per (re)connection attempt
+    // sequence — a second consecutive 401 means the fresh token is not
+    // accepted and the session must fail rather than loop.
+    #[cfg(feature = "client-oauth")]
+    let mut reauthorized = false;
     loop {
+        let bearer = auth.bearer();
         let mut req = client
             .get(session.url())
             .header(ACCEPT, "application/json, text/event-stream")
             .header(CACHE_CONTROL, "no-cache");
 
-        if let Some(ref access_token) = access_token {
-            req = req.bearer_auth(String::from_utf8_lossy(access_token));
+        if let Some(ref bearer) = bearer {
+            req = req.bearer_auth(bearer);
         }
 
         if let Some(session_id) = session.session_id() {
@@ -310,6 +421,33 @@ async fn handle_sse_connection(
             }
         };
 
+        // A 401 under a managed OAuth session re-runs the authorization
+        // flow once and retries the subscription with the fresh token.
+        #[cfg(feature = "client-oauth")]
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && !reauthorized
+            && let ClientAuth::OAuth(oauth) = &auth
+        {
+            let challenge = resp
+                .headers()
+                .get(reqwest::header::WWW_AUTHENTICATE)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            match oauth
+                .authorize(challenge.as_deref(), bearer.as_deref())
+                .await
+            {
+                Ok(_) => {
+                    reauthorized = true;
+                    continue;
+                }
+                Err(_err) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::error!(logger = "neva", "OAuth authorization failed: {}", _err);
+                }
+            }
+        }
+
         if !resp.status().is_success() {
             #[cfg(feature = "tracing")]
             tracing::error!(
@@ -321,6 +459,11 @@ async fn handle_sse_connection(
             // is unblocked instead of hanging forever.
             session.cancellation_token().cancel();
             return;
+        }
+
+        #[cfg(feature = "client-oauth")]
+        {
+            reauthorized = false;
         }
 
         let mut stream = sse_stream::SseStream::from_bytes_stream(resp.bytes_stream())

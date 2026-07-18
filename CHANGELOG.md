@@ -5,9 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.4.2
 
 ### Added
+* Client-side OAuth 2.1 authorization behind the new `client-oauth`
+  feature (included in `client-full`), built on `volga-oauth-client`:
+  * `HttpClient::with_oauth(...)` enables the automatic flow: a `401`
+    challenge drives RFC 9728/8414 discovery (OIDC fallback), dynamic
+    client registration when no `client_id` is configured (RFC 7591,
+    `application_type: "native"` for loopback redirects), and the
+    authorization-code + PKCE flow with the server's canonical URI as
+    the RFC 8707 resource indicator; the failed request is retried once
+    with the fresh token, concurrent `401`s share a single flow.
+  * The callback is validated for `state` and the RFC 9207 `iss`
+    parameter (required when the server advertises support) before the
+    code exchange — mix-up-attack responses abort the flow.
+  * The interactive step is pluggable via `AuthorizationHandler`; the
+    default `LoopbackHandler` opens the system browser and captures the
+    redirect on a loopback listener. Tokens persist through the
+    re-exported `TokenStore` abstraction (`InMemoryTokenStore` default).
+  * Everything exported under `neva::auth::oauth`.
 * Engine-neutral OAuth 2.1 resource-server primitives behind the new
   `server-oauth` feature (included in `server-full`), built on
   `volga-oauth-core` — protocol types only, no Volga framework dependency,
@@ -47,6 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   shorthand (kid `"0"`). (#81)
 
 ### Fixed
+* Client-only feature sets (e.g. `http-client` alone) failed to build:
+  the client's notification handler uses `tokio::task::block_in_place`,
+  but nothing enabled `tokio/rt-multi-thread` — now the `client` feature
+  does.
 * The legacy `initialize` result no longer advertises the `logging` capability
   in builds without the `tracing` feature, where the `logging/setLevel`
   handler is not registered — capability-trusting clients (e.g. newer MCP
