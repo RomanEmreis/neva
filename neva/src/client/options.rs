@@ -3,15 +3,11 @@
 use crate::PROTOCOL_VERSIONS;
 use crate::client::notification_handler::NotificationsHandler;
 use crate::transport::{StdIoClient, TransportProto, stdio::options::StdIoOptions};
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 use crate::types::SamplingCapability;
 use crate::types::elicitation::ElicitationHandler;
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 use crate::types::sampling::SamplingHandler;
 use crate::types::{ElicitationCapability, Implementation};
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 use crate::types::{Root, RootsCapability, Uri};
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
@@ -56,11 +52,9 @@ pub struct McpOptions {
     pub(super) timeout: Duration,
 
     /// Roots capability options
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     pub(super) roots_capability: Option<RootsCapability>,
 
     /// Sampling capability options
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     pub(super) sampling_capability: Option<SamplingCapability>,
 
     /// Elicitation capability options
@@ -71,7 +65,6 @@ pub struct McpOptions {
     pub(super) tasks_capability: Option<ClientTasksCapability>,
 
     /// Represents a handler function that runs when received a "sampling/createMessage" request
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     pub(super) sampling_handler: Option<SamplingHandler>,
 
     /// Represents a handler function that runs when received a "elicitation/create" request
@@ -87,7 +80,6 @@ pub struct McpOptions {
     proto: Option<TransportProto>,
 
     /// Represents a list of roots that the client supports
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     roots: HashMap<Uri, Root>,
 
     /// Optional W3C Trace Context provider. Invoked before each outbound
@@ -99,6 +91,12 @@ pub struct McpOptions {
     /// (guards against a server that never converges).
     #[cfg(feature = "proto-2026-07-28-rc")]
     pub(crate) max_mrtr_rounds: usize,
+
+    /// The dual-mode runtime switch: which protocol generation the
+    /// connected peer speaks. Shared with the transport so per-request
+    /// behavior (headers) follows the handshake outcome.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) peer_mode: crate::shared::PeerMode,
 }
 
 impl Debug for McpOptions {
@@ -109,14 +107,12 @@ impl Debug for McpOptions {
             .field("timeout", &self.timeout)
             .field("elicitation_capability", &self.elicitation_capability);
 
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
         let dbg = dbg
             .field("roots_capability", &self.roots_capability)
             .field("sampling_capability", &self.sampling_capability);
 
         let dbg = dbg.field("protocol_ver", &self.protocol_ver);
 
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
         let dbg = dbg.field("roots", &self.roots);
 
         #[cfg(feature = "tasks")]
@@ -132,18 +128,14 @@ impl Default for McpOptions {
         Self {
             timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT),
             implementation: Default::default(),
-            #[cfg(not(feature = "proto-2026-07-28-rc"))]
             roots: Default::default(),
-            #[cfg(not(feature = "proto-2026-07-28-rc"))]
             roots_capability: None,
-            #[cfg(not(feature = "proto-2026-07-28-rc"))]
             sampling_capability: None,
             elicitation_capability: None,
             #[cfg(feature = "tasks")]
             tasks_capability: None,
             proto: None,
             protocol_ver: None,
-            #[cfg(not(feature = "proto-2026-07-28-rc"))]
             sampling_handler: None,
             elicitation_handler: None,
             notification_handler: None,
@@ -151,6 +143,8 @@ impl Default for McpOptions {
             trace_context_provider: None,
             #[cfg(feature = "proto-2026-07-28-rc")]
             max_mrtr_rounds: DEFAULT_MAX_MRTR_ROUNDS,
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            peer_mode: Default::default(),
         }
     }
 }
@@ -170,7 +164,9 @@ impl McpOptions {
     /// Sets Streamable HTTP as a transport protocol
     #[cfg(feature = "http-client")]
     pub fn with_http<F: FnOnce(HttpClient) -> HttpClient>(mut self, config: F) -> Self {
-        self.proto = Some(TransportProto::HttpClient(config(HttpClient::default())));
+        self.proto = Some(TransportProto::HttpClient(Box::new(config(
+            HttpClient::default(),
+        ))));
         self
     }
 
@@ -201,20 +197,16 @@ impl McpOptions {
     ///
     /// Default: last available protocol version
     ///
-    /// Not available under `proto-2026-07-28-rc`: that flag compiles the client
-    /// as a pure 2026-07-28 RC peer (sampling/roots removed, stateless transport,
-    /// MRTR), so negotiating an older version would advertise a protocol the
-    /// build cannot actually speak. The RC version is fixed and sent on every
-    /// request. When the RC graduates and the flags invert, version selection
-    /// returns under the legacy flag.
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    /// Under `proto-2026-07-28-rc` the RC version itself is fixed — the
+    /// value set here only selects which **legacy** version the
+    /// dual-mode fallback negotiates when a server rejects
+    /// `server/discover` (default: the newest pre-RC version).
     pub fn with_mcp_version(mut self, ver: &'static str) -> Self {
         self.protocol_ver = Some(ver);
         self
     }
 
     /// Configures Roots capability
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     #[deprecated(
         note = "Roots are removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
     )]
@@ -227,7 +219,6 @@ impl McpOptions {
     }
 
     /// Configures Sampling capability
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     #[deprecated(
         note = "Sampling is removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
     )]
@@ -313,18 +304,41 @@ impl McpOptions {
 
     /// Returns current transport protocol
     pub(crate) fn transport(&mut self) -> TransportProto {
-        let transport = self.proto.take();
-        transport.unwrap_or_default()
+        let transport = self.proto.take().unwrap_or_default();
+        // Hand the dual-mode switch to the HTTP transport so request
+        // headers follow the negotiated protocol generation.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let transport = match transport {
+            TransportProto::HttpClient(http) => {
+                TransportProto::HttpClient(Box::new(http.with_peer_mode(self.peer_mode.clone())))
+            }
+            other => other,
+        };
+        transport
+    }
+
+    /// The newest pre-RC protocol version — what the dual-mode fallback
+    /// negotiates with a legacy peer. Honors a legacy
+    /// [`with_mcp_version`](Self::with_mcp_version) override.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) fn legacy_protocol_ver(&self) -> &'static str {
+        match self.protocol_ver {
+            Some(ver) if ver != crate::RC_PROTOCOL_VERSION => ver,
+            _ => PROTOCOL_VERSIONS
+                .iter()
+                .rev()
+                .find(|ver| **ver != crate::RC_PROTOCOL_VERSION)
+                .copied()
+                .unwrap_or("2025-11-25"),
+        }
     }
 
     /// Adds a root
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     pub fn add_root(&mut self, root: Root) -> &mut Root {
         self.roots.entry(root.uri.clone()).or_insert(root)
     }
 
     /// Adds multiple roots
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     pub fn add_roots<T, I>(&mut self, roots: I) -> &mut Self
     where
         T: Into<Root>,
@@ -339,13 +353,11 @@ impl McpOptions {
     }
 
     /// Returns a list of defined Roots
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     pub fn roots(&self) -> Vec<Root> {
         self.roots.values().cloned().collect()
     }
 
     /// Registers a handler for sampling requests
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     pub(crate) fn add_sampling_handler(&mut self, handler: SamplingHandler) {
         self.sampling_handler = Some(handler);
     }
@@ -358,7 +370,6 @@ impl McpOptions {
     /// Returns [`RootsCapability`] if configured.
     /// If not configured but at least one [`Root`] exists, returns [`Default`].
     /// Otherwise, returns `None`.
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     pub(crate) fn roots_capability(&self) -> Option<RootsCapability> {
         self.roots_capability
             .clone()
@@ -368,7 +379,6 @@ impl McpOptions {
     /// Returns [`SamplingCapability`] if configured.
     /// If not configured but a sampling handler exists, it returns [`Default`].
     /// Otherwise, returns `None`.
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     pub(crate) fn sampling_capability(&self) -> Option<SamplingCapability> {
         self.sampling_capability
             .clone()
@@ -378,7 +388,6 @@ impl McpOptions {
     /// Returns [`ElicitationCapability`] if configured.
     /// If not configured but an elicitation handler exists, it returns [`Default`].
     /// Otherwise, returns `None`.
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     pub(crate) fn elicitation_capability(&self) -> Option<ElicitationCapability> {
         self.elicitation_capability
             .clone()
@@ -388,7 +397,7 @@ impl McpOptions {
     /// Returns [`ClientTasksCapability`] if configured.
     ///
     /// Otherwise, returns `None`.
-    #[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
+    #[cfg(feature = "tasks")]
     pub(crate) fn tasks_capability(&self) -> Option<ClientTasksCapability> {
         self.tasks_capability.clone()
     }

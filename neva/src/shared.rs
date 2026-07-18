@@ -104,6 +104,32 @@ async fn wait_for_shutdown_signal_impl() -> std::io::Result<()> {
     }
 }
 
+/// Which protocol generation the connected peer speaks — the runtime
+/// switch behind the dual-mode client (issue #84).
+///
+/// An RC-flagged client starts in RC mode (`server/discover`, stateless,
+/// MRTR) and flips to legacy exactly once, in `Client::connect`'s
+/// fallback, before any other traffic — so nothing races the switch.
+/// The legacy build has no switch: it is legacy by construction.
+///
+/// Cheap to clone; all clones observe the same flip.
+#[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PeerMode(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+#[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+impl PeerMode {
+    /// Marks the peer as a legacy (pre-RC) server.
+    pub(crate) fn set_legacy(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether the peer speaks the legacy (pre-RC) protocol.
+    pub(crate) fn is_legacy(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
 /// MRTR-eligible client requests (the only ones that may receive an
 /// `InputRequiredResult`).
 #[cfg(feature = "proto-2026-07-28-rc")]

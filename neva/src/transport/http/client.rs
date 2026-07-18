@@ -6,17 +6,13 @@ use crate::{
     transport::http::{ClientRuntimeContext, MCP_SESSION_ID, get_mcp_session_id},
     types::Message,
 };
-// SSE-stream imports — used only by the non-RC GET stream path.
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 use futures_util::{StreamExt, TryStreamExt};
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 use reqwest::header::{CACHE_CONTROL, HeaderName};
 use reqwest::{
     RequestBuilder,
     header::{ACCEPT, CONTENT_TYPE},
 };
 use std::sync::Arc;
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 use std::time::Duration;
 
 #[cfg(feature = "client-tls")]
@@ -66,11 +62,10 @@ impl ClientAuth {
     }
 }
 
-// SSE-only constants — the standalone GET stream does not exist under the
-// stateless RC transport.
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+// SSE constants — the standalone GET stream serves legacy peers only;
+// its machinery compiles under both flags for the dual-mode client and
+// activates at runtime when a legacy `initialize` handshake happens.
 const LAST_EVENT_ID: HeaderName = HeaderName::from_static("last-event-id");
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 const SSE_RECONNECT_DELAY: Duration = Duration::from_secs(3);
 
 #[cfg(feature = "proto-2026-07-28-rc")]
@@ -91,7 +86,12 @@ fn name_param(req: &crate::types::Request) -> Option<&str> {
 }
 
 pub(super) async fn connect(rt: ClientRuntimeContext, token: CancellationToken) {
-    let session = Arc::new(McpSession::new(rt.url, token));
+    let session = Arc::new(McpSession::new(
+        rt.url,
+        token,
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        rt.peer_mode.clone(),
+    ));
 
     #[cfg(feature = "client-oauth")]
     let auth = match rt.oauth {
@@ -101,19 +101,10 @@ pub(super) async fn connect(rt: ClientRuntimeContext, token: CancellationToken) 
     #[cfg(not(feature = "client-oauth"))]
     let auth = ClientAuth::from_static(rt.access_token);
 
-    // Stateless RC transport issues only POSTs — no standalone SSE GET stream.
-    #[cfg(feature = "proto-2026-07-28-rc")]
-    handle_connection(
-        session.clone(),
-        rt.rx,
-        rt.tx.clone(),
-        auth,
-        #[cfg(feature = "client-tls")]
-        rt.tls_config.clone(),
-    )
-    .await;
-
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    // The SSE task arms itself only when a legacy `initialize` handshake
+    // completes (`session.initialized()` fires exclusively for the
+    // `initialize` method) — against an RC peer it stays parked until
+    // cancellation, so the stateless RC transport still issues only POSTs.
     tokio::join!(
         handle_connection(
             session.clone(),
@@ -201,29 +192,23 @@ fn build_post(
         resp = resp.header(MCP_SESSION_ID, session_id.to_string())
     }
 
-    // Routing headers are exercised end-to-end via the trace-context
-    // integration in Task 2.4. Unit-level hint extraction is tested in
+    // RC-peer routing headers: legacy servers never negotiated them, so
+    // a peer that fell back to `initialize` gets the same wire shape a
+    // pure legacy client produces (no routing headers, no RC protocol
+    // version). Routing headers are exercised end-to-end via the
+    // trace-context integration; unit-level hint extraction is tested in
     // `routing_hints_tests`.
     #[cfg(feature = "proto-2026-07-28-rc")]
-    if let Some((method, name)) = routing_hints(req) {
-        resp = resp.header(crate::transport::http::MCP_METHOD, method);
-        if let Some(n) = name {
-            resp = resp.header(crate::transport::http::MCP_NAME, n);
+    if !session.is_legacy() {
+        if let Some((method, name)) = routing_hints(req) {
+            resp = resp.header(crate::transport::http::MCP_METHOD, method);
+            if let Some(n) = name {
+                resp = resp.header(crate::transport::http::MCP_NAME, n);
+            }
         }
-    }
-
-    // Under the RC the protocol version is fixed: `with_mcp_version`
-    // is compiled out, so the client can only ever speak the latest
-    // (RC) version. Sending the last compiled version is therefore
-    // exactly the configured version on every request.
-    #[cfg(feature = "proto-2026-07-28-rc")]
-    {
         resp = resp.header(
             crate::transport::http::MCP_PROTOCOL_VERSION,
-            crate::PROTOCOL_VERSIONS
-                .last()
-                .copied()
-                .unwrap_or("2026-07-28"),
+            crate::RC_PROTOCOL_VERSION,
         );
     }
 
@@ -338,7 +323,6 @@ async fn send_request(
     }
 }
 
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 async fn start_sse_connection(
     session: Arc<McpSession>,
     resp_tx: mpsc::Sender<Result<Message, Error>>,
@@ -361,7 +345,6 @@ async fn start_sse_connection(
     }
 }
 
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 async fn handle_sse_connection(
     session: Arc<McpSession>,
     resp_tx: mpsc::Sender<Result<Message, Error>>,
@@ -499,7 +482,6 @@ async fn handle_sse_connection(
     }
 }
 
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 async fn handle_event(
     event: sse_stream::Sse,
     session: &Arc<McpSession>,
@@ -521,14 +503,12 @@ async fn handle_event(
 }
 
 #[inline]
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 fn handle_error(_err: sse_stream::Error) {
     #[cfg(feature = "tracing")]
     tracing::error!(logger = "neva", "SSE Error: {}", _err);
 }
 
 // Returns true if the message was successfully parsed and delivered.
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 async fn handle_msg(
     event: sse_stream::Sse,
     resp_tx: &mpsc::Sender<Result<Message, Error>>,
@@ -575,9 +555,9 @@ impl From<reqwest::Error> for Error {
     }
 }
 
-// These tests exercise the SSE GET stream path, which does not exist under
-// the stateless RC transport.
-#[cfg(all(test, not(feature = "proto-2026-07-28-rc")))]
+// These tests exercise the SSE GET stream path, which serves legacy
+// peers — compiled under both flags for the dual-mode client.
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::transport::http::ServiceUrl;
@@ -586,6 +566,8 @@ mod tests {
         Arc::new(McpSession::new(
             ServiceUrl::default(),
             CancellationToken::new(),
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            Default::default(),
         ))
     }
 

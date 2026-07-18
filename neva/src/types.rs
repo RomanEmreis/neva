@@ -23,14 +23,14 @@ use {crate::auth::Claims, http::HeaderMap, std::sync::Arc};
 
 #[cfg(not(feature = "proto-2026-07-28-rc"))]
 pub use capabilities::LoggingCapability;
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
 pub use capabilities::RootsCapability;
 pub use capabilities::{
     ClientCapabilities, CompletionsCapability, ElicitationCapability, ElicitationFormCapability,
     ElicitationUrlCapability, PromptsCapability, ResourcesCapability, ServerCapabilities,
     ToolsCapability,
 };
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
 pub use capabilities::{SamplingCapability, SamplingContextCapability, SamplingToolsCapability};
 pub use completion::{Argument, CompleteRequestParams, CompleteResult, Completion};
 pub use content::{
@@ -119,7 +119,7 @@ pub use resource::{
     Resource, ResourceContents, ResourceTemplate, SubscribeRequestParams, TextResourceContents,
     UnsubscribeRequestParams, Uri,
 };
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
 pub use sampling::{
     CreateMessageRequestParams, CreateMessageResult, SamplingMessage, StopReason, ToolChoice,
     ToolChoiceMode,
@@ -143,7 +143,7 @@ pub use task::{
 pub use prompt::PromptHandler;
 
 pub use progress::ProgressToken;
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
 pub use root::Root;
 
 #[cfg(feature = "proto-2026-07-28-rc")]
@@ -167,9 +167,9 @@ mod reference;
 mod request;
 pub mod resource;
 mod response;
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
 pub mod root;
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
 pub mod sampling;
 mod schema;
 pub mod schema_2020;

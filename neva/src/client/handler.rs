@@ -1,9 +1,7 @@
 //! Request handling utilities
 
 use crate::client::notification_handler::NotificationsHandler;
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 use crate::types::sampling::SamplingHandler;
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 use crate::types::{Root, root::ListRootsResult};
 use crate::{
     client::options::McpOptions,
@@ -22,12 +20,11 @@ use std::{
     sync::atomic::{AtomicI64, Ordering},
     time::Duration,
 };
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 use tokio::sync::RwLock;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-#[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
+#[cfg(feature = "tasks")]
 use crate::types::CreateMessageRequestParams;
 #[cfg(feature = "tasks")]
 use crate::{
@@ -42,7 +39,6 @@ use crate::{
 #[cfg(feature = "tasks")]
 const DEFAULT_PAGE_SIZE: usize = 10;
 
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 struct Roots {
     /// Cached list of [`Root`]
     inner: Arc<RwLock<Vec<Root>>>,
@@ -70,11 +66,9 @@ pub(super) struct RequestHandler {
     sender: TransportProtoSender,
 
     /// Cached list of [`Root`]
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     roots: Roots,
 
     /// Represents a handler function that runs when received a "sampling/createMessage" request
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     sampling_handler: Option<SamplingHandler>,
 
     /// Represents a handler function that runs when received an "elicitation/create" request
@@ -88,7 +82,6 @@ pub(super) struct RequestHandler {
     tasks: Arc<TaskTracker>,
 }
 
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 impl Roots {
     fn new(options: &McpOptions, notifications_sender: &TransportProtoSender) -> Self {
         let mut roots = Self {
@@ -145,14 +138,12 @@ impl RequestHandler {
         let (tx, rx) = transport.split();
 
         let handler = Self {
-            #[cfg(not(feature = "proto-2026-07-28-rc"))]
             roots: Roots::new(options, &tx),
             counter: AtomicI64::new(1),
             pending: RequestQueue::new(options.timeout),
             sender: tx,
             timeout: options.timeout,
             token,
-            #[cfg(not(feature = "proto-2026-07-28-rc"))]
             sampling_handler: options.sampling_handler.clone(),
             elicitation_handler: options.elicitation_handler.clone(),
             notification_handler: options.notification_handler.clone(),
@@ -293,7 +284,6 @@ impl RequestHandler {
     }
 
     /// Updates [`Root`] cache
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     pub(super) fn notify_roots_changed(&mut self, roots: Vec<Root>) {
         self.roots.update(roots);
     }
@@ -302,9 +292,7 @@ impl RequestHandler {
     fn start(self, mut rx: TransportProtoReceiver) -> Self {
         let pending = self.pending.clone();
         let mut sender = self.sender.clone();
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
         let roots = self.roots.inner.clone();
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
         let sampling_handler = self.sampling_handler.clone();
         let elicitation_handler = self.elicitation_handler.clone();
         let notification_handler = self.notification_handler.clone();
@@ -319,9 +307,7 @@ impl RequestHandler {
                     Message::Request(req) => {
                         let resp = dispatch_request(
                             req,
-                            #[cfg(not(feature = "proto-2026-07-28-rc"))]
                             &roots,
-                            #[cfg(not(feature = "proto-2026-07-28-rc"))]
                             &sampling_handler,
                             &elicitation_handler,
                             #[cfg(feature = "tasks")]
@@ -356,9 +342,7 @@ impl RequestHandler {
                         // individual messages.
                         let responses = dispatch_batch_deferred(
                             deferred,
-                            #[cfg(not(feature = "proto-2026-07-28-rc"))]
                             &roots,
-                            #[cfg(not(feature = "proto-2026-07-28-rc"))]
                             &sampling_handler,
                             &elicitation_handler,
                             &notification_handler,
@@ -386,8 +370,8 @@ impl RequestHandler {
 #[inline]
 async fn dispatch_batch_deferred(
     deferred: Vec<MessageEnvelope>,
-    #[cfg(not(feature = "proto-2026-07-28-rc"))] roots: &Arc<RwLock<Vec<Root>>>,
-    #[cfg(not(feature = "proto-2026-07-28-rc"))] sampling_handler: &Option<SamplingHandler>,
+    roots: &Arc<RwLock<Vec<Root>>>,
+    sampling_handler: &Option<SamplingHandler>,
     elicitation_handler: &Option<ElicitationHandler>,
     notification_handler: &Option<Arc<NotificationsHandler>>,
     #[cfg(feature = "tasks")] tasks: &Arc<TaskTracker>,
@@ -400,9 +384,7 @@ async fn dispatch_batch_deferred(
             MessageEnvelope::Request(req) => Some(MessageEnvelope::Response(
                 dispatch_request(
                     req,
-                    #[cfg(not(feature = "proto-2026-07-28-rc"))]
                     roots,
-                    #[cfg(not(feature = "proto-2026-07-28-rc"))]
                     sampling_handler,
                     elicitation_handler,
                     #[cfg(feature = "tasks")]
@@ -435,14 +417,13 @@ async fn send_response_impl(sender: &mut TransportProtoSender, resp: Response) {
 #[inline]
 async fn dispatch_request(
     req: Request,
-    #[cfg(not(feature = "proto-2026-07-28-rc"))] roots: &Arc<RwLock<Vec<Root>>>,
-    #[cfg(not(feature = "proto-2026-07-28-rc"))] sampling_handler: &Option<SamplingHandler>,
+    roots: &Arc<RwLock<Vec<Root>>>,
+    sampling_handler: &Option<SamplingHandler>,
     elicitation_handler: &Option<ElicitationHandler>,
     #[cfg(feature = "tasks")] tasks: &Arc<TaskTracker>,
 ) -> Response {
     let req_id = req.id();
     match req.method.as_str() {
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
         crate::types::sampling::commands::CREATE => {
             handle_sampling(
                 req,
@@ -461,7 +442,6 @@ async fn dispatch_request(
             )
             .await
         }
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
         crate::types::root::commands::LIST => handle_roots(req, roots).await,
         #[cfg(feature = "tasks")]
         crate::types::task::commands::RESULT => get_task_result(req, tasks).await,
@@ -485,12 +465,11 @@ async fn dispatch_notification(
     if let Some(h) = handler {
         h.notify(notification).await
     } else {
-        #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+        #[cfg(feature = "tracing")]
         notification.write();
     }
 }
 
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 #[inline]
 async fn handle_roots(req: Request, roots: &Arc<RwLock<Vec<Root>>>) -> Response {
     let roots = {
@@ -501,7 +480,7 @@ async fn handle_roots(req: Request, roots: &Arc<RwLock<Vec<Root>>>) -> Response 
 }
 
 #[inline]
-#[cfg(all(not(feature = "tasks"), not(feature = "proto-2026-07-28-rc")))]
+#[cfg(not(feature = "tasks"))]
 async fn handle_sampling(req: Request, handler: &Option<SamplingHandler>) -> Response {
     let id = req.id();
     if let Some(handler) = &handler {
@@ -525,7 +504,7 @@ async fn handle_sampling(req: Request, handler: &Option<SamplingHandler>) -> Res
 }
 
 #[inline]
-#[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
+#[cfg(feature = "tasks")]
 async fn handle_sampling(
     req: Request,
     handler: &Option<SamplingHandler>,
@@ -733,20 +712,17 @@ fn validate_batch_ids(items: &[MessageEnvelope]) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     use std::pin::Pin;
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     use tokio::time::Instant;
 
     #[tokio::test]
     #[cfg(feature = "http-client")]
     async fn cancelled_transport_fails_pending_request_immediately() {
-        use crate::transport::http::HttpClient;
         use tokio::time::{Duration, timeout};
 
         let token = CancellationToken::new();
         let mut handler = RequestHandler::new(
-            TransportProto::HttpClient(HttpClient::default()),
+            TransportProto::HttpClient(Box::default()),
             &McpOptions::default(),
             token.clone(),
         );
@@ -817,7 +793,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     async fn batch_requests_are_dispatched_concurrently() {
         use crate::types::sampling::{CreateMessageRequestParams, CreateMessageResult};
         use tokio::time::Duration;
