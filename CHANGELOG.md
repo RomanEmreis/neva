@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     default `LoopbackHandler` opens the system browser and captures the
     redirect on a loopback listener. Tokens persist through the
     re-exported `TokenStore` abstraction (`InMemoryTokenStore` default).
+  * Token lifecycle: an access token about to expire (30s leeway) is
+    refreshed proactively before the next request, and a `401` tries the
+    refresh-token grant before falling back to interactive
+    authorization — refresh-token rotation and dead-entry pruning
+    included. Both paths are non-interactive and single-flight.
   * Everything exported under `neva::auth::oauth`.
 * Engine-neutral OAuth 2.1 resource-server primitives behind the new
   `server-oauth` feature (included in `server-full`), built on

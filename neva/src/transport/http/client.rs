@@ -46,13 +46,15 @@ enum ClientAuth {
 }
 
 impl ClientAuth {
-    /// The bearer token to attach right now, if any.
-    fn bearer(&self) -> Option<Arc<str>> {
+    /// The bearer token to attach to the next request, if any. Under a
+    /// managed OAuth session a token about to expire is refreshed first
+    /// (non-interactive, when a refresh token is available).
+    async fn fresh_bearer(&self) -> Option<Arc<str>> {
         match self {
             ClientAuth::None => None,
             ClientAuth::Static(token) => Some(token.clone()),
             #[cfg(feature = "client-oauth")]
-            ClientAuth::OAuth(session) => session.bearer(),
+            ClientAuth::OAuth(session) => session.refreshed_bearer().await,
         }
     }
 
@@ -238,7 +240,7 @@ async fn send_request(
     resp_tx: mpsc::Sender<Result<Message, Error>>,
     auth: ClientAuth,
 ) {
-    let bearer = auth.bearer();
+    let bearer = auth.fresh_bearer().await;
     let resp = match build_post(&client, &session, &req, bearer.as_deref())
         .send()
         .await
@@ -393,7 +395,7 @@ async fn handle_sse_connection(
     #[cfg(feature = "client-oauth")]
     let mut reauthorized = false;
     loop {
-        let bearer = auth.bearer();
+        let bearer = auth.fresh_bearer().await;
         let mut req = client
             .get(session.url())
             .header(ACCEPT, "application/json, text/event-stream")

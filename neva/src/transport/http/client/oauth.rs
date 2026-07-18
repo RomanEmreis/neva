@@ -17,6 +17,7 @@
 //! the system browser and capturing the redirect on a loopback listener.
 
 use futures_util::future::BoxFuture;
+use std::future::Future;
 use std::sync::{Arc, RwLock};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -481,6 +482,19 @@ impl OAuthClientConfig {
     }
 }
 
+/// The OAuth client and authorization-server metadata retained from the
+/// last successful flow — everything a non-interactive token refresh
+/// needs.
+struct FlowState {
+    client: OAuthClient,
+    metadata: AuthorizationServerMetadata,
+}
+
+/// How early before expiration a stored access token is proactively
+/// refreshed. Mirrors the leeway `OAuthClient::token` applies, so the
+/// cheap staleness probe and the actual refresh decision agree.
+const REFRESH_LEEWAY: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Per-connection OAuth state: the current access token and the
 /// single-flight authorization flow.
 pub(crate) struct OAuthSession {
@@ -490,8 +504,9 @@ pub(crate) struct OAuthSession {
     resource: String,
     /// Current bearer token, read on every outgoing request.
     token: RwLock<Option<Arc<str>>>,
-    /// Serializes authorization flows: concurrent 401s run one flow.
-    flow: Mutex<()>,
+    /// Serializes authorization flows (concurrent 401s run one flow) and
+    /// caches the client + metadata for non-interactive refresh.
+    flow: Mutex<Option<FlowState>>,
 }
 
 impl std::fmt::Debug for OAuthSession {
@@ -516,7 +531,7 @@ impl OAuthSession {
             config,
             resource,
             token: RwLock::new(token),
-            flow: Mutex::new(()),
+            flow: Mutex::new(None),
         })
     }
 
@@ -526,6 +541,76 @@ impl OAuthSession {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    fn set_token(&self, token: Arc<str>) {
+        *self
+            .token
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(token);
+    }
+
+    /// The bearer token to attach to the next request, proactively
+    /// refreshed when the stored set is about to expire and a refresh
+    /// token is available — the session then renews without user
+    /// interaction. Falls back to the current token when refresh is not
+    /// possible; the `401` path handles the rest.
+    pub(crate) async fn refreshed_bearer(&self) -> Option<Arc<str>> {
+        // Cheap staleness probe before taking the flow lock.
+        let stale = self
+            .config
+            .store
+            .get(&self.resource)
+            .is_some_and(|tokens| tokens.expires_within(REFRESH_LEEWAY));
+
+        if !stale {
+            return self.bearer();
+        }
+
+        let mut flow = self.flow.lock().await;
+        self.maintain(&mut flow).await.or_else(|| self.bearer())
+    }
+
+    /// Non-interactive token maintenance through the cached client:
+    /// serves the stored set, refreshing it when stale (rotation
+    /// carry-over and dead-entry pruning included, via
+    /// `OAuthClient::token`). Returns `None` when interactive
+    /// authorization is required or no flow has completed yet.
+    async fn maintain(&self, state: &mut Option<FlowState>) -> Option<Arc<str>> {
+        let FlowState { client, metadata } = state.take()?;
+        let key = self.resource.clone();
+        let outcome = run_non_send(move || async move {
+            let result = client.token(&key, &metadata).await;
+            Ok((client, metadata, result))
+        })
+        .await;
+
+        match outcome {
+            Ok((client, metadata, result)) => {
+                *state = Some(FlowState { client, metadata });
+                match result {
+                    Ok(Some(tokens)) => {
+                        let token: Arc<str> = tokens.access_token.into();
+                        self.set_token(token.clone());
+                        Some(token)
+                    }
+                    // Nothing renewable — interactive authorization it is.
+                    Ok(None) => None,
+                    // Transient failure (issuer unreachable): keep the
+                    // current token and let the request outcome decide.
+                    Err(_err) => {
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!(logger = "neva", "token refresh failed: {_err}");
+                        None
+                    }
+                }
+            }
+            Err(_err) => {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(logger = "neva", "token refresh failed: {_err}");
+                None
+            }
+        }
     }
 
     /// Runs the authorization flow triggered by a `401` and returns the
@@ -541,13 +626,22 @@ impl OAuthSession {
         www_authenticate: Option<&str>,
         used: Option<&str>,
     ) -> Result<Arc<str>, Error> {
-        let _flight = self.flow.lock().await;
+        let mut flight = self.flow.lock().await;
 
         // Someone else completed the flow while this caller waited.
         if let Some(current) = self.bearer()
             && used != Some(&*current)
         {
             return Ok(current);
+        }
+
+        // Refresh before interrupting the user: a stored refresh token
+        // renews the session silently. A token identical to the rejected
+        // one is no help though (revoked server-side) — interactive then.
+        if let Some(token) = self.maintain(&mut flight).await
+            && used != Some(&*token)
+        {
+            return Ok(token);
         }
 
         let metadata_url = www_authenticate
@@ -594,14 +688,19 @@ impl OAuthSession {
         }
         validate_issuer(&params, &server_metadata)?;
 
-        let tokens = exchange_code(client, server_metadata, params, request).await?;
+        let (client, server_metadata, tokens) =
+            exchange_code(client, server_metadata, params, request).await?;
 
         self.config.store.put(&self.resource, &tokens);
+        // Keep the client + metadata so future refreshes stay
+        // non-interactive.
+        *flight = Some(FlowState {
+            client,
+            metadata: server_metadata,
+        });
+        
         let token: Arc<str> = tokens.access_token.into();
-        *self
-            .token
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(token.clone());
+        self.set_token(token.clone());
         Ok(token)
     }
 
@@ -711,29 +810,46 @@ fn validate_issuer(
     }
 }
 
-/// Exchanges the authorization code for tokens on a dedicated
-/// current-thread runtime.
-///
-/// `OAuthClient::exchange_code` in volga-oauth-client 0.9.5 holds a
-/// `form_urlencoded::Serializer` across an `.await`, which makes its
-/// future `!Send` — it cannot run inside neva's spawned request tasks
-/// directly. The token exchange is a single short round-trip at the end
-/// of an interactive flow, so bridging it through `spawn_blocking` is
-/// invisible in practice. Drop this bridge once upstream releases a
-/// `Send` `exchange_code`.
+/// Exchanges the authorization code for tokens, returning the client
+/// and metadata back for the session's refresh cache.
 async fn exchange_code(
     client: OAuthClient,
     server_metadata: AuthorizationServerMetadata,
     params: CallbackParams,
     request: volga_oauth_client::AuthorizationRequest,
-) -> Result<TokenSet, Error> {
+) -> Result<(OAuthClient, AuthorizationServerMetadata, TokenSet), Error> {
+    run_non_send(move || async move {
+        let tokens = client
+            .exchange_code(&server_metadata, &params.code, &request)
+            .await
+            .map_err(flow_error)?;
+        Ok((client, server_metadata, tokens))
+    })
+    .await
+}
+
+/// Runs a token-endpoint future to completion on a dedicated
+/// current-thread runtime.
+///
+/// `OAuthClient::exchange_code` / `refresh` in volga-oauth-client 0.9.5
+/// hold a `form_urlencoded::Serializer` across an `.await`, which makes
+/// their futures `!Send` — they cannot run inside neva's spawned request
+/// tasks directly. These are single short round-trips (end of an
+/// interactive flow, or a rare refresh), so bridging them through
+/// `spawn_blocking` is invisible in practice. Drop this bridge once
+/// upstream ships `Send` token-endpoint futures.
+async fn run_non_send<T, F, Fut>(f: F) -> Result<T, Error>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<T, Error>>,
+    T: Send + 'static,
+{
     tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(Error::from)?;
-        rt.block_on(client.exchange_code(&server_metadata, &params.code, &request))
-            .map_err(flow_error)
+        rt.block_on(f())
     })
     .await
     .map_err(|err| Error::new(ErrorCode::InternalError, err.to_string()))?
@@ -881,6 +997,111 @@ mod tests {
 
         let browser_view = callback.await.unwrap();
         assert!(browser_view.starts_with("HTTP/1.1 200"));
+    }
+
+    /// Serves one canned token-endpoint response over raw HTTP and
+    /// returns the bound address.
+    async fn spawn_token_endpoint(body: &'static str) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(resp.as_bytes()).await.unwrap();
+        });
+        addr
+    }
+
+    fn stale_tokens() -> TokenSet {
+        TokenSet {
+            access_token: "stale-token".into(),
+            token_type: "Bearer".into(),
+            refresh_token: Some("refresh-1".into()),
+            scope: None,
+            id_token: None,
+            expires_at: Some(std::time::SystemTime::now()),
+        }
+    }
+
+    fn session_with(store: Arc<dyn TokenStore>, flow: Option<FlowState>) -> OAuthSession {
+        let config = OAuthClientConfig {
+            store,
+            ..OAuthClientConfig::default()
+        };
+        OAuthSession {
+            config,
+            resource: "http://127.0.0.1:3000/mcp".into(),
+            token: RwLock::new(Some("stale-token".into())),
+            flow: Mutex::new(flow),
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_token_is_refreshed_without_interaction() {
+        let addr = spawn_token_endpoint(
+            r#"{"access_token":"fresh-token","token_type":"Bearer","expires_in":3600}"#,
+        )
+        .await;
+
+        let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+        store.put("http://127.0.0.1:3000/mcp", &stale_tokens());
+
+        let flow = FlowState {
+            client: OAuthClient::new("cid")
+                .with_config(ClientConfig::new().require_https(false))
+                .with_token_store(store.clone()),
+            metadata: AuthorizationServerMetadata::new("http://issuer.local")
+                .with_token_endpoint(format!("http://{addr}/token")),
+        };
+        let session = session_with(store.clone(), Some(flow));
+
+        let token = session.refreshed_bearer().await;
+
+        assert_eq!(token.as_deref(), Some("fresh-token"));
+        let stored = store.get("http://127.0.0.1:3000/mcp").unwrap();
+        assert_eq!(stored.access_token, "fresh-token");
+        // No rotation in the response — the old refresh token carries over.
+        assert_eq!(stored.refresh_token.as_deref(), Some("refresh-1"));
+        // The flow state survives for the next refresh.
+        assert!(session.flow.lock().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn fresh_token_skips_refresh() {
+        let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+        let mut tokens = stale_tokens();
+        tokens.expires_at =
+            Some(std::time::SystemTime::now() + std::time::Duration::from_secs(3600));
+        store.put("http://127.0.0.1:3000/mcp", &tokens);
+
+        // No flow state — a refresh attempt would return None; a fresh
+        // token must never get that far.
+        let session = session_with(store, None);
+
+        assert_eq!(
+            session.refreshed_bearer().await.as_deref(),
+            Some("stale-token")
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_token_without_flow_state_stays_usable() {
+        let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+        store.put("http://127.0.0.1:3000/mcp", &stale_tokens());
+
+        let session = session_with(store, None);
+
+        // Nothing to refresh with — the current token is returned and
+        // the 401 path decides what happens next.
+        assert_eq!(
+            session.refreshed_bearer().await.as_deref(),
+            Some("stale-token")
+        );
     }
 
     #[tokio::test]
