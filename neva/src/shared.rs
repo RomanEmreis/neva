@@ -50,7 +50,12 @@ mod task_tracker;
 pub(crate) fn wait_for_shutdown_signal(token: CancellationToken) {
     tokio::spawn(async move {
         match wait_for_shutdown_signal_impl().await {
-            Ok(_) => (),
+            // A shutdown signal actually arrived — cancel the transport.
+            Ok(_) => token.cancel(),
+            // Failing to *register* the handler (e.g. a sandboxed
+            // environment restricting signal APIs) must not tear the
+            // transport down — the watcher simply exits and process
+            // lifecycle stays with whatever launched it.
             #[cfg(feature = "tracing")]
             Err(err) => tracing::error!(
                 logger = "neva",
@@ -60,7 +65,6 @@ pub(crate) fn wait_for_shutdown_signal(token: CancellationToken) {
             #[cfg(not(feature = "tracing"))]
             Err(_) => (),
         }
-        token.cancel();
     });
 }
 

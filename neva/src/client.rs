@@ -2140,7 +2140,19 @@ mod rc_roundtrip_tests {
             .with_options(|opt| opt.with_http(|http| http.bind("127.0.0.1:39817")));
         app.map_tool("echo", |name: String| async move { name });
         tokio::spawn(app.run());
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // Wait until the server socket actually accepts connections —
+        // a fixed sleep is not enough on loaded CI machines.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match tokio::net::TcpStream::connect("127.0.0.1:39817").await {
+                Ok(_) => break,
+                Err(_) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await
+                }
+                Err(err) => panic!("RC server never became reachable: {err}"),
+            }
+        }
 
         let mut client = Client::new().with_options(|opt| {
             opt.with_http(|http| http.bind("127.0.0.1:39817"))
