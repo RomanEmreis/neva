@@ -259,15 +259,25 @@ impl Client {
         Ok(())
     }
 
-    /// The protocol version this client expects from the connected peer:
-    /// the configured one, or the negotiated legacy version after a
-    /// dual-mode fallback.
+    /// The protocol version this client expects from the connected peer.
+    ///
+    /// Under the RC flag the RC expectation is pinned to
+    /// [`crate::RC_PROTOCOL_VERSION`]: a `with_mcp_version` override only
+    /// selects which legacy version the dual-mode fallback negotiates —
+    /// it must never make `server/discover` reject a valid RC server.
     fn expected_protocol_ver(&self) -> &'static str {
         #[cfg(feature = "proto-2026-07-28-rc")]
-        if self.is_legacy_peer() {
-            return self.options.legacy_protocol_ver();
+        {
+            if self.is_legacy_peer() {
+                self.options.legacy_protocol_ver()
+            } else {
+                crate::RC_PROTOCOL_VERSION
+            }
         }
-        self.options.protocol_ver()
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        {
+            self.options.protocol_ver()
+        }
     }
 
     /// Validates a server-reported protocol version against what this client
@@ -1878,7 +1888,21 @@ mod dual_mode_tests {
     /// A minimal 2025-11-25 server: rejects `server/discover` with
     /// `MethodNotFound`, answers `initialize` with a session id, serves
     /// an SSE GET stream and an empty `tools/list`.
-    async fn serve_legacy(listener: TcpListener, log: Arc<Mutex<Vec<String>>>) {
+    /// How the mock rejects `server/discover` — legacy servers in the
+    /// wild answer either with a JSON-RPC `MethodNotFound` (neva's own
+    /// legacy build) or with a plain non-JSON-RPC 4xx page (framework
+    /// routers, the TS SDK's "server not initialized" family).
+    #[derive(Clone, Copy)]
+    enum DiscoverRejection {
+        MethodNotFound,
+        Html400,
+    }
+
+    async fn serve_legacy(
+        listener: TcpListener,
+        log: Arc<Mutex<Vec<String>>>,
+        rejection: DiscoverRejection,
+    ) {
         loop {
             let Ok((mut stream, _)) = listener.accept().await else {
                 return;
@@ -1911,21 +1935,32 @@ mod dual_mode_tests {
                         .and_then(|m| m.as_str())
                         .unwrap_or_default()
                     {
-                        crate::commands::DISCOVER => {
-                            let body = serde_json::json!({
-                                "jsonrpc": "2.0",
-                                "id": id,
-                                "error": { "code": -32601, "message": "Method not found" }
-                            })
-                            .to_string();
-                            write_response(
-                                &mut stream,
-                                "200 OK",
-                                "Content-Type: application/json\r\n",
-                                &body,
-                            )
-                            .await;
-                        }
+                        crate::commands::DISCOVER => match rejection {
+                            DiscoverRejection::MethodNotFound => {
+                                let body = serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "error": { "code": -32601, "message": "Method not found" }
+                                })
+                                .to_string();
+                                write_response(
+                                    &mut stream,
+                                    "200 OK",
+                                    "Content-Type: application/json\r\n",
+                                    &body,
+                                )
+                                .await;
+                            }
+                            DiscoverRejection::Html400 => {
+                                write_response(
+                                    &mut stream,
+                                    "400 Bad Request",
+                                    "Content-Type: text/html\r\n",
+                                    "<html><body>Bad Request</body></html>",
+                                )
+                                .await;
+                            }
+                        },
                         crate::commands::INIT => {
                             let body = rpc_result(
                                 &id,
@@ -1963,7 +1998,11 @@ mod dual_mode_tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let log = Arc::new(Mutex::new(Vec::<String>::new()));
-        tokio::spawn(serve_legacy(listener, log.clone()));
+        tokio::spawn(serve_legacy(
+            listener,
+            log.clone(),
+            DiscoverRejection::MethodNotFound,
+        ));
 
         let mut client = Client::new().with_options(|opt| {
             opt.with_http(|http| http.bind(addr.to_string()))
@@ -2026,6 +2065,51 @@ mod dual_mode_tests {
             list_lower.contains(&format!("mcp-session-id: {LEGACY_SESSION_ID}")),
             "the captured session id must ride every request"
         );
+    }
+
+    /// A legacy server that rejects `server/discover` with a plain
+    /// non-JSON-RPC 4xx page (no JSON-RPC error at all) must also
+    /// trigger the fallback: the transport completes the request with an
+    /// id-bound `ParseError` response instead of a bare channel error.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rc_client_falls_back_when_discover_gets_a_non_json_4xx() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        tokio::spawn(serve_legacy(
+            listener,
+            log.clone(),
+            DiscoverRejection::Html400,
+        ));
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                .with_timeout(std::time::Duration::from_secs(5))
+        });
+
+        client
+            .connect()
+            .await
+            .expect("fallback connect must succeed");
+        assert!(client.is_legacy_peer(), "peer must be marked legacy");
+
+        let tools = client
+            .list_tools(None)
+            .await
+            .expect("tools/list must work after the fallback");
+        assert!(tools.tools.is_empty());
+    }
+
+    /// A `with_mcp_version` legacy override must not leak into the RC
+    /// expectation: `server/discover` still expects the RC version, the
+    /// override only selects the fallback's negotiated legacy version.
+    #[test]
+    fn legacy_version_override_keeps_the_rc_expectation() {
+        let client = Client::new().with_options(|opt| opt.with_mcp_version("2025-06-18"));
+        assert_eq!(client.expected_protocol_ver(), crate::RC_PROTOCOL_VERSION);
+
+        client.options.peer_mode.set_legacy();
+        assert_eq!(client.expected_protocol_ver(), "2025-06-18");
     }
 }
 

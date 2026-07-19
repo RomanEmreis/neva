@@ -300,7 +300,7 @@ async fn send_request(
         session.set_session_id(session_id);
     }
 
-    if let Message::Request(r) = req
+    if let Message::Request(r) = &req
         && r.method == crate::commands::INIT
     {
         let token = session.cancellation_token();
@@ -315,11 +315,50 @@ async fn send_request(
         }
     }
 
-    let resp = resp.json::<Message>().await;
+    match resp.json::<Message>().await {
+        Ok(msg) => {
+            if let Err(_err) = resp_tx.send(Ok(msg)).await {
+                #[cfg(feature = "tracing")]
+                tracing::error!(logger = "neva", "Failed to send response: {}", _err);
+            }
+        }
+        // A reply that is not JSON-RPC — an HTML error page, or an error
+        // code outside neva's `ErrorCode` set (e.g. the TS SDK's -32000).
+        // Complete every originating request with an id-bound `ParseError`
+        // response: a bare `Err` pushed into the channel would terminate
+        // the receive loop without ever resolving the pending request.
+        // This is also what lets `server/discover` classify such replies
+        // and fall back to `initialize`.
+        Err(err) => {
+            #[cfg(feature = "tracing")]
+            tracing::error!(logger = "neva", "Failed to parse HTTP response: {}", err);
+            let reason = err.to_string();
+            for id in request_ids(&req) {
+                let resp = crate::types::Response::error(
+                    id,
+                    Error::new(ErrorCode::ParseError, reason.clone()),
+                );
+                if resp_tx.send(Ok(Message::Response(resp))).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
 
-    if let Err(_err) = resp_tx.send(resp.map_err(Error::from)).await {
-        #[cfg(feature = "tracing")]
-        tracing::error!(logger = "neva", "Failed to send response: {}", _err);
+/// The ids of the requests `msg` carries (empty for notifications and
+/// notification-only batches).
+fn request_ids(msg: &Message) -> Vec<crate::types::RequestId> {
+    match msg {
+        Message::Request(r) => vec![r.id()],
+        Message::Batch(batch) => batch
+            .iter()
+            .filter_map(|envelope| match envelope {
+                crate::types::MessageEnvelope::Request(r) => Some(r.id()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -516,14 +555,23 @@ async fn handle_msg(
     let Some(data) = event.data else {
         return false;
     };
-    let msg = serde_json::from_str::<Message>(&data);
-    let parsed_ok = msg.is_ok();
-    if let Err(_err) = resp_tx.send(msg.map_err(Error::from)).await {
+    // A malformed SSE frame must not reach the receive loop as a bare
+    // `Err` (that would terminate it) — log and skip; the last event id
+    // does not advance, so a reconnect replays the event.
+    let msg = match serde_json::from_str::<Message>(&data) {
+        Ok(msg) => msg,
+        Err(_err) => {
+            #[cfg(feature = "tracing")]
+            tracing::error!(logger = "neva", "Failed to parse SSE event: {}", _err);
+            return false;
+        }
+    };
+    if let Err(_err) = resp_tx.send(Ok(msg)).await {
         #[cfg(feature = "tracing")]
         tracing::error!(logger = "neva", "Failed to send server request: {}", _err);
         return false;
     }
-    parsed_ok
+    true
 }
 
 #[inline]

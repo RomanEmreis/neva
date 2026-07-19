@@ -294,6 +294,11 @@ impl McpOptions {
     }
 
     /// Returns a Model Context Protocol version that client supports
+    ///
+    /// Under `proto-2026-07-28-rc` the RC version is pinned and the
+    /// legacy override is read via
+    /// [`legacy_protocol_ver`](Self::legacy_protocol_ver) instead.
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     #[inline]
     pub(crate) fn protocol_ver(&self) -> &'static str {
         match self.protocol_ver {
