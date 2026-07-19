@@ -949,12 +949,22 @@ impl Client {
     }
 
     /// Resolves the server's tasks capability from the negotiated server
-    /// capabilities (extension form, MCP 2026-07-28 RC).
+    /// capabilities (MCP 2026-07-28 RC build).
+    ///
+    /// An RC peer advertises tasks through
+    /// `capabilities.extensions["io.modelcontextprotocol/tasks"]`; a
+    /// legacy peer reached via the dual-mode fallback advertises the
+    /// top-level `tasks` field of its `initialize` result — both must
+    /// resolve, or task-augmented calls report no support after a
+    /// fallback.
     #[cfg(all(feature = "tasks", feature = "proto-2026-07-28-rc"))]
     fn server_tasks_capability(&self) -> Option<crate::types::ServerTasksCapability> {
-        self.server_capabilities
+        let caps = self.server_capabilities.as_ref()?;
+        if let Some(tasks) = &caps.tasks {
+            return Some(tasks.clone());
+        }
+        caps.extensions
             .as_ref()
-            .and_then(|c| c.extensions.as_ref())
             .and_then(|ext| ext.get(crate::types::task::TASKS_EXTENSION_ID))
             .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
@@ -2143,5 +2153,48 @@ mod rc_roundtrip_tests {
         let tools = client.list_tools(None).await.expect("tools/list");
         assert_eq!(tools.tools.len(), 1);
         assert_eq!(tools.tools[0].name, "echo");
+    }
+}
+
+/// After a dual-mode fallback, a legacy peer's top-level `tasks`
+/// capability must survive and resolve — an RC peer's extension form
+/// must keep working too.
+#[cfg(all(test, feature = "tasks", feature = "proto-2026-07-28-rc"))]
+mod fallback_tasks_capability_tests {
+    use super::*;
+    use crate::types::ServerCapabilities;
+    use serde_json::json;
+
+    fn client_with_capabilities(caps: serde_json::Value) -> Client {
+        let mut client = Client::new();
+        client.server_capabilities =
+            Some(serde_json::from_value::<ServerCapabilities>(caps).expect("valid capabilities"));
+        client
+    }
+
+    #[test]
+    fn legacy_top_level_tasks_capability_resolves() {
+        let client = client_with_capabilities(json!({
+            "tools": {},
+            "tasks": { "requests": { "tools": { "call": {} } } }
+        }));
+        assert!(client.is_server_supports_tasks());
+    }
+
+    #[test]
+    fn rc_extension_tasks_capability_still_resolves() {
+        let client = client_with_capabilities(json!({
+            "tools": {},
+            "extensions": {
+                "io.modelcontextprotocol/tasks": { "requests": { "tools": { "call": {} } } }
+            }
+        }));
+        assert!(client.is_server_supports_tasks());
+    }
+
+    #[test]
+    fn no_tasks_capability_resolves_to_none() {
+        let client = client_with_capabilities(json!({ "tools": {} }));
+        assert!(!client.is_server_supports_tasks());
     }
 }

@@ -822,6 +822,11 @@ impl DiscoverResult {
                 prompts: options.prompts_capability(),
                 completions: Some(CompletionsCapability::default()),
                 extensions: options.extensions(),
+                // The legacy field exists in this build only because the
+                // dual-mode client resurrects it; the RC server always
+                // advertises tasks through `extensions`.
+                #[cfg(all(feature = "tasks", feature = "client"))]
+                tasks: None,
                 experimental: None,
             },
             server_info: options.implementation.clone(),

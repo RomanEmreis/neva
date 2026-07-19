@@ -193,7 +193,15 @@ pub struct ServerCapabilities {
     /// Under `proto-2026-07-28-rc`, tasks become an extension; this top-level
     /// field is replaced by an entry in the `extensions` map keyed by
     /// `io.modelcontextprotocol/tasks`.
-    #[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
+    ///
+    /// Compiled for the RC **client** too: after a dual-mode fallback a
+    /// legacy peer advertises tasks here, and the field must survive
+    /// deserialization of its `initialize` result. The RC server never
+    /// sets it, and `skip_serializing_if` keeps the RC wire unchanged.
+    #[cfg(all(
+        feature = "tasks",
+        any(not(feature = "proto-2026-07-28-rc"), feature = "client")
+    ))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tasks: Option<ServerTasksCapability>,
 
