@@ -360,21 +360,28 @@ impl Client {
     /// notification is sent — the transport is stateless.
     #[cfg(feature = "proto-2026-07-28-rc")]
     pub async fn discover(&mut self) -> Result<(), Error> {
-        let req = Request::new(
+        let resp = self.send_request(Self::discover_request()).await?;
+        let result = resp.into_result::<crate::types::DiscoverResult>()?;
+        self.apply_discover(result)
+    }
+
+    /// Builds the `server/discover` request.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    fn discover_request() -> Request {
+        Request::new(
             Some(RequestId::Uuid(uuid::Uuid::new_v4())),
             crate::commands::DISCOVER,
             Some(crate::types::DiscoverRequestParams::default()),
-        );
+        )
+    }
 
-        let resp = self.send_request(req).await?;
-
-        let result = resp.into_result::<crate::types::DiscoverResult>()?;
-
+    /// Applies a successful `server/discover` result: validates the
+    /// reported protocol version and stores the capabilities.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    fn apply_discover(&mut self, result: crate::types::DiscoverResult) -> Result<(), Error> {
         self.validate_server_version(result.protocol_ver.as_str())?;
-
         self.server_capabilities = Some(result.capabilities);
         self.server_info = Some(result.server_info);
-
         Ok(())
     }
 
@@ -383,20 +390,45 @@ impl Client {
     /// falls back to the legacy `initialize` handshake and marks the
     /// peer as legacy — subsequent traffic uses legacy semantics
     /// (session header, SSE stream, no MRTR, no RC routing headers).
+    ///
+    /// Only **wire-phase** failures classify for the fallback: transport
+    /// errors and the server's JSON-RPC *error* reply. Once the server
+    /// answers `server/discover` successfully, the peer has committed to
+    /// the RC protocol — later local failures (a malformed result, an
+    /// unsupported/mismatched `protocolVersion`) surface as real errors
+    /// instead of a misleading fallback attempt on a transport that
+    /// version validation may already have cancelled.
     #[cfg(feature = "proto-2026-07-28-rc")]
     pub async fn init(&mut self) -> Result<(), Error> {
-        match self.discover().await {
-            Err(err) if is_fallback_trigger(&err) => {
-                #[cfg(feature = "tracing")]
-                tracing::info!(
-                    logger = "neva",
-                    "`server/discover` rejected ({err}); falling back to `initialize`"
-                );
-                self.options.peer_mode.set_legacy();
-                self.legacy_init().await
+        let resp = match self.send_request(Self::discover_request()).await {
+            Ok(resp) => resp,
+            Err(err) if is_fallback_trigger(&err) => return self.fallback_init(&err).await,
+            Err(err) => return Err(err),
+        };
+
+        let is_error_reply = matches!(resp, Response::Err(_));
+        let result = match resp.into_result::<crate::types::DiscoverResult>() {
+            Ok(result) => result,
+            Err(err) if is_error_reply && is_fallback_trigger(&err) => {
+                return self.fallback_init(&err).await;
             }
-            other => other,
-        }
+            Err(err) => return Err(err),
+        };
+
+        self.apply_discover(result)
+    }
+
+    /// Runs the legacy half of the dual-mode handshake after a
+    /// classified `server/discover` rejection.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    async fn fallback_init(&mut self, _err: &Error) -> Result<(), Error> {
+        #[cfg(feature = "tracing")]
+        tracing::info!(
+            logger = "neva",
+            "`server/discover` rejected ({_err}); falling back to `initialize`"
+        );
+        self.options.peer_mode.set_legacy();
+        self.legacy_init().await
     }
 
     /// Whether the peer negotiated the legacy protocol through the
@@ -1898,20 +1930,23 @@ mod dual_mode_tests {
     /// A minimal 2025-11-25 server: rejects `server/discover` with
     /// `MethodNotFound`, answers `initialize` with a session id, serves
     /// an SSE GET stream and an empty `tools/list`.
-    /// How the mock rejects `server/discover` — legacy servers in the
-    /// wild answer either with a JSON-RPC `MethodNotFound` (neva's own
-    /// legacy build) or with a plain non-JSON-RPC 4xx page (framework
-    /// routers, the TS SDK's "server not initialized" family).
+    /// How the mock answers `server/discover`: legacy servers reject it
+    /// with a JSON-RPC `MethodNotFound` (neva's own legacy build) or a
+    /// plain non-JSON-RPC 4xx page (framework routers, the TS SDK's
+    /// "server not initialized" family); a future server answers
+    /// *successfully* but with a `protocolVersion` this build does not
+    /// support — which must NOT trigger the fallback.
     #[derive(Clone, Copy)]
-    enum DiscoverRejection {
+    enum DiscoverReply {
         MethodNotFound,
         Html400,
+        UnsupportedVersion,
     }
 
     async fn serve_legacy(
         listener: TcpListener,
         log: Arc<Mutex<Vec<String>>>,
-        rejection: DiscoverRejection,
+        reply: DiscoverReply,
     ) {
         loop {
             let Ok((mut stream, _)) = listener.accept().await else {
@@ -1945,8 +1980,8 @@ mod dual_mode_tests {
                         .and_then(|m| m.as_str())
                         .unwrap_or_default()
                     {
-                        crate::commands::DISCOVER => match rejection {
-                            DiscoverRejection::MethodNotFound => {
+                        crate::commands::DISCOVER => match reply {
+                            DiscoverReply::MethodNotFound => {
                                 let body = serde_json::json!({
                                     "jsonrpc": "2.0",
                                     "id": id,
@@ -1961,12 +1996,29 @@ mod dual_mode_tests {
                                 )
                                 .await;
                             }
-                            DiscoverRejection::Html400 => {
+                            DiscoverReply::Html400 => {
                                 write_response(
                                     &mut stream,
                                     "400 Bad Request",
                                     "Content-Type: text/html\r\n",
                                     "<html><body>Bad Request</body></html>",
+                                )
+                                .await;
+                            }
+                            DiscoverReply::UnsupportedVersion => {
+                                let body = rpc_result(
+                                    &id,
+                                    serde_json::json!({
+                                        "protocolVersion": "2099-01-01",
+                                        "capabilities": { "tools": {} },
+                                        "serverInfo": { "name": "future-mock", "version": "1.0.0" }
+                                    }),
+                                );
+                                write_response(
+                                    &mut stream,
+                                    "200 OK",
+                                    "Content-Type: application/json\r\n",
+                                    &body,
                                 )
                                 .await;
                             }
@@ -2011,7 +2063,7 @@ mod dual_mode_tests {
         tokio::spawn(serve_legacy(
             listener,
             log.clone(),
-            DiscoverRejection::MethodNotFound,
+            DiscoverReply::MethodNotFound,
         ));
 
         let mut client = Client::new().with_options(|opt| {
@@ -2086,11 +2138,7 @@ mod dual_mode_tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let log = Arc::new(Mutex::new(Vec::<String>::new()));
-        tokio::spawn(serve_legacy(
-            listener,
-            log.clone(),
-            DiscoverRejection::Html400,
-        ));
+        tokio::spawn(serve_legacy(listener, log.clone(), DiscoverReply::Html400));
 
         let mut client = Client::new().with_options(|opt| {
             opt.with_http(|http| http.bind(addr.to_string()))
@@ -2108,6 +2156,50 @@ mod dual_mode_tests {
             .await
             .expect("tools/list must work after the fallback");
         assert!(tools.tools.is_empty());
+    }
+
+    /// A server that answers `server/discover` *successfully* but with a
+    /// protocol version this build does not support has committed to the
+    /// RC path — the client must surface the real version error, not
+    /// mark the peer legacy and chase `initialize` on a cancelled
+    /// transport.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn successful_discover_with_unsupported_version_does_not_fall_back() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        tokio::spawn(serve_legacy(
+            listener,
+            log.clone(),
+            DiscoverReply::UnsupportedVersion,
+        ));
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                .with_timeout(std::time::Duration::from_secs(5))
+        });
+
+        let err = client
+            .connect()
+            .await
+            .expect_err("an unsupported RC version must fail the connect");
+        assert!(
+            err.to_string()
+                .contains("Unsupported server protocol version"),
+            "the real version error must surface, got: {err}"
+        );
+        assert!(
+            !client.is_legacy_peer(),
+            "a successful discovery must never mark the peer legacy"
+        );
+
+        let log = log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            !log.iter().any(|r| r.contains("\"method\":\"initialize\"")),
+            "no initialize fallback may be attempted after successful discovery"
+        );
     }
 
     /// A `with_mcp_version` legacy override must not leak into the RC
