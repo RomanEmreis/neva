@@ -118,6 +118,51 @@ impl StdIoSender {
     }
 }
 
+/// Parses one stdio line into a [`Message`].
+///
+/// A line that isn't a readable `Message` — malformed JSON, or a JSON-RPC
+/// error whose `code` falls outside neva's [`ErrorCode`] set (the TS SDK's
+/// `-32000` "server not initialized" family) — must **not** tear down the
+/// receive loop: the peer is alive and every following line is still
+/// readable. Pushing a bare `Err` did exactly that, and since the loop
+/// died before completing the pending request, the caller saw a timeout
+/// instead of the parse failure.
+///
+/// So when the line carries an `id`, the failure is reported as an
+/// id-bound `ParseError` response: the pending request completes with the
+/// real cause. That is also what makes the RC client's dual-mode fallback
+/// reachable over stdio — it classifies such a rejection as "legacy peer"
+/// and retries `initialize`, which a timeout never could.
+///
+/// A line with no usable `id` belongs to no pending request; it is logged
+/// and dropped.
+fn parse_line(line: &str) -> Option<Message> {
+    let err = match serde_json::from_str::<Message>(line) {
+        Ok(msg) => return Some(msg),
+        Err(err) => err,
+    };
+
+    let id = serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|line| line.get("id").cloned())
+        .and_then(|id| serde_json::from_value::<crate::types::RequestId>(id).ok());
+
+    let Some(id) = id else {
+        #[cfg(feature = "tracing")]
+        tracing::error!(
+            logger = "neva",
+            "Failed to parse an unaddressed stdio message: {}",
+            err
+        );
+        return None;
+    };
+
+    Some(Message::Response(crate::types::Response::error(
+        id,
+        Error::new(ErrorCode::ParseError, err.to_string()),
+    )))
+}
+
 impl StdIoReceiver {
     /// Creates a new stdio transport receiver
     pub(crate) fn new() -> Self {
@@ -143,11 +188,8 @@ impl StdIoReceiver {
                         match read_line {
                             Ok(0) => break, // EOF
                             Ok(_) => {
-                                let req = match serde_json::from_str(&line) {
-                                    Ok(req) => Ok(req),
-                                    Err(err) => Err(err.into()),
-                                };
-                                if let Err(_e) = tx.send(req).await {
+                                let Some(msg) = parse_line(&line) else { continue };
+                                if let Err(_e) = tx.send(Ok(msg)).await {
                                     #[cfg(feature = "tracing")]
                                     tracing::error!(logger = "neva", "Failed to send request: {:?}", _e);
                                     break;
@@ -323,6 +365,84 @@ impl Transport for StdIoServer {
     #[inline]
     fn split(self) -> (Self::Sender, Self::Receiver) {
         (self.sender, self.receiver)
+    }
+}
+
+#[cfg(test)]
+mod parse_line_tests {
+    use super::*;
+    use crate::types::RequestId;
+
+    /// A JSON-RPC error whose code is outside neva's `ErrorCode` set (the
+    /// TS SDK's `-32000`) is the exact reply a legacy server sends to the
+    /// RC client's pre-initialize `server/discover`. It must complete the
+    /// pending request as an id-bound `ParseError`, not kill the loop.
+    #[test]
+    fn unknown_error_code_becomes_an_id_bound_parse_error() {
+        let line = r#"{"jsonrpc":"2.0","id":7,"error":{"code":-32000,"message":"Server not initialized"}}"#;
+
+        let Some(Message::Response(crate::types::Response::Err(resp))) = parse_line(line) else {
+            panic!("an addressed parse failure must produce an error response");
+        };
+        assert_eq!(resp.id, RequestId::Number(7));
+        assert_eq!(resp.error.code, ErrorCode::ParseError);
+    }
+
+    /// The regression the fix is really about: the bad line must not end
+    /// the stream — the pending request completes *and* the following
+    /// lines keep arriving.
+    #[tokio::test]
+    async fn a_bad_line_neither_ends_the_stream_nor_is_swallowed() {
+        const INPUT: &[u8] = concat!(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"Server not initialized"}}"#,
+            "\n",
+            "total garbage, no id\n",
+            r#"{"jsonrpc":"2.0","method":"ping"}"#,
+            "\n",
+        )
+        .as_bytes();
+
+        let mut receiver = StdIoReceiver::new();
+        receiver.start(BufReader::new(INPUT), CancellationToken::new());
+
+        let Ok(Message::Response(crate::types::Response::Err(resp))) = receiver.recv().await else {
+            panic!("the legacy rejection must complete the pending request");
+        };
+        assert_eq!(resp.id, RequestId::Number(1));
+        assert_eq!(resp.error.code, ErrorCode::ParseError);
+
+        // The unaddressed garbage line is skipped, not fatal.
+        assert!(
+            matches!(receiver.recv().await, Ok(Message::Notification(_))),
+            "the stream must survive both bad lines"
+        );
+    }
+
+    #[test]
+    fn an_id_is_salvaged_only_when_the_line_is_still_valid_json() {
+        let line = r#"{"jsonrpc":"2.0","id":"abc","result":}"#;
+        // Broken JSON — the id is salvaged from the raw text only when the
+        // document itself still parses, so this one is unaddressable.
+        assert!(parse_line(line).is_none());
+
+        // Valid JSON that simply isn't a `Message`.
+        let line = r#"{"jsonrpc":"2.0","id":"abc","totally":"unknown"}"#;
+        let Some(Message::Response(crate::types::Response::Err(resp))) = parse_line(line) else {
+            panic!("an addressed parse failure must produce an error response");
+        };
+        assert_eq!(resp.id, RequestId::String("abc".into()));
+    }
+
+    #[test]
+    fn unaddressed_garbage_is_dropped_not_fatal() {
+        assert!(parse_line("not json at all").is_none());
+        assert!(parse_line(r#"{"jsonrpc":"2.0","method":123}"#).is_none());
+    }
+
+    #[test]
+    fn well_formed_lines_are_unaffected() {
+        let line = r#"{"jsonrpc":"2.0","method":"ping"}"#;
+        assert!(matches!(parse_line(line), Some(Message::Notification(_))));
     }
 }
 
