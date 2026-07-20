@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## 0.4.2
 
 ### Added
+* **Dual-mode client (`initialize` fallback).** Under
+  `proto-2026-07-28-rc` the client now carries both handshakes: it tries
+  `server/discover` and, when the server clearly doesn't speak the RC
+  protocol (`MethodNotFound`, `InvalidRequest`, or a non-JSON-RPC /
+  unknown-code reply), falls back to the legacy `initialize`/`initialized`
+  handshake — negotiating the newest pre-RC version (override with
+  `with_mcp_version`) — and speaks legacy for that peer at runtime:
+  `Mcp-Session-Id` header, the standalone SSE GET stream, legacy
+  server-push sampling/roots/logging, no MRTR and no RC routing headers.
+  Network-level failures do not trigger the fallback. The switch is
+  per-connection, monotonic, and decided before any other traffic; the
+  server side remains compile-time pure. The legacy client machinery now
+  compiles (dormant) under the RC flag for this — the legacy build is
+  unchanged. (#84)
 * Client-side OAuth 2.1 authorization behind the new `client-oauth`
   feature (included in `client-full`), built on `volga-oauth-client`:
   * `HttpClient::with_oauth(...)` enables the automatic flow: a `401`

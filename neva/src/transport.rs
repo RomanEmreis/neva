@@ -56,7 +56,7 @@ pub(crate) enum TransportProto {
     #[cfg(feature = "http-server")]
     HttpServer(Box<dyn http::core::engine::HttpTransport>),
     #[cfg(feature = "http-client")]
-    HttpClient(HttpClient),
+    HttpClient(Box<HttpClient>),
     //Ws(Websocket),
     // add more options here...
 }

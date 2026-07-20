@@ -1,9 +1,7 @@
 //! Request handling utilities
 
 use crate::client::notification_handler::NotificationsHandler;
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 use crate::types::sampling::SamplingHandler;
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 use crate::types::{Root, root::ListRootsResult};
 use crate::{
     client::options::McpOptions,
@@ -22,12 +20,11 @@ use std::{
     sync::atomic::{AtomicI64, Ordering},
     time::Duration,
 };
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 use tokio::sync::RwLock;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-#[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
+#[cfg(feature = "tasks")]
 use crate::types::CreateMessageRequestParams;
 #[cfg(feature = "tasks")]
 use crate::{
@@ -42,7 +39,6 @@ use crate::{
 #[cfg(feature = "tasks")]
 const DEFAULT_PAGE_SIZE: usize = 10;
 
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 struct Roots {
     /// Cached list of [`Root`]
     inner: Arc<RwLock<Vec<Root>>>,
@@ -70,11 +66,9 @@ pub(super) struct RequestHandler {
     sender: TransportProtoSender,
 
     /// Cached list of [`Root`]
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     roots: Roots,
 
     /// Represents a handler function that runs when received a "sampling/createMessage" request
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     sampling_handler: Option<SamplingHandler>,
 
     /// Represents a handler function that runs when received an "elicitation/create" request
@@ -86,9 +80,14 @@ pub(super) struct RequestHandler {
     /// Task tracker for client sampling tasks.
     #[cfg(feature = "tasks")]
     tasks: Arc<TaskTracker>,
+
+    /// Which protocol generation the peer speaks (issue #84) — shared with
+    /// [`Client`](crate::client::Client), so the dual-mode fallback's flip
+    /// is observed by the receive loop.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    peer_mode: crate::shared::PeerMode,
 }
 
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 impl Roots {
     fn new(options: &McpOptions, notifications_sender: &TransportProtoSender) -> Self {
         let mut roots = Self {
@@ -145,19 +144,19 @@ impl RequestHandler {
         let (tx, rx) = transport.split();
 
         let handler = Self {
-            #[cfg(not(feature = "proto-2026-07-28-rc"))]
             roots: Roots::new(options, &tx),
             counter: AtomicI64::new(1),
             pending: RequestQueue::new(options.timeout),
             sender: tx,
             timeout: options.timeout,
             token,
-            #[cfg(not(feature = "proto-2026-07-28-rc"))]
             sampling_handler: options.sampling_handler.clone(),
             elicitation_handler: options.elicitation_handler.clone(),
             notification_handler: options.notification_handler.clone(),
             #[cfg(feature = "tasks")]
             tasks: Arc::new(TaskTracker::new()),
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            peer_mode: options.peer_mode.clone(),
         };
 
         handler.start(rx)
@@ -293,7 +292,6 @@ impl RequestHandler {
     }
 
     /// Updates [`Root`] cache
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     pub(super) fn notify_roots_changed(&mut self, roots: Vec<Root>) {
         self.roots.update(roots);
     }
@@ -302,15 +300,15 @@ impl RequestHandler {
     fn start(self, mut rx: TransportProtoReceiver) -> Self {
         let pending = self.pending.clone();
         let mut sender = self.sender.clone();
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
         let roots = self.roots.inner.clone();
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
         let sampling_handler = self.sampling_handler.clone();
         let elicitation_handler = self.elicitation_handler.clone();
         let notification_handler = self.notification_handler.clone();
 
         #[cfg(feature = "tasks")]
         let tasks = self.tasks.clone();
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let peer_mode = self.peer_mode.clone();
 
         tokio::task::spawn(async move {
             while let Ok(msg) = rx.recv().await {
@@ -319,13 +317,13 @@ impl RequestHandler {
                     Message::Request(req) => {
                         let resp = dispatch_request(
                             req,
-                            #[cfg(not(feature = "proto-2026-07-28-rc"))]
                             &roots,
-                            #[cfg(not(feature = "proto-2026-07-28-rc"))]
                             &sampling_handler,
                             &elicitation_handler,
                             #[cfg(feature = "tasks")]
                             &tasks,
+                            #[cfg(feature = "proto-2026-07-28-rc")]
+                            &peer_mode,
                         )
                         .await;
                         send_response_impl(&mut sender, resp).await;
@@ -356,14 +354,14 @@ impl RequestHandler {
                         // individual messages.
                         let responses = dispatch_batch_deferred(
                             deferred,
-                            #[cfg(not(feature = "proto-2026-07-28-rc"))]
                             &roots,
-                            #[cfg(not(feature = "proto-2026-07-28-rc"))]
                             &sampling_handler,
                             &elicitation_handler,
                             &notification_handler,
                             #[cfg(feature = "tasks")]
                             &tasks,
+                            #[cfg(feature = "proto-2026-07-28-rc")]
+                            &peer_mode,
                         )
                         .await;
                         // MessageBatch::new returns Err for an empty vec (all
@@ -386,11 +384,12 @@ impl RequestHandler {
 #[inline]
 async fn dispatch_batch_deferred(
     deferred: Vec<MessageEnvelope>,
-    #[cfg(not(feature = "proto-2026-07-28-rc"))] roots: &Arc<RwLock<Vec<Root>>>,
-    #[cfg(not(feature = "proto-2026-07-28-rc"))] sampling_handler: &Option<SamplingHandler>,
+    roots: &Arc<RwLock<Vec<Root>>>,
+    sampling_handler: &Option<SamplingHandler>,
     elicitation_handler: &Option<ElicitationHandler>,
     notification_handler: &Option<Arc<NotificationsHandler>>,
     #[cfg(feature = "tasks")] tasks: &Arc<TaskTracker>,
+    #[cfg(feature = "proto-2026-07-28-rc")] peer_mode: &crate::shared::PeerMode,
 ) -> Vec<MessageEnvelope> {
     use futures_util::future::join_all;
 
@@ -400,13 +399,13 @@ async fn dispatch_batch_deferred(
             MessageEnvelope::Request(req) => Some(MessageEnvelope::Response(
                 dispatch_request(
                     req,
-                    #[cfg(not(feature = "proto-2026-07-28-rc"))]
                     roots,
-                    #[cfg(not(feature = "proto-2026-07-28-rc"))]
                     sampling_handler,
                     elicitation_handler,
                     #[cfg(feature = "tasks")]
                     tasks,
+                    #[cfg(feature = "proto-2026-07-28-rc")]
+                    peer_mode,
                 )
                 .await,
             )),
@@ -432,18 +431,32 @@ async fn send_response_impl(sender: &mut TransportProtoSender, resp: Response) {
 /// returns the [`Response`] to send back. Unknown methods produce a
 /// [`ErrorCode::MethodNotFound`] error response so the peer is never left
 /// waiting for a reply that will never arrive.
+///
+/// Under `proto-2026-07-28-rc` the legacy server-initiated methods
+/// (`sampling/createMessage`, `roots/list`) are dispatched **only** once the
+/// dual-mode fallback (issue #84) has marked the peer legacy: an RC client
+/// advertises neither capability, so an RC peer asking for them is out of
+/// contract and is answered `MethodNotFound` like any unknown method,
+/// instead of silently running the configured handler.
 #[inline]
 async fn dispatch_request(
     req: Request,
-    #[cfg(not(feature = "proto-2026-07-28-rc"))] roots: &Arc<RwLock<Vec<Root>>>,
-    #[cfg(not(feature = "proto-2026-07-28-rc"))] sampling_handler: &Option<SamplingHandler>,
+    roots: &Arc<RwLock<Vec<Root>>>,
+    sampling_handler: &Option<SamplingHandler>,
     elicitation_handler: &Option<ElicitationHandler>,
     #[cfg(feature = "tasks")] tasks: &Arc<TaskTracker>,
+    #[cfg(feature = "proto-2026-07-28-rc")] peer_mode: &crate::shared::PeerMode,
 ) -> Response {
+    // The legacy build is legacy by construction; the RC build reads the
+    // switch per dispatch so a post-fallback flip is observed immediately.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    let legacy_peer = peer_mode.is_legacy();
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    let legacy_peer = true;
+
     let req_id = req.id();
     match req.method.as_str() {
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
-        crate::types::sampling::commands::CREATE => {
+        crate::types::sampling::commands::CREATE if legacy_peer => {
             handle_sampling(
                 req,
                 sampling_handler,
@@ -461,8 +474,7 @@ async fn dispatch_request(
             )
             .await
         }
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
-        crate::types::root::commands::LIST => handle_roots(req, roots).await,
+        crate::types::root::commands::LIST if legacy_peer => handle_roots(req, roots).await,
         #[cfg(feature = "tasks")]
         crate::types::task::commands::RESULT => get_task_result(req, tasks).await,
         #[cfg(feature = "tasks")]
@@ -485,12 +497,11 @@ async fn dispatch_notification(
     if let Some(h) = handler {
         h.notify(notification).await
     } else {
-        #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+        #[cfg(feature = "tracing")]
         notification.write();
     }
 }
 
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 #[inline]
 async fn handle_roots(req: Request, roots: &Arc<RwLock<Vec<Root>>>) -> Response {
     let roots = {
@@ -501,7 +512,7 @@ async fn handle_roots(req: Request, roots: &Arc<RwLock<Vec<Root>>>) -> Response 
 }
 
 #[inline]
-#[cfg(all(not(feature = "tasks"), not(feature = "proto-2026-07-28-rc")))]
+#[cfg(not(feature = "tasks"))]
 async fn handle_sampling(req: Request, handler: &Option<SamplingHandler>) -> Response {
     let id = req.id();
     if let Some(handler) = &handler {
@@ -525,7 +536,7 @@ async fn handle_sampling(req: Request, handler: &Option<SamplingHandler>) -> Res
 }
 
 #[inline]
-#[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
+#[cfg(feature = "tasks")]
 async fn handle_sampling(
     req: Request,
     handler: &Option<SamplingHandler>,
@@ -733,20 +744,17 @@ fn validate_batch_ids(items: &[MessageEnvelope]) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     use std::pin::Pin;
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     use tokio::time::Instant;
 
     #[tokio::test]
     #[cfg(feature = "http-client")]
     async fn cancelled_transport_fails_pending_request_immediately() {
-        use crate::transport::http::HttpClient;
         use tokio::time::{Duration, timeout};
 
         let token = CancellationToken::new();
         let mut handler = RequestHandler::new(
-            TransportProto::HttpClient(HttpClient::default()),
+            TransportProto::HttpClient(Box::default()),
             &McpOptions::default(),
             token.clone(),
         );
@@ -817,7 +825,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     async fn batch_requests_are_dispatched_concurrently() {
         use crate::types::sampling::{CreateMessageRequestParams, CreateMessageResult};
         use tokio::time::Duration;
@@ -849,6 +856,15 @@ mod tests {
             )),
         ];
 
+        // `sampling/createMessage` is a legacy server-initiated method, so
+        // the dispatcher only runs the handler for a legacy peer.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let peer_mode = {
+            let mode = crate::shared::PeerMode::default();
+            mode.set_legacy();
+            mode
+        };
+
         let started = Instant::now();
         let responses = dispatch_batch_deferred(
             deferred,
@@ -858,6 +874,8 @@ mod tests {
             &notification_handler,
             #[cfg(feature = "tasks")]
             &Arc::new(crate::shared::TaskTracker::default()),
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            &peer_mode,
         )
         .await;
 
@@ -866,6 +884,72 @@ mod tests {
             started.elapsed() < Duration::from_millis(180),
             "batch requests should run concurrently"
         );
+    }
+
+    /// Legacy server-initiated methods are out of contract for an RC peer:
+    /// the client advertises neither `sampling` nor `roots`, so the
+    /// configured handlers must stay unreachable until the dual-mode
+    /// fallback marks the peer legacy.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[tokio::test]
+    async fn legacy_server_push_is_gated_on_the_peer_mode() {
+        use crate::types::sampling::{CreateMessageRequestParams, CreateMessageResult};
+
+        let roots = Arc::new(RwLock::new(Vec::<Root>::new()));
+        let sampling_handler: Option<SamplingHandler> = Some(Arc::new(
+            |_params: CreateMessageRequestParams| -> Pin<
+                Box<dyn Future<Output = CreateMessageResult> + Send + 'static>,
+            > { Box::pin(async move { CreateMessageResult::assistant() }) },
+        ));
+        let elicitation_handler = None;
+        let peer_mode = crate::shared::PeerMode::default();
+
+        // `sampling/createMessage` needs well-formed params to reach its
+        // handler at all, so the gate is what the assertions isolate.
+        let request = |method: &str| match method {
+            crate::types::sampling::commands::CREATE => Request::new(
+                Some(RequestId::Number(1)),
+                method,
+                Some(CreateMessageRequestParams::default()),
+            ),
+            _ => Request::new(Some(RequestId::Number(1)), method, None::<()>),
+        };
+
+        let dispatch = async |method: &str, peer_mode: &crate::shared::PeerMode| {
+            dispatch_request(
+                request(method),
+                &roots,
+                &sampling_handler,
+                &elicitation_handler,
+                #[cfg(feature = "tasks")]
+                &Arc::new(crate::shared::TaskTracker::default()),
+                peer_mode,
+            )
+            .await
+        };
+
+        for method in [
+            crate::types::sampling::commands::CREATE,
+            crate::types::root::commands::LIST,
+        ] {
+            let resp = dispatch(method, &peer_mode).await;
+            let Response::Err(err) = resp else {
+                panic!("an RC peer must not reach the legacy `{method}` handler");
+            };
+            assert_eq!(err.error.code, ErrorCode::MethodNotFound);
+        }
+
+        // After the fallback the very same requests are in contract again.
+        peer_mode.set_legacy();
+        for method in [
+            crate::types::sampling::commands::CREATE,
+            crate::types::root::commands::LIST,
+        ] {
+            assert!(
+                matches!(dispatch(method, &peer_mode).await, Response::Ok(_)),
+                "a legacy peer must reach the `{method}` handler"
+            );
+        }
     }
 
     #[test]

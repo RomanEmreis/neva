@@ -50,7 +50,12 @@ mod task_tracker;
 pub(crate) fn wait_for_shutdown_signal(token: CancellationToken) {
     tokio::spawn(async move {
         match wait_for_shutdown_signal_impl().await {
-            Ok(_) => (),
+            // A shutdown signal actually arrived — cancel the transport.
+            Ok(_) => token.cancel(),
+            // Failing to *register* the handler (e.g. a sandboxed
+            // environment restricting signal APIs) must not tear the
+            // transport down — the watcher simply exits and process
+            // lifecycle stays with whatever launched it.
             #[cfg(feature = "tracing")]
             Err(err) => tracing::error!(
                 logger = "neva",
@@ -60,7 +65,6 @@ pub(crate) fn wait_for_shutdown_signal(token: CancellationToken) {
             #[cfg(not(feature = "tracing"))]
             Err(_) => (),
         }
-        token.cancel();
     });
 }
 
@@ -101,6 +105,32 @@ async fn wait_for_shutdown_signal_impl() -> std::io::Result<()> {
         {
             tokio::signal::ctrl_c().await
         }
+    }
+}
+
+/// Which protocol generation the connected peer speaks — the runtime
+/// switch behind the dual-mode client (issue #84).
+///
+/// An RC-flagged client starts in RC mode (`server/discover`, stateless,
+/// MRTR) and flips to legacy exactly once, in `Client::connect`'s
+/// fallback, before any other traffic — so nothing races the switch.
+/// The legacy build has no switch: it is legacy by construction.
+///
+/// Cheap to clone; all clones observe the same flip.
+#[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PeerMode(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+#[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+impl PeerMode {
+    /// Marks the peer as a legacy (pre-RC) server.
+    pub(crate) fn set_legacy(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether the peer speaks the legacy (pre-RC) protocol.
+    pub(crate) fn is_legacy(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
     }
 }
 

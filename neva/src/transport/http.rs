@@ -139,6 +139,8 @@ where
 pub struct HttpClient {
     url: ServiceUrl,
     access_token: Option<Box<[u8]>>,
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    peer_mode: crate::shared::PeerMode,
     #[cfg(feature = "client-oauth")]
     oauth: Option<client::oauth::OAuthClientConfig>,
     #[cfg(feature = "client-tls")]
@@ -160,6 +162,8 @@ pub(super) struct ClientRuntimeContext {
     tx: Sender<Result<Message, Error>>,
     rx: Receiver<Message>,
     access_token: Option<Box<[u8]>>,
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(super) peer_mode: crate::shared::PeerMode,
     #[cfg(feature = "client-oauth")]
     oauth: Option<std::sync::Arc<client::oauth::OAuthSession>>,
     #[cfg(feature = "client-tls")]
@@ -224,6 +228,8 @@ impl Default for HttpClient {
         Self {
             url: ServiceUrl::default(),
             access_token: None,
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            peer_mode: Default::default(),
             #[cfg(feature = "client-oauth")]
             oauth: None,
             #[cfg(feature = "client-tls")]
@@ -663,6 +669,15 @@ impl HttpClient {
         self
     }
 
+    /// Hands the dual-mode protocol switch to this transport (set by
+    /// `McpOptions::transport`) so per-request headers follow the
+    /// negotiated protocol generation.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) fn with_peer_mode(mut self, peer_mode: crate::shared::PeerMode) -> Self {
+        self.peer_mode = peer_mode;
+        self
+    }
+
     /// Set the bearer token for requests
     ///
     ///Default: `None`
@@ -725,6 +740,8 @@ impl HttpClient {
             tx: self.receiver.tx.clone(),
             rx: sender_rx,
             access_token: self.access_token.take(),
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            peer_mode: self.peer_mode.clone(),
             #[cfg(feature = "client-oauth")]
             oauth,
             #[cfg(feature = "client-tls")]

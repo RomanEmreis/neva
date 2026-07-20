@@ -96,8 +96,12 @@ pub(crate) const PROTOCOL_VERSIONS: &[&str] = &[
     "2025-06-18",
     "2025-11-25",
     #[cfg(feature = "proto-2026-07-28-rc")]
-    "2026-07-28",
+    RC_PROTOCOL_VERSION,
 ];
+
+/// The MCP 2026-07-28 RC protocol version string.
+#[cfg(feature = "proto-2026-07-28-rc")]
+pub(crate) const RC_PROTOCOL_VERSION: &str = "2026-07-28";
 
 // Mutual-exclusion guard for `proto-*` generation flags.
 //

@@ -43,6 +43,10 @@ jobs:
         run: cargo clippy --all-targets --features client-full -- -D warnings
       - name: Run server+client with proto-2026-07-28-rc
         run: cargo clippy --all-targets --features "server-full client-full proto-2026-07-28-rc" -- -D warnings
+      - name: Run slim client with proto-2026-07-28-rc
+        run: cargo clippy --all-targets --features "client proto-2026-07-28-rc" -- -D warnings
+      - name: Run slim server with proto-2026-07-28-rc
+        run: cargo clippy --all-targets --features "server proto-2026-07-28-rc" -- -D warnings
 
   audit:
     runs-on: ubuntu-latest

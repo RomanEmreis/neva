@@ -3,9 +3,7 @@
 use crate::error::{Error, ErrorCode};
 use crate::shared;
 use crate::transport::Transport;
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 use crate::types::Root;
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 use crate::types::sampling::{CreateMessageRequestParams, CreateMessageResult, SamplingHandler};
 use crate::types::{
     CallToolRequestParams, CallToolResponse, GetPromptRequestParams, GetPromptResult,
@@ -19,7 +17,6 @@ use crate::types::{
     notification::Notification,
     resource::{SubscribeRequestParams, UnsubscribeRequestParams},
 };
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 use crate::types::{ClientCapabilities, InitializeRequestParams, InitializeResult};
 use handler::RequestHandler;
 use options::McpOptions;
@@ -120,7 +117,6 @@ impl Client {
     /// # client.disconnect().await
     /// # }
     /// ```
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     #[deprecated(
         note = "Roots are removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
     )]
@@ -148,7 +144,6 @@ impl Client {
     /// # client.disconnect().await
     /// # }
     /// ```
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     #[deprecated(
         note = "Roots are removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
     )]
@@ -164,7 +159,6 @@ impl Client {
     }
 
     /// Sends the "notifications/roots/list_changed" notification to the server
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     #[deprecated(
         note = "Roots are removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
     )]
@@ -176,7 +170,6 @@ impl Client {
     }
 
     /// Registers a handler that will be running when a "sampling/createMessage" request is received
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     #[deprecated(
         note = "Sampling are removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
     )]
@@ -228,7 +221,7 @@ impl Client {
         let mut transport = self.options.transport();
         let token = transport.start();
 
-        #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+        #[cfg(feature = "tracing")]
         self.register_tracing_notification_handlers();
 
         self.cancellation_token = Some(token.clone());
@@ -266,6 +259,27 @@ impl Client {
         Ok(())
     }
 
+    /// The protocol version this client expects from the connected peer.
+    ///
+    /// Under the RC flag the RC expectation is pinned to
+    /// [`crate::RC_PROTOCOL_VERSION`]: a `with_mcp_version` override only
+    /// selects which legacy version the dual-mode fallback negotiates —
+    /// it must never make `server/discover` reject a valid RC server.
+    fn expected_protocol_ver(&self) -> &'static str {
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        {
+            if self.is_legacy_peer() {
+                self.options.legacy_protocol_ver()
+            } else {
+                crate::RC_PROTOCOL_VERSION
+            }
+        }
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        {
+            self.options.protocol_ver()
+        }
+    }
+
     /// Validates a server-reported protocol version against what this client
     /// negotiated, cancelling the transport on mismatch.
     fn validate_server_version(&mut self, server_ver: &str) -> Result<(), Error> {
@@ -276,13 +290,13 @@ impl Client {
                 format!("Unsupported server protocol version: {server_ver}"),
             ));
         }
-        if server_ver != self.options.protocol_ver() {
+        if server_ver != self.expected_protocol_ver() {
             self.cancel_transport();
             return Err(Error::new(
                 ErrorCode::InvalidRequest,
                 format!(
                     "Server protocol version mismatch: expected {}, got {server_ver}",
-                    self.options.protocol_ver()
+                    self.expected_protocol_ver()
                 ),
             ));
         }
@@ -292,8 +306,22 @@ impl Client {
     /// Sends `initialize` request to an MCP server (pre-RC handshake).
     #[cfg(not(feature = "proto-2026-07-28-rc"))]
     pub async fn init(&mut self) -> Result<(), Error> {
+        self.legacy_init().await
+    }
+
+    /// The `initialize`/`initialized` handshake: the only handshake for
+    /// the legacy build, the dual-mode fallback for the RC build.
+    async fn legacy_init(&mut self) -> Result<(), Error> {
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        let protocol_ver = self.options.protocol_ver().to_string();
+        // The fallback negotiates the newest pre-RC version — offering
+        // the RC version to a server that just rejected `server/discover`
+        // would only get refused again.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let protocol_ver = self.options.legacy_protocol_ver().to_string();
+
         let params = InitializeRequestParams {
-            protocol_ver: self.options.protocol_ver().to_string(),
+            protocol_ver,
             client_info: Some(self.options.implementation.clone()),
             capabilities: Some(ClientCapabilities {
                 roots: self.options.roots_capability(),
@@ -301,6 +329,8 @@ impl Client {
                 elicitation: self.options.elicitation_capability(),
                 #[cfg(feature = "tasks")]
                 tasks: self.options.tasks_capability(),
+                #[cfg(feature = "proto-2026-07-28-rc")]
+                extensions: None,
                 experimental: None,
             }),
         };
@@ -330,29 +360,82 @@ impl Client {
     /// notification is sent — the transport is stateless.
     #[cfg(feature = "proto-2026-07-28-rc")]
     pub async fn discover(&mut self) -> Result<(), Error> {
-        let req = Request::new(
+        let resp = self.send_request(Self::discover_request()).await?;
+        let result = resp.into_result::<crate::types::DiscoverResult>()?;
+        self.apply_discover(result)
+    }
+
+    /// Builds the `server/discover` request.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    fn discover_request() -> Request {
+        Request::new(
             Some(RequestId::Uuid(uuid::Uuid::new_v4())),
             crate::commands::DISCOVER,
             Some(crate::types::DiscoverRequestParams::default()),
-        );
+        )
+    }
 
-        let resp = self.send_request(req).await?;
-
-        let result = resp.into_result::<crate::types::DiscoverResult>()?;
-
+    /// Applies a successful `server/discover` result: validates the
+    /// reported protocol version and stores the capabilities.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    fn apply_discover(&mut self, result: crate::types::DiscoverResult) -> Result<(), Error> {
         self.validate_server_version(result.protocol_ver.as_str())?;
-
         self.server_capabilities = Some(result.capabilities);
         self.server_info = Some(result.server_info);
-
         Ok(())
     }
 
-    /// Back-compat alias for [`discover`](Self::discover) so existing
-    /// `connect()` flows keep working under the RC flag.
+    /// The dual-mode handshake (issue #84): tries `server/discover`
+    /// first and, when the server clearly doesn't speak the RC protocol,
+    /// falls back to the legacy `initialize` handshake and marks the
+    /// peer as legacy — subsequent traffic uses legacy semantics
+    /// (session header, SSE stream, no MRTR, no RC routing headers).
+    ///
+    /// Only **wire-phase** failures classify for the fallback: transport
+    /// errors and the server's JSON-RPC *error* reply. Once the server
+    /// answers `server/discover` successfully, the peer has committed to
+    /// the RC protocol — later local failures (a malformed result, an
+    /// unsupported/mismatched `protocolVersion`) surface as real errors
+    /// instead of a misleading fallback attempt on a transport that
+    /// version validation may already have cancelled.
     #[cfg(feature = "proto-2026-07-28-rc")]
     pub async fn init(&mut self) -> Result<(), Error> {
-        self.discover().await
+        let resp = match self.send_request(Self::discover_request()).await {
+            Ok(resp) => resp,
+            Err(err) if is_fallback_trigger(&err) => return self.fallback_init(&err).await,
+            Err(err) => return Err(err),
+        };
+
+        let is_error_reply = matches!(resp, Response::Err(_));
+        let result = match resp.into_result::<crate::types::DiscoverResult>() {
+            Ok(result) => result,
+            Err(err) if is_error_reply && is_fallback_trigger(&err) => {
+                return self.fallback_init(&err).await;
+            }
+            Err(err) => return Err(err),
+        };
+
+        self.apply_discover(result)
+    }
+
+    /// Runs the legacy half of the dual-mode handshake after a
+    /// classified `server/discover` rejection.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    async fn fallback_init(&mut self, _err: &Error) -> Result<(), Error> {
+        #[cfg(feature = "tracing")]
+        tracing::info!(
+            logger = "neva",
+            "`server/discover` rejected ({_err}); falling back to `initialize`"
+        );
+        self.options.peer_mode.set_legacy();
+        self.legacy_init().await
+    }
+
+    /// Whether the peer negotiated the legacy protocol through the
+    /// dual-mode fallback.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    fn is_legacy_peer(&self) -> bool {
+        self.options.peer_mode.is_legacy()
     }
 
     /// Sends a ping to the MCP server
@@ -898,12 +981,22 @@ impl Client {
     }
 
     /// Resolves the server's tasks capability from the negotiated server
-    /// capabilities (extension form, MCP 2026-07-28 RC).
+    /// capabilities (MCP 2026-07-28 RC build).
+    ///
+    /// An RC peer advertises tasks through
+    /// `capabilities.extensions["io.modelcontextprotocol/tasks"]`; a
+    /// legacy peer reached via the dual-mode fallback advertises the
+    /// top-level `tasks` field of its `initialize` result — both must
+    /// resolve, or task-augmented calls report no support after a
+    /// fallback.
     #[cfg(all(feature = "tasks", feature = "proto-2026-07-28-rc"))]
     fn server_tasks_capability(&self) -> Option<crate::types::ServerTasksCapability> {
-        self.server_capabilities
+        let caps = self.server_capabilities.as_ref()?;
+        if let Some(tasks) = &caps.tasks {
+            return Some(tasks.clone());
+        }
+        caps.extensions
             .as_ref()
-            .and_then(|c| c.extensions.as_ref())
             .and_then(|ext| ext.get(crate::types::task::TASKS_EXTENSION_ID))
             .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
@@ -966,16 +1059,28 @@ impl Client {
     async fn send_request(&mut self, req: Request) -> Result<Response, Error> {
         #[cfg(feature = "proto-2026-07-28-rc")]
         {
+            // A legacy peer (dual-mode fallback) never speaks MRTR — its
+            // requests take the plain path, elicitation rides the legacy
+            // server-push channel instead.
+            if self.is_legacy_peer() {
+                return self.plain_send_request(req).await;
+            }
             self.run_with_mrtr(req).await
         }
         #[cfg(not(feature = "proto-2026-07-28-rc"))]
         {
-            self.handler
-                .as_mut()
-                .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?
-                .send_request(req)
-                .await
+            self.plain_send_request(req).await
         }
+    }
+
+    /// Sends a request without the MRTR loop.
+    #[inline]
+    async fn plain_send_request(&mut self, req: Request) -> Result<Response, Error> {
+        self.handler
+            .as_mut()
+            .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?
+            .send_request(req)
+            .await
     }
 
     /// Sends a request and transparently drives the MRTR loop: while the
@@ -1185,28 +1290,28 @@ impl Client {
         // Under the RC a batched request may elicit just like a single send, so
         // the batch is driven through the same MRTR retry loop (see
         // `run_batch_with_mrtr`) rather than returning the protocol-intermediate
-        // `input_required` result as final.
+        // `input_required` result as final. A legacy peer (dual-mode
+        // fallback) never speaks MRTR and takes the plain path.
         #[cfg(feature = "proto-2026-07-28-rc")]
         {
-            self.run_batch_with_mrtr(items).await
+            if !self.is_legacy_peer() {
+                return self.run_batch_with_mrtr(items).await;
+            }
         }
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
-        {
-            let handler = self
-                .handler
-                .as_mut()
-                .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
+        let handler = self
+            .handler
+            .as_mut()
+            .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
 
-            let request_timeout = handler.timeout();
-            let pending = handler.pending().clone();
-            let token = handler.cancellation();
-            let receivers = handler.send_batch(items).await?;
+        let request_timeout = handler.timeout();
+        let pending = handler.pending().clone();
+        let token = handler.cancellation();
+        let receivers = handler.send_batch(items).await?;
 
-            collect_batch_responses(receivers, &pending, request_timeout, token)
-                .await
-                .into_iter()
-                .collect()
-        }
+        collect_batch_responses(receivers, &pending, request_timeout, token)
+            .await
+            .into_iter()
+            .collect()
     }
 
     /// Drives the MRTR retry loop across an entire batch.
@@ -1405,7 +1510,7 @@ impl Client {
             .await
     }
 
-    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+    #[cfg(feature = "tracing")]
     fn register_tracing_notification_handlers(&mut self) {
         use crate::types::notification::commands::*;
 
@@ -1414,7 +1519,7 @@ impl Client {
         self.subscribe(PROGRESS, Self::default_notification_handler);
     }
 
-    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+    #[cfg(feature = "tracing")]
     async fn default_notification_handler(notification: Notification) {
         notification.write();
     }
@@ -1589,6 +1694,27 @@ async fn collect_batch_responses(
     join_all(futures).await
 }
 
+/// Whether a `server/discover` failure means "this server doesn't speak
+/// the RC protocol" — the dual-mode fallback triggers only then.
+///
+/// * `MethodNotFound` — a legacy server rejecting the unknown method
+///   (neva's own legacy build answers exactly this);
+/// * `InvalidRequest` — strict servers rejecting the RC request shape;
+/// * `ParseError` — a non-JSON-RPC reply (an HTTP 4xx page) or an error
+///   code outside neva's `ErrorCode` set (e.g. the TS SDK's `-32000`
+///   "server not initialized"), both of which surface as parse failures.
+///
+/// Network-level failures (`Timeout`, `InternalError`/"Connection
+/// closed") are *not* triggers: the server never answered, so falling
+/// back would only mask the outage.
+#[cfg(feature = "proto-2026-07-28-rc")]
+fn is_fallback_trigger(err: &Error) -> bool {
+    matches!(
+        err.code,
+        ErrorCode::MethodNotFound | ErrorCode::InvalidRequest | ErrorCode::ParseError
+    )
+}
+
 #[inline]
 fn make_handler<F, R, P, O>(handler: F) -> Handler<P, O>
 where
@@ -1709,5 +1835,577 @@ mod tests {
         let meta = &req.params.as_ref().expect("params present")["_meta"];
         assert!(meta.get("traceparent").is_none());
         assert!(meta.get("tracestate").is_none());
+    }
+}
+
+#[cfg(all(test, feature = "proto-2026-07-28-rc"))]
+mod fallback_trigger_tests {
+    use super::*;
+
+    fn err(code: ErrorCode) -> Error {
+        Error::new(code, "test")
+    }
+
+    #[test]
+    fn protocol_level_rejections_trigger_the_fallback() {
+        assert!(is_fallback_trigger(&err(ErrorCode::MethodNotFound)));
+        assert!(is_fallback_trigger(&err(ErrorCode::InvalidRequest)));
+        // Non-JSON-RPC replies (HTTP 4xx pages) and unknown error codes
+        // (e.g. the TS SDK's -32000) surface as parse failures.
+        assert!(is_fallback_trigger(&err(ErrorCode::ParseError)));
+    }
+
+    #[test]
+    fn transport_failures_do_not_trigger_the_fallback() {
+        assert!(!is_fallback_trigger(&err(ErrorCode::Timeout)));
+        assert!(!is_fallback_trigger(&err(ErrorCode::InternalError)));
+        assert!(!is_fallback_trigger(&err(ErrorCode::InvalidParams)));
+    }
+}
+
+/// The dual-mode "Done when" (issue #84): an RC client completes calls
+/// against a 2025-11-25 server via the `initialize` fallback. The legacy
+/// server is a raw-HTTP mock because a legacy neva server cannot exist
+/// in an RC-flagged build.
+#[cfg(all(test, feature = "http-client", feature = "proto-2026-07-28-rc"))]
+mod dual_mode_tests {
+    use super::*;
+    use std::sync::Mutex;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    const LEGACY_SESSION_ID: &str = "6f2f0dc8-6a5e-4f6e-9c1a-2b7f9d3f1c11";
+
+    /// Reads one HTTP/1.1 request; returns `(head, body)`.
+    async fn read_request(stream: &mut TcpStream) -> Option<(String, String)> {
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 2048];
+        let header_end = loop {
+            let n = stream.read(&mut tmp).await.ok()?;
+            if n == 0 {
+                return None;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos + 4;
+            }
+            if buf.len() > 65536 {
+                return None;
+            }
+        };
+        let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+        let content_length = head
+            .lines()
+            .find_map(|l| {
+                l.to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .map(|v| v.trim().parse::<usize>().ok())
+            })
+            .flatten()
+            .unwrap_or(0);
+        while buf.len() < header_end + content_length {
+            let n = stream.read(&mut tmp).await.ok()?;
+            if n == 0 {
+                return None;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+        let body =
+            String::from_utf8_lossy(&buf[header_end..header_end + content_length]).to_string();
+        Some((head, body))
+    }
+
+    async fn write_response(stream: &mut TcpStream, status: &str, extra_headers: &str, body: &str) {
+        let resp = format!(
+            "HTTP/1.1 {status}\r\n{extra_headers}Content-Length: {}\r\nConnection: keep-alive\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(resp.as_bytes()).await;
+    }
+
+    fn rpc_result(id: &serde_json::Value, result: serde_json::Value) -> String {
+        serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string()
+    }
+
+    /// A minimal 2025-11-25 server: rejects `server/discover` with
+    /// `MethodNotFound`, answers `initialize` with a session id, serves
+    /// an SSE GET stream and an empty `tools/list`.
+    /// How the mock answers `server/discover`: legacy servers reject it
+    /// with a JSON-RPC `MethodNotFound` (neva's own legacy build) or a
+    /// plain non-JSON-RPC 4xx page (framework routers, the TS SDK's
+    /// "server not initialized" family); a future server answers
+    /// *successfully* but with a `protocolVersion` this build does not
+    /// support — which must NOT trigger the fallback.
+    /// A protected endpoint answering `401` with a non-JSON body must not
+    /// trigger the fallback either — that is an authentication failure,
+    /// not evidence of a legacy peer.
+    #[derive(Clone, Copy)]
+    enum DiscoverReply {
+        MethodNotFound,
+        Html400,
+        UnsupportedVersion,
+        Unauthorized401,
+        Unavailable503,
+    }
+
+    async fn serve_legacy(
+        listener: TcpListener,
+        log: Arc<Mutex<Vec<String>>>,
+        reply: DiscoverReply,
+    ) {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let log = log.clone();
+            tokio::spawn(async move {
+                loop {
+                    let Some((head, body)) = read_request(&mut stream).await else {
+                        return;
+                    };
+                    log.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(format!("{head}{body}"));
+
+                    if head.starts_with("GET") {
+                        let _ = stream
+                            .write_all(
+                                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\r\n: hi\n\n",
+                            )
+                            .await;
+                        // Hold the stream open like a real legacy server.
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        return;
+                    }
+
+                    let msg: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                    match msg
+                        .get("method")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or_default()
+                    {
+                        crate::commands::DISCOVER => match reply {
+                            DiscoverReply::MethodNotFound => {
+                                let body = serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "error": { "code": -32601, "message": "Method not found" }
+                                })
+                                .to_string();
+                                write_response(
+                                    &mut stream,
+                                    "200 OK",
+                                    "Content-Type: application/json\r\n",
+                                    &body,
+                                )
+                                .await;
+                            }
+                            DiscoverReply::Html400 => {
+                                write_response(
+                                    &mut stream,
+                                    "400 Bad Request",
+                                    "Content-Type: text/html\r\n",
+                                    "<html><body>Bad Request</body></html>",
+                                )
+                                .await;
+                            }
+                            DiscoverReply::Unavailable503 => {
+                                write_response(
+                                    &mut stream,
+                                    "503 Service Unavailable",
+                                    "Content-Type: text/html\r\n",
+                                    "<html><body>upstream down</body></html>",
+                                )
+                                .await;
+                            }
+                            DiscoverReply::Unauthorized401 => {
+                                write_response(
+                                    &mut stream,
+                                    "401 Unauthorized",
+                                    "Content-Type: text/html\r\nWWW-Authenticate: Bearer\r\n",
+                                    "<html><body>Unauthorized</body></html>",
+                                )
+                                .await;
+                            }
+                            DiscoverReply::UnsupportedVersion => {
+                                let body = rpc_result(
+                                    &id,
+                                    serde_json::json!({
+                                        "protocolVersion": "2099-01-01",
+                                        "capabilities": { "tools": {} },
+                                        "serverInfo": { "name": "future-mock", "version": "1.0.0" }
+                                    }),
+                                );
+                                write_response(
+                                    &mut stream,
+                                    "200 OK",
+                                    "Content-Type: application/json\r\n",
+                                    &body,
+                                )
+                                .await;
+                            }
+                        },
+                        crate::commands::INIT => {
+                            let body = rpc_result(
+                                &id,
+                                serde_json::json!({
+                                    "protocolVersion": "2025-11-25",
+                                    "capabilities": { "tools": {} },
+                                    "serverInfo": { "name": "legacy-mock", "version": "1.0.0" }
+                                }),
+                            );
+                            let headers = format!(
+                                "Content-Type: application/json\r\nMcp-Session-Id: {LEGACY_SESSION_ID}\r\n"
+                            );
+                            write_response(&mut stream, "200 OK", &headers, &body).await;
+                        }
+                        crate::types::tool::commands::LIST => {
+                            let body = rpc_result(&id, serde_json::json!({ "tools": [] }));
+                            write_response(
+                                &mut stream,
+                                "200 OK",
+                                "Content-Type: application/json\r\n",
+                                &body,
+                            )
+                            .await;
+                        }
+                        // notifications (initialized / cancelled)
+                        _ => write_response(&mut stream, "202 Accepted", "", "").await,
+                    }
+                }
+            });
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rc_client_falls_back_to_initialize_against_legacy_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        tokio::spawn(serve_legacy(
+            listener,
+            log.clone(),
+            DiscoverReply::MethodNotFound,
+        ));
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                .with_timeout(std::time::Duration::from_secs(5))
+        });
+
+        client
+            .connect()
+            .await
+            .expect("fallback connect must succeed");
+        assert!(client.is_legacy_peer(), "peer must be marked legacy");
+        assert_eq!(
+            client.server_info.as_ref().map(|i| i.name.as_str()),
+            Some("legacy-mock")
+        );
+
+        let tools = client
+            .list_tools(None)
+            .await
+            .expect("tools/list must work after the fallback");
+        assert!(tools.tools.is_empty());
+
+        let log = log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let discover = log
+            .iter()
+            .find(|r| r.contains("server/discover"))
+            .expect("discover must be attempted first");
+        assert!(
+            discover
+                .to_ascii_lowercase()
+                .contains("mcp-protocol-version"),
+            "the RC attempt carries the protocol-version header"
+        );
+
+        let init = log
+            .iter()
+            .find(|r| r.contains("\"method\":\"initialize\""))
+            .expect("initialize must be sent after the rejection");
+        assert!(
+            init.contains("2025-11-25"),
+            "the fallback negotiates the newest pre-RC version"
+        );
+
+        let list = log
+            .iter()
+            .find(|r| r.contains(crate::types::tool::commands::LIST))
+            .expect("tools/list recorded");
+        let list_lower = list.to_ascii_lowercase();
+        assert!(
+            !list_lower.contains("mcp-protocol-version"),
+            "legacy peers must not receive the RC protocol-version header"
+        );
+        assert!(
+            !list_lower.contains("mcp-method:"),
+            "legacy peers must not receive RC routing headers"
+        );
+        assert!(
+            list_lower.contains(&format!("mcp-session-id: {LEGACY_SESSION_ID}")),
+            "the captured session id must ride every request"
+        );
+    }
+
+    /// A legacy server that rejects `server/discover` with a plain
+    /// non-JSON-RPC 4xx page (no JSON-RPC error at all) must also
+    /// trigger the fallback: the transport completes the request with an
+    /// id-bound `ParseError` response instead of a bare channel error.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rc_client_falls_back_when_discover_gets_a_non_json_4xx() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        tokio::spawn(serve_legacy(listener, log.clone(), DiscoverReply::Html400));
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                .with_timeout(std::time::Duration::from_secs(5))
+        });
+
+        client
+            .connect()
+            .await
+            .expect("fallback connect must succeed");
+        assert!(client.is_legacy_peer(), "peer must be marked legacy");
+
+        let tools = client
+            .list_tools(None)
+            .await
+            .expect("tools/list must work after the fallback");
+        assert!(tools.tools.is_empty());
+    }
+
+    /// A server that answers `server/discover` *successfully* but with a
+    /// protocol version this build does not support has committed to the
+    /// RC path — the client must surface the real version error, not
+    /// mark the peer legacy and chase `initialize` on a cancelled
+    /// transport.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn successful_discover_with_unsupported_version_does_not_fall_back() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        tokio::spawn(serve_legacy(
+            listener,
+            log.clone(),
+            DiscoverReply::UnsupportedVersion,
+        ));
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                .with_timeout(std::time::Duration::from_secs(5))
+        });
+
+        let err = client
+            .connect()
+            .await
+            .expect_err("an unsupported RC version must fail the connect");
+        assert!(
+            err.to_string()
+                .contains("Unsupported server protocol version"),
+            "the real version error must surface, got: {err}"
+        );
+        assert!(
+            !client.is_legacy_peer(),
+            "a successful discovery must never mark the peer legacy"
+        );
+
+        let log = log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            !log.iter().any(|r| r.contains("\"method\":\"initialize\"")),
+            "no initialize fallback may be attempted after successful discovery"
+        );
+    }
+
+    /// A protected RC endpoint replying `401` with a non-JSON body must
+    /// surface the authentication failure, not be mistaken for a legacy
+    /// peer — otherwise the client silently drops the RC headers and
+    /// retries `initialize`, masking the real cause.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unauthorized_discover_does_not_fall_back() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        tokio::spawn(serve_legacy(
+            listener,
+            log.clone(),
+            DiscoverReply::Unauthorized401,
+        ));
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                .with_timeout(std::time::Duration::from_secs(5))
+        });
+
+        let err = client
+            .connect()
+            .await
+            .expect_err("an unauthenticated connect must fail");
+        assert!(
+            err.to_string().contains("401"),
+            "the HTTP status must be carried through, got: {err}"
+        );
+        assert!(
+            !client.is_legacy_peer(),
+            "an auth failure must never mark the peer legacy"
+        );
+
+        let log = log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            !log.iter().any(|r| r.contains("\"method\":\"initialize\"")),
+            "no initialize fallback may be attempted after an auth failure"
+        );
+    }
+
+    /// An upstream outage (reverse proxy `503`, rate limit, gateway
+    /// timeout) says nothing about the peer's protocol generation: the
+    /// failure must surface instead of being read as "legacy" and retried
+    /// as `initialize` into the very same outage.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn upstream_failure_during_discover_does_not_fall_back() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        tokio::spawn(serve_legacy(
+            listener,
+            log.clone(),
+            DiscoverReply::Unavailable503,
+        ));
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                .with_timeout(std::time::Duration::from_secs(5))
+        });
+
+        let err = client
+            .connect()
+            .await
+            .expect_err("an upstream outage must fail the connect");
+        assert!(
+            err.to_string().contains("503"),
+            "the upstream status must surface, got: {err}"
+        );
+        assert!(
+            !client.is_legacy_peer(),
+            "an upstream outage must never mark the peer legacy"
+        );
+
+        let log = log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            !log.iter().any(|r| r.contains("\"method\":\"initialize\"")),
+            "no initialize fallback may be attempted on an upstream failure"
+        );
+    }
+
+    /// A `with_mcp_version` legacy override must not leak into the RC
+    /// expectation: `server/discover` still expects the RC version, the
+    /// override only selects the fallback's negotiated legacy version.
+    #[test]
+    fn legacy_version_override_keeps_the_rc_expectation() {
+        let client = Client::new().with_options(|opt| opt.with_mcp_version("2025-06-18"));
+        assert_eq!(client.expected_protocol_ver(), crate::RC_PROTOCOL_VERSION);
+
+        client.options.peer_mode.set_legacy();
+        assert_eq!(client.expected_protocol_ver(), "2025-06-18");
+    }
+}
+
+/// The other half of the "Done when": against an RC server the client
+/// keeps using `server/discover` (no fallback).
+#[cfg(all(
+    test,
+    feature = "http-client",
+    feature = "http-server-volga",
+    feature = "proto-2026-07-28-rc"
+))]
+mod rc_roundtrip_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rc_client_discovers_rc_server() {
+        let mut app = crate::App::new()
+            .with_options(|opt| opt.with_http(|http| http.bind("127.0.0.1:39817")));
+        app.map_tool("echo", |name: String| async move { name });
+        tokio::spawn(app.run());
+
+        // Wait until the server socket actually accepts connections —
+        // a fixed sleep is not enough on loaded CI machines.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match tokio::net::TcpStream::connect("127.0.0.1:39817").await {
+                Ok(_) => break,
+                Err(_) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await
+                }
+                Err(err) => panic!("RC server never became reachable: {err}"),
+            }
+        }
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind("127.0.0.1:39817"))
+                .with_timeout(std::time::Duration::from_secs(5))
+        });
+
+        client.connect().await.expect("discover must succeed");
+        assert!(!client.is_legacy_peer(), "RC peers never fall back");
+
+        let tools = client.list_tools(None).await.expect("tools/list");
+        assert_eq!(tools.tools.len(), 1);
+        assert_eq!(tools.tools[0].name, "echo");
+    }
+}
+
+/// After a dual-mode fallback, a legacy peer's top-level `tasks`
+/// capability must survive and resolve — an RC peer's extension form
+/// must keep working too.
+#[cfg(all(test, feature = "tasks", feature = "proto-2026-07-28-rc"))]
+mod fallback_tasks_capability_tests {
+    use super::*;
+    use crate::types::ServerCapabilities;
+    use serde_json::json;
+
+    fn client_with_capabilities(caps: serde_json::Value) -> Client {
+        let mut client = Client::new();
+        client.server_capabilities =
+            Some(serde_json::from_value::<ServerCapabilities>(caps).expect("valid capabilities"));
+        client
+    }
+
+    #[test]
+    fn legacy_top_level_tasks_capability_resolves() {
+        let client = client_with_capabilities(json!({
+            "tools": {},
+            "tasks": { "requests": { "tools": { "call": {} } } }
+        }));
+        assert!(client.is_server_supports_tasks());
+    }
+
+    #[test]
+    fn rc_extension_tasks_capability_still_resolves() {
+        let client = client_with_capabilities(json!({
+            "tools": {},
+            "extensions": {
+                "io.modelcontextprotocol/tasks": { "requests": { "tools": { "call": {} } } }
+            }
+        }));
+        assert!(client.is_server_supports_tasks());
+    }
+
+    #[test]
+    fn no_tasks_capability_resolves_to_none() {
+        let client = client_with_capabilities(json!({ "tools": {} }));
+        assert!(!client.is_server_supports_tasks());
     }
 }

@@ -15,13 +15,13 @@ pub struct ClientCapabilities {
     /// >
     /// > The server can use `RequestRoots` to request the list of
     /// > available roots from the client, which will trigger the client's `RootsHandler`.
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub roots: Option<RootsCapability>,
 
     /// Gets or sets the client's sampling capability, which indicates whether the client
     /// supports issuing requests to an LLM on behalf of the server.
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sampling: Option<SamplingCapability>,
 
@@ -35,7 +35,10 @@ pub struct ClientCapabilities {
     /// Under `proto-2026-07-28-rc`, tasks become an extension; this top-level
     /// field is replaced by an entry in the `extensions` map keyed by
     /// `io.modelcontextprotocol/tasks`.
-    #[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
+    #[cfg(all(
+        feature = "tasks",
+        any(not(feature = "proto-2026-07-28-rc"), feature = "client")
+    ))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tasks: Option<ClientTasksCapability>,
 
@@ -71,7 +74,7 @@ pub struct ClientCapabilities {
 /// > servers can navigate to access specific resources.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct RootsCapability {
     /// Indicates whether the client supports notifications for changes to the roots list.
@@ -91,7 +94,7 @@ pub struct RootsCapability {
 /// > using an AI model. The client must set a `SamplingHandler` to process these requests.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct SamplingCapability {
     /// Indicates whether the client supports context inclusion via `includeContext` parameter.
@@ -106,7 +109,7 @@ pub struct SamplingCapability {
 /// Represents the sampling context capability.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct SamplingContextCapability {
     // Currently empty in the spec, but may be extended in the future
@@ -115,7 +118,7 @@ pub struct SamplingContextCapability {
 /// Represents the sampling tools capability.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct SamplingToolsCapability {
     // Currently empty in the spec, but may be extended in the future
@@ -190,7 +193,15 @@ pub struct ServerCapabilities {
     /// Under `proto-2026-07-28-rc`, tasks become an extension; this top-level
     /// field is replaced by an entry in the `extensions` map keyed by
     /// `io.modelcontextprotocol/tasks`.
-    #[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
+    ///
+    /// Compiled for the RC **client** too: after a dual-mode fallback a
+    /// legacy peer advertises tasks here, and the field must survive
+    /// deserialization of its `initialize` result. The RC server never
+    /// sets it, and `skip_serializing_if` keeps the RC wire unchanged.
+    #[cfg(all(
+        feature = "tasks",
+        any(not(feature = "proto-2026-07-28-rc"), feature = "client")
+    ))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tasks: Option<ServerTasksCapability>,
 
@@ -450,7 +461,7 @@ impl PromptsCapability {
     }
 }
 
-#[cfg(all(feature = "client", not(feature = "proto-2026-07-28-rc")))]
+#[cfg(feature = "client")]
 impl RootsCapability {
     /// Specifies whether this client supports notifications for changes to the roots list.
     ///
@@ -461,7 +472,7 @@ impl RootsCapability {
     }
 }
 
-#[cfg(all(feature = "client", not(feature = "proto-2026-07-28-rc")))]
+#[cfg(feature = "client")]
 impl SamplingCapability {
     /// Specifies whether this client supports context inclusion.
     ///

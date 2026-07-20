@@ -6,17 +6,13 @@ use crate::{
     transport::http::{ClientRuntimeContext, MCP_SESSION_ID, get_mcp_session_id},
     types::Message,
 };
-// SSE-stream imports — used only by the non-RC GET stream path.
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 use futures_util::{StreamExt, TryStreamExt};
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 use reqwest::header::{CACHE_CONTROL, HeaderName};
 use reqwest::{
     RequestBuilder,
     header::{ACCEPT, CONTENT_TYPE},
 };
 use std::sync::Arc;
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 use std::time::Duration;
 
 #[cfg(feature = "client-tls")]
@@ -66,11 +62,10 @@ impl ClientAuth {
     }
 }
 
-// SSE-only constants — the standalone GET stream does not exist under the
-// stateless RC transport.
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+// SSE constants — the standalone GET stream serves legacy peers only;
+// its machinery compiles under both flags for the dual-mode client and
+// activates at runtime when a legacy `initialize` handshake happens.
 const LAST_EVENT_ID: HeaderName = HeaderName::from_static("last-event-id");
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 const SSE_RECONNECT_DELAY: Duration = Duration::from_secs(3);
 
 #[cfg(feature = "proto-2026-07-28-rc")]
@@ -91,7 +86,12 @@ fn name_param(req: &crate::types::Request) -> Option<&str> {
 }
 
 pub(super) async fn connect(rt: ClientRuntimeContext, token: CancellationToken) {
-    let session = Arc::new(McpSession::new(rt.url, token));
+    let session = Arc::new(McpSession::new(
+        rt.url,
+        token,
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        rt.peer_mode.clone(),
+    ));
 
     #[cfg(feature = "client-oauth")]
     let auth = match rt.oauth {
@@ -101,19 +101,10 @@ pub(super) async fn connect(rt: ClientRuntimeContext, token: CancellationToken) 
     #[cfg(not(feature = "client-oauth"))]
     let auth = ClientAuth::from_static(rt.access_token);
 
-    // Stateless RC transport issues only POSTs — no standalone SSE GET stream.
-    #[cfg(feature = "proto-2026-07-28-rc")]
-    handle_connection(
-        session.clone(),
-        rt.rx,
-        rt.tx.clone(),
-        auth,
-        #[cfg(feature = "client-tls")]
-        rt.tls_config.clone(),
-    )
-    .await;
-
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    // The SSE task arms itself only when a legacy `initialize` handshake
+    // completes (`session.initialized()` fires exclusively for the
+    // `initialize` method) — against an RC peer it stays parked until
+    // cancellation, so the stateless RC transport still issues only POSTs.
     tokio::join!(
         handle_connection(
             session.clone(),
@@ -201,29 +192,23 @@ fn build_post(
         resp = resp.header(MCP_SESSION_ID, session_id.to_string())
     }
 
-    // Routing headers are exercised end-to-end via the trace-context
-    // integration in Task 2.4. Unit-level hint extraction is tested in
+    // RC-peer routing headers: legacy servers never negotiated them, so
+    // a peer that fell back to `initialize` gets the same wire shape a
+    // pure legacy client produces (no routing headers, no RC protocol
+    // version). Routing headers are exercised end-to-end via the
+    // trace-context integration; unit-level hint extraction is tested in
     // `routing_hints_tests`.
     #[cfg(feature = "proto-2026-07-28-rc")]
-    if let Some((method, name)) = routing_hints(req) {
-        resp = resp.header(crate::transport::http::MCP_METHOD, method);
-        if let Some(n) = name {
-            resp = resp.header(crate::transport::http::MCP_NAME, n);
+    if !session.is_legacy() {
+        if let Some((method, name)) = routing_hints(req) {
+            resp = resp.header(crate::transport::http::MCP_METHOD, method);
+            if let Some(n) = name {
+                resp = resp.header(crate::transport::http::MCP_NAME, n);
+            }
         }
-    }
-
-    // Under the RC the protocol version is fixed: `with_mcp_version`
-    // is compiled out, so the client can only ever speak the latest
-    // (RC) version. Sending the last compiled version is therefore
-    // exactly the configured version on every request.
-    #[cfg(feature = "proto-2026-07-28-rc")]
-    {
         resp = resp.header(
             crate::transport::http::MCP_PROTOCOL_VERSION,
-            crate::PROTOCOL_VERSIONS
-                .last()
-                .copied()
-                .unwrap_or("2026-07-28"),
+            crate::RC_PROTOCOL_VERSION,
         );
     }
 
@@ -315,7 +300,7 @@ async fn send_request(
         session.set_session_id(session_id);
     }
 
-    if let Message::Request(r) = req
+    if let Message::Request(r) = &req
         && r.method == crate::commands::INIT
     {
         let token = session.cancellation_token();
@@ -330,15 +315,91 @@ async fn send_request(
         }
     }
 
-    let resp = resp.json::<Message>().await;
-
-    if let Err(_err) = resp_tx.send(resp.map_err(Error::from)).await {
-        #[cfg(feature = "tracing")]
-        tracing::error!(logger = "neva", "Failed to send response: {}", _err);
+    let status = resp.status();
+    match resp.json::<Message>().await {
+        Ok(msg) => {
+            if let Err(_err) = resp_tx.send(Ok(msg)).await {
+                #[cfg(feature = "tracing")]
+                tracing::error!(logger = "neva", "Failed to send response: {}", _err);
+            }
+        }
+        // A reply that is not JSON-RPC — an HTML error page, or an error
+        // code outside neva's `ErrorCode` set (e.g. the TS SDK's -32000).
+        // Complete every originating request with an id-bound error
+        // response: a bare `Err` pushed into the channel would terminate
+        // the receive loop without ever resolving the pending request.
+        // This is also what lets `server/discover` classify such replies
+        // and fall back to `initialize`.
+        Err(err) => {
+            #[cfg(feature = "tracing")]
+            tracing::error!(
+                logger = "neva",
+                "Failed to parse HTTP response ({}): {}",
+                status,
+                err
+            );
+            let (code, reason) = parse_failure(status, &err);
+            for id in request_ids(&req) {
+                let resp = crate::types::Response::error(id, Error::new(code, reason.clone()));
+                if resp_tx.send(Ok(Message::Response(resp))).await.is_err() {
+                    break;
+                }
+            }
+        }
     }
 }
 
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+/// Classifies a non-JSON-RPC HTTP reply into the code and message the
+/// originating requests are completed with, carrying the HTTP status so
+/// the caller can tell *why* the body wasn't JSON-RPC.
+///
+/// The code matters beyond diagnostics: `ParseError` is one of the
+/// dual-mode fallback triggers (issue #84), so it must be produced *only*
+/// for replies that genuinely suggest "this peer doesn't know the RC
+/// method/route" — an allowlist, not a catch-all:
+///
+/// * any `2xx` — a legacy peer answering `server/discover` on the wire but
+///   with a body neva can't read as JSON-RPC, most notably an error code
+///   outside its `ErrorCode` set (the TS SDK's `-32000` "server not
+///   initialized" family);
+/// * `400` / `404` / `405` / `406` — routers and legacy servers rejecting
+///   the unknown method or endpoint outright.
+///
+/// Everything else is an upstream failure that says nothing about the
+/// peer's protocol generation and must surface as-is
+/// (`InternalError`, like "Connection closed"):
+/// `401`/`403`/`407` (authentication — otherwise a failed login against a
+/// valid RC server reads as "legacy"), `429` (rate limit) and every `5xx`
+/// (reverse-proxy outage, gateway timeout). Treating those as legacy
+/// evidence would silently drop the RC headers, retry `initialize` into
+/// the same outage, and bury the real cause.
+#[inline]
+fn parse_failure(status: reqwest::StatusCode, err: &impl std::fmt::Display) -> (ErrorCode, String) {
+    let unsupported_route = matches!(status.as_u16(), 400 | 404 | 405 | 406);
+    let code = if status.is_success() || unsupported_route {
+        ErrorCode::ParseError
+    } else {
+        ErrorCode::InternalError
+    };
+    (code, format!("HTTP {status}: {err}"))
+}
+
+/// The ids of the requests `msg` carries (empty for notifications and
+/// notification-only batches).
+fn request_ids(msg: &Message) -> Vec<crate::types::RequestId> {
+    match msg {
+        Message::Request(r) => vec![r.id()],
+        Message::Batch(batch) => batch
+            .iter()
+            .filter_map(|envelope| match envelope {
+                crate::types::MessageEnvelope::Request(r) => Some(r.id()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 async fn start_sse_connection(
     session: Arc<McpSession>,
     resp_tx: mpsc::Sender<Result<Message, Error>>,
@@ -361,7 +422,6 @@ async fn start_sse_connection(
     }
 }
 
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 async fn handle_sse_connection(
     session: Arc<McpSession>,
     resp_tx: mpsc::Sender<Result<Message, Error>>,
@@ -499,7 +559,6 @@ async fn handle_sse_connection(
     }
 }
 
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 async fn handle_event(
     event: sse_stream::Sse,
     session: &Arc<McpSession>,
@@ -521,14 +580,12 @@ async fn handle_event(
 }
 
 #[inline]
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 fn handle_error(_err: sse_stream::Error) {
     #[cfg(feature = "tracing")]
     tracing::error!(logger = "neva", "SSE Error: {}", _err);
 }
 
 // Returns true if the message was successfully parsed and delivered.
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
 async fn handle_msg(
     event: sse_stream::Sse,
     resp_tx: &mpsc::Sender<Result<Message, Error>>,
@@ -536,14 +593,23 @@ async fn handle_msg(
     let Some(data) = event.data else {
         return false;
     };
-    let msg = serde_json::from_str::<Message>(&data);
-    let parsed_ok = msg.is_ok();
-    if let Err(_err) = resp_tx.send(msg.map_err(Error::from)).await {
+    // A malformed SSE frame must not reach the receive loop as a bare
+    // `Err` (that would terminate it) — log and skip; the last event id
+    // does not advance, so a reconnect replays the event.
+    let msg = match serde_json::from_str::<Message>(&data) {
+        Ok(msg) => msg,
+        Err(_err) => {
+            #[cfg(feature = "tracing")]
+            tracing::error!(logger = "neva", "Failed to parse SSE event: {}", _err);
+            return false;
+        }
+    };
+    if let Err(_err) = resp_tx.send(Ok(msg)).await {
         #[cfg(feature = "tracing")]
         tracing::error!(logger = "neva", "Failed to send server request: {}", _err);
         return false;
     }
-    parsed_ok
+    true
 }
 
 #[inline]
@@ -575,9 +641,9 @@ impl From<reqwest::Error> for Error {
     }
 }
 
-// These tests exercise the SSE GET stream path, which does not exist under
-// the stateless RC transport.
-#[cfg(all(test, not(feature = "proto-2026-07-28-rc")))]
+// These tests exercise the SSE GET stream path, which serves legacy
+// peers — compiled under both flags for the dual-mode client.
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::transport::http::ServiceUrl;
@@ -586,11 +652,49 @@ mod tests {
         Arc::new(McpSession::new(
             ServiceUrl::default(),
             CancellationToken::new(),
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            Default::default(),
         ))
     }
 
     // A minimal valid JSON-RPC notification that Message will accept
     const VALID_MSG: &str = r#"{"jsonrpc":"2.0","method":"ping"}"#;
+
+    /// Only statuses that actually suggest an unknown method/route may
+    /// yield `ParseError` — the dual-mode fallback trigger. Upstream
+    /// failures (auth, rate limit, 5xx) must stay `InternalError` so a
+    /// valid RC peer is never mistaken for a legacy one.
+    #[test]
+    fn parse_failure_classifies_statuses() {
+        let cases = [
+            // legacy evidence: the peer answered, the body just isn't JSON-RPC
+            (200, ErrorCode::ParseError),
+            (202, ErrorCode::ParseError),
+            (400, ErrorCode::ParseError),
+            (404, ErrorCode::ParseError),
+            (405, ErrorCode::ParseError),
+            (406, ErrorCode::ParseError),
+            // upstream failures: say nothing about the protocol generation
+            (401, ErrorCode::InternalError),
+            (403, ErrorCode::InternalError),
+            (407, ErrorCode::InternalError),
+            (429, ErrorCode::InternalError),
+            (500, ErrorCode::InternalError),
+            (502, ErrorCode::InternalError),
+            (503, ErrorCode::InternalError),
+            (504, ErrorCode::InternalError),
+        ];
+
+        for (status, expected) in cases {
+            let status = reqwest::StatusCode::from_u16(status).unwrap();
+            let (code, reason) = parse_failure(status, &"boom");
+            assert_eq!(code, expected, "wrong code for HTTP {status}");
+            assert!(
+                reason.contains(status.as_str()),
+                "the status must be carried in the message, got: {reason}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn it_advances_last_event_id_on_successful_delivery() {
