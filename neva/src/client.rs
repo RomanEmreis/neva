@@ -1945,6 +1945,7 @@ mod dual_mode_tests {
         Html400,
         UnsupportedVersion,
         Unauthorized401,
+        Unavailable503,
     }
 
     async fn serve_legacy(
@@ -2006,6 +2007,15 @@ mod dual_mode_tests {
                                     "400 Bad Request",
                                     "Content-Type: text/html\r\n",
                                     "<html><body>Bad Request</body></html>",
+                                )
+                                .await;
+                            }
+                            DiscoverReply::Unavailable503 => {
+                                write_response(
+                                    &mut stream,
+                                    "503 Service Unavailable",
+                                    "Content-Type: text/html\r\n",
+                                    "<html><body>upstream down</body></html>",
                                 )
                                 .await;
                             }
@@ -2254,6 +2264,48 @@ mod dual_mode_tests {
         assert!(
             !log.iter().any(|r| r.contains("\"method\":\"initialize\"")),
             "no initialize fallback may be attempted after an auth failure"
+        );
+    }
+
+    /// An upstream outage (reverse proxy `503`, rate limit, gateway
+    /// timeout) says nothing about the peer's protocol generation: the
+    /// failure must surface instead of being read as "legacy" and retried
+    /// as `initialize` into the very same outage.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn upstream_failure_during_discover_does_not_fall_back() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        tokio::spawn(serve_legacy(
+            listener,
+            log.clone(),
+            DiscoverReply::Unavailable503,
+        ));
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                .with_timeout(std::time::Duration::from_secs(5))
+        });
+
+        let err = client
+            .connect()
+            .await
+            .expect_err("an upstream outage must fail the connect");
+        assert!(
+            err.to_string().contains("503"),
+            "the upstream status must surface, got: {err}"
+        );
+        assert!(
+            !client.is_legacy_peer(),
+            "an upstream outage must never mark the peer legacy"
+        );
+
+        let log = log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            !log.iter().any(|r| r.contains("\"method\":\"initialize\"")),
+            "no initialize fallback may be attempted on an upstream failure"
         );
     }
 

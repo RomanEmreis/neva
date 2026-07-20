@@ -390,7 +390,7 @@ impl McpOptions {
     pub(crate) fn sampling_capability(&self) -> Option<SamplingCapability> {
         self.sampling_capability
             .clone()
-            .or_else(|| self.sampling_handler.is_none().then(Default::default))
+            .or_else(|| self.sampling_handler.is_some().then(Default::default))
     }
 
     /// Returns [`ElicitationCapability`] if configured.
@@ -399,7 +399,7 @@ impl McpOptions {
     pub(crate) fn elicitation_capability(&self) -> Option<ElicitationCapability> {
         self.elicitation_capability
             .clone()
-            .or_else(|| self.elicitation_handler.is_none().then(Default::default))
+            .or_else(|| self.elicitation_handler.is_some().then(Default::default))
     }
 
     /// Returns [`ClientTasksCapability`] if configured.
@@ -413,8 +413,41 @@ impl McpOptions {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[allow(unused_imports)]
     use super::*;
+
+    /// Implicit sampling/elicitation capabilities follow the *installed
+    /// handler*: advertising one a client cannot serve makes a legacy
+    /// server send requests answered with `MethodNotFound`, while hiding
+    /// one that is installed makes it skip the feature entirely.
+    #[test]
+    fn implicit_capabilities_follow_the_installed_handlers() {
+        let mut opts = McpOptions::default();
+        assert!(
+            opts.sampling_capability().is_none(),
+            "no sampling handler — nothing to advertise"
+        );
+        assert!(
+            opts.elicitation_capability().is_none(),
+            "no elicitation handler — nothing to advertise"
+        );
+
+        opts.add_sampling_handler(Arc::new(|_params| {
+            Box::pin(async move { crate::types::sampling::CreateMessageResult::assistant() })
+        }));
+        opts.add_elicitation_handler(Arc::new(|_params| {
+            Box::pin(async move { crate::types::elicitation::ElicitResult::decline() })
+        }));
+
+        assert!(
+            opts.sampling_capability().is_some(),
+            "an installed sampling handler must be advertised"
+        );
+        assert!(
+            opts.elicitation_capability().is_some(),
+            "an installed elicitation handler must be advertised"
+        );
+    }
 
     #[test]
     #[cfg(feature = "proto-2026-07-28-rc")]

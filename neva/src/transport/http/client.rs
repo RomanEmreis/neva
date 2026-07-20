@@ -354,22 +354,32 @@ async fn send_request(
 /// the caller can tell *why* the body wasn't JSON-RPC.
 ///
 /// The code matters beyond diagnostics: `ParseError` is one of the
-/// dual-mode fallback triggers, so a protected endpoint
-/// answering `401`/`403`/`407` with an HTML page must **not** produce it —
-/// otherwise a failed authentication against a perfectly valid RC server
-/// would be read as "this peer is legacy", silently dropping the RC
-/// headers and retrying `initialize`. Authentication failures are
-/// transport-level (`InternalError`, like "Connection closed") and
-/// surface to the caller as-is.
+/// dual-mode fallback triggers (issue #84), so it must be produced *only*
+/// for replies that genuinely suggest "this peer doesn't know the RC
+/// method/route" — an allowlist, not a catch-all:
+///
+/// * any `2xx` — a legacy peer answering `server/discover` on the wire but
+///   with a body neva can't read as JSON-RPC, most notably an error code
+///   outside its `ErrorCode` set (the TS SDK's `-32000` "server not
+///   initialized" family);
+/// * `400` / `404` / `405` / `406` — routers and legacy servers rejecting
+///   the unknown method or endpoint outright.
+///
+/// Everything else is an upstream failure that says nothing about the
+/// peer's protocol generation and must surface as-is
+/// (`InternalError`, like "Connection closed"):
+/// `401`/`403`/`407` (authentication — otherwise a failed login against a
+/// valid RC server reads as "legacy"), `429` (rate limit) and every `5xx`
+/// (reverse-proxy outage, gateway timeout). Treating those as legacy
+/// evidence would silently drop the RC headers, retry `initialize` into
+/// the same outage, and bury the real cause.
 #[inline]
-fn parse_failure(status: reqwest::StatusCode, err: &reqwest::Error) -> (ErrorCode, String) {
-    use reqwest::StatusCode;
-
-    let code = match status {
-        StatusCode::UNAUTHORIZED
-        | StatusCode::FORBIDDEN
-        | StatusCode::PROXY_AUTHENTICATION_REQUIRED => ErrorCode::InternalError,
-        _ => ErrorCode::ParseError,
+fn parse_failure(status: reqwest::StatusCode, err: &impl std::fmt::Display) -> (ErrorCode, String) {
+    let unsupported_route = matches!(status.as_u16(), 400 | 404 | 405 | 406);
+    let code = if status.is_success() || unsupported_route {
+        ErrorCode::ParseError
+    } else {
+        ErrorCode::InternalError
     };
     (code, format!("HTTP {status}: {err}"))
 }
@@ -649,6 +659,42 @@ mod tests {
 
     // A minimal valid JSON-RPC notification that Message will accept
     const VALID_MSG: &str = r#"{"jsonrpc":"2.0","method":"ping"}"#;
+
+    /// Only statuses that actually suggest an unknown method/route may
+    /// yield `ParseError` — the dual-mode fallback trigger. Upstream
+    /// failures (auth, rate limit, 5xx) must stay `InternalError` so a
+    /// valid RC peer is never mistaken for a legacy one.
+    #[test]
+    fn parse_failure_classifies_statuses() {
+        let cases = [
+            // legacy evidence: the peer answered, the body just isn't JSON-RPC
+            (200, ErrorCode::ParseError),
+            (202, ErrorCode::ParseError),
+            (400, ErrorCode::ParseError),
+            (404, ErrorCode::ParseError),
+            (405, ErrorCode::ParseError),
+            (406, ErrorCode::ParseError),
+            // upstream failures: say nothing about the protocol generation
+            (401, ErrorCode::InternalError),
+            (403, ErrorCode::InternalError),
+            (407, ErrorCode::InternalError),
+            (429, ErrorCode::InternalError),
+            (500, ErrorCode::InternalError),
+            (502, ErrorCode::InternalError),
+            (503, ErrorCode::InternalError),
+            (504, ErrorCode::InternalError),
+        ];
+
+        for (status, expected) in cases {
+            let status = reqwest::StatusCode::from_u16(status).unwrap();
+            let (code, reason) = parse_failure(status, &"boom");
+            assert_eq!(code, expected, "wrong code for HTTP {status}");
+            assert!(
+                reason.contains(status.as_str()),
+                "the status must be carried in the message, got: {reason}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn it_advances_last_event_id_on_successful_delivery() {
