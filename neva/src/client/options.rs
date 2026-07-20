@@ -311,8 +311,11 @@ impl McpOptions {
     pub(crate) fn transport(&mut self) -> TransportProto {
         let transport = self.proto.take().unwrap_or_default();
         // Hand the dual-mode switch to the HTTP transport so request
-        // headers follow the negotiated protocol generation.
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        // headers follow the negotiated protocol generation. Only the
+        // HTTP transport carries them, so this is gated on `http-client`
+        // as well — stdio-only RC clients (no `TransportProto::HttpClient`
+        // variant at all) pass the transport through untouched.
+        #[cfg(all(feature = "proto-2026-07-28-rc", feature = "http-client"))]
         let transport = match transport {
             TransportProto::HttpClient(http) => {
                 TransportProto::HttpClient(Box::new(http.with_peer_mode(self.peer_mode.clone())))

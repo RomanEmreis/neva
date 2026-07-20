@@ -26,8 +26,9 @@ use crate::{
 };
 // `RequestId` is only referenced by the server→client request paths (non-RC
 // elicitation/sampling) and the task API; under the stateless RC build without
-// tasks it is unused.
-#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "tasks", test))]
+// tasks it is unused — including in tests, whose `RequestId` uses live in
+// modules carrying those very same gates.
+#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "tasks"))]
 use crate::types::RequestId;
 use std::{
     collections::HashMap,
