@@ -315,6 +315,7 @@ async fn send_request(
         }
     }
 
+    let status = resp.status();
     match resp.json::<Message>().await {
         Ok(msg) => {
             if let Err(_err) = resp_tx.send(Ok(msg)).await {
@@ -324,26 +325,53 @@ async fn send_request(
         }
         // A reply that is not JSON-RPC — an HTML error page, or an error
         // code outside neva's `ErrorCode` set (e.g. the TS SDK's -32000).
-        // Complete every originating request with an id-bound `ParseError`
+        // Complete every originating request with an id-bound error
         // response: a bare `Err` pushed into the channel would terminate
         // the receive loop without ever resolving the pending request.
         // This is also what lets `server/discover` classify such replies
         // and fall back to `initialize`.
         Err(err) => {
             #[cfg(feature = "tracing")]
-            tracing::error!(logger = "neva", "Failed to parse HTTP response: {}", err);
-            let reason = err.to_string();
+            tracing::error!(
+                logger = "neva",
+                "Failed to parse HTTP response ({}): {}",
+                status,
+                err
+            );
+            let (code, reason) = parse_failure(status, &err);
             for id in request_ids(&req) {
-                let resp = crate::types::Response::error(
-                    id,
-                    Error::new(ErrorCode::ParseError, reason.clone()),
-                );
+                let resp = crate::types::Response::error(id, Error::new(code, reason.clone()));
                 if resp_tx.send(Ok(Message::Response(resp))).await.is_err() {
                     break;
                 }
             }
         }
     }
+}
+
+/// Classifies a non-JSON-RPC HTTP reply into the code and message the
+/// originating requests are completed with, carrying the HTTP status so
+/// the caller can tell *why* the body wasn't JSON-RPC.
+///
+/// The code matters beyond diagnostics: `ParseError` is one of the
+/// dual-mode fallback triggers, so a protected endpoint
+/// answering `401`/`403`/`407` with an HTML page must **not** produce it —
+/// otherwise a failed authentication against a perfectly valid RC server
+/// would be read as "this peer is legacy", silently dropping the RC
+/// headers and retrying `initialize`. Authentication failures are
+/// transport-level (`InternalError`, like "Connection closed") and
+/// surface to the caller as-is.
+#[inline]
+fn parse_failure(status: reqwest::StatusCode, err: &reqwest::Error) -> (ErrorCode, String) {
+    use reqwest::StatusCode;
+
+    let code = match status {
+        StatusCode::UNAUTHORIZED
+        | StatusCode::FORBIDDEN
+        | StatusCode::PROXY_AUTHENTICATION_REQUIRED => ErrorCode::InternalError,
+        _ => ErrorCode::ParseError,
+    };
+    (code, format!("HTTP {status}: {err}"))
 }
 
 /// The ids of the requests `msg` carries (empty for notifications and
