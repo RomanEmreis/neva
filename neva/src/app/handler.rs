@@ -3,11 +3,11 @@
 use crate::Context;
 use crate::app::options::RuntimeMcpOptions;
 use crate::error::{Error, ErrorCode};
+use crate::shared::BoxFuture;
 use crate::types::{
     CallToolRequestParams, CompleteRequestParams, GetPromptRequestParams, IntoResponse,
     ListResourcesRequestParams, ReadResourceRequestParams, Request, RequestId, Response,
 };
-use futures_util::future::BoxFuture;
 use std::future::Future;
 use std::sync::Arc;
 

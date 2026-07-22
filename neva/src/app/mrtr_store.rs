@@ -24,9 +24,9 @@
 //! the same reason such a deployment must share the MRTR secret (a retry routed
 //! to a different instance must see the same committed state).
 
+use crate::shared::BoxFuture;
 use crate::types::Response;
 use crate::types::mrtr::state::now_secs;
-use futures_util::future::BoxFuture;
 use std::sync::Arc;
 
 /// A store that remembers the final response of a committed MRTR `requestState`

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## 0.4.3
 
+### Added
+* `neva::shared::BoxFuture` (also in the prelude) — the return type of
+  neva's object-safe async traits, now owned by neva instead of borrowed
+  from `futures_util`. Implementing
+  [`AuthorizationHandler`](https://docs.rs/neva/latest/neva/auth/oauth/trait.AuthorizationHandler.html)
+  or [`RequestStateStore`](https://docs.rs/neva/latest/neva/trait.RequestStateStore.html)
+  no longer requires a `futures` dependency of your own, kept in lockstep
+  with neva's. It is a plain alias for
+  `Pin<Box<dyn Future<Output = T> + Send + 'a>>` — the same type
+  `futures_util::future::BoxFuture` denotes — so existing implementations
+  that spell out the `futures_util` path keep compiling unchanged.
+
 ### Changed
 * Updated to `volga` / `volga-oauth-core` / `volga-oauth-client` 0.9.6,
   which ships the two upstream fixes this crate was working around:

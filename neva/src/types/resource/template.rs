@@ -5,7 +5,7 @@ use crate::app::handler::{FromHandlerParams, GenericHandler, Handler, HandlerPar
 #[cfg(feature = "server")]
 use crate::error::Error;
 #[cfg(feature = "server")]
-use futures_util::future::BoxFuture;
+use crate::shared::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt::Debug;

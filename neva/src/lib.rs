@@ -235,6 +235,7 @@ pub mod prelude {
 
     pub use crate::error::*;
     pub use crate::json::*;
+    pub use crate::shared::BoxFuture;
     pub use crate::types::*;
 
     #[cfg(feature = "http-server-volga")]

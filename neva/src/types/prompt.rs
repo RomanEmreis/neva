@@ -6,13 +6,13 @@ use super::helpers::TypeCategory;
 use crate::error::{Error, ErrorCode};
 use crate::shared;
 #[cfg(feature = "server")]
+use crate::shared::BoxFuture;
+#[cfg(feature = "server")]
 use crate::types::FromRequest;
 use crate::types::request::RequestParamsMeta;
 use crate::types::{Cursor, Icon};
 #[cfg(feature = "server")]
 use crate::types::{IntoResponse, Page, PropertyType, Request, RequestId, Response};
-#[cfg(feature = "server")]
-use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;

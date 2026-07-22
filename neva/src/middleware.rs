@@ -1,10 +1,10 @@
 //! MCP Server middleware utilities
 
+use crate::shared::BoxFuture;
 use crate::{
     app::context::ServerRuntime,
     types::{Message, Request, RequestId, Response, notification::Notification},
 };
-use futures_util::future::BoxFuture;
 use std::fmt::Debug;
 use std::sync::Arc;
 

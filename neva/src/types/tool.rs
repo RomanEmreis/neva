@@ -11,12 +11,12 @@ use std::fmt::{Debug, Formatter};
 #[cfg(feature = "server")]
 use {
     super::helpers::TypeCategory,
+    crate::shared::BoxFuture,
     crate::types::{FromRequest, IntoResponse, Page, Request, RequestId, Response},
     crate::{
         Context,
         app::handler::{FromHandlerParams, GenericHandler, Handler, HandlerParams, RequestHandler},
     },
-    futures_util::future::BoxFuture,
     std::{future::Future, sync::Arc},
 };
 

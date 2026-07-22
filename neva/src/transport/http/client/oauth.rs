@@ -16,7 +16,7 @@
 //! the default [`LoopbackHandler`] serves desktop/CLI clients by opening
 //! the system browser and capturing the redirect on a loopback listener.
 
-use futures_util::future::BoxFuture;
+use crate::shared::BoxFuture;
 use std::sync::{Arc, RwLock};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -151,11 +151,17 @@ fn percent_decode(s: &str) -> Option<String> {
 /// headless embedder implements this trait to route the URL through its
 /// own UI and deliver the callback parameters however they arrive.
 ///
+/// Both methods return a [`BoxFuture`] rather than being `async fn`: the
+/// handler is stored behind `Arc<dyn AuthorizationHandler>`, and `async fn`
+/// in a trait is not dyn-compatible. `Box::pin(async move { … })` is all an
+/// implementation needs — and the alias is neva's own, so implementing this
+/// trait pulls in no `futures` dependency.
+///
 /// # Example
 /// ```no_run
-/// use futures_util::future::BoxFuture;
 /// use neva::auth::oauth::{AuthorizationHandler, CallbackParams};
 /// use neva::error::Error;
+/// use neva::shared::BoxFuture;
 ///
 /// struct MyUi;
 ///
@@ -712,7 +718,7 @@ impl OAuthSession {
                 OAuthClient::from_registration(&response).map_err(flow_error)?
             }
         };
-        
+
         Ok(client
             .with_config(self.config.client_config())
             .with_redirect_uri(redirect_uri)
