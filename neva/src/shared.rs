@@ -48,8 +48,8 @@ mod task_tracker;
 /// The future returned by neva's object-safe async traits — a boxed,
 /// `Send` future borrowing for `'a`.
 ///
-/// Traits like [`AuthorizationHandler`](crate::auth::oauth::AuthorizationHandler)
-/// and [`RequestStateStore`](crate::RequestStateStore) are stored behind
+/// Traits like `AuthorizationHandler` (client OAuth) and `RequestStateStore`
+/// (MRTR idempotency) are stored behind
 /// `Arc<dyn …>`, which rules out `async fn` in the trait (not dyn-compatible),
 /// so their methods return this instead. Owning the alias here means
 /// implementing such a trait needs no `futures` dependency of your own — and

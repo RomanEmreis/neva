@@ -9,35 +9,34 @@
 //!
 //! # `requestState`: sealed, not merely signed
 //!
-//! MRTR is stateless — all cross-round progress travels through the client,
-//! which echoes the opaque `requestState` blob back on each retry. How that
-//! blob is protected is therefore a design decision, not a detail. neva
-//! **seals** it with ChaCha20-Poly1305 (AEAD) rather than **signing** it
-//! (HMAC).
+//! MRTR is stateless — all cross-round progress travels through the client, which
+//! echoes the opaque `requestState` blob back on each retry. How that blob is
+//! protected is therefore a design decision, not a detail. neva **seals** it with
+//! ChaCha20-Poly1305 (AEAD) rather than **signing** it (HMAC).
 //!
-//! A signed state is tamper-*evident*: the client cannot alter it undetected,
-//! but it can **read** it. That suffices while the state carries only what the
-//! client already knows — the answers it supplied itself. It stops sufficing
-//! the moment the server puts its *own* data in there, which is precisely what
-//! [`Context::memo`](crate::Context::memo) does: a memoized value is
-//! server-computed — an upstream API response, a quoted price, a record looked
-//! up under the caller's identity, a downstream token — and it is written into
-//! the state so the next round replays it instead of recomputing it. Signing
-//! alone would publish every such value to the client, and to anything that
-//! logs a request body in between.
+//! A signed state is tamper-*evident*: the client cannot alter it undetected, but
+//! it can **read** it. That suffices while the state carries only what the client
+//! already knows — the answers it supplied itself. It stops sufficing the moment
+//! the server puts its *own* data in there, which is precisely what
+//! `Context::memo` does: a memoized value is
+//! server-computed — an upstream API response, a quoted price, a record looked up
+//! under the caller's identity, a downstream token — and it is written into the
+//! state so the next round replays it instead of recomputing it. Signing alone
+//! would publish every such value to the client, and to anything that logs a
+//! request body in between.
 //!
-//! Nothing is traded away for that confidentiality: the AEAD tag authenticates
-//! the payload exactly as an HMAC would, and the `v1.{kid}` header is bound in
-//! as associated data so no segment can be transplanted between blobs. The
-//! payload additionally carries a TTL, a binding to the originating request,
-//! and a binding to the authenticated principal.
+//! Nothing is traded away for that confidentiality: the AEAD tag authenticates the
+//! payload exactly as an HMAC would, and the `v1.{kid}` header is bound in as
+//! associated data so no segment can be transplanted between blobs. The payload
+//! additionally carries a TTL, a binding to the originating request, and a binding
+//! to the authenticated principal.
 //!
 //! Two practical consequences:
 //! * `ctx.memo` is safe to use for values the client must not see.
 //! * The shared secret set via
-//!   [`App::with_request_state_secret`](crate::App::with_request_state_secret)
+//!   `App::with_request_state_secret`
 //!   (rotated via
-//!   [`App::with_request_state_keys`](crate::App::with_request_state_keys))
+//!   `App::with_request_state_keys`)
 //!   upholds confidentiality, not just integrity — treat it as a secret.
 //!
 //! # Side effects across rounds are the framework's problem
@@ -45,26 +44,26 @@
 //! Re-run + replay means a handler executes from the top on *every* round, so
 //! anything with a side effect between rounds is at risk of running more than
 //! once. The protocol itself says nothing about this — it is left to each
-//! implementation, and an SDK may reasonably hand the problem to the
-//! application author. neva does not:
+//! implementation, and an SDK may reasonably hand the problem to the application
+//! author. neva does not:
 //!
-//! * [`Context::memo`](crate::Context::memo) — compute once, replay the value
-//!   on later rounds (sealed into `requestState`, hence the section above).
-//! * [`Context::once`](crate::Context::once) — run an effect at most once
-//!   across the whole chain.
-//! * [`Context::on_commit`](crate::Context::on_commit) — defer an effect until
-//!   the handler actually reaches its final result, so an abandoned or failed
-//!   chain never applies it.
-//! * [`RequestStateStore`](crate::RequestStateStore) — close the one gap the
+//! * `Context::memo` — compute once, replay the value on
+//!   later rounds (sealed into `requestState`, hence the section above).
+//! * `Context::once` — run an effect at most once across
+//!   the whole chain.
+//! * `Context::on_commit` — defer an effect until the
+//!   handler actually reaches its final result, so an abandoned or failed chain
+//!   never applies it.
+//! * `RequestStateStore` — close the one gap the
 //!   sealed state structurally cannot: the final round mints no new state, so a
 //!   lost HTTP response would otherwise re-run the handler and its commits on
-//!   retry. The store caches the committed final response and replays it
-//!   verbatim. It is on by default (in-process); a multi-instance deployment
-//!   supplies a shared implementation.
+//!   retry. The store caches the committed final response and replays it verbatim.
+//!   It is on by default (in-process); a multi-instance deployment supplies a
+//!   shared implementation.
 //!
-//! Together these make an MRTR handler safe to write in the obvious way —
-//! charge the card, send the receipt — without hand-rolling idempotency keys
-//! per tool. See `docs/specs/2026-05-30-mrtr-design.md` for the full design.
+//! Together these make an MRTR handler safe to write in the obvious way — charge
+//! the card, send the receipt — without hand-rolling idempotency keys per tool.
+//! See `docs/specs/2026-05-30-mrtr-design.md` for the full design.
 
 // The encrypted `requestState` codec is server-only: the client treats
 // `requestState` as opaque and never encodes/decodes it.
@@ -113,7 +112,7 @@ pub type InputRequests = HashMap<String, InputRequest>;
 /// [`CreateMessageResult`](crate::types::sampling::CreateMessageResult),
 /// [`ListRootsResult`](crate::types::root::ListRootsResult)). Each server-side
 /// helper deserializes its own type out of the replay log, exactly like
-/// [`Context::memo`](crate::Context::memo) does.
+/// `ctx.memo` does.
 pub type InputResponses = HashMap<String, serde_json::Value>;
 
 /// One `{ method, params }` input-request envelope — the kind of input the
