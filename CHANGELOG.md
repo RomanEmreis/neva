@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.4.3
+
+### Changed
+* Updated to `volga` / `volga-oauth-core` / `volga-oauth-client` 0.9.6,
+  which ships the two upstream fixes this crate was working around:
+  * The token-endpoint futures (`exchange_code` / `refresh` / `token`) are
+    now `Send`, so the internal `spawn_blocking` bridge that ran them on a
+    dedicated current-thread runtime is gone — the OAuth code exchange and
+    token refresh run inline on the caller's runtime, with no extra thread
+    or runtime per operation. A `Send` bound assertion now guards the
+    regression.
+  * `application_type` is a first-class member of the registration
+    document, so the loopback (native client) declaration no longer travels
+    as an extension field. The wire shape is unchanged.
+* Dependency updates: `serde` 1.0.229, `serde_json` 1.0.151, `tokio`
+  1.53.1, `tokio-util` 0.7.19, `futures-util` 0.3.33, `jsonschema` 0.48.2,
+  and `syn` 3.0 / `quote` 1.0.47 / `proc-macro2` 1.0.107 in `neva_macros`.
+
+### Fixed
+* A managed OAuth session could permanently lose its ability to refresh
+  non-interactively: the cached client/metadata were taken out of the
+  single-flight slot for the duration of a refresh and were not restored
+  if the (now removed) bridge itself failed, so every later request fell
+  back to interactive authorization. The cached state is now borrowed
+  rather than moved.
+
 ## 0.4.2
 
 ### Added
