@@ -1161,13 +1161,17 @@ impl Client {
     ) {
         let mut meta = req.meta().unwrap_or_default();
         meta.client_info = Some(self.options.implementation.clone());
-        // Each flag reflects what this client can actually fulfil right now:
-        // a configured handler for elicitation/sampling, and — since roots are
-        // data rather than a handler — a non-empty roots list.
+        // Each flag reflects what this client can actually fulfil right now: a
+        // configured handler for elicitation/sampling, and — since roots are
+        // data rather than a handler — a declared roots capability. That is
+        // either an explicit `with_roots(..)` or simply having roots, and it
+        // deliberately stays true for an empty list: an empty
+        // `ListRootsResult` is a valid answer, so a client that opted in must
+        // not be gated out of being asked.
         meta.client_capabilities = Some(crate::types::mrtr::ClientMrtrCapabilities {
             elicitation: self.options.elicitation_handler.is_some(),
             sampling: self.options.sampling_handler.is_some(),
-            roots: !self.options.roots().is_empty(),
+            roots: self.options.roots_capability().is_some(),
         });
 
         if input_responses.is_some() {

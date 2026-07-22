@@ -1455,6 +1455,50 @@ async fn client_drives_sampling_and_roots_end_to_end() {
     handle.abort();
 }
 
+/// A client that opted into roots but exposes none must still be askable — an
+/// empty `ListRootsResult` is a valid answer, and gating it out would leave the
+/// server unable to complete the call at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_with_an_empty_roots_list_still_answers() {
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("scan", |mut ctx: Context| async move {
+        #[allow(deprecated)]
+        let roots = ctx.list_roots("dirs").await?;
+        Ok::<String, Error>(format!("{} root(s)", roots.roots.len()))
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // Explicit opt-in, no roots added.
+    #[allow(deprecated)]
+    let mut client = Client::new().with_options(|o| {
+        o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
+            .with_roots(|roots| roots)
+    });
+    client.connect().await.expect("client connects");
+
+    let resp = client
+        .call_tool("scan", ())
+        .await
+        .expect("the round-trip must complete");
+    let text = resp
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.as_str());
+    assert_eq!(text, Some("0 root(s)"));
+    assert!(!resp.is_error, "an empty roots list is a valid answer");
+
+    client.disconnect().await.ok();
+    handle.abort();
+}
+
 /// The server must not ask for a kind the client never declared: a client with
 /// no sampling handler declares `sampling: false`, and the request is rejected
 /// rather than stalling the loop.

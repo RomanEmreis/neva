@@ -416,6 +416,24 @@ mod tests {
     #[allow(unused_imports)]
     use super::*;
 
+    /// An explicit `with_roots(..)` must survive an empty roots list: the MRTR
+    /// flag is derived from this, and an empty `ListRootsResult` is a perfectly
+    /// valid answer — a client that opted in must still be askable.
+    #[test]
+    fn an_explicit_roots_capability_survives_an_empty_list() {
+        #[allow(deprecated)]
+        let opts = McpOptions::default().with_roots(|roots| roots);
+        assert!(opts.roots().is_empty(), "no roots were added");
+        assert!(
+            opts.roots_capability().is_some(),
+            "an explicit opt-in must not be dropped just because the list is empty"
+        );
+
+        // …and with neither an opt-in nor any roots there is nothing to declare.
+        let bare = McpOptions::default();
+        assert!(bare.roots_capability().is_none());
+    }
+
     /// Implicit sampling/elicitation capabilities follow the *installed
     /// handler*: advertising one a client cannot serve makes a legacy
     /// server send requests answered with `MethodNotFound`, while hiding

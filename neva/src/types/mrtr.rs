@@ -128,7 +128,10 @@ pub type InputResponses = HashMap<String, serde_json::Value>;
 /// `{ method, params }` (the per-key id is the map key), whereas `Request`
 /// has required `jsonrpc`/`id` fields — emitting it would add non-spec fields
 /// and deserializing a conformant peer's bare `{method,params}` would fail.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Deserialization is hand-written rather than derived (see the `impl` below):
+/// the adjacent tag would make `params` mandatory, and a conforming peer may
+/// omit it for a kind that needs none.
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "method", content = "params")]
 pub enum InputRequest {
     /// `elicitation/create` — ask the end user for structured input.
@@ -154,6 +157,51 @@ pub enum InputRequest {
         note = "roots are deprecated in MCP 2026-07-28; they return as an MRTR input-request kind only for migration"
     )]
     Roots(Box<ListRootsRequestParams>),
+}
+
+impl<'de> Deserialize<'de> for InputRequest {
+    /// Decodes a `{ method, params }` envelope, dispatching on `method`.
+    ///
+    /// `params` is optional on the wire: `roots/list` takes none, so a
+    /// conforming peer may send a bare `{"method": "roots/list"}` (or an
+    /// explicit `null`). An absent value is read as an empty object rather
+    /// than as "use the default", so each kind's own params type still decides
+    /// what is acceptable — `roots/list` decodes (every field is optional)
+    /// while a paramless `elicitation/create` or `sampling/createMessage`
+    /// fails with that type's own error, as it should.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use crate::types::{elicitation, root, sampling};
+        use serde::de::Error as DeError;
+
+        #[derive(Deserialize)]
+        struct Envelope {
+            method: String,
+            #[serde(default)]
+            params: Option<serde_json::Value>,
+        }
+
+        let envelope = Envelope::deserialize(deserializer)?;
+        let params = envelope
+            .params
+            .filter(|params| !params.is_null())
+            .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+
+        fn parse<T: serde::de::DeserializeOwned, E: DeError>(
+            value: serde_json::Value,
+        ) -> Result<T, E> {
+            serde_json::from_value(value).map_err(E::custom)
+        }
+
+        #[allow(deprecated)]
+        match envelope.method.as_str() {
+            elicitation::commands::CREATE => parse(params).map(Self::Elicitation),
+            sampling::commands::CREATE => parse(params).map(Self::Sampling),
+            root::commands::LIST => parse(params).map(Self::Roots),
+            unknown => Err(D::Error::custom(format!(
+                "unknown MRTR input request method `{unknown}`"
+            ))),
+        }
+    }
 }
 
 impl InputRequest {
@@ -311,10 +359,40 @@ mod tests {
     /// A peer's `roots/list` envelope may omit `params` entirely; the
     /// params type is all-optional, so it must still decode.
     #[test]
-    fn a_roots_envelope_decodes_without_params() {
-        let json = serde_json::json!({ "method": "roots/list", "params": {} });
-        let parsed: InputRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(parsed.method(), "roots/list");
+    fn a_roots_envelope_decodes_with_or_without_params() {
+        for json in [
+            serde_json::json!({ "method": "roots/list", "params": {} }),
+            // A conforming peer may omit the empty object entirely.
+            serde_json::json!({ "method": "roots/list" }),
+            serde_json::json!({ "method": "roots/list", "params": null }),
+        ] {
+            let parsed: InputRequest = serde_json::from_value(json.clone())
+                .unwrap_or_else(|err| panic!("{json} must decode: {err}"));
+            assert_eq!(parsed.method(), "roots/list");
+        }
+    }
+
+    /// Absent params is *not* a blanket "use the default": a kind whose params
+    /// carry required fields still fails, with its own error.
+    #[test]
+    fn a_paramless_envelope_still_fails_for_kinds_that_need_params() {
+        for method in ["elicitation/create", "sampling/createMessage"] {
+            let json = serde_json::json!({ "method": method });
+            assert!(
+                serde_json::from_value::<InputRequest>(json).is_err(),
+                "{method} must not decode without params"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_input_kind_is_rejected_by_name() {
+        let json = serde_json::json!({ "method": "sorcery/summon", "params": {} });
+        let err = serde_json::from_value::<InputRequest>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("sorcery/summon"),
+            "the error must name the unknown method, got: {err}"
+        );
     }
 
     // `allows` is the server's gate, so it only exists in server builds.
