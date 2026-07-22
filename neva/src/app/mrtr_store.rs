@@ -18,6 +18,13 @@
 //! echoes the same blob and answers (same key), so the cached response is
 //! returned verbatim and the handler never re-executes.
 //!
+//! The protocol does not mandate any of this — final-round deduplication is
+//! left to the implementation, and an SDK may reasonably leave it to the
+//! application author. neva ships it on by default, so a tool that charges a
+//! card or sends a receipt is safe to write in the obvious way. See the
+//! [`mrtr`](crate::types::mrtr) module docs for how it fits with `once` /
+//! `memo` / `on_commit`.
+//!
 //! The default [`InMemoryStateStore`] is per-process. A multi-instance
 //! deployment should supply a shared implementation (e.g. Redis) via
 //! [`App::with_request_state_store`](crate::App::with_request_state_store) — for

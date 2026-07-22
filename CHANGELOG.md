@@ -49,6 +49,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `futures_util::future::BoxFuture` denotes — so existing implementations
   that spell out the `futures_util` path keep compiling unchanged.
 
+### Documentation
+* Documented why MRTR **seals** `requestState` with ChaCha20-Poly1305 instead
+  of signing it (#82): a signed state is tamper-evident but *readable*, which
+  stops being enough once `ctx.memo` writes server-computed values — an
+  upstream response, a quoted price, a downstream token — into the state for
+  the next round to replay. The AEAD tag authenticates exactly as an HMAC
+  would, so confidentiality costs nothing. The consequence for callers is
+  spelled out at [`types::mrtr`](https://docs.rs/neva/latest/neva/types/mrtr/)
+  and at `App::with_request_state_secret`: the secret upholds confidentiality,
+  not just integrity.
+* Documented the MRTR idempotency story as a whole (#82): a re-run/replay
+  handler executes from the top every round, and the protocol leaves the
+  resulting side-effect problem to the implementation. `ctx.memo` /
+  `ctx.once` / `ctx.on_commit` plus the default `RequestStateStore`
+  (final-round replay protection for a lost HTTP response) mean a tool that
+  charges a card can be written in the obvious way.
+
 ### Changed
 * **Breaking (`proto-2026-07-28-rc` API, #85)** — generalizing the MRTR input
   request reshapes three public items. The *wire* format is unchanged: an

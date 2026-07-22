@@ -21,6 +21,8 @@ fully aligned with the latest MCP specification.
 - **Tools**, **Resources** & **Prompts** - full-house support for defining and consuming the main MCP entities.
 - **Authentication & Authorization** - bearer token authentication, role-based access control, and more to fit high security standards.
 - **Structured Data** - output validation, embedded resources, and resource links out of the box.
+- **Safe Multi Round-Trip Requests** - a handler that asks the client for input mid-call re-runs from the top on every round, so neva owns the idempotency: `ctx.memo` computes once, `ctx.once` runs an effect once, `ctx.on_commit` defers it to the final result, and a built-in store makes a lost-response retry replay the committed answer instead of charging the card twice. The protocol leaves this to the implementation; you don't hand-roll it per tool.
+- **Confidential request state** - the `requestState` blob that carries progress between rounds is sealed with ChaCha20-Poly1305, not merely signed, so the server-computed values `ctx.memo` caches stay unreadable to the client that echoes them back.
 - **Spec Alignment** - designed to track the latest MCP specification and cover its core functionality.
 
 ## Quick Start

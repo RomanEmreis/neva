@@ -337,6 +337,11 @@ impl App {
     /// This is the single-key shorthand (kid `"0"`); for key rotation use
     /// [`with_request_state_keys`](Self::with_request_state_keys).
     ///
+    /// Because the state is sealed rather than signed, this value protects the
+    /// *confidentiality* of memoized values, not just their integrity — treat
+    /// it as a secret. See the [state codec docs](crate::types::mrtr) for why
+    /// MRTR encrypts instead of signing.
+    ///
     /// # Example
     /// ```no_run
     /// # #[cfg(feature = "proto-2026-07-28-rc")] {
