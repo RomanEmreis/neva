@@ -1,0 +1,12 @@
+[package]
+name = "rc-server"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+neva = { path = "../../../../neva", features = ["server-macros", "http-server-volga", "tracing", "proto-2026-07-28-rc"] }
+tokio = { version = "1.47.1", features = ["full"] }
+tracing = "0.1.41"
+tracing-subscriber = "0.3.20"

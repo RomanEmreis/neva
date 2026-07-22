@@ -208,7 +208,7 @@ impl McpOptions {
 
     /// Configures Roots capability
     #[deprecated(
-        note = "Roots are removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
+        note = "Roots are deprecated in MCP 2026-07-28: the capability-driven `roots/list` request is gone and the ability is re-homed onto MRTR — see `Context::list_roots`. Under the RC this configures what the client answers MRTR `roots/list` input requests with."
     )]
     pub fn with_roots<T>(mut self, config: T) -> Self
     where
@@ -220,7 +220,7 @@ impl McpOptions {
 
     /// Configures Sampling capability
     #[deprecated(
-        note = "Sampling is removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
+        note = "Sampling is deprecated in MCP 2026-07-28: the capability-driven `sampling/createMessage` request is gone and the ability is re-homed onto MRTR — see `Context::sample`."
     )]
     pub fn with_sampling<T>(mut self, config: T) -> Self
     where

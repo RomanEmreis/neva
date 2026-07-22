@@ -591,12 +591,15 @@ mod tests {
         );
     }
 
-    fn answer(content: serde_json::Value) -> crate::types::elicitation::ElicitResult {
-        crate::types::elicitation::ElicitResult {
+    /// An answer as it is stored in the replay log: raw JSON, since the result
+    /// type depends on which input kind was requested.
+    fn answer(content: serde_json::Value) -> serde_json::Value {
+        serde_json::to_value(crate::types::elicitation::ElicitResult {
             action: crate::types::elicitation::ElicitationAction::Accept,
             content: Some(content),
             meta: None,
-        }
+        })
+        .expect("an ElicitResult always serializes")
     }
 
     #[test]

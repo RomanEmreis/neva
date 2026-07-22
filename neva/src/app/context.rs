@@ -74,13 +74,18 @@ pub(crate) type CommitFut =
 pub(crate) struct MrtrCtx {
     /// Answers available this round (prior answers decoded from
     /// `requestState`, merged with this round's `inputResponses`).
-    pub(crate) answers: std::collections::HashMap<String, crate::types::elicitation::ElicitResult>,
+    ///
+    /// Raw [`serde_json::Value`]s: the result type depends on which kind of
+    /// input was requested, so each helper deserializes its own — the same
+    /// arrangement [`Context::memo`] uses.
+    pub(crate) answers: std::collections::HashMap<String, serde_json::Value>,
 
-    /// The newly-requested input (v1: at most one), recorded on a cache miss.
-    pub(crate) pending: std::sync::Mutex<Option<(String, ElicitRequestParams)>>,
+    /// The newly-requested input (at most one per round), recorded on a
+    /// cache miss.
+    pub(crate) pending: std::sync::Mutex<Option<(String, crate::types::mrtr::InputRequest)>>,
 
-    /// Whether the client declared elicitation support this round.
-    pub(crate) elicitation_allowed: bool,
+    /// Which input-request kinds the client declared support for this round.
+    pub(crate) client_capabilities: crate::types::mrtr::ClientMrtrCapabilities,
 
     /// Cached `ctx.memo` values (seeded from `requestState`, grown on miss).
     pub(crate) memos: std::sync::Mutex<std::collections::HashMap<String, serde_json::Value>>,
@@ -99,7 +104,7 @@ impl std::fmt::Debug for MrtrCtx {
         f.debug_struct("MrtrCtx")
             .field("answers", &self.answers)
             .field("pending", &self.pending)
-            .field("elicitation_allowed", &self.elicitation_allowed)
+            .field("client_capabilities", &self.client_capabilities)
             .field("memos", &self.memos)
             .field("effects", &self.effects)
             .finish_non_exhaustive()
@@ -110,16 +115,30 @@ impl std::fmt::Debug for MrtrCtx {
 impl MrtrCtx {
     /// Returns the cached answer for `key`, or records the request and returns
     /// the MRTR "input required" sentinel error to unwind the handler.
-    pub(crate) fn resolve(
+    ///
+    /// The answer is stored raw, so it is deserialized into `T` — the result
+    /// type the requested kind implies — on the replay round. A stored answer
+    /// that does not fit `T` means the client answered the right key with the
+    /// wrong kind of result, which is a protocol violation rather than a
+    /// reason to re-ask (re-asking would loop).
+    pub(crate) fn resolve<T: serde::de::DeserializeOwned>(
         &self,
         key: String,
-        params: ElicitRequestParams,
-    ) -> Result<ElicitResult, Error> {
+        request: crate::types::mrtr::InputRequest,
+    ) -> Result<T, Error> {
         if let Some(answer) = self.answers.get(&key) {
-            return Ok(answer.clone());
+            return serde_json::from_value(answer.clone()).map_err(|err| {
+                Error::new(
+                    ErrorCode::InvalidParams,
+                    format!(
+                        "the answer for `{key}` is not a valid {} result: {err}",
+                        request.method()
+                    ),
+                )
+            });
         }
         if let Ok(mut pending) = self.pending.lock() {
-            *pending = Some((key, params));
+            *pending = Some((key, request));
         }
         Err(Error::input_required())
     }
@@ -987,6 +1006,7 @@ impl Context {
     /// ```no_run
     /// # #[cfg(all(feature = "server-macros", feature = "proto-2026-07-28-rc"))] {
     /// use neva::{Context, error::Error, types::elicitation::ElicitRequestParams, tool};
+    ///
     /// #[tool]
     /// async fn greet(mut ctx: Context) -> Result<String, Error> {
     ///     let params = ElicitRequestParams::form("Your name?")
@@ -1008,7 +1028,10 @@ impl Context {
         // the explicit `ctx.task().elicit(...)` builder instead — the two never
         // mix (see [`ExecMode`]).
         match &self.exec {
-            ExecMode::Mrtr(mrtr) => mrtr.resolve(key.into(), params),
+            ExecMode::Mrtr(mrtr) => mrtr.resolve(
+                key.into(),
+                crate::types::mrtr::InputRequest::Elicitation(params),
+            ),
             #[cfg(feature = "tasks")]
             ExecMode::Task(_) => Err(Error::new(
                 ErrorCode::InvalidRequest,
@@ -1017,6 +1040,122 @@ impl Context {
             _ => Err(Error::new(
                 ErrorCode::InvalidRequest,
                 "elicitation is not available for this request",
+            )),
+        }
+    }
+
+    /// Requests an LLM completion from the client (MRTR, `proto-2026-07-28-rc`).
+    ///
+    /// Same re-run/replay semantics as [`Self::elicit`]: on the first dispatch
+    /// the answer for `key` is absent, so the request is recorded and the
+    /// handler unwinds; when the client retries with the result, the handler
+    /// re-runs and this returns the cached [`CreateMessageResult`](crate::types::sampling::CreateMessageResult).
+    ///
+    /// **Important:** code before this point re-executes on every round-trip —
+    /// keep it side-effect-free, or guard it with [`Self::once`] /
+    /// [`Self::memo`] / [`Self::on_commit`], which work here exactly as they do
+    /// for elicitation.
+    ///
+    /// # Deprecated on arrival
+    /// MCP 2026-07-28 removed sampling as a capability-driven server→client
+    /// request and re-homed the *ability* onto MRTR — already on its
+    /// deprecation path (a 12-month lifecycle shared with roots and logging).
+    /// It exists for migration; prefer tools that do not need the client's
+    /// model.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(all(feature = "server-macros", feature = "proto-2026-07-28-rc"))] {
+    /// use neva::{Context, error::Error, tool};
+    /// use neva::types::sampling::{CreateMessageRequestParams, SamplingMessage};
+    ///
+    /// #[tool]
+    /// async fn summarize(mut ctx: Context, text: String) -> Result<String, Error> {
+    ///     let params = CreateMessageRequestParams::new()
+    ///         .with_message(SamplingMessage::user().with(format!("Summarize: {text}")));
+    ///     # #[allow(deprecated)]
+    ///     let res = ctx.sample("summary", params).await?;
+    ///     Ok(format!("{:?}", res.content))
+    /// }
+    /// # }
+    /// ```
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[deprecated(
+        note = "sampling is deprecated in MCP 2026-07-28; it returns as an MRTR input-request kind only for migration"
+    )]
+    pub async fn sample(
+        &mut self,
+        key: impl Into<String>,
+        params: crate::types::sampling::CreateMessageRequestParams,
+    ) -> Result<crate::types::sampling::CreateMessageResult, Error> {
+        #[allow(deprecated)]
+        self.request_input(
+            key,
+            crate::types::mrtr::InputRequest::Sampling(Box::new(params)),
+            "sampling",
+        )
+    }
+
+    /// Asks the client which filesystem roots it exposes (MRTR,
+    /// `proto-2026-07-28-rc`).
+    ///
+    /// Same re-run/replay semantics as [`Self::elicit`] — see [`Self::sample`]
+    /// for the round-trip caveat.
+    ///
+    /// # Deprecated on arrival
+    /// As with [`Self::sample`]: the capability-driven `roots/list` request is
+    /// gone in MCP 2026-07-28 and the ability returns re-homed onto MRTR,
+    /// already deprecated.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(all(feature = "server-macros", feature = "proto-2026-07-28-rc"))] {
+    /// use neva::{Context, error::Error, tool};
+    ///
+    /// #[tool]
+    /// async fn scan(mut ctx: Context) -> Result<String, Error> {
+    ///     # #[allow(deprecated)]
+    ///     let roots = ctx.list_roots("roots").await?;
+    ///     Ok(format!("{} roots", roots.roots.len()))
+    /// }
+    /// # }
+    /// ```
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[deprecated(
+        note = "roots are deprecated in MCP 2026-07-28; they return as an MRTR input-request kind only for migration"
+    )]
+    pub async fn list_roots(
+        &mut self,
+        key: impl Into<String>,
+    ) -> Result<crate::types::root::ListRootsResult, Error> {
+        #[allow(deprecated)]
+        self.request_input(
+            key,
+            crate::types::mrtr::InputRequest::Roots(Default::default()),
+            "roots",
+        )
+    }
+
+    /// The shared body behind [`Self::elicit`] / [`Self::sample`] /
+    /// [`Self::list_roots`]: every input kind rides the same MRTR substrate,
+    /// so only the envelope and the result type differ.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    fn request_input<T: serde::de::DeserializeOwned>(
+        &self,
+        key: impl Into<String>,
+        request: crate::types::mrtr::InputRequest,
+        kind: &str,
+    ) -> Result<T, Error> {
+        match &self.exec {
+            ExecMode::Mrtr(mrtr) => mrtr.resolve(key.into(), request),
+            #[cfg(feature = "tasks")]
+            ExecMode::Task(_) => Err(Error::new(
+                ErrorCode::InvalidRequest,
+                format!("this is a task-augmented call; {kind} is only available on the MRTR path"),
+            )),
+            _ => Err(Error::new(
+                ErrorCode::InvalidRequest,
+                format!("{kind} is not available for this request"),
             )),
         }
     }
@@ -1655,32 +1794,98 @@ mod mrtr_tests {
             .into()
     }
 
+    fn elicitation() -> crate::types::mrtr::InputRequest {
+        crate::types::mrtr::InputRequest::Elicitation(params())
+    }
+
+    fn mrtr_with(answers: std::collections::HashMap<String, serde_json::Value>) -> MrtrCtx {
+        MrtrCtx {
+            answers,
+            pending: Default::default(),
+            client_capabilities: crate::types::mrtr::ClientMrtrCapabilities {
+                elicitation: true,
+                sampling: true,
+                roots: true,
+            },
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn resolve_replays_cached_answer_and_records_pending_on_miss() {
         let mut answers = std::collections::HashMap::new();
         answers.insert(
             "known".to_string(),
-            ElicitResult {
+            serde_json::to_value(ElicitResult {
                 action: ElicitationAction::Accept,
                 content: Some(serde_json::json!({ "x": 1 })),
                 meta: None,
-            },
+            })
+            .unwrap(),
         );
-        let mrtr = MrtrCtx {
-            answers,
-            pending: Default::default(),
-            elicitation_allowed: true,
-            ..Default::default()
-        };
+        let mrtr = mrtr_with(answers);
 
-        // Hit: returns the cached answer.
-        let got = mrtr.resolve("known".into(), params()).expect("cached");
+        // Hit: returns the cached answer, deserialized into the kind's result.
+        let got: ElicitResult = mrtr.resolve("known".into(), elicitation()).expect("cached");
         assert_eq!(got.action, ElicitationAction::Accept);
 
         // Miss: returns the sentinel and records pending.
-        let miss = mrtr.resolve("unknown".into(), params());
+        let miss = mrtr.resolve::<ElicitResult>("unknown".into(), elicitation());
         assert_eq!(miss.unwrap_err().code, ErrorCode::InputRequired);
         assert!(mrtr.pending.lock().unwrap().is_some());
+    }
+
+    /// Every kind replays through the same slot — only the result type differs.
+    #[test]
+    fn resolve_replays_each_input_kind_as_its_own_result_type() {
+        use crate::types::mrtr::InputRequest;
+        use crate::types::root::ListRootsResult;
+        use crate::types::sampling::CreateMessageResult;
+
+        let mut answers = std::collections::HashMap::new();
+        answers.insert(
+            "poem".to_string(),
+            serde_json::to_value(CreateMessageResult::assistant()).unwrap(),
+        );
+        answers.insert(
+            "dirs".to_string(),
+            serde_json::json!({ "roots": [{ "uri": "file:///work", "name": "work" }] }),
+        );
+        let mrtr = mrtr_with(answers);
+
+        #[allow(deprecated)]
+        let sampled: CreateMessageResult = mrtr
+            .resolve("poem".into(), InputRequest::Sampling(Box::default()))
+            .expect("cached sampling result");
+        assert_eq!(sampled.role, crate::types::Role::Assistant);
+
+        #[allow(deprecated)]
+        let roots: ListRootsResult = mrtr
+            .resolve("dirs".into(), InputRequest::Roots(Default::default()))
+            .expect("cached roots result");
+        assert_eq!(roots.roots.len(), 1);
+    }
+
+    /// A key answered with the wrong kind of result is a protocol violation:
+    /// re-asking would loop forever, so it must surface as an error.
+    #[test]
+    fn resolve_rejects_a_mismatched_answer_instead_of_re_asking() {
+        let mut answers = std::collections::HashMap::new();
+        answers.insert("k".to_string(), serde_json::json!({ "not": "an elicit" }));
+        let mrtr = mrtr_with(answers);
+
+        let err = mrtr
+            .resolve::<ElicitResult>("k".into(), elicitation())
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+        assert!(
+            err.to_string().contains("elicitation/create"),
+            "the error must name the kind that was asked for, got: {err}"
+        );
+        assert!(
+            mrtr.pending.lock().unwrap().is_none(),
+            "a mismatched answer must not re-request the input"
+        );
     }
 
     #[test]
