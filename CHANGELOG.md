@@ -5,6 +5,103 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.4.3
+
+### Added
+* **MRTR input-request kinds: sampling + roots** (`proto-2026-07-28-rc`, #85).
+  The spec did not delete sampling and roots — it removed them as
+  capability-driven server→client *requests* and re-homed the ability onto
+  MRTR, as input-request kinds. They return here the same way, and — matching
+  the spec's own 12-month lifecycle — **already deprecated**:
+  * `ctx.sample(key, params)` and `ctx.list_roots(key)` join `ctx.elicit` on
+    the MRTR substrate, with identical re-run/replay semantics. `once` /
+    `memo` / `on_commit` cover them for free — one substrate, three kinds.
+  * `CreateMessageRequestParams`/`Result` and `ListRootsResult`/`Root` are
+    available under the RC again, now as input-request params/results. The
+    server-push `SamplingHandler` channel stays gone: the client fulfils
+    sampling from its `map_sampling` handler and roots from its configured
+    list, both on the MRTR loop.
+  * `ClientMrtrCapabilities` grows `sampling` and `roots` flags; the server
+    gates each kind on its own flag and reports a request for an undeclared
+    kind instead of stalling the round-trip. The flags are additive, so a peer
+    that only sends `elicitation` still decodes.
+  * Both new server APIs, the new `InputRequest::Sampling`/`Roots` variants and
+    the capability flags carry `#[deprecated]`. Elicitation stays first-class.
+
+  Existing deprecation notes on `Client::map_sampling`, `add_root(s)`,
+  `McpOptions::with_roots`/`with_sampling` were reworded: they described the
+  ability as *removed* in 2026-07-28, which is no longer accurate.
+* RC variants of the roots and sampling examples, alongside the legacy ones:
+  `examples/roots/rc/{server,client}` and
+  `examples/sampling/rc/{server,client}`. Each `rc/` directory is its own
+  workspace — Cargo unifies features across members built together, so keeping
+  the RC crates in the legacy workspace would switch `proto-2026-07-28-rc` on
+  for the legacy crates and stop them compiling.
+
+* `neva::shared::BoxFuture` (also in the prelude) — the return type of
+  neva's object-safe async traits, now owned by neva instead of borrowed
+  from `futures_util`. Implementing
+  [`AuthorizationHandler`](https://docs.rs/neva/latest/neva/auth/oauth/trait.AuthorizationHandler.html)
+  or [`RequestStateStore`](https://docs.rs/neva/latest/neva/trait.RequestStateStore.html)
+  no longer requires a `futures` dependency of your own, kept in lockstep
+  with neva's. It is a plain alias for
+  `Pin<Box<dyn Future<Output = T> + Send + 'a>>` — the same type
+  `futures_util::future::BoxFuture` denotes — so existing implementations
+  that spell out the `futures_util` path keep compiling unchanged.
+
+### Documentation
+* Documented why MRTR **seals** `requestState` with ChaCha20-Poly1305 instead
+  of signing it (#82): a signed state is tamper-evident but *readable*, which
+  stops being enough once `ctx.memo` writes server-computed values — an
+  upstream response, a quoted price, a downstream token — into the state for
+  the next round to replay. The AEAD tag authenticates exactly as an HMAC
+  would, so confidentiality costs nothing. The consequence for callers is
+  spelled out at [`types::mrtr`](https://docs.rs/neva/latest/neva/types/mrtr/)
+  and at `App::with_request_state_secret`: the secret upholds confidentiality,
+  not just integrity.
+* Documented the MRTR idempotency story as a whole (#82): a re-run/replay
+  handler executes from the top every round, and the protocol leaves the
+  resulting side-effect problem to the implementation. `ctx.memo` /
+  `ctx.once` / `ctx.on_commit` plus the default `RequestStateStore`
+  (final-round replay protection for a lost HTTP response) mean a tool that
+  charges a card can be written in the obvious way.
+
+### Changed
+* **Breaking (`proto-2026-07-28-rc` API, #85)** — generalizing the MRTR input
+  request reshapes three public items. The *wire* format is unchanged: an
+  envelope is still `{ method, params }` and `method` is still the
+  discriminator, so peers interoperate across the change.
+  * `mrtr::ElicitationInputRequest` (and its `ElicitationCreateMethod` tag) are
+    replaced by the `mrtr::InputRequest` union. Migration:
+    `ElicitationInputRequest { params, .. }` → `InputRequest::Elicitation(params)`.
+  * `mrtr::InputResponses` is now `HashMap<String, serde_json::Value>` rather
+    than `HashMap<String, ElicitResult>` — the result type depends on the kind
+    that was requested. Deserialize your own type out of the value.
+  * `mrtr::ClientMrtrCapabilities` gained two fields, so struct-literal
+    construction needs `..Default::default()`.
+* Updated to `volga` / `volga-oauth-core` / `volga-oauth-client` 0.9.6,
+  which ships the two upstream fixes this crate was working around:
+  * The token-endpoint futures (`exchange_code` / `refresh` / `token`) are
+    now `Send`, so the internal `spawn_blocking` bridge that ran them on a
+    dedicated current-thread runtime is gone — the OAuth code exchange and
+    token refresh run inline on the caller's runtime, with no extra thread
+    or runtime per operation. A `Send` bound assertion now guards the
+    regression.
+  * `application_type` is a first-class member of the registration
+    document, so the loopback (native client) declaration no longer travels
+    as an extension field. The wire shape is unchanged.
+* Dependency updates: `serde` 1.0.229, `serde_json` 1.0.151, `tokio`
+  1.53.1, `tokio-util` 0.7.19, `futures-util` 0.3.33, `jsonschema` 0.48.2,
+  and `syn` 3.0 / `quote` 1.0.47 / `proc-macro2` 1.0.107 in `neva_macros`.
+
+### Fixed
+* A managed OAuth session could permanently lose its ability to refresh
+  non-interactively: the cached client/metadata were taken out of the
+  single-flight slot for the duration of a refresh and were not restored
+  if the (now removed) bridge itself failed, so every later request fell
+  back to interactive authorization. The cached state is now borrowed
+  rather than moved.
+
 ## 0.4.2
 
 ### Added

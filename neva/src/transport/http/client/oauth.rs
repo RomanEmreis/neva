@@ -16,8 +16,7 @@
 //! the default [`LoopbackHandler`] serves desktop/CLI clients by opening
 //! the system browser and capturing the redirect on a loopback listener.
 
-use futures_util::future::BoxFuture;
-use std::future::Future;
+use crate::shared::BoxFuture;
 use std::sync::{Arc, RwLock};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -152,11 +151,17 @@ fn percent_decode(s: &str) -> Option<String> {
 /// headless embedder implements this trait to route the URL through its
 /// own UI and deliver the callback parameters however they arrive.
 ///
+/// Both methods return a [`BoxFuture`] rather than being `async fn`: the
+/// handler is stored behind `Arc<dyn AuthorizationHandler>`, and `async fn`
+/// in a trait is not dyn-compatible. `Box::pin(async move { … })` is all an
+/// implementation needs — and the alias is neva's own, so implementing this
+/// trait pulls in no `futures` dependency.
+///
 /// # Example
 /// ```no_run
-/// use futures_util::future::BoxFuture;
 /// use neva::auth::oauth::{AuthorizationHandler, CallbackParams};
 /// use neva::error::Error;
+/// use neva::shared::BoxFuture;
 ///
 /// struct MyUi;
 ///
@@ -577,34 +582,17 @@ impl OAuthSession {
     /// `OAuthClient::token`). Returns `None` when interactive
     /// authorization is required or no flow has completed yet.
     async fn maintain(&self, state: &mut Option<FlowState>) -> Option<Arc<str>> {
-        let FlowState { client, metadata } = state.take()?;
-        let key = self.resource.clone();
-        let outcome = run_non_send(move || async move {
-            let result = client.token(&key, &metadata).await;
-            Ok((client, metadata, result))
-        })
-        .await;
-
-        match outcome {
-            Ok((client, metadata, result)) => {
-                *state = Some(FlowState { client, metadata });
-                match result {
-                    Ok(Some(tokens)) => {
-                        let token: Arc<str> = tokens.access_token.into();
-                        self.set_token(token.clone());
-                        Some(token)
-                    }
-                    // Nothing renewable — interactive authorization it is.
-                    Ok(None) => None,
-                    // Transient failure (issuer unreachable): keep the
-                    // current token and let the request outcome decide.
-                    Err(_err) => {
-                        #[cfg(feature = "tracing")]
-                        tracing::warn!(logger = "neva", "token refresh failed: {_err}");
-                        None
-                    }
-                }
+        let FlowState { client, metadata } = state.as_ref()?;
+        match client.token(&self.resource, metadata).await {
+            Ok(Some(tokens)) => {
+                let token: Arc<str> = tokens.access_token.into();
+                self.set_token(token.clone());
+                Some(token)
             }
+            // Nothing renewable — interactive authorization it is.
+            Ok(None) => None,
+            // Transient failure (issuer unreachable): keep the current
+            // token and let the request outcome decide.
             Err(_err) => {
                 #[cfg(feature = "tracing")]
                 tracing::warn!(logger = "neva", "token refresh failed: {_err}");
@@ -688,8 +676,10 @@ impl OAuthSession {
         }
         validate_issuer(&params, &server_metadata)?;
 
-        let (client, server_metadata, tokens) =
-            exchange_code(client, server_metadata, params, request).await?;
+        let tokens = client
+            .exchange_code(&server_metadata, &params.code, &request)
+            .await
+            .map_err(flow_error)?;
 
         self.config.store.put(&self.resource, &tokens);
         // Keep the client + metadata so future refreshes stay
@@ -728,6 +718,7 @@ impl OAuthSession {
                 OAuthClient::from_registration(&response).map_err(flow_error)?
             }
         };
+
         Ok(client
             .with_config(self.config.client_config())
             .with_redirect_uri(redirect_uri)
@@ -749,9 +740,11 @@ fn registration_metadata(redirect_uri: &str) -> ClientMetadata {
         .with_response_types(["code"])
         .with_token_endpoint_auth_method("none")
         .with_client_name(DEFAULT_CLIENT_NAME);
+
     if is_loopback_redirect(redirect_uri) {
-        metadata = metadata.with_additional_field("application_type", "native");
+        metadata = metadata.with_application_type("native");
     }
+
     metadata
 }
 
@@ -810,51 +803,6 @@ fn validate_issuer(
     }
 }
 
-/// Exchanges the authorization code for tokens, returning the client
-/// and metadata back for the session's refresh cache.
-async fn exchange_code(
-    client: OAuthClient,
-    server_metadata: AuthorizationServerMetadata,
-    params: CallbackParams,
-    request: volga_oauth_client::AuthorizationRequest,
-) -> Result<(OAuthClient, AuthorizationServerMetadata, TokenSet), Error> {
-    run_non_send(move || async move {
-        let tokens = client
-            .exchange_code(&server_metadata, &params.code, &request)
-            .await
-            .map_err(flow_error)?;
-        Ok((client, server_metadata, tokens))
-    })
-    .await
-}
-
-/// Runs a token-endpoint future to completion on a dedicated
-/// current-thread runtime.
-///
-/// `OAuthClient::exchange_code` / `refresh` in volga-oauth-client 0.9.5
-/// hold a `form_urlencoded::Serializer` across an `.await`, which makes
-/// their futures `!Send` — they cannot run inside neva's spawned request
-/// tasks directly. These are single short round-trips (end of an
-/// interactive flow, or a rare refresh), so bridging them through
-/// `spawn_blocking` is invisible in practice. Drop this bridge once
-/// upstream ships `Send` token-endpoint futures.
-async fn run_non_send<T, F, Fut>(f: F) -> Result<T, Error>
-where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: Future<Output = Result<T, Error>>,
-    T: Send + 'static,
-{
-    tokio::task::spawn_blocking(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(Error::from)?;
-        rt.block_on(f())
-    })
-    .await
-    .map_err(|err| Error::new(ErrorCode::InternalError, err.to_string()))?
-}
-
 /// Maps a `volga-oauth-client` failure onto neva's error type.
 fn flow_error(err: ClientError) -> Error {
     Error::new(
@@ -890,6 +838,30 @@ mod tests {
         assert!(CallbackParams::from_query("state=xyz").is_err());
     }
 
+    /// The token-endpoint futures must stay `Send`: neva drives them from
+    /// spawned request tasks. volga-oauth-client 0.9.5 held a non-`Sync`
+    /// `form_urlencoded::Serializer` across the await, which forced a
+    /// `spawn_blocking` bridge here; 0.9.6 scopes it. Asserting the bound
+    /// directly means a regression fails here rather than at some distant
+    /// `tokio::spawn` call site.
+    #[test]
+    fn token_endpoint_futures_are_send() {
+        fn assert_send<T: Send>(_: T) {}
+
+        let client = OAuthClient::new("client-id");
+        let metadata = as_metadata(None)
+            .with_authorization_endpoint("https://auth.example.com/authorize")
+            .with_token_endpoint("https://auth.example.com/token");
+        let request = client
+            .authorization_request(&metadata)
+            .with_scopes(["openid"])
+            .build()
+            .unwrap();
+
+        assert_send(client.exchange_code(&metadata, "code", &request));
+        assert_send(client.refresh(&metadata, "refresh-token"));
+    }
+
     #[test]
     fn loopback_redirects_are_detected() {
         assert!(is_loopback_redirect("http://127.0.0.1:8919/callback"));
@@ -902,17 +874,20 @@ mod tests {
     #[test]
     fn loopback_registration_declares_a_native_client() {
         let metadata = registration_metadata("http://127.0.0.1:8919/callback");
-        assert_eq!(
-            metadata.additional_fields.get("application_type"),
-            Some(&serde_json::Value::from("native"))
-        );
+        assert_eq!(metadata.application_type.as_deref(), Some("native"));
         assert_eq!(metadata.token_endpoint_auth_method.as_deref(), Some("none"));
+        // The wire shape is what the AS actually reads — it must stay a
+        // top-level member, not an extension field.
+        let json = serde_json::to_value(&metadata).unwrap();
+        assert_eq!(json["application_type"], serde_json::json!("native"));
     }
 
     #[test]
     fn web_registration_stays_a_web_client() {
         let metadata = registration_metadata("https://my.app/oauth/callback");
-        assert!(!metadata.additional_fields.contains_key("application_type"));
+        assert!(metadata.application_type.is_none());
+        let json = serde_json::to_value(&metadata).unwrap();
+        assert!(json.get("application_type").is_none());
     }
 
     fn as_metadata(supported: Option<bool>) -> AuthorizationServerMetadata {

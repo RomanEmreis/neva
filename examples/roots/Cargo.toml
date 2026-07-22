@@ -1,5 +1,9 @@
 [workspace]
 members = ["client", "server"]
+# `rc/` is its own workspace: it enables `proto-2026-07-28-rc` on the shared
+# `neva` path dependency, and Cargo would unify that feature onto these legacy
+# members if they were built together.
+exclude = ["rc"]
 resolver = "2"
 
 [workspace.package]

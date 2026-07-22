@@ -1,0 +1,10 @@
+# The RC examples are a workspace of their own, deliberately separate from the
+# legacy one next door: Cargo unifies features across the members it builds
+# together, so a single workspace would switch `proto-2026-07-28-rc` on for the
+# legacy crates too and they would stop compiling against the RC API.
+[workspace]
+members = ["client", "server"]
+resolver = "2"
+
+[workspace.package]
+rust-version = "1.90.0"

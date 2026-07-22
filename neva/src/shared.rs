@@ -45,6 +45,38 @@ mod task_api;
 #[cfg(feature = "tasks")]
 mod task_tracker;
 
+/// The future returned by neva's object-safe async traits — a boxed,
+/// `Send` future borrowing for `'a`.
+///
+/// Traits like `AuthorizationHandler` (client OAuth) and `RequestStateStore`
+/// (MRTR idempotency) are stored behind
+/// `Arc<dyn …>`, which rules out `async fn` in the trait (not dyn-compatible),
+/// so their methods return this instead. Owning the alias here means
+/// implementing such a trait needs no `futures` dependency of your own — and
+/// no version of it kept in lockstep with neva's.
+///
+/// It is a plain alias for `Pin<Box<dyn Future<Output = T> + Send + 'a>>`
+/// (identical to `futures_util::future::BoxFuture`), so `Box::pin(async { … })`
+/// is all an implementation has to write.
+///
+/// # Example
+/// ```
+/// use neva::shared::BoxFuture;
+///
+/// trait Greeter {
+///     fn greet(&self) -> BoxFuture<'_, String>;
+/// }
+///
+/// struct English;
+///
+/// impl Greeter for English {
+///     fn greet(&self) -> BoxFuture<'_, String> {
+///         Box::pin(async { "hello".into() })
+///     }
+/// }
+/// ```
+pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
 #[inline]
 #[cfg(any(feature = "server", feature = "client"))]
 pub(crate) fn wait_for_shutdown_signal(token: CancellationToken) {
@@ -144,4 +176,37 @@ pub(crate) fn is_mrtr_method(method: &str) -> bool {
             | crate::types::prompt::commands::GET
             | crate::types::resource::commands::READ
     )
+}
+
+#[cfg(test)]
+mod box_future_tests {
+    use super::BoxFuture;
+
+    /// The alias must stay *the same type* as `futures_util`'s, not merely
+    /// a similar one: downstream code that already spells out
+    /// `futures_util::future::BoxFuture` in its trait impls keeps compiling,
+    /// so adopting neva's own alias is not a breaking change. Passing a
+    /// value of one type where the other is expected only compiles if they
+    /// are identical.
+    #[test]
+    fn it_is_the_same_type_as_the_futures_util_alias() {
+        fn ours<'a, T: 'a>(fut: futures_util::future::BoxFuture<'a, T>) -> BoxFuture<'a, T> {
+            fut
+        }
+        fn theirs<'a, T: 'a>(fut: BoxFuture<'a, T>) -> futures_util::future::BoxFuture<'a, T> {
+            fut
+        }
+
+        let fut: BoxFuture<'_, u8> = Box::pin(async { 42 });
+        let fut = theirs(fut);
+        let mut fut = ours(fut);
+
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        assert_eq!(
+            fut.as_mut().poll(&mut cx),
+            std::task::Poll::Ready(42),
+            "the boxed future must still drive to completion"
+        );
+    }
 }

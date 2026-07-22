@@ -337,6 +337,11 @@ impl App {
     /// This is the single-key shorthand (kid `"0"`); for key rotation use
     /// [`with_request_state_keys`](Self::with_request_state_keys).
     ///
+    /// Because the state is sealed rather than signed, this value protects the
+    /// *confidentiality* of memoized values, not just their integrity — treat
+    /// it as a secret. See the [state codec docs](crate::types::mrtr) for why
+    /// MRTR encrypts instead of signing.
+    ///
     /// # Example
     /// ```no_run
     /// # #[cfg(feature = "proto-2026-07-28-rc")] {
@@ -1467,11 +1472,10 @@ fn seed_mrtr_ctx(
     use crate::types::mrtr::state::{StateCodec, now_secs, request_binding};
 
     let meta = req.meta();
-    let elicitation_allowed = meta
+    let client_capabilities = meta
         .as_ref()
         .and_then(|m| m.client_capabilities)
-        .map(|c| c.elicitation)
-        .unwrap_or(false);
+        .unwrap_or_default();
 
     let mut answers = std::collections::HashMap::new();
     let mut memos = std::collections::HashMap::new();
@@ -1493,22 +1497,26 @@ fn seed_mrtr_ctx(
                 "requestState exceeds the configured maximum size",
             ));
         }
+
         let payload = StateCodec::new(options.request_state_keys()).decode(&state)?;
         if payload.exp < now_secs() {
             return Err(Error::new(ErrorCode::InvalidParams, "requestState expired"));
         }
+
         if payload.req != request_binding(method, salient) {
             return Err(Error::new(
                 ErrorCode::InvalidParams,
                 "requestState does not match this request",
             ));
         }
+
         if payload.principal.as_deref() != principal {
             return Err(Error::new(
                 ErrorCode::InvalidParams,
                 "requestState principal mismatch",
             ));
         }
+
         answers = payload.answers;
         memos = payload.memos;
         effects = payload.effects;
@@ -1527,6 +1535,7 @@ fn seed_mrtr_ctx(
                 "inputResponses supplied without a requestState",
             ));
         };
+
         for (key, value) in responses {
             if answers.contains_key(&key) {
                 return Err(Error::new(
@@ -1547,7 +1556,7 @@ fn seed_mrtr_ctx(
     Ok(std::sync::Arc::new(crate::app::context::MrtrCtx {
         answers,
         pending: Default::default(),
-        elicitation_allowed,
+        client_capabilities,
         memos: std::sync::Mutex::new(memos),
         effects: std::sync::Mutex::new(effects),
         commits: Default::default(),
@@ -1567,20 +1576,29 @@ fn build_input_required(
     use crate::types::mrtr::InputRequiredResult;
     use crate::types::mrtr::state::{StateCodec, StatePayload, now_secs, request_binding};
 
-    if !arc.elicitation_allowed {
-        return Err(Error::new(
-            ErrorCode::InvalidRequest,
-            "server requested elicitation but the client did not declare support",
-        ));
-    }
-    let (key, params) = arc
+    let (key, request) = arc
         .pending
         .lock()
         .ok()
         .and_then(|mut p| p.take())
         .ok_or_else(|| Error::new(ErrorCode::InternalError, "missing pending MRTR input"))?;
+
+    // Each kind is gated on its own flag: a client that fulfils elicitation
+    // need not fulfil the deprecated sampling/roots kinds, and asking for one
+    // it never declared would otherwise stall the round-trip.
+    if !arc.client_capabilities.allows(&request) {
+        return Err(Error::new(
+            ErrorCode::InvalidRequest,
+            format!(
+                "server requested `{}` but the client did not declare support",
+                request.method()
+            ),
+        ));
+    }
+
     let memos = arc.memos.lock().map(|m| m.clone()).unwrap_or_default();
     let effects = arc.effects.lock().map(|e| e.clone()).unwrap_or_default();
+
     let payload = StatePayload {
         answers: arc.answers.clone(),
         // Bind the key we are requesting into the signed state so the next
@@ -1592,6 +1610,7 @@ fn build_input_required(
         req: request_binding(method, salient),
         principal,
     };
+
     let state = StateCodec::new(options.request_state_keys()).encode(&payload)?;
     if state.len() > options.max_state_bytes() {
         return Err(Error::new(
@@ -1599,7 +1618,8 @@ fn build_input_required(
             "requestState too large",
         ));
     }
-    Ok(InputRequiredResult::elicitation(key, params, state))
+
+    Ok(InputRequiredResult::single(key, request, state))
 }
 
 /// Returns `true` only when `resp` is a genuine success that should trigger the
@@ -1783,7 +1803,12 @@ mod tests {
             use crate::types::elicitation::ElicitResult;
             let answers = answers
                 .iter()
-                .map(|k| ((*k).to_owned(), ElicitResult::accept()))
+                .filter_map(|k| {
+                    Some((
+                        (*k).to_owned(),
+                        serde_json::to_value(ElicitResult::accept()).ok()?,
+                    ))
+                })
                 .collect();
             let payload = StatePayload {
                 answers,

@@ -77,6 +77,15 @@ jobs:
         run: cargo doc --no-deps --all-features
       - name: Check docs build clean with proto-2026-07-28-rc
         run: cargo doc --no-deps --features "server-full client-full proto-2026-07-28-rc"
+      # The rows above have every feature on, so every intra-doc link resolves
+      # by construction. Slim rows catch docs that link to items a smaller
+      # feature set does not compile.
+      - name: Check docs build clean on a slim server
+        run: cargo doc --no-deps --features server
+      - name: Check docs build clean on a slim client
+        run: cargo doc --no-deps --features client
+      - name: Check docs build clean on a client-only RC build
+        run: cargo doc --no-deps --features "client proto-2026-07-28-rc"
 
   build:
     environment: CICD

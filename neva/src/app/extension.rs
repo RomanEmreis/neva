@@ -5,7 +5,7 @@
 //! capability value under `capabilities.extensions[id]`, and brings its own
 //! request handlers. This module defines the [`Extension`] trait that wires
 //! such a feature into an [`App`]; concrete extensions live in submodules
-//! (e.g. the built-in [`TasksExtension`]).
+//! (e.g. the built-in `TasksExtension`, under the `tasks` feature).
 
 use super::App;
 

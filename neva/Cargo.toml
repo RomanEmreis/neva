@@ -22,30 +22,30 @@ bytes = "1.12.1"
 sha2 = { version = "0.11.0", optional = true }
 chrono = { version = "0.4.45", features = ["serde"] }
 dashmap = "6.2.1"
-futures-util = { version = "0.3.32", default-features = false, features = ["alloc"] }
+futures-util = { version = "0.3.33", default-features = false, features = ["alloc"] }
 http = "1.4.2"
 memchr = "2.8.3"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.150"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 schemars = { version = "1.2.1" }
-tokio = { version = "1.53.0", features = ["sync", "io-std", "io-util", "rt", "time", "macros"] }
-tokio-util = "0.7.18"
+tokio = { version = "1.53.1", features = ["sync", "io-std", "io-util", "rt", "time", "macros"] }
+tokio-util = "0.7.19"
 uuid = { version = "1.24.0", features = ["v4", "serde"] }
 
 # optional
 chacha20poly1305 = { version = "0.11.0", optional = true }
 inventory = { version = "0.3.24", optional = true }
-jsonschema = { version = "0.48.0", optional = true }
+jsonschema = { version = "0.48.2", optional = true }
 once_cell = { version = "1.21.4", features = ["std"], optional = true }
 reqwest = { version = "0.13.4", features = ["stream", "json"], optional = true }
 sse-stream = { version = "0.2.4", optional = true }
 tokio-stream = { version = "0.1.18", optional = true }
 tracing = { version = "0.1.44", optional = true }
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "json"], optional = true }
-volga = { version = "0.9.5", features = ["di", "jwt-auth-full"], optional = true }
-volga-di = { version = "0.9.5", optional = true }
-volga-oauth-core = { version = "0.9.5", optional = true }
-volga-oauth-client = { version = "0.9.5", optional = true }
+volga = { version = "0.9.6", features = ["di", "jwt-auth-full"], optional = true }
+volga-di = { version = "0.9.6", optional = true }
+volga-oauth-core = { version = "0.9.6", optional = true }
+volga-oauth-client = { version = "0.9.6", optional = true }
 
 # neva
 neva_macros = { workspace = true, optional = true }
@@ -57,7 +57,7 @@ windows = { version = "0.62.0", features = ["Win32_Foundation", "Win32_System_Jo
 nix = { version = "0.31.1", features = ["signal"], optional = true }
 
 [dev-dependencies]
-tokio = { version = "1.53.0", features = ["rt", "rt-multi-thread", "macros"] }
+tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread", "macros"] }
 tokio-stream = { version = "0.1.18" }
 
 [features]

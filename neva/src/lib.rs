@@ -117,7 +117,8 @@ compile_error!("Only one `proto-*` feature flag may be enabled per build");
 
 #[cfg(any(feature = "http-server", feature = "client-oauth"))]
 pub mod auth {
-    //! Authentication utilities: neva's engine-neutral [`Claims`] trait,
+    //! Authentication utilities: neva's engine-neutral `Claims` trait
+    //! (under the HTTP server features),
     //! the bearer-auth configuration types (under the Volga adapter),
     //! and the OAuth 2.1 building blocks for both sides of the
     //! Streamable HTTP transport (under the OAuth features).
@@ -185,7 +186,7 @@ pub mod auth {
     pub mod oauth {
         //! OAuth 2.1 / OIDC building blocks.
         //!
-        //! Server side (`server-oauth`): [`OAuthResourceOptions`]
+        //! Server side (`server-oauth`): `OAuthResourceOptions`
         //! configures the RFC 9728 Protected Resource Metadata document
         //! through `HttpServer::with_oauth_metadata`; the protocol-level
         //! types are re-exported from
@@ -194,8 +195,8 @@ pub mod auth {
         //! framework, so they are available to every `HttpEngine`.
         //!
         //! Client side (`client-oauth`): the pluggable
-        //! [`AuthorizationHandler`] contract with the default
-        //! [`LoopbackHandler`], plus the [`TokenStore`] persistence
+        //! `AuthorizationHandler` contract with the default
+        //! `LoopbackHandler`, plus the `TokenStore` persistence
         //! abstraction — configured through `HttpClient::with_oauth`.
 
         #[cfg(feature = "server-oauth")]
@@ -235,6 +236,7 @@ pub mod prelude {
 
     pub use crate::error::*;
     pub use crate::json::*;
+    pub use crate::shared::BoxFuture;
     pub use crate::types::*;
 
     #[cfg(feature = "http-server-volga")]

@@ -118,7 +118,7 @@ impl Client {
     /// # }
     /// ```
     #[deprecated(
-        note = "Roots are removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
+        note = "Roots are deprecated in MCP 2026-07-28: the capability-driven `roots/list` request is gone and the ability is re-homed onto MRTR — see `Context::list_roots`. Under the RC this configures what the client answers MRTR `roots/list` input requests with."
     )]
     #[allow(deprecated)]
     pub fn add_root(&mut self, uri: impl Into<Uri>, name: impl Into<String>) -> &mut Self {
@@ -145,7 +145,7 @@ impl Client {
     /// # }
     /// ```
     #[deprecated(
-        note = "Roots are removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
+        note = "Roots are deprecated in MCP 2026-07-28: the capability-driven `roots/list` request is gone and the ability is re-homed onto MRTR — see `Context::list_roots`. Under the RC this configures what the client answers MRTR `roots/list` input requests with."
     )]
     #[allow(deprecated)]
     pub fn add_roots<T, I>(&mut self, roots: I) -> &mut Self
@@ -160,7 +160,7 @@ impl Client {
 
     /// Sends the "notifications/roots/list_changed" notification to the server
     #[deprecated(
-        note = "Roots are removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
+        note = "Roots are deprecated in MCP 2026-07-28: the capability-driven `roots/list` request is gone and the ability is re-homed onto MRTR — see `Context::list_roots`. Under the RC this configures what the client answers MRTR `roots/list` input requests with."
     )]
     pub fn publish_roots_changed(&mut self) {
         if let Some(handler) = self.handler.as_mut() {
@@ -171,7 +171,7 @@ impl Client {
 
     /// Registers a handler that will be running when a "sampling/createMessage" request is received
     #[deprecated(
-        note = "Sampling are removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
+        note = "Sampling is deprecated in MCP 2026-07-28: the capability-driven `sampling/createMessage` request is gone and the ability is re-homed onto MRTR — see `Context::sample`. Under the RC this handler fulfils MRTR `sampling/createMessage` input requests."
     )]
     pub fn map_sampling<F, R>(&mut self, handler: F) -> &mut Self
     where
@@ -1127,9 +1127,8 @@ impl Client {
 
             let mut input_responses = crate::types::mrtr::InputResponses::new();
             if let Some(reqs) = ir.input_requests {
-                for (key, envelope) in reqs {
-                    let result = self.fulfil_elicitation(envelope.params).await?;
-                    input_responses.insert(key, result);
+                for (key, request) in reqs {
+                    input_responses.insert(key, self.fulfil_input(request).await?);
                 }
             }
 
@@ -1162,21 +1161,34 @@ impl Client {
     ) {
         let mut meta = req.meta().unwrap_or_default();
         meta.client_info = Some(self.options.implementation.clone());
+        // Each flag reflects what this client can actually fulfil right now: a
+        // configured handler for elicitation/sampling, and — since roots are
+        // data rather than a handler — a declared roots capability. That is
+        // either an explicit `with_roots(..)` or simply having roots, and it
+        // deliberately stays true for an empty list: an empty
+        // `ListRootsResult` is a valid answer, so a client that opted in must
+        // not be gated out of being asked.
         meta.client_capabilities = Some(crate::types::mrtr::ClientMrtrCapabilities {
             elicitation: self.options.elicitation_handler.is_some(),
+            sampling: self.options.sampling_handler.is_some(),
+            roots: self.options.roots_capability().is_some(),
         });
+
         if input_responses.is_some() {
             meta.input_responses = input_responses;
         }
+
         if request_state.is_some() {
             meta.request_state = request_state;
         }
+
         if let Some(provider) = self.options.trace_context_provider.as_ref()
             && let Some(tc) = provider()
         {
             meta.traceparent = Some(tc.traceparent);
             meta.tracestate = tc.tracestate;
         }
+
         req.set_meta(meta);
     }
 
@@ -1194,19 +1206,39 @@ impl Client {
         }
     }
 
-    /// Fulfils a server-requested elicitation via the configured handler.
+    /// Fulfils one server-requested input, whatever its kind, and returns the
+    /// raw result to echo back under the request's key.
+    ///
+    /// Sampling and roots are fulfilled here, on the MRTR loop — *not* as
+    /// server-initiated pushes: under the RC there is no such channel. The
+    /// client only ever gets asked for a kind it declared in
+    /// [`ClientMrtrCapabilities`](crate::types::mrtr::ClientMrtrCapabilities),
+    /// so a missing handler here means the server ignored those flags.
     #[cfg(feature = "proto-2026-07-28-rc")]
-    async fn fulfil_elicitation(
+    async fn fulfil_input(
         &self,
-        params: crate::types::elicitation::ElicitRequestParams,
-    ) -> Result<crate::types::elicitation::ElicitResult, Error> {
-        match self.options.elicitation_handler.clone() {
-            Some(handler) => Ok(handler(params).await),
-            None => Err(Error::new(
-                ErrorCode::InvalidRequest,
-                "server requested elicitation but no handler is configured",
-            )),
-        }
+        request: crate::types::mrtr::InputRequest,
+    ) -> Result<serde_json::Value, Error> {
+        use crate::types::mrtr::InputRequest;
+
+        #[allow(deprecated)]
+        let value = match request {
+            InputRequest::Elicitation(params) => match self.options.elicitation_handler.clone() {
+                Some(handler) => serde_json::to_value(handler(params).await)?,
+                None => return Err(no_fulfiller("elicitation")),
+            },
+            InputRequest::Sampling(params) => match self.options.sampling_handler.clone() {
+                Some(handler) => serde_json::to_value(handler(*params).await)?,
+                None => return Err(no_fulfiller("sampling")),
+            },
+            // Roots are configured data, not a handler: the client answers
+            // from the list it was built with.
+            InputRequest::Roots(_) => serde_json::to_value(crate::types::root::ListRootsResult {
+                roots: self.options.roots(),
+                meta: None,
+            })?,
+        };
+        Ok(value)
     }
 
     /// Creates a [`BatchBuilder`] for sending multiple requests in a single batch.
@@ -1391,6 +1423,7 @@ impl Client {
             if round == 0 {
                 envelopes.append(&mut extras);
             }
+
             let mut round_slots: Vec<usize> = Vec::new();
             for (i, slot) in slots.iter_mut().enumerate() {
                 if let Slot::Pending { req, .. } = slot
@@ -1400,6 +1433,7 @@ impl Client {
                     envelopes.push(MessageEnvelope::Request(request));
                 }
             }
+
             if round_slots.is_empty() {
                 break;
             }
@@ -1409,6 +1443,7 @@ impl Client {
                 .handler
                 .as_mut()
                 .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
+
             let request_timeout = handler.timeout();
             let pending = handler.pending().clone();
             let token = handler.cancellation();
@@ -1437,6 +1472,7 @@ impl Client {
                             if ok.result.get("resultType")
                                 == Some(&serde_json::json!("input_required"))
                     );
+
                 if !is_input_required {
                     slots[slot_i] = Slot::Done(resp);
                     continue;
@@ -1452,15 +1488,16 @@ impl Client {
 
                 let mut input_responses = crate::types::mrtr::InputResponses::new();
                 if let Some(reqs) = ir.input_requests {
-                    for (key, envelope) in reqs {
-                        let result = self.fulfil_elicitation(envelope.params).await?;
-                        input_responses.insert(key, result);
+                    for (key, request) in reqs {
+                        input_responses.insert(key, self.fulfil_input(request).await?);
                     }
                 }
 
                 let new_id = self.generate_id()?;
                 let mut retry = Request::new(Some(new_id), method, original_params);
+
                 self.apply_client_meta(&mut retry, Some(input_responses), ir.request_state);
+
                 if let Slot::Pending { req, .. } = &mut slots[slot_i] {
                     *req = Some(retry);
                 }
@@ -1692,6 +1729,17 @@ async fn collect_batch_responses(
     });
 
     join_all(futures).await
+}
+
+/// The error for an input kind the server asked for but this client has no
+/// fulfiller for — only reachable if the server ignored the declared
+/// [`ClientMrtrCapabilities`](crate::types::mrtr::ClientMrtrCapabilities).
+#[cfg(feature = "proto-2026-07-28-rc")]
+fn no_fulfiller(kind: &str) -> Error {
+    Error::new(
+        ErrorCode::InvalidRequest,
+        format!("server requested {kind} but no handler is configured"),
+    )
 }
 
 /// Whether a `server/discover` failure means "this server doesn't speak

@@ -1200,6 +1200,362 @@ async fn one_retry_budget_completes_a_single_question_flow() {
     handle.abort();
 }
 
+/// #85: sampling returns as an MRTR input-request kind. The wire contract is
+/// the same two rounds elicitation uses — only the envelope's `method` and the
+/// result type differ.
+#[tokio::test(flavor = "multi_thread")]
+async fn tool_samples_then_completes_over_two_rounds() {
+    use neva::types::sampling::{CreateMessageRequestParams, SamplingMessage};
+
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("summarize", |mut ctx: Context| async move {
+        let params = CreateMessageRequestParams::new()
+            .with_message(SamplingMessage::user().with("Summarize the repo"));
+        #[allow(deprecated)]
+        let res = ctx.sample("summary", params).await?;
+        let text = res
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .unwrap_or_default();
+        Ok::<String, Error>(format!("summary: {text}"))
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{addr}/mcp");
+
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "summarize", "arguments": {},
+            "_meta": { "clientCapabilities": { "sampling": true } } }
+    });
+    let r1: serde_json::Value = client
+        .post(&url)
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .json(&call)
+        .send()
+        .await
+        .expect("round 1 send")
+        .json()
+        .await
+        .expect("round 1 json");
+    assert_eq!(
+        r1["result"]["resultType"],
+        serde_json::json!("input_required"),
+        "round 1 must request input: {r1}"
+    );
+    let state = r1["result"]["requestState"]
+        .as_str()
+        .expect("requestState present")
+        .to_string();
+    let requests = r1["result"]["inputRequests"]
+        .as_object()
+        .expect("inputRequests object");
+    let key = requests.keys().next().expect("one input request").clone();
+    assert_eq!(
+        requests[&key]["method"],
+        serde_json::json!("sampling/createMessage"),
+        "the envelope must name the sampling method: {r1}"
+    );
+
+    let retry = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": { "name": "summarize", "arguments": {},
+            "_meta": {
+                "clientCapabilities": { "sampling": true },
+                "requestState": state,
+                "inputResponses": { key: {
+                    "role": "assistant",
+                    "content": { "type": "text", "text": "it is a Rust MCP SDK" },
+                    "model": "test-model"
+                } }
+            } }
+    });
+    let r2: serde_json::Value = client
+        .post(&url)
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .json(&retry)
+        .send()
+        .await
+        .expect("round 2 send")
+        .json()
+        .await
+        .expect("round 2 json");
+    assert_eq!(
+        r2.pointer("/result/content/0/text")
+            .and_then(|v| v.as_str()),
+        Some("summary: it is a Rust MCP SDK"),
+        "round 2 must complete with the sampled text: {r2}"
+    );
+
+    handle.abort();
+}
+
+/// #85: roots likewise. The envelope carries `roots/list` and the answer is a
+/// `ListRootsResult`.
+#[tokio::test(flavor = "multi_thread")]
+async fn tool_lists_roots_then_completes_over_two_rounds() {
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("scan", |mut ctx: Context| async move {
+        #[allow(deprecated)]
+        let roots = ctx.list_roots("dirs").await?;
+        let names = roots
+            .roots
+            .iter()
+            .map(|r| r.uri.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok::<String, Error>(format!("scanning {names}"))
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{addr}/mcp");
+
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "scan", "arguments": {},
+            "_meta": { "clientCapabilities": { "roots": true } } }
+    });
+    let r1: serde_json::Value = client
+        .post(&url)
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .json(&call)
+        .send()
+        .await
+        .expect("round 1 send")
+        .json()
+        .await
+        .expect("round 1 json");
+    let state = r1["result"]["requestState"]
+        .as_str()
+        .unwrap_or_else(|| panic!("requestState present: {r1}"))
+        .to_string();
+    let requests = r1["result"]["inputRequests"]
+        .as_object()
+        .expect("inputRequests object");
+    let key = requests.keys().next().expect("one input request").clone();
+    assert_eq!(
+        requests[&key]["method"],
+        serde_json::json!("roots/list"),
+        "the envelope must name the roots method: {r1}"
+    );
+
+    let retry = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": { "name": "scan", "arguments": {},
+            "_meta": {
+                "clientCapabilities": { "roots": true },
+                "requestState": state,
+                "inputResponses": { key: {
+                    "roots": [{ "uri": "file:///work", "name": "work" }]
+                } }
+            } }
+    });
+    let r2: serde_json::Value = client
+        .post(&url)
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .json(&retry)
+        .send()
+        .await
+        .expect("round 2 send")
+        .json()
+        .await
+        .expect("round 2 json");
+    assert_eq!(
+        r2.pointer("/result/content/0/text")
+            .and_then(|v| v.as_str()),
+        Some("scanning file:///work"),
+        "round 2 must complete with the listed roots: {r2}"
+    );
+
+    handle.abort();
+}
+
+/// The real client fulfils both deprecated kinds through the MRTR loop —
+/// sampling from its configured handler, roots from its configured list — with
+/// no server→client push channel involved.
+#[tokio::test(flavor = "multi_thread")]
+async fn client_drives_sampling_and_roots_end_to_end() {
+    use neva::types::sampling::{CreateMessageRequestParams, CreateMessageResult, SamplingMessage};
+
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    // Two different kinds in one call: each is a separate round, and both
+    // replay from the same `requestState` log.
+    app.map_tool("audit", |mut ctx: Context| async move {
+        #[allow(deprecated)]
+        let roots = ctx.list_roots("dirs").await?;
+        let params = CreateMessageRequestParams::new()
+            .with_message(SamplingMessage::user().with("Describe these roots"));
+        #[allow(deprecated)]
+        let sampled = ctx.sample("describe", params).await?;
+        let text = sampled
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .unwrap_or_default();
+        Ok::<String, Error>(format!("{} root(s): {text}", roots.roots.len()))
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let mut client =
+        Client::new().with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+    // Roots are configured data, so declaring the capability is implied by
+    // having any: no handler is registered for them.
+    #[allow(deprecated)]
+    client.add_root("file:///work", "work");
+    #[allow(deprecated)]
+    client.map_sampling(|_params: CreateMessageRequestParams| async move {
+        CreateMessageResult::assistant().with_content("looks fine")
+    });
+    client.connect().await.expect("client connects");
+
+    let resp = client
+        .call_tool("audit", ())
+        .await
+        .expect("tool call completes through the MRTR loop");
+
+    let text = resp
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.as_str());
+    assert_eq!(
+        text,
+        Some("1 root(s): looks fine"),
+        "the client must fulfil both deprecated kinds"
+    );
+    assert!(!resp.is_error, "final result must not be an error");
+
+    client.disconnect().await.ok();
+    handle.abort();
+}
+
+/// A client that opted into roots but exposes none must still be askable — an
+/// empty `ListRootsResult` is a valid answer, and gating it out would leave the
+/// server unable to complete the call at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_with_an_empty_roots_list_still_answers() {
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("scan", |mut ctx: Context| async move {
+        #[allow(deprecated)]
+        let roots = ctx.list_roots("dirs").await?;
+        Ok::<String, Error>(format!("{} root(s)", roots.roots.len()))
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // Explicit opt-in, no roots added.
+    #[allow(deprecated)]
+    let mut client = Client::new().with_options(|o| {
+        o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
+            .with_roots(|roots| roots)
+    });
+    client.connect().await.expect("client connects");
+
+    let resp = client
+        .call_tool("scan", ())
+        .await
+        .expect("the round-trip must complete");
+    let text = resp
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.as_str());
+    assert_eq!(text, Some("0 root(s)"));
+    assert!(!resp.is_error, "an empty roots list is a valid answer");
+
+    client.disconnect().await.ok();
+    handle.abort();
+}
+
+/// The server must not ask for a kind the client never declared: a client with
+/// no sampling handler declares `sampling: false`, and the request is rejected
+/// rather than stalling the loop.
+#[tokio::test(flavor = "multi_thread")]
+async fn sampling_without_declared_capability_is_rejected() {
+    use neva::types::sampling::{CreateMessageRequestParams, SamplingMessage};
+
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("summarize", |mut ctx: Context| async move {
+        let params =
+            CreateMessageRequestParams::new().with_message(SamplingMessage::user().with("hi"));
+        #[allow(deprecated)]
+        let res = ctx.sample("summary", params).await?;
+        Ok::<String, Error>(format!("{:?}", res.content))
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{addr}/mcp");
+
+    // Elicitation is declared, sampling is not.
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "summarize", "arguments": {},
+            "_meta": { "clientCapabilities": { "elicitation": true } } }
+    });
+    let r1: serde_json::Value = client
+        .post(&url)
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .json(&call)
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+
+    let message = r1
+        .pointer("/result/content/0/text")
+        .or_else(|| r1.pointer("/error/message"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        message.contains("sampling/createMessage"),
+        "the rejection must name the kind the client did not declare: {r1}"
+    );
+
+    handle.abort();
+}
+
 fn pick_free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();

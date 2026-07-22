@@ -1,10 +1,10 @@
 //! Encode/verify the opaque, encrypted `requestState` blob.
 //!
-//! The blob is sealed with ChaCha20-Poly1305 (AEAD): the AEAD tag provides
-//! integrity (replacing the former HMAC) *and* the payload is encrypted, so
-//! server-side values a handler caches via [`crate::Context::memo`] — API
-//! responses, PII, tokens — are confidential rather than merely signed and
-//! readable by the client that echoes the blob.
+//! The blob is sealed with ChaCha20-Poly1305 (AEAD) rather than signed; the
+//! rationale is user-facing and lives in the [`mrtr`](crate::types::mrtr)
+//! module docs. Beyond confidentiality and the authentication tag, the payload
+//! carries a TTL, a binding to the originating request and a binding to the
+//! authenticated principal — see [`StatePayload`].
 
 use chacha20poly1305::aead::{Aead, Generate, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
@@ -591,12 +591,15 @@ mod tests {
         );
     }
 
-    fn answer(content: serde_json::Value) -> crate::types::elicitation::ElicitResult {
-        crate::types::elicitation::ElicitResult {
+    /// An answer as it is stored in the replay log: raw JSON, since the result
+    /// type depends on which input kind was requested.
+    fn answer(content: serde_json::Value) -> serde_json::Value {
+        serde_json::to_value(crate::types::elicitation::ElicitResult {
             action: crate::types::elicitation::ElicitationAction::Accept,
             content: Some(content),
             meta: None,
-        }
+        })
+        .expect("an ElicitResult always serializes")
     }
 
     #[test]

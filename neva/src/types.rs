@@ -167,9 +167,11 @@ mod reference;
 mod request;
 pub mod resource;
 mod response;
-#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
+// Under the RC these are no longer capability-driven server→client requests,
+// but the types did not go away: they are the params/results of the deprecated
+// `roots/list` and `sampling/createMessage` MRTR input-request kinds (#85), so
+// both peers need them in every build.
 pub mod root;
-#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
 pub mod sampling;
 mod schema;
 pub mod schema_2020;
