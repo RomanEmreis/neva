@@ -147,15 +147,24 @@ impl LogMessage {
     #[cfg(feature = "tracing")]
     pub fn write(self) {
         let data = serde_json::to_value(&self.data).unwrap_or_default();
+        // Carry the original MCP level as a field: tracing has only
+        // ERROR/WARN/INFO/DEBUG, so Notice/Critical/Alert/Emergency would
+        // otherwise be lost when the notification is rebuilt and filtered.
+        let mcp_level = serde_json::to_value(self.level)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        
+        let mcp_level = mcp_level.as_str();
         match self.level {
-            LoggingLevel::Alert => tracing::event!(Level::ERROR, %data),
-            LoggingLevel::Critical => tracing::event!(Level::ERROR, %data),
-            LoggingLevel::Emergency => tracing::event!(Level::ERROR, %data),
-            LoggingLevel::Error => tracing::event!(Level::ERROR, %data),
-            LoggingLevel::Warning => tracing::event!(Level::WARN, %data),
-            LoggingLevel::Notice => tracing::event!(Level::WARN, %data),
-            LoggingLevel::Info => tracing::event!(Level::INFO, %data),
-            LoggingLevel::Debug => tracing::event!(Level::DEBUG, %data),
+            LoggingLevel::Alert => tracing::event!(Level::ERROR, mcp_level, %data),
+            LoggingLevel::Critical => tracing::event!(Level::ERROR, mcp_level, %data),
+            LoggingLevel::Emergency => tracing::event!(Level::ERROR, mcp_level, %data),
+            LoggingLevel::Error => tracing::event!(Level::ERROR, mcp_level, %data),
+            LoggingLevel::Warning => tracing::event!(Level::WARN, mcp_level, %data),
+            LoggingLevel::Notice => tracing::event!(Level::WARN, mcp_level, %data),
+            LoggingLevel::Info => tracing::event!(Level::INFO, mcp_level, %data),
+            LoggingLevel::Debug => tracing::event!(Level::DEBUG, mcp_level, %data),
         };
     }
 }

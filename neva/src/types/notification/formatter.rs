@@ -101,7 +101,10 @@ where
                     .find_map(|s| s.extensions().get::<MinLogSeverity>().map(|m| m.0))
             });
 
-            let event_severity = LoggingLevel::from(event.metadata().level()).severity();
+            // Filter on the notification's own level (which preserves MCP
+            // severities), not the lossy tracing level of the event.
+            let event_severity = notification_severity(&notification)
+                .unwrap_or_else(|| LoggingLevel::from(event.metadata().level()).severity());
             if !message_delivered(requested, event_severity) {
                 return Ok(());
             }
@@ -128,6 +131,20 @@ pub(super) struct MinLogSeverity(pub(super) u8);
 #[inline]
 pub(super) fn message_delivered(requested: Option<u8>, event_severity: u8) -> bool {
     requested.map(|min| event_severity >= min).unwrap_or(false)
+}
+
+/// Reads the RFC-5424 severity rank of a `notifications/message`'s own level,
+/// so filtering matches the level actually delivered to the client (which, via
+/// [`build_notification`], preserves MCP-specific severities).
+#[cfg(feature = "proto-2026-07-28-rc")]
+#[inline]
+pub(super) fn notification_severity(notification: &Notification) -> Option<u8> {
+    notification
+        .params
+        .as_ref()
+        .and_then(|params| params.get("level"))
+        .and_then(|level| serde_json::from_value::<LoggingLevel>(level.clone()).ok())
+        .map(LoggingLevel::severity)
 }
 
 #[inline]
@@ -161,8 +178,15 @@ pub(super) fn build_notification(event: &Event<'_>) -> Notification {
             let mut data_map = fields.clone();
             data_map.remove("logger");
 
+            // An explicit MCP level (from `LogMessage::write`) preserves
+            // severities tracing cannot express; otherwise map the tracing level.
+            let level = data_map
+                .remove("mcp_level")
+                .and_then(|v| serde_json::from_value::<LoggingLevel>(v).ok())
+                .unwrap_or_else(|| level.into());
+
             let log = LogMessage {
-                level: level.into(),
+                level,
                 data: serde_json::to_value(data_map).ok(),
                 logger,
             };

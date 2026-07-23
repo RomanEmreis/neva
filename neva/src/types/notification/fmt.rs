@@ -109,8 +109,10 @@ where
                         .get::<super::formatter::MinLogSeverity>()
                         .map(|m| m.0)
                 });
-
-                let event_severity = LoggingLevel::from(event.metadata().level()).severity();
+                // Filter on the notification's own level (which preserves MCP
+                // severities), not the lossy tracing level of the event.
+                let event_severity = super::formatter::notification_severity(&notification)
+                    .unwrap_or_else(|| LoggingLevel::from(event.metadata().level()).severity());
                 if !super::formatter::message_delivered(requested, event_severity) {
                     return;
                 }
@@ -330,5 +332,43 @@ mod tests {
         // No `logLevel` on the request => the server emits no log notifications.
         let got = levels(&emit_within_request(None));
         assert!(got.is_empty(), "expected none, got: {got:?}");
+    }
+
+    #[test]
+    fn preserves_mcp_specific_severity_past_tracing() {
+        use crate::types::notification::LogMessage;
+
+        // `LogMessage::write()` downgrades to a tracing ERROR for both, but the
+        // MCP level is preserved on the wire and used for filtering: a client
+        // requesting `emergency` gets the emergency log and not the error one.
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry()
+            .with(super::span_context())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(NotificationFormatter)
+                    .with_writer(BufWriter(buf.clone())),
+            );
+
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!(
+                "request",
+                mcp_log_level = u64::from(LoggingLevel::Emergency.severity())
+            );
+            let _entered = span.enter();
+            LogMessage::new(LoggingLevel::Emergency, None, None).write();
+            LogMessage::new(LoggingLevel::Error, None, None).write();
+        });
+
+        let raw = buf.lock().unwrap().clone();
+        let got: Vec<String> = String::from_utf8(raw)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(str::to_owned)
+            .collect();
+        let got = levels(&got);
+        assert!(got.contains(&"emergency".to_owned()), "got: {got:?}");
+        assert!(!got.contains(&"error".to_owned()), "got: {got:?}");
     }
 }

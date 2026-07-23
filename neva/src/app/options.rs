@@ -514,6 +514,15 @@ impl McpOptions {
             .add(middleware);
     }
 
+    /// Registers a middleware as the outermost layer of the pipeline.
+    #[inline]
+    #[cfg(feature = "tracing")]
+    pub(crate) fn add_middleware_front(&mut self, middleware: Middleware) {
+        self.middlewares
+            .get_or_insert_with(Middlewares::new)
+            .add_front(middleware);
+    }
+
     /// Returns a Model Context Protocol version that this server supports
     #[inline]
     pub(crate) fn protocol_ver(&self) -> &'static str {

@@ -278,9 +278,14 @@ impl App {
             );
         }
 
+        // The request tracing span must wrap the whole composed pipeline -- user
+        // `wrap` middleware included -- so log events they emit around
+        // `next(ctx)` stay inside the span and see the request-scoped level.
+        // Prepending makes it the outermost layer; the terminal dispatcher
+        // (`message_middleware`) stays innermost.
         #[cfg(feature = "tracing")]
         self.options
-            .add_middleware(make_mw(Self::tracing_middleware));
+            .add_middleware_front(make_mw(Self::tracing_middleware));
         self.options
             .add_middleware(make_mw(Self::message_middleware));
 
