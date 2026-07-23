@@ -176,6 +176,7 @@ impl Middlewares {
     /// layer so its wrapping (e.g. the request tracing span) covers every
     /// already-registered user middleware.
     #[inline]
+    #[cfg(feature = "tracing")]
     pub(super) fn add_front(&mut self, middleware: Middleware) {
         self.pipeline.insert(0, middleware);
     }
