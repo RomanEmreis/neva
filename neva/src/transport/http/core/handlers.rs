@@ -299,7 +299,7 @@ pub async fn handle_delete(req: HttpRequest, ctx: &HttpContext) -> HttpResponse 
             .unwrap_or_default();
     };
 
-    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+    #[cfg(feature = "tracing")]
     crate::types::notification::fmt::LOG_REGISTRY.unregister(&id);
     ctx.sse_registry.terminate(&id);
 
@@ -385,7 +385,7 @@ struct SseConnectionCleanup {
 
 impl Drop for SseConnectionCleanup {
     fn drop(&mut self) {
-        #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+        #[cfg(feature = "tracing")]
         crate::types::notification::fmt::LOG_REGISTRY
             .unregister_if_generation(&self.id, self.generation);
         self.registry.unregister(&self.id, self.generation);
@@ -422,7 +422,7 @@ pub async fn handle_get_sse<E: HttpEngine>(
     let (_log_tx, log_rx) = tokio::sync::mpsc::channel::<Message>(ctx.sse_log_queue_capacity);
 
     let generation = ctx.sse_registry.register(id, msg_tx);
-    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+    #[cfg(feature = "tracing")]
     crate::types::notification::fmt::LOG_REGISTRY.register(id, generation, _log_tx);
 
     let last_seq: Option<u64> = req

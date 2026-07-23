@@ -108,6 +108,20 @@ pub struct RequestParamsMeta {
     #[serde(rename = "requestState", skip_serializing_if = "Option::is_none")]
     pub(crate) request_state: Option<String>,
 
+    /// Request-scoped logging level (MCP 2026-07-28).
+    ///
+    /// The minimum severity the client wants to receive as
+    /// `notifications/message` while the server handles this request. This
+    /// replaces the removed global `logging/setLevel` handshake; the desired
+    /// level now rides on the originating request's `_meta`. Deprecated in the
+    /// 2026-07-28 draft together with the rest of the logging surface.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[serde(
+        rename = "io.modelcontextprotocol/logLevel",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) log_level: Option<crate::types::notification::LoggingLevel>,
+
     /// MRTR/stateless: client capabilities declared per-request (v1: a single
     /// `elicitation` flag) so the server can honor "MUST NOT send an input
     /// type the client didn't declare".
@@ -277,6 +291,32 @@ mod tests {
         let v = serde_json::to_value(&meta).unwrap();
         assert!(v.get("traceparent").is_none());
         assert!(v.get("tracestate").is_none());
+    }
+
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[test]
+    fn log_level_roundtrips_under_spec_meta_key() {
+        use crate::types::notification::LoggingLevel;
+        use serde_json::json;
+
+        let meta = RequestParamsMeta {
+            log_level: Some(LoggingLevel::Warning),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&meta).unwrap();
+        // The request-scoped level rides under the spec `_meta` key, lowercase.
+        assert_eq!(v["io.modelcontextprotocol/logLevel"], json!("warning"));
+
+        let back: RequestParamsMeta = serde_json::from_value(v).unwrap();
+        assert_eq!(back.log_level, Some(LoggingLevel::Warning));
+    }
+
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[test]
+    fn absent_log_level_is_omitted() {
+        let meta = RequestParamsMeta::default();
+        let v = serde_json::to_value(&meta).unwrap();
+        assert!(v.get("io.modelcontextprotocol/logLevel").is_none());
     }
 
     #[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]

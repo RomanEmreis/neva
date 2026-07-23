@@ -920,7 +920,19 @@ impl App {
 
     #[cfg(feature = "tracing")]
     async fn tracing_middleware(ctx: MwContext, next: Next) -> Response {
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
         let span = create_tracing_span(ctx.session_id().cloned());
+        // RC: the request-scoped logging level rides on the originating
+        // request's `_meta`. Stamp it onto the span so the notification layer
+        // can decide which `notifications/message` to deliver for this request.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let span = {
+            let log_level = ctx
+                .request()
+                .and_then(|req| req.meta())
+                .and_then(|meta| meta.log_level);
+            create_tracing_span(ctx.session_id().cloned(), log_level)
+        };
         next(ctx).instrument(span).await
     }
 
@@ -1421,7 +1433,6 @@ impl App {
                     runtime.options().cancel_request(&params.request_id);
                 }
             }
-            #[cfg(not(feature = "proto-2026-07-28-rc"))]
             crate::types::notification::commands::MESSAGE => {
                 #[cfg(feature = "tracing")]
                 notification.write();
@@ -1436,12 +1447,35 @@ impl App {
     }
 }
 
-#[cfg(feature = "tracing")]
+#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
 fn create_tracing_span(session_id: Option<uuid::Uuid>) -> tracing::Span {
     if let Some(mcp_session_id) = session_id {
         tracing::info_span!("request", mcp_session_id = mcp_session_id.to_string())
     } else {
         tracing::info_span!("request")
+    }
+}
+
+/// Builds the per-request tracing span, carrying the session id and (RC) the
+/// request-scoped logging level as span fields the notification layer reads.
+#[cfg(all(feature = "tracing", feature = "proto-2026-07-28-rc"))]
+fn create_tracing_span(
+    session_id: Option<uuid::Uuid>,
+    log_level: Option<crate::types::notification::LoggingLevel>,
+) -> tracing::Span {
+    match (session_id, log_level) {
+        (Some(sid), Some(level)) => tracing::info_span!(
+            "request",
+            mcp_session_id = sid.to_string(),
+            mcp_log_level = u64::from(level.severity())
+        ),
+        (Some(sid), None) => {
+            tracing::info_span!("request", mcp_session_id = sid.to_string())
+        }
+        (None, Some(level)) => {
+            tracing::info_span!("request", mcp_log_level = u64::from(level.severity()))
+        }
+        (None, None) => tracing::info_span!("request"),
     }
 }
 

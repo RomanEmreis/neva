@@ -1,11 +1,11 @@
 //! Utilities for log messages
 
-#[cfg(feature = "server")]
+#[cfg(all(feature = "server", not(feature = "proto-2026-07-28-rc")))]
 use crate::app::handler::{FromHandlerParams, HandlerParams};
 use crate::error::Error;
 use crate::types::notification::Notification;
 use crate::types::response::ErrorDetails;
-#[cfg(feature = "server")]
+#[cfg(all(feature = "server", not(feature = "proto-2026-07-28-rc")))]
 use crate::types::{FromRequest, Request};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "tracing")]
@@ -42,6 +42,30 @@ pub enum LoggingLevel {
     Emergency,
 }
 
+#[cfg(all(feature = "tracing", feature = "proto-2026-07-28-rc"))]
+impl LoggingLevel {
+    /// Severity rank where a higher number is more severe, following the
+    /// RFC-5424 ordering. A message at `self` is delivered to a client that
+    /// requested `min` when `self.severity() >= min.severity()`.
+    ///
+    /// The enum's declaration order is not the severity order, so this cannot
+    /// be derived; it is also what travels on the request span as a plain
+    /// integer field, avoiding a redundant string encoding of the level.
+    #[inline]
+    pub(crate) fn severity(self) -> u8 {
+        match self {
+            LoggingLevel::Debug => 0,
+            LoggingLevel::Info => 1,
+            LoggingLevel::Notice => 2,
+            LoggingLevel::Warning => 3,
+            LoggingLevel::Error => 4,
+            LoggingLevel::Critical => 5,
+            LoggingLevel::Alert => 6,
+            LoggingLevel::Emergency => 7,
+        }
+    }
+}
+
 /// Sent from the server as the payload of "notifications/message" notifications whenever a log message is generated.
 /// If no logging/setLevel request has been sent from the client, the server MAY decide which messages to send automatically.
 ///
@@ -62,7 +86,12 @@ pub struct LogMessage {
 
 /// A request from the client to the server, to enable or adjust logging.
 ///
+/// Removed under MCP 2026-07-28: the global `logging/setLevel` handshake is
+/// gone; the desired level now rides per-request on
+/// `_meta["io.modelcontextprotocol/logLevel"]`.
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetLevelRequestParams {
     /// The level of logging that the client wants to receive from the server.
@@ -89,7 +118,7 @@ impl From<LogMessage> for Notification {
     }
 }
 
-#[cfg(feature = "server")]
+#[cfg(all(feature = "server", not(feature = "proto-2026-07-28-rc")))]
 impl FromHandlerParams for SetLevelRequestParams {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
@@ -128,5 +157,34 @@ impl LogMessage {
             LoggingLevel::Info => tracing::event!(Level::INFO, %data),
             LoggingLevel::Debug => tracing::event!(Level::DEBUG, %data),
         };
+    }
+}
+
+#[cfg(all(test, feature = "tracing", feature = "proto-2026-07-28-rc"))]
+mod tests {
+    use super::LoggingLevel;
+
+    const ALL: [LoggingLevel; 8] = [
+        LoggingLevel::Debug,
+        LoggingLevel::Info,
+        LoggingLevel::Notice,
+        LoggingLevel::Warning,
+        LoggingLevel::Error,
+        LoggingLevel::Critical,
+        LoggingLevel::Alert,
+        LoggingLevel::Emergency,
+    ];
+
+    #[test]
+    fn severity_follows_rfc5424_ordering() {
+        // Strictly increasing from least to most severe.
+        for pair in ALL.windows(2) {
+            assert!(
+                pair[0].severity() < pair[1].severity(),
+                "{:?} should be less severe than {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
     }
 }

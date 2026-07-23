@@ -1189,6 +1189,11 @@ impl Client {
             meta.tracestate = tc.tracestate;
         }
 
+        // Request-scoped logging level (replaces the removed `logging/setLevel`).
+        if self.options.log_level.is_some() {
+            meta.log_level = self.options.log_level;
+        }
+
         req.set_meta(meta);
     }
 

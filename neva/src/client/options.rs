@@ -97,6 +97,12 @@ pub struct McpOptions {
     /// behavior (headers) follows the handshake outcome.
     #[cfg(feature = "proto-2026-07-28-rc")]
     pub(crate) peer_mode: crate::shared::PeerMode,
+
+    /// Request-scoped logging level attached to every outbound request's
+    /// `_meta["io.modelcontextprotocol/logLevel"]` (MCP 2026-07-28). Replaces
+    /// the removed global `logging/setLevel`.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    pub(crate) log_level: Option<crate::types::notification::LoggingLevel>,
 }
 
 impl Debug for McpOptions {
@@ -145,6 +151,8 @@ impl Default for McpOptions {
             max_mrtr_rounds: DEFAULT_MAX_MRTR_ROUNDS,
             #[cfg(feature = "proto-2026-07-28-rc")]
             peer_mode: Default::default(),
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            log_level: None,
         }
     }
 }
@@ -279,6 +287,34 @@ impl McpOptions {
     #[cfg(feature = "proto-2026-07-28-rc")]
     pub fn with_max_mrtr_rounds(mut self, rounds: usize) -> Self {
         self.max_mrtr_rounds = rounds;
+        self
+    }
+
+    /// Sets the request-scoped logging level (MCP 2026-07-28).
+    ///
+    /// The level is attached to every outbound request's
+    /// `_meta["io.modelcontextprotocol/logLevel"]`; the server delivers
+    /// `notifications/message` at or above this severity while handling the
+    /// request. This replaces the removed global `logging/setLevel` handshake.
+    ///
+    /// Deprecated on arrival: the 2026-07-28 draft marks the logging surface
+    /// deprecated, and it is expected to be removed in a future revision.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::client::Client;
+    /// use neva::types::notification::LoggingLevel;
+    ///
+    /// # #[allow(deprecated)]
+    /// let client = Client::new()
+    ///     .with_options(|o| o.with_log_level(LoggingLevel::Warning));
+    /// ```
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[deprecated(
+        note = "Request-scoped logging is deprecated in MCP 2026-07-28 and may be removed in a future revision."
+    )]
+    pub fn with_log_level(mut self, level: crate::types::notification::LoggingLevel) -> Self {
+        self.log_level = Some(level);
         self
     }
 

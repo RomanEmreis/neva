@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.4.4
+
+### Added
+* **Request-scoped logging** (`proto-2026-07-28-rc`, #93). The 2026-07-28 draft
+  removes only `logging/setLevel`; it keeps `notifications/message` as a
+  deprecated, request-scoped log notification. neva had compiled the whole
+  logging surface out under the RC -- this brings the kept part back:
+  * The desired level rides per-request on
+    `_meta["io.modelcontextprotocol/logLevel"]` (`RequestParamsMeta`) instead of
+    a global `setLevel` handshake. While the server handles a request, it emits
+    `notifications/message` at or above that severity and suppresses the rest;
+    with no requested level it emits none.
+  * Both emission paths honor the level: the HTTP `MpscLayer`
+    (`notification::fmt::layer()`) and the stdio `NotificationFormatter`. A new
+    `notification::fmt::span_context()` layer records the request context for
+    the stdio formatter to read.
+  * Client API: `McpOptions::with_log_level` (via `Client::with_options`),
+    `#[deprecated]` on arrival to mirror the schema. `LoggingLevel`/`LogMessage`
+    stay undecorated.
+  * `logging/setLevel` and `with_logging`/`set_log_level` stay removed under the
+    RC.
+
 ## 0.4.3
 
 ### Added

@@ -91,6 +91,8 @@ mod tests {
                 request_state: None,
                 #[cfg(feature = "proto-2026-07-28-rc")]
                 client_capabilities: None,
+                #[cfg(feature = "proto-2026-07-28-rc")]
+                log_level: None,
                 context: None,
                 #[cfg(feature = "tasks")]
                 task: None,
@@ -120,6 +122,8 @@ mod tests {
                 request_state: None,
                 #[cfg(feature = "proto-2026-07-28-rc")]
                 client_capabilities: None,
+                #[cfg(feature = "proto-2026-07-28-rc")]
+                log_level: None,
                 context: None,
                 #[cfg(feature = "tasks")]
                 task: None,

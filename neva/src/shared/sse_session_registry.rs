@@ -160,7 +160,6 @@ impl SseSessionRegistry {
                 session.sender = Self::disconnected_sender();
                 #[cfg(feature = "tracing")]
                 {
-                    #[cfg(not(feature = "proto-2026-07-28-rc"))]
                     crate::types::notification::fmt::LOG_REGISTRY.unregister(&session_id);
                     tracing::warn!(
                         logger = "neva",
@@ -174,7 +173,6 @@ impl SseSessionRegistry {
                 session.sender = Self::disconnected_sender();
                 #[cfg(feature = "tracing")]
                 {
-                    #[cfg(not(feature = "proto-2026-07-28-rc"))]
                     crate::types::notification::fmt::LOG_REGISTRY.unregister(&session_id);
                     tracing::warn!(
                         logger = "neva",
@@ -274,7 +272,7 @@ impl SseSessionRegistry {
                     .unwrap_or_else(|e| e.into_inner());
                 session.sender.is_closed() && now.saturating_duration_since(last_activity) >= ttl
             });
-            #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+            #[cfg(feature = "tracing")]
             if _removed.is_some() {
                 crate::types::notification::fmt::LOG_REGISTRY.unregister(&id);
             }
