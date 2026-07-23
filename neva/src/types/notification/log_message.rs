@@ -154,7 +154,7 @@ impl LogMessage {
             .ok()
             .and_then(|v| v.as_str().map(str::to_owned))
             .unwrap_or_default();
-        
+
         let mcp_level = mcp_level.as_str();
         match self.level {
             LoggingLevel::Alert => tracing::event!(Level::ERROR, mcp_level, %data),
