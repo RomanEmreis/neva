@@ -6,7 +6,7 @@
 //! cargo run -p example-actix
 //! ```
 //!
-//! This example shows how to plug a non-default HTTP stack — here, actix-web —
+//! This example shows how to plug a non-default HTTP stack -- here, actix-web --
 //! into neva's Streamable HTTP transport. It pulls in `neva` with only the
 //! engine-agnostic `http-server` feature, implements
 //! the [`HttpEngine`] contract for an `ActixEngine`, and wires it into
@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 /// HTTP engine backed by [actix-web](https://docs.rs/actix-web).
 ///
-/// `Request` / `Response` are actix's own native types — they're `!Send`
+/// `Request` / `Response` are actix's own native types -- they're `!Send`
 /// but the `HttpEngine` trait doesn't require Send there, and actix
 /// handlers never cross a `tokio::spawn` boundary so the `!Send` future
 /// produced by `dispatch_*` is fine.
@@ -35,7 +35,7 @@ impl HttpEngine for ActixEngine {
     /// separate extractor arguments, so we wrap them in a tuple.
     type Request = (ActixHttpRequest, ActixBytes);
     type Response = ActixHttpResponse;
-    /// Pre-formatted SSE wire bytes — actix-web's `streaming(...)`
+    /// Pre-formatted SSE wire bytes -- actix-web's `streaming(...)`
     /// consumes a stream of `Result<Bytes, _>`, and we wrap each event
     /// in `Ok` because neva never produces SSE errors.
     type SseEvent = Result<Bytes, std::convert::Infallible>;

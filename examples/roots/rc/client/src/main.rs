@@ -3,7 +3,7 @@
 //! Roots are configured *data*, not a handler: the client answers the server's
 //! MRTR `roots/list` input request from the list it was built with. Because the
 //! list is non-empty, the client automatically declares
-//! `clientCapabilities.roots` on every request — a server may only ask for a
+//! `clientCapabilities.roots` on every request -- a server may only ask for a
 //! kind the client declared.
 //!
 //! The MRTR round-trips happen inside `call_tool`: the caller sees one call.
@@ -21,7 +21,7 @@ async fn main() -> Result<(), Error> {
         opt.with_http(|http| http.bind("127.0.0.1:3001").with_endpoint("/mcp"))
     });
 
-    // Deprecated on arrival, like the whole roots kind — the API stays for
+    // Deprecated on arrival, like the whole roots kind -- the API stays for
     // migration.
     #[allow(deprecated)]
     client
@@ -31,7 +31,7 @@ async fn main() -> Result<(), Error> {
             "My Another Project",
         );
 
-    // `connect()` runs `server/discover` — no `initialize` handshake under RC.
+    // `connect()` runs `server/discover` -- no `initialize` handshake under RC.
     client.connect().await?;
 
     let result = client.call_tool("scan_workspace", ()).await?;

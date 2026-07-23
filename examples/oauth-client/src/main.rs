@@ -36,7 +36,7 @@ async fn main() -> Result<(), Error> {
                 .with_oauth(|oauth| oauth)
         })
         // The first request may wait for the user to finish in the
-        // browser — give it more than the default 10 seconds.
+        // browser -- give it more than the default 10 seconds.
         .with_timeout(Duration::from_secs(300))
     });
 

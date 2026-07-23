@@ -756,11 +756,11 @@ mod tests {
         let task_id = task.id.clone();
         let _handle = tracker.track(task);
 
-        // Tracked but no parked elicit → the response is handed back (boxed).
+        // Tracked but no parked elicit -> the response is handed back (boxed).
         let answer = Response::success(RequestId::Number(1), serde_json::json!("x"));
         assert!(tracker.provide_input(&task_id, answer).is_err());
 
-        // Unknown task → also handed back.
+        // Unknown task -> also handed back.
         let answer = Response::success(RequestId::Number(2), serde_json::json!("x"));
         assert!(tracker.provide_input("nonexistent", answer).is_err());
     }

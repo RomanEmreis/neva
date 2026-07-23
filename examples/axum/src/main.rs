@@ -6,12 +6,12 @@
 //! cargo run -p example-axum
 //! ```
 //!
-//! This example shows how to plug a non-default HTTP stack — here, axum —
+//! This example shows how to plug a non-default HTTP stack -- here, axum --
 //! into neva's Streamable HTTP transport. It pulls in `neva` with only the
 //! engine-agnostic `http-server` feature, implements
 //! the [`HttpEngine`] contract for an `AxumEngine`, and wires it into
-//! `HttpServer::from_engine`. All adapter surfaces — HTTP request /
-//! response conversion *and* SSE event construction — live on the
+//! `HttpServer::from_engine`. All adapter surfaces -- HTTP request /
+//! response conversion *and* SSE event construction -- live on the
 //! engine, so route handlers are one-liners.
 
 use axum::{

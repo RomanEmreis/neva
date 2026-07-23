@@ -36,7 +36,7 @@ enum ClientAuth {
     None,
     /// Static bearer token from `HttpClient::with_auth`.
     Static(Arc<str>),
-    /// Managed OAuth session — the token changes as flows complete.
+    /// Managed OAuth session -- the token changes as flows complete.
     #[cfg(feature = "client-oauth")]
     OAuth(Arc<oauth::OAuthSession>),
 }
@@ -62,7 +62,7 @@ impl ClientAuth {
     }
 }
 
-// SSE constants — the standalone GET stream serves legacy peers only;
+// SSE constants -- the standalone GET stream serves legacy peers only;
 // its machinery compiles under both flags for the dual-mode client and
 // activates at runtime when a legacy `initialize` handshake happens.
 const LAST_EVENT_ID: HeaderName = HeaderName::from_static("last-event-id");
@@ -103,7 +103,7 @@ pub(super) async fn connect(rt: ClientRuntimeContext, token: CancellationToken) 
 
     // The SSE task arms itself only when a legacy `initialize` handshake
     // completes (`session.initialized()` fires exclusively for the
-    // `initialize` method) — against an RC peer it stays parked until
+    // `initialize` method) -- against an RC peer it stays parked until
     // cancellation, so the stateless RC transport still issues only POSTs.
     tokio::join!(
         handle_connection(
@@ -323,7 +323,7 @@ async fn send_request(
                 tracing::error!(logger = "neva", "Failed to send response: {}", _err);
             }
         }
-        // A reply that is not JSON-RPC — an HTML error page, or an error
+        // A reply that is not JSON-RPC -- an HTML error page, or an error
         // code outside neva's `ErrorCode` set (e.g. the TS SDK's -32000).
         // Complete every originating request with an id-bound error
         // response: a bare `Err` pushed into the channel would terminate
@@ -356,19 +356,19 @@ async fn send_request(
 /// The code matters beyond diagnostics: `ParseError` is one of the
 /// dual-mode fallback triggers (issue #84), so it must be produced *only*
 /// for replies that genuinely suggest "this peer doesn't know the RC
-/// method/route" — an allowlist, not a catch-all:
+/// method/route" -- an allowlist, not a catch-all:
 ///
-/// * any `2xx` — a legacy peer answering `server/discover` on the wire but
+/// * any `2xx` -- a legacy peer answering `server/discover` on the wire but
 ///   with a body neva can't read as JSON-RPC, most notably an error code
 ///   outside its `ErrorCode` set (the TS SDK's `-32000` "server not
 ///   initialized" family);
-/// * `400` / `404` / `405` / `406` — routers and legacy servers rejecting
+/// * `400` / `404` / `405` / `406` -- routers and legacy servers rejecting
 ///   the unknown method or endpoint outright.
 ///
 /// Everything else is an upstream failure that says nothing about the
 /// peer's protocol generation and must surface as-is
 /// (`InternalError`, like "Connection closed"):
-/// `401`/`403`/`407` (authentication — otherwise a failed login against a
+/// `401`/`403`/`407` (authentication -- otherwise a failed login against a
 /// valid RC server reads as "legacy"), `429` (rate limit) and every `5xx`
 /// (reverse-proxy outage, gateway timeout). Treating those as legacy
 /// evidence would silently drop the RC headers, retry `initialize` into
@@ -450,7 +450,7 @@ async fn handle_sse_connection(
 
     let token = session.cancellation_token();
     // At most one interactive re-authorization per (re)connection attempt
-    // sequence — a second consecutive 401 means the fresh token is not
+    // sequence -- a second consecutive 401 means the fresh token is not
     // accepted and the session must fail rather than loop.
     #[cfg(feature = "client-oauth")]
     let mut reauthorized = false;
@@ -550,7 +550,7 @@ async fn handle_sse_connection(
             }
         }
 
-        // Stream ended — wait before reconnecting to avoid hammering the server
+        // Stream ended -- wait before reconnecting to avoid hammering the server
         tokio::select! {
             biased;
             _ = token.cancelled() => return,
@@ -594,7 +594,7 @@ async fn handle_msg(
         return false;
     };
     // A malformed SSE frame must not reach the receive loop as a bare
-    // `Err` (that would terminate it) — log and skip; the last event id
+    // `Err` (that would terminate it) -- log and skip; the last event id
     // does not advance, so a reconnect replays the event.
     let msg = match serde_json::from_str::<Message>(&data) {
         Ok(msg) => msg,
@@ -642,7 +642,7 @@ impl From<reqwest::Error> for Error {
 }
 
 // These tests exercise the SSE GET stream path, which serves legacy
-// peers — compiled under both flags for the dual-mode client.
+// peers -- compiled under both flags for the dual-mode client.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -661,7 +661,7 @@ mod tests {
     const VALID_MSG: &str = r#"{"jsonrpc":"2.0","method":"ping"}"#;
 
     /// Only statuses that actually suggest an unknown method/route may
-    /// yield `ParseError` — the dual-mode fallback trigger. Upstream
+    /// yield `ParseError` -- the dual-mode fallback trigger. Upstream
     /// failures (auth, rate limit, 5xx) must stay `InternalError` so a
     /// valid RC peer is never mistaken for a legacy one.
     #[test]
@@ -738,7 +738,7 @@ mod tests {
         let session = make_session();
         let (tx, _rx) = mpsc::channel(1);
 
-        // Non-message SSE event (has event: field) — no data sent to channel, but
+        // Non-message SSE event (has event: field) -- no data sent to channel, but
         // ID should still advance so the server does not replay it on reconnect.
         let event = sse_stream::Sse::default()
             .id("evt-keepalive")

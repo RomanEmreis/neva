@@ -36,12 +36,12 @@ pub struct AuthConfig<C: AuthClaims = DefaultClaims> {
 
     /// Whether the user configured an audience themselves (via
     /// [`with_aud`](Self::with_aud) / [`with_resource`](Self::with_resource) /
-    /// [`with_resources`](Self::with_resources)) — suppresses the
+    /// [`with_resources`](Self::with_resources)) -- suppresses the
     /// OAuth-mode default of binding tokens to the canonical resource URI.
     #[cfg(feature = "server-oauth")]
     aud_configured: bool,
 
-    /// Whether the user configured acceptable issuers themselves —
+    /// Whether the user configured acceptable issuers themselves --
     /// suppresses the OAuth-mode default of requiring the configured
     /// issuer.
     #[cfg(feature = "server-oauth")]
@@ -140,7 +140,7 @@ impl<C: AuthClaims> AuthConfig<C> {
     /// tokens.
     ///
     /// In OAuth issuer mode this is set automatically to the server's
-    /// canonical resource URI — call it only to accept a different
+    /// canonical resource URI -- call it only to accept a different
     /// audience (e.g. a public URL behind a reverse proxy).
     ///
     /// # Example
@@ -284,7 +284,7 @@ impl<C: AuthClaims> AuthConfig<C> {
     /// Switches token validation to OAuth 2.1/OIDC issuer mode: instead
     /// of a static decoding key, the issuer's JSON Web Key Set is
     /// discovered (RFC 8414, with an OIDC fallback) and used to validate
-    /// incoming JWTs, keyed by each token's `kid` — with rotation,
+    /// incoming JWTs, keyed by each token's `kid` -- with rotation,
     /// refresh cooldown and key-age limits handled by Volga.
     ///
     /// MCP defaults applied automatically unless overridden: the token's
@@ -317,7 +317,7 @@ impl<C: AuthClaims> AuthConfig<C> {
     }
 
     /// The issuer configured through [`with_oauth`](Self::with_oauth),
-    /// if any — used by the transport to seed the Protected Resource
+    /// if any -- used by the transport to seed the Protected Resource
     /// Metadata document when it was not configured explicitly.
     #[cfg(feature = "server-oauth")]
     pub(crate) fn oauth_issuer(&self) -> Option<&str> {
@@ -347,7 +347,7 @@ impl<C: AuthClaims> AuthConfig<C> {
     }
 
     /// Takes the Volga-facing OAuth issuer configuration out, validating
-    /// that an issuer was actually provided — `with_oauth` without
+    /// that an issuer was actually provided -- `with_oauth` without
     /// `with_issuer` is a configuration error that must fail startup.
     #[cfg(feature = "server-oauth")]
     pub(crate) fn take_oauth(&mut self) -> Result<Option<VolgaOAuthConfig>, crate::error::Error> {
@@ -395,7 +395,7 @@ impl Debug for OAuthConfig {
 #[cfg(feature = "server-oauth")]
 impl OAuthConfig {
     /// Sets the issuer identifier URL whose keys validate bearer tokens.
-    /// Mandatory — OAuth mode without an issuer fails server start.
+    /// Mandatory -- OAuth mode without an issuer fails server start.
     ///
     /// # Example
     /// ```no_run
@@ -526,7 +526,7 @@ mod tests {
     }
 
     // `BearerAuthConfig` keeps its audience set private; its `Debug` impl
-    // exposes the RFC 8707 `resources` list, which `with_resource` feeds —
+    // exposes the RFC 8707 `resources` list, which `with_resource` feeds --
     // assert through that.
     fn resources_of(auth: &AuthConfig) -> String {
         format!("{:?}", auth.inner)

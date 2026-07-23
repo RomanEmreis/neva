@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 /// Represents current MCP Session
 pub(super) struct McpSession {
-    /// Dual-mode protocol switch — legacy peers get legacy headers.
+    /// Dual-mode protocol switch -- legacy peers get legacy headers.
     #[cfg(feature = "proto-2026-07-28-rc")]
     peer_mode: crate::shared::PeerMode,
     initialized: Notify,

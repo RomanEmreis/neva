@@ -2,8 +2,8 @@
 //!
 //! Implements the MCP authorization sequence on top of
 //! [`volga-oauth-client`](https://docs.rs/volga-oauth-client) (framework
-//! independent — plain hyper): a `401` challenge is parsed for its
-//! `resource_metadata` pointer (RFC 9728 §5.1), the Protected Resource
+//! independent -- plain hyper): a `401` challenge is parsed for its
+//! `resource_metadata` pointer (RFC 9728 section 5.1), the Protected Resource
 //! Metadata and the authorization server metadata are discovered
 //! (RFC 8414, OIDC fallback), the client registers dynamically when no
 //! `client_id` is configured (RFC 7591, `application_type: "native"` for
@@ -61,7 +61,7 @@ impl CallbackParams {
     /// (e.g. `"code=abc&state=xyz&iss=https%3A%2F%2Fauth"`).
     ///
     /// Returns an error when the response carries an OAuth `error`
-    /// (RFC 6749 §4.1.2.1) or is missing `code`/`state`.
+    /// (RFC 6749 section 4.1.2.1) or is missing `code`/`state`.
     ///
     /// # Example
     /// ```no_run
@@ -107,7 +107,7 @@ impl CallbackParams {
     }
 }
 
-/// Minimal `application/x-www-form-urlencoded` pair iterator — enough
+/// Minimal `application/x-www-form-urlencoded` pair iterator -- enough
 /// for authorization-response queries (no `+`-space legacy handling
 /// beyond the standard).
 fn form_urlencoded_parse(query: &str) -> impl Iterator<Item = (String, String)> + '_ {
@@ -153,8 +153,8 @@ fn percent_decode(s: &str) -> Option<String> {
 ///
 /// Both methods return a [`BoxFuture`] rather than being `async fn`: the
 /// handler is stored behind `Arc<dyn AuthorizationHandler>`, and `async fn`
-/// in a trait is not dyn-compatible. `Box::pin(async move { … })` is all an
-/// implementation needs — and the alias is neva's own, so implementing this
+/// in a trait is not dyn-compatible. `Box::pin(async move { ... })` is all an
+/// implementation needs -- and the alias is neva's own, so implementing this
 /// trait pulls in no `futures` dependency.
 ///
 /// # Example
@@ -171,7 +171,7 @@ fn percent_decode(s: &str) -> Option<String> {
 ///     }
 ///     fn authorize(&self, url: String) -> BoxFuture<'_, Result<CallbackParams, Error>> {
 ///         Box::pin(async move {
-///             // show `url` to the user, await the callback…
+///             // show `url` to the user, await the callback...
 ///             # let _ = url;
 ///             todo!()
 ///         })
@@ -181,7 +181,7 @@ fn percent_decode(s: &str) -> Option<String> {
 pub trait AuthorizationHandler: Send + Sync + 'static {
     /// The redirect URI the authorization response will be delivered to.
     ///
-    /// Called once per flow, before dynamic client registration — the
+    /// Called once per flow, before dynamic client registration -- the
     /// URI is registered and sent with the authorization request.
     fn redirect_uri(&self) -> BoxFuture<'_, Result<String, Error>>;
 
@@ -194,7 +194,7 @@ pub trait AuthorizationHandler: Send + Sync + 'static {
 /// loopback listener, opens the system browser at the authorization URL
 /// and captures the single redirect request.
 ///
-/// The redirect URI is `http://127.0.0.1:{port}/callback` — loopback
+/// The redirect URI is `http://127.0.0.1:{port}/callback` -- loopback
 /// redirects are the standard exception to the HTTPS rule for native
 /// clients, and dynamic registration declares such a client as
 /// `application_type: "native"` accordingly.
@@ -246,7 +246,7 @@ impl LoopbackHandler {
         Self::default()
     }
 
-    /// Pins the callback listener to a fixed port — required when the
+    /// Pins the callback listener to a fixed port -- required when the
     /// authorization server does not allow arbitrary loopback ports on
     /// the registered redirect URI.
     pub fn with_port(mut self, port: u16) -> Self {
@@ -315,7 +315,7 @@ impl LoopbackHandler {
 }
 
 /// Extracts the query string out of the callback's request line
-/// (`GET /callback?code=…&state=… HTTP/1.1`) and parses it.
+/// (`GET /callback?code=...&state=... HTTP/1.1`) and parses it.
 fn parse_callback_request(raw: &[u8]) -> Result<CallbackParams, Error> {
     let line = raw
         .split(|&b| b == b'\r' || b == b'\n')
@@ -359,7 +359,7 @@ impl AuthorizationHandler for LoopbackHandler {
     }
 }
 
-/// Launches the system browser at `url`, best-effort — on failure the
+/// Launches the system browser at `url`, best-effort -- on failure the
 /// URL is still available from the log/handler.
 fn open_in_browser(url: &str) {
     #[cfg(target_os = "macos")]
@@ -469,7 +469,7 @@ impl OAuthClientConfig {
     }
 
     /// Replaces the in-process token store with a custom
-    /// [`TokenStore`] (encrypted file, OS keychain, …).
+    /// [`TokenStore`] (encrypted file, OS keychain, ...).
     pub fn with_token_store(mut self, store: impl TokenStore + 'static) -> Self {
         self.store = Arc::new(store);
         self
@@ -488,7 +488,7 @@ impl OAuthClientConfig {
 }
 
 /// The OAuth client and authorization-server metadata retained from the
-/// last successful flow — everything a non-interactive token refresh
+/// last successful flow -- everything a non-interactive token refresh
 /// needs.
 struct FlowState {
     client: OAuthClient,
@@ -504,7 +504,7 @@ const REFRESH_LEEWAY: std::time::Duration = std::time::Duration::from_secs(30);
 /// single-flight authorization flow.
 pub(crate) struct OAuthSession {
     config: OAuthClientConfig,
-    /// Canonicalized server URL — the RFC 8707 resource indicator and
+    /// Canonicalized server URL -- the RFC 8707 resource indicator and
     /// the token-store key.
     resource: String,
     /// Current bearer token, read on every outgoing request.
@@ -557,7 +557,7 @@ impl OAuthSession {
 
     /// The bearer token to attach to the next request, proactively
     /// refreshed when the stored set is about to expire and a refresh
-    /// token is available — the session then renews without user
+    /// token is available -- the session then renews without user
     /// interaction. Falls back to the current token when refresh is not
     /// possible; the `401` path handles the rest.
     pub(crate) async fn refreshed_bearer(&self) -> Option<Arc<str>> {
@@ -589,7 +589,7 @@ impl OAuthSession {
                 self.set_token(token.clone());
                 Some(token)
             }
-            // Nothing renewable — interactive authorization it is.
+            // Nothing renewable -- interactive authorization it is.
             Ok(None) => None,
             // Transient failure (issuer unreachable): keep the current
             // token and let the request outcome decide.
@@ -604,7 +604,7 @@ impl OAuthSession {
     /// Runs the authorization flow triggered by a `401` and returns the
     /// fresh bearer token.
     ///
-    /// `www_authenticate` is the challenge header value, when present —
+    /// `www_authenticate` is the challenge header value, when present --
     /// its `resource_metadata` pointer takes precedence over well-known
     /// derivation. `used` is the token the failed request carried:
     /// concurrent callers that lost the race simply pick up the token
@@ -625,7 +625,7 @@ impl OAuthSession {
 
         // Refresh before interrupting the user: a stored refresh token
         // renews the session silently. A token identical to the rejected
-        // one is no help though (revoked server-side) — interactive then.
+        // one is no help though (revoked server-side) -- interactive then.
         if let Some(token) = self.maintain(&mut flight).await
             && used != Some(&*token)
         {
@@ -694,7 +694,7 @@ impl OAuthSession {
         Ok(token)
     }
 
-    /// Builds the [`OAuthClient`] — from the configured `client_id` or
+    /// Builds the [`OAuthClient`] -- from the configured `client_id` or
     /// through dynamic registration (RFC 7591).
     async fn build_client(
         &self,
@@ -730,7 +730,7 @@ impl OAuthSession {
 /// authorization-code client.
 ///
 /// A loopback redirect URI makes this a **native** client
-/// (`application_type: "native"`) — authorization servers reject `web`
+/// (`application_type: "native"`) -- authorization servers reject `web`
 /// clients with plain-http loopback redirects, which is exactly the
 /// desktop/CLI case.
 fn registration_metadata(redirect_uri: &str) -> ClientMetadata {
@@ -758,7 +758,7 @@ fn is_loopback_redirect(uri: &str) -> bool {
         return false;
     };
     let authority = rest.split(['/', '?']).next().unwrap_or_default();
-    // Bracketed IPv6 hosts carry colons of their own — split on the
+    // Bracketed IPv6 hosts carry colons of their own -- split on the
     // closing bracket first, then strip a `:port` for everything else.
     let host = match authority.split_once(']') {
         Some((bracketed, _)) => &authority[..bracketed.len() + 1],
@@ -775,8 +775,8 @@ fn is_loopback_redirect(uri: &str) -> bool {
 /// `authorization_response_iss_parameter_supported`, the parameter is
 /// required and must match the issuer; when it is merely present, it
 /// must still match. A mismatch means the response may come from a
-/// different (potentially malicious) authorization server — mix-up
-/// attack — and aborts the flow.
+/// different (potentially malicious) authorization server -- mix-up
+/// attack -- and aborts the flow.
 fn validate_issuer(
     params: &CallbackParams,
     metadata: &AuthorizationServerMetadata,
@@ -876,7 +876,7 @@ mod tests {
         let metadata = registration_metadata("http://127.0.0.1:8919/callback");
         assert_eq!(metadata.application_type.as_deref(), Some("native"));
         assert_eq!(metadata.token_endpoint_auth_method.as_deref(), Some("none"));
-        // The wire shape is what the AS actually reads — it must stay a
+        // The wire shape is what the AS actually reads -- it must stay a
         // top-level member, not an extension field.
         let json = serde_json::to_value(&metadata).unwrap();
         assert_eq!(json["application_type"], serde_json::json!("native"));
@@ -1040,7 +1040,7 @@ mod tests {
         assert_eq!(token.as_deref(), Some("fresh-token"));
         let stored = store.get("http://127.0.0.1:3000/mcp").unwrap();
         assert_eq!(stored.access_token, "fresh-token");
-        // No rotation in the response — the old refresh token carries over.
+        // No rotation in the response -- the old refresh token carries over.
         assert_eq!(stored.refresh_token.as_deref(), Some("refresh-1"));
         // The flow state survives for the next refresh.
         assert!(session.flow.lock().await.is_some());
@@ -1054,7 +1054,7 @@ mod tests {
             Some(std::time::SystemTime::now() + std::time::Duration::from_secs(3600));
         store.put("http://127.0.0.1:3000/mcp", &tokens);
 
-        // No flow state — a refresh attempt would return None; a fresh
+        // No flow state -- a refresh attempt would return None; a fresh
         // token must never get that far.
         let session = session_with(store, None);
 
@@ -1071,7 +1071,7 @@ mod tests {
 
         let session = session_with(store, None);
 
-        // Nothing to refresh with — the current token is returned and
+        // Nothing to refresh with -- the current token is returned and
         // the 401 path decides what happens next.
         assert_eq!(
             session.refreshed_bearer().await.as_deref(),

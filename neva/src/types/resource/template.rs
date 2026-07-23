@@ -31,7 +31,7 @@ pub struct ResourceTemplate {
     /// A human-readable name for this resource template.
     pub name: String,
 
-    /// Intended for UI and end-user contexts — optimized to be human-readable and easily understood,
+    /// Intended for UI and end-user contexts -- optimized to be human-readable and easily understood,
     /// even by those unfamiliar with domain-specific terminology.
     ///
     /// If not provided, the name should be used for display (except for Tool,

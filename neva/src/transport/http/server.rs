@@ -1,4 +1,4 @@
-//! HTTP server module — under the `http-server-volga` default feature
+//! HTTP server module -- under the `http-server-volga` default feature
 //! this re-exports the Volga adapter; under bare `http-server` alone
 //! it is essentially empty.
 

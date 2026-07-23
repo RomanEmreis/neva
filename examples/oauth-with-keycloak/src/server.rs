@@ -1,4 +1,4 @@
-//! The resource-server half of the Keycloak walkthrough — see README.md
+//! The resource-server half of the Keycloak walkthrough -- see README.md
 //! in this directory for the full setup.
 //!
 //! Minimal configuration on purpose: pointing bearer auth at the issuer

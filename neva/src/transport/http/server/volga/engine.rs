@@ -1,4 +1,4 @@
-//! [`VolgaEngine`] — the default [`HttpEngine`] implementation.
+//! [`VolgaEngine`] -- the default [`HttpEngine`] implementation.
 //!
 //! This engine is bound by `HttpServer` when the `http-server-volga`
 //! feature is enabled. It owns the Volga adapter logic exclusively: any
@@ -35,7 +35,7 @@ use super::routes;
 /// use neva::transport::http::server::volga::VolgaEngine;
 ///
 /// let engine = VolgaEngine::default();
-/// // wired into `HttpServer` by Task 13 — engines never run standalone.
+/// // wired into `HttpServer` by Task 13 -- engines never run standalone.
 /// ```
 #[derive(Default)]
 pub struct VolgaEngine {
@@ -122,14 +122,14 @@ impl HttpEngine for VolgaEngine {
                 // URI (RFC 8707) and `iss` must match the issuer.
                 #[cfg(feature = "server-oauth")]
                 auth.apply_mcp_defaults(ctx.oauth_resource());
-                // `with_oauth` without an issuer is a config error —
+                // `with_oauth` without an issuer is a config error --
                 // surface it as a failed start, not a Volga panic.
                 #[cfg(feature = "server-oauth")]
                 let volga_oauth = auth.take_oauth()?;
 
                 let (bearer, rules) = auth.into_parts();
                 // Advertise the RFC 9728 document on Volga's own 401
-                // challenges: `WWW-Authenticate: Bearer resource_metadata="…"`.
+                // challenges: `WWW-Authenticate: Bearer resource_metadata="..."`.
                 #[cfg(feature = "server-oauth")]
                 let bearer = match &oauth_metadata_url {
                     Some(url) => bearer.with_resource_metadata_url(url.as_str()),
@@ -166,7 +166,7 @@ impl HttpEngine for VolgaEngine {
                 }
                 mcp.map_post("/", routes::post);
                 // Stateless RC transport has no SSE GET stream and no
-                // session-termination DELETE — only POST is routed.
+                // session-termination DELETE -- only POST is routed.
                 #[cfg(not(feature = "proto-2026-07-28-rc"))]
                 {
                     mcp.map_get("/", routes::get);
@@ -174,7 +174,7 @@ impl HttpEngine for VolgaEngine {
                 }
             });
 
-        // RFC 9728 §3: the Protected Resource Metadata document must be
+        // RFC 9728 section 3: the Protected Resource Metadata document must be
         // reachable without credentials.
         #[cfg(feature = "server-oauth")]
         if let Some(path) = &oauth_metadata_path {

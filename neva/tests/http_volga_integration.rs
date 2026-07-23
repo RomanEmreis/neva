@@ -1,4 +1,4 @@
-//! Volga adapter end-to-end smoke test — performs an init POST + tool-call
+//! Volga adapter end-to-end smoke test -- performs an init POST + tool-call
 //! POST + DELETE against a running `HttpServer<DefaultClaims, VolgaEngine>`
 //! bound to an ephemeral port. Asserts session-id round-trip and basic
 //! response shape.

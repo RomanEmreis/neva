@@ -21,7 +21,7 @@ struct Profile {
     age: u32,
 }
 
-// No `JsonSchema` derive — must degrade to `{"type":"object"}`.
+// No `JsonSchema` derive -- must degrade to `{"type":"object"}`.
 #[derive(Deserialize)]
 #[allow(dead_code)]
 struct Opaque {
@@ -81,7 +81,7 @@ async fn tool_macro_emits_json_schema_2020() {
     let client = reqwest::Client::new();
     let url = format!("http://{addr}/mcp");
 
-    // Stateless RC transport: no handshake/session — a single `tools/list`
+    // Stateless RC transport: no handshake/session -- a single `tools/list`
     // POST carrying the required `MCP-Protocol-Version` header is enough.
     let list_body = serde_json::json!({
         "jsonrpc": "2.0",

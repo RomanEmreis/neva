@@ -81,7 +81,7 @@ pub(crate) enum TransportProtoSender {
         /// Accumulated response envelopes to be bundled into the batch reply.
         ///
         /// `std::sync::Mutex` is intentional: the lock is never held across an
-        /// `.await` (lock → push → unlock, then `Ok(())`), so the lighter
+        /// `.await` (lock -> push -> unlock, then `Ok(())`), so the lighter
         /// synchronous mutex is the right tool here.
         responses: std::sync::Arc<std::sync::Mutex<Vec<crate::types::MessageEnvelope>>>,
     },

@@ -81,7 +81,7 @@ pub async fn dispatch_delete<E: HttpEngine>(
 /// native SSE response type) vs `Status(resp)` (passing `resp` through
 /// [`HttpEngine::adapt_response`]).
 ///
-/// Returns [`Err`] when [`HttpEngine::adapt_request`] fails — same
+/// Returns [`Err`] when [`HttpEngine::adapt_request`] fails -- same
 /// rationale as [`dispatch_post`].
 pub async fn dispatch_get_sse<E: HttpEngine>(
     req: E::Request,
@@ -91,7 +91,7 @@ pub async fn dispatch_get_sse<E: HttpEngine>(
     Ok(handle_get_sse::<E>(neutral, ctx).await)
 }
 
-/// Handle a POST `/{endpoint}` request — the JSON-RPC message ingress.
+/// Handle a POST `/{endpoint}` request -- the JSON-RPC message ingress.
 ///
 /// All MCP protocol logic lives here: parse body, classify as
 /// request/notification/batch, run the init pre-register, attach claims
@@ -113,7 +113,7 @@ pub async fn handle_post(req: HttpRequest, ctx: &HttpContext) -> HttpResponse {
     // `MCP-Protocol-Version` header; reject before body dispatch otherwise.
     // `PROTOCOL_VERSIONS` still lists legacy versions (e.g. 2025-06-18) for
     // the non-RC build, but this build has removed the legacy initialize/SSE
-    // behavior and only speaks RC stateless semantics — so a client/proxy
+    // behavior and only speaks RC stateless semantics -- so a client/proxy
     // advertising a legacy version must be rejected, not silently served
     // under RC. Compare against the fixed RC version (the last/only RC entry)
     // rather than the whole compatibility list.
@@ -212,9 +212,9 @@ pub async fn handle_post(req: HttpRequest, ctx: &HttpContext) -> HttpResponse {
 
     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<Message>();
     // full_id() takes &self, so we can compute the key before moving msg
-    // into the send. RequestId is not Clone — the original handler used
+    // into the send. RequestId is not Clone -- the original handler used
     // the same insert-then-send order. The pending entry is reaped by
-    // the SSE registry's cleanup loop if the inbound send fails (rare —
+    // the SSE registry's cleanup loop if the inbound send fails (rare --
     // the channel is sized for hundreds of in-flight requests).
     ctx.pending.insert(msg.full_id(), resp_tx);
     if ctx.inbound_tx.send(Ok(msg)).await.is_err() {
@@ -229,8 +229,8 @@ pub async fn handle_post(req: HttpRequest, ctx: &HttpContext) -> HttpResponse {
 /// Parse the body into a [`Message`].
 ///
 /// Single-step decode: `serde_json::Error::classify()` distinguishes
-/// JSON-RPC 2.0 §5.1 ParseError (`Category::Syntax` / `Category::Eof` —
-/// the body is not valid JSON) from InvalidRequest (`Category::Data` —
+/// JSON-RPC 2.0 section 5.1 ParseError (`Category::Syntax` / `Category::Eof` --
+/// the body is not valid JSON) from InvalidRequest (`Category::Data` --
 /// the body is valid JSON but does not match any [`Message`] variant).
 fn parse_message(body: &Bytes) -> Result<Message, ErrorCode> {
     serde_json::from_slice::<Message>(body).map_err(|e| match e.classify() {
@@ -286,7 +286,7 @@ fn status_response(
     resp
 }
 
-/// Handle a DELETE `/{endpoint}` request — explicit session termination.
+/// Handle a DELETE `/{endpoint}` request -- explicit session termination.
 ///
 /// Returns 400 if `Mcp-Session-Id` is missing; otherwise terminates the
 /// SSE session in the registry (and unregisters its log channel, when
@@ -313,7 +313,7 @@ fn parse_session_id(headers: &HeaderMap) -> Option<uuid::Uuid> {
         .and_then(|s| uuid::Uuid::parse_str(s).ok())
 }
 
-/// Handle a GET on the well-known path — serves the RFC 9728 Protected
+/// Handle a GET on the well-known path -- serves the RFC 9728 Protected
 /// Resource Metadata document pre-built at server start.
 ///
 /// The engine mounts this on [`HttpContext::oauth_metadata_path`]; if the
@@ -347,7 +347,7 @@ pub fn handle_oauth_metadata(ctx: &HttpContext) -> HttpResponse {
 /// when OAuth is not configured.
 ///
 /// The default Volga adapter emits its own challenge through Volga's
-/// bearer pipeline — this helper is for custom engines that validate
+/// bearer pipeline -- this helper is for custom engines that validate
 /// tokens themselves.
 ///
 /// # Example
@@ -369,7 +369,7 @@ pub fn handle_unauthorized(ctx: &HttpContext) -> HttpResponse {
         .unwrap_or_default()
 }
 
-/// Internal item type used inside the GET handler — the engine's
+/// Internal item type used inside the GET handler -- the engine's
 /// `tracked_event` / `ephemeral_event` is invoked exactly once per emitted
 /// event to produce the engine-native representation.
 enum SseItem {
@@ -392,7 +392,7 @@ impl Drop for SseConnectionCleanup {
     }
 }
 
-/// Handle a GET `/{endpoint}` request — SSE stream subscribe.
+/// Handle a GET `/{endpoint}` request -- SSE stream subscribe.
 ///
 /// Returns `SseResponse::Status(400)` if the session id is missing,
 /// otherwise opens (or reconnects to) the session in the SSE registry

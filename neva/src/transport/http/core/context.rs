@@ -16,7 +16,7 @@ pub(crate) type RequestMap = Arc<DashMap<crate::types::RequestId, oneshot::Sende
 /// the SSE session registry, and per-session queue capacities.
 ///
 /// All fields are cheaply cloneable (Arc / Copy), so engines can move
-/// the whole context into route handlers — wrap it in `Arc` only if
+/// the whole context into route handlers -- wrap it in `Arc` only if
 /// the framework's state pattern requires that (Volga `add_singleton`,
 /// axum `with_state`).
 ///
@@ -76,7 +76,7 @@ impl HttpContext {
     /// deployed as (e.g. `"https://api.example.com/mcp"`), when OAuth is
     /// configured.
     ///
-    /// This is the audience value access tokens must be bound to — the
+    /// This is the audience value access tokens must be bound to -- the
     /// default Volga adapter feeds it into bearer validation as a
     /// required `aud`; a custom engine should enforce the same check.
     #[cfg(feature = "server-oauth")]

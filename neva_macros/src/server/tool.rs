@@ -5,17 +5,17 @@
 //! Under the `proto-2026-07-28-rc` feature the generated `inputSchema` /
 //! `outputSchema` are full JSON Schema 2020-12 documents:
 //!
-//! - **Primitive arguments** (`String`, integers, `bool`, `Vec<_>`, …) become
+//! - **Primitive arguments** (`String`, integers, `bool`, `Vec<_>`, ...) become
 //!   inline primitive property schemas, exactly as before.
 //! - **Structured arguments** passed as `Json<T>` produce a rich, self-contained
 //!   subschema when the inner `T` derives `JsonSchema` (via
 //!   `#[derive(neva::json_schema)]` or `schemars::JsonSchema`). An inner type
 //!   that does **not** derive it degrades gracefully to `{"type":"object"}`.
 //!   Deriving is therefore recommended for structured argument and return types.
-//!   No `schemars` dependency is required in your crate — it is re-exported by
+//!   No `schemars` dependency is required in your crate -- it is re-exported by
 //!   neva.
 //! - **Recursive types cannot be inlined**; model them with an explicit
-//!   `input_schema = "…"` instead.
+//!   `input_schema = "..."` instead.
 //! - **Explicit `input_schema` / `output_schema` string literals** are validated
 //!   at compile time; malformed JSON is a compile error (on every feature
 //!   configuration).

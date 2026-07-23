@@ -1,8 +1,8 @@
 //! MRTR (elicitation) end-to-end over the stateless RC transport.
 //!
 //! Drives the raw protocol so the two-round wire contract is asserted
-//! directly: round 1 `tools/call` → `input_required` (+ `requestState`),
-//! round 2 retry (new id + `inputResponses` + echoed state) → final result.
+//! directly: round 1 `tools/call` -> `input_required` (+ `requestState`),
+//! round 2 retry (new id + `inputResponses` + echoed state) -> final result.
 #![cfg(all(
     feature = "proto-2026-07-28-rc",
     feature = "http-server-volga",
@@ -42,7 +42,7 @@ async fn tool_elicits_then_completes_over_two_rounds() {
     let client = reqwest::Client::new();
     let url = format!("http://{addr}/mcp");
 
-    // Round 1: tools/call → input_required.
+    // Round 1: tools/call -> input_required.
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "greet", "arguments": {},
@@ -117,7 +117,7 @@ static CONCURRENT_FINAL_COMMITS: AtomicUsize = AtomicUsize::new(0);
 async fn final_round_replay_is_idempotent_after_a_lost_response() {
     // The final POST commits and produces a result, but its HTTP response is
     // "lost"; the client retries the SAME requestState + inputResponses. The
-    // server must serve the cached result without re-running the handler — so
+    // server must serve the cached result without re-running the handler -- so
     // the on_commit side effect fires exactly once across both finals.
     LOST_RESPONSE_COMMITS.store(0, Ordering::SeqCst);
 
@@ -149,7 +149,7 @@ async fn final_round_replay_is_idempotent_after_a_lost_response() {
     let client = reqwest::Client::new();
     let url = format!("http://{addr}/mcp");
 
-    // Round 1: tools/call → input_required.
+    // Round 1: tools/call -> input_required.
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "greet", "arguments": {},
@@ -266,7 +266,7 @@ async fn concurrent_final_round_retries_commit_exactly_once() {
             .content
             .and_then(|c| c.get("name").and_then(|v| v.as_str().map(str::to_owned)))
             .unwrap_or_else(|| "stranger".into());
-        // Widen the get-miss → put window so both retries would overlap absent
+        // Widen the get-miss -> put window so both retries would overlap absent
         // the reservation.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         ctx.on_commit(async move {
@@ -282,7 +282,7 @@ async fn concurrent_final_round_retries_commit_exactly_once() {
     let client = reqwest::Client::new();
     let url = format!("http://{addr}/mcp");
 
-    // Round 1: tools/call → input_required.
+    // Round 1: tools/call -> input_required.
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "greet", "arguments": {},
@@ -363,7 +363,7 @@ async fn distinct_answers_to_the_same_state_do_not_collide_in_the_cache() {
     // Two flows reach the SAME pre-answer requestState (same method/params/
     // principal, no nonce) but supply DIFFERENT inputResponses. The final cache
     // is keyed by the state tag plus the answers digest, so the second flow must
-    // see its own answer reflected — never the first flow's cached result.
+    // see its own answer reflected -- never the first flow's cached result.
     let port = pick_free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
@@ -554,7 +554,7 @@ async fn effects_run_once_memo_caches_commit_fires_on_final_round() {
         .expect("one input request")
         .clone();
 
-    // Round 2: retry → final result. memo HIT (no fetch), once HIT (no charge),
+    // Round 2: retry -> final result. memo HIT (no fetch), once HIT (no charge),
     // commit fires exactly once.
     let retry = serde_json::json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
@@ -655,7 +655,7 @@ async fn oversized_request_state_is_rejected() {
 async fn oversized_inbound_request_state_is_rejected_before_decoding() {
     // An untrusted client supplies a bogus `requestState` far larger than the
     // configured cap. It must be rejected on size *before* base64 decoding and
-    // HMAC verification run, so the cap protects inbound retries — not just the
+    // HMAC verification run, so the cap protects inbound retries -- not just the
     // outbound states the server mints.
     let port = pick_free_port();
     let addr = format!("127.0.0.1:{port}");
@@ -678,7 +678,7 @@ async fn oversized_inbound_request_state_is_rejected_before_decoding() {
     let client = reqwest::Client::new();
     let url = format!("http://{addr}/mcp");
 
-    // A 4 KiB blob — well over the 256-byte cap and never a valid signed state.
+    // A 4 KiB blob -- well over the 256-byte cap and never a valid signed state.
     let bogus_state = "A".repeat(4096);
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -753,7 +753,7 @@ async fn replaying_request_state_against_a_different_request_is_rejected() {
         .expect("requestState present")
         .to_string();
 
-    // Replay that state against a request with DIFFERENT arguments → the
+    // Replay that state against a request with DIFFERENT arguments -> the
     // request binding no longer matches.
     let replay = serde_json::json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
@@ -807,7 +807,7 @@ async fn eliciting_without_declared_capability_is_rejected() {
     let client = reqwest::Client::new();
     let url = format!("http://{addr}/mcp");
 
-    // No `clientCapabilities.elicitation` → the server cannot ask for input.
+    // No `clientCapabilities.elicitation` -> the server cannot ask for input.
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "greet", "arguments": {} }
@@ -841,7 +841,7 @@ static C_CHARGES: AtomicUsize = AtomicUsize::new(0);
 static C_RECEIPTS: AtomicUsize = AtomicUsize::new(0);
 
 /// Real end-to-end: the neva MCP **client** (not raw reqwest) drives the whole
-/// MRTR loop — `connect()` runs `server/discover`, `call_tool` enters
+/// MRTR loop -- `connect()` runs `server/discover`, `call_tool` enters
 /// `run_with_mrtr`, and the registered elicitation handler answers the
 /// server's request transparently across the round-trip.
 #[tokio::test(flavor = "multi_thread")]
@@ -1014,7 +1014,7 @@ async fn client_drives_mrtr_across_a_batch_end_to_end() {
 /// three-request batch elicits on every slot; after the round-2 retry one tool
 /// returns `Err` (surfaced as an `is_error` `CallToolResponse`, not a JSON-RPC
 /// error), while the other two complete normally. The batch still resolves to
-/// `Ok` with all three slots filled in order — the failing slot carries the
+/// `Ok` with all three slots filled in order -- the failing slot carries the
 /// error result, its neighbours carry their final answers. This locks down that
 /// a per-slot tool failure is isolated, not fatal to the whole batch.
 #[tokio::test(flavor = "multi_thread")]
@@ -1104,7 +1104,7 @@ async fn batch_isolates_a_single_slot_failure_after_elicitation() {
 }
 
 /// The MRTR round cap is configurable via `with_max_mrtr_rounds`, and counts
-/// *re-issues* — not the initial send. A cap of 0 sends the request once and
+/// *re-issues* -- not the initial send. A cap of 0 sends the request once and
 /// fails the moment it elicits, so the client gives up with the max-rounds error
 /// instead of looping the default 8 times.
 #[tokio::test(flavor = "multi_thread")]
@@ -1149,8 +1149,8 @@ async fn configurable_max_rounds_caps_the_mrtr_loop() {
 }
 
 /// The cap counts re-issues, not the initial send: `with_max_mrtr_rounds(1)`
-/// must let a normal one-question flow converge (initial send → `input_required`
-/// → one retry → final), rather than spending its only iteration on the first
+/// must let a normal one-question flow converge (initial send -> `input_required`
+/// -> one retry -> final), rather than spending its only iteration on the first
 /// send and erroring before it can retry.
 #[tokio::test(flavor = "multi_thread")]
 async fn one_retry_budget_completes_a_single_question_flow() {
@@ -1201,7 +1201,7 @@ async fn one_retry_budget_completes_a_single_question_flow() {
 }
 
 /// #85: sampling returns as an MRTR input-request kind. The wire contract is
-/// the same two rounds elicitation uses — only the envelope's `method` and the
+/// the same two rounds elicitation uses -- only the envelope's `method` and the
 /// result type differ.
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_samples_then_completes_over_two_rounds() {
@@ -1388,9 +1388,9 @@ async fn tool_lists_roots_then_completes_over_two_rounds() {
     handle.abort();
 }
 
-/// The real client fulfils both deprecated kinds through the MRTR loop —
-/// sampling from its configured handler, roots from its configured list — with
-/// no server→client push channel involved.
+/// The real client fulfils both deprecated kinds through the MRTR loop --
+/// sampling from its configured handler, roots from its configured list -- with
+/// no server->client push channel involved.
 #[tokio::test(flavor = "multi_thread")]
 async fn client_drives_sampling_and_roots_end_to_end() {
     use neva::types::sampling::{CreateMessageRequestParams, CreateMessageResult, SamplingMessage};
@@ -1455,7 +1455,7 @@ async fn client_drives_sampling_and_roots_end_to_end() {
     handle.abort();
 }
 
-/// A client that opted into roots but exposes none must still be askable — an
+/// A client that opted into roots but exposes none must still be askable -- an
 /// empty `ListRootsResult` is a valid answer, and gating it out would leave the
 /// server unable to complete the call at all.
 #[tokio::test(flavor = "multi_thread")]

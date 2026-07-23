@@ -10,7 +10,7 @@ use http::HeaderMap;
 
 /// Engine-neutral inbound HTTP request.
 ///
-/// The body is fully buffered to [`Bytes`] before this type is constructed —
+/// The body is fully buffered to [`Bytes`] before this type is constructed --
 /// MCP messages are bounded JSON-RPC frames and the protocol handlers always
 /// buffer the whole body before parsing.
 ///
@@ -39,7 +39,7 @@ pub type HttpResponse = http::Response<Bytes>;
 
 /// Outcome of the GET handler: either an SSE stream or a non-SSE status reply.
 ///
-/// `Stream` is the happy path — 200 OK + the event stream.
+/// `Stream` is the happy path -- 200 OK + the event stream.
 /// `Status` is returned when the request couldn't establish a session
 /// (typically 400 with no `Mcp-Session-Id` header).
 #[derive(Debug)]
@@ -65,7 +65,7 @@ pub enum SseResponse<S> {
 ///
 /// Under the default Volga adapter, `volga::auth::AuthClaims` is also
 /// re-exported as [`crate::auth::Claims`], and the Volga-flavored
-/// `DefaultClaims` implements this trait too — so the same validator
+/// `DefaultClaims` implements this trait too -- so the same validator
 /// runs for every engine.
 ///
 /// # Example
@@ -104,30 +104,30 @@ pub trait Claims: std::fmt::Debug + Send + Sync + 'static {
 }
 
 /// Engine-agnostic pre-built [`Claims`] type matching the JWT standard
-/// claim names. Available for every HTTP engine — under the Volga
+/// claim names. Available for every HTTP engine -- under the Volga
 /// adapter it also implements `volga::auth::AuthClaims` so it can be
 /// fed straight into Volga's bearer-auth pipeline.
 #[derive(Default, Clone, Debug, serde::Deserialize)]
 pub struct DefaultClaims {
-    /// JWT `sub` claim — subject.
+    /// JWT `sub` claim -- subject.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sub: Option<String>,
-    /// JWT `iss` claim — issuer.
+    /// JWT `iss` claim -- issuer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub iss: Option<String>,
-    /// JWT `aud` claim — audience.
+    /// JWT `aud` claim -- audience.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aud: Option<String>,
-    /// JWT `exp` claim — expiration time (seconds since epoch).
+    /// JWT `exp` claim -- expiration time (seconds since epoch).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exp: Option<i64>,
-    /// JWT `nbf` claim — not-before time.
+    /// JWT `nbf` claim -- not-before time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nbf: Option<i64>,
-    /// JWT `iat` claim — issued-at time.
+    /// JWT `iat` claim -- issued-at time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub iat: Option<i64>,
-    /// JWT `jti` claim — token id.
+    /// JWT `jti` claim -- token id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jti: Option<String>,
     /// Subject role.

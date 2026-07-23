@@ -6,12 +6,12 @@
 //! cargo run -p example-hyper
 //! ```
 //!
-//! This example shows how to plug a non-default HTTP stack — here, raw
-//! hyper — into neva's Streamable HTTP transport. It pulls in `neva`
+//! This example shows how to plug a non-default HTTP stack -- here, raw
+//! hyper -- into neva's Streamable HTTP transport. It pulls in `neva`
 //! with only the engine-agnostic `http-server` feature, implements the [`HttpEngine`] contract for a `HyperEngine`,
 //! and wires it into `HttpServer::from_engine`.
 //!
-//! Unlike axum / actix-web, hyper ships no router — the engine's
+//! Unlike axum / actix-web, hyper ships no router -- the engine's
 //! accept loop dispatches on `(method, path)` directly.
 
 use std::convert::Infallible;
@@ -28,7 +28,7 @@ use hyper_util::rt::TokioIo;
 use neva::prelude::*;
 use tokio_util::sync::CancellationToken;
 
-/// Boxed body type used uniformly by every response this engine builds —
+/// Boxed body type used uniformly by every response this engine builds --
 /// `BoxBody` lets the SSE-streaming branch and the buffered-JSON branch
 /// share a single response type.
 type BoxedBody = BoxBody<Bytes, Infallible>;

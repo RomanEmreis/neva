@@ -5,8 +5,8 @@
 //! ([RFC 9728](https://www.rfc-editor.org/rfc/rfc9728)) and answer
 //! unauthorized requests with a `WWW-Authenticate` bearer challenge that
 //! points at it. This module owns the engine-neutral half of that
-//! contract — options, one-time resolution into a ready-to-serve document,
-//! and the challenge — so any [`HttpEngine`](super::engine::HttpEngine)
+//! contract -- options, one-time resolution into a ready-to-serve document,
+//! and the challenge -- so any [`HttpEngine`](super::engine::HttpEngine)
 //! (Volga, axum, hyper, a custom adapter) serves byte-identical metadata.
 //!
 //! Protocol-level types come from
@@ -16,7 +16,7 @@
 //!
 //! Token *validation* deliberately stays the engine's job (the default
 //! Volga adapter uses Volga's bearer/JWKS pipeline; a custom engine brings
-//! its own middleware) — see the authorization contract on
+//! its own middleware) -- see the authorization contract on
 //! [`HttpEngine`](super::engine::HttpEngine).
 
 use bytes::Bytes;
@@ -37,7 +37,7 @@ pub use volga_oauth_core::{
 /// The `resource` identifier defaults to the server's own URL
 /// (`proto://addr/endpoint`) and only needs
 /// [`with_resource`](Self::with_resource) when the public URL differs
-/// from the bind address — e.g. behind a reverse proxy.
+/// from the bind address -- e.g. behind a reverse proxy.
 ///
 /// # Example
 /// ```no_run
@@ -62,7 +62,7 @@ impl OAuthResourceOptions {
     ///
     /// Defaults to the server's own URL. Set it when clients reach the
     /// server through a different public URL than the bind address
-    /// (reverse proxy, TLS termination). The value is canonicalized —
+    /// (reverse proxy, TLS termination). The value is canonicalized --
     /// scheme/host lowercased, default ports dropped.
     ///
     /// # Example
@@ -156,7 +156,7 @@ impl OAuthResourceOptions {
     /// Resolves the options against the server's base URL into the
     /// ready-to-serve [`OAuthResource`]: canonicalizes the resource
     /// identifier (defaulting it to `base_url`), derives the metadata
-    /// URL/path per RFC 9728 §3.1, pre-serializes the document, and
+    /// URL/path per RFC 9728 section 3.1, pre-serializes the document, and
     /// pre-renders the `WWW-Authenticate` challenge.
     pub(crate) fn resolve(self, base_url: &str) -> Result<OAuthResource, Error> {
         let mut metadata = self.metadata;
@@ -191,7 +191,7 @@ impl OAuthResourceOptions {
 pub(crate) struct OAuthResource {
     /// Pre-serialized RFC 9728 metadata document.
     pub(crate) body: Bytes,
-    /// Absolute URL of the metadata document — the `resource_metadata`
+    /// Absolute URL of the metadata document -- the `resource_metadata`
     /// value of the bearer challenge.
     pub(crate) metadata_url: Arc<str>,
     /// Path the engine mounts the metadata route on
@@ -199,15 +199,15 @@ pub(crate) struct OAuthResource {
     pub(crate) metadata_path: Arc<str>,
     /// Pre-rendered `WWW-Authenticate` header value.
     pub(crate) challenge: Arc<str>,
-    /// Canonicalized resource identifier (RFC 8707) — the audience value
+    /// Canonicalized resource identifier (RFC 8707) -- the audience value
     /// access tokens must be bound to.
     pub(crate) resource: Arc<str>,
 }
 
 /// Strips the scheme and authority off an absolute URL, leaving the path.
 ///
-/// `metadata_url` always carries a path (RFC 9728 §3.1 inserts the
-/// well-known segment), so the fallback is unreachable — it only exists
+/// `metadata_url` always carries a path (RFC 9728 section 3.1 inserts the
+/// well-known segment), so the fallback is unreachable -- it only exists
 /// to keep the function total without panicking.
 fn well_known_path(url: &str) -> &str {
     url.find("://")

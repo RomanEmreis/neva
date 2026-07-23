@@ -118,7 +118,7 @@ impl Client {
     /// # }
     /// ```
     #[deprecated(
-        note = "Roots are deprecated in MCP 2026-07-28: the capability-driven `roots/list` request is gone and the ability is re-homed onto MRTR — see `Context::list_roots`. Under the RC this configures what the client answers MRTR `roots/list` input requests with."
+        note = "Roots are deprecated in MCP 2026-07-28: the capability-driven `roots/list` request is gone and the ability is re-homed onto MRTR -- see `Context::list_roots`. Under the RC this configures what the client answers MRTR `roots/list` input requests with."
     )]
     #[allow(deprecated)]
     pub fn add_root(&mut self, uri: impl Into<Uri>, name: impl Into<String>) -> &mut Self {
@@ -145,7 +145,7 @@ impl Client {
     /// # }
     /// ```
     #[deprecated(
-        note = "Roots are deprecated in MCP 2026-07-28: the capability-driven `roots/list` request is gone and the ability is re-homed onto MRTR — see `Context::list_roots`. Under the RC this configures what the client answers MRTR `roots/list` input requests with."
+        note = "Roots are deprecated in MCP 2026-07-28: the capability-driven `roots/list` request is gone and the ability is re-homed onto MRTR -- see `Context::list_roots`. Under the RC this configures what the client answers MRTR `roots/list` input requests with."
     )]
     #[allow(deprecated)]
     pub fn add_roots<T, I>(&mut self, roots: I) -> &mut Self
@@ -160,7 +160,7 @@ impl Client {
 
     /// Sends the "notifications/roots/list_changed" notification to the server
     #[deprecated(
-        note = "Roots are deprecated in MCP 2026-07-28: the capability-driven `roots/list` request is gone and the ability is re-homed onto MRTR — see `Context::list_roots`. Under the RC this configures what the client answers MRTR `roots/list` input requests with."
+        note = "Roots are deprecated in MCP 2026-07-28: the capability-driven `roots/list` request is gone and the ability is re-homed onto MRTR -- see `Context::list_roots`. Under the RC this configures what the client answers MRTR `roots/list` input requests with."
     )]
     pub fn publish_roots_changed(&mut self) {
         if let Some(handler) = self.handler.as_mut() {
@@ -171,7 +171,7 @@ impl Client {
 
     /// Registers a handler that will be running when a "sampling/createMessage" request is received
     #[deprecated(
-        note = "Sampling is deprecated in MCP 2026-07-28: the capability-driven `sampling/createMessage` request is gone and the ability is re-homed onto MRTR — see `Context::sample`. Under the RC this handler fulfils MRTR `sampling/createMessage` input requests."
+        note = "Sampling is deprecated in MCP 2026-07-28: the capability-driven `sampling/createMessage` request is gone and the ability is re-homed onto MRTR -- see `Context::sample`. Under the RC this handler fulfils MRTR `sampling/createMessage` input requests."
     )]
     pub fn map_sampling<F, R>(&mut self, handler: F) -> &mut Self
     where
@@ -263,7 +263,7 @@ impl Client {
     ///
     /// Under the RC flag the RC expectation is pinned to
     /// [`crate::RC_PROTOCOL_VERSION`]: a `with_mcp_version` override only
-    /// selects which legacy version the dual-mode fallback negotiates —
+    /// selects which legacy version the dual-mode fallback negotiates --
     /// it must never make `server/discover` reject a valid RC server.
     fn expected_protocol_ver(&self) -> &'static str {
         #[cfg(feature = "proto-2026-07-28-rc")]
@@ -314,7 +314,7 @@ impl Client {
     async fn legacy_init(&mut self) -> Result<(), Error> {
         #[cfg(not(feature = "proto-2026-07-28-rc"))]
         let protocol_ver = self.options.protocol_ver().to_string();
-        // The fallback negotiates the newest pre-RC version — offering
+        // The fallback negotiates the newest pre-RC version -- offering
         // the RC version to a server that just rejected `server/discover`
         // would only get refused again.
         #[cfg(feature = "proto-2026-07-28-rc")]
@@ -357,7 +357,7 @@ impl Client {
     /// Discovers server capabilities via `server/discover` (MCP 2026-07-28 RC).
     ///
     /// Replaces the `initialize`/`initialized` handshake. No `initialized`
-    /// notification is sent — the transport is stateless.
+    /// notification is sent -- the transport is stateless.
     #[cfg(feature = "proto-2026-07-28-rc")]
     pub async fn discover(&mut self) -> Result<(), Error> {
         let resp = self.send_request(Self::discover_request()).await?;
@@ -388,13 +388,13 @@ impl Client {
     /// The dual-mode handshake (issue #84): tries `server/discover`
     /// first and, when the server clearly doesn't speak the RC protocol,
     /// falls back to the legacy `initialize` handshake and marks the
-    /// peer as legacy — subsequent traffic uses legacy semantics
+    /// peer as legacy -- subsequent traffic uses legacy semantics
     /// (session header, SSE stream, no MRTR, no RC routing headers).
     ///
     /// Only **wire-phase** failures classify for the fallback: transport
     /// errors and the server's JSON-RPC *error* reply. Once the server
     /// answers `server/discover` successfully, the peer has committed to
-    /// the RC protocol — later local failures (a malformed result, an
+    /// the RC protocol -- later local failures (a malformed result, an
     /// unsupported/mismatched `protocolVersion`) surface as real errors
     /// instead of a misleading fallback attempt on a transport that
     /// version validation may already have cancelled.
@@ -986,7 +986,7 @@ impl Client {
     /// An RC peer advertises tasks through
     /// `capabilities.extensions["io.modelcontextprotocol/tasks"]`; a
     /// legacy peer reached via the dual-mode fallback advertises the
-    /// top-level `tasks` field of its `initialize` result — both must
+    /// top-level `tasks` field of its `initialize` result -- both must
     /// resolve, or task-augmented calls report no support after a
     /// fallback.
     #[cfg(all(feature = "tasks", feature = "proto-2026-07-28-rc"))]
@@ -1059,7 +1059,7 @@ impl Client {
     async fn send_request(&mut self, req: Request) -> Result<Response, Error> {
         #[cfg(feature = "proto-2026-07-28-rc")]
         {
-            // A legacy peer (dual-mode fallback) never speaks MRTR — its
+            // A legacy peer (dual-mode fallback) never speaks MRTR -- its
             // requests take the plain path, elicitation rides the legacy
             // server-push channel instead.
             if self.is_legacy_peer() {
@@ -1162,8 +1162,8 @@ impl Client {
         let mut meta = req.meta().unwrap_or_default();
         meta.client_info = Some(self.options.implementation.clone());
         // Each flag reflects what this client can actually fulfil right now: a
-        // configured handler for elicitation/sampling, and — since roots are
-        // data rather than a handler — a declared roots capability. That is
+        // configured handler for elicitation/sampling, and -- since roots are
+        // data rather than a handler -- a declared roots capability. That is
         // either an explicit `with_roots(..)` or simply having roots, and it
         // deliberately stays true for an empty list: an empty
         // `ListRootsResult` is a valid answer, so a client that opted in must
@@ -1195,7 +1195,7 @@ impl Client {
     /// Applies the initial per-request RC client metadata (`clientInfo` /
     /// `clientCapabilities`, plus trace context) to every [`Request`] in a
     /// batch. The MRTR re-run fields (`inputResponses` / `requestState`) stay
-    /// `None` here — they are filled per request on each retry round by
+    /// `None` here -- they are filled per request on each retry round by
     /// [`Self::run_batch_with_mrtr`]. Notifications are left untouched.
     #[cfg(feature = "proto-2026-07-28-rc")]
     fn apply_client_meta_to_batch(&self, items: &mut [MessageEnvelope]) {
@@ -1209,7 +1209,7 @@ impl Client {
     /// Fulfils one server-requested input, whatever its kind, and returns the
     /// raw result to echo back under the request's key.
     ///
-    /// Sampling and roots are fulfilled here, on the MRTR loop — *not* as
+    /// Sampling and roots are fulfilled here, on the MRTR loop -- *not* as
     /// server-initiated pushes: under the RC there is no such channel. The
     /// client only ever gets asked for a kind it declared in
     /// [`ClientMrtrCapabilities`](crate::types::mrtr::ClientMrtrCapabilities),
@@ -1348,8 +1348,8 @@ impl Client {
 
     /// Drives the MRTR retry loop across an entire batch.
     ///
-    /// Each batched [`Request`] that elicits — the server replies with an
-    /// `input_required` result — is fulfilled via the configured elicitation
+    /// Each batched [`Request`] that elicits -- the server replies with an
+    /// `input_required` result -- is fulfilled via the configured elicitation
     /// handler and re-issued (carrying `inputResponses` + the echoed
     /// `requestState`) alongside any other still-eliciting requests, so the
     /// whole batch is driven to completion in lock-step rounds. One transport
@@ -1705,7 +1705,7 @@ async fn collect_batch_responses(
             tokio::select! {
                 biased;
                 // The transport died (or a shutdown signal cancelled it)
-                // — no response is coming for any receiver.
+                // -- no response is coming for any receiver.
                 _ = token.cancelled() => {
                     let _ = pending.pop(&id);
                     Err(Error::new(ErrorCode::InternalError, "Connection closed"))
@@ -1732,7 +1732,7 @@ async fn collect_batch_responses(
 }
 
 /// The error for an input kind the server asked for but this client has no
-/// fulfiller for — only reachable if the server ignored the declared
+/// fulfiller for -- only reachable if the server ignored the declared
 /// [`ClientMrtrCapabilities`](crate::types::mrtr::ClientMrtrCapabilities).
 #[cfg(feature = "proto-2026-07-28-rc")]
 fn no_fulfiller(kind: &str) -> Error {
@@ -1743,12 +1743,12 @@ fn no_fulfiller(kind: &str) -> Error {
 }
 
 /// Whether a `server/discover` failure means "this server doesn't speak
-/// the RC protocol" — the dual-mode fallback triggers only then.
+/// the RC protocol" -- the dual-mode fallback triggers only then.
 ///
-/// * `MethodNotFound` — a legacy server rejecting the unknown method
+/// * `MethodNotFound` -- a legacy server rejecting the unknown method
 ///   (neva's own legacy build answers exactly this);
-/// * `InvalidRequest` — strict servers rejecting the RC request shape;
-/// * `ParseError` — a non-JSON-RPC reply (an HTTP 4xx page) or an error
+/// * `InvalidRequest` -- strict servers rejecting the RC request shape;
+/// * `ParseError` -- a non-JSON-RPC reply (an HTTP 4xx page) or an error
 ///   code outside neva's `ErrorCode` set (e.g. the TS SDK's `-32000`
 ///   "server not initialized"), both of which surface as parse failures.
 ///
@@ -1836,7 +1836,7 @@ mod tests {
 
     /// A configured trace-context provider is invoked during RC metadata
     /// assembly, so `_meta.traceparent`/`tracestate` reach the wire alongside
-    /// `clientInfo` — for both single sends and (via the same path) batches.
+    /// `clientInfo` -- for both single sends and (via the same path) batches.
     #[cfg(feature = "proto-2026-07-28-rc")]
     #[test]
     fn apply_client_meta_injects_trace_context() {
@@ -1983,9 +1983,9 @@ mod dual_mode_tests {
     /// plain non-JSON-RPC 4xx page (framework routers, the TS SDK's
     /// "server not initialized" family); a future server answers
     /// *successfully* but with a `protocolVersion` this build does not
-    /// support — which must NOT trigger the fallback.
+    /// support -- which must NOT trigger the fallback.
     /// A protected endpoint answering `401` with a non-JSON body must not
-    /// trigger the fallback either — that is an authentication failure,
+    /// trigger the fallback either -- that is an authentication failure,
     /// not evidence of a legacy peer.
     #[derive(Clone, Copy)]
     enum DiscoverReply {
@@ -2231,7 +2231,7 @@ mod dual_mode_tests {
 
     /// A server that answers `server/discover` *successfully* but with a
     /// protocol version this build does not support has committed to the
-    /// RC path — the client must surface the real version error, not
+    /// RC path -- the client must surface the real version error, not
     /// mark the peer legacy and chase `initialize` on a cancelled
     /// transport.
     #[tokio::test(flavor = "multi_thread")]
@@ -2275,7 +2275,7 @@ mod dual_mode_tests {
 
     /// A protected RC endpoint replying `401` with a non-JSON body must
     /// surface the authentication failure, not be mistaken for a legacy
-    /// peer — otherwise the client silently drops the RC headers and
+    /// peer -- otherwise the client silently drops the RC headers and
     /// retries `initialize`, masking the real cause.
     #[tokio::test(flavor = "multi_thread")]
     async fn unauthorized_discover_does_not_fall_back() {
@@ -2388,7 +2388,7 @@ mod rc_roundtrip_tests {
         app.map_tool("echo", |name: String| async move { name });
         tokio::spawn(app.run());
 
-        // Wait until the server socket actually accepts connections —
+        // Wait until the server socket actually accepts connections --
         // a fixed sleep is not enough on loaded CI machines.
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
@@ -2416,7 +2416,7 @@ mod rc_roundtrip_tests {
 }
 
 /// After a dual-mode fallback, a legacy peer's top-level `tasks`
-/// capability must survive and resolve — an RC peer's extension form
+/// capability must survive and resolve -- an RC peer's extension form
 /// must keep working too.
 #[cfg(all(test, feature = "tasks", feature = "proto-2026-07-28-rc"))]
 mod fallback_tasks_capability_tests {

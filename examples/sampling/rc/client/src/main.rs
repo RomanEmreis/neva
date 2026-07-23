@@ -1,6 +1,6 @@
 //! New-spec (MCP 2026-07-28 RC) sampling example client.
 //!
-//! The sampling handler is still a handler — but it is no longer a *push*
+//! The sampling handler is still a handler -- but it is no longer a *push*
 //! endpoint. Under the RC it fulfils MRTR `sampling/createMessage` input
 //! requests inside the client's round-trip loop, so the caller of `call_tool`
 //! sees a single call. Registering one makes the client declare
@@ -44,12 +44,12 @@ async fn main() -> Result<(), Error> {
         opt.with_http(|http| http.bind("127.0.0.1:3002").with_endpoint("/mcp"))
     });
 
-    // Deprecated on arrival, like the whole sampling kind — the API stays for
+    // Deprecated on arrival, like the whole sampling kind -- the API stays for
     // migration.
     #[allow(deprecated)]
     client.map_sampling(complete);
 
-    // `connect()` runs `server/discover` — no `initialize` handshake under RC.
+    // `connect()` runs `server/discover` -- no `initialize` handshake under RC.
     client.connect().await?;
 
     // One call from here; the MRTR round-trips happen inside.

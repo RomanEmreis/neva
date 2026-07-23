@@ -1,4 +1,4 @@
-//! Volga route shells — each is the thinnest possible bridge from a
+//! Volga route shells -- each is the thinnest possible bridge from a
 //! `volga::HttpRequest` into the engine-agnostic helpers in
 //! [`crate::transport::http::core::handlers`].
 //!
@@ -20,11 +20,11 @@ use super::engine::VolgaEngine;
 use crate::auth::Claims;
 use crate::transport::http::core::types::DefaultClaims;
 
-/// `POST /<endpoint>` — JSON-RPC ingress.
+/// `POST /<endpoint>` -- JSON-RPC ingress.
 pub(crate) async fn post(req: HttpRequest) -> HttpResult {
     let manager: Dc<Arc<HttpContext>> = req.extract()?;
 
-    // Claims decoded and validated by Volga's `authorize` middleware —
+    // Claims decoded and validated by Volga's `authorize` middleware --
     // the single decode path for both static-key and OAuth/JWKS modes.
     // Reading them from the request (rather than re-decoding the
     // `Authorization` header) also survives Volga's default
@@ -39,7 +39,7 @@ pub(crate) async fn post(req: HttpRequest) -> HttpResult {
     // Stash claims (if any) in the neutral request's extensions so the
     // engine-agnostic handler can attach them to the outgoing message.
     // The wire shape here is `Arc<dyn Claims>`, matching the contract
-    // documented on `HttpEngine` — every engine inserts its own
+    // documented on `HttpEngine` -- every engine inserts its own
     // `Claims`-implementing type wrapped in `Arc<dyn Claims>` so neva's
     // per-tool/prompt/resource gates run identically across engines.
     if let Some(claims) = claims {
@@ -51,7 +51,7 @@ pub(crate) async fn post(req: HttpRequest) -> HttpResult {
     VolgaEngine::adapt_response(resp)
 }
 
-/// `DELETE /<endpoint>` — explicit session termination.
+/// `DELETE /<endpoint>` -- explicit session termination.
 ///
 /// Not routed under `proto-2026-07-28-rc` (stateless: no sessions); kept
 /// compiled for the non-RC build.
@@ -65,7 +65,7 @@ pub(crate) async fn delete(req: HttpRequest) -> HttpResult {
     VolgaEngine::adapt_response(resp)
 }
 
-/// `GET /<endpoint>` — SSE subscribe.
+/// `GET /<endpoint>` -- SSE subscribe.
 ///
 /// Not routed under `proto-2026-07-28-rc` (stateless: no SSE GET stream);
 /// kept compiled for the non-RC build.
@@ -92,12 +92,12 @@ pub(crate) async fn get(req: HttpRequest) -> HttpResult {
     }
 }
 
-/// `GET /.well-known/oauth-protected-resource[/<endpoint>]` — the RFC 9728
+/// `GET /.well-known/oauth-protected-resource[/<endpoint>]` -- the RFC 9728
 /// Protected Resource Metadata document.
 ///
 /// Publicly reachable by design: authorization is scoped to the MCP
-/// endpoint group, and RFC 9728 §3 requires the metadata to be fetchable
-/// without credentials — it is what a client reads to find out *how* to
+/// endpoint group, and RFC 9728 section 3 requires the metadata to be fetchable
+/// without credentials -- it is what a client reads to find out *how* to
 /// authenticate.
 #[cfg(feature = "server-oauth")]
 pub(crate) async fn oauth_metadata(req: HttpRequest) -> HttpResult {

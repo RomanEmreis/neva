@@ -2,7 +2,7 @@
 
 The full MCP authorization flow against a real OAuth 2.1/OIDC issuer:
 a neva server validating tokens against Keycloak's JWKS, and a neva
-client walking discovery → browser login → PKCE code exchange → tool
+client walking discovery -> browser login -> PKCE code exchange -> tool
 calls, including a role-gated tool.
 
 ## 1. Start Keycloak
@@ -23,7 +23,7 @@ The imported `neva` realm contains:
 |---|---|---|
 | public client | `neva-mcp-client`, redirect `http://127.0.0.1:8919/callback`, PKCE S256 | the MCP client |
 | audience mapper | adds `http://127.0.0.1:3000/mcp` to `aud` | RFC 8707 binding the server verifies |
-| role mapper | realm roles → flat `roles` claim | what neva's `DefaultClaims` / `#[tool(roles = [...])]` read |
+| role mapper | realm roles -> flat `roles` claim | what neva's `DefaultClaims` / `#[tool(roles = [...])]` read |
 | user | `demo` / `demo`, realm role `admin` | the person in the browser |
 
 ## 2. Start the MCP server
@@ -44,7 +44,7 @@ cargo run -p example-oauth-with-keycloak --bin keycloak-client
 ```
 
 The first request hits a `401`, the client discovers Keycloak through
-the challenge, and the system browser opens the login page — sign in as
+the challenge, and the system browser opens the login page -- sign in as
 `demo` / `demo`. After the redirect the client retries transparently and
 calls both tools; `admin_report` works because `demo` carries the
 `admin` realm role. Tokens are refreshed in the background afterwards.
@@ -63,12 +63,12 @@ In the authentication settings set **Client ID** to `neva-mcp-client`
 so the Inspector cannot register itself), then follow the prompts and
 sign in as `demo` / `demo`.
 
-The Inspector's **redirect URL field is read-only by design** — the
+The Inspector's **redirect URL field is read-only by design** -- the
 callback must land on the Inspector web app itself
-(`http://localhost:6274/oauth/callback`, plus `…/callback/debug` for the
+(`http://localhost:6274/oauth/callback`, plus `.../callback/debug` for the
 guided flow). Both are pre-registered on `neva-mcp-client` by the realm
 import; if you run the Inspector on a non-default port, add the matching
-URIs in the Keycloak admin console (Clients → `neva-mcp-client` → Valid
+URIs in the Keycloak admin console (Clients -> `neva-mcp-client` -> Valid
 redirect URIs).
 
 ## Notes

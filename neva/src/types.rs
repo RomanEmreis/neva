@@ -73,7 +73,7 @@ pub use tool::ToolHandler;
 /// matching the MCP 2026-07-28 RC requirement that tool schemas carry
 /// full JSON Schema 2020-12 documents.
 ///
-/// Use this alias in code that constructs or accepts tool schemas — it lets
+/// Use this alias in code that constructs or accepts tool schemas -- it lets
 /// the same call site compile on both feature sets. Both backing types
 /// implement [`Default`], serde derive, and the relevant
 /// `From<serde_json::Value>` / `From<schemars::Schema>` conversions, so a
@@ -91,7 +91,7 @@ pub type ToolInputSchema = tool::ToolSchema;
 
 /// The MCP schema type for tool input and output schemas.
 ///
-/// See the legacy-flag definition above for the full doc — under the
+/// See the legacy-flag definition above for the full doc -- under the
 /// `proto-2026-07-28-rc` feature this alias resolves to
 /// [`schema_2020::InputSchema`].
 ///
@@ -167,7 +167,7 @@ mod reference;
 mod request;
 pub mod resource;
 mod response;
-// Under the RC these are no longer capability-driven server→client requests,
+// Under the RC these are no longer capability-driven server->client requests,
 // but the types did not go away: they are the params/results of the deprecated
 // `roots/list` and `sampling/createMessage` MRTR input-request kinds (#85), so
 // both peers need them in every build.
@@ -256,7 +256,7 @@ pub struct MessageBatch {
     /// Copied onto each inner [`Request`] in `execute_batch` so that
     /// role/permission guards work correctly for batched HTTP calls.
     ///
-    /// Type-erased — the HTTP engine may insert any [`Claims`]-implementing
+    /// Type-erased -- the HTTP engine may insert any [`Claims`]-implementing
     /// type (e.g. neva's `DefaultClaims`, or a custom claims struct).
     #[cfg(feature = "http-server")]
     pub(crate) claims: Option<Arc<dyn Claims>>,
@@ -337,7 +337,7 @@ impl MessageBatch {
     /// Used by the HTTP transport alongside [`Self::has_requests`] to decide
     /// whether a pending reply slot must be allocated. Batches with error
     /// responses include synthetic `InvalidRequest` errors that the deserializer
-    /// injects for malformed items — those require an HTTP reply so the caller
+    /// injects for malformed items -- those require an HTTP reply so the caller
     /// receives the per-item error payloads.
     #[inline]
     #[cfg(feature = "http-server")]
@@ -359,7 +359,7 @@ impl IntoIterator for MessageBatch {
 
 impl Serialize for MessageBatch {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // `id` and `session_id` are internal — only the items are sent over the wire.
+        // `id` and `session_id` are internal -- only the items are sent over the wire.
         self.items.serialize(serializer)
     }
 }
@@ -367,7 +367,7 @@ impl Serialize for MessageBatch {
 impl<'de> Deserialize<'de> for MessageBatch {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         // Parse as raw JSON values first so that a single malformed element
-        // does not discard the entire batch (JSON-RPC §6 requires per-item
+        // does not discard the entire batch (JSON-RPC section 6 requires per-item
         // Invalid Request responses, not a top-level failure).
         let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
         if raw.is_empty() {
@@ -377,7 +377,7 @@ impl<'de> Deserialize<'de> for MessageBatch {
         }
 
         // Every item either deserializes cleanly or produces an error response.
-        // Items without an id use RequestId::Null (JSON-RPC 2.0 §5.1 requires
+        // Items without an id use RequestId::Null (JSON-RPC 2.0 section 5.1 requires
         // `"id": null` when the id cannot be extracted from a malformed request).
         let items: Vec<MessageEnvelope> = raw
             .into_iter()
@@ -736,7 +736,7 @@ impl Message {
     /// Sets Authentication and Authorization claims for [`Request`] or [`MessageBatch`] message.
     ///
     /// Accepts an [`Arc`]-wrapped trait object so any HTTP engine can
-    /// attach its own [`Claims`]-implementing type — neva does not
+    /// attach its own [`Claims`]-implementing type -- neva does not
     /// require the concrete type, only that it can supply roles and
     /// permissions for the per-tool/prompt/resource gate.
     #[cfg(feature = "http-server")]
@@ -924,7 +924,7 @@ mod tests {
     #[test]
     fn message_batch_emits_null_error_for_malformed_item_without_id() {
         // A malformed item with no "id" yields an Invalid Request response with
-        // a null id (JSON-RPC 2.0 §5.1).
+        // a null id (JSON-RPC 2.0 section 5.1).
         let json = r#"[
             {"jsonrpc":"2.0","id":1,"method":"ping","params":null},
             {"not":"valid json-rpc"}
@@ -973,7 +973,7 @@ mod tests {
     #[test]
     fn message_batch_all_malformed_without_ids_produces_null_error_responses() {
         // Even when every item is malformed with no id, the batch deserializes
-        // successfully and produces null-id Invalid Request error responses —
+        // successfully and produces null-id Invalid Request error responses --
         // one per item.
         let json = r#"[{"not":"valid"},{"also":"not valid"}]"#;
         let batch: MessageBatch = serde_json::from_str(json).unwrap();

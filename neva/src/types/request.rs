@@ -82,7 +82,7 @@ pub struct RequestParamsMeta {
     ///
     /// Companion to [`Self::traceparent`]; carries vendor-specific state
     /// alongside the parent identifier. Same source-compatibility rationale
-    /// applies — the field is unconditional and older peers ignore it.
+    /// applies -- the field is unconditional and older peers ignore it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tracestate: Option<String>,
 
@@ -208,8 +208,8 @@ impl Request {
     /// Merges `meta` into the request's `_meta`, creating the params/`_meta`
     /// objects when none exist. Symmetric counterpart to [`Self::meta`];
     /// existing (non-`_meta`) params keys are preserved, as are any `_meta`
-    /// entries the typed [`RequestParamsMeta`] does not model — e.g. custom
-    /// extension keys such as `com.example/foo` — which a full replacement
+    /// entries the typed [`RequestParamsMeta`] does not model -- e.g. custom
+    /// extension keys such as `com.example/foo` -- which a full replacement
     /// would silently drop. Only the fields populated on `meta` are written;
     /// unset (`None`) fields leave any existing entry untouched.
     ///

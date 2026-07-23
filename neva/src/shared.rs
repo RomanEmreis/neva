@@ -45,18 +45,18 @@ mod task_api;
 #[cfg(feature = "tasks")]
 mod task_tracker;
 
-/// The future returned by neva's object-safe async traits — a boxed,
+/// The future returned by neva's object-safe async traits -- a boxed,
 /// `Send` future borrowing for `'a`.
 ///
 /// Traits like `AuthorizationHandler` (client OAuth) and `RequestStateStore`
 /// (MRTR idempotency) are stored behind
-/// `Arc<dyn …>`, which rules out `async fn` in the trait (not dyn-compatible),
+/// `Arc<dyn ...>`, which rules out `async fn` in the trait (not dyn-compatible),
 /// so their methods return this instead. Owning the alias here means
-/// implementing such a trait needs no `futures` dependency of your own — and
+/// implementing such a trait needs no `futures` dependency of your own -- and
 /// no version of it kept in lockstep with neva's.
 ///
 /// It is a plain alias for `Pin<Box<dyn Future<Output = T> + Send + 'a>>`
-/// (identical to `futures_util::future::BoxFuture`), so `Box::pin(async { … })`
+/// (identical to `futures_util::future::BoxFuture`), so `Box::pin(async { ... })`
 /// is all an implementation has to write.
 ///
 /// # Example
@@ -82,11 +82,11 @@ pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T
 pub(crate) fn wait_for_shutdown_signal(token: CancellationToken) {
     tokio::spawn(async move {
         match wait_for_shutdown_signal_impl().await {
-            // A shutdown signal actually arrived — cancel the transport.
+            // A shutdown signal actually arrived -- cancel the transport.
             Ok(_) => token.cancel(),
             // Failing to *register* the handler (e.g. a sandboxed
             // environment restricting signal APIs) must not tear the
-            // transport down — the watcher simply exits and process
+            // transport down -- the watcher simply exits and process
             // lifecycle stays with whatever launched it.
             #[cfg(feature = "tracing")]
             Err(err) => tracing::error!(
@@ -140,12 +140,12 @@ async fn wait_for_shutdown_signal_impl() -> std::io::Result<()> {
     }
 }
 
-/// Which protocol generation the connected peer speaks — the runtime
+/// Which protocol generation the connected peer speaks -- the runtime
 /// switch behind the dual-mode client (issue #84).
 ///
 /// An RC-flagged client starts in RC mode (`server/discover`, stateless,
 /// MRTR) and flips to legacy exactly once, in `Client::connect`'s
-/// fallback, before any other traffic — so nothing races the switch.
+/// fallback, before any other traffic -- so nothing races the switch.
 /// The legacy build has no switch: it is legacy by construction.
 ///
 /// Cheap to clone; all clones observe the same flip.

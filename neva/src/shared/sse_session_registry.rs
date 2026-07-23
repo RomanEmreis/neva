@@ -32,7 +32,7 @@ struct SseSession {
     /// happens-before for all readers.
     next_seq: AtomicU64,
     capacity: usize,
-    /// Updated on each reconnect via register(). Plain u64 — mutated only through
+    /// Updated on each reconnect via register(). Plain u64 -- mutated only through
     /// a DashMap write-shard lock.
     generation: u64,
 }
@@ -114,7 +114,7 @@ impl SseSessionRegistry {
     /// Unconditionally removes a session.
     ///
     /// Use for explicit session termination (e.g. DELETE /mcp). Unlike [`unregister`],
-    /// this does not check the generation — the session is always removed.
+    /// this does not check the generation -- the session is always removed.
     pub(crate) fn terminate(&self, id: &Uuid) {
         self.sessions.remove(id);
     }
@@ -122,7 +122,7 @@ impl SseSessionRegistry {
     /// Buffers `message` and sends it to the session's live channel.
     ///
     /// Buffer-first: the message is stored before the channel send, so a dead
-    /// channel does not lose the event — it remains available for the next reconnect.
+    /// channel does not lose the event -- it remains available for the next reconnect.
     /// If the session is not found, the event is dropped (no buffer to write to).
     pub(crate) fn send(&self, message: Message) -> Result<(), Error> {
         let Some(&session_id) = message.session_id() else {
@@ -133,7 +133,7 @@ impl SseSessionRegistry {
             #[cfg(feature = "tracing")]
             tracing::warn!(
                 logger = "neva",
-                "Session {} not found for SSE send — event dropped",
+                "Session {} not found for SSE send -- event dropped",
                 session_id
             );
             return Ok(());
@@ -204,7 +204,7 @@ impl SseSessionRegistry {
             return Vec::new();
         }
 
-        // Eviction path: oldest seq was evicted → best-effort, return full buffer
+        // Eviction path: oldest seq was evicted -> best-effort, return full buffer
         if buf.front().is_some_and(|(s, _)| *s > last_seq) {
             return buf.iter().cloned().collect();
         }
@@ -215,7 +215,7 @@ impl SseSessionRegistry {
     /// Returns all buffered events in sequence order.
     ///
     /// Used on an initial SSE connection (no `Last-Event-ID`) to recover any events
-    /// buffered during the POST → GET handshake window. Returns empty if the session
+    /// buffered during the POST -> GET handshake window. Returns empty if the session
     /// is unknown or the buffer is empty.
     pub(crate) fn replay_all(&self, id: &Uuid) -> Vec<(u64, Arc<Message>)> {
         let Some(session) = self.sessions.get(id) else {
@@ -230,7 +230,7 @@ impl SseSessionRegistry {
     /// Call when a session ID is first minted (on POST /mcp) so that any server-initiated
     /// events emitted before the client's SSE GET arrive are buffered and available for
     /// replay. If an entry already exists (live connection or prior pre-registration),
-    /// this is a no-op — the existing buffer and sequence counter are preserved.
+    /// this is a no-op -- the existing buffer and sequence counter are preserved.
     ///
     /// Has no effect when `capacity == 0` (buffering disabled).
     // Stateless RC transport skips pre-registration (no SSE GET); the method
@@ -329,7 +329,7 @@ mod tests {
         let registry = SseSessionRegistry::new(16);
         let id = Uuid::new_v4();
 
-        // First connection: send 3 events → seqs 0, 1, 2
+        // First connection: send 3 events -> seqs 0, 1, 2
         let (tx1, _rx1) = mpsc::channel(16);
         registry.register(id, tx1);
         for _ in 0..3 {
@@ -437,7 +437,7 @@ mod tests {
         let (seq, _) = rx.try_recv().expect("event must be delivered live");
         assert_eq!(seq, 0);
 
-        // Send second event: seq=1. replay_since(&id, 0) returns seq > 0 → [seq=1]
+        // Send second event: seq=1. replay_since(&id, 0) returns seq > 0 -> [seq=1]
         registry.send(make_msg(id)).unwrap();
         let replayed = registry.replay_since(&id, 0);
         assert_eq!(replayed.len(), 1);
@@ -474,7 +474,7 @@ mod tests {
         }
 
         // Buffer should hold seqs 1, 2, 3 (seq 0 evicted)
-        // Eviction path: oldest_seq(1) > last_seq(0) → return full buffer
+        // Eviction path: oldest_seq(1) > last_seq(0) -> return full buffer
         let replayed = registry.replay_since(&id, 0);
         assert_eq!(replayed.len(), 3);
         assert_eq!(replayed[0].0, 1);
@@ -524,7 +524,7 @@ mod tests {
             registry.send(make_msg(id)).unwrap();
         }
         // Buffer holds seqs 2, 3, 4 (seqs 0 and 1 were evicted).
-        // Client sends last_seq=0 (evicted) → oldest(2) > 0 → full buffer returned.
+        // Client sends last_seq=0 (evicted) -> oldest(2) > 0 -> full buffer returned.
         let replayed = registry.replay_since(&id, 0);
         assert_eq!(replayed.len(), 3);
         assert_eq!(replayed[0].0, 2);
@@ -540,7 +540,7 @@ mod tests {
         for _ in 0..3 {
             registry.send(make_msg(id)).unwrap();
         }
-        // Newest seq = 2; replay_since(2) → strictly > 2 → empty
+        // Newest seq = 2; replay_since(2) -> strictly > 2 -> empty
         let replayed = registry.replay_since(&id, 2);
         assert!(replayed.is_empty());
     }
@@ -559,7 +559,7 @@ mod tests {
         registry.register(id, tx);
         drop(rx); // kill the channel
 
-        // send() must not return an error — event is buffered for next reconnect
+        // send() must not return an error -- event is buffered for next reconnect
         registry.send(make_msg(id)).unwrap();
 
         // Buffer holds the event
@@ -608,7 +608,7 @@ mod tests {
         registry.send(make_msg(id)).unwrap(); // seq=0
         registry.send(make_msg(id)).unwrap(); // seq=1
 
-        // Simulate GET /mcp: register live channel — in-place, preserving buffer
+        // Simulate GET /mcp: register live channel -- in-place, preserving buffer
         let (tx, mut rx) = mpsc::channel(8);
         registry.register(id, tx);
 

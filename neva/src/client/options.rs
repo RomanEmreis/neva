@@ -197,7 +197,7 @@ impl McpOptions {
     ///
     /// Default: last available protocol version
     ///
-    /// Under `proto-2026-07-28-rc` the RC version itself is fixed — the
+    /// Under `proto-2026-07-28-rc` the RC version itself is fixed -- the
     /// value set here only selects which **legacy** version the
     /// dual-mode fallback negotiates when a server rejects
     /// `server/discover` (default: the newest pre-RC version).
@@ -208,7 +208,7 @@ impl McpOptions {
 
     /// Configures Roots capability
     #[deprecated(
-        note = "Roots are deprecated in MCP 2026-07-28: the capability-driven `roots/list` request is gone and the ability is re-homed onto MRTR — see `Context::list_roots`. Under the RC this configures what the client answers MRTR `roots/list` input requests with."
+        note = "Roots are deprecated in MCP 2026-07-28: the capability-driven `roots/list` request is gone and the ability is re-homed onto MRTR -- see `Context::list_roots`. Under the RC this configures what the client answers MRTR `roots/list` input requests with."
     )]
     pub fn with_roots<T>(mut self, config: T) -> Self
     where
@@ -220,7 +220,7 @@ impl McpOptions {
 
     /// Configures Sampling capability
     #[deprecated(
-        note = "Sampling is deprecated in MCP 2026-07-28: the capability-driven `sampling/createMessage` request is gone and the ability is re-homed onto MRTR — see `Context::sample`."
+        note = "Sampling is deprecated in MCP 2026-07-28: the capability-driven `sampling/createMessage` request is gone and the ability is re-homed onto MRTR -- see `Context::sample`."
     )]
     pub fn with_sampling<T>(mut self, config: T) -> Self
     where
@@ -262,9 +262,9 @@ impl McpOptions {
     /// error. Guards against a server that keeps requesting input without ever
     /// converging.
     ///
-    /// This counts *re-issues* only — the initial send is always made on top of
-    /// this budget. So `1` permits a normal one-question flow (initial send →
-    /// `input_required` → one retry → final), and `0` sends the request once and
+    /// This counts *re-issues* only -- the initial send is always made on top of
+    /// this budget. So `1` permits a normal one-question flow (initial send ->
+    /// `input_required` -> one retry -> final), and `0` sends the request once and
     /// fails if it elicits at all.
     ///
     /// Default: 8.
@@ -313,7 +313,7 @@ impl McpOptions {
         // Hand the dual-mode switch to the HTTP transport so request
         // headers follow the negotiated protocol generation. Only the
         // HTTP transport carries them, so this is gated on `http-client`
-        // as well — stdio-only RC clients (no `TransportProto::HttpClient`
+        // as well -- stdio-only RC clients (no `TransportProto::HttpClient`
         // variant at all) pass the transport through untouched.
         #[cfg(all(feature = "proto-2026-07-28-rc", feature = "http-client"))]
         let transport = match transport {
@@ -325,7 +325,7 @@ impl McpOptions {
         transport
     }
 
-    /// The newest pre-RC protocol version — what the dual-mode fallback
+    /// The newest pre-RC protocol version -- what the dual-mode fallback
     /// negotiates with a legacy peer. Honors a legacy
     /// [`with_mcp_version`](Self::with_mcp_version) override.
     #[cfg(feature = "proto-2026-07-28-rc")]
@@ -418,7 +418,7 @@ mod tests {
 
     /// An explicit `with_roots(..)` must survive an empty roots list: the MRTR
     /// flag is derived from this, and an empty `ListRootsResult` is a perfectly
-    /// valid answer — a client that opted in must still be askable.
+    /// valid answer -- a client that opted in must still be askable.
     #[test]
     fn an_explicit_roots_capability_survives_an_empty_list() {
         #[allow(deprecated)]
@@ -429,7 +429,7 @@ mod tests {
             "an explicit opt-in must not be dropped just because the list is empty"
         );
 
-        // …and with neither an opt-in nor any roots there is nothing to declare.
+        // ...and with neither an opt-in nor any roots there is nothing to declare.
         let bare = McpOptions::default();
         assert!(bare.roots_capability().is_none());
     }
@@ -443,11 +443,11 @@ mod tests {
         let mut opts = McpOptions::default();
         assert!(
             opts.sampling_capability().is_none(),
-            "no sampling handler — nothing to advertise"
+            "no sampling handler -- nothing to advertise"
         );
         assert!(
             opts.elicitation_capability().is_none(),
-            "no elicitation handler — nothing to advertise"
+            "no elicitation handler -- nothing to advertise"
         );
 
         opts.add_sampling_handler(Arc::new(|_params| {

@@ -152,7 +152,7 @@ pub mod auth {
     pub use crate::transport::http::core::types::Claims;
 
     /// `DefaultClaims` is a pre-built [`Claims`] impl matching the JWT
-    /// standard claim names. Engine-agnostic — under the Volga adapter
+    /// standard claim names. Engine-agnostic -- under the Volga adapter
     /// it additionally implements `volga::auth::AuthClaims` so it can
     /// be fed straight into Volga's bearer-auth pipeline.
     #[cfg(feature = "http-server")]
@@ -171,7 +171,7 @@ pub mod auth {
 
     /// Volga's claims trait, re-exported for users who need to plug a
     /// custom claims type into Volga's `Authorizer<C>`. For neva's own
-    /// per-tool checks, implement [`Claims`] instead — that one is
+    /// per-tool checks, implement [`Claims`] instead -- that one is
     /// engine-neutral.
     #[cfg(feature = "http-server-volga")]
     pub use volga::auth::AuthClaims;
@@ -190,14 +190,14 @@ pub mod auth {
         //! configures the RFC 9728 Protected Resource Metadata document
         //! through `HttpServer::with_oauth_metadata`; the protocol-level
         //! types are re-exported from
-        //! [`volga-oauth-core`](https://docs.rs/volga-oauth-core) —
+        //! [`volga-oauth-core`](https://docs.rs/volga-oauth-core) --
         //! a crate with no HTTP I/O and no dependency on the Volga
         //! framework, so they are available to every `HttpEngine`.
         //!
         //! Client side (`client-oauth`): the pluggable
         //! `AuthorizationHandler` contract with the default
         //! `LoopbackHandler`, plus the `TokenStore` persistence
-        //! abstraction — configured through `HttpClient::with_oauth`.
+        //! abstraction -- configured through `HttpClient::with_oauth`.
 
         #[cfg(feature = "server-oauth")]
         pub use crate::transport::http::core::oauth::{
@@ -297,7 +297,7 @@ mod proto_versions_tests {
     fn stable_versions_always_listed() {
         // Stable versions are PROTOCOL_VERSIONS minus the RC entry (when enabled).
         // Future stable additions land in PROTOCOL_VERSIONS and are automatically
-        // covered by this test — no need to update the test when new versions
+        // covered by this test -- no need to update the test when new versions
         // are advertised.
         let stable: Vec<_> = PROTOCOL_VERSIONS
             .iter()
@@ -308,7 +308,7 @@ mod proto_versions_tests {
             !stable.is_empty(),
             "PROTOCOL_VERSIONS must always advertise at least one stable version"
         );
-        // The set must include 2024-11-05 (the inaugural MCP version) — this is
+        // The set must include 2024-11-05 (the inaugural MCP version) -- this is
         // a stronger invariant: even if we ever retire intermediate versions,
         // the original SHOULD remain for backwards compatibility.
         assert!(
