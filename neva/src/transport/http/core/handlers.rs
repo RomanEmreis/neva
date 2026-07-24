@@ -302,7 +302,7 @@ async fn handle_post_streaming<E: HttpEngine>(
             let full_id = msg.full_id();
             ctx.pending.insert(full_id.clone(), resp_tx);
 
-            if !request_opts_into_notifications(&msg) {
+            if !opts_into_notifications(&msg) {
                 if ctx.inbound_tx.send(Ok(msg)).await.is_err() {
                     ctx.pending.remove(&full_id);
                     return StreamResponse::Complete(status_response(
@@ -352,21 +352,36 @@ async fn handle_post_streaming<E: HttpEngine>(
     }
 }
 
-/// Whether a request opted into request-scoped notifications, i.e. carries a
-/// `logLevel` or `progressToken` in `_meta`.
+/// Whether a message opts into request-scoped notifications: a request -- or,
+/// for a batch, *any* contained request -- carrying `logLevel` or
+/// `progressToken` in `_meta`.
+///
+/// Batches count because a client (e.g. via `Client::apply_client_meta_to_batch`)
+/// stamps the configured level onto every batched request; the inner requests
+/// share this POST's session id (copied in `execute_batch`), so their
+/// notifications route to the one sink and stream on this single response.
 #[cfg(all(feature = "proto-2026-07-28-rc", feature = "tracing"))]
-fn request_opts_into_notifications(msg: &Message) -> bool {
-    if let Message::Request(r) = msg
-        && let Some(meta) = r
-            .params
-            .as_ref()
-            .and_then(|p| p.get("_meta"))
-            .and_then(|m| m.as_object())
-    {
-        meta.contains_key("io.modelcontextprotocol/logLevel") || meta.contains_key("progressToken")
-    } else {
-        false
+fn opts_into_notifications(msg: &Message) -> bool {
+    match msg {
+        Message::Request(r) => request_opts_in(r),
+        Message::Batch(batch) => batch.iter().any(
+            |env| matches!(env, crate::types::MessageEnvelope::Request(r) if request_opts_in(r)),
+        ),
+        _ => false,
     }
+}
+
+/// Whether a single request carries `logLevel` or `progressToken` in `_meta`.
+#[cfg(all(feature = "proto-2026-07-28-rc", feature = "tracing"))]
+fn request_opts_in(req: &crate::types::Request) -> bool {
+    req.params
+        .as_ref()
+        .and_then(|p| p.get("_meta"))
+        .and_then(|m| m.as_object())
+        .is_some_and(|meta| {
+            meta.contains_key("io.modelcontextprotocol/logLevel")
+                || meta.contains_key("progressToken")
+        })
 }
 
 /// Builds the request-scoped SSE body: it yields notifications from `notif_rx`

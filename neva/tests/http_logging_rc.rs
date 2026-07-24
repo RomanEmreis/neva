@@ -113,6 +113,47 @@ async fn request_scoped_logging_streams_over_post() {
         Some("pong")
     );
 
+    // (c) a batch whose inner request opts in streams too: the inner request's
+    // log rides the single SSE POST response alongside the batch response.
+    let batch = serde_json::json!([
+        {
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {
+                "name": "shout",
+                "arguments": {},
+                "_meta": { "io.modelcontextprotocol/logLevel": "info" }
+            }
+        },
+        {
+            "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+            "params": { "name": "shout", "arguments": {} }
+        }
+    ]);
+    let resp = client
+        .post(&url)
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Accept", "application/json, text/event-stream")
+        .json(&batch)
+        .send()
+        .await
+        .expect("batch call failed");
+    assert!(resp.status().is_success());
+    let ctype = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        ctype.contains("text/event-stream"),
+        "a batch with an opted-in inner request must stream, got content-type {ctype:?}"
+    );
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("notifications/message") && body.contains(MARKER),
+        "batch SSE body must carry the inner request's log, got: {body}"
+    );
+
     handle.abort();
 }
 
