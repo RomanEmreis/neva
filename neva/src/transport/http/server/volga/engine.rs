@@ -117,9 +117,6 @@ impl HttpEngine for VolgaEngine {
     }
 
     async fn run(self, ctx: HttpContext, token: CancellationToken) -> Result<(), Error> {
-        // Volga wires shared state through DI as `Arc<HttpContext>`, so
-        // wrap once here for the duration of the engine's lifetime.
-        let ctx = Arc::new(ctx);
         let addr = ctx.addr().to_owned();
         let endpoint = ctx.endpoint().to_owned();
         #[cfg(feature = "server-oauth")]

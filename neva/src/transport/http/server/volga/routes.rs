@@ -14,9 +14,14 @@ use ::volga::{
     HttpRequest, HttpResult, di::Dc, error::Error as VolgaError, http::sse::Message as SseMessage,
     sse,
 };
-use std::sync::Arc;
 
 use super::engine::VolgaEngine;
+
+// Extractor ordering matters in these signatures: `Dc<T>` reads the request
+// parts by reference (`Source::Parts`), while `HttpRequest` consumes them
+// (`Source::Request`, a `parts.take()`). Volga resolves handler arguments
+// left to right, so `Dc<HttpContext>` must come before `HttpRequest` --
+// swapped around, the `Dc` extractor finds nothing to read from.
 
 /// `POST /<endpoint>` -- JSON-RPC ingress.
 ///
@@ -26,8 +31,7 @@ use super::engine::VolgaEngine;
 /// followed by its response) and `Complete` is a single-body reply.
 /// Claims are attached inside [`VolgaEngine::adapt_request`], per the
 /// `HttpEngine` contract.
-pub(crate) async fn post(req: HttpRequest, manager: Dc<Arc<HttpContext>>) -> HttpResult {
-    //let manager: Dc<Arc<HttpContext>> = req.extract()?;
+pub(crate) async fn post(manager: Dc<HttpContext>, req: HttpRequest) -> HttpResult {
     let outcome = handlers::dispatch_post::<VolgaEngine>(req, &manager)
         .await
         .map_err(to_volga_err)?;
@@ -45,8 +49,7 @@ pub(crate) async fn post(req: HttpRequest, manager: Dc<Arc<HttpContext>>) -> Htt
 /// Not routed under `proto-2026-07-28-rc` (stateless: no sessions); kept
 /// compiled for the non-RC build.
 #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
-pub(crate) async fn delete(req: HttpRequest) -> HttpResult {
-    let manager: Dc<Arc<HttpContext>> = req.extract()?;
+pub(crate) async fn delete(manager: Dc<HttpContext>, req: HttpRequest) -> HttpResult {
     let neutral = VolgaEngine::adapt_request(req)
         .await
         .map_err(to_volga_err)?;
@@ -59,8 +62,7 @@ pub(crate) async fn delete(req: HttpRequest) -> HttpResult {
 /// Not routed under `proto-2026-07-28-rc` (stateless: no SSE GET stream);
 /// kept compiled for the non-RC build.
 #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
-pub(crate) async fn get(req: HttpRequest) -> HttpResult {
-    let manager: Dc<Arc<HttpContext>> = req.extract()?;
+pub(crate) async fn get(manager: Dc<HttpContext>, req: HttpRequest) -> HttpResult {
     let outcome = handlers::dispatch_get_sse::<VolgaEngine>(req, &manager)
         .await
         .map_err(to_volga_err)?;
@@ -89,8 +91,7 @@ pub(crate) async fn get(req: HttpRequest) -> HttpResult {
 /// without credentials -- it is what a client reads to find out *how* to
 /// authenticate.
 #[cfg(feature = "server-oauth")]
-pub(crate) async fn oauth_metadata(req: HttpRequest) -> HttpResult {
-    let manager: Dc<Arc<HttpContext>> = req.extract()?;
+pub(crate) async fn oauth_metadata(manager: Dc<HttpContext>) -> HttpResult {
     VolgaEngine::adapt_response(handlers::handle_oauth_metadata(&manager))
 }
 
