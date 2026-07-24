@@ -34,8 +34,12 @@ pub use core::{
     context::HttpContext,
     engine::HttpEngine,
     handlers,
-    types::{HttpRequest, HttpResponse, SseResponse},
+    types::{HttpRequest, HttpResponse, StreamResponse},
 };
+
+#[cfg(feature = "http-server")]
+#[allow(deprecated)]
+pub use core::types::SseResponse;
 
 #[cfg(feature = "http-client")]
 pub(crate) mod client;

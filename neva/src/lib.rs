@@ -246,11 +246,14 @@ pub mod prelude {
     #[cfg(feature = "http-server")]
     pub use crate::auth::{Claims, DefaultClaims};
 
+    #[cfg(feature = "http-server")]
+    #[allow(deprecated)]
+    pub use crate::transport::SseResponse;
     #[cfg(all(feature = "http-server", feature = "server-tls"))]
     pub use crate::transport::http::{DevCertMode, TlsConfig};
     #[cfg(feature = "http-server")]
     pub use crate::transport::{
-        HttpContext, HttpEngine, HttpRequest, HttpResponse, HttpServer, SseResponse, handlers,
+        HttpContext, HttpEngine, HttpRequest, HttpResponse, HttpServer, StreamResponse, handlers,
     };
 
     #[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]

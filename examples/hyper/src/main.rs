@@ -119,19 +119,15 @@ async fn dispatch(req: http::Request<Incoming>, ctx: HttpContext) -> http::Respo
         return status_only(http::StatusCode::NOT_FOUND);
     }
     match *req.method() {
-        Method::POST => handlers::dispatch_post::<HyperEngine>(req, &ctx)
-            .await
-            .unwrap_or_else(|_| status_only(http::StatusCode::INTERNAL_SERVER_ERROR)),
-        Method::DELETE => handlers::dispatch_delete::<HyperEngine>(req, &ctx)
-            .await
-            .unwrap_or_else(|_| status_only(http::StatusCode::INTERNAL_SERVER_ERROR)),
-        Method::GET => {
-            let outcome = match handlers::dispatch_get_sse::<HyperEngine>(req, &ctx).await {
+        // Same two-arm shape as the GET arm below: a POST reply is either a
+        // single body (`Complete`) or a request-scoped SSE stream (`Stream`).
+        Method::POST => {
+            let outcome = match handlers::dispatch_post::<HyperEngine>(req, &ctx).await {
                 Ok(outcome) => outcome,
                 Err(_) => return status_only(http::StatusCode::INTERNAL_SERVER_ERROR),
             };
             match outcome {
-                SseResponse::Stream { headers, stream } => {
+                StreamResponse::Stream { headers, stream } => {
                     let body = StreamBody::new(stream).boxed();
                     let mut resp = http::Response::builder()
                         .status(http::StatusCode::OK)
@@ -143,7 +139,31 @@ async fn dispatch(req: http::Request<Incoming>, ctx: HttpContext) -> http::Respo
                     }
                     resp
                 }
-                SseResponse::Status(resp) => HyperEngine::adapt_response(resp),
+                StreamResponse::Complete(resp) => HyperEngine::adapt_response(resp),
+            }
+        }
+        Method::DELETE => handlers::dispatch_delete::<HyperEngine>(req, &ctx)
+            .await
+            .unwrap_or_else(|_| status_only(http::StatusCode::INTERNAL_SERVER_ERROR)),
+        Method::GET => {
+            let outcome = match handlers::dispatch_get_sse::<HyperEngine>(req, &ctx).await {
+                Ok(outcome) => outcome,
+                Err(_) => return status_only(http::StatusCode::INTERNAL_SERVER_ERROR),
+            };
+            match outcome {
+                StreamResponse::Stream { headers, stream } => {
+                    let body = StreamBody::new(stream).boxed();
+                    let mut resp = http::Response::builder()
+                        .status(http::StatusCode::OK)
+                        .header(http::header::CONTENT_TYPE, "text/event-stream")
+                        .body(body)
+                        .expect("valid response");
+                    for (name, value) in headers.iter() {
+                        resp.headers_mut().insert(name, value.clone());
+                    }
+                    resp
+                }
+                StreamResponse::Complete(resp) => HyperEngine::adapt_response(resp),
             }
         }
         _ => status_only(http::StatusCode::METHOD_NOT_ALLOWED),

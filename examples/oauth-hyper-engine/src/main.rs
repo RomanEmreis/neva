@@ -156,8 +156,8 @@ async fn route(
             HyperEngine::adapt_response(handlers::handle_delete(neutral, &ctx).await)
         }
         http::Method::GET => match handlers::handle_get_sse::<HyperEngine>(neutral, &ctx).await {
-            SseResponse::Status(resp) => HyperEngine::adapt_response(resp),
-            SseResponse::Stream { headers, stream } => {
+            StreamResponse::Complete(resp) => HyperEngine::adapt_response(resp),
+            StreamResponse::Stream { headers, stream } => {
                 let body = StreamBody::new(stream.map(|event| Ok(Frame::data(event))));
                 let mut resp = http::Response::builder()
                     .status(http::StatusCode::OK)

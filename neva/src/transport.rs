@@ -7,8 +7,12 @@ use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "http-server")]
 pub use http::{
-    HttpContext, HttpEngine, HttpRequest, HttpResponse, HttpServer, SseResponse, handlers,
+    HttpContext, HttpEngine, HttpRequest, HttpResponse, HttpServer, StreamResponse, handlers,
 };
+
+#[cfg(feature = "http-server")]
+#[allow(deprecated)]
+pub use http::SseResponse;
 
 #[cfg(feature = "server")]
 pub(crate) use stdio::StdIoServer;

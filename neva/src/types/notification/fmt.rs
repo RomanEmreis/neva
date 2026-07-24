@@ -2,6 +2,8 @@
 
 use crate::shared::MessageRegistry;
 #[cfg(feature = "proto-2026-07-28-rc")]
+use crate::types::Message;
+#[cfg(feature = "proto-2026-07-28-rc")]
 use crate::types::notification::LoggingLevel;
 use crate::types::notification::{Notification, formatter::build_notification};
 use once_cell::sync::Lazy;
@@ -26,7 +28,53 @@ const MCP_LOG_LEVEL: &str = "mcp_log_level";
 
 pub(crate) static LOG_REGISTRY: Lazy<MessageRegistry> = Lazy::new(MessageRegistry::new);
 
+/// Per-request notification sinks for the RC stateless HTTP transport, keyed by
+/// the per-`POST` session id (each stateless `POST` mints a fresh one).
+///
+/// The RC transport has no `GET`/SSE stream, so request-scoped notifications
+/// (`notifications/message`, `notifications/progress`) flow on the originating
+/// request's `POST` response stream instead. `handle_post` registers a sink
+/// before dispatch and drains it into that response; the notification layer
+/// routes events fired while handling the request to the matching sink.
+#[cfg(feature = "proto-2026-07-28-rc")]
+pub(crate) static REQUEST_NOTIFICATIONS: Lazy<dashmap::DashMap<uuid::Uuid, Sender<Message>>> =
+    Lazy::new(dashmap::DashMap::new);
+
+/// Registers a per-request notification sink for `id` (the per-`POST` session
+/// id). Returns the receiving end for the `POST` response stream to drain.
+///
+/// Only the HTTP server writes sinks; the layer (which may run client-side too)
+/// merely reads [`REQUEST_NOTIFICATIONS`], so these live behind `http-server`.
+#[cfg(all(feature = "proto-2026-07-28-rc", feature = "http-server"))]
+pub(crate) fn register_request_sink(
+    id: uuid::Uuid,
+    capacity: usize,
+) -> tokio::sync::mpsc::Receiver<Message> {
+    let (tx, rx) = channel::<Message>(capacity);
+    REQUEST_NOTIFICATIONS.insert(id, tx);
+    rx
+}
+
+/// Removes the per-request notification sink for `id`.
+#[cfg(all(feature = "proto-2026-07-28-rc", feature = "http-server"))]
+pub(crate) fn unregister_request_sink(id: &uuid::Uuid) {
+    REQUEST_NOTIFICATIONS.remove(id);
+}
+
 /// Creates a custom tracing layer that delivers messages to MCP Client
+///
+/// This layer routes notifications to a connected client. On the legacy HTTP
+/// transport that is the session-scoped SSE `GET` stream.
+///
+/// # MCP 2026-07-28 (`proto-2026-07-28-rc`)
+///
+/// The RC HTTP transport is stateless (no `GET`/SSE stream, no sessions), so
+/// request-scoped notifications flow on the *originating request's `POST`
+/// response stream*, per the spec. This layer routes each event to the
+/// per-request sink registered by the POST handler (keyed by the per-`POST`
+/// session id the request span carries); the `POST` reply is then a
+/// `text/event-stream` carrying the notifications followed by the response.
+/// The same works over stdio, where notifications interleave on stdout.
 ///
 /// # Example
 /// ```no_run
@@ -116,6 +164,18 @@ where
                 if !super::formatter::message_delivered(requested, event_severity) {
                     return;
                 }
+            }
+
+            // RC: request-scoped notifications flow on the originating request's
+            // `POST` response stream (there is no session SSE `GET`). Route to the
+            // per-request sink registered by `handle_post` for this `POST` session
+            // id; fall through to the legacy session-SSE path otherwise.
+            #[cfg(feature = "proto-2026-07-28-rc")]
+            if let Some(session_id) = notification.session_id
+                && let Some(sink) = REQUEST_NOTIFICATIONS.get(&session_id)
+            {
+                let _ = sink.try_send(Message::Notification(notification));
+                return;
             }
 
             self.sender.send_notification(notification);

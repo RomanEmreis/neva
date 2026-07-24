@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## 0.4.4
 
+### Changed (breaking)
+* **Unified streaming-capable POST seam** for HTTP engine adapters. Streamable
+  HTTP has allowed a POST reply to be either a single JSON body or an SSE
+  stream since spec revision 2025-03-26; neva's engine seam only modeled the
+  JSON shape. Now:
+  * `SseResponse` is renamed to `StreamResponse` and its `Status` variant to
+    `Complete` (it carries full JSON replies, not just error statuses). A
+    deprecated `SseResponse` type alias remains for one release.
+  * `handlers::dispatch_post` returns
+    `StreamResponse<impl Stream<Item = E::SseEvent>>` instead of
+    `E::Response`: engines handle the same two-arm match their GET route
+    already has. Under `proto-2026-07-28-rc` + `tracing` the `Stream` arm
+    carries request-scoped notifications followed by the response; other
+    builds always produce `Complete` (no behavior change).
+  * `handle_post` stays available as the JSON-only building block.
+  * The default Volga adapter now goes through `dispatch_post` like every
+    other engine (claims moved into `VolgaEngine::adapt_request`, per the
+    `HttpEngine` contract); the axum/hyper/actix engine examples were updated
+    to the two-arm match.
+
 ### Added
 * **Request-scoped logging** (`proto-2026-07-28-rc`, #93). The 2026-07-28 draft
   removes only `logging/setLevel`; it keeps `notifications/message` as a
@@ -26,6 +46,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     stay undecorated.
   * `logging/setLevel` and `with_logging`/`set_log_level` stay removed under the
     RC.
+  * Delivery: request-scoped notifications flow on the originating request's
+    response stream, per the spec. Over **stdio** they interleave on stdout.
+    Over the stateless **HTTP** transport, a `POST` that opts in (carries
+    `io.modelcontextprotocol/logLevel` or a `progressToken` in `_meta`) gets a
+    `text/event-stream` reply carrying its `notifications/message` /
+    `notifications/progress` followed by the response; other `POST`s stay a
+    single JSON object. The layer routes each request's notifications to a
+    per-`POST` sink (keyed by the per-`POST` session id); the client parses the
+    SSE reply and dispatches notifications before resolving the request. The
+    suppression rule ("no `logLevel` => no `notifications/message`") holds on
+    every transport.
 
 ## 0.4.3
 

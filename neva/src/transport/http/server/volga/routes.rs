@@ -8,47 +8,36 @@
 //! routes call those methods so the seam matches every other engine.
 
 use crate::transport::http::core::{
-    context::HttpContext, engine::HttpEngine, handlers, types::SseResponse,
+    context::HttpContext, engine::HttpEngine, handlers, types::StreamResponse,
 };
 use ::volga::{
-    HttpRequest, HttpResult, auth::Authenticated, di::Dc, error::Error as VolgaError,
-    http::sse::Message as SseMessage, sse,
+    HttpRequest, HttpResult, di::Dc, error::Error as VolgaError, http::sse::Message as SseMessage,
+    sse,
 };
 use std::sync::Arc;
 
 use super::engine::VolgaEngine;
-use crate::auth::Claims;
-use crate::transport::http::core::types::DefaultClaims;
 
 /// `POST /<endpoint>` -- JSON-RPC ingress.
-pub(crate) async fn post(req: HttpRequest) -> HttpResult {
-    let manager: Dc<Arc<HttpContext>> = req.extract()?;
-
-    // Claims decoded and validated by Volga's `authorize` middleware --
-    // the single decode path for both static-key and OAuth/JWKS modes.
-    // Reading them from the request (rather than re-decoding the
-    // `Authorization` header) also survives Volga's default
-    // `strip_token_from_request`, which removes the header before the
-    // route runs.
-    let claims: Option<Authenticated<DefaultClaims>> = req.extract().ok();
-
-    let mut neutral = VolgaEngine::adapt_request(req)
+///
+/// The same two-arm shape as [`get`]: `dispatch_post` yields a
+/// [`StreamResponse`], where `Stream` is a request-scoped SSE reply (RC:
+/// the request's `notifications/message` / `notifications/progress`
+/// followed by its response) and `Complete` is a single-body reply.
+/// Claims are attached inside [`VolgaEngine::adapt_request`], per the
+/// `HttpEngine` contract.
+pub(crate) async fn post(req: HttpRequest, manager: Dc<Arc<HttpContext>>) -> HttpResult {
+    //let manager: Dc<Arc<HttpContext>> = req.extract()?;
+    let outcome = handlers::dispatch_post::<VolgaEngine>(req, &manager)
         .await
         .map_err(to_volga_err)?;
-
-    // Stash claims (if any) in the neutral request's extensions so the
-    // engine-agnostic handler can attach them to the outgoing message.
-    // The wire shape here is `Arc<dyn Claims>`, matching the contract
-    // documented on `HttpEngine` -- every engine inserts its own
-    // `Claims`-implementing type wrapped in `Arc<dyn Claims>` so neva's
-    // per-tool/prompt/resource gates run identically across engines.
-    if let Some(claims) = claims {
-        let claims: Arc<dyn Claims> = Arc::new(claims.into_inner());
-        neutral.extensions_mut().insert(claims);
+    match outcome {
+        StreamResponse::Stream { stream, .. } => {
+            let stream = futures_util::StreamExt::map(stream, Ok::<SseMessage, VolgaError>);
+            sse!(stream)
+        }
+        StreamResponse::Complete(resp) => VolgaEngine::adapt_response(resp),
     }
-
-    let resp = handlers::handle_post(neutral, &manager).await;
-    VolgaEngine::adapt_response(resp)
 }
 
 /// `DELETE /<endpoint>` -- explicit session termination.
@@ -76,7 +65,7 @@ pub(crate) async fn get(req: HttpRequest) -> HttpResult {
         .await
         .map_err(to_volga_err)?;
     match outcome {
-        SseResponse::Stream { headers, stream } => {
+        StreamResponse::Stream { headers, stream } => {
             let session_id = headers
                 .get(handlers::MCP_SESSION_ID)
                 .and_then(|v| v.to_str().ok())
@@ -88,7 +77,7 @@ pub(crate) async fn get(req: HttpRequest) -> HttpResult {
                 sse!(stream)
             }
         }
-        SseResponse::Status(resp) => VolgaEngine::adapt_response(resp),
+        StreamResponse::Complete(resp) => VolgaEngine::adapt_response(resp),
     }
 }
 

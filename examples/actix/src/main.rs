@@ -129,9 +129,29 @@ async fn post_handler(
     req: ActixHttpRequest,
     body: ActixBytes,
 ) -> ActixHttpResponse {
-    handlers::dispatch_post::<ActixEngine>((req, body), &ctx)
-        .await
-        .unwrap_or_else(internal_error)
+    // Same two-arm shape as `get_handler`: a POST reply is either a single
+    // body (`Complete`) or a request-scoped SSE stream (`Stream`) carrying
+    // the request's notifications followed by its response.
+    let outcome = match handlers::dispatch_post::<ActixEngine>((req, body), &ctx).await {
+        Ok(outcome) => outcome,
+        Err(e) => return internal_error(e),
+    };
+    match outcome {
+        StreamResponse::Stream { headers, stream } => {
+            let mut builder = ActixHttpResponse::Ok();
+            builder.content_type("text/event-stream");
+            for (name, value) in headers.iter() {
+                if let (Ok(n), Ok(v)) = (
+                    actix_web::http::header::HeaderName::from_bytes(name.as_str().as_bytes()),
+                    actix_web::http::header::HeaderValue::from_bytes(value.as_bytes()),
+                ) {
+                    builder.append_header((n, v));
+                }
+            }
+            builder.streaming(stream)
+        }
+        StreamResponse::Complete(resp) => ActixEngine::adapt_response(resp),
+    }
 }
 
 async fn delete_handler(
@@ -154,7 +174,7 @@ async fn get_handler(
         Err(e) => return internal_error(e),
     };
     match outcome {
-        SseResponse::Stream { headers, stream } => {
+        StreamResponse::Stream { headers, stream } => {
             let mut builder = ActixHttpResponse::Ok();
             builder.content_type("text/event-stream");
             for (name, value) in headers.iter() {
@@ -167,7 +187,7 @@ async fn get_handler(
             }
             builder.streaming(stream)
         }
-        SseResponse::Status(resp) => ActixEngine::adapt_response(resp),
+        StreamResponse::Complete(resp) => ActixEngine::adapt_response(resp),
     }
 }
 

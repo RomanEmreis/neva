@@ -316,6 +316,36 @@ async fn send_request(
     }
 
     let status = resp.status();
+
+    // Streamable HTTP allows a POST reply to be a request-scoped SSE stream
+    // (MCP 2026-07-28): it carries this request's `notifications/message` /
+    // `notifications/progress` followed by the response. Forward every parsed
+    // message to the receive loop, which routes notifications to handlers and
+    // resolves the pending request on the response.
+    let is_event_stream = resp
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("text/event-stream"));
+
+    if is_event_stream {
+        let mut stream = sse_stream::SseStream::from_bytes_stream(resp.bytes_stream());
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(sse) if sse.is_message() => {
+                    handle_msg(sse, &resp_tx).await;
+                }
+                Ok(_) => {}
+                Err(_err) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::error!(logger = "neva", "SSE POST stream error: {}", _err);
+                    break;
+                }
+            }
+        }
+        return;
+    }
+
     match resp.json::<Message>().await {
         Ok(msg) => {
             if let Err(_err) = resp_tx.send(Ok(msg)).await {

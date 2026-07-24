@@ -37,13 +37,20 @@ pub type HttpRequest = http::Request<Bytes>;
 /// ```
 pub type HttpResponse = http::Response<Bytes>;
 
-/// Outcome of the GET handler: either an SSE stream or a non-SSE status reply.
+/// Outcome of a streaming-capable handler: an SSE stream or a complete
+/// (single-body) reply.
 ///
-/// `Stream` is the happy path -- 200 OK + the event stream.
-/// `Status` is returned when the request couldn't establish a session
-/// (typically 400 with no `Mcp-Session-Id` header).
+/// This is the neutral shape of every MCP HTTP reply. Streamable HTTP has
+/// allowed both forms on `POST` since 2025-03-26: a single JSON body (one
+/// object, or an array for a batch) or a `text/event-stream` carrying
+/// request-scoped messages. The GET handler uses the same shape for the
+/// session SSE stream on the legacy transport.
+///
+/// `Stream` is the streaming path -- 200 OK + the event stream.
+/// `Complete` is a finished single-body reply: a JSON object or batch array,
+/// a `202 Accepted`, or an error status.
 #[derive(Debug)]
-pub enum SseResponse<S> {
+pub enum StreamResponse<S> {
     /// 200 OK with an SSE event stream.
     Stream {
         /// Response headers (typically just `Mcp-Session-Id`).
@@ -51,9 +58,15 @@ pub enum SseResponse<S> {
         /// Stream of engine-native SSE event values.
         stream: S,
     },
-    /// Non-streaming status response (e.g. 400 when no session id is provided).
-    Status(HttpResponse),
+    /// A complete non-streaming reply (JSON body or bare status).
+    Complete(HttpResponse),
 }
+
+/// Former name of [`StreamResponse`], kept for one release.
+///
+/// Note the `Status` variant is now [`StreamResponse::Complete`].
+#[deprecated(note = "renamed to StreamResponse; the Status variant is now Complete")]
+pub type SseResponse<S> = StreamResponse<S>;
 
 /// Typed claims contract used by neva's per-tool authorization checks.
 ///

@@ -10,7 +10,7 @@ use crate::error::{Error, ErrorCode};
 use crate::transport::http::core::{
     context::HttpContext,
     engine::HttpEngine,
-    types::{HttpRequest as NeutralRequest, HttpResponse as NeutralResponse},
+    types::{DefaultClaims, HttpRequest as NeutralRequest, HttpResponse as NeutralResponse},
 };
 use crate::types::Message;
 #[cfg(feature = "server-tls")]
@@ -58,6 +58,16 @@ impl HttpEngine for VolgaEngine {
     type SseEvent = SseMessage;
 
     async fn adapt_request(req: Self::Request) -> Result<NeutralRequest, Error> {
+        // Claims decoded and validated by Volga's `authorize` middleware --
+        // the single decode path for both static-key and OAuth/JWKS modes.
+        // Reading them from the request (rather than re-decoding the
+        // `Authorization` header) also survives Volga's default
+        // `strip_token_from_request`, which removes the header before the
+        // route runs. Inserting them here (per the `HttpEngine` contract)
+        // keeps the Volga routes on the same `dispatch_*` seam as every
+        // other engine.
+        let claims: Option<::volga::auth::Authenticated<DefaultClaims>> = req.extract().ok();
+
         let mut builder = http::Request::builder()
             .method(req.method().clone())
             .uri(req.uri().clone())
@@ -72,9 +82,17 @@ impl HttpEngine for VolgaEngine {
         let body = read_body(req.into_body())
             .await
             .map_err(|e| Error::new(ErrorCode::InternalError, e.to_string()))?;
-        builder
+
+        let mut neutral = builder
             .body(body)
-            .map_err(|e| Error::new(ErrorCode::InternalError, e.to_string()))
+            .map_err(|e| Error::new(ErrorCode::InternalError, e.to_string()))?;
+
+        if let Some(claims) = claims {
+            let claims: Arc<dyn crate::auth::Claims> = Arc::new(claims.into_inner());
+            neutral.extensions_mut().insert(claims);
+        }
+
+        Ok(neutral)
     }
 
     fn adapt_response(resp: NeutralResponse) -> Self::Response {
@@ -86,6 +104,7 @@ impl HttpEngine for VolgaEngine {
         for (name, value) in parts.headers.iter() {
             builder = builder.header_raw(name.as_str(), value.as_bytes());
         }
+
         builder.body(http_body)
     }
 
