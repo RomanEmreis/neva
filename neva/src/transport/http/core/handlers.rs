@@ -471,7 +471,19 @@ fn parse_message(body: &Bytes) -> Result<Message, ErrorCode> {
     })
 }
 
-fn get_or_create_mcp_session(headers: &HeaderMap) -> uuid::Uuid {
+fn get_or_create_mcp_session(
+    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(unused_variables))] headers: &HeaderMap,
+) -> uuid::Uuid {
+    // RC removed protocol-level sessions and the `Mcp-Session-Id` header, and
+    // this id doubles as the per-POST correlation key for the pending-response
+    // slot and the request notification sink. Mint a fresh one per POST so a
+    // client-supplied (or proxied) header can never collide two concurrent
+    // stateless requests onto the same sink/slot.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    {
+        uuid::Uuid::new_v4()
+    }
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     headers
         .get(MCP_SESSION_ID)
         .and_then(|v| v.to_str().ok())

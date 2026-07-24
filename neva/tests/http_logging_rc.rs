@@ -16,6 +16,8 @@ use neva::types::notification;
 use tracing_subscriber::prelude::*;
 
 const MARKER: &str = "distinctive-log-marker";
+const MARKER_A: &str = "marker-alpha";
+const MARKER_B: &str = "marker-bravo";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn request_scoped_logging_streams_over_post() {
@@ -33,6 +35,18 @@ async fn request_scoped_logging_streams_over_post() {
     app.map_tool("shout", || async move {
         tracing::warn!(logger = "tool", "{MARKER}");
         "pong".to_string()
+    });
+    // Two tools that log a distinct marker after a short delay, so two
+    // concurrent POSTs overlap in-flight -- exercising sink isolation.
+    app.map_tool("shout_a", || async move {
+        tracing::warn!(logger = "tool", "{MARKER_A}");
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        "a".to_string()
+    });
+    app.map_tool("shout_b", || async move {
+        tracing::warn!(logger = "tool", "{MARKER_B}");
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        "b".to_string()
     });
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -152,6 +166,44 @@ async fn request_scoped_logging_streams_over_post() {
     assert!(
         body.contains("notifications/message") && body.contains(MARKER),
         "batch SSE body must carry the inner request's log, got: {body}"
+    );
+
+    // (d) two concurrent opted-in POSTs sharing one client-supplied
+    // `Mcp-Session-Id` must not cross-talk: each stateless POST mints its own
+    // sink key, so each response carries only its own request's log.
+    let shared_session = uuid::Uuid::new_v4().to_string();
+    let call_for = |tool: &str| {
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+            "params": {
+                "name": tool,
+                "arguments": {},
+                "_meta": { "io.modelcontextprotocol/logLevel": "info" }
+            }
+        })
+    };
+    let send = |call: serde_json::Value| {
+        client
+            .post(&url)
+            .header("MCP-Protocol-Version", "2026-07-28")
+            .header("Accept", "application/json, text/event-stream")
+            .header("Mcp-Session-Id", shared_session.clone())
+            .json(&call)
+            .send()
+    };
+    let (resp_a, resp_b) = tokio::join!(send(call_for("shout_a")), send(call_for("shout_b")));
+    let body_a = resp_a.expect("a failed").text().await.unwrap();
+    let body_b = resp_b.expect("b failed").text().await.unwrap();
+
+    // Each response sees its own marker and not the other's -- no sink collision
+    // even though both POSTs carried the same `Mcp-Session-Id`.
+    assert!(
+        body_a.contains(MARKER_A) && !body_a.contains(MARKER_B),
+        "response A must carry only its own log, got: {body_a}"
+    );
+    assert!(
+        body_b.contains(MARKER_B) && !body_b.contains(MARKER_A),
+        "response B must carry only its own log, got: {body_b}"
     );
 
     handle.abort();
