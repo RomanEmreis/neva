@@ -38,9 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     `notifications/message` at or above that severity and suppresses the rest;
     with no requested level it emits none.
   * Both emission paths honor the level: the HTTP `MpscLayer`
-    (`notification::fmt::layer()`) and the stdio `NotificationFormatter`. A new
-    `notification::fmt::span_context()` layer records the request context for
-    the stdio formatter to read.
+    (`notification::fmt::layer()`) and the stdio `NotificationFormatter`. Every
+    supported stdio setup works unchanged -- the formatter resolves the
+    request-scoped level on its own, including from a formatter-only subscriber.
+    A new `notification::fmt::span_context()` layer can be added alongside to
+    resolve it from a typed span extension instead.
   * Client API: `McpOptions::with_log_level` (via `Client::with_options`),
     `#[deprecated]` on arrival to mirror the schema. `LoggingLevel`/`LogMessage`
     stay undecorated.

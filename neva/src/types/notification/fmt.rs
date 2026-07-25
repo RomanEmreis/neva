@@ -24,7 +24,7 @@ const MCP_SESSION_ID: &str = "mcp_session_id";
 /// Span field carrying the request-scoped minimum severity (RC), as the
 /// [`LoggingLevel`] RFC-5424 severity rank rather than a redundant string.
 #[cfg(feature = "proto-2026-07-28-rc")]
-const MCP_LOG_LEVEL: &str = "mcp_log_level";
+pub(super) const MCP_LOG_LEVEL: &str = "mcp_log_level";
 
 pub(crate) static LOG_REGISTRY: Lazy<MessageRegistry> = Lazy::new(MessageRegistry::new);
 
@@ -197,10 +197,13 @@ where
 /// under MCP 2026-07-28, the request-scoped [`LoggingLevel`]) into a span's
 /// extensions.
 ///
-/// The [`layer`] function's `MpscLayer` records this itself; add
-/// [`span_context`] alongside a plain `tracing_subscriber::fmt` layer that uses
-/// [`NotificationFormatter`](super::NotificationFormatter) (the stdio setup) so
-/// that formatter can apply the request-scoped `notifications/message` filter.
+/// This is an optimization, not a requirement. The [`layer`] function's
+/// `MpscLayer` records the context itself, and the stdio
+/// [`NotificationFormatter`](super::NotificationFormatter) resolves the
+/// request-scoped level from the span fields `fmt::Layer` already records when no
+/// extension is present -- so both emission paths apply the request-scoped
+/// `notifications/message` filter with or without this layer. Adding it next to
+/// the stdio formatter just replaces that lookup with a typed one.
 #[derive(Debug, Default)]
 pub struct SpanContextLayer;
 
