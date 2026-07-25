@@ -28,7 +28,10 @@ async fn volga_engine_round_trip() {
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
     let url = format!("http://{addr}/mcp");
 
     let init_body = serde_json::json!({

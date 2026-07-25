@@ -39,7 +39,10 @@ async fn tool_elicits_then_completes_over_two_rounds() {
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
     let url = format!("http://{addr}/mcp");
 
     // Round 1: tools/call -> input_required.
@@ -146,7 +149,10 @@ async fn final_round_replay_is_idempotent_after_a_lost_response() {
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
     let url = format!("http://{addr}/mcp");
 
     // Round 1: tools/call -> input_required.
@@ -279,7 +285,10 @@ async fn concurrent_final_round_retries_commit_exactly_once() {
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
     let url = format!("http://{addr}/mcp");
 
     // Round 1: tools/call -> input_required.
@@ -385,7 +394,10 @@ async fn distinct_answers_to_the_same_state_do_not_collide_in_the_cache() {
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
     let url = format!("http://{addr}/mcp");
 
     let call = serde_json::json!({
@@ -506,7 +518,10 @@ async fn effects_run_once_memo_caches_commit_fires_on_final_round() {
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
     let url = format!("http://{addr}/mcp");
 
     // Round 1: input_required. Effect + memo ran; commit NOT yet.
@@ -621,7 +636,10 @@ async fn oversized_request_state_is_rejected() {
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
     let url = format!("http://{addr}/mcp");
 
     let call = serde_json::json!({
@@ -675,7 +693,10 @@ async fn oversized_inbound_request_state_is_rejected_before_decoding() {
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
     let url = format!("http://{addr}/mcp");
 
     // A 4 KiB blob -- well over the 256-byte cap and never a valid signed state.
@@ -729,7 +750,10 @@ async fn replaying_request_state_against_a_different_request_is_rejected() {
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
     let url = format!("http://{addr}/mcp");
 
     // Round 1: bind state to `arguments: {}`.
@@ -804,7 +828,10 @@ async fn eliciting_without_declared_capability_is_rejected() {
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
     let url = format!("http://{addr}/mcp");
 
     // No `clientCapabilities.elicitation` -> the server cannot ask for input.
@@ -1230,7 +1257,10 @@ async fn tool_samples_then_completes_over_two_rounds() {
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
     let url = format!("http://{addr}/mcp");
 
     let call = serde_json::json!({
@@ -1325,7 +1355,10 @@ async fn tool_lists_roots_then_completes_over_two_rounds() {
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
     let url = format!("http://{addr}/mcp");
 
     let call = serde_json::json!({
@@ -1523,7 +1556,10 @@ async fn sampling_without_declared_capability_is_rejected() {
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
     let url = format!("http://{addr}/mcp");
 
     // Elicitation is declared, sampling is not.

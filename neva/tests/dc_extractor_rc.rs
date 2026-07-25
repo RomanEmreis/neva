@@ -55,7 +55,10 @@ async fn dc_extractor_is_injected_not_advertised() {
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
     let url = format!("http://{addr}/mcp");
 
     // --- tools/list: assert the Dc dependency is not advertised ---

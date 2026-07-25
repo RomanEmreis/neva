@@ -70,7 +70,13 @@ async fn request_scoped_logging_streams_over_post() {
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let client = reqwest::Client::new();
+    // `no_proxy`: reqwest honors `HTTP_PROXY`/`HTTPS_PROXY` from the environment,
+    // and an uppercase `NO_PROXY` that omits localhost would still send these
+    // loopback requests through the proxy. The server under test is local only.
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
     let url = format!("http://{addr}/mcp");
 
     // (a) opted in via `_meta.logLevel` -> SSE reply with the log then response.

@@ -79,7 +79,10 @@ async fn tool_macro_emits_json_schema_2020() {
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
     let url = format!("http://{addr}/mcp");
 
     // Stateless RC transport: no handshake/session -- a single `tools/list`

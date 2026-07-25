@@ -28,7 +28,10 @@ async fn tasks_capability_is_advertised_as_extension() {
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
     let url = format!("http://{addr}/mcp");
 
     // (a) discover advertises tasks under the extensions map, not top-level.
@@ -111,7 +114,10 @@ async fn task_augmented_tool_elicits_via_suspend_resume() {
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
     let url = format!("http://{addr}/mcp");
 
     let post = |body: serde_json::Value| {
@@ -226,7 +232,10 @@ async fn mrtr_elicit_inside_a_task_is_rejected_with_guidance() {
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
     let url = format!("http://{addr}/mcp");
     let post = |body: serde_json::Value| {
         let client = client.clone();
@@ -300,7 +309,10 @@ async fn mrtr_once_in_a_required_task_is_rejected() {
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
     let url = format!("http://{addr}/mcp");
     let post = |body: serde_json::Value| {
         let client = client.clone();
