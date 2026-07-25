@@ -35,7 +35,13 @@ async fn request_scoped_logging_streams_over_post() {
     // The notification layer must be the active subscriber in the server task so
     // the tool's `tracing` events become `notifications/message`. Each test file
     // is its own process, so installing the global default here is safe.
+    //
+    // The warning-only threshold is deliberate and mirrors a common application
+    // setup: every log below is emitted at WARN, so all of them stay enabled,
+    // and the request span that carries the routing context must survive the
+    // same filter.
     tracing_subscriber::registry()
+        .with(tracing::level_filters::LevelFilter::WARN)
         .with(notification::fmt::layer())
         .init();
 

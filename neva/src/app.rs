@@ -1500,35 +1500,47 @@ impl Drop for RequestSinkGuard {
     }
 }
 
+/// Builds the per-request tracing span carrying the session id.
+///
+/// See the RC variant below for why the span is created at `ERROR`.
 #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
 fn create_tracing_span(session_id: Option<uuid::Uuid>) -> tracing::Span {
     if let Some(mcp_session_id) = session_id {
-        tracing::info_span!("request", mcp_session_id = mcp_session_id.to_string())
+        tracing::error_span!("request", mcp_session_id = mcp_session_id.to_string())
     } else {
-        tracing::info_span!("request")
+        tracing::error_span!("request")
     }
 }
 
 /// Builds the per-request tracing span, carrying the session id and (RC) the
 /// request-scoped logging level as span fields the notification layer reads.
+///
+/// The span is created at `ERROR` -- the highest level -- so it is not itself
+/// filtered out. It carries no message: it exists only to route and filter the
+/// events emitted inside it. At a lower level a common global threshold (say
+/// `LevelFilter::WARN`) would disable the span while still letting WARN/ERROR
+/// events through, leaving those events with no `mcp_session_id` to route by and
+/// no `mcp_log_level` to filter against -- request-scoped logging would silently
+/// stop working. `ERROR` keeps the context observable for every event that the
+/// application's own threshold admits.
 #[cfg(all(feature = "tracing", feature = "proto-2026-07-28-rc"))]
 fn create_tracing_span(
     session_id: Option<uuid::Uuid>,
     log_level: Option<crate::types::notification::LoggingLevel>,
 ) -> tracing::Span {
     match (session_id, log_level) {
-        (Some(sid), Some(level)) => tracing::info_span!(
+        (Some(sid), Some(level)) => tracing::error_span!(
             "request",
             mcp_session_id = sid.to_string(),
             mcp_log_level = u64::from(level.severity())
         ),
         (Some(sid), None) => {
-            tracing::info_span!("request", mcp_session_id = sid.to_string())
+            tracing::error_span!("request", mcp_session_id = sid.to_string())
         }
         (None, Some(level)) => {
-            tracing::info_span!("request", mcp_log_level = u64::from(level.severity()))
+            tracing::error_span!("request", mcp_log_level = u64::from(level.severity()))
         }
-        (None, None) => tracing::info_span!("request"),
+        (None, None) => tracing::error_span!("request"),
     }
 }
 
@@ -1742,6 +1754,32 @@ mod tests {
     fn with_max_state_bytes_sets_the_option() {
         let app = App::new().with_max_state_bytes(4096);
         assert_eq!(app.options.max_state_bytes(), 4096);
+    }
+
+    /// The request span carries the routing and filtering context for every
+    /// event emitted while handling a request, so a common global threshold
+    /// (`LevelFilter::WARN`) must not disable it: WARN/ERROR events stay enabled
+    /// and would otherwise lose their `mcp_session_id` and `mcp_log_level`.
+    #[cfg(all(feature = "tracing", feature = "proto-2026-07-28-rc"))]
+    #[test]
+    fn request_span_survives_a_warning_only_filter() {
+        use crate::types::notification::LoggingLevel;
+        use tracing_subscriber::prelude::*;
+
+        let subscriber =
+            tracing_subscriber::registry().with(tracing::level_filters::LevelFilter::WARN);
+
+        tracing::subscriber::with_default(subscriber, || {
+            let span =
+                super::create_tracing_span(Some(uuid::Uuid::new_v4()), Some(LoggingLevel::Warning));
+            assert!(
+                !span.is_disabled(),
+                "the request span must stay enabled under a warning-only filter"
+            );
+            // The contrast: an INFO span -- what this used to be -- is dropped,
+            // taking the request context with it.
+            assert!(tracing::info_span!("request").is_disabled());
+        });
     }
 
     /// Deferred MRTR commits must run only for a genuine success -- never for a
