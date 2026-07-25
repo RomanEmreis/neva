@@ -384,11 +384,18 @@ fn request_opts_in(req: &crate::types::Request) -> bool {
         })
 }
 
-/// Builds the request-scoped SSE body: it yields notifications from `notif_rx`
-/// as they arrive (biased ahead of the response so buffered notifications lead),
-/// then the final response from `resp_rx`, then ends. Dropping the stream (end
-/// of body or client disconnect) unregisters the per-request sink and clears the
-/// pending entry.
+/// Builds the request-scoped SSE body: notifications flow as they arrive
+/// (biased ahead of the response), then the final response closes the stream.
+///
+/// The response is *buffered* rather than emitted on arrival: the terminal
+/// `message_middleware` completes it while user middleware wrapped around
+/// `next(ctx)` may still be running and logging. The stream therefore stays open
+/// until the notification channel closes -- which happens when the whole
+/// pipeline is done and `App`'s sink guard drops the sender (see
+/// `RequestSinkGuard`) -- drains what is queued, and emits the response last.
+///
+/// Dropping the stream (end of body or client disconnect) unregisters the
+/// per-request sink and clears the pending entry.
 #[cfg(all(feature = "proto-2026-07-28-rc", feature = "tracing"))]
 fn post_notification_stream(
     id: uuid::Uuid,
@@ -409,51 +416,86 @@ fn post_notification_stream(
         }
     }
 
-    enum State {
-        Active {
-            notif_rx: tokio::sync::mpsc::Receiver<Message>,
-            resp_rx: tokio::sync::oneshot::Receiver<Message>,
-            cleanup: Cleanup,
-        },
-        // Holds the cleanup guard until the stream is fully consumed.
-        Done(Cleanup),
+    struct State {
+        notif_rx: tokio::sync::mpsc::Receiver<Message>,
+        /// Taken once the response arrives (or the channel is known dead).
+        resp_rx: Option<tokio::sync::oneshot::Receiver<Message>>,
+        /// The buffered final response, emitted after the last notification.
+        response: Option<Message>,
+        /// Whether more notifications may still arrive.
+        notifs_open: bool,
+        /// Holds the cleanup guard until the stream is fully consumed.
+        _cleanup: Cleanup,
     }
 
-    let cleanup = Cleanup {
-        id,
-        full_id,
-        pending,
+    /// What one poll of the two channels produced.
+    enum Step {
+        Notification(Message),
+        NotificationsClosed,
+        Response(Option<Message>),
+    }
+
+    let state = State {
+        notif_rx,
+        resp_rx: Some(resp_rx),
+        response: None,
+        notifs_open: true,
+        _cleanup: Cleanup {
+            id,
+            full_id,
+            pending,
+        },
     };
 
-    stream::unfold(
-        State::Active {
-            notif_rx,
-            resp_rx,
-            cleanup,
-        },
-        |state| async move {
-            match state {
-                State::Done(_cleanup) => None,
-                State::Active {
-                    mut notif_rx,
-                    mut resp_rx,
-                    cleanup,
-                } => {
-                    tokio::select! {
+    stream::unfold(state, |mut state| async move {
+        while state.notifs_open {
+            // Split the borrows so both channels can be polled in one `select!`.
+            let step = {
+                let State {
+                    notif_rx, resp_rx, ..
+                } = &mut state;
+                match resp_rx.as_mut() {
+                    Some(rx) => tokio::select! {
                         biased;
-                        Some(n) = notif_rx.recv() => Some((
-                            n,
-                            State::Active { notif_rx, resp_rx, cleanup },
-                        )),
-                        r = &mut resp_rx => match r {
-                            Ok(resp) => Some((resp, State::Done(cleanup))),
-                            Err(_) => None,
+                        n = notif_rx.recv() => match n {
+                            Some(n) => Step::Notification(n),
+                            None => Step::NotificationsClosed,
                         },
-                    }
+                        r = rx => Step::Response(r.ok()),
+                    },
+                    // Response already in hand: keep draining notifications.
+                    None => match notif_rx.recv().await {
+                        Some(n) => Step::Notification(n),
+                        None => Step::NotificationsClosed,
+                    },
+                }
+            };
+
+            match step {
+                Step::Notification(n) => return Some((n, state)),
+                Step::NotificationsClosed => state.notifs_open = false,
+                Step::Response(Some(resp)) => {
+                    // Buffer it and keep draining until the pipeline is done.
+                    state.response = Some(resp);
+                    state.resp_rx = None;
+                }
+                // The response channel was dropped: the runtime will never
+                // answer, so stop waiting on notifications and end the body
+                // rather than holding the connection open.
+                Step::Response(None) => {
+                    state.resp_rx = None;
+                    state.notifs_open = false;
                 }
             }
-        },
-    )
+        }
+
+        // Pipeline finished and every notification is drained; close with the
+        // response. A dropped response channel (runtime gone) just ends the body.
+        if let Some(rx) = state.resp_rx.take() {
+            state.response = rx.await.ok();
+        }
+        state.response.take().map(|resp| (resp, state))
+    })
 }
 
 /// Parse the body into a [`Message`].

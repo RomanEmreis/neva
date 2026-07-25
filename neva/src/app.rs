@@ -943,6 +943,16 @@ impl App {
 
     #[inline]
     async fn execute(msg: Message, runtime: ServerRuntime) {
+        // Closing the request notification sink here -- once the *whole*
+        // middleware pipeline has run -- is what lets a request-scoped SSE POST
+        // response know no more notifications are coming, so logs emitted by
+        // user middleware after `next(ctx)` still make it onto the stream.
+        #[cfg(all(
+            feature = "proto-2026-07-28-rc",
+            feature = "tracing",
+            feature = "http-server"
+        ))]
+        let _sink_guard = RequestSinkGuard(msg.session_id().copied());
         runtime.execute(msg).await;
     }
 
@@ -957,6 +967,16 @@ impl App {
         // role/permission guards, SSE routing) sees the original HTTP context.
         let batch_id = batch.id.clone();
         let batch_session_id = batch.session_id;
+        // One guard for the whole batch (inner requests run through
+        // `ServerRuntime::execute`, so they never close the shared sink early):
+        // the request-scoped SSE response stays open until every inner request
+        // and its middleware have finished. See `App::execute`.
+        #[cfg(all(
+            feature = "proto-2026-07-28-rc",
+            feature = "tracing",
+            feature = "http-server"
+        ))]
+        let _sink_guard = RequestSinkGuard(batch_session_id);
         #[cfg(feature = "http-server")]
         let batch_headers = batch.headers.clone();
         #[cfg(feature = "http-server")]
@@ -1449,6 +1469,34 @@ impl App {
     #[inline]
     fn wait_for_shutdown_signal(&mut self, token: CancellationToken) {
         shared::wait_for_shutdown_signal(token);
+    }
+}
+
+/// Closes the per-request notification sink for a stateless HTTP `POST` when the
+/// message's whole middleware pipeline is done (including on panic or task
+/// cancellation, hence a `Drop` guard rather than a plain call).
+///
+/// Dropping the sender is the completion signal a request-scoped SSE `POST`
+/// response waits for: only then does it know every notification -- including
+/// ones user middleware emitted after `next(ctx)` -- has been queued, so it can
+/// drain them and close with the final response.
+#[cfg(all(
+    feature = "proto-2026-07-28-rc",
+    feature = "tracing",
+    feature = "http-server"
+))]
+struct RequestSinkGuard(Option<uuid::Uuid>);
+
+#[cfg(all(
+    feature = "proto-2026-07-28-rc",
+    feature = "tracing",
+    feature = "http-server"
+))]
+impl Drop for RequestSinkGuard {
+    fn drop(&mut self) {
+        if let Some(id) = self.0 {
+            crate::types::notification::fmt::unregister_request_sink(&id);
+        }
     }
 }
 

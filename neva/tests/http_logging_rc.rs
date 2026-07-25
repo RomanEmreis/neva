@@ -18,6 +18,17 @@ use tracing_subscriber::prelude::*;
 const MARKER: &str = "distinctive-log-marker";
 const MARKER_A: &str = "marker-alpha";
 const MARKER_B: &str = "marker-bravo";
+const MARKER_AFTER_NEXT: &str = "marker-after-next";
+
+/// Reads a response body, failing loudly instead of hanging: a request-scoped
+/// SSE body that never closes (e.g. the notification sink outliving the
+/// pipeline) would otherwise stall the test forever.
+async fn body_within(resp: reqwest::Response, what: &str) -> String {
+    tokio::time::timeout(std::time::Duration::from_secs(5), resp.text())
+        .await
+        .unwrap_or_else(|_| panic!("{what}: SSE body did not close within 5s"))
+        .expect("body read failed")
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn request_scoped_logging_streams_over_post() {
@@ -30,8 +41,16 @@ async fn request_scoped_logging_streams_over_post() {
 
     let port = pick_free_port();
     let addr = format!("127.0.0.1:{port}");
-    let mut app =
-        App::new().with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")));
+    let mut app = App::new()
+        .with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")))
+        // Logs *after* `next(ctx)`: the terminal middleware has already completed
+        // the response by then, so this only reaches the client if the SSE body
+        // stays open until the whole pipeline is done.
+        .wrap(|ctx, next| async move {
+            let resp = next(ctx).await;
+            tracing::warn!(logger = "mw", "{MARKER_AFTER_NEXT}");
+            resp
+        });
     app.map_tool("shout", || async move {
         tracing::warn!(logger = "tool", "{MARKER}");
         "pong".to_string()
@@ -82,7 +101,7 @@ async fn request_scoped_logging_streams_over_post() {
         ctype.contains("text/event-stream"),
         "opted-in reply must be an SSE stream, got content-type {ctype:?}"
     );
-    let body = resp.text().await.unwrap();
+    let body = body_within(resp, "opted-in call").await;
     assert!(
         body.contains("notifications/message"),
         "SSE body must carry the log notification, got: {body}"
@@ -94,6 +113,19 @@ async fn request_scoped_logging_streams_over_post() {
     assert!(
         body.contains("pong"),
         "SSE body must carry the response, got: {body}"
+    );
+    // A log emitted by user middleware *after* `next(ctx)` must still reach the
+    // client: the stream stays open until the whole pipeline finishes.
+    assert!(
+        body.contains(MARKER_AFTER_NEXT),
+        "SSE body must carry the after-next middleware log, got: {body}"
+    );
+    // ...and the response closes the stream: every notification precedes it.
+    let resp_at = body.find("\"result\"").expect("response in body");
+    assert!(
+        body.find(MARKER).is_some_and(|at| at < resp_at)
+            && body.find(MARKER_AFTER_NEXT).is_some_and(|at| at < resp_at),
+        "notifications must precede the final response, got: {body}"
     );
 
     // (b) no `logLevel` -> plain JSON reply, no log notifications (suppressed).
@@ -162,7 +194,7 @@ async fn request_scoped_logging_streams_over_post() {
         ctype.contains("text/event-stream"),
         "a batch with an opted-in inner request must stream, got content-type {ctype:?}"
     );
-    let body = resp.text().await.unwrap();
+    let body = body_within(resp, "batch call").await;
     assert!(
         body.contains("notifications/message") && body.contains(MARKER),
         "batch SSE body must carry the inner request's log, got: {body}"
@@ -192,8 +224,8 @@ async fn request_scoped_logging_streams_over_post() {
             .send()
     };
     let (resp_a, resp_b) = tokio::join!(send(call_for("shout_a")), send(call_for("shout_b")));
-    let body_a = resp_a.expect("a failed").text().await.unwrap();
-    let body_b = resp_b.expect("b failed").text().await.unwrap();
+    let body_a = body_within(resp_a.expect("a failed"), "concurrent A").await;
+    let body_b = body_within(resp_b.expect("b failed"), "concurrent B").await;
 
     // Each response sees its own marker and not the other's -- no sink collision
     // even though both POSTs carried the same `Mcp-Session-Id`.

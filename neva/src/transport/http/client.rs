@@ -67,6 +67,7 @@ impl ClientAuth {
 // activates at runtime when a legacy `initialize` handshake happens.
 const LAST_EVENT_ID: HeaderName = HeaderName::from_static("last-event-id");
 const SSE_RECONNECT_DELAY: Duration = Duration::from_secs(3);
+const STREAM_ENDED_BEFORE_RESPONSE: &str = "POST SSE stream ended before the response arrived";
 
 #[cfg(feature = "proto-2026-07-28-rc")]
 fn routing_hints(msg: &Message) -> Option<(&str, Option<&str>)> {
@@ -329,16 +330,39 @@ async fn send_request(
         .is_some_and(|ct| ct.contains("text/event-stream"));
 
     if is_event_stream {
+        let mut answered = false;
         let mut stream = sse_stream::SseStream::from_bytes_stream(resp.bytes_stream());
         while let Some(event) = stream.next().await {
             match event {
                 Ok(sse) if sse.is_message() => {
-                    handle_msg(sse, &resp_tx).await;
+                    if forward_sse_message(sse, &resp_tx).await {
+                        answered = true;
+                    }
                 }
                 Ok(_) => {}
                 Err(_err) => {
                     #[cfg(feature = "tracing")]
                     tracing::error!(logger = "neva", "SSE POST stream error: {}", _err);
+                    break;
+                }
+            }
+        }
+
+        // A truncated stream, an unparseable frame, or EOF before the final
+        // response would otherwise leave the originating request sitting in the
+        // pending queue until it times out. Fail it now, id-bound, exactly like
+        // the non-JSON-RPC reply path below. `InternalError` (not `ParseError`)
+        // on purpose: the peer clearly speaks RC, so this must not be mistaken
+        // for dual-mode fallback evidence.
+        if !answered {
+            #[cfg(feature = "tracing")]
+            tracing::error!(logger = "neva", STREAM_ENDED_BEFORE_RESPONSE);
+            for id in request_ids(&req) {
+                let resp = crate::types::Response::error(
+                    id,
+                    Error::new(ErrorCode::InternalError, STREAM_ENDED_BEFORE_RESPONSE),
+                );
+                if resp_tx.send(Ok(Message::Response(resp))).await.is_err() {
                     break;
                 }
             }
@@ -642,6 +666,35 @@ async fn handle_msg(
     true
 }
 
+/// Forwards one frame of a request-scoped SSE `POST` reply to the receive loop.
+///
+/// Returns `true` only for the *terminal* reply -- a response or a batch
+/// response -- so the caller can tell an orderly stream end from a truncated one
+/// (notifications, and frames that fail to parse, return `false`).
+async fn forward_sse_message(
+    event: sse_stream::Sse,
+    resp_tx: &mpsc::Sender<Result<Message, Error>>,
+) -> bool {
+    let Some(data) = event.data else {
+        return false;
+    };
+    let msg = match serde_json::from_str::<Message>(&data) {
+        Ok(msg) => msg,
+        Err(_err) => {
+            #[cfg(feature = "tracing")]
+            tracing::error!(logger = "neva", "Failed to parse SSE POST event: {}", _err);
+            return false;
+        }
+    };
+    let terminal = matches!(msg, Message::Response(_) | Message::Batch(_));
+    if let Err(_err) = resp_tx.send(Ok(msg)).await {
+        #[cfg(feature = "tracing")]
+        tracing::error!(logger = "neva", "Failed to send response: {}", _err);
+        return false;
+    }
+    terminal
+}
+
 #[inline]
 #[cfg(not(feature = "client-tls"))]
 fn create_client() -> Result<reqwest::Client, Error> {
@@ -788,6 +841,44 @@ mod tests {
         handle_event(event, &session, &tx).await;
 
         assert!(session.last_event_id().is_none());
+    }
+
+    /// A request-scoped SSE `POST` reply must be recognized as *answered* only
+    /// once its terminal reply arrives -- that flag is what tells a truncated
+    /// stream (which has to fail the pending request) from an orderly one.
+    #[tokio::test]
+    async fn forward_sse_message_flags_only_terminal_replies() {
+        let cases = [
+            // (frame, is_terminal)
+            (
+                r#"{"jsonrpc":"2.0","method":"notifications/message"}"#,
+                false,
+            ),
+            (r#"{"jsonrpc":"2.0","id":1,"result":{}}"#, true),
+            (r#"[{"jsonrpc":"2.0","id":1,"result":{}}]"#, true),
+        ];
+
+        for (frame, terminal) in cases {
+            let (tx, mut rx) = mpsc::channel(1);
+            let event = sse_stream::Sse::default().data(frame);
+            assert_eq!(
+                forward_sse_message(event, &tx).await,
+                terminal,
+                "wrong terminal flag for {frame}"
+            );
+            assert!(rx.try_recv().is_ok(), "{frame} should still be delivered");
+        }
+    }
+
+    #[tokio::test]
+    async fn forward_sse_message_reports_unparseable_frame_as_unanswered() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let event = sse_stream::Sse::default().data("not json");
+        assert!(!forward_sse_message(event, &tx).await);
+        assert!(
+            rx.try_recv().is_err(),
+            "a malformed frame must not reach the receive loop"
+        );
     }
 }
 
