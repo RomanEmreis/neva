@@ -6,6 +6,7 @@
 
 #![cfg(all(
     feature = "proto-2026-07-28-rc",
+    feature = "server-macros",
     feature = "http-server-volga",
     feature = "http-client"
 ))]

@@ -143,7 +143,13 @@ where
         let notification = build_notification(event);
         if let Some(span) = ctx.event_span(event) {
             let mut notification = notification;
-            notification.session_id = span.extensions().get::<uuid::Uuid>().cloned();
+            // Resolve the request context through the whole span scope, not just
+            // the immediate span: an event emitted from a child span (e.g. a
+            // `#[tracing::instrument]` handler) sits below the `request` span
+            // that carries the extensions.
+            notification.session_id = span
+                .scope()
+                .find_map(|s| s.extensions().get::<uuid::Uuid>().cloned());
 
             // RC: `logging/setLevel` is gone; the level is request-scoped. Deliver
             // a `notifications/message` only when the originating request carried
@@ -430,5 +436,50 @@ mod tests {
         let got = levels(&got);
         assert!(got.contains(&"emergency".to_owned()), "got: {got:?}");
         assert!(!got.contains(&"error".to_owned()), "got: {got:?}");
+    }
+
+    /// Drives `MpscLayer` (the HTTP/SSE emit path) with the request context on an
+    /// *ancestor* span, the way a `#[tracing::instrument]` handler emits: from a
+    /// child span that carries no MCP fields of its own.
+    #[tokio::test]
+    async fn routes_events_from_nested_spans_to_the_request_sink() {
+        use crate::types::Message;
+        use crate::types::notification::Notification;
+
+        let session_id = uuid::Uuid::new_v4();
+        let (sink_tx, mut sink_rx) = tokio::sync::mpsc::channel::<Message>(8);
+        super::REQUEST_NOTIFICATIONS.insert(session_id, sink_tx);
+
+        let (fallback_tx, mut fallback_rx) = tokio::sync::mpsc::channel::<Notification>(8);
+        let subscriber = tracing_subscriber::registry().with(super::MpscLayer {
+            sender: super::NotificationSender::new(fallback_tx),
+        });
+
+        tracing::subscriber::with_default(subscriber, || {
+            let request = tracing::info_span!(
+                "request",
+                mcp_session_id = session_id.to_string(),
+                mcp_log_level = u64::from(LoggingLevel::Debug.severity())
+            );
+            let _entered = request.enter();
+            let handler = tracing::info_span!("handler");
+            let _handler = handler.enter();
+            tracing::warn!(logger = "tool", "nested message");
+        });
+
+        super::REQUEST_NOTIFICATIONS.remove(&session_id);
+
+        let msg = sink_rx
+            .try_recv()
+            .expect("an event from a nested span must still reach the request sink");
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["method"], "notifications/message");
+        assert_eq!(json["params"]["data"]["message"], "nested message");
+        // ...and it must not fall through to the legacy session-SSE registry,
+        // which has no reader on the RC stateless transport.
+        assert!(
+            fallback_rx.try_recv().is_err(),
+            "request-scoped notification leaked to the legacy path"
+        );
     }
 }

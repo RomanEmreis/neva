@@ -323,13 +323,7 @@ async fn send_request(
     // `notifications/progress` followed by the response. Forward every parsed
     // message to the receive loop, which routes notifications to handlers and
     // resolves the pending request on the response.
-    let is_event_stream = resp
-        .headers()
-        .get(CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|ct| ct.contains("text/event-stream"));
-
-    if is_event_stream {
+    if is_event_stream(resp.headers()) {
         let mut answered = false;
         let mut stream = sse_stream::SseStream::from_bytes_stream(resp.bytes_stream());
         while let Some(event) = stream.next().await {
@@ -436,6 +430,15 @@ fn parse_failure(status: reqwest::StatusCode, err: &impl std::fmt::Display) -> (
         ErrorCode::InternalError
     };
     (code, format!("HTTP {status}: {err}"))
+}
+
+/// Whether a reply is SSE-framed rather than a single JSON document.
+fn is_event_stream(headers: &reqwest::header::HeaderMap) -> bool {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|ct| ct.split(';').next())
+        .is_some_and(|essence| essence.trim().eq_ignore_ascii_case("text/event-stream"))
 }
 
 /// The ids of the requests `msg` carries (empty for notifications and
@@ -878,6 +881,36 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "a malformed frame must not reach the receive loop"
+        );
+    }
+
+    /// Media types are case-insensitive and may carry parameters: mistaking such
+    /// a reply for JSON would fail the request on an SSE-framed body.
+    #[test]
+    fn event_stream_media_type_is_matched_case_insensitively() {
+        let cases = [
+            ("text/event-stream", true),
+            ("Text/Event-Stream", true),
+            ("TEXT/EVENT-STREAM; charset=utf-8", true),
+            ("text/event-stream ;charset=utf-8", true),
+            ("application/json", false),
+            ("text/event-streaming", false),
+            ("application/json, text/event-stream", false),
+        ];
+
+        for (value, expected) in cases {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(CONTENT_TYPE, value.parse().unwrap());
+            assert_eq!(
+                is_event_stream(&headers),
+                expected,
+                "wrong verdict for content-type {value:?}"
+            );
+        }
+
+        assert!(
+            !is_event_stream(&reqwest::header::HeaderMap::new()),
+            "a reply without content-type is not an SSE stream"
         );
     }
 }
