@@ -172,6 +172,15 @@ impl Middlewares {
         self.pipeline.push(middleware);
     }
 
+    /// Adds a middleware at the front of the pipeline, making it the outermost
+    /// layer so its wrapping (e.g. the request tracing span) covers every
+    /// already-registered user middleware.
+    #[inline]
+    #[cfg(feature = "tracing")]
+    pub(super) fn add_front(&mut self, middleware: Middleware) {
+        self.pipeline.insert(0, middleware);
+    }
+
     /// Composes middlewares into a "Linked List" and returns head
     pub(super) fn compose(&self) -> Option<Next> {
         if self.pipeline.is_empty() {

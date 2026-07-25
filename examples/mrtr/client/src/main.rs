@@ -2,7 +2,7 @@
 //!
 //! Connects over stateless HTTP, runs `server/discover` on `connect()`, and
 //! calls `place_order`. The `#[elicitation]` handler answers the server's form
-//! request transparently — the MRTR round-trips are driven inside the client.
+//! request transparently -- the MRTR round-trips are driven inside the client.
 
 use neva::prelude::*;
 use tracing_subscriber::prelude::*;

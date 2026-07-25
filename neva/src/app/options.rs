@@ -514,6 +514,15 @@ impl McpOptions {
             .add(middleware);
     }
 
+    /// Registers a middleware as the outermost layer of the pipeline.
+    #[inline]
+    #[cfg(feature = "tracing")]
+    pub(crate) fn add_middleware_front(&mut self, middleware: Middleware) {
+        self.middlewares
+            .get_or_insert_with(Middlewares::new)
+            .add_front(middleware);
+    }
+
     /// Returns a Model Context Protocol version that this server supports
     #[inline]
     pub(crate) fn protocol_ver(&self) -> &'static str {
@@ -607,7 +616,7 @@ impl McpOptions {
         let mut cap = self.tools_capability.clone();
         // The stateless `proto-2026-07-28-rc` transport cannot push
         // `notifications/tools/list_changed`, so never advertise `listChanged`
-        // under RC — clients refresh on cache-TTL / the next `tools/list`
+        // under RC -- clients refresh on cache-TTL / the next `tools/list`
         // instead of relying on a push that will never arrive.
         #[cfg(feature = "proto-2026-07-28-rc")]
         if let Some(c) = cap.as_mut() {
@@ -643,7 +652,7 @@ impl McpOptions {
         let mut cap = self.prompts_capability.clone();
         // The stateless `proto-2026-07-28-rc` transport cannot push
         // `notifications/prompts/list_changed`, so never advertise `listChanged`
-        // under RC — see `tools_capability` for the rationale.
+        // under RC -- see `tools_capability` for the rationale.
         #[cfg(feature = "proto-2026-07-28-rc")]
         if let Some(c) = cap.as_mut() {
             c.list_changed = false;

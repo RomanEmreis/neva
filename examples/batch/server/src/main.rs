@@ -1,4 +1,4 @@
-//! Batch example — server side
+//! Batch example -- server side
 //!
 //! Run with:
 //! ```no_rust

@@ -118,25 +118,25 @@ impl StdIoSender {
     }
 }
 
-/// The direction an unreadable line has to travel — a parse failure is
+/// The direction an unreadable line has to travel -- a parse failure is
 /// answered or completed depending on what the line *was*, and routing it
 /// the wrong way loses it silently.
 enum Line {
-    /// A readable message — hand it to the receive loop.
+    /// A readable message -- hand it to the receive loop.
     Message(Message),
-    /// An unreadable inbound **request**: JSON-RPC 2.0 §5 says the peer
+    /// An unreadable inbound **request**: JSON-RPC 2.0 section 5 says the peer
     /// gets an error response, so this goes straight back out the
     /// transport's sender rather than into pending-request handling.
     Reply(Message),
-    /// Nothing actionable — logged and dropped.
+    /// Nothing actionable -- logged and dropped.
     Drop,
 }
 
 /// Parses one stdio line into a [`Message`].
 ///
-/// A line that isn't a readable `Message` — malformed JSON, or a JSON-RPC
+/// A line that isn't a readable `Message` -- malformed JSON, or a JSON-RPC
 /// error whose `code` falls outside neva's [`ErrorCode`] set (the TS SDK's
-/// `-32000` "server not initialized" family) — must **not** tear down the
+/// `-32000` "server not initialized" family) -- must **not** tear down the
 /// receive loop: the peer is alive and every following line is still
 /// readable. Pushing a bare `Err` did exactly that, and since the loop
 /// died before completing the pending request, the caller saw a timeout
@@ -145,7 +145,7 @@ enum Line {
 /// A malformed **response** carrying an `id` belongs to a request this side
 /// is waiting on: it is reported as an id-bound `ParseError` so the pending
 /// request completes with the real cause. That is what makes the RC
-/// client's dual-mode fallback reachable over stdio — it classifies such a
+/// client's dual-mode fallback reachable over stdio -- it classifies such a
 /// rejection as "legacy peer" and retries `initialize`, which a timeout
 /// never could.
 ///
@@ -155,14 +155,14 @@ enum Line {
 /// silently swallow it and leave the peer waiting out its own timeout.
 ///
 /// A line whose JSON is broken outright can't be classified at all, so
-/// JSON-RPC 2.0 §5.1 prescribes the answer directly: a parse error with
+/// JSON-RPC 2.0 section 5.1 prescribes the answer directly: a parse error with
 /// [`RequestId::Null`](crate::types::RequestId::Null).
 ///
 /// Dropped, because no move applies:
 ///
-/// * a malformed **notification** — a `method` but no `id`. JSON-RPC 2.0
-///   §4.1 forbids replying to notifications;
-/// * a response-shaped line with no usable `id` — it completes no pending
+/// * a malformed **notification** -- a `method` but no `id`. JSON-RPC 2.0
+///   section 4.1 forbids replying to notifications;
+/// * a response-shaped line with no usable `id` -- it completes no pending
 ///   request, and answering a response is not a thing.
 fn parse_line(line: &str) -> Line {
     let err = match serde_json::from_str::<Message>(line) {
@@ -177,7 +177,7 @@ fn parse_line(line: &str) -> Line {
         ))
     };
 
-    // Broken JSON: nothing to classify, and §5.1 answers exactly this case.
+    // Broken JSON: nothing to classify, and section 5.1 answers exactly this case.
     let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
         return Line::Reply(reply(crate::types::RequestId::Null));
     };
@@ -461,7 +461,7 @@ mod parse_line_tests {
     }
 
     /// The regression the fix is really about: the bad line must not end
-    /// the stream — the pending request completes *and* the following
+    /// the stream -- the pending request completes *and* the following
     /// lines keep arriving.
     #[tokio::test]
     async fn a_bad_line_neither_ends_the_stream_nor_is_swallowed() {
@@ -484,7 +484,7 @@ mod parse_line_tests {
         assert_eq!(resp.id, RequestId::Number(1));
         assert_eq!(resp.error.code, ErrorCode::ParseError);
 
-        // The garbage line is answered out-of-band (§5.1) rather than
+        // The garbage line is answered out-of-band (section 5.1) rather than
         // routed here, so the next thing the loop sees is the good line.
         assert!(
             matches!(receiver.recv().await, Ok(Message::Notification(_))),
@@ -516,7 +516,7 @@ mod parse_line_tests {
         assert_eq!(resp.id, RequestId::Number(42));
         assert_eq!(resp.error.code, ErrorCode::ParseError);
 
-        // The bad request never reaches the receive loop — the next thing
+        // The bad request never reaches the receive loop -- the next thing
         // it sees is the following, well-formed line.
         assert!(
             matches!(receiver.recv().await, Ok(Message::Notification(_))),
@@ -524,7 +524,7 @@ mod parse_line_tests {
         );
     }
 
-    /// JSON-RPC 2.0 §5.1: invalid JSON is answered with a parse error
+    /// JSON-RPC 2.0 section 5.1: invalid JSON is answered with a parse error
     /// carrying `"id": null`, since there is no id to salvage.
     #[test]
     fn broken_json_is_answered_with_a_null_id() {
@@ -536,7 +536,7 @@ mod parse_line_tests {
             let Line::Reply(Message::Response(crate::types::Response::Err(resp))) =
                 parse_line(line)
             else {
-                panic!("broken JSON must be answered per §5.1: {line}");
+                panic!("broken JSON must be answered per section 5.1: {line}");
             };
             assert_eq!(resp.id, RequestId::Null);
             assert_eq!(resp.error.code, ErrorCode::ParseError);
@@ -559,7 +559,7 @@ mod parse_line_tests {
 
     #[test]
     fn unanswerable_lines_are_dropped_not_fatal() {
-        // A `method` but no `id` — a notification, which JSON-RPC §4.1
+        // A `method` but no `id` -- a notification, which JSON-RPC section 4.1
         // forbids replying to. An explicit `null` id is just as unaddressable.
         for line in [
             r#"{"jsonrpc":"2.0","method":123}"#,

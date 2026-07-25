@@ -1,4 +1,4 @@
-//! The [`HttpEngine`] contract — what an HTTP-stack adapter must implement.
+//! The [`HttpEngine`] contract -- what an HTTP-stack adapter must implement.
 
 use crate::{error::Error, types::Message};
 use std::future::Future;
@@ -15,7 +15,7 @@ use super::{
 /// HTTP conversion bridges and two SSE event constructors, and runs an
 /// HTTP server until `token` fires. All JSON-RPC framing, SSE
 /// replay/dedup, batch fast-path, and oneshot pending logic stays in
-/// neva — an engine adapter is the thinnest possible shim from neva's
+/// neva -- an engine adapter is the thinnest possible shim from neva's
 /// neutral types onto a framework's native types.
 ///
 /// Route handlers typically just call the `dispatch_*` helpers in
@@ -27,12 +27,12 @@ use super::{
 /// To enable neva's per-tool / per-prompt / per-resource role and
 /// permission gates, the engine is responsible for decoding the
 /// inbound request's auth credential (bearer token, session cookie,
-/// custom header — whatever the engine supports) into a value
+/// custom header -- whatever the engine supports) into a value
 /// implementing [`crate::auth::Claims`], wrapping it in
 /// `Arc<dyn neva::auth::Claims>`, and inserting it into
 /// `request.extensions_mut()` **before** calling [`dispatch_post`].
 ///
-/// neva itself does not parse credentials — that is the engine's job.
+/// neva itself does not parse credentials -- that is the engine's job.
 /// If no claims are inserted, neva treats the request as unauthenticated
 /// and any tool/prompt/resource that declares required roles or
 /// permissions will reject it.
@@ -49,14 +49,14 @@ use super::{
 /// responsible for two things:
 ///
 /// 1. Mount a GET route on `HttpContext::oauth_metadata_path` and serve it
-///    with `handlers::handle_oauth_metadata` — this is the RFC 9728 Protected
+///    with `handlers::handle_oauth_metadata` -- this is the RFC 9728 Protected
 ///    Resource Metadata document, reachable without authentication.
 /// 2. Answer requests that fail token validation with
 ///    `handlers::handle_unauthorized`, so the 401 carries the
 ///    `WWW-Authenticate` challenge pointing at that document and clients can
 ///    start the OAuth discovery flow.
 ///
-/// Both helpers return neva's neutral [`HttpResponse`] — pass it through
+/// Both helpers return neva's neutral [`HttpResponse`] -- pass it through
 /// `adapt_response` like any other reply.
 ///
 /// [`dispatch_post`]: super::handlers::dispatch_post
@@ -86,7 +86,7 @@ pub trait HttpEngine: Send + Sync + 'static {
     ///
     /// `Send` is intentionally not required here, so engines whose native
     /// request type holds a non-`Send` state (actix-web's `HttpRequest`
-    /// holds `Rc<…>` internally) can still implement this trait. For
+    /// holds `Rc<...>` internally) can still implement this trait. For
     /// engines whose request type is `Send`, [`dispatch_post`] /
     /// [`dispatch_delete`] / [`dispatch_get_sse`] produce `Send` futures
     /// automatically; for `!Send` engines, the futures are `!Send` and
@@ -146,7 +146,7 @@ pub trait HttpEngine: Send + Sync + 'static {
 
 /// `pub(crate)` dyn-compatible bridge: lets `TransportProto::HttpServer`
 /// store any `HttpServer<C, E>` behind a single trait object without
-/// becoming generic itself. Engines never see this trait — it lives at
+/// becoming generic itself. Engines never see this trait -- it lives at
 /// the `HttpServer` ⇄ `TransportProto` seam.
 pub(crate) trait HttpTransport: Send + Sync + 'static {
     /// Starts the engine and returns a token that, when cancelled, shuts

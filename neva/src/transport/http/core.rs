@@ -1,7 +1,7 @@
 //! Engine-agnostic Streamable HTTP transport primitives.
 //!
 //! This module owns the protocol-level logic of the MCP Streamable HTTP
-//! transport — JSON-RPC framing, SSE replay/dispatch, and the request/response
+//! transport -- JSON-RPC framing, SSE replay/dispatch, and the request/response
 //! types that flow through engine adapters. Engines (Volga, Axum, custom)
 //! implement [`engine::HttpEngine`] and call the free helpers in [`handlers`].
 

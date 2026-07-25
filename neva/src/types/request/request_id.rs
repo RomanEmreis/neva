@@ -29,7 +29,7 @@ pub enum RequestId {
     /// A null identifier.
     ///
     /// Used in error responses when the id cannot be extracted from a
-    /// malformed request (JSON-RPC 2.0 §5.1 requires `"id": null` in that
+    /// malformed request (JSON-RPC 2.0 section 5.1 requires `"id": null` in that
     /// case). Serializes as JSON `null`.
     Null,
 }

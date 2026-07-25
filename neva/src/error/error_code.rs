@@ -37,7 +37,7 @@ pub enum ErrorCode {
     Timeout = -99998,
 
     /// [Internal code] A handler requested additional input via MRTR. Never
-    /// sent on the wire as an error — intercepted by the server dispatch layer
+    /// sent on the wire as an error -- intercepted by the server dispatch layer
     /// and converted into an `InputRequiredResult`.
     #[cfg(feature = "proto-2026-07-28-rc")]
     InputRequired = -99997,
@@ -157,7 +157,7 @@ impl ErrorCode {
         }
     }
 
-    /// Code to use for "resource not found" — spec-version dependent.
+    /// Code to use for "resource not found" -- spec-version dependent.
     ///
     /// - Default build (pre-2026 spec): [`Self::ResourceNotFound`] (`-32002`).
     /// - `proto-2026-07-28-rc`: [`Self::InvalidParams`] (`-32602`), per the RC.

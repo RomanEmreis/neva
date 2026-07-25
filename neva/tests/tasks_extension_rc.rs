@@ -28,7 +28,10 @@ async fn tasks_capability_is_advertised_as_extension() {
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
     let url = format!("http://{addr}/mcp");
 
     // (a) discover advertises tasks under the extensions map, not top-level.
@@ -83,7 +86,7 @@ async fn task_augmented_tool_elicits_via_suspend_resume() {
     // background future suspends (task -> input_required), the client posts the
     // answer as a Response keyed by the task id (session-independent), the future
     // resumes in place, and the final result carries the elicited value. Side
-    // effects are just run inline (no MRTR `on_commit` needed — there is no
+    // effects are just run inline (no MRTR `on_commit` needed -- there is no
     // re-run); the counter below proves the resumed body ran to completion.
     TASK_COMMITS.store(0, Ordering::SeqCst);
 
@@ -111,7 +114,10 @@ async fn task_augmented_tool_elicits_via_suspend_resume() {
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
     let url = format!("http://{addr}/mcp");
 
     let post = |body: serde_json::Value| {
@@ -149,7 +155,7 @@ async fn task_augmented_tool_elicits_via_suspend_resume() {
         }
     };
 
-    // 1. Task-augmented call → CreateTaskResult carrying a task id.
+    // 1. Task-augmented call -> CreateTaskResult carrying a task id.
     let r1 = post(serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {
@@ -164,7 +170,7 @@ async fn task_augmented_tool_elicits_via_suspend_resume() {
         .unwrap_or_else(|| panic!("task id present, got: {r1}"))
         .to_string();
 
-    // 2. The tool elicits → the task suspends into input_required.
+    // 2. The tool elicits -> the task suspends into input_required.
     assert!(
         wait_status("input_required", task_id.clone()).await,
         "task must enter input_required when the tool elicits"
@@ -205,7 +211,7 @@ async fn task_augmented_tool_elicits_via_suspend_resume() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mrtr_elicit_inside_a_task_is_rejected_with_guidance() {
-    // The MRTR `ctx.elicit` is not valid on the task substrate — it must guide
+    // The MRTR `ctx.elicit` is not valid on the task substrate -- it must guide
     // the author to `ctx.task().elicit(...)` rather than silently misbehave.
     let port = pick_free_port();
     let addr = format!("127.0.0.1:{port}");
@@ -226,7 +232,10 @@ async fn mrtr_elicit_inside_a_task_is_rejected_with_guidance() {
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
     let url = format!("http://{addr}/mcp");
     let post = |body: serde_json::Value| {
         let client = client.clone();
@@ -300,7 +309,10 @@ async fn mrtr_once_in_a_required_task_is_rejected() {
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
     let url = format!("http://{addr}/mcp");
     let post = |body: serde_json::Value| {
         let client = client.clone();

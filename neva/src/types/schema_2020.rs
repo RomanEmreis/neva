@@ -4,13 +4,13 @@
 //! and `outputSchema` fields carry full JSON Schema 2020-12 documents.
 //! Unlike the legacy `ToolSchema` (a typed struct
 //! mirroring a small Draft 7-ish subset), schemas under the new draft
-//! must be representable as **arbitrary** JSON — including `oneOf`,
+//! must be representable as **arbitrary** JSON -- including `oneOf`,
 //! `anyOf`, `$ref`, `additionalProperties`, conditional `if`/`then`,
 //! and any custom keywords the implementor chooses to embed.
 //!
 //! [`InputSchema`] is therefore a `#[serde(transparent)]` newtype around
-//! [`serde_json::Value`]. The schema **is** the value — there is no
-//! wrapper key — so it round-trips losslessly.
+//! [`serde_json::Value`]. The schema **is** the value -- there is no
+//! wrapper key -- so it round-trips losslessly.
 //!
 //! This module is intentionally minimal in Task 3.1: it only introduces
 //! the type. Wiring into [`crate::types::tool::Tool`] happens in later
@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 ///
 /// The inner [`serde_json::Value`] holds the full schema verbatim. This is
 /// a transparent newtype, so [`InputSchema`] serializes and deserializes
-/// exactly as if it were a raw [`Value`] — no wrapper key is added.
+/// exactly as if it were a raw [`Value`] -- no wrapper key is added.
 ///
 /// # Examples
 ///
@@ -46,7 +46,7 @@ pub struct InputSchema(
     /// The underlying JSON Schema document.
     ///
     /// Kept `pub(crate)` so the type stays closed to arbitrary external
-    /// mutation — construct via [`InputSchema::from_value`] and read via
+    /// mutation -- construct via [`InputSchema::from_value`] and read via
     /// [`InputSchema::as_value`]/[`InputSchema::into_value`]. This leaves room
     /// to attach a lazily-compiled validator beside the schema later without a
     /// breaking change.
@@ -57,7 +57,7 @@ impl Default for InputSchema {
     /// Returns an empty object schema: `{"type": "object", "properties": {}}`.
     ///
     /// This mirrors the legacy `ToolSchema::default`
-    /// shape — an *empty object schema*, not a totally empty JSON object —
+    /// shape -- an *empty object schema*, not a totally empty JSON object --
     /// so the wire format remains compatible with existing clients that
     /// expect at minimum a `type` discriminator.
     #[inline]
@@ -120,7 +120,7 @@ impl InputSchema {
 impl InputSchema {
     /// Wraps an arbitrary [`serde_json::Value`] as an [`InputSchema`].
     ///
-    /// The value is stored verbatim — no validation is performed at this
+    /// The value is stored verbatim -- no validation is performed at this
     /// point. Validation of incoming tool arguments against the schema
     /// happens elsewhere (see `validate_call_args` in the `tool` module).
     ///
@@ -144,7 +144,7 @@ impl InputSchema {
     ///
     /// Returns [`crate::error::Error`] when the input is not valid JSON.
     /// Unlike the legacy `ToolSchema::from_json_str`,
-    /// this constructor never panics — library code must propagate errors
+    /// this constructor never panics -- library code must propagate errors
     /// rather than expect, per project conventions.
     ///
     /// # Examples
@@ -222,14 +222,14 @@ impl From<schemars::Schema> for InputSchema {
 // These items back the `#[tool]` macro's JSON Schema 2020-12 emission under
 // `proto-2026-07-28-rc`. The `schema_2020` module itself is always compiled
 // (the `InputSchema` type exists on every config), so the macro-support items
-// are individually gated on the RC flag — they are unused on the legacy path.
+// are individually gated on the RC flag -- they are unused on the legacy path.
 
 /// Autoref-specialization probe used by the `#[tool]` macro to build a
 /// per-argument JSON Schema 2020-12 subschema.
 ///
 /// Resolves to a `schemars`-derived (inlined, self-contained) subschema when
 /// the argument type implements [`schemars::JsonSchema`], and to an opaque
-/// `{"type":"object"}` otherwise — chosen at the call site without requiring a
+/// `{"type":"object"}` otherwise -- chosen at the call site without requiring a
 /// trait bound the macro cannot enforce.
 #[cfg(feature = "proto-2026-07-28-rc")]
 #[doc(hidden)]
@@ -373,7 +373,7 @@ mod tests {
     #[test]
     fn transparent_serde_has_no_wrapper_key() {
         // Serializing must not introduce a wrapper field like `{"0": ...}`
-        // or `{"value": ...}` — the schema IS the value.
+        // or `{"value": ...}` -- the schema IS the value.
         let raw = json!({ "type": "string", "minLength": 1 });
         let schema = InputSchema(raw.clone());
         let serialized = serde_json::to_value(&schema).expect("serializes");
@@ -408,7 +408,7 @@ mod tests {
 
         // Re-serializing through serde_json::to_string yields a string that
         // deserializes back to the same Value (byte-exactness is not
-        // guaranteed across serde_json — key order in maps is preserved by
+        // guaranteed across serde_json -- key order in maps is preserved by
         // default but we compare as Value to be canonical).
         let re_serialized = serde_json::to_string(&schema).expect("serializes");
         let reparsed: Value = serde_json::from_str(&re_serialized).expect("reparses");
@@ -421,7 +421,7 @@ mod tests {
     fn from_value_preserves_arbitrary_keys() {
         // The whole point of Value-shaped schemas: full JSON Schema 2020-12
         // expressivity. `oneOf`, `$ref`, `additionalProperties`, custom
-        // keywords — all must round-trip verbatim.
+        // keywords -- all must round-trip verbatim.
         let raw = json!({
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "$id": "https://example.com/widget.schema.json",

@@ -24,9 +24,9 @@ use crate::{
         resource::SubscribeRequestParams,
     },
 };
-// `RequestId` is only referenced by the server→client request paths (non-RC
+// `RequestId` is only referenced by the server->client request paths (non-RC
 // elicitation/sampling) and the task API; under the stateless RC build without
-// tasks it is unused — including in tests, whose `RequestId` uses live in
+// tasks it is unused -- including in tests, whose `RequestId` uses live in
 // modules carrying those very same gates.
 #[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "tasks"))]
 use crate::types::RequestId;
@@ -76,7 +76,7 @@ pub(crate) struct MrtrCtx {
     /// `requestState`, merged with this round's `inputResponses`).
     ///
     /// Raw [`serde_json::Value`]s: the result type depends on which kind of
-    /// input was requested, so each helper deserializes its own — the same
+    /// input was requested, so each helper deserializes its own -- the same
     /// arrangement [`Context::memo`] uses.
     pub(crate) answers: std::collections::HashMap<String, serde_json::Value>,
 
@@ -116,8 +116,8 @@ impl MrtrCtx {
     /// Returns the cached answer for `key`, or records the request and returns
     /// the MRTR "input required" sentinel error to unwind the handler.
     ///
-    /// The answer is stored raw, so it is deserialized into `T` — the result
-    /// type the requested kind implies — on the replay round. A stored answer
+    /// The answer is stored raw, so it is deserialized into `T` -- the result
+    /// type the requested kind implies -- on the replay round. A stored answer
     /// that does not fit `T` means the client answered the right key with the
     /// wrong kind of result, which is a protocol violation rather than a
     /// reason to re-ask (re-asking would loop).
@@ -196,7 +196,7 @@ pub(crate) enum ExecMode {
 
     /// Stateful task-augmented call: the tool runs in a background future that
     /// genuinely suspends on the task tracker. Carries no MRTR key /
-    /// `requestState` / replay log — the task tracker is the held state.
+    /// `requestState` / replay log -- the task tracker is the held state.
     #[cfg(feature = "tasks")]
     Task(Arc<TaskExec>),
 }
@@ -204,7 +204,7 @@ pub(crate) enum ExecMode {
 /// Per-dispatch state for a background, task-augmented tool call
 /// (`proto-2026-07-28-rc` + `tasks`): just the task id (also the
 /// session-independent resume key) and whether the tool's task support is
-/// `Required`. No MRTR key, `requestState`, or replay log — tasks run on the
+/// `Required`. No MRTR key, `requestState`, or replay log -- tasks run on the
 /// stateful substrate, not MRTR, so the MRTR effect helpers do not apply here.
 #[cfg(all(feature = "proto-2026-07-28-rc", feature = "tasks"))]
 #[derive(Default)]
@@ -230,7 +230,7 @@ impl TaskExec {
 ///
 /// Obtained via [`Context::task`]; mirrors the client's `Client::task()` builder.
 /// Its methods operate on the stateful task substrate (suspend/resume) and error
-/// when the current dispatch is not task-augmented — keeping the task and MRTR
+/// when the current dispatch is not task-augmented -- keeping the task and MRTR
 /// substrates explicitly separate.
 #[cfg(all(feature = "proto-2026-07-28-rc", feature = "tasks"))]
 #[derive(Debug)]
@@ -307,7 +307,7 @@ pub struct Context {
     /// Type-erased JWT/auth claims of the current request.
     ///
     /// Inserted by the HTTP engine. Any type implementing [`Claims`]
-    /// works — neva's `DefaultClaims`, or a custom claims struct from a
+    /// works -- neva's `DefaultClaims`, or a custom claims struct from a
     /// custom engine adapter.
     #[cfg(feature = "http-server")]
     pub(crate) claims: Option<Arc<dyn Claims>>,
@@ -317,7 +317,7 @@ pub struct Context {
 
     /// Represents a queue of pending requests
     ///
-    /// Only read by [`Context::send_request`] (server→client requests), which
+    /// Only read by [`Context::send_request`] (server->client requests), which
     /// the stateless RC build does not use.
     #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
     pending: RequestQueue,
@@ -796,7 +796,7 @@ impl Context {
                     let task_id = task.id.clone();
 
                     // The tool runs in this spawned task on the *stateful* task
-                    // substrate — not MRTR. Under the RC it gets a `Task`
+                    // substrate -- not MRTR. Under the RC it gets a `Task`
                     // execution context (no MRTR key / `requestState`): elicitation
                     // goes through `ctx.task().elicit(...)`, which suspends on the
                     // task tracker (resumed by a client answer keyed by the task
@@ -1000,7 +1000,7 @@ impl Context {
     /// [`ElicitResult`].
     ///
     /// **Important:** code before an `elicit` point re-executes on every
-    /// round-trip — keep it side-effect-free.
+    /// round-trip -- keep it side-effect-free.
     ///
     /// # Example
     /// ```no_run
@@ -1025,7 +1025,7 @@ impl Context {
     ) -> Result<ElicitResult, Error> {
         // `ctx.elicit` is the *MRTR* (stateless re-run) entry point. A
         // task-augmented call runs on the stateful task substrate and must use
-        // the explicit `ctx.task().elicit(...)` builder instead — the two never
+        // the explicit `ctx.task().elicit(...)` builder instead -- the two never
         // mix (see [`ExecMode`]).
         match &self.exec {
             ExecMode::Mrtr(mrtr) => mrtr.resolve(
@@ -1051,14 +1051,14 @@ impl Context {
     /// handler unwinds; when the client retries with the result, the handler
     /// re-runs and this returns the cached [`CreateMessageResult`](crate::types::sampling::CreateMessageResult).
     ///
-    /// **Important:** code before this point re-executes on every round-trip —
+    /// **Important:** code before this point re-executes on every round-trip --
     /// keep it side-effect-free, or guard it with [`Self::once`] /
     /// [`Self::memo`] / [`Self::on_commit`], which work here exactly as they do
     /// for elicitation.
     ///
     /// # Deprecated on arrival
-    /// MCP 2026-07-28 removed sampling as a capability-driven server→client
-    /// request and re-homed the *ability* onto MRTR — already on its
+    /// MCP 2026-07-28 removed sampling as a capability-driven server->client
+    /// request and re-homed the *ability* onto MRTR -- already on its
     /// deprecation path (a 12-month lifecycle shared with roots and logging).
     /// It exists for migration; prefer tools that do not need the client's
     /// model.
@@ -1099,7 +1099,7 @@ impl Context {
     /// Asks the client which filesystem roots it exposes (MRTR,
     /// `proto-2026-07-28-rc`).
     ///
-    /// Same re-run/replay semantics as [`Self::elicit`] — see [`Self::sample`]
+    /// Same re-run/replay semantics as [`Self::elicit`] -- see [`Self::sample`]
     /// for the round-trip caveat.
     ///
     /// # Deprecated on arrival
@@ -1215,7 +1215,7 @@ impl Context {
 
     /// Suspends a task-augmented elicit until the client posts an answer.
     ///
-    /// Parks a resume slot keyed by the **task id** (not the session — the
+    /// Parks a resume slot keyed by the **task id** (not the session -- the
     /// stateless transport mints a fresh session per POST), exposes the prompt
     /// via `tasks/result`, and flips the task to `input_required`. The live
     /// background future then awaits the answer, which the dispatch layer routes
@@ -1265,7 +1265,7 @@ impl Context {
     ///
     /// # Durability
     /// The effect runs *before* the `requestState` recording it is durably
-    /// acknowledged by the client — it is at-most-once within a single
+    /// acknowledged by the client -- it is at-most-once within a single
     /// `requestState` chain, **not** globally exactly-once. For non-idempotent
     /// side effects, pass a stable idempotency key to the downstream system.
     ///
@@ -1294,7 +1294,7 @@ impl Context {
                 Ok(true)
             }
             // `once` is an MRTR helper (it dedups across re-runs). A required-task
-            // tool never re-runs, so using it there is a mistake — reject it.
+            // tool never re-runs, so using it there is a mistake -- reject it.
             #[cfg(feature = "tasks")]
             ExecMode::Task(task) if task.required => Err(Error::new(
                 ErrorCode::InvalidRequest,
@@ -1346,14 +1346,14 @@ impl Context {
                 Ok(value)
             }
             // `memo` is an MRTR helper (it caches across re-runs). A required-task
-            // tool never re-runs, so using it there is a mistake — reject it.
+            // tool never re-runs, so using it there is a mistake -- reject it.
             #[cfg(feature = "tasks")]
             ExecMode::Task(task) if task.required => Err(Error::new(
                 ErrorCode::InvalidRequest,
                 "ctx.memo is an MRTR helper and is not available in a required-task tool; compute the value inline",
             )),
             // Optional-task / None: no re-run, so there is nothing to cache
-            // against — just compute the value.
+            // against -- just compute the value.
             _ => {
                 let _ = key;
                 compute.await
@@ -1370,20 +1370,20 @@ impl Context {
     ///
     /// Commits run whenever the tool returns a success response.
     /// If your tool encodes failure in content rather than returning `Err` or
-    /// setting `isError: true`, commits will still run — return `Err`
+    /// setting `isError: true`, commits will still run -- return `Err`
     /// (folded into `isError: true` by the wrapper) or set the flag explicitly
     /// to suppress them.
     ///
     /// The future is stored in the shared dispatch state, so it must be
-    /// `Send + 'static` — capture by `move`. This is an **MRTR-only** helper:
+    /// `Send + 'static` -- capture by `move`. This is an **MRTR-only** helper:
     /// a task runs on the stateful substrate and never re-runs, so in a
     /// task-augmented call `on_commit` is ignored (run the effect inline
-    /// instead) — it warns for a `Required` tool and logs at `debug` for an
+    /// instead) -- it warns for a `Required` tool and logs at `debug` for an
     /// `Optional` one. Called outside an elicitable dispatch, it is a no-op.
     ///
     /// # Durability
     /// "Exactly once" means once per successfully-completed flow, not globally
-    /// idempotent — a client that abandons and restarts the flow runs it again.
+    /// idempotent -- a client that abandons and restarts the flow runs it again.
     ///
     /// # Example
     /// ```no_run
@@ -1617,8 +1617,8 @@ impl Context {
 
     /// Sends a [`Request`] to a client
     ///
-    /// Server→client requests (non-RC elicitation/sampling/roots and the task
-    /// API). The stateless RC transport has no out-of-band server→client
+    /// Server->client requests (non-RC elicitation/sampling/roots and the task
+    /// API). The stateless RC transport has no out-of-band server->client
     /// channel, so this is unused there.
     #[inline]
     #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
@@ -1654,7 +1654,7 @@ impl Context {
     /// Sends a notification to a client.
     ///
     /// Under the stateless `proto-2026-07-28-rc` transport there is no
-    /// out-of-band server→client channel, so this is a no-op: progress,
+    /// out-of-band server->client channel, so this is a no-op: progress,
     /// list-changed, resource-updated, task-status and elicitation
     /// notifications are inert and clients poll instead.
     #[inline]
@@ -1667,10 +1667,10 @@ impl Context {
     ) -> Result<(), Error> {
         #[cfg(feature = "proto-2026-07-28-rc")]
         {
-            // No out-of-band server→client channel on the stateless transport,
+            // No out-of-band server->client channel on the stateless transport,
             // so this is an intentional no-op. Surface it once at debug so a
             // server author who calls e.g. `resource_updated`/`add_tool` and
-            // expects a push isn't silently misled — the masked capabilities
+            // expects a push isn't silently misled -- the masked capabilities
             // already tell clients to poll instead.
             #[cfg(feature = "tracing")]
             tracing::debug!(
@@ -1835,7 +1835,7 @@ mod mrtr_tests {
         assert!(mrtr.pending.lock().unwrap().is_some());
     }
 
-    /// Every kind replays through the same slot — only the result type differs.
+    /// Every kind replays through the same slot -- only the result type differs.
     #[test]
     fn resolve_replays_each_input_kind_as_its_own_result_type() {
         use crate::types::mrtr::InputRequest;

@@ -6,13 +6,13 @@
 //!   [`handlers::handle_oauth_metadata`];
 //! * requests failing token validation answer with
 //!   [`handlers::handle_unauthorized`], so the `401` carries the
-//!   `WWW-Authenticate: Bearer resource_metadata="…"` challenge;
+//!   `WWW-Authenticate: Bearer resource_metadata="..."` challenge;
 //! * decoded claims go into the neutral request's extensions as
 //!   `Arc<dyn Claims>`, which keeps `#[tool(roles = [...])]` gates
 //!   working exactly like under the default Volga engine.
 //!
 //! Token validation here is HS256 with a shared secret to keep the
-//! example self-contained — swap `decode_claims` for your JWKS-based
+//! example self-contained -- swap `decode_claims` for your JWKS-based
 //! validation against a real issuer.
 //!
 //! Run with:
@@ -108,7 +108,7 @@ impl HttpEngine for HyperEngine {
     }
 }
 
-/// The engine's router — the hyper counterpart of the three MCP routes
+/// The engine's router -- the hyper counterpart of the three MCP routes
 /// plus the well-known metadata document.
 async fn route(
     req: http::Request<Incoming>,
@@ -134,7 +134,7 @@ async fn route(
     };
 
     // The engine authorization contract: validate the credential, put
-    // the claims into the neutral request's extensions — or answer with
+    // the claims into the neutral request's extensions -- or answer with
     // the challenge so the client can start the OAuth flow.
     match decode_claims(neutral.headers(), &ctx, &secret) {
         Some(claims) => {
@@ -156,8 +156,8 @@ async fn route(
             HyperEngine::adapt_response(handlers::handle_delete(neutral, &ctx).await)
         }
         http::Method::GET => match handlers::handle_get_sse::<HyperEngine>(neutral, &ctx).await {
-            SseResponse::Status(resp) => HyperEngine::adapt_response(resp),
-            SseResponse::Stream { headers, stream } => {
+            StreamResponse::Complete(resp) => HyperEngine::adapt_response(resp),
+            StreamResponse::Stream { headers, stream } => {
                 let body = StreamBody::new(stream.map(|event| Ok(Frame::data(event))));
                 let mut resp = http::Response::builder()
                     .status(http::StatusCode::OK)
@@ -175,7 +175,7 @@ async fn route(
 }
 
 /// HS256 bearer validation with the audience bound to the canonical
-/// resource URI — the place to plug JWKS validation instead.
+/// resource URI -- the place to plug JWKS validation instead.
 fn decode_claims(
     headers: &http::HeaderMap,
     ctx: &HttpContext,

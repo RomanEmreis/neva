@@ -12,8 +12,8 @@ use crate::{
 
 /// A fluent builder for constructing and sending a JSON-RPC 2.0 batch request.
 ///
-/// Obtain via [`Client::batch`]. Add requests with the provided methods —
-/// which mirror [`Client`]'s single-call API — then call [`BatchBuilder::send`].
+/// Obtain via [`Client::batch`]. Add requests with the provided methods --
+/// which mirror [`Client`]'s single-call API -- then call [`BatchBuilder::send`].
 ///
 /// # Example
 /// ```no_run

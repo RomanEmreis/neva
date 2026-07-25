@@ -129,7 +129,7 @@ impl App {
         // `notifications/resources/updated`, so the `resources.subscribe`
         // capability is masked off (see `McpOptions::resources_capability`).
         // Don't register subscribe/unsubscribe handlers under RC either, so the
-        // advertised surface and the accepted methods stay in sync — the server
+        // advertised surface and the accepted methods stay in sync -- the server
         // won't accept a subscription it never announces.
         #[cfg(not(feature = "proto-2026-07-28-rc"))]
         {
@@ -278,9 +278,14 @@ impl App {
             );
         }
 
+        // The request tracing span must wrap the whole composed pipeline -- user
+        // `wrap` middleware included -- so log events they emit around
+        // `next(ctx)` stay inside the span and see the request-scoped level.
+        // Prepending makes it the outermost layer; the terminal dispatcher
+        // (`message_middleware`) stays innermost.
         #[cfg(feature = "tracing")]
         self.options
-            .add_middleware(make_mw(Self::tracing_middleware));
+            .add_middleware_front(make_mw(Self::tracing_middleware));
         self.options
             .add_middleware(make_mw(Self::message_middleware));
 
@@ -325,12 +330,12 @@ impl App {
     /// `requestState` (`proto-2026-07-28-rc`).
     ///
     /// The blob is sealed with ChaCha20-Poly1305 (AEAD) using a key derived from
-    /// this secret, so the payload — including any values a handler caches via
-    /// [`Context::memo`](crate::Context::memo) — is confidential as well as
+    /// this secret, so the payload -- including any values a handler caches via
+    /// [`Context::memo`](crate::Context::memo) -- is confidential as well as
     /// tamper-evident.
     ///
     /// **Multi-instance stateless deployments MUST set this to a shared
-    /// secret** — otherwise a retry that lands on a different instance fails to
+    /// secret** -- otherwise a retry that lands on a different instance fails to
     /// decrypt the `requestState`. If unset, an ephemeral per-process key is
     /// used (fine for single-instance / development).
     ///
@@ -338,7 +343,7 @@ impl App {
     /// [`with_request_state_keys`](Self::with_request_state_keys).
     ///
     /// Because the state is sealed rather than signed, this value protects the
-    /// *confidentiality* of memoized values, not just their integrity — treat
+    /// *confidentiality* of memoized values, not just their integrity -- treat
     /// it as a secret. See the [state codec docs](crate::types::mrtr) for why
     /// MRTR encrypts instead of signing.
     ///
@@ -361,9 +366,9 @@ impl App {
     /// enabling zero-downtime key rotation (`proto-2026-07-28-rc`).
     ///
     /// New blobs are sealed with the key `active_kid` names and carry the kid
-    /// on the wire (`v1.{kid}.…`); an inbound blob is decrypted with whichever
+    /// on the wire (`v1.{kid}....`); an inbound blob is decrypted with whichever
     /// accepted key its kid segment names. To rotate: ship the new key as
-    /// *accepted* on every instance first, then flip `active_kid` to it —
+    /// *accepted* on every instance first, then flip `active_kid` to it --
     /// states minted under the old kid keep verifying until their TTL lapses,
     /// after which the old key can be dropped.
     ///
@@ -435,7 +440,7 @@ impl App {
     /// [`InMemoryStateStore`](crate::app::mrtr_store::InMemoryStateStore).
     /// **Multi-instance stateless deployments should set a shared store** (e.g.
     /// Redis) so a retry routed to another instance still sees the committed
-    /// result — the same constraint as
+    /// result -- the same constraint as
     /// [`with_request_state_secret`](Self::with_request_state_secret).
     ///
     /// # Example
@@ -920,12 +925,34 @@ impl App {
 
     #[cfg(feature = "tracing")]
     async fn tracing_middleware(ctx: MwContext, next: Next) -> Response {
+        #[cfg(not(feature = "proto-2026-07-28-rc"))]
         let span = create_tracing_span(ctx.session_id().cloned());
+        // RC: the request-scoped logging level rides on the originating
+        // request's `_meta`. Stamp it onto the span so the notification layer
+        // can decide which `notifications/message` to deliver for this request.
+        #[cfg(feature = "proto-2026-07-28-rc")]
+        let span = {
+            let log_level = ctx
+                .request()
+                .and_then(|req| req.meta())
+                .and_then(|meta| meta.log_level);
+            create_tracing_span(ctx.session_id().cloned(), log_level)
+        };
         next(ctx).instrument(span).await
     }
 
     #[inline]
     async fn execute(msg: Message, runtime: ServerRuntime) {
+        // Closing the request notification sink here -- once the *whole*
+        // middleware pipeline has run -- is what lets a request-scoped SSE POST
+        // response know no more notifications are coming, so logs emitted by
+        // user middleware after `next(ctx)` still make it onto the stream.
+        #[cfg(all(
+            feature = "proto-2026-07-28-rc",
+            feature = "tracing",
+            feature = "http-server"
+        ))]
+        let _sink_guard = RequestSinkGuard(msg.session_id().copied());
         runtime.execute(msg).await;
     }
 
@@ -940,6 +967,16 @@ impl App {
         // role/permission guards, SSE routing) sees the original HTTP context.
         let batch_id = batch.id.clone();
         let batch_session_id = batch.session_id;
+        // One guard for the whole batch (inner requests run through
+        // `ServerRuntime::execute`, so they never close the shared sink early):
+        // the request-scoped SSE response stays open until every inner request
+        // and its middleware have finished. See `App::execute`.
+        #[cfg(all(
+            feature = "proto-2026-07-28-rc",
+            feature = "tracing",
+            feature = "http-server"
+        ))]
+        let _sink_guard = RequestSinkGuard(batch_session_id);
         #[cfg(feature = "http-server")]
         let batch_headers = batch.headers.clone();
         #[cfg(feature = "http-server")]
@@ -962,7 +999,7 @@ impl App {
         };
 
         // Capture before consuming the batch so we know whether to send an ack
-        // when all Response envelopes were consumed by pending.complete (§ below).
+        // when all Response envelopes were consumed by pending.complete (section below).
         let has_error_responses = batch
             .iter()
             .any(|e| matches!(e, MessageEnvelope::Response(Response::Err(_))));
@@ -1016,7 +1053,7 @@ impl App {
                         // complete it (the client is responding to a server request
                         // inside the batch). Otherwise, if the response carries an
                         // error, it is a synthetic InvalidRequest injected by the
-                        // deserializer for a malformed batch item — route it through
+                        // deserializer for a malformed batch item -- route it through
                         // the collector so it appears in the batch reply.
                         // Unmatched Ok responses are unsolicited or stale and are
                         // dropped silently, consistent with the single-message
@@ -1034,7 +1071,7 @@ impl App {
         join_all(futures).await;
 
         // Snapshot collected responses. Any response that a background task
-        // produces after this point is silently discarded — it arrived too
+        // produces after this point is silently discarded -- it arrived too
         // late to be included in the batch reply.
         let envelopes = responses
             .lock()
@@ -1131,7 +1168,7 @@ impl App {
             ),
             Message::Response(resp) => Some(Self::handle_response(resp, runtime).await),
             Message::Notification(notification) => {
-                // JSON-RPC 2.0 §4: notifications must never receive a response.
+                // JSON-RPC 2.0 section 4: notifications must never receive a response.
                 Self::handle_notification(notification, runtime).await;
                 None
             }
@@ -1225,16 +1262,16 @@ impl App {
 
         // MRTR idempotency: the final-round response cache is keyed by the
         // incoming state's sealed segment (the ciphertext+tag after the last
-        // `.` — `rsplit_once` keeps grabbing it regardless of the leading
-        // `v1.kid.` header segments — unique per minted state thanks to the
+        // `.` -- `rsplit_once` keeps grabbing it regardless of the leading
+        // `v1.kid.` header segments -- unique per minted state thanks to the
         // random AEAD nonce) *plus* a
         // digest of this round's `inputResponses`. The answers digest matters
         // because the *same* minted state can be echoed with *different*
-        // answers — a client (or attacker) replaying one round-1 blob with two
+        // answers -- a client (or attacker) replaying one round-1 blob with two
         // different `inputResponses` would otherwise hit the first answer's
         // cached result for the second. Folding in the answers' digest keeps
-        // those apart, while a genuine lost-response retry — same state *and*
-        // same answers — still hits. Only committed *final* rounds are ever
+        // those apart, while a genuine lost-response retry -- same state *and*
+        // same answers -- still hits. Only committed *final* rounds are ever
         // cached, so a hit here is by construction a replay of one.
         #[cfg(feature = "proto-2026-07-28-rc")]
         let state_tag: Option<String> = if mrtr_method {
@@ -1303,8 +1340,8 @@ impl App {
 
         // MRTR interception: if the handler requested input (recorded in the
         // shared `MrtrCtx`), convert to an `InputRequiredResult` regardless of
-        // what the handler returned. The pending flag — not the sentinel error
-        // — is the reliable signal, because tool/prompt/resource wrappers fold
+        // what the handler returned. The pending flag -- not the sentinel error
+        // -- is the reliable signal, because tool/prompt/resource wrappers fold
         // a handler `Err` into an in-band error result before we see it.
         #[cfg(feature = "proto-2026-07-28-rc")]
         let mut cache_final = false;
@@ -1380,7 +1417,7 @@ impl App {
 
         // RC task-elicit resume: an answer to a suspended task `ctx.elicit` is
         // correlated by the server-generated task id (the bare response id),
-        // *not* the session — the stateless transport mints a fresh session per
+        // *not* the session -- the stateless transport mints a fresh session per
         // POST, so the session-keyed request queue could never match the
         // suspend round. Try delivering to a parked task first; `provide_input`
         // hands the response back when no task elicit is waiting, so non-task
@@ -1421,7 +1458,6 @@ impl App {
                     runtime.options().cancel_request(&params.request_id);
                 }
             }
-            #[cfg(not(feature = "proto-2026-07-28-rc"))]
             crate::types::notification::commands::MESSAGE => {
                 #[cfg(feature = "tracing")]
                 notification.write();
@@ -1436,12 +1472,75 @@ impl App {
     }
 }
 
-#[cfg(feature = "tracing")]
+/// Closes the per-request notification sink for a stateless HTTP `POST` when the
+/// message's whole middleware pipeline is done (including on panic or task
+/// cancellation, hence a `Drop` guard rather than a plain call).
+///
+/// Dropping the sender is the completion signal a request-scoped SSE `POST`
+/// response waits for: only then does it know every notification -- including
+/// ones user middleware emitted after `next(ctx)` -- has been queued, so it can
+/// drain them and close with the final response.
+#[cfg(all(
+    feature = "proto-2026-07-28-rc",
+    feature = "tracing",
+    feature = "http-server"
+))]
+struct RequestSinkGuard(Option<uuid::Uuid>);
+
+#[cfg(all(
+    feature = "proto-2026-07-28-rc",
+    feature = "tracing",
+    feature = "http-server"
+))]
+impl Drop for RequestSinkGuard {
+    fn drop(&mut self) {
+        if let Some(id) = self.0 {
+            crate::types::notification::fmt::unregister_request_sink(&id);
+        }
+    }
+}
+
+/// Builds the per-request tracing span carrying the session id.
+///
+/// See the RC variant below for why the span is created at `ERROR`.
+#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
 fn create_tracing_span(session_id: Option<uuid::Uuid>) -> tracing::Span {
     if let Some(mcp_session_id) = session_id {
-        tracing::info_span!("request", mcp_session_id = mcp_session_id.to_string())
+        tracing::error_span!("request", mcp_session_id = mcp_session_id.to_string())
     } else {
-        tracing::info_span!("request")
+        tracing::error_span!("request")
+    }
+}
+
+/// Builds the per-request tracing span, carrying the session id and (RC) the
+/// request-scoped logging level as span fields the notification layer reads.
+///
+/// The span is created at `ERROR` -- the highest level -- so it is not itself
+/// filtered out. It carries no message: it exists only to route and filter the
+/// events emitted inside it. At a lower level a common global threshold (say
+/// `LevelFilter::WARN`) would disable the span while still letting WARN/ERROR
+/// events through, leaving those events with no `mcp_session_id` to route by and
+/// no `mcp_log_level` to filter against -- request-scoped logging would silently
+/// stop working. `ERROR` keeps the context observable for every event that the
+/// application's own threshold admits.
+#[cfg(all(feature = "tracing", feature = "proto-2026-07-28-rc"))]
+fn create_tracing_span(
+    session_id: Option<uuid::Uuid>,
+    log_level: Option<crate::types::notification::LoggingLevel>,
+) -> tracing::Span {
+    match (session_id, log_level) {
+        (Some(sid), Some(level)) => tracing::error_span!(
+            "request",
+            mcp_session_id = sid.to_string(),
+            mcp_log_level = u64::from(level.severity())
+        ),
+        (Some(sid), None) => {
+            tracing::error_span!("request", mcp_session_id = sid.to_string())
+        }
+        (None, Some(level)) => {
+            tracing::error_span!("request", mcp_log_level = u64::from(level.severity()))
+        }
+        (None, None) => tracing::error_span!("request"),
     }
 }
 
@@ -1526,7 +1625,7 @@ fn seed_mrtr_ctx(
         // `inputResponses` are answers to inputs the server requested in a
         // prior round; that request set lives in the encrypted `requestState`.
         // Without a verified state there is nothing to bind them to, so accept
-        // only solicited, non-duplicate keys — otherwise a client could
+        // only solicited, non-duplicate keys -- otherwise a client could
         // pre-seed answers for a later `ctx.elicit` key (skipping the intended
         // `InputRequiredResult`) or overwrite an already-resolved answer.
         let Some(requested) = requested.as_ref() else {
@@ -1628,7 +1727,7 @@ fn build_input_required(
 /// A protocol-level failure (`Err`, or an `Ok(Response::Err(..))`) is excluded
 /// by construction. Crucially, so is an *in-band* tool error: tool/prompt
 /// wrappers fold a handler `Err` into `Ok(CallToolResponse { isError: true })`,
-/// so a plain `resp.is_ok()` check would still run commits on a failed call —
+/// so a plain `resp.is_ok()` check would still run commits on a failed call --
 /// applying irreversible side effects (DB writes, charges) registered via
 /// `ctx.on_commit(..)` even though the tool ultimately reported failure.
 #[cfg(feature = "proto-2026-07-28-rc")]
@@ -1657,7 +1756,33 @@ mod tests {
         assert_eq!(app.options.max_state_bytes(), 4096);
     }
 
-    /// Deferred MRTR commits must run only for a genuine success — never for a
+    /// The request span carries the routing and filtering context for every
+    /// event emitted while handling a request, so a common global threshold
+    /// (`LevelFilter::WARN`) must not disable it: WARN/ERROR events stay enabled
+    /// and would otherwise lose their `mcp_session_id` and `mcp_log_level`.
+    #[cfg(all(feature = "tracing", feature = "proto-2026-07-28-rc"))]
+    #[test]
+    fn request_span_survives_a_warning_only_filter() {
+        use crate::types::notification::LoggingLevel;
+        use tracing_subscriber::prelude::*;
+
+        let subscriber =
+            tracing_subscriber::registry().with(tracing::level_filters::LevelFilter::WARN);
+
+        tracing::subscriber::with_default(subscriber, || {
+            let span =
+                super::create_tracing_span(Some(uuid::Uuid::new_v4()), Some(LoggingLevel::Warning));
+            assert!(
+                !span.is_disabled(),
+                "the request span must stay enabled under a warning-only filter"
+            );
+            // The contrast: an INFO span -- what this used to be -- is dropped,
+            // taking the request context with it.
+            assert!(tracing::info_span!("request").is_disabled());
+        });
+    }
+
+    /// Deferred MRTR commits must run only for a genuine success -- never for a
     /// protocol-level error nor for an in-band tool error (`isError: true`),
     /// which tool wrappers fold a handler `Err` into.
     #[cfg(feature = "proto-2026-07-28-rc")]
@@ -1669,29 +1794,29 @@ mod tests {
 
         let id = RequestId::Number(1);
 
-        // Genuine success → commit.
+        // Genuine success -> commit.
         let ok = Ok(Response::success(
             id.clone(),
             json!({ "content": [], "isError": false }),
         ));
         assert!(super::mrtr_should_commit(&ok));
 
-        // Success with no `isError` field at all (e.g. a non-tool result) → commit.
+        // Success with no `isError` field at all (e.g. a non-tool result) -> commit.
         let plain = Ok(Response::success(id.clone(), json!({ "ok": true })));
         assert!(super::mrtr_should_commit(&plain));
 
-        // In-band tool error folded into Ok → do NOT commit.
+        // In-band tool error folded into Ok -> do NOT commit.
         let tool_err = Ok(Response::success(
             id.clone(),
             json!({ "content": [], "isError": true }),
         ));
         assert!(!super::mrtr_should_commit(&tool_err));
 
-        // Protocol-level error response → do NOT commit.
+        // Protocol-level error response -> do NOT commit.
         let proto_err = Ok(Response::error(id.clone(), Error::new(-32603, "boom")));
         assert!(!super::mrtr_should_commit(&proto_err));
 
-        // Handler `Err` → do NOT commit.
+        // Handler `Err` -> do NOT commit.
         let hard_err: Result<Response, Error> = Err(Error::new(-32603, "boom"));
         assert!(!super::mrtr_should_commit(&hard_err));
     }
@@ -1775,7 +1900,7 @@ mod tests {
         }
 
         /// Builds the `_meta` JSON with the given request state (if any) and
-        /// `inputResponses` map of key → accepted [`ElicitResult`].
+        /// `inputResponses` map of key -> accepted [`ElicitResult`].
         fn request_with_responses(state: Option<&str>, response_keys: &[&str]) -> Request {
             use crate::types::elicitation::ElicitResult;
             let responses: serde_json::Map<String, serde_json::Value> = response_keys
@@ -1899,7 +2024,7 @@ mod tests {
         .expect("non-empty batch must be constructable");
 
         // Replicate the filter logic from execute_batch:
-        // Request → Some(response slot), Notification/Response → None
+        // Request -> Some(response slot), Notification/Response -> None
         let response_slots: Vec<MessageEnvelope> = batch
             .into_iter()
             .filter_map(|envelope| match envelope {

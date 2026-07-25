@@ -2,8 +2,8 @@
 //!
 //! These helpers enforce the `with_roles` / `with_permissions` rules
 //! attached to tools, prompts, and resources. They operate on neva's
-//! own [`Claims`] trait so any HTTP engine — Volga, axum, hyper, a
-//! custom adapter — can opt in by implementing the trait for its claims
+//! own [`Claims`] trait so any HTTP engine -- Volga, axum, hyper, a
+//! custom adapter -- can opt in by implementing the trait for its claims
 //! type. The Volga adapter re-uses these same validators so behavior is
 //! identical across engines.
 
@@ -21,7 +21,7 @@ const ERR_UNAUTHORIZED: &str = "Subject is not authorized to invoke this";
 /// `claims` is `None`.
 ///
 /// Accepts `Option<&dyn Claims>` so the same validator runs against any
-/// engine-supplied claims type — Volga's `DefaultClaims` or a custom
+/// engine-supplied claims type -- Volga's `DefaultClaims` or a custom
 /// claims struct from an axum / hyper adapter.
 #[inline]
 pub(crate) fn validate_permissions(
@@ -163,7 +163,7 @@ mod tests {
     }
 
     /// Verify that two different `Claims`-implementing types both flow
-    /// through the same dyn-Claims validator — this is the engine
+    /// through the same dyn-Claims validator -- this is the engine
     /// neutrality contract.
     #[test]
     fn validator_accepts_heterogeneous_claims_types() {

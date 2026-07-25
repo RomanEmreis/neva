@@ -82,7 +82,7 @@ pub struct RequestParamsMeta {
     ///
     /// Companion to [`Self::traceparent`]; carries vendor-specific state
     /// alongside the parent identifier. Same source-compatibility rationale
-    /// applies — the field is unconditional and older peers ignore it.
+    /// applies -- the field is unconditional and older peers ignore it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tracestate: Option<String>,
 
@@ -107,6 +107,20 @@ pub struct RequestParamsMeta {
     #[cfg(feature = "proto-2026-07-28-rc")]
     #[serde(rename = "requestState", skip_serializing_if = "Option::is_none")]
     pub(crate) request_state: Option<String>,
+
+    /// Request-scoped logging level (MCP 2026-07-28).
+    ///
+    /// The minimum severity the client wants to receive as
+    /// `notifications/message` while the server handles this request. This
+    /// replaces the removed global `logging/setLevel` handshake; the desired
+    /// level now rides on the originating request's `_meta`. Deprecated in the
+    /// 2026-07-28 draft together with the rest of the logging surface.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[serde(
+        rename = "io.modelcontextprotocol/logLevel",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) log_level: Option<crate::types::notification::LoggingLevel>,
 
     /// MRTR/stateless: client capabilities declared per-request (v1: a single
     /// `elicitation` flag) so the server can honor "MUST NOT send an input
@@ -208,8 +222,8 @@ impl Request {
     /// Merges `meta` into the request's `_meta`, creating the params/`_meta`
     /// objects when none exist. Symmetric counterpart to [`Self::meta`];
     /// existing (non-`_meta`) params keys are preserved, as are any `_meta`
-    /// entries the typed [`RequestParamsMeta`] does not model — e.g. custom
-    /// extension keys such as `com.example/foo` — which a full replacement
+    /// entries the typed [`RequestParamsMeta`] does not model -- e.g. custom
+    /// extension keys such as `com.example/foo` -- which a full replacement
     /// would silently drop. Only the fields populated on `meta` are written;
     /// unset (`None`) fields leave any existing entry untouched.
     ///
@@ -277,6 +291,32 @@ mod tests {
         let v = serde_json::to_value(&meta).unwrap();
         assert!(v.get("traceparent").is_none());
         assert!(v.get("tracestate").is_none());
+    }
+
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[test]
+    fn log_level_roundtrips_under_spec_meta_key() {
+        use crate::types::notification::LoggingLevel;
+        use serde_json::json;
+
+        let meta = RequestParamsMeta {
+            log_level: Some(LoggingLevel::Warning),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&meta).unwrap();
+        // The request-scoped level rides under the spec `_meta` key, lowercase.
+        assert_eq!(v["io.modelcontextprotocol/logLevel"], json!("warning"));
+
+        let back: RequestParamsMeta = serde_json::from_value(v).unwrap();
+        assert_eq!(back.log_level, Some(LoggingLevel::Warning));
+    }
+
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[test]
+    fn absent_log_level_is_omitted() {
+        let meta = RequestParamsMeta::default();
+        let v = serde_json::to_value(&meta).unwrap();
+        assert!(v.get("io.modelcontextprotocol/logLevel").is_none());
     }
 
     #[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]

@@ -1,4 +1,4 @@
-//! [`VolgaEngine`] — the default [`HttpEngine`] implementation.
+//! [`VolgaEngine`] -- the default [`HttpEngine`] implementation.
 //!
 //! This engine is bound by `HttpServer` when the `http-server-volga`
 //! feature is enabled. It owns the Volga adapter logic exclusively: any
@@ -10,7 +10,7 @@ use crate::error::{Error, ErrorCode};
 use crate::transport::http::core::{
     context::HttpContext,
     engine::HttpEngine,
-    types::{HttpRequest as NeutralRequest, HttpResponse as NeutralResponse},
+    types::{DefaultClaims, HttpRequest as NeutralRequest, HttpResponse as NeutralResponse},
 };
 use crate::types::Message;
 #[cfg(feature = "server-tls")]
@@ -35,7 +35,7 @@ use super::routes;
 /// use neva::transport::http::server::volga::VolgaEngine;
 ///
 /// let engine = VolgaEngine::default();
-/// // wired into `HttpServer` by Task 13 — engines never run standalone.
+/// // wired into `HttpServer` by Task 13 -- engines never run standalone.
 /// ```
 #[derive(Default)]
 pub struct VolgaEngine {
@@ -58,6 +58,16 @@ impl HttpEngine for VolgaEngine {
     type SseEvent = SseMessage;
 
     async fn adapt_request(req: Self::Request) -> Result<NeutralRequest, Error> {
+        // Claims decoded and validated by Volga's `authorize` middleware --
+        // the single decode path for both static-key and OAuth/JWKS modes.
+        // Reading them from the request (rather than re-decoding the
+        // `Authorization` header) also survives Volga's default
+        // `strip_token_from_request`, which removes the header before the
+        // route runs. Inserting them here (per the `HttpEngine` contract)
+        // keeps the Volga routes on the same `dispatch_*` seam as every
+        // other engine.
+        let claims: Option<::volga::auth::Authenticated<DefaultClaims>> = req.extract().ok();
+
         let mut builder = http::Request::builder()
             .method(req.method().clone())
             .uri(req.uri().clone())
@@ -72,9 +82,17 @@ impl HttpEngine for VolgaEngine {
         let body = read_body(req.into_body())
             .await
             .map_err(|e| Error::new(ErrorCode::InternalError, e.to_string()))?;
-        builder
+
+        let mut neutral = builder
             .body(body)
-            .map_err(|e| Error::new(ErrorCode::InternalError, e.to_string()))
+            .map_err(|e| Error::new(ErrorCode::InternalError, e.to_string()))?;
+
+        if let Some(claims) = claims {
+            let claims: Arc<dyn crate::auth::Claims> = Arc::new(claims.into_inner());
+            neutral.extensions_mut().insert(claims);
+        }
+
+        Ok(neutral)
     }
 
     fn adapt_response(resp: NeutralResponse) -> Self::Response {
@@ -86,6 +104,7 @@ impl HttpEngine for VolgaEngine {
         for (name, value) in parts.headers.iter() {
             builder = builder.header_raw(name.as_str(), value.as_bytes());
         }
+
         builder.body(http_body)
     }
 
@@ -98,9 +117,6 @@ impl HttpEngine for VolgaEngine {
     }
 
     async fn run(self, ctx: HttpContext, token: CancellationToken) -> Result<(), Error> {
-        // Volga wires shared state through DI as `Arc<HttpContext>`, so
-        // wrap once here for the duration of the engine's lifetime.
-        let ctx = Arc::new(ctx);
         let addr = ctx.addr().to_owned();
         let endpoint = ctx.endpoint().to_owned();
         #[cfg(feature = "server-oauth")]
@@ -122,14 +138,14 @@ impl HttpEngine for VolgaEngine {
                 // URI (RFC 8707) and `iss` must match the issuer.
                 #[cfg(feature = "server-oauth")]
                 auth.apply_mcp_defaults(ctx.oauth_resource());
-                // `with_oauth` without an issuer is a config error —
+                // `with_oauth` without an issuer is a config error --
                 // surface it as a failed start, not a Volga panic.
                 #[cfg(feature = "server-oauth")]
                 let volga_oauth = auth.take_oauth()?;
 
                 let (bearer, rules) = auth.into_parts();
                 // Advertise the RFC 9728 document on Volga's own 401
-                // challenges: `WWW-Authenticate: Bearer resource_metadata="…"`.
+                // challenges: `WWW-Authenticate: Bearer resource_metadata="..."`.
                 #[cfg(feature = "server-oauth")]
                 let bearer = match &oauth_metadata_url {
                     Some(url) => bearer.with_resource_metadata_url(url.as_str()),
@@ -166,7 +182,7 @@ impl HttpEngine for VolgaEngine {
                 }
                 mcp.map_post("/", routes::post);
                 // Stateless RC transport has no SSE GET stream and no
-                // session-termination DELETE — only POST is routed.
+                // session-termination DELETE -- only POST is routed.
                 #[cfg(not(feature = "proto-2026-07-28-rc"))]
                 {
                     mcp.map_get("/", routes::get);
@@ -174,7 +190,7 @@ impl HttpEngine for VolgaEngine {
                 }
             });
 
-        // RFC 9728 §3: the Protected Resource Metadata document must be
+        // RFC 9728 section 3: the Protected Resource Metadata document must be
         // reachable without credentials.
         #[cfg(feature = "server-oauth")]
         if let Some(path) = &oauth_metadata_path {

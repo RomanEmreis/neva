@@ -9,22 +9,25 @@ use crate::{
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
-pub use log_message::{LogMessage, LoggingLevel, SetLevelRequestParams};
+// `notifications/message` (and its `LoggingLevel`/`LogMessage` payload) is kept
+// under MCP 2026-07-28 as a deprecated, request-scoped notification. Only the
+// `logging/setLevel` handshake (`SetLevelRequestParams`) is removed under the RC.
+#[cfg(not(feature = "proto-2026-07-28-rc"))]
+pub use log_message::SetLevelRequestParams;
+pub use log_message::{LogMessage, LoggingLevel};
 
 #[cfg(feature = "server")]
 use crate::app::handler::{FromHandlerParams, HandlerParams};
 
 pub use progress::ProgressNotification;
 
-#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+#[cfg(feature = "tracing")]
 pub use formatter::NotificationFormatter;
 
-#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+#[cfg(feature = "tracing")]
 pub mod fmt;
-#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+#[cfg(feature = "tracing")]
 mod formatter;
-#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
 mod log_message;
 mod progress;
 
@@ -37,7 +40,6 @@ pub mod commands {
     pub const CANCELLED: &str = "notifications/cancelled";
 
     /// Notification name that indicates that a new log message has been received.
-    #[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
     pub const MESSAGE: &str = "notifications/message";
 
     /// Notification name that indicates that a progress notification has been received.
@@ -144,10 +146,7 @@ impl Notification {
 
     /// Writes the [`Notification`]
     #[inline]
-    #[cfg(all(
-        feature = "tracing",
-        any(not(feature = "proto-2026-07-28-rc"), feature = "client")
-    ))]
+    #[cfg(feature = "tracing")]
     pub fn write(self) {
         let is_stderr = self.is_stderr();
         let Some(params) = self.params else {

@@ -81,7 +81,7 @@ pub(super) struct RequestHandler {
     #[cfg(feature = "tasks")]
     tasks: Arc<TaskTracker>,
 
-    /// Which protocol generation the peer speaks (issue #84) — shared with
+    /// Which protocol generation the peer speaks (issue #84) -- shared with
     /// [`Client`](crate::client::Client), so the dual-mode fallback's flip
     /// is observed by the receive loop.
     #[cfg(feature = "proto-2026-07-28-rc")]
@@ -200,7 +200,7 @@ impl RequestHandler {
 
         tokio::select! {
             biased;
-            // The transport died (or a shutdown signal cancelled it) —
+            // The transport died (or a shutdown signal cancelled it) --
             // no response is coming; fail now rather than after the
             // full request timeout.
             _ = self.token.cancelled() => {
@@ -332,7 +332,7 @@ impl RequestHandler {
                         dispatch_notification(notification, &notification_handler).await;
                     }
                     Message::Batch(batch) => {
-                        // JSON-RPC 2.0 §6 allows either peer to send a batch
+                        // JSON-RPC 2.0 section 6 allows either peer to send a batch
                         // containing any mix of Requests, Notifications, and
                         // Responses.
                         //
@@ -348,8 +348,8 @@ impl RequestHandler {
                                 other => deferred.push(other),
                             }
                         }
-                        // JSON-RPC 2.0 §6: the response to a batch MUST be an
-                        // array — collect all per-request responses and send
+                        // JSON-RPC 2.0 section 6: the response to a batch MUST be an
+                        // array -- collect all per-request responses and send
                         // them back as one Message::Batch rather than as
                         // individual messages.
                         let responses = dispatch_batch_deferred(
@@ -366,7 +366,7 @@ impl RequestHandler {
                         .await;
                         // MessageBatch::new returns Err for an empty vec (all
                         // items were notifications), in which case no reply is
-                        // sent — correct per JSON-RPC 2.0 §6.
+                        // sent -- correct per JSON-RPC 2.0 section 6.
                         if let Ok(batch) = MessageBatch::new(responses)
                             && let Err(_err) = sender.send(Message::Batch(batch)).await
                         {
@@ -719,9 +719,9 @@ async fn get_task_result(req: Request, tasks: &Arc<TaskTracker>) -> Response {
 
 /// Validates that no two [`Request`] envelopes in a batch share the same ID.
 ///
-/// JSON-RPC 2.0 §6 does not explicitly forbid duplicate IDs in a batch, but
+/// JSON-RPC 2.0 section 6 does not explicitly forbid duplicate IDs in a batch, but
 /// duplicate IDs make response-to-request correlation ambiguous on the client
-/// side — [`crate::shared::RequestQueue::push`] would silently overwrite the
+/// side -- [`crate::shared::RequestQueue::push`] would silently overwrite the
 /// earlier waiter, causing it to time out even when a response arrives.
 ///
 /// This is a client-side defensive check, not a spec requirement.
@@ -759,7 +759,7 @@ mod tests {
             token.clone(),
         );
 
-        // The transport was never started — nothing will ever answer.
+        // The transport was never started -- nothing will ever answer.
         let req = Request::new(Some(RequestId::Number(1)), "ping", None::<()>);
         let pending = handler.send_request(req);
         tokio::pin!(pending);
@@ -796,7 +796,7 @@ mod tests {
         let rx2 = queue.push(&id2);
 
         let resp1 = Response::success(id1.clone(), json!({"result": "a"}));
-        // A Request envelope in the middle — must be skipped, not completed
+        // A Request envelope in the middle -- must be skipped, not completed
         let dummy_req = Request::new(Some(RequestId::Number(99)), "ping", None::<()>);
         let resp2 = Response::success(id2.clone(), json!({"result": "b"}));
 
@@ -962,10 +962,10 @@ mod tests {
             ))
         };
 
-        // Unique IDs — should pass
+        // Unique IDs -- should pass
         assert!(validate_batch_ids(&[req(1), req(2), req(3)]).is_ok());
 
-        // Duplicate ID — should fail
+        // Duplicate ID -- should fail
         let err = validate_batch_ids(&[req(1), req(2), req(1)]).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidRequest);
     }
@@ -977,7 +977,7 @@ mod tests {
         ));
         let req =
             MessageEnvelope::Request(Request::new(Some(RequestId::Number(1)), "ping", None::<()>));
-        // Two notifications with no ID fields — should not trigger duplicate check
+        // Two notifications with no ID fields -- should not trigger duplicate check
         assert!(validate_batch_ids(&[notif.clone(), req, notif]).is_ok());
     }
 

@@ -3,7 +3,7 @@
 //! These free functions contain all the JSON-RPC and MCP transport logic
 //! that used to live inside Volga-shaped route handlers. They take a
 //! neutral [`HttpRequest`] and an [`HttpContext`], and return a neutral
-//! [`HttpResponse`] (or an [`SseResponse`] for the GET handler).
+//! [`StreamResponse`] (POST and GET) or [`HttpResponse`] (DELETE, metadata).
 
 use crate::{
     auth::Claims,
@@ -20,31 +20,45 @@ use tokio_stream::wrappers::ReceiverStream;
 use super::{
     context::HttpContext,
     engine::HttpEngine,
-    types::{HttpRequest, HttpResponse, SseResponse},
+    types::{HttpRequest, HttpResponse, StreamResponse},
 };
 
 pub(crate) const MCP_SESSION_ID: &str = "Mcp-Session-Id";
 
 /// One-call POST pipeline for engine adapters: convert the engine-native
-/// request into neva's neutral form via [`HttpEngine::adapt_request`],
-/// run the JSON-RPC dispatch via [`handle_post`], then convert the
-/// neutral response back via [`HttpEngine::adapt_response`].
+/// request into neva's neutral form via [`HttpEngine::adapt_request`] and
+/// run the JSON-RPC dispatch.
+///
+/// The result is a [`StreamResponse`] -- the two reply shapes Streamable
+/// HTTP allows on POST (both since spec revision 2025-03-26):
+///
+/// * `Complete(resp)` -- a single-body reply (JSON object, batch array, or a
+///   bare status such as `202`); pass it through
+///   [`HttpEngine::adapt_response`].
+/// * `Stream { stream, .. }` -- a request-scoped SSE stream carrying the
+///   request's `notifications/message` / `notifications/progress` followed by
+///   its final response; frame it exactly like the GET stream. Produced under
+///   `proto-2026-07-28-rc` + `tracing` when the request opts in (carries
+///   `io.modelcontextprotocol/logLevel` or a `progressToken` in `_meta`);
+///   other builds always return `Complete`.
 ///
 /// Returns [`Err`] when [`HttpEngine::adapt_request`] fails. Engines whose
 /// native response type is itself a `Result` can integrate with `?`;
 /// engines whose response type is infallible can map the error onto an
 /// HTTP 500 of their choosing.
 ///
-/// Lets a route handler collapse to a single line, e.g. (axum):
+/// A route handler is the same two-arm match the GET route already has,
+/// e.g. (axum):
 ///
 /// ```rust,ignore
 /// async fn post_handler(
 ///     State(ctx): State<HttpContext>,
 ///     req: axum::Request<Body>,
 /// ) -> Result<axum::Response, MyError> {
-///     handlers::dispatch_post::<MyEngine>(req, &ctx)
-///         .await
-///         .map_err(MyError::from)
+///     match handlers::dispatch_post::<MyEngine>(req, &ctx).await? {
+///         StreamResponse::Stream { stream, .. } => sse_response(stream),
+///         StreamResponse::Complete(resp) => Ok(MyEngine::adapt_response(resp)),
+///     }
 /// }
 /// ```
 ///
@@ -57,10 +71,19 @@ pub(crate) const MCP_SESSION_ID: &str = "Mcp-Session-Id";
 pub async fn dispatch_post<E: HttpEngine>(
     req: E::Request,
     ctx: &HttpContext,
-) -> Result<E::Response, Error> {
+) -> Result<StreamResponse<impl Stream<Item = E::SseEvent> + Send + 'static>, Error> {
     let neutral = E::adapt_request(req).await?;
-    let resp = handle_post(neutral, ctx).await;
-    Ok(E::adapt_response(resp))
+    #[cfg(all(feature = "proto-2026-07-28-rc", feature = "tracing"))]
+    {
+        Ok(handle_post_streaming::<E>(neutral, ctx).await)
+    }
+    // Without the RC flag (or without tracing to source the notifications)
+    // every POST reply is a single body; the Stream arm is never produced.
+    #[cfg(not(all(feature = "proto-2026-07-28-rc", feature = "tracing")))]
+    {
+        let resp = handle_post(neutral, ctx).await;
+        Ok(StreamResponse::<stream::Empty<E::SseEvent>>::Complete(resp))
+    }
 }
 
 /// One-call DELETE pipeline for engine adapters. See [`dispatch_post`].
@@ -76,28 +99,33 @@ pub async fn dispatch_delete<E: HttpEngine>(
 /// One-call GET-SSE pipeline for engine adapters: converts the
 /// engine-native request to neutral and runs the GET-SSE handshake.
 ///
-/// The returned [`SseResponse`] is engine-agnostic; the engine still
+/// The returned [`StreamResponse`] is engine-agnostic; the engine still
 /// matches `Stream { headers, stream }` (wrapping the stream in its
-/// native SSE response type) vs `Status(resp)` (passing `resp` through
+/// native SSE response type) vs `Complete(resp)` (passing `resp` through
 /// [`HttpEngine::adapt_response`]).
 ///
-/// Returns [`Err`] when [`HttpEngine::adapt_request`] fails — same
+/// Returns [`Err`] when [`HttpEngine::adapt_request`] fails -- same
 /// rationale as [`dispatch_post`].
 pub async fn dispatch_get_sse<E: HttpEngine>(
     req: E::Request,
     ctx: &HttpContext,
-) -> Result<SseResponse<impl Stream<Item = E::SseEvent> + Send + 'static>, Error> {
+) -> Result<StreamResponse<impl Stream<Item = E::SseEvent> + Send + 'static>, Error> {
     let neutral = E::adapt_request(req).await?;
     Ok(handle_get_sse::<E>(neutral, ctx).await)
 }
 
-/// Handle a POST `/{endpoint}` request — the JSON-RPC message ingress.
+/// Handle a POST `/{endpoint}` request -- the JSON-RPC message ingress,
+/// always replying with a single body (JSON object, batch array, or status).
 ///
-/// All MCP protocol logic lives here: parse body, classify as
+/// This is the JSON-only building block: parse body, classify as
 /// request/notification/batch, run the init pre-register, attach claims
 /// from `req.extensions()`, push the message onto the inbound channel,
 /// and await the response on a oneshot (for requests) or return 202
 /// immediately (for notifications and notification-only batches).
+///
+/// Prefer [`dispatch_post`], which also covers the request-scoped SSE reply
+/// (`StreamResponse::Stream`) the RC transport produces for requests that opt
+/// into notifications; use this directly only when the engine cannot stream.
 ///
 /// # Example
 ///
@@ -106,6 +134,37 @@ pub async fn dispatch_get_sse<E: HttpEngine>(
 /// // engine translates `resp` into its native response type
 /// ```
 pub async fn handle_post(req: HttpRequest, ctx: &HttpContext) -> HttpResponse {
+    match prepare_post(req, ctx).await {
+        PostPrep::Reply(resp) => resp,
+        PostPrep::Dispatch { id, msg } => {
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<Message>();
+            ctx.pending.insert(msg.full_id(), resp_tx);
+            if ctx.inbound_tx.send(Ok(msg)).await.is_err() {
+                return status_response(http::StatusCode::INTERNAL_SERVER_ERROR, id);
+            }
+            match resp_rx.await {
+                Ok(resp) => build_json_response(http::StatusCode::OK, id, &resp),
+                Err(_) => status_response(http::StatusCode::INTERNAL_SERVER_ERROR, id),
+            }
+        }
+    }
+}
+
+/// Outcome of the shared POST preamble: either an early reply (protocol error,
+/// parse error, or a `202` for a notification/notification-only batch, all with
+/// side effects already applied), or a request ready to dispatch.
+enum PostPrep {
+    /// A fully-formed reply -- return it as-is.
+    Reply(HttpResponse),
+    /// A request to dispatch: `msg` already carries its session id, headers, and
+    /// claims; `id` is the per-`POST` session id used for response framing.
+    Dispatch { id: uuid::Uuid, msg: Message },
+}
+
+/// Runs the transport preamble shared by the JSON and streaming POST paths:
+/// protocol-version validation, body parse, trace-context recording, and the
+/// notification fast-paths (which forward to the runtime and reply `202`).
+async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
     let mut headers = req.headers().clone();
     let id = get_or_create_mcp_session(&headers);
 
@@ -113,7 +172,7 @@ pub async fn handle_post(req: HttpRequest, ctx: &HttpContext) -> HttpResponse {
     // `MCP-Protocol-Version` header; reject before body dispatch otherwise.
     // `PROTOCOL_VERSIONS` still lists legacy versions (e.g. 2025-06-18) for
     // the non-RC build, but this build has removed the legacy initialize/SSE
-    // behavior and only speaks RC stateless semantics — so a client/proxy
+    // behavior and only speaks RC stateless semantics -- so a client/proxy
     // advertising a legacy version must be rejected, not silently served
     // under RC. Compare against the fixed RC version (the last/only RC entry)
     // rather than the whole compatibility list.
@@ -124,6 +183,7 @@ pub async fn handle_post(req: HttpRequest, ctx: &HttpContext) -> HttpResponse {
             .get(crate::transport::http::MCP_PROTOCOL_VERSION)
             .and_then(|v| v.to_str().ok())
             .is_some_and(|v| Some(v) == rc_version);
+
         if !ok {
             let resp = Response::error(
                 RequestId::Null,
@@ -132,7 +192,11 @@ pub async fn handle_post(req: HttpRequest, ctx: &HttpContext) -> HttpResponse {
                     "Missing or unsupported MCP-Protocol-Version header",
                 ),
             );
-            return build_json_response(http::StatusCode::OK, id, &Message::Response(resp));
+            return PostPrep::Reply(build_json_response(
+                http::StatusCode::OK,
+                id,
+                &Message::Response(resp),
+            ));
         }
     }
     // Engine-neutral claims pickup: any engine that decoded auth claims
@@ -148,7 +212,11 @@ pub async fn handle_post(req: HttpRequest, ctx: &HttpContext) -> HttpResponse {
         Ok(msg) => msg,
         Err(code) => {
             let resp = Response::error(RequestId::Null, Error::from(code));
-            return build_json_response(http::StatusCode::OK, id, &Message::Response(resp));
+            return PostPrep::Reply(build_json_response(
+                http::StatusCode::OK,
+                id,
+                &Message::Response(resp),
+            ));
         }
     };
 
@@ -187,7 +255,7 @@ pub async fn handle_post(req: HttpRequest, ctx: &HttpContext) -> HttpResponse {
     if matches!(msg, Message::Notification(_)) {
         let msg = msg.set_session_id(id);
         let _ = ctx.inbound_tx.send(Ok(msg)).await;
-        return status_response(http::StatusCode::ACCEPTED, id);
+        return PostPrep::Reply(status_response(http::StatusCode::ACCEPTED, id));
     }
 
     // Batch-of-notifications fast-path.
@@ -197,9 +265,9 @@ pub async fn handle_post(req: HttpRequest, ctx: &HttpContext) -> HttpResponse {
     {
         let msg = msg.set_session_id(id);
         if ctx.inbound_tx.send(Ok(msg)).await.is_err() {
-            return status_response(http::StatusCode::INTERNAL_SERVER_ERROR, id);
+            return PostPrep::Reply(status_response(http::StatusCode::INTERNAL_SERVER_ERROR, id));
         }
-        return status_response(http::StatusCode::ACCEPTED, id);
+        return PostPrep::Reply(status_response(http::StatusCode::ACCEPTED, id));
     }
 
     // Strip Authorization before forwarding (claims are already extracted).
@@ -210,27 +278,231 @@ pub async fn handle_post(req: HttpRequest, ctx: &HttpContext) -> HttpResponse {
         msg = msg.set_claims(c);
     }
 
-    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<Message>();
-    // full_id() takes &self, so we can compute the key before moving msg
-    // into the send. RequestId is not Clone — the original handler used
-    // the same insert-then-send order. The pending entry is reaped by
-    // the SSE registry's cleanup loop if the inbound send fails (rare —
-    // the channel is sized for hundreds of in-flight requests).
-    ctx.pending.insert(msg.full_id(), resp_tx);
-    if ctx.inbound_tx.send(Ok(msg)).await.is_err() {
-        return status_response(http::StatusCode::INTERNAL_SERVER_ERROR, id);
+    PostPrep::Dispatch { id, msg }
+}
+
+/// The RC arm of [`dispatch_post`]: a POST pipeline that can return a
+/// request-scoped SSE response, mirroring [`handle_get_sse`].
+///
+/// When the request opts into request-scoped notifications (carries
+/// `io.modelcontextprotocol/logLevel` or a `progressToken` in `_meta`), the
+/// reply is an SSE stream: notifications produced while handling the request
+/// flow first (routed via the per-request sink), then the final response closes
+/// the stream. Otherwise the reply is a single JSON object (`Complete`),
+/// exactly as [`handle_post`].
+#[cfg(all(feature = "proto-2026-07-28-rc", feature = "tracing"))]
+async fn handle_post_streaming<E: HttpEngine>(
+    req: HttpRequest,
+    ctx: &HttpContext,
+) -> StreamResponse<impl Stream<Item = E::SseEvent> + Send + 'static> {
+    match prepare_post(req, ctx).await {
+        PostPrep::Reply(resp) => StreamResponse::Complete(resp),
+        PostPrep::Dispatch { id, msg } => {
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<Message>();
+            let full_id = msg.full_id();
+            ctx.pending.insert(full_id.clone(), resp_tx);
+
+            if !opts_into_notifications(&msg) {
+                if ctx.inbound_tx.send(Ok(msg)).await.is_err() {
+                    ctx.pending.remove(&full_id);
+                    return StreamResponse::Complete(status_response(
+                        http::StatusCode::INTERNAL_SERVER_ERROR,
+                        id,
+                    ));
+                }
+                return match resp_rx.await {
+                    Ok(resp) => StreamResponse::Complete(build_json_response(
+                        http::StatusCode::OK,
+                        id,
+                        &resp,
+                    )),
+                    Err(_) => StreamResponse::Complete(status_response(
+                        http::StatusCode::INTERNAL_SERVER_ERROR,
+                        id,
+                    )),
+                };
+            }
+
+            // Opted in: register the per-request notification sink (keyed by the
+            // per-POST session id, which the tracing span carries) before the
+            // runtime starts handling, then stream notifications + response.
+            let notif_rx = crate::types::notification::fmt::register_request_sink(
+                id,
+                ctx.sse_log_queue_capacity,
+            );
+
+            if ctx.inbound_tx.send(Ok(msg)).await.is_err() {
+                crate::types::notification::fmt::unregister_request_sink(&id);
+                ctx.pending.remove(&full_id);
+                return StreamResponse::Complete(status_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    id,
+                ));
+            }
+
+            let stream =
+                post_notification_stream(id, full_id, ctx.pending.clone(), notif_rx, resp_rx)
+                    .map(|msg| E::ephemeral_event(&msg));
+
+            StreamResponse::Stream {
+                headers: HeaderMap::new(),
+                stream,
+            }
+        }
     }
-    match resp_rx.await {
-        Ok(resp) => build_json_response(http::StatusCode::OK, id, &resp),
-        Err(_) => status_response(http::StatusCode::INTERNAL_SERVER_ERROR, id),
+}
+
+/// Whether a message opts into request-scoped notifications: a request -- or,
+/// for a batch, *any* contained request -- carrying `logLevel` or
+/// `progressToken` in `_meta`.
+///
+/// Batches count because a client (e.g. via `Client::apply_client_meta_to_batch`)
+/// stamps the configured level onto every batched request; the inner requests
+/// share this POST's session id (copied in `execute_batch`), so their
+/// notifications route to the one sink and stream on this single response.
+#[cfg(all(feature = "proto-2026-07-28-rc", feature = "tracing"))]
+fn opts_into_notifications(msg: &Message) -> bool {
+    match msg {
+        Message::Request(r) => request_opts_in(r),
+        Message::Batch(batch) => batch.iter().any(
+            |env| matches!(env, crate::types::MessageEnvelope::Request(r) if request_opts_in(r)),
+        ),
+        _ => false,
     }
+}
+
+/// Whether a single request carries `logLevel` or `progressToken` in `_meta`.
+#[cfg(all(feature = "proto-2026-07-28-rc", feature = "tracing"))]
+fn request_opts_in(req: &crate::types::Request) -> bool {
+    req.params
+        .as_ref()
+        .and_then(|p| p.get("_meta"))
+        .and_then(|m| m.as_object())
+        .is_some_and(|meta| {
+            meta.contains_key("io.modelcontextprotocol/logLevel")
+                || meta.contains_key("progressToken")
+        })
+}
+
+/// Builds the request-scoped SSE body: notifications flow as they arrive
+/// (biased ahead of the response), then the final response closes the stream.
+///
+/// The response is *buffered* rather than emitted on arrival: the terminal
+/// `message_middleware` completes it while user middleware wrapped around
+/// `next(ctx)` may still be running and logging. The stream therefore stays open
+/// until the notification channel closes -- which happens when the whole
+/// pipeline is done and `App`'s sink guard drops the sender (see
+/// `RequestSinkGuard`) -- drains what is queued, and emits the response last.
+///
+/// Dropping the stream (end of body or client disconnect) unregisters the
+/// per-request sink and clears the pending entry.
+#[cfg(all(feature = "proto-2026-07-28-rc", feature = "tracing"))]
+fn post_notification_stream(
+    id: uuid::Uuid,
+    full_id: RequestId,
+    pending: super::context::RequestMap,
+    notif_rx: tokio::sync::mpsc::Receiver<Message>,
+    resp_rx: tokio::sync::oneshot::Receiver<Message>,
+) -> impl Stream<Item = Message> + Send {
+    struct Cleanup {
+        id: uuid::Uuid,
+        full_id: RequestId,
+        pending: super::context::RequestMap,
+    }
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            crate::types::notification::fmt::unregister_request_sink(&self.id);
+            self.pending.remove(&self.full_id);
+        }
+    }
+
+    struct State {
+        notif_rx: tokio::sync::mpsc::Receiver<Message>,
+        /// Taken once the response arrives (or the channel is known dead).
+        resp_rx: Option<tokio::sync::oneshot::Receiver<Message>>,
+        /// The buffered final response, emitted after the last notification.
+        response: Option<Message>,
+        /// Whether more notifications may still arrive.
+        notifs_open: bool,
+        /// Holds the cleanup guard until the stream is fully consumed.
+        _cleanup: Cleanup,
+    }
+
+    /// What one poll of the two channels produced.
+    enum Step {
+        Notification(Message),
+        NotificationsClosed,
+        Response(Option<Message>),
+    }
+
+    let state = State {
+        notif_rx,
+        resp_rx: Some(resp_rx),
+        response: None,
+        notifs_open: true,
+        _cleanup: Cleanup {
+            id,
+            full_id,
+            pending,
+        },
+    };
+
+    stream::unfold(state, |mut state| async move {
+        while state.notifs_open {
+            // Split the borrows so both channels can be polled in one `select!`.
+            let step = {
+                let State {
+                    notif_rx, resp_rx, ..
+                } = &mut state;
+                match resp_rx.as_mut() {
+                    Some(rx) => tokio::select! {
+                        biased;
+                        n = notif_rx.recv() => match n {
+                            Some(n) => Step::Notification(n),
+                            None => Step::NotificationsClosed,
+                        },
+                        r = rx => Step::Response(r.ok()),
+                    },
+                    // Response already in hand: keep draining notifications.
+                    None => match notif_rx.recv().await {
+                        Some(n) => Step::Notification(n),
+                        None => Step::NotificationsClosed,
+                    },
+                }
+            };
+
+            match step {
+                Step::Notification(n) => return Some((n, state)),
+                Step::NotificationsClosed => state.notifs_open = false,
+                Step::Response(Some(resp)) => {
+                    // Buffer it and keep draining until the pipeline is done.
+                    state.response = Some(resp);
+                    state.resp_rx = None;
+                }
+                // The response channel was dropped: the runtime will never
+                // answer, so stop waiting on notifications and end the body
+                // rather than holding the connection open.
+                Step::Response(None) => {
+                    state.resp_rx = None;
+                    state.notifs_open = false;
+                }
+            }
+        }
+
+        // Pipeline finished and every notification is drained; close with the
+        // response. A dropped response channel (runtime gone) just ends the body.
+        if let Some(rx) = state.resp_rx.take() {
+            state.response = rx.await.ok();
+        }
+        state.response.take().map(|resp| (resp, state))
+    })
 }
 
 /// Parse the body into a [`Message`].
 ///
 /// Single-step decode: `serde_json::Error::classify()` distinguishes
-/// JSON-RPC 2.0 §5.1 ParseError (`Category::Syntax` / `Category::Eof` —
-/// the body is not valid JSON) from InvalidRequest (`Category::Data` —
+/// JSON-RPC 2.0 section 5.1 ParseError (`Category::Syntax` / `Category::Eof` --
+/// the body is not valid JSON) from InvalidRequest (`Category::Data` --
 /// the body is valid JSON but does not match any [`Message`] variant).
 fn parse_message(body: &Bytes) -> Result<Message, ErrorCode> {
     serde_json::from_slice::<Message>(body).map_err(|e| match e.classify() {
@@ -241,7 +513,19 @@ fn parse_message(body: &Bytes) -> Result<Message, ErrorCode> {
     })
 }
 
-fn get_or_create_mcp_session(headers: &HeaderMap) -> uuid::Uuid {
+fn get_or_create_mcp_session(
+    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(unused_variables))] headers: &HeaderMap,
+) -> uuid::Uuid {
+    // RC removed protocol-level sessions and the `Mcp-Session-Id` header, and
+    // this id doubles as the per-POST correlation key for the pending-response
+    // slot and the request notification sink. Mint a fresh one per POST so a
+    // client-supplied (or proxied) header can never collide two concurrent
+    // stateless requests onto the same sink/slot.
+    #[cfg(feature = "proto-2026-07-28-rc")]
+    {
+        uuid::Uuid::new_v4()
+    }
+    #[cfg(not(feature = "proto-2026-07-28-rc"))]
     headers
         .get(MCP_SESSION_ID)
         .and_then(|v| v.to_str().ok())
@@ -286,7 +570,7 @@ fn status_response(
     resp
 }
 
-/// Handle a DELETE `/{endpoint}` request — explicit session termination.
+/// Handle a DELETE `/{endpoint}` request -- explicit session termination.
 ///
 /// Returns 400 if `Mcp-Session-Id` is missing; otherwise terminates the
 /// SSE session in the registry (and unregisters its log channel, when
@@ -299,7 +583,7 @@ pub async fn handle_delete(req: HttpRequest, ctx: &HttpContext) -> HttpResponse 
             .unwrap_or_default();
     };
 
-    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+    #[cfg(feature = "tracing")]
     crate::types::notification::fmt::LOG_REGISTRY.unregister(&id);
     ctx.sse_registry.terminate(&id);
 
@@ -313,7 +597,7 @@ fn parse_session_id(headers: &HeaderMap) -> Option<uuid::Uuid> {
         .and_then(|s| uuid::Uuid::parse_str(s).ok())
 }
 
-/// Handle a GET on the well-known path — serves the RFC 9728 Protected
+/// Handle a GET on the well-known path -- serves the RFC 9728 Protected
 /// Resource Metadata document pre-built at server start.
 ///
 /// The engine mounts this on [`HttpContext::oauth_metadata_path`]; if the
@@ -347,7 +631,7 @@ pub fn handle_oauth_metadata(ctx: &HttpContext) -> HttpResponse {
 /// when OAuth is not configured.
 ///
 /// The default Volga adapter emits its own challenge through Volga's
-/// bearer pipeline — this helper is for custom engines that validate
+/// bearer pipeline -- this helper is for custom engines that validate
 /// tokens themselves.
 ///
 /// # Example
@@ -369,7 +653,7 @@ pub fn handle_unauthorized(ctx: &HttpContext) -> HttpResponse {
         .unwrap_or_default()
 }
 
-/// Internal item type used inside the GET handler — the engine's
+/// Internal item type used inside the GET handler -- the engine's
 /// `tracked_event` / `ephemeral_event` is invoked exactly once per emitted
 /// event to produce the engine-native representation.
 enum SseItem {
@@ -385,18 +669,18 @@ struct SseConnectionCleanup {
 
 impl Drop for SseConnectionCleanup {
     fn drop(&mut self) {
-        #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+        #[cfg(feature = "tracing")]
         crate::types::notification::fmt::LOG_REGISTRY
             .unregister_if_generation(&self.id, self.generation);
         self.registry.unregister(&self.id, self.generation);
     }
 }
 
-/// Handle a GET `/{endpoint}` request — SSE stream subscribe.
+/// Handle a GET `/{endpoint}` request -- SSE stream subscribe.
 ///
-/// Returns `SseResponse::Status(400)` if the session id is missing,
+/// Returns `StreamResponse::Complete(400)` if the session id is missing,
 /// otherwise opens (or reconnects to) the session in the SSE registry
-/// and returns `SseResponse::Stream { headers, stream }` where `stream`
+/// and returns `StreamResponse::Stream { headers, stream }` where `stream`
 /// is an `impl Stream<Item = E::SseEvent>` produced by calling the
 /// engine's [`HttpEngine::tracked_event`] / [`HttpEngine::ephemeral_event`]
 /// for each underlying `SseItem`.
@@ -407,9 +691,9 @@ impl Drop for SseConnectionCleanup {
 pub async fn handle_get_sse<E: HttpEngine>(
     req: HttpRequest,
     ctx: &HttpContext,
-) -> SseResponse<impl Stream<Item = E::SseEvent> + Send + 'static> {
+) -> StreamResponse<impl Stream<Item = E::SseEvent> + Send + 'static> {
     let Some(id) = parse_session_id(req.headers()) else {
-        return SseResponse::Status(
+        return StreamResponse::Complete(
             http::Response::builder()
                 .status(http::StatusCode::BAD_REQUEST)
                 .body(Bytes::new())
@@ -422,7 +706,7 @@ pub async fn handle_get_sse<E: HttpEngine>(
     let (_log_tx, log_rx) = tokio::sync::mpsc::channel::<Message>(ctx.sse_log_queue_capacity);
 
     let generation = ctx.sse_registry.register(id, msg_tx);
-    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+    #[cfg(feature = "tracing")]
     crate::types::notification::fmt::LOG_REGISTRY.register(id, generation, _log_tx);
 
     let last_seq: Option<u64> = req
@@ -473,7 +757,7 @@ pub async fn handle_get_sse<E: HttpEngine>(
         headers.insert(MCP_SESSION_ID, v);
     }
 
-    SseResponse::Stream {
+    StreamResponse::Stream {
         headers,
         stream: guarded,
     }
@@ -715,8 +999,8 @@ mod tests {
             .unwrap();
         let resp = handle_get_sse::<TestEngine>(req, &ctx).await;
         match resp {
-            SseResponse::Status(r) => assert_eq!(r.status(), http::StatusCode::BAD_REQUEST),
-            SseResponse::Stream { .. } => panic!("expected Status, got Stream"),
+            StreamResponse::Complete(r) => assert_eq!(r.status(), http::StatusCode::BAD_REQUEST),
+            StreamResponse::Stream { .. } => panic!("expected Status, got Stream"),
         }
     }
 
@@ -733,13 +1017,13 @@ mod tests {
             .unwrap();
         let resp = handle_get_sse::<TestEngine>(req, &ctx).await;
         match resp {
-            SseResponse::Stream { headers, stream: _ } => {
+            StreamResponse::Stream { headers, stream: _ } => {
                 assert_eq!(
                     headers.get(MCP_SESSION_ID).and_then(|v| v.to_str().ok()),
                     Some(id.to_string().as_str())
                 );
             }
-            SseResponse::Status(_) => panic!("expected Stream, got Status"),
+            StreamResponse::Complete(_) => panic!("expected Stream, got Status"),
         }
     }
 

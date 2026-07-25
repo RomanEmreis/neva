@@ -179,7 +179,7 @@ pub enum ContextInclusion {
 /// Represents a server's preferences for model selection, requested of the client during sampling.
 ///
 /// > **Note:** Because LLMs can vary along multiple dimensions, choosing the _best_ model is
-/// > rarely straightforward.  Different models excel in different areas—some are
+/// > rarely straightforward.  Different models excel in different areas--some are
 /// > faster but less capable, others are more capable but more expensive, and so
 /// > on. This struct allows servers to express their priorities across multiple
 /// > dimensions to help clients make an appropriate selection for their use case.

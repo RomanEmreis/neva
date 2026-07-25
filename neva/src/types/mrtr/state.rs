@@ -4,7 +4,7 @@
 //! rationale is user-facing and lives in the [`mrtr`](crate::types::mrtr)
 //! module docs. Beyond confidentiality and the authentication tag, the payload
 //! carries a TTL, a binding to the originating request and a binding to the
-//! authenticated principal — see [`StatePayload`].
+//! authenticated principal -- see [`StatePayload`].
 
 use chacha20poly1305::aead::{Aead, Generate, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
@@ -50,7 +50,7 @@ pub(crate) struct StatePayload {
     /// already present in [`StatePayload::answers`]); anything else is unsolicited and
     /// must be rejected, otherwise a client could pre-seed/overwrite answers
     /// for inputs the server never asked for. Defaults to empty so an older
-    /// payload schema still decodes — and, by design, rejects any
+    /// payload schema still decodes -- and, by design, rejects any
     /// `inputResponses` paired with it.
     #[serde(default)]
     pub requested: Vec<String>,
@@ -76,7 +76,7 @@ pub(crate) struct StateKeyring {
     /// Kid new blobs are sealed under. Must resolve in [`Self::keys`], or
     /// [`StateCodec::encode`] fails.
     active_kid: Box<str>,
-    /// Accepted `kid → secret` map used to select the decryption key by the
+    /// Accepted `kid -> secret` map used to select the decryption key by the
     /// kid segment of the inbound blob.
     keys: HashMap<Box<str>, Arc<[u8]>>,
 }
@@ -92,7 +92,7 @@ impl std::fmt::Debug for StateKeyring {
 }
 
 impl StateKeyring {
-    /// Single-key ring under [`DEFAULT_KID`] — the
+    /// Single-key ring under [`DEFAULT_KID`] -- the
     /// [`crate::App::with_request_state_secret`] path.
     pub(crate) fn single(secret: &[u8]) -> Self {
         Self::new(DEFAULT_KID, [(DEFAULT_KID, secret)])
@@ -194,7 +194,7 @@ impl<'a> StateCodec<'a> {
     }
 
     /// Decrypts and verifies integrity, selecting the key by the blob's kid
-    /// segment. Does NOT check `exp`/`req`/`principal` — callers do that
+    /// segment. Does NOT check `exp`/`req`/`principal` -- callers do that
     /// against the returned [`StatePayload`].
     pub(crate) fn decode(&self, blob: &str) -> Result<StatePayload, Error> {
         use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
@@ -490,7 +490,7 @@ mod tests {
     #[test]
     fn legacy_two_segment_blob_is_rejected_as_malformed() {
         // The pre-versioning wire format (`b64(nonce).b64(ct)`) must not be
-        // taken for a v1 blob — segment-count parsing rejects it outright.
+        // taken for a v1 blob -- segment-count parsing rejects it outright.
         let ring = ring(b"secret-key");
         let codec = StateCodec::new(&ring);
         let blob = codec.encode(&payload()).unwrap();

@@ -6,7 +6,7 @@
 //! # Static decoding key (HS256):
 //! JWT_SECRET=a-string-secret-at-least-256-bits-long cargo run -p example-protected-server
 //!
-//! # OAuth 2.1/OIDC issuer mode — tokens are validated against the
+//! # OAuth 2.1/OIDC issuer mode -- tokens are validated against the
 //! # issuer's JWKS, and /.well-known/oauth-protected-resource/mcp is
 //! # served automatically:
 //! OAUTH_ISSUER=https://auth.example.com cargo run -p example-protected-server
@@ -67,7 +67,7 @@ async fn main() {
                         //   .with_config(|cfg| cfg
                         //       .with_client_config(|c| c.require_https(false)))
                         (Some(issuer), _) => auth.with_oauth(|oauth| oauth.with_issuer(issuer)),
-                        // Static decoding key (HS256) — the pre-OAuth setup.
+                        // Static decoding key (HS256) -- the pre-OAuth setup.
                         (None, Some(secret)) => auth
                             .validate_exp(false)
                             .with_aud(["some aud"])

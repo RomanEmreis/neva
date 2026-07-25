@@ -57,7 +57,7 @@ pub struct Tool {
     /// The name of the tool.
     pub name: String,
 
-    /// Intended for UI and end-user contexts — optimized to be human-readable and easily understood,
+    /// Intended for UI and end-user contexts -- optimized to be human-readable and easily understood,
     /// even by those unfamiliar with domain-specific terminology.
     ///
     /// If not provided, the name should be used for display (except for Tool,
@@ -505,7 +505,7 @@ impl ToolSchema {
     /// [`schemars`]-generated [`JsonSchema`] type.
     ///
     /// Note that this is distinct from the static [`ToolSchema::from_schema`]
-    /// — `with_schema` is a chainable instance method, while `from_schema` is
+    /// -- `with_schema` is a chainable instance method, while `from_schema` is
     /// a static constructor.
     pub fn with_schema<T: JsonSchema>(self) -> Self {
         let json_schema = schemars::schema_for!(T);
@@ -957,7 +957,7 @@ impl Tool {
     /// `proto-2026-07-28-rc` the schema is already a [`serde_json::Value`]
     /// (wrapped by [`crate::types::schema_2020::InputSchema`]), so we borrow
     /// it directly via [`crate::types::schema_2020::InputSchema::as_value`]
-    /// — no re-serialization is needed.
+    /// -- no re-serialization is needed.
     pub fn validate<'a>(&self, resp: &'a CallToolResponse) -> Result<&'a CallToolResponse, Error> {
         let Some(schema_ref) = self.output_schema.as_ref() else {
             return Err(Error::new(
@@ -1152,7 +1152,7 @@ mod tests {
         // `from_schemars`, so their outputs for the same input schema
         // must be identical. The wrapper retains the old behaviour
         // (non-generic, takes a `schemars::Schema`) under a renamed
-        // identifier — see deviation note for why we did not keep the
+        // identifier -- see deviation note for why we did not keep the
         // exact `from_schema` name.
         let a = ToolSchema::from_schemars(schemars::schema_for!(MyT));
         let b = ToolSchema::from_schema_legacy(schemars::schema_for!(MyT));

@@ -10,7 +10,7 @@ async fn sampling_handler(params: CreateMessageRequestParams) -> CreateMessageRe
         .with_model("gpt-5")
         .with_content(
             r#"Winter night whispers,
-Warm lights breathe through frosted glass—
+Warm lights breathe through frosted glass--
 Time pauses, snow listens."#)
         .end_turn()
 }

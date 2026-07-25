@@ -6,12 +6,12 @@
 //! cargo run -p example-hyper
 //! ```
 //!
-//! This example shows how to plug a non-default HTTP stack — here, raw
-//! hyper — into neva's Streamable HTTP transport. It pulls in `neva`
+//! This example shows how to plug a non-default HTTP stack -- here, raw
+//! hyper -- into neva's Streamable HTTP transport. It pulls in `neva`
 //! with only the engine-agnostic `http-server` feature, implements the [`HttpEngine`] contract for a `HyperEngine`,
 //! and wires it into `HttpServer::from_engine`.
 //!
-//! Unlike axum / actix-web, hyper ships no router — the engine's
+//! Unlike axum / actix-web, hyper ships no router -- the engine's
 //! accept loop dispatches on `(method, path)` directly.
 
 use std::convert::Infallible;
@@ -28,7 +28,7 @@ use hyper_util::rt::TokioIo;
 use neva::prelude::*;
 use tokio_util::sync::CancellationToken;
 
-/// Boxed body type used uniformly by every response this engine builds —
+/// Boxed body type used uniformly by every response this engine builds --
 /// `BoxBody` lets the SSE-streaming branch and the buffered-JSON branch
 /// share a single response type.
 type BoxedBody = BoxBody<Bytes, Infallible>;
@@ -119,19 +119,15 @@ async fn dispatch(req: http::Request<Incoming>, ctx: HttpContext) -> http::Respo
         return status_only(http::StatusCode::NOT_FOUND);
     }
     match *req.method() {
-        Method::POST => handlers::dispatch_post::<HyperEngine>(req, &ctx)
-            .await
-            .unwrap_or_else(|_| status_only(http::StatusCode::INTERNAL_SERVER_ERROR)),
-        Method::DELETE => handlers::dispatch_delete::<HyperEngine>(req, &ctx)
-            .await
-            .unwrap_or_else(|_| status_only(http::StatusCode::INTERNAL_SERVER_ERROR)),
-        Method::GET => {
-            let outcome = match handlers::dispatch_get_sse::<HyperEngine>(req, &ctx).await {
+        // Same two-arm shape as the GET arm below: a POST reply is either a
+        // single body (`Complete`) or a request-scoped SSE stream (`Stream`).
+        Method::POST => {
+            let outcome = match handlers::dispatch_post::<HyperEngine>(req, &ctx).await {
                 Ok(outcome) => outcome,
                 Err(_) => return status_only(http::StatusCode::INTERNAL_SERVER_ERROR),
             };
             match outcome {
-                SseResponse::Stream { headers, stream } => {
+                StreamResponse::Stream { headers, stream } => {
                     let body = StreamBody::new(stream).boxed();
                     let mut resp = http::Response::builder()
                         .status(http::StatusCode::OK)
@@ -143,7 +139,31 @@ async fn dispatch(req: http::Request<Incoming>, ctx: HttpContext) -> http::Respo
                     }
                     resp
                 }
-                SseResponse::Status(resp) => HyperEngine::adapt_response(resp),
+                StreamResponse::Complete(resp) => HyperEngine::adapt_response(resp),
+            }
+        }
+        Method::DELETE => handlers::dispatch_delete::<HyperEngine>(req, &ctx)
+            .await
+            .unwrap_or_else(|_| status_only(http::StatusCode::INTERNAL_SERVER_ERROR)),
+        Method::GET => {
+            let outcome = match handlers::dispatch_get_sse::<HyperEngine>(req, &ctx).await {
+                Ok(outcome) => outcome,
+                Err(_) => return status_only(http::StatusCode::INTERNAL_SERVER_ERROR),
+            };
+            match outcome {
+                StreamResponse::Stream { headers, stream } => {
+                    let body = StreamBody::new(stream).boxed();
+                    let mut resp = http::Response::builder()
+                        .status(http::StatusCode::OK)
+                        .header(http::header::CONTENT_TYPE, "text/event-stream")
+                        .body(body)
+                        .expect("valid response");
+                    for (name, value) in headers.iter() {
+                        resp.headers_mut().insert(name, value.clone());
+                    }
+                    resp
+                }
+                StreamResponse::Complete(resp) => HyperEngine::adapt_response(resp),
             }
         }
         _ => status_only(http::StatusCode::METHOD_NOT_ALLOWED),

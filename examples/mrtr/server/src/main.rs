@@ -22,7 +22,7 @@ async fn place_order(mut ctx: Context) -> Result<String, Error> {
     // instead of running the future again.
     let quote_cents: u32 = ctx
         .memo("quote", async {
-            tracing::info!("📦 fetching shipping quote…");
+            tracing::info!("📦 fetching shipping quote...");
             Ok(1299)
         })
         .await?;
@@ -43,7 +43,7 @@ async fn place_order(mut ctx: Context) -> Result<String, Error> {
 
     // once: the charge runs at most once across all rounds.
     ctx.once("charge", async {
-        tracing::info!("💳 charging card…");
+        tracing::info!("💳 charging card...");
         Ok(())
     })
     .await?;
@@ -56,7 +56,7 @@ async fn place_order(mut ctx: Context) -> Result<String, Error> {
     });
 
     Ok(format!(
-        "Order confirmed for {} shipping to {} — total ${:.2}",
+        "Order confirmed for {} shipping to {} -- total ${:.2}",
         ship.full_name,
         ship.address,
         quote_cents as f64 / 100.0

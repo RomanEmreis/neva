@@ -6,6 +6,7 @@
 
 #![cfg(all(
     feature = "proto-2026-07-28-rc",
+    feature = "server-macros",
     feature = "http-server-volga",
     feature = "http-client"
 ))]
@@ -21,7 +22,7 @@ struct Profile {
     age: u32,
 }
 
-// No `JsonSchema` derive — must degrade to `{"type":"object"}`.
+// No `JsonSchema` derive -- must degrade to `{"type":"object"}`.
 #[derive(Deserialize)]
 #[allow(dead_code)]
 struct Opaque {
@@ -78,10 +79,13 @@ async fn tool_macro_emits_json_schema_2020() {
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
     let url = format!("http://{addr}/mcp");
 
-    // Stateless RC transport: no handshake/session — a single `tools/list`
+    // Stateless RC transport: no handshake/session -- a single `tools/list`
     // POST carrying the required `MCP-Protocol-Version` header is enough.
     let list_body = serde_json::json!({
         "jsonrpc": "2.0",

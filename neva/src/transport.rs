@@ -7,8 +7,12 @@ use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "http-server")]
 pub use http::{
-    HttpContext, HttpEngine, HttpRequest, HttpResponse, HttpServer, SseResponse, handlers,
+    HttpContext, HttpEngine, HttpRequest, HttpResponse, HttpServer, StreamResponse, handlers,
 };
+
+#[cfg(feature = "http-server")]
+#[allow(deprecated)]
+pub use http::SseResponse;
 
 #[cfg(feature = "server")]
 pub(crate) use stdio::StdIoServer;
@@ -81,7 +85,7 @@ pub(crate) enum TransportProtoSender {
         /// Accumulated response envelopes to be bundled into the batch reply.
         ///
         /// `std::sync::Mutex` is intentional: the lock is never held across an
-        /// `.await` (lock → push → unlock, then `Ok(())`), so the lighter
+        /// `.await` (lock -> push -> unlock, then `Ok(())`), so the lighter
         /// synchronous mutex is the right tool here.
         responses: std::sync::Arc<std::sync::Mutex<Vec<crate::types::MessageEnvelope>>>,
     },

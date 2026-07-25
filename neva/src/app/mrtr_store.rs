@@ -8,9 +8,9 @@
 //! any server-side state. There is one gap that the signed state structurally
 //! cannot close: the **final** round mints no new state, so if its HTTP
 //! response is lost and the client retries the same `requestState` +
-//! `inputResponses`, the handler — and any
+//! `inputResponses`, the handler -- and any
 //! [`Context::on_commit`](crate::Context::on_commit) commits or post-elicit
-//! `once`/`memo` effects — would run a second time.
+//! `once`/`memo` effects -- would run a second time.
 //!
 //! This module's [`RequestStateStore`] closes that gap by caching the final
 //! response of a committed round, keyed by the incoming state's sealed segment
@@ -18,7 +18,7 @@
 //! echoes the same blob and answers (same key), so the cached response is
 //! returned verbatim and the handler never re-executes.
 //!
-//! The protocol does not mandate any of this — final-round deduplication is
+//! The protocol does not mandate any of this -- final-round deduplication is
 //! left to the implementation, and an SDK may reasonably leave it to the
 //! application author. neva ships it on by default, so a tool that charges a
 //! card or sends a receipt is safe to write in the obvious way. See the
@@ -27,7 +27,7 @@
 //!
 //! The default [`InMemoryStateStore`] is per-process. A multi-instance
 //! deployment should supply a shared implementation (e.g. Redis) via
-//! [`App::with_request_state_store`](crate::App::with_request_state_store) — for
+//! [`App::with_request_state_store`](crate::App::with_request_state_store) -- for
 //! the same reason such a deployment must share the MRTR secret (a retry routed
 //! to a different instance must see the same committed state).
 
@@ -65,7 +65,7 @@ pub trait RequestStateStore: Send + Sync {
     /// and re-sent while the first round is still executing) can both miss
     /// [`get`](Self::get) before either reaches [`put`](Self::put), so both
     /// re-run the handler and re-drain its
-    /// [`on_commit`](crate::Context::on_commit) effects — duplicating side
+    /// [`on_commit`](crate::Context::on_commit) effects -- duplicating side
     /// effects such as charges. Holding a per-`tag` reservation across the whole
     /// section serialises them: the loser blocks until the winner has committed,
     /// then sees the cached response on its own [`get`](Self::get) and never
@@ -88,11 +88,11 @@ pub trait RequestStateStore: Send + Sync {
 /// The default per-process [`RequestStateStore`], backed by a concurrent map
 /// with lazy TTL eviction (`proto-2026-07-28-rc`).
 ///
-/// Entries are bounded by their TTL (the state's `exp`, ≤ the configured
+/// Entries are bounded by their TTL (the state's `exp`, <= the configured
 /// `requestState` TTL, 300s by default) and evicted opportunistically on access,
 /// so the map's footprint tracks the number of in-flight MRTR flows. Each
 /// [`put`](Self::put) sweeps expired entries (and released reservation locks),
-/// which is `O(n)` in the live set — fine for single-instance and development,
+/// which is `O(n)` in the live set -- fine for single-instance and development,
 /// but high-QPS deployments should provide a shared store with background
 /// eviction instead (see the [module docs](self)).
 #[derive(Debug, Default)]
@@ -134,7 +134,7 @@ impl RequestStateStore for InMemoryStateStore {
             let now = now_secs();
             // Opportunistically drop expired entries so the map stays bounded.
             self.entries.retain(|_, (_, e)| *e > now);
-            // Drop reservation locks no task holds or awaits — only the map's
+            // Drop reservation locks no task holds or awaits -- only the map's
             // own reference remains (`strong_count == 1`). The tag committing
             // here is still held by the live guard (`>= 2`), so it survives.
             self.locks.retain(|_, m| Arc::strong_count(m) > 1);

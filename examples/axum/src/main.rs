@@ -6,12 +6,12 @@
 //! cargo run -p example-axum
 //! ```
 //!
-//! This example shows how to plug a non-default HTTP stack — here, axum —
+//! This example shows how to plug a non-default HTTP stack -- here, axum --
 //! into neva's Streamable HTTP transport. It pulls in `neva` with only the
 //! engine-agnostic `http-server` feature, implements
 //! the [`HttpEngine`] contract for an `AxumEngine`, and wires it into
-//! `HttpServer::from_engine`. All adapter surfaces — HTTP request /
-//! response conversion *and* SSE event construction — live on the
+//! `HttpServer::from_engine`. All adapter surfaces -- HTTP request /
+//! response conversion *and* SSE event construction -- live on the
 //! engine, so route handlers are one-liners.
 
 use axum::{
@@ -107,9 +107,24 @@ impl HttpEngine for AxumEngine {
 }
 
 async fn post_handler(State(ctx): State<HttpContext>, req: axum::http::Request<Body>) -> Response {
-    handlers::dispatch_post::<AxumEngine>(req, &ctx)
-        .await
-        .unwrap_or_else(internal_error)
+    // Same two-arm shape as `get_handler`: a POST reply is either a single
+    // body (`Complete`) or a request-scoped SSE stream (`Stream`) carrying
+    // the request's notifications followed by its response.
+    let outcome = match handlers::dispatch_post::<AxumEngine>(req, &ctx).await {
+        Ok(outcome) => outcome,
+        Err(e) => return internal_error(e),
+    };
+    match outcome {
+        StreamResponse::Stream { headers, stream } => {
+            let sse = Sse::new(stream).keep_alive(KeepAlive::default());
+            let mut response: Response = sse.into_response();
+            for (name, value) in headers.iter() {
+                response.headers_mut().insert(name, value.clone());
+            }
+            response
+        }
+        StreamResponse::Complete(resp) => AxumEngine::adapt_response(resp),
+    }
 }
 
 async fn delete_handler(State(ctx): State<HttpContext>, req: http::Request<Body>) -> Response {
@@ -124,7 +139,7 @@ async fn get_handler(State(ctx): State<HttpContext>, req: http::Request<Body>) -
         Err(e) => return internal_error(e),
     };
     match outcome {
-        SseResponse::Stream { headers, stream } => {
+        StreamResponse::Stream { headers, stream } => {
             let sse = Sse::new(stream).keep_alive(KeepAlive::default());
             let mut response: Response = sse.into_response();
             for (name, value) in headers.iter() {
@@ -132,7 +147,7 @@ async fn get_handler(State(ctx): State<HttpContext>, req: http::Request<Body>) -
             }
             response
         }
-        SseResponse::Status(resp) => AxumEngine::adapt_response(resp),
+        StreamResponse::Complete(resp) => AxumEngine::adapt_response(resp),
     }
 }
 
