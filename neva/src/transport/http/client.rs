@@ -324,23 +324,8 @@ async fn send_request(
     // message to the receive loop, which routes notifications to handlers and
     // resolves the pending request on the response.
     if is_event_stream(resp.headers()) {
-        let mut answered = false;
-        let mut stream = sse_stream::SseStream::from_bytes_stream(resp.bytes_stream());
-        while let Some(event) = stream.next().await {
-            match event {
-                Ok(sse) if sse.is_message() => {
-                    if forward_sse_message(sse, &resp_tx).await {
-                        answered = true;
-                    }
-                }
-                Ok(_) => {}
-                Err(_err) => {
-                    #[cfg(feature = "tracing")]
-                    tracing::error!(logger = "neva", "SSE POST stream error: {}", _err);
-                    break;
-                }
-            }
-        }
+        let stream = sse_stream::SseStream::from_bytes_stream(resp.bytes_stream());
+        let answered = drain_post_sse(stream, &resp_tx).await;
 
         // A truncated stream, an unparseable frame, or EOF before the final
         // response would otherwise leave the originating request sitting in the
@@ -616,13 +601,55 @@ async fn handle_sse_connection(
     }
 }
 
+/// Drains a request-scoped SSE `POST` reply, forwarding every JSON-RPC message
+/// it carries to the receive loop.
+///
+/// Returns whether the terminal reply arrived, so the caller can fail the
+/// originating request when the stream ends without one.
+async fn drain_post_sse<S>(mut stream: S, resp_tx: &mpsc::Sender<Result<Message, Error>>) -> bool
+where
+    S: futures_util::Stream<Item = Result<sse_stream::Sse, sse_stream::Error>> + Unpin,
+{
+    let mut answered = false;
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(sse) if is_message_event(&sse) => {
+                if forward_sse_message(sse, resp_tx).await {
+                    answered = true;
+                }
+            }
+            Ok(_) => {}
+            Err(_err) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(logger = "neva", "SSE POST stream error: {}", _err);
+                break;
+            }
+        }
+    }
+    answered
+}
+
+/// Whether an SSE frame carries a JSON-RPC message.
+///
+/// `message` is the *default* SSE event type, so a frame that omits `event:` and
+/// one that names it explicitly mean the same thing. `Sse::is_message` only
+/// covers the former (it is `event.is_none()`), so a peer that spells the type
+/// out would otherwise have every frame -- notifications and the terminal
+/// response alike -- discarded.
+fn is_message_event(event: &sse_stream::Sse) -> bool {
+    match &event.event {
+        None => true,
+        Some(kind) => kind.trim() == "message",
+    }
+}
+
 async fn handle_event(
     event: sse_stream::Sse,
     session: &Arc<McpSession>,
     resp_tx: &mpsc::Sender<Result<Message, Error>>,
 ) {
     let id = event.id.clone();
-    let delivered = if event.is_message() {
+    let delivered = if is_message_event(&event) {
         handle_msg(event, resp_tx).await
     } else {
         #[cfg(feature = "tracing")]
@@ -839,11 +866,87 @@ mod tests {
         let session = make_session();
         let (tx, _rx) = mpsc::channel(1);
 
-        // is_message() returns true (no event: field) but data is None
+        // A message frame (no event: field) but data is None
         let event = sse_stream::Sse::default().id("evt-empty");
         handle_event(event, &session, &tx).await;
 
         assert!(session.last_event_id().is_none());
+    }
+
+    /// `message` is the default SSE event type, so naming it explicitly must be
+    /// treated exactly like omitting it.
+    #[test]
+    fn explicitly_named_message_events_count_as_messages() {
+        let cases = [
+            (None, true),
+            (Some("message"), true),
+            (Some(" message "), true),
+            (Some("Message"), false),
+            (Some("keepalive"), false),
+            (Some("endpoint"), false),
+        ];
+
+        for (kind, expected) in cases {
+            let event = match kind {
+                Some(kind) => sse_stream::Sse::default().event(kind),
+                None => sse_stream::Sse::default(),
+            };
+            assert_eq!(
+                is_message_event(&event),
+                expected,
+                "wrong verdict for event type {kind:?}"
+            );
+        }
+    }
+
+    /// A peer that frames its stream with `event: message` must have its payload
+    /// delivered on both SSE paths -- the standalone `GET` and the POST reply.
+    #[tokio::test]
+    async fn named_message_events_are_delivered_on_both_sse_paths() {
+        let response = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+
+        // Standalone GET stream: delivered, and the last event id advances.
+        let session = make_session();
+        let (tx, mut rx) = mpsc::channel(1);
+        let event = sse_stream::Sse::default()
+            .id("evt-named")
+            .event("message")
+            .data(response);
+        handle_event(event, &session, &tx).await;
+        assert!(rx.try_recv().is_ok(), "GET frame must be delivered");
+        assert_eq!(session.last_event_id(), Some("evt-named".to_string()));
+
+        // Request-scoped POST reply, driven through the real drain loop: the
+        // notification and the response are both delivered, and the stream counts
+        // as answered so the request is not failed as truncated.
+        let (tx, mut rx) = mpsc::channel(4);
+        let frames = vec![
+            Ok(sse_stream::Sse::default()
+                .event("message")
+                .data(r#"{"jsonrpc":"2.0","method":"notifications/message"}"#)),
+            Ok(sse_stream::Sse::default().event("message").data(response)),
+        ];
+        assert!(
+            drain_post_sse(futures_util::stream::iter(frames), &tx).await,
+            "the POST stream must count as answered"
+        );
+        assert!(matches!(rx.try_recv(), Ok(Ok(Message::Notification(_)))));
+        assert!(matches!(rx.try_recv(), Ok(Ok(Message::Response(_)))));
+    }
+
+    /// Frames of some other event type are skipped without answering the
+    /// request, and a stream that carries only those ends unanswered.
+    #[tokio::test]
+    async fn drain_post_sse_skips_other_event_types() {
+        let (tx, mut rx) = mpsc::channel(2);
+        let frames = vec![
+            Ok(sse_stream::Sse::default().event("keepalive").data("{}")),
+            Ok(sse_stream::Sse::default()
+                .event("endpoint")
+                .data(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#)),
+        ];
+        assert!(!drain_post_sse(futures_util::stream::iter(frames), &tx).await);
+        assert!(rx.try_recv().is_err(), "no frame should be delivered");
     }
 
     /// A request-scoped SSE `POST` reply must be recognized as *answered* only
