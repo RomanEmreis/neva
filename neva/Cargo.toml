@@ -78,7 +78,11 @@ server-oauth = ["http-server", "dep:volga-oauth-core", "volga?/oauth-client"]
 http-server = ["server", "dep:tokio-stream"]
 # Default Volga adapter — pulls Volga as a dep and provides VolgaEngine.
 http-server-volga = ["http-server", "dep:volga"]
-server = ["tokio/signal", "tokio/rt-multi-thread"]
+# `chacha20poly1305` + `sha2` back the MRTR `requestState` sealing codec
+# (`types/mrtr/state.rs`), which is server-only and compiled out under
+# `legacy-spec`. Cargo features are additive, so they cannot be un-enabled by
+# `legacy-spec`; a legacy server build simply never links them.
+server = ["tokio/signal", "tokio/rt-multi-thread", "dep:chacha20poly1305", "dep:sha2"]
 
 # client
 client-full = ["client-macros", "tracing", "http-client", "client-tls", "client-oauth", "tasks"]
@@ -88,9 +92,12 @@ client-tls = ["reqwest?/rustls"]
 http-client = ["client", "dep:reqwest", "dep:sse-stream", "dep:tokio-stream", "dep:once_cell"]
 client = ["dep:windows", "dep:nix", "dep:jsonschema", "tokio/process", "tokio/signal", "tokio/rt-multi-thread"]
 
-# Opt-in MCP 2026-07-28 Release Candidate support. Mutually exclusive
-# with any future `proto-*` generation flag — see lib.rs guard.
-proto-2026-07-28-rc = ["neva_macros?/proto-2026-07-28-rc", "dep:chacha20poly1305", "dep:sha2"]
+# Opt-in legacy protocol profile: MCP 2024-11-05 .. 2025-11-25.
+# The default build targets MCP 2026-07-28; enabling this flag compiles that
+# generation out and restores the pre-2026-07-28 wire surface
+# (`initialize` handshake, session-bound SSE transport, top-level `tasks`
+# capability, legacy `ToolSchema`, `with_mcp_version`, ...).
+legacy-spec = ["neva_macros?/legacy-spec"]
 
 [package.metadata.docs.rs]
 all-features = true

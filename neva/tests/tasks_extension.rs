@@ -1,11 +1,11 @@
-//! Tasks-as-extension (MCP 2026-07-28 RC) end-to-end checks.
+//! Tasks-as-extension (MCP 2026-07-28) end-to-end checks.
 //!
-//! Under the RC flag the tasks capability is advertised through the extensions
+//! Under MCP 2026-07-28 the tasks capability is advertised through the extensions
 //! map (`capabilities.extensions["io.modelcontextprotocol/tasks"]`) instead of
 //! the former top-level `capabilities.tasks` field, while the `tasks/*` wire
 //! methods are unchanged. Exercised over the stateless POST-only path.
 #![cfg(all(
-    feature = "proto-2026-07-28-rc",
+    not(feature = "legacy-spec"),
     feature = "tasks",
     feature = "http-server-volga",
     feature = "http-client"
@@ -55,7 +55,7 @@ async fn tasks_capability_is_advertised_as_extension() {
     );
     assert!(
         caps.get("tasks").is_none(),
-        "no top-level capabilities.tasks under the RC flag, got: {caps}"
+        "no top-level capabilities.tasks under MCP 2026-07-28, got: {caps}"
     );
 
     // (b) the tasks/* wire methods are unchanged and still dispatch.

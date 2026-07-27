@@ -217,12 +217,13 @@ impl From<schemars::Schema> for InputSchema {
     }
 }
 
-// --- `#[tool]` macro support (RC only) -------------------------------------
+// --- `#[tool]` macro support (2026-07-28 only) -------------------------------------
 //
 // These items back the `#[tool]` macro's JSON Schema 2020-12 emission under
-// `proto-2026-07-28-rc`. The `schema_2020` module itself is always compiled
+// MCP 2026-07-28. The `schema_2020` module itself is always compiled
 // (the `InputSchema` type exists on every config), so the macro-support items
-// are individually gated on the RC flag -- they are unused on the legacy path.
+// are individually gated on `not(feature = "legacy-spec")` -- they are unused
+// on the legacy path.
 
 /// Autoref-specialization probe used by the `#[tool]` macro to build a
 /// per-argument JSON Schema 2020-12 subschema.
@@ -231,12 +232,12 @@ impl From<schemars::Schema> for InputSchema {
 /// the argument type implements [`schemars::JsonSchema`], and to an opaque
 /// `{"type":"object"}` otherwise -- chosen at the call site without requiring a
 /// trait bound the macro cannot enforce.
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 #[doc(hidden)]
 #[derive(Debug)]
 pub struct SchemaProbe<T>(std::marker::PhantomData<T>);
 
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 #[doc(hidden)]
 impl<T> SchemaProbe<T> {
     /// Creates a new probe.
@@ -246,7 +247,7 @@ impl<T> SchemaProbe<T> {
     }
 }
 
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 #[doc(hidden)]
 impl<T> Default for SchemaProbe<T> {
     #[inline]
@@ -256,14 +257,14 @@ impl<T> Default for SchemaProbe<T> {
 }
 
 /// Preferred specialization: exists only when `T: JsonSchema`.
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 #[doc(hidden)]
 pub trait ViaJsonSchema {
     /// Builds an inlined, self-contained subschema for `T`.
     fn neva_subschema(&self) -> Value;
 }
 
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 #[doc(hidden)]
 impl<T: schemars::JsonSchema> ViaJsonSchema for &SchemaProbe<T> {
     #[inline]
@@ -277,14 +278,14 @@ impl<T: schemars::JsonSchema> ViaJsonSchema for &SchemaProbe<T> {
 }
 
 /// Fallback specialization: available for any `T`.
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 #[doc(hidden)]
 pub trait ViaFallback {
     /// Builds an opaque object subschema.
     fn neva_subschema(&self) -> Value;
 }
 
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 #[doc(hidden)]
 impl<T> ViaFallback for SchemaProbe<T> {
     #[inline]
@@ -296,7 +297,7 @@ impl<T> ViaFallback for SchemaProbe<T> {
 /// Builds an inline primitive subschema `{"type": ty}` for a tool argument.
 /// Used by the `#[tool]` macro for arguments mapping to a JSON primitive,
 /// keeping `serde_json` entirely inside neva (generated code never names it).
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 #[doc(hidden)]
 #[inline]
 pub fn primitive_subschema(ty: &str) -> Value {
@@ -307,7 +308,7 @@ pub fn primitive_subschema(ty: &str) -> Value {
 /// property pairs and a list of required property names. Used by the `#[tool]`
 /// macro so generated code only ever names `neva::` paths. Uses the
 /// unconditional `From<Value>` (no `server` feature required).
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 #[doc(hidden)]
 pub fn object_schema(properties: Vec<(String, Value)>, required: Vec<String>) -> InputSchema {
     let mut props = serde_json::Map::with_capacity(properties.len());
@@ -331,7 +332,7 @@ pub fn object_schema(properties: Vec<(String, Value)>, required: Vec<String>) ->
 /// The `&&` double-reference makes the `ViaJsonSchema for &SchemaProbe<T>`
 /// candidate be tried first; when its `T: JsonSchema` bound is unmet it is not a
 /// candidate and method resolution falls through to `ViaFallback`.
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __tool_arg_subschema {
@@ -460,7 +461,7 @@ mod tests {
         assert_eq!(schema.as_value(), &raw);
     }
 
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[test]
     fn probe_uses_schemars_when_type_derives_json_schema() {
         #[derive(schemars::JsonSchema)]
@@ -481,7 +482,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[test]
     fn probe_falls_back_for_type_without_json_schema() {
         struct Opaque;
@@ -489,7 +490,7 @@ mod tests {
         assert_eq!(v, json!({ "type": "object" }));
     }
 
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[test]
     fn probe_inlines_nested_struct_without_refs() {
         #[derive(schemars::JsonSchema)]
@@ -516,7 +517,7 @@ mod tests {
         assert!(v["properties"]["inner"]["properties"]["label"].is_object());
     }
 
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[test]
     fn object_schema_assembles_properties_and_required() {
         use crate::__macro_support::{object_schema, primitive_subschema};

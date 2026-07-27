@@ -12,7 +12,7 @@
 //! OAUTH_ISSUER=https://auth.example.com cargo run -p example-protected-server
 //! ```
 use neva::prelude::*;
-use tracing_subscriber::{filter, prelude::*, reload};
+use tracing_subscriber::{filter, prelude::*};
 
 /// A tool that allowed to everyone
 #[tool]
@@ -45,38 +45,34 @@ async fn main() {
     let issuer = std::env::var("OAUTH_ISSUER").ok();
     let secret = std::env::var("JWT_SECRET").ok();
 
-    let (filter, handle) = reload::Layer::new(filter::LevelFilter::DEBUG);
     tracing_subscriber::registry()
-        .with(filter)
+        .with(filter::LevelFilter::DEBUG)
         .with(notification::fmt::layer())
         .init();
 
-    #[allow(deprecated)]
     App::new()
         .with_options(|opt| {
-            opt.with_name("Protected Server Example")
-                .with_http(|http| {
-                    http.with_auth(|auth| match (&issuer, &secret) {
-                        // OAuth issuer mode: keys come from the issuer's
-                        // JWKS; the token's `aud` is bound to this server's
-                        // canonical URI and its `iss` to the issuer, and the
-                        // RFC 9728 metadata document is derived and served
-                        // automatically. For a local issuer over plain http
-                        // (e.g. Keycloak on localhost), relax the discovery
-                        // client with:
-                        //   .with_config(|cfg| cfg
-                        //       .with_client_config(|c| c.require_https(false)))
-                        (Some(issuer), _) => auth.with_oauth(|oauth| oauth.with_issuer(issuer)),
-                        // Static decoding key (HS256) -- the pre-OAuth setup.
-                        (None, Some(secret)) => auth
-                            .validate_exp(false)
-                            .with_aud(["some aud"])
-                            .with_iss(["some issuer"])
-                            .set_decoding_key(secret.as_bytes()),
-                        (None, None) => panic!("Set OAUTH_ISSUER or JWT_SECRET"),
-                    })
+            opt.with_name("Protected Server Example").with_http(|http| {
+                http.with_auth(|auth| match (&issuer, &secret) {
+                    // OAuth issuer mode: keys come from the issuer's
+                    // JWKS; the token's `aud` is bound to this server's
+                    // canonical URI and its `iss` to the issuer, and the
+                    // RFC 9728 metadata document is derived and served
+                    // automatically. For a local issuer over plain http
+                    // (e.g. Keycloak on localhost), relax the discovery
+                    // client with:
+                    //   .with_config(|cfg| cfg
+                    //       .with_client_config(|c| c.require_https(false)))
+                    (Some(issuer), _) => auth.with_oauth(|oauth| oauth.with_issuer(issuer)),
+                    // Static decoding key (HS256) -- the pre-OAuth setup.
+                    (None, Some(secret)) => auth
+                        .validate_exp(false)
+                        .with_aud(["some aud"])
+                        .with_iss(["some issuer"])
+                        .set_decoding_key(secret.as_bytes()),
+                    (None, None) => panic!("Set OAUTH_ISSUER or JWT_SECRET"),
                 })
-                .with_logging(handle)
+            })
         })
         .run()
         .await;

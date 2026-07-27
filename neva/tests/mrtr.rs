@@ -1,10 +1,10 @@
-//! MRTR (elicitation) end-to-end over the stateless RC transport.
+//! MRTR (elicitation) end-to-end over the stateless 2026-07-28 transport.
 //!
 //! Drives the raw protocol so the two-round wire contract is asserted
 //! directly: round 1 `tools/call` -> `input_required` (+ `requestState`),
 //! round 2 retry (new id + `inputResponses` + echoed state) -> final result.
 #![cfg(all(
-    feature = "proto-2026-07-28-rc",
+    not(feature = "legacy-spec"),
     feature = "http-server-volga",
     feature = "http-client"
 ))]

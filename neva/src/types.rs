@@ -21,16 +21,16 @@ pub use request::FromRequest;
 #[cfg(feature = "http-server")]
 use {crate::auth::Claims, http::HeaderMap, std::sync::Arc};
 
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+#[cfg(feature = "legacy-spec")]
 pub use capabilities::LoggingCapability;
-#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
+#[cfg(any(feature = "legacy-spec", feature = "client"))]
 pub use capabilities::RootsCapability;
 pub use capabilities::{
     ClientCapabilities, CompletionsCapability, ElicitationCapability, ElicitationFormCapability,
     ElicitationUrlCapability, PromptsCapability, ResourcesCapability, ServerCapabilities,
     ToolsCapability,
 };
-#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
+#[cfg(any(feature = "legacy-spec", feature = "client"))]
 pub use capabilities::{SamplingCapability, SamplingContextCapability, SamplingToolsCapability};
 pub use completion::{Argument, CompleteRequestParams, CompleteResult, Completion};
 pub use content::{
@@ -49,7 +49,7 @@ pub use capabilities::{
     ElicitationTaskCapability, ServerTaskRequestsCapability, ServerTasksCapability,
     TaskCancellationCapability, TaskListCapability, ToolsCallTaskCapability, ToolsTaskCapability,
 };
-#[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 pub use capabilities::{SamplingCreateMessageTaskCapability, SamplingTaskCapability};
 
 pub use tool::{
@@ -57,7 +57,7 @@ pub use tool::{
     ToolAnnotations,
 };
 
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+#[cfg(feature = "legacy-spec")]
 pub use tool::ToolSchema;
 
 #[cfg(feature = "server")]
@@ -65,12 +65,12 @@ pub use tool::ToolHandler;
 
 /// The MCP schema type for tool input and output schemas.
 ///
-/// Under the legacy default feature set this resolves to the typed
-/// [`tool::ToolSchema`] struct (a small Draft 7-ish subset).
+/// Under `legacy-spec` this resolves to the typed [`tool::ToolSchema`] struct
+/// (a small Draft 7-ish subset).
 ///
-/// Under feature `proto-2026-07-28-rc` it resolves to
+/// In the default build it resolves to
 /// [`schema_2020::InputSchema`] (a Value-shaped JSON Schema 2020-12 wrapper),
-/// matching the MCP 2026-07-28 RC requirement that tool schemas carry
+/// matching the MCP 2026-07-28 requirement that tool schemas carry
 /// full JSON Schema 2020-12 documents.
 ///
 /// Use this alias in code that constructs or accepts tool schemas -- it lets
@@ -86,13 +86,13 @@ pub use tool::ToolHandler;
 /// let schema = ToolInputSchema::default();
 /// # let _ = schema;
 /// ```
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+#[cfg(feature = "legacy-spec")]
 pub type ToolInputSchema = tool::ToolSchema;
 
 /// The MCP schema type for tool input and output schemas.
 ///
-/// See the legacy-flag definition above for the full doc -- under the
-/// `proto-2026-07-28-rc` feature this alias resolves to
+/// See the `legacy-spec` definition above for the full doc -- in the default
+/// (MCP 2026-07-28) build this alias resolves to
 /// [`schema_2020::InputSchema`].
 ///
 /// # Examples
@@ -102,7 +102,7 @@ pub type ToolInputSchema = tool::ToolSchema;
 /// let schema = ToolInputSchema::default();
 /// # let _ = schema;
 /// ```
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 pub type ToolInputSchema = schema_2020::InputSchema;
 
 pub use elicitation::{
@@ -119,7 +119,7 @@ pub use resource::{
     Resource, ResourceContents, ResourceTemplate, SubscribeRequestParams, TextResourceContents,
     UnsubscribeRequestParams, Uri,
 };
-#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
+#[cfg(any(feature = "legacy-spec", feature = "client"))]
 pub use sampling::{
     CreateMessageRequestParams, CreateMessageResult, SamplingMessage, StopReason, ToolChoice,
     ToolChoiceMode,
@@ -143,13 +143,13 @@ pub use task::{
 pub use prompt::PromptHandler;
 
 pub use progress::ProgressToken;
-#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
+#[cfg(any(feature = "legacy-spec", feature = "client"))]
 pub use root::Root;
 
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 pub use cache::CacheScope;
 
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 pub mod cache;
 mod capabilities;
 pub mod completion;
@@ -158,7 +158,7 @@ pub mod cursor;
 pub mod elicitation;
 pub(crate) mod helpers;
 mod icon;
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 pub mod mrtr;
 pub mod notification;
 mod progress;
@@ -167,7 +167,7 @@ mod reference;
 mod request;
 pub mod resource;
 mod response;
-// Under the RC these are no longer capability-driven server->client requests,
+// Under MCP 2026-07-28 these are no longer capability-driven server->client requests,
 // but the types did not go away: they are the params/results of the deprecated
 // `roots/list` and `sampling/createMessage` MRTR input-request kinds (#85), so
 // both peers need them in every build.
@@ -451,31 +451,31 @@ pub struct InitializeResult {
     pub instructions: Option<String>,
 }
 
-/// Parameters for a `server/discover` request (MCP 2026-07-28 RC).
+/// Parameters for a `server/discover` request (MCP 2026-07-28).
 ///
 /// Discovery takes no required input; any client metadata rides in the
 /// request's `_meta` like every other request.
 ///
 /// # Example
 /// ```
-/// # #[cfg(feature = "proto-2026-07-28-rc")]
+/// # #[cfg(not(feature = "legacy-spec"))]
 /// # {
 /// use neva::types::DiscoverRequestParams;
 /// let _p = DiscoverRequestParams::default();
 /// # }
 /// ```
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DiscoverRequestParams {}
 
-/// Result of a `server/discover` request (MCP 2026-07-28 RC).
+/// Result of a `server/discover` request (MCP 2026-07-28).
 ///
 /// Structurally mirrors [`InitializeResult`] but is a distinct type so the
 /// stateless discovery path is explicit at every call site.
 ///
 /// # Example
 /// ```
-/// # #[cfg(feature = "proto-2026-07-28-rc")]
+/// # #[cfg(not(feature = "legacy-spec"))]
 /// # {
 /// use neva::types::DiscoverResult;
 /// let json = r#"{"protocolVersion":"2026-07-28","capabilities":{},"serverInfo":{"name":"s","version":"1"}}"#;
@@ -483,7 +483,7 @@ pub struct DiscoverRequestParams {}
 /// assert_eq!(r.protocol_ver, "2026-07-28");
 /// # }
 /// ```
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoverResult {
     /// The protocol version the server speaks.
@@ -502,7 +502,7 @@ pub struct DiscoverResult {
     pub instructions: Option<String>,
 }
 
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 impl IntoResponse for DiscoverResult {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
@@ -636,7 +636,7 @@ impl FromHandlerParams for InitializeRequestParams {
     }
 }
 
-#[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+#[cfg(all(feature = "server", not(feature = "legacy-spec")))]
 impl FromHandlerParams for DiscoverRequestParams {
     #[inline]
     fn from_params(_params: &HandlerParams) -> Result<Self, Error> {
@@ -785,7 +785,7 @@ impl Implementation {
     }
 }
 
-#[cfg(all(feature = "server", not(feature = "proto-2026-07-28-rc")))]
+#[cfg(all(feature = "server", feature = "legacy-spec"))]
 impl InitializeResult {
     pub(crate) fn new(options: &McpOptions) -> Self {
         Self {
@@ -798,9 +798,9 @@ impl InitializeResult {
                 // `tracing` feature; advertise the capability only when the
                 // handler exists, otherwise clients that trust capabilities
                 // (e.g. MCP Inspector) call it and hit `MethodNotFound`.
-                #[cfg(all(not(feature = "proto-2026-07-28-rc"), feature = "tracing"))]
+                #[cfg(all(feature = "legacy-spec", feature = "tracing"))]
                 logging: Some(LoggingCapability::default()),
-                #[cfg(all(not(feature = "proto-2026-07-28-rc"), not(feature = "tracing")))]
+                #[cfg(all(feature = "legacy-spec", not(feature = "tracing")))]
                 logging: None,
                 completions: Some(CompletionsCapability::default()),
                 #[cfg(feature = "tasks")]
@@ -813,7 +813,7 @@ impl InitializeResult {
     }
 }
 
-#[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+#[cfg(all(feature = "server", not(feature = "legacy-spec")))]
 impl DiscoverResult {
     pub(crate) fn new(options: &McpOptions) -> Self {
         Self {
@@ -825,7 +825,7 @@ impl DiscoverResult {
                 completions: Some(CompletionsCapability::default()),
                 extensions: options.extensions(),
                 // The legacy field exists in this build only because the
-                // dual-mode client resurrects it; the RC server always
+                // dual-mode client resurrects it; the 2026-07-28 server always
                 // advertises tasks through `extensions`.
                 #[cfg(all(feature = "tasks", feature = "client"))]
                 tasks: None,
@@ -841,7 +841,7 @@ impl DiscoverResult {
 mod tests {
     use super::*;
 
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[test]
     fn discover_result_roundtrips() {
         let json = r#"{"protocolVersion":"2026-07-28","capabilities":{},"serverInfo":{"name":"s","version":"1"}}"#;
@@ -853,11 +853,11 @@ mod tests {
         assert_eq!(back["serverInfo"]["name"], serde_json::json!("s"));
     }
 
-    #[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
     #[test]
-    fn discover_masks_push_capabilities_under_stateless_rc() {
+    fn discover_masks_push_capabilities_under_stateless_transport() {
         // Even when the server explicitly configures listChanged + subscribe,
-        // the stateless RC transport cannot push, so `DiscoverResult` must not
+        // the stateless 2026-07-28 transport cannot push, so `DiscoverResult` must not
         // advertise capabilities clients can never rely on.
         let options = McpOptions::default()
             .with_tools(|t| t.with_list_changed())
@@ -877,7 +877,7 @@ mod tests {
     /// handler is compiled in (the `tracing` feature). Advertising it without
     /// the handler sends capability-trusting clients into `MethodNotFound`
     /// (caught live by MCP Inspector against `examples/server`).
-    #[cfg(all(feature = "server", not(feature = "proto-2026-07-28-rc")))]
+    #[cfg(all(feature = "server", feature = "legacy-spec"))]
     #[test]
     fn logging_capability_is_advertised_iff_handler_compiled() {
         let init = InitializeResult::new(&McpOptions::default());

@@ -2,19 +2,9 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 use neva::prelude::*;
 
-#[sampling]
-async fn sampling_handler(params: CreateMessageRequestParams) -> CreateMessageResult {
-    tracing::info!("Received sampling: {:?}", params);
-    
-    CreateMessageResult::assistant()
-        .with_model("gpt-5")
-        .with_content(
-            r#"Winter night whispers,
-Warm lights breathe through frosted glass--
-Time pauses, snow listens."#)
-        .end_turn()
-}
-
+// No sampling handler here: MCP 2026-07-28 removed the server-push
+// `sampling/createMessage` request, so there is no task-augmented sampling to
+// answer. See `examples/sampling` for the MRTR form of that round-trip.
 #[elicitation]
 async fn elicitation_handler(params: ElicitRequestParams) -> ElicitResult {
     tracing::info!("Received elicitation: {:?}", params);
@@ -39,14 +29,6 @@ async fn main() -> Result<(), Error> {
             .with_default_http());
     
     client.connect().await?;
-
-    tracing::info!("Calling tool with sampling as task...");
-    
-    let result = client
-        .task()
-        .call_tool("tool_with_sampling", ()).await;
-    
-    tracing::info!("Received result: {:?}", result);
 
     tracing::info!("Calling tool with elicitation as task...");
     

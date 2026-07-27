@@ -1,11 +1,11 @@
-//! Stateless HTTP transport (MCP 2026-07-28 RC) end-to-end checks.
+//! Stateless HTTP transport (MCP 2026-07-28) end-to-end checks.
 //!
 //! Exercises the stateless POST-only path: `server/discover` without a
 //! session, a stateless `tools/call` carrying the required
 //! `MCP-Protocol-Version` header, rejection of a header-less POST, and the
 //! absence of the GET (SSE) / DELETE routes.
 #![cfg(all(
-    feature = "proto-2026-07-28-rc",
+    not(feature = "legacy-spec"),
     feature = "http-server-volga",
     feature = "http-client"
 ))]

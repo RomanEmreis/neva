@@ -10,23 +10,19 @@ async fn endless_tool() {
     }
 }
 
-#[tool(task_support = "required")]
-async fn tool_with_sampling(mut ctx: Context) -> String {
-    let params = CreateMessageRequestParams::new()
-        .with_message(SamplingMessage::from("Write a haiku."))
-        .with_ttl(Some(5000));
-
-    let res = ctx.sample(params).await;
-
-    format!("{:?}", res.unwrap().content)
-}
-
+// MCP 2026-07-28 has no task-augmented *sampling*: sampling lost its
+// capability-driven server->client request and now lives on the MRTR substrate
+// (`ctx.sample(key, params)`), which never mixes with the task substrate. See
+// `examples/sampling` for that round-trip. Elicitation is the one input kind a
+// task can await, via `ctx.task()`.
 #[tool(task_support = "required")]
 async fn tool_with_elicitation(mut ctx: Context, task: Meta<RelatedTaskMetadata>) -> String {
     let params = ElicitRequestParams::form("Are you sure to proceed?")
         .with_related_task(task);
 
-    let res = ctx.elicit(params.into()).await;
+    // A task does not re-run, it genuinely suspends -- so unlike the MRTR
+    // `ctx.elicit(key, params)` this takes no replay key.
+    let res = ctx.task().elicit(params.into()).await;
 
     format!("{:?}", res.unwrap().action)
 }

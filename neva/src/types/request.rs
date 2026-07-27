@@ -73,7 +73,7 @@ pub struct RequestParamsMeta {
     ///
     /// Always present in the struct for source-compatibility across feature
     /// configurations. The semantic interpretation (W3C Trace Context, MCP
-    /// 2026-07-28) is meaningful under `proto-2026-07-28-rc`; older peers
+    /// 2026-07-28) is meaningful under MCP 2026-07-28; older peers
     /// silently ignore the field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub traceparent: Option<String>,
@@ -91,7 +91,7 @@ pub struct RequestParamsMeta {
     ///
     /// Always present in the struct for source-compatibility across feature
     /// configurations, like the trace fields; only populated (and meaningful)
-    /// under `proto-2026-07-28-rc`. Older peers ignore it.
+    /// under MCP 2026-07-28. Older peers ignore it.
     #[serde(
         rename = "io.modelcontextprotocol/clientInfo",
         skip_serializing_if = "Option::is_none"
@@ -99,12 +99,12 @@ pub struct RequestParamsMeta {
     pub(crate) client_info: Option<super::Implementation>,
 
     /// MRTR: the client's results for a prior `InputRequiredResult`.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[serde(rename = "inputResponses", skip_serializing_if = "Option::is_none")]
     pub(crate) input_responses: Option<crate::types::mrtr::InputResponses>,
 
     /// MRTR: the opaque `requestState` echoed back from `InputRequiredResult`.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[serde(rename = "requestState", skip_serializing_if = "Option::is_none")]
     pub(crate) request_state: Option<String>,
 
@@ -115,7 +115,7 @@ pub struct RequestParamsMeta {
     /// replaces the removed global `logging/setLevel` handshake; the desired
     /// level now rides on the originating request's `_meta`. Deprecated in the
     /// 2026-07-28 draft together with the rest of the logging surface.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[serde(
         rename = "io.modelcontextprotocol/logLevel",
         skip_serializing_if = "Option::is_none"
@@ -125,7 +125,7 @@ pub struct RequestParamsMeta {
     /// MRTR/stateless: client capabilities declared per-request (v1: a single
     /// `elicitation` flag) so the server can honor "MUST NOT send an input
     /// type the client didn't declare".
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[serde(rename = "clientCapabilities", skip_serializing_if = "Option::is_none")]
     pub(crate) client_capabilities: Option<crate::types::mrtr::ClientMrtrCapabilities>,
 
@@ -231,7 +231,7 @@ impl Request {
     /// `command("x", Some(vec![1, 2]))`) are left untouched: `_meta` has no
     /// place on a non-object JSON-RPC params value, and replacing it would
     /// silently drop the caller's payload, so metadata injection is skipped.
-    #[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+    #[cfg(all(feature = "client", not(feature = "legacy-spec")))]
     pub(crate) fn set_meta(&mut self, meta: RequestParamsMeta) {
         let Ok(serde_json::Value::Object(fields)) = serde_json::to_value(meta) else {
             return;
@@ -293,7 +293,7 @@ mod tests {
         assert!(v.get("tracestate").is_none());
     }
 
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[test]
     fn log_level_roundtrips_under_spec_meta_key() {
         use crate::types::notification::LoggingLevel;
@@ -311,7 +311,7 @@ mod tests {
         assert_eq!(back.log_level, Some(LoggingLevel::Warning));
     }
 
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[test]
     fn absent_log_level_is_omitted() {
         let meta = RequestParamsMeta::default();
@@ -319,7 +319,7 @@ mod tests {
         assert!(v.get("io.modelcontextprotocol/logLevel").is_none());
     }
 
-    #[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+    #[cfg(all(feature = "client", not(feature = "legacy-spec")))]
     #[test]
     fn set_meta_writes_meta_and_preserves_params() {
         use serde_json::json;
@@ -346,7 +346,7 @@ mod tests {
         assert_eq!(req.params.expect("params present")["x"], json!(1));
     }
 
-    #[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+    #[cfg(all(feature = "client", not(feature = "legacy-spec")))]
     #[test]
     fn set_meta_preserves_unknown_meta_entries() {
         use serde_json::json;
@@ -379,7 +379,7 @@ mod tests {
         assert_eq!(params["name"], json!("echo"));
     }
 
-    #[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+    #[cfg(all(feature = "client", not(feature = "legacy-spec")))]
     #[test]
     fn set_meta_preserves_non_object_params() {
         use serde_json::json;
@@ -404,7 +404,7 @@ mod tests {
         assert_eq!(req.params, Some(json!("id")));
     }
 
-    #[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+    #[cfg(all(feature = "client", not(feature = "legacy-spec")))]
     #[test]
     fn set_meta_creates_params_when_absent() {
         let mut req = Request::new(Some(RequestId::Number(1)), "x", None::<serde_json::Value>);

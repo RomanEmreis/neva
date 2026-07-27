@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 // `notifications/message` (and its `LoggingLevel`/`LogMessage` payload) is kept
 // under MCP 2026-07-28 as a deprecated, request-scoped notification. Only the
-// `logging/setLevel` handshake (`SetLevelRequestParams`) is removed under the RC.
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+// `logging/setLevel` handshake (`SetLevelRequestParams`) is removed under MCP 2026-07-28.
+#[cfg(feature = "legacy-spec")]
 pub use log_message::SetLevelRequestParams;
 pub use log_message::{LogMessage, LoggingLevel};
 
@@ -49,7 +49,7 @@ pub mod commands {
     pub const STDERR: &str = "notifications/stderr";
 
     /// Command name that sets the log level.
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[cfg(feature = "legacy-spec")]
     pub const SET_LOG_LEVEL: &str = "logging/setLevel";
 }
 

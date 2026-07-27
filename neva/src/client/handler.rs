@@ -84,7 +84,7 @@ pub(super) struct RequestHandler {
     /// Which protocol generation the peer speaks (issue #84) -- shared with
     /// [`Client`](crate::client::Client), so the dual-mode fallback's flip
     /// is observed by the receive loop.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     peer_mode: crate::shared::PeerMode,
 }
 
@@ -155,7 +155,7 @@ impl RequestHandler {
             notification_handler: options.notification_handler.clone(),
             #[cfg(feature = "tasks")]
             tasks: Arc::new(TaskTracker::new()),
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             peer_mode: options.peer_mode.clone(),
         };
 
@@ -231,7 +231,7 @@ impl RequestHandler {
     /// per request (in input order). [`MessageEnvelope::Notification`] items
     /// are included in the wire payload but produce no receiver slot.
     ///
-    /// > **Note:** under `proto-2026-07-28-rc`, per-request client metadata
+    /// > **Note:** under MCP 2026-07-28, per-request client metadata
     /// > (`clientInfo` / `clientCapabilities`, plus `_meta.traceparent` /
     /// > `tracestate` when a trace-context provider is installed) is injected
     /// > upstream by
@@ -307,7 +307,7 @@ impl RequestHandler {
 
         #[cfg(feature = "tasks")]
         let tasks = self.tasks.clone();
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         let peer_mode = self.peer_mode.clone();
 
         tokio::task::spawn(async move {
@@ -322,7 +322,7 @@ impl RequestHandler {
                             &elicitation_handler,
                             #[cfg(feature = "tasks")]
                             &tasks,
-                            #[cfg(feature = "proto-2026-07-28-rc")]
+                            #[cfg(not(feature = "legacy-spec"))]
                             &peer_mode,
                         )
                         .await;
@@ -360,7 +360,7 @@ impl RequestHandler {
                             &notification_handler,
                             #[cfg(feature = "tasks")]
                             &tasks,
-                            #[cfg(feature = "proto-2026-07-28-rc")]
+                            #[cfg(not(feature = "legacy-spec"))]
                             &peer_mode,
                         )
                         .await;
@@ -389,7 +389,7 @@ async fn dispatch_batch_deferred(
     elicitation_handler: &Option<ElicitationHandler>,
     notification_handler: &Option<Arc<NotificationsHandler>>,
     #[cfg(feature = "tasks")] tasks: &Arc<TaskTracker>,
-    #[cfg(feature = "proto-2026-07-28-rc")] peer_mode: &crate::shared::PeerMode,
+    #[cfg(not(feature = "legacy-spec"))] peer_mode: &crate::shared::PeerMode,
 ) -> Vec<MessageEnvelope> {
     use futures_util::future::join_all;
 
@@ -404,7 +404,7 @@ async fn dispatch_batch_deferred(
                     elicitation_handler,
                     #[cfg(feature = "tasks")]
                     tasks,
-                    #[cfg(feature = "proto-2026-07-28-rc")]
+                    #[cfg(not(feature = "legacy-spec"))]
                     peer_mode,
                 )
                 .await,
@@ -432,10 +432,10 @@ async fn send_response_impl(sender: &mut TransportProtoSender, resp: Response) {
 /// [`ErrorCode::MethodNotFound`] error response so the peer is never left
 /// waiting for a reply that will never arrive.
 ///
-/// Under `proto-2026-07-28-rc` the legacy server-initiated methods
+/// Under MCP 2026-07-28 the legacy server-initiated methods
 /// (`sampling/createMessage`, `roots/list`) are dispatched **only** once the
-/// dual-mode fallback (issue #84) has marked the peer legacy: an RC client
-/// advertises neither capability, so an RC peer asking for them is out of
+/// dual-mode fallback (issue #84) has marked the peer legacy: a 2026-07-28 client
+/// advertises neither capability, so a 2026-07-28 peer asking for them is out of
 /// contract and is answered `MethodNotFound` like any unknown method,
 /// instead of silently running the configured handler.
 #[inline]
@@ -445,13 +445,13 @@ async fn dispatch_request(
     sampling_handler: &Option<SamplingHandler>,
     elicitation_handler: &Option<ElicitationHandler>,
     #[cfg(feature = "tasks")] tasks: &Arc<TaskTracker>,
-    #[cfg(feature = "proto-2026-07-28-rc")] peer_mode: &crate::shared::PeerMode,
+    #[cfg(not(feature = "legacy-spec"))] peer_mode: &crate::shared::PeerMode,
 ) -> Response {
-    // The legacy build is legacy by construction; the RC build reads the
+    // The legacy build is legacy by construction; the 2026-07-28 build reads the
     // switch per dispatch so a post-fallback flip is observed immediately.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     let legacy_peer = peer_mode.is_legacy();
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[cfg(feature = "legacy-spec")]
     let legacy_peer = true;
 
     let req_id = req.id();
@@ -858,7 +858,7 @@ mod tests {
 
         // `sampling/createMessage` is a legacy server-initiated method, so
         // the dispatcher only runs the handler for a legacy peer.
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         let peer_mode = {
             let mode = crate::shared::PeerMode::default();
             mode.set_legacy();
@@ -874,7 +874,7 @@ mod tests {
             &notification_handler,
             #[cfg(feature = "tasks")]
             &Arc::new(crate::shared::TaskTracker::default()),
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             &peer_mode,
         )
         .await;
@@ -886,11 +886,11 @@ mod tests {
         );
     }
 
-    /// Legacy server-initiated methods are out of contract for an RC peer:
+    /// Legacy server-initiated methods are out of contract for a 2026-07-28 peer:
     /// the client advertises neither `sampling` nor `roots`, so the
     /// configured handlers must stay unreachable until the dual-mode
     /// fallback marks the peer legacy.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[tokio::test]
     async fn legacy_server_push_is_gated_on_the_peer_mode() {
         use crate::types::sampling::{CreateMessageRequestParams, CreateMessageResult};
@@ -934,7 +934,7 @@ mod tests {
         ] {
             let resp = dispatch(method, &peer_mode).await;
             let Response::Err(err) = resp else {
-                panic!("an RC peer must not reach the legacy `{method}` handler");
+                panic!("a 2026-07-28 peer must not reach the legacy `{method}` handler");
             };
             assert_eq!(err.error.code, ErrorCode::MethodNotFound);
         }

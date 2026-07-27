@@ -107,12 +107,12 @@ pub struct ListResourceTemplatesResult {
     pub next_cursor: Option<Cursor>,
 
     /// Suggested TTL in milliseconds for caching this list result, when set by the server.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[serde(rename = "ttlMs", skip_serializing_if = "Option::is_none")]
     pub ttl_ms: Option<u64>,
 
     /// Suggested cache scope for this list result, when set by the server.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[serde(rename = "cacheScope", skip_serializing_if = "Option::is_none")]
     pub cache_scope: Option<crate::types::CacheScope>,
 }
@@ -129,7 +129,7 @@ impl IntoResponse for ListResourceTemplatesResult {
 
 impl From<Vec<ResourceTemplate>> for ListResourceTemplatesResult {
     #[inline]
-    #[cfg_attr(not(feature = "proto-2026-07-28-rc"), allow(clippy::needless_update))]
+    #[cfg_attr(feature = "legacy-spec", allow(clippy::needless_update))]
     fn from(templates: Vec<ResourceTemplate>) -> Self {
         Self {
             next_cursor: None,
@@ -141,7 +141,7 @@ impl From<Vec<ResourceTemplate>> for ListResourceTemplatesResult {
 
 impl From<Page<'_, ResourceTemplate>> for ListResourceTemplatesResult {
     #[inline]
-    #[cfg_attr(not(feature = "proto-2026-07-28-rc"), allow(clippy::needless_update))]
+    #[cfg_attr(feature = "legacy-spec", allow(clippy::needless_update))]
     fn from(page: Page<'_, ResourceTemplate>) -> Self {
         Self {
             next_cursor: page.next_cursor,

@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## 0.5.0
 
 ### Changed (breaking)
+* **MCP 2026-07-28 is now the default protocol generation.** The
+  `proto-2026-07-28-rc` opt-in flag is gone; what it used to gate is what a
+  plain `neva` build now speaks. The previous default -- MCP 2024-11-05 ..
+  2025-11-25 -- moves behind a new **`legacy-spec`** feature. This is the
+  deliberate breaking change flagged since 0.4.0: the spec revision itself is
+  breaking, and neva follows it rather than freezing on the old wire.
+  * Migration: builds that enabled `proto-2026-07-28-rc` simply drop the flag.
+    Builds that relied on the old default add `features = ["legacy-spec"]`.
+  * `with_mcp_version` (server side) is available again -- under `legacy-spec`,
+    where version selection is meaningful. The default build pins `2026-07-28`.
+  * The `roots` and `sampling` examples swapped places: the MCP 2026-07-28
+    variants are now `examples/{roots,sampling}/{server,client}` and the legacy
+    ones moved to `examples/{roots,sampling}/legacy/{server,client}`.
+  * Note that `--all-features` enables `legacy-spec`, so it now exercises the
+    legacy profile; the default profile needs an explicit feature list
+    (e.g. `--features "server-full client-full"`).
 * **Unified streaming-capable POST seam** for HTTP engine adapters. Streamable
   HTTP has allowed a POST reply to be either a single JSON body or an SSE
   stream since spec revision 2025-03-26; neva's engine seam only modeled the
@@ -18,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   * `handlers::dispatch_post` returns
     `StreamResponse<impl Stream<Item = E::SseEvent>>` instead of
     `E::Response`: engines handle the same two-arm match their GET route
-    already has. Under `proto-2026-07-28-rc` + `tracing` the `Stream` arm
+    already has. In the default (MCP 2026-07-28) build with `tracing` the `Stream` arm
     carries request-scoped notifications followed by the response; other
     builds always produce `Complete` (no behavior change).
   * `handle_post` stays available as the JSON-only building block.
@@ -28,10 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     to the two-arm match.
 
 ### Added
-* **Request-scoped logging** (`proto-2026-07-28-rc`, #93). The 2026-07-28 draft
+* **Request-scoped logging** (MCP 2026-07-28, #93). The 2026-07-28 spec
   removes only `logging/setLevel`; it keeps `notifications/message` as a
   deprecated, request-scoped log notification. neva had compiled the whole
-  logging surface out under the RC -- this brings the kept part back:
+  logging surface out -- this brings the kept part back:
   * The desired level rides per-request on
     `_meta["io.modelcontextprotocol/logLevel"]` (`RequestParamsMeta`) instead of
     a global `setLevel` handshake. While the server handles a request, it emits
@@ -46,8 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   * Client API: `McpOptions::with_log_level` (via `Client::with_options`),
     `#[deprecated]` on arrival to mirror the schema. `LoggingLevel`/`LogMessage`
     stay undecorated.
-  * `logging/setLevel` and `with_logging`/`set_log_level` stay removed under the
-    RC.
+  * `logging/setLevel` and `with_logging`/`set_log_level` stay removed in the
+    default build.
   * Delivery: request-scoped notifications flow on the originating request's
     response stream, per the spec. Over **stdio** they interleave on stdout.
     Over the stateless **HTTP** transport, a `POST` that opts in (carries

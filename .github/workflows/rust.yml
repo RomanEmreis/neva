@@ -41,12 +41,16 @@ jobs:
         run: cargo clippy --all-targets --features http-client -- -D warnings
       - name: Run all features client
         run: cargo clippy --all-targets --features client-full -- -D warnings
-      - name: Run server+client with proto-2026-07-28-rc
-        run: cargo clippy --all-targets --features "server-full client-full proto-2026-07-28-rc" -- -D warnings
-      - name: Run slim client with proto-2026-07-28-rc
-        run: cargo clippy --all-targets --features "client proto-2026-07-28-rc" -- -D warnings
-      - name: Run slim server with proto-2026-07-28-rc
-        run: cargo clippy --all-targets --features "server proto-2026-07-28-rc" -- -D warnings
+      - name: Run server+client
+        run: cargo clippy --all-targets --features "server-full client-full" -- -D warnings
+      # `--all-features` turns `legacy-spec` on, so the rows above cover the
+      # default (MCP 2026-07-28) profile and the rows below cover the legacy one.
+      - name: Run server+client with legacy-spec
+        run: cargo clippy --all-targets --features "server-full client-full legacy-spec" -- -D warnings
+      - name: Run slim client with legacy-spec
+        run: cargo clippy --all-targets --features "client legacy-spec" -- -D warnings
+      - name: Run slim server with legacy-spec
+        run: cargo clippy --all-targets --features "server legacy-spec" -- -D warnings
 
   audit:
     runs-on: ubuntu-latest
@@ -75,8 +79,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check docs build clean
         run: cargo doc --no-deps --all-features
-      - name: Check docs build clean with proto-2026-07-28-rc
-        run: cargo doc --no-deps --features "server-full client-full proto-2026-07-28-rc"
+      - name: Check docs build clean with legacy-spec
+        run: cargo doc --no-deps --features "server-full client-full legacy-spec"
       # The rows above have every feature on, so every intra-doc link resolves
       # by construction. Slim rows catch docs that link to items a smaller
       # feature set does not compile.
@@ -84,8 +88,8 @@ jobs:
         run: cargo doc --no-deps --features server
       - name: Check docs build clean on a slim client
         run: cargo doc --no-deps --features client
-      - name: Check docs build clean on a client-only RC build
-        run: cargo doc --no-deps --features "client proto-2026-07-28-rc"
+      - name: Check docs build clean on a client-only legacy build
+        run: cargo doc --no-deps --features "client legacy-spec"
 
   build:
     environment: CICD
@@ -102,5 +106,7 @@ jobs:
         run: cargo test --features server-full --verbose
       - name: Run client tests
         run: cargo test --features client-full --verbose
-      - name: Run tests with proto-2026-07-28-rc
-        run: cargo test --features "server-full client-full proto-2026-07-28-rc" --verbose
+      - name: Run server+client tests
+        run: cargo test --features "server-full client-full" --verbose
+      - name: Run tests with legacy-spec
+        run: cargo test --features "server-full client-full legacy-spec" --verbose

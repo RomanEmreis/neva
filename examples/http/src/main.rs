@@ -6,30 +6,29 @@
 //! cargo run -p example-http
 //! ```
 use neva::prelude::*;
-use tracing_subscriber::{filter, prelude::*, reload};
+use tracing_subscriber::{filter, prelude::*};
 
 #[tool]
-async fn remote_tool(name: String, mut ctx: Context) {
+async fn remote_tool(name: String) {
+    // `logging/setLevel` is gone in MCP 2026-07-28; `notifications/message` is
+    // request-scoped instead. A call that carries
+    // `_meta["io.modelcontextprotocol/logLevel"]` gets these events back on its
+    // own SSE reply, filtered to the level it asked for -- see
+    // `notification::fmt::layer()` below. A call that asks for nothing gets none.
     tracing::debug!("running remote tool: {}", name);
-    let roots = ctx.list_roots().await.unwrap();
-    tracing::debug!("roots: {:?}", roots.roots);
 }
 
 #[tokio::main]
 async fn main() {
-    let (filter, handle) = reload::Layer::new(filter::LevelFilter::DEBUG);
     tracing_subscriber::registry()
-        .with(filter)
+        .with(filter::LevelFilter::DEBUG)
         .with(notification::fmt::layer())
         .init();
 
-    #[allow(deprecated)]
     App::new()
         .with_options(|opt| {
             opt.with_http(|http| http.bind("127.0.0.1:3000").with_endpoint("/mcp"))
                 .with_name("Streamable HTTP Example Server")
-                .with_mcp_version("2025-06-18")
-                .with_logging(handle)
         })
         .run()
         .await;

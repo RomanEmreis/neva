@@ -1,4 +1,4 @@
-//! Multi Round-Trip Request (MRTR) wire types (MCP `proto-2026-07-28-rc`).
+//! Multi Round-Trip Request (MRTR) wire types (MCP 2026-07-28).
 //!
 //! A server processing `tools/call` / `prompts/get` / `resources/read` may
 //! reply with [`InputRequiredResult`] to request additional input before

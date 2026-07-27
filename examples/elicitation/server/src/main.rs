@@ -12,8 +12,7 @@ async fn generate_business_card(mut ctx: Context) -> Result<String, Error> {
     let params = ElicitRequestParams::form("Please provide your contact information")
         .with_schema::<Contact>();
     
-    ctx
-        .elicit(params.into())
+    ctx.elicit("contact", params.into())
         .await?
         .map(format_contact)
 }
@@ -26,9 +25,7 @@ async fn pay_a_bill(mut ctx: Context) -> Result<String, Error> {
 
     let elicitation_id = params.id.clone();
     
-    ctx
-        .elicit(params.into())
-        .await?;
+    ctx.elicit("bill", params.into()).await?;
     
     ctx.complete_elicitation(elicitation_id).await?;
     

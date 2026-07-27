@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 /// Suggested scope at which a list-result may be cached.
 ///
 /// Carried alongside `ttl_ms` on list-result structs (tools, prompts,
-/// resources, resource templates) under `proto-2026-07-28-rc`. The
+/// resources, resource templates) under MCP 2026-07-28. The
 /// server announces the scope; the client (or any caching middleware)
 /// decides whether to honor it.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]

@@ -5,7 +5,7 @@
 //! ```
 
 use neva::prelude::*;
-use tracing_subscriber::{filter, prelude::*, reload};
+use tracing_subscriber::{filter, prelude::*};
 
 #[tool(middleware = [specific_middleware])]
 async fn greeter(name: String) -> String {
@@ -60,20 +60,13 @@ async fn specific_middleware(ctx: MwContext, next: Next) -> Response {
 
 #[tokio::main]
 async fn main() {
-    let (filter, handle) = reload::Layer::new(filter::LevelFilter::DEBUG);
     tracing_subscriber::registry()
-        .with(filter)
+        .with(filter::LevelFilter::DEBUG)
         .with(tracing_subscriber::fmt::layer().event_format(notification::NotificationFormatter))
         .init();
 
-    #[allow(deprecated)]
     App::new()
-        .with_options(|opt| {
-            opt.with_name("Middleware Example Server")
-                .with_stdio()
-                .with_logging(handle)
-                .with_mcp_version("2025-06-18")
-        })
+        .with_options(|opt| opt.with_name("Middleware Example Server").with_stdio())
         .wrap(logging_middleware) // Wraps all requests that pass through the server
         .wrap_tools(global_tool_middleware) // Wraps all tools/call requests that pass through the server
         .run()

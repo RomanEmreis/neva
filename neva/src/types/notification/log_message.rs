@@ -1,11 +1,11 @@
 //! Utilities for log messages
 
-#[cfg(all(feature = "server", not(feature = "proto-2026-07-28-rc")))]
+#[cfg(all(feature = "server", feature = "legacy-spec"))]
 use crate::app::handler::{FromHandlerParams, HandlerParams};
 use crate::error::Error;
 use crate::types::notification::Notification;
 use crate::types::response::ErrorDetails;
-#[cfg(all(feature = "server", not(feature = "proto-2026-07-28-rc")))]
+#[cfg(all(feature = "server", feature = "legacy-spec"))]
 use crate::types::{FromRequest, Request};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "tracing")]
@@ -42,7 +42,7 @@ pub enum LoggingLevel {
     Emergency,
 }
 
-#[cfg(all(feature = "tracing", feature = "proto-2026-07-28-rc"))]
+#[cfg(all(feature = "tracing", not(feature = "legacy-spec")))]
 impl LoggingLevel {
     /// Severity rank where a higher number is more severe, following the
     /// RFC-5424 ordering. A message at `self` is delivered to a client that
@@ -91,7 +91,7 @@ pub struct LogMessage {
 /// `_meta["io.modelcontextprotocol/logLevel"]`.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+#[cfg(feature = "legacy-spec")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetLevelRequestParams {
     /// The level of logging that the client wants to receive from the server.
@@ -118,7 +118,7 @@ impl From<LogMessage> for Notification {
     }
 }
 
-#[cfg(all(feature = "server", not(feature = "proto-2026-07-28-rc")))]
+#[cfg(all(feature = "server", feature = "legacy-spec"))]
 impl FromHandlerParams for SetLevelRequestParams {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
@@ -169,7 +169,7 @@ impl LogMessage {
     }
 }
 
-#[cfg(all(test, feature = "tracing", feature = "proto-2026-07-28-rc"))]
+#[cfg(all(test, feature = "tracing", not(feature = "legacy-spec")))]
 mod tests {
     use super::LoggingLevel;
 

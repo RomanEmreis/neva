@@ -1,6 +1,6 @@
-//! Protocol extensions (MCP 2026-07-28 RC).
+//! Protocol extensions (MCP 2026-07-28).
 //!
-//! The RC reclassifies several former core features (starting with Tasks) as
+//! MCP 2026-07-28 reclassifies several former core features (starting with Tasks) as
 //! *extensions*: each is identified by a reverse-DNS id, advertises a
 //! capability value under `capabilities.extensions[id]`, and brings its own
 //! request handlers. This module defines the [`Extension`] trait that wires
@@ -15,7 +15,7 @@ mod tasks;
 #[cfg(feature = "tasks")]
 pub use tasks::TasksExtension;
 
-/// A protocol extension (MCP 2026-07-28 RC).
+/// A protocol extension (MCP 2026-07-28).
 ///
 /// An extension contributes a capability value (surfaced in `server/discover`
 /// under `capabilities.extensions`) and registers its request handlers.

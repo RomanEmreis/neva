@@ -15,13 +15,13 @@ pub struct ClientCapabilities {
     /// >
     /// > The server can use `RequestRoots` to request the list of
     /// > available roots from the client, which will trigger the client's `RootsHandler`.
-    #[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
+    #[cfg(any(feature = "legacy-spec", feature = "client"))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub roots: Option<RootsCapability>,
 
     /// Gets or sets the client's sampling capability, which indicates whether the client
     /// supports issuing requests to an LLM on behalf of the server.
-    #[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
+    #[cfg(any(feature = "legacy-spec", feature = "client"))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sampling: Option<SamplingCapability>,
 
@@ -32,22 +32,19 @@ pub struct ClientCapabilities {
 
     /// Present if the client supports task-augmented requests.
     ///
-    /// Under `proto-2026-07-28-rc`, tasks become an extension; this top-level
+    /// Under MCP 2026-07-28, tasks become an extension; this top-level
     /// field is replaced by an entry in the `extensions` map keyed by
     /// `io.modelcontextprotocol/tasks`.
-    #[cfg(all(
-        feature = "tasks",
-        any(not(feature = "proto-2026-07-28-rc"), feature = "client")
-    ))]
+    #[cfg(all(feature = "tasks", any(feature = "legacy-spec", feature = "client")))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tasks: Option<ClientTasksCapability>,
 
-    /// Protocol extensions the client supports (MCP 2026-07-28 RC).
+    /// Protocol extensions the client supports (MCP 2026-07-28).
     ///
     /// Keyed by reverse-DNS extension id (e.g. `io.modelcontextprotocol/tasks`)
     /// mapping to that extension's capability value. Replaces the former
-    /// top-level `tasks` capability under the RC flag.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    /// top-level `tasks` capability under MCP 2026-07-28.
+    #[cfg(not(feature = "legacy-spec"))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<HashMap<String, serde_json::Value>>,
 
@@ -74,7 +71,7 @@ pub struct ClientCapabilities {
 /// > servers can navigate to access specific resources.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
+#[cfg(any(feature = "legacy-spec", feature = "client"))]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct RootsCapability {
     /// Indicates whether the client supports notifications for changes to the roots list.
@@ -94,7 +91,7 @@ pub struct RootsCapability {
 /// > using an AI model. The client must set a `SamplingHandler` to process these requests.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
+#[cfg(any(feature = "legacy-spec", feature = "client"))]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct SamplingCapability {
     /// Indicates whether the client supports context inclusion via `includeContext` parameter.
@@ -109,7 +106,7 @@ pub struct SamplingCapability {
 /// Represents the sampling context capability.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
+#[cfg(any(feature = "legacy-spec", feature = "client"))]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct SamplingContextCapability {
     // Currently empty in the spec, but may be extended in the future
@@ -118,7 +115,7 @@ pub struct SamplingContextCapability {
 /// Represents the sampling tools capability.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "client"))]
+#[cfg(any(feature = "legacy-spec", feature = "client"))]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct SamplingToolsCapability {
     // Currently empty in the spec, but may be extended in the future
@@ -180,7 +177,7 @@ pub struct ServerCapabilities {
     pub resources: Option<ResourcesCapability>,
 
     /// Present if the server supports sending log messages to the client.
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[cfg(feature = "legacy-spec")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logging: Option<LoggingCapability>,
 
@@ -190,27 +187,24 @@ pub struct ServerCapabilities {
 
     /// Present if the server supports task-augmented requests.
     ///
-    /// Under `proto-2026-07-28-rc`, tasks become an extension; this top-level
+    /// Under MCP 2026-07-28, tasks become an extension; this top-level
     /// field is replaced by an entry in the `extensions` map keyed by
     /// `io.modelcontextprotocol/tasks`.
     ///
-    /// Compiled for the RC **client** too: after a dual-mode fallback a
+    /// Compiled for the 2026-07-28 **client** too: after a dual-mode fallback a
     /// legacy peer advertises tasks here, and the field must survive
-    /// deserialization of its `initialize` result. The RC server never
-    /// sets it, and `skip_serializing_if` keeps the RC wire unchanged.
-    #[cfg(all(
-        feature = "tasks",
-        any(not(feature = "proto-2026-07-28-rc"), feature = "client")
-    ))]
+    /// deserialization of its `initialize` result. A 2026-07-28 server never
+    /// sets it, and `skip_serializing_if` keeps the 2026-07-28 wire unchanged.
+    #[cfg(all(feature = "tasks", any(feature = "legacy-spec", feature = "client")))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tasks: Option<ServerTasksCapability>,
 
-    /// Protocol extensions the server supports (MCP 2026-07-28 RC).
+    /// Protocol extensions the server supports (MCP 2026-07-28).
     ///
     /// Keyed by reverse-DNS extension id (e.g. `io.modelcontextprotocol/tasks`)
     /// mapping to that extension's capability value. Replaces the former
-    /// top-level `tasks` capability under the RC flag.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    /// top-level `tasks` capability under MCP 2026-07-28.
+    #[cfg(not(feature = "legacy-spec"))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<HashMap<String, serde_json::Value>>,
 
@@ -263,7 +257,7 @@ pub struct ResourcesCapability {
 /// Represents the logging capability configuration.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+#[cfg(feature = "legacy-spec")]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct LoggingCapability {
     // Currently empty in the spec, but may be extended in the future
@@ -355,7 +349,7 @@ pub struct ClientTaskRequestsCapability {
     pub elicitation: Option<ElicitationTaskCapability>,
 
     /// Specifies task support for sampling-related requests.
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[cfg(feature = "legacy-spec")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sampling: Option<SamplingTaskCapability>,
 }
@@ -385,7 +379,7 @@ pub struct ElicitationTaskCapability {
 /// Specifies task support for sampling-related requests.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct SamplingTaskCapability {
     /// Indicates whether the client supports task-augmented `sampling/createMessage` requests.
@@ -414,7 +408,7 @@ pub struct ElicitationCreateTaskCapability {
 /// Represents task support configuration for `sampling/createMessage` requests.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct SamplingCreateMessageTaskCapability {
     // Currently empty in the spec, but may be extended in the future
@@ -573,20 +567,20 @@ impl ClientTasksCapability {
     }
 
     /// Specifies whether this client supports task-augmented sampling-related requests
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[cfg(feature = "legacy-spec")]
     pub fn with_sampling(self) -> Self {
         self.with_requests(|req| req.with_sampling())
     }
 
     /// Specifies whether this client supports all task-augmented capabilities
     pub fn with_all(self) -> Self {
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        #[cfg(feature = "legacy-spec")]
         return self
             .with_cancel()
             .with_list()
             .with_elicitation()
             .with_sampling();
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         return self.with_cancel().with_list().with_elicitation();
     }
 }
@@ -613,7 +607,7 @@ impl ClientTaskRequestsCapability {
     }
 
     /// Specifies task support for sampling-related requests.
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[cfg(feature = "legacy-spec")]
     pub fn with_sampling(mut self) -> Self {
         self.sampling = Some(SamplingTaskCapability {
             create: Some(SamplingCreateMessageTaskCapability {}),

@@ -15,9 +15,9 @@ use std::{
 use tokio::sync::watch::{Receiver, Sender, channel};
 use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
 
-#[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+#[cfg(all(feature = "server", not(feature = "legacy-spec")))]
 use crate::types::Response;
-#[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+#[cfg(all(feature = "server", not(feature = "legacy-spec")))]
 use tokio::sync::oneshot;
 
 pub(crate) struct TaskTracker {
@@ -33,18 +33,18 @@ pub(crate) type MaybePayload = Option<TaskPayload>;
 pub(crate) struct TaskEntry {
     task: Task,
     token: CancellationToken,
-    // Unused under `proto-2026-07-28-rc`: the task-coupled elicit path that
+    // Unused under MCP 2026-07-28: the task-coupled elicit path that
     // fed results through `tx` is replaced by MRTR.
     #[cfg(feature = "server")]
-    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
+    #[cfg_attr(not(feature = "legacy-spec"), allow(dead_code))]
     tx: Sender<MaybePayload>,
     rx: Receiver<MaybePayload>,
-    /// RC task-elicit resume slot. Under the stateless transport a parked
+    /// 2026-07-28 task-elicit resume slot. Under the stateless transport a parked
     /// `ctx.elicit` inside a task cannot be correlated by session (a fresh one
     /// is minted per POST), so the answer is delivered by the server-generated
     /// `task_id`: the elicit stores its oneshot sender here and an inbound
     /// answer (a `Response` whose id is this `task_id`) takes and fulfills it.
-    #[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
     input: Mutex<Option<oneshot::Sender<Response>>>,
 }
 
@@ -122,7 +122,7 @@ impl TaskTracker {
                 tx: tx.clone(),
                 task,
                 rx,
-                #[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+                #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
                 input: Mutex::new(None),
             },
         );
@@ -168,7 +168,7 @@ impl TaskTracker {
 
     /// Sets the task into `input_required` status
     #[cfg(feature = "server")]
-    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
+    #[cfg_attr(not(feature = "legacy-spec"), allow(dead_code))]
     pub(crate) fn require_input(&self, id: &str) {
         self.cleanup_expired();
 
@@ -179,7 +179,7 @@ impl TaskTracker {
 
     /// Sets the task into `working` status
     #[cfg(feature = "server")]
-    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
+    #[cfg_attr(not(feature = "legacy-spec"), allow(dead_code))]
     pub(crate) fn reset(&self, id: &str) {
         self.cleanup_expired();
 
@@ -191,7 +191,7 @@ impl TaskTracker {
 
     /// Sets the result of the [`Task`].
     #[cfg(feature = "server")]
-    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
+    #[cfg_attr(not(feature = "legacy-spec"), allow(dead_code))]
     pub(crate) fn set_result<T: Serialize>(&self, id: &str, result: T) {
         self.cleanup_expired();
 
@@ -211,7 +211,7 @@ impl TaskTracker {
     /// Parks a task-elicit, returning a receiver fulfilled by a later
     /// [`Self::provide_input`] for the same `id`. Replaces any previously parked
     /// (unanswered) slot. Returns `None` if the task no longer exists.
-    #[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
     pub(crate) fn park_input(&self, id: &str) -> Option<oneshot::Receiver<Response>> {
         let entry = self.tasks.get(id)?;
         let (tx, rx) = oneshot::channel();
@@ -228,7 +228,7 @@ impl TaskTracker {
     /// server-generated `task_id` (session-independent). Returns the `resp`
     /// back (boxed) as `Err` when no elicit is parked for `id`, so the caller
     /// can fall back to the session-keyed request queue for non-task responses.
-    #[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
     pub(crate) fn provide_input(&self, id: &str, resp: Response) -> Result<(), Box<Response>> {
         let Some(entry) = self.tasks.get(id) else {
             return Err(Box::new(resp));
@@ -725,7 +725,7 @@ mod tests {
         assert_eq!(tracker.tasks().len(), 0);
     }
 
-    #[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
     #[tokio::test]
     async fn park_input_is_fulfilled_by_provide_input() {
         use crate::types::{RequestId, Response};
@@ -746,7 +746,7 @@ mod tests {
         assert_eq!(got.id().to_string(), task_id);
     }
 
-    #[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
     #[test]
     fn provide_input_hands_back_when_nothing_parked() {
         use crate::types::{RequestId, Response};

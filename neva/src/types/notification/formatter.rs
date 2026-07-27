@@ -18,7 +18,7 @@ use crate::types::notification::{LogMessage, LoggingLevel, Notification};
 /// JSON-RPC `notifications/message` (or `notifications/progress`), interleaved
 /// with the transport's other traffic.
 ///
-/// # MCP 2026-07-28 (`proto-2026-07-28-rc`)
+/// # MCP 2026-07-28
 ///
 /// `logging/setLevel` is gone and the level is request-scoped, so a
 /// `notifications/message` is emitted only when the originating request carried
@@ -112,12 +112,12 @@ where
     ) -> std::fmt::Result {
         let notification = build_notification(event);
 
-        // RC: the stdio emission path honors the same request-scoped level as
+        // 2026-07-28: the stdio emission path honors the same request-scoped level as
         // the HTTP path. A `notifications/message` is written only when the
         // originating request carried `io.modelcontextprotocol/logLevel` and
         // this event is at or above that severity. Progress notifications are
         // not gated.
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         if notification.method.as_str() == crate::types::notification::commands::MESSAGE {
             let requested = requested_severity(_ctx);
 
@@ -139,7 +139,7 @@ where
 /// extensions (MCP 2026-07-28), as an RFC-5424 severity rank. Both emission
 /// paths ([`NotificationFormatter`] for stdio and [`super::fmt`] for HTTP) read
 /// it back to filter `notifications/message`.
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 #[derive(Debug, Clone, Copy)]
 pub(super) struct MinLogSeverity(pub(super) u8);
 
@@ -153,7 +153,7 @@ pub(super) struct MinLogSeverity(pub(super) u8);
 /// fallback is what lets a formatter-only subscriber -- `fmt::layer()
 /// .event_format(NotificationFormatter)` with no other layer -- honor
 /// `io.modelcontextprotocol/logLevel` without extra configuration.
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 fn requested_severity<S, N>(ctx: &FmtContext<'_, S, N>) -> Option<u8>
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
@@ -171,7 +171,7 @@ where
 
 /// Reads the `mcp_log_level` rank out of a span's formatted fields, accepting
 /// both the default `key=value` shape and the JSON one (`"key":value`).
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 fn severity_from_fields(fields: &str) -> Option<u8> {
     let fields = strip_ansi(fields);
     let rest = fields.split_once(super::fmt::MCP_LOG_LEVEL)?.1;
@@ -188,7 +188,7 @@ fn severity_from_fields(fields: &str) -> Option<u8> {
 /// `fmt::Layer` styles field names by default, so the rank sits behind escape
 /// sequences -- and those contain digits of their own, which would otherwise be
 /// read as the level. Borrows when there is nothing to strip.
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 fn strip_ansi(fields: &str) -> std::borrow::Cow<'_, str> {
     const ESC: char = '\u{1b}';
     if !fields.contains(ESC) {
@@ -219,7 +219,7 @@ fn strip_ansi(fields: &str) -> std::borrow::Cow<'_, str> {
 /// a client that requested a minimum severity (MCP 2026-07-28, request-scoped
 /// logging). No requested level means no delivery. Both values are
 /// [`LoggingLevel::severity`] ranks.
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 #[inline]
 pub(super) fn message_delivered(requested: Option<u8>, event_severity: u8) -> bool {
     requested.map(|min| event_severity >= min).unwrap_or(false)
@@ -228,7 +228,7 @@ pub(super) fn message_delivered(requested: Option<u8>, event_severity: u8) -> bo
 /// Reads the RFC-5424 severity rank of a `notifications/message`'s own level,
 /// so filtering matches the level actually delivered to the client (which, via
 /// [`build_notification`], preserves MCP-specific severities).
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 #[inline]
 pub(super) fn notification_severity(notification: &Notification) -> Option<u8> {
     notification
@@ -329,7 +329,7 @@ impl Visit for Visitor<'_> {
     }
 }
 
-#[cfg(all(test, feature = "proto-2026-07-28-rc"))]
+#[cfg(all(test, not(feature = "legacy-spec")))]
 mod tests {
     use super::{message_delivered, severity_from_fields};
     use crate::types::notification::LoggingLevel;

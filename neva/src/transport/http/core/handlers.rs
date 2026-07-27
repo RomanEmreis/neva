@@ -38,7 +38,7 @@ pub(crate) const MCP_SESSION_ID: &str = "Mcp-Session-Id";
 /// * `Stream { stream, .. }` -- a request-scoped SSE stream carrying the
 ///   request's `notifications/message` / `notifications/progress` followed by
 ///   its final response; frame it exactly like the GET stream. Produced under
-///   `proto-2026-07-28-rc` + `tracing` when the request opts in (carries
+///   MCP 2026-07-28 + `tracing` when the request opts in (carries
 ///   `io.modelcontextprotocol/logLevel` or a `progressToken` in `_meta`);
 ///   other builds always return `Complete`.
 ///
@@ -73,13 +73,13 @@ pub async fn dispatch_post<E: HttpEngine>(
     ctx: &HttpContext,
 ) -> Result<StreamResponse<impl Stream<Item = E::SseEvent> + Send + 'static>, Error> {
     let neutral = E::adapt_request(req).await?;
-    #[cfg(all(feature = "proto-2026-07-28-rc", feature = "tracing"))]
+    #[cfg(all(not(feature = "legacy-spec"), feature = "tracing"))]
     {
         Ok(handle_post_streaming::<E>(neutral, ctx).await)
     }
-    // Without the RC flag (or without tracing to source the notifications)
+    // Under `legacy-spec` (or without tracing to source the notifications)
     // every POST reply is a single body; the Stream arm is never produced.
-    #[cfg(not(all(feature = "proto-2026-07-28-rc", feature = "tracing")))]
+    #[cfg(not(all(not(feature = "legacy-spec"), feature = "tracing")))]
     {
         let resp = handle_post(neutral, ctx).await;
         Ok(StreamResponse::<stream::Empty<E::SseEvent>>::Complete(resp))
@@ -124,7 +124,7 @@ pub async fn dispatch_get_sse<E: HttpEngine>(
 /// immediately (for notifications and notification-only batches).
 ///
 /// Prefer [`dispatch_post`], which also covers the request-scoped SSE reply
-/// (`StreamResponse::Stream`) the RC transport produces for requests that opt
+/// (`StreamResponse::Stream`) the 2026-07-28 transport produces for requests that opt
 /// into notifications; use this directly only when the engine cannot stream.
 ///
 /// # Example
@@ -168,21 +168,21 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
     let mut headers = req.headers().clone();
     let id = get_or_create_mcp_session(&headers);
 
-    // Stateless RC transport requires every POST to carry the exact RC
+    // Stateless 2026-07-28 transport requires every POST to carry the exact 2026-07-28
     // `MCP-Protocol-Version` header; reject before body dispatch otherwise.
     // `PROTOCOL_VERSIONS` still lists legacy versions (e.g. 2025-06-18) for
-    // the non-RC build, but this build has removed the legacy initialize/SSE
-    // behavior and only speaks RC stateless semantics -- so a client/proxy
+    // the legacy build, but this build has removed the legacy initialize/SSE
+    // behavior and only speaks 2026-07-28 stateless semantics -- so a client/proxy
     // advertising a legacy version must be rejected, not silently served
-    // under RC. Compare against the fixed RC version (the last/only RC entry)
+    // under MCP 2026-07-28. Compare against the fixed 2026-07-28 version (the last/only 2026-07-28 entry)
     // rather than the whole compatibility list.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     {
-        let rc_version = crate::PROTOCOL_VERSIONS.last().copied();
+        let latest_version = crate::PROTOCOL_VERSIONS.last().copied();
         let ok = headers
             .get(crate::transport::http::MCP_PROTOCOL_VERSION)
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| Some(v) == rc_version);
+            .is_some_and(|v| Some(v) == latest_version);
 
         if !ok {
             let resp = Response::error(
@@ -220,12 +220,12 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
         }
     };
 
-    // Passive W3C Trace Context recorder: when both `proto-2026-07-28-rc`
+    // Passive W3C Trace Context recorder: when both MCP 2026-07-28
     // and `tracing` are enabled, record any `_meta.traceparent` /
     // `_meta.tracestate` on the active span. `Span::current().record(...)`
     // is a no-op unless the caller's span declares these fields via
     // `#[instrument(fields(traceparent, tracestate))]`.
-    #[cfg(all(feature = "proto-2026-07-28-rc", feature = "tracing"))]
+    #[cfg(all(not(feature = "legacy-spec"), feature = "tracing"))]
     if let Message::Request(ref r) = msg
         && let Some(meta) = r
             .params
@@ -242,9 +242,9 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
     }
 
     // Pre-register on the initialize handshake so the server can emit
-    // events between the init POST response and the SSE GET. Stateless RC
+    // events between the init POST response and the SSE GET. Stateless 2026-07-28
     // transport has no SSE GET, so this is skipped under the flag.
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[cfg(feature = "legacy-spec")]
     if let Message::Request(ref r) = msg
         && r.method == crate::commands::INIT
     {
@@ -281,7 +281,7 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
     PostPrep::Dispatch { id, msg }
 }
 
-/// The RC arm of [`dispatch_post`]: a POST pipeline that can return a
+/// The 2026-07-28 arm of [`dispatch_post`]: a POST pipeline that can return a
 /// request-scoped SSE response, mirroring [`handle_get_sse`].
 ///
 /// When the request opts into request-scoped notifications (carries
@@ -290,7 +290,7 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
 /// flow first (routed via the per-request sink), then the final response closes
 /// the stream. Otherwise the reply is a single JSON object (`Complete`),
 /// exactly as [`handle_post`].
-#[cfg(all(feature = "proto-2026-07-28-rc", feature = "tracing"))]
+#[cfg(all(not(feature = "legacy-spec"), feature = "tracing"))]
 async fn handle_post_streaming<E: HttpEngine>(
     req: HttpRequest,
     ctx: &HttpContext,
@@ -360,7 +360,7 @@ async fn handle_post_streaming<E: HttpEngine>(
 /// stamps the configured level onto every batched request; the inner requests
 /// share this POST's session id (copied in `execute_batch`), so their
 /// notifications route to the one sink and stream on this single response.
-#[cfg(all(feature = "proto-2026-07-28-rc", feature = "tracing"))]
+#[cfg(all(not(feature = "legacy-spec"), feature = "tracing"))]
 fn opts_into_notifications(msg: &Message) -> bool {
     match msg {
         Message::Request(r) => request_opts_in(r),
@@ -372,7 +372,7 @@ fn opts_into_notifications(msg: &Message) -> bool {
 }
 
 /// Whether a single request carries `logLevel` or `progressToken` in `_meta`.
-#[cfg(all(feature = "proto-2026-07-28-rc", feature = "tracing"))]
+#[cfg(all(not(feature = "legacy-spec"), feature = "tracing"))]
 fn request_opts_in(req: &crate::types::Request) -> bool {
     req.params
         .as_ref()
@@ -396,7 +396,7 @@ fn request_opts_in(req: &crate::types::Request) -> bool {
 ///
 /// Dropping the stream (end of body or client disconnect) unregisters the
 /// per-request sink and clears the pending entry.
-#[cfg(all(feature = "proto-2026-07-28-rc", feature = "tracing"))]
+#[cfg(all(not(feature = "legacy-spec"), feature = "tracing"))]
 fn post_notification_stream(
     id: uuid::Uuid,
     full_id: RequestId,
@@ -514,18 +514,18 @@ fn parse_message(body: &Bytes) -> Result<Message, ErrorCode> {
 }
 
 fn get_or_create_mcp_session(
-    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(unused_variables))] headers: &HeaderMap,
+    #[cfg_attr(not(feature = "legacy-spec"), allow(unused_variables))] headers: &HeaderMap,
 ) -> uuid::Uuid {
-    // RC removed protocol-level sessions and the `Mcp-Session-Id` header, and
+    // 2026-07-28 removed protocol-level sessions and the `Mcp-Session-Id` header, and
     // this id doubles as the per-POST correlation key for the pending-response
     // slot and the request notification sink. Mint a fresh one per POST so a
     // client-supplied (or proxied) header can never collide two concurrent
     // stateless requests onto the same sink/slot.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     {
         uuid::Uuid::new_v4()
     }
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[cfg(feature = "legacy-spec")]
     headers
         .get(MCP_SESSION_ID)
         .and_then(|v| v.to_str().ok())
@@ -535,18 +535,18 @@ fn get_or_create_mcp_session(
 
 fn build_json_response(
     status: http::StatusCode,
-    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(unused_variables))] session: uuid::Uuid,
+    #[cfg_attr(not(feature = "legacy-spec"), allow(unused_variables))] session: uuid::Uuid,
     body: &Message,
 ) -> HttpResponse {
     let json = serde_json::to_vec(body).unwrap_or_default();
-    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(unused_mut))]
+    #[cfg_attr(not(feature = "legacy-spec"), allow(unused_mut))]
     let mut resp = http::Response::builder()
         .status(status)
         .header(http::header::CONTENT_TYPE, "application/json")
         .body(Bytes::from(json))
         .unwrap_or_default();
-    // Stateless RC transport never puts the session id on the wire.
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    // Stateless 2026-07-28 transport never puts the session id on the wire.
+    #[cfg(feature = "legacy-spec")]
     if let Ok(v) = HeaderValue::from_str(&session.to_string()) {
         resp.headers_mut().insert(MCP_SESSION_ID, v);
     }
@@ -555,15 +555,15 @@ fn build_json_response(
 
 fn status_response(
     status: http::StatusCode,
-    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(unused_variables))] session: uuid::Uuid,
+    #[cfg_attr(not(feature = "legacy-spec"), allow(unused_variables))] session: uuid::Uuid,
 ) -> HttpResponse {
-    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(unused_mut))]
+    #[cfg_attr(not(feature = "legacy-spec"), allow(unused_mut))]
     let mut resp = http::Response::builder()
         .status(status)
         .body(Bytes::new())
         .unwrap_or_default();
-    // Stateless RC transport never puts the session id on the wire.
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    // Stateless 2026-07-28 transport never puts the session id on the wire.
+    #[cfg(feature = "legacy-spec")]
     if let Ok(v) = HeaderValue::from_str(&session.to_string()) {
         resp.headers_mut().insert(MCP_SESSION_ID, v);
     }
@@ -809,16 +809,16 @@ mod tests {
         Bytes::from(serde_json::to_vec(&body).unwrap())
     }
 
-    /// A POST request builder that, under the RC flag, carries the required
+    /// A POST request builder that, under MCP 2026-07-28, carries the required
     /// `MCP-Protocol-Version` header so it passes the stateless gate.
     fn post_builder() -> http::request::Builder {
         let b = http::Request::builder().method("POST").uri("/mcp");
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         let b = b.header(crate::transport::http::MCP_PROTOCOL_VERSION, "2026-07-28");
         b
     }
 
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[tokio::test]
     async fn rejects_missing_protocol_version() {
         let (ctx, _rx) = make_ctx();
@@ -833,7 +833,7 @@ mod tests {
         assert_eq!(body["error"]["code"], -32600);
     }
 
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[tokio::test]
     async fn rejects_unsupported_protocol_version() {
         let (ctx, _rx) = make_ctx();
@@ -849,12 +849,12 @@ mod tests {
         assert_eq!(body["error"]["code"], -32600);
     }
 
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[tokio::test]
     async fn rejects_legacy_protocol_version() {
-        // A legacy version that IS in `PROTOCOL_VERSIONS` but is not the RC
+        // A legacy version that IS in `PROTOCOL_VERSIONS` but is not the 2026-07-28
         // version: the old `.contains()` gate accepted it even though this build
-        // only speaks RC stateless semantics. It must be rejected.
+        // only speaks 2026-07-28 stateless semantics. It must be rejected.
         let (ctx, _rx) = make_ctx();
         let req = http::Request::builder()
             .method("POST")
@@ -936,8 +936,8 @@ mod tests {
         assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
     }
 
-    // Session-id echo is intentionally removed under the stateless RC transport.
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    // Session-id echo is intentionally removed under the stateless 2026-07-28 transport.
+    #[cfg(feature = "legacy-spec")]
     #[tokio::test]
     async fn delete_with_session_id_echoes_it_back() {
         let (ctx, _rx) = make_ctx();

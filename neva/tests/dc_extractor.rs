@@ -1,4 +1,4 @@
-//! RC end-to-end check that the `Dc<T>` DI extractor is **not** advertised as a
+//! 2026-07-28 end-to-end check that the `Dc<T>` DI extractor is **not** advertised as a
 //! tool/prompt argument and is resolved from the request context at call time.
 //!
 //! Regression test: `get_arg_type` used to classify the unknown `Dc<_>` type as
@@ -7,11 +7,11 @@
 //! bogus `repo` field). Resources were unaffected because their schema is
 //! derived from the URI template, not the function signature.
 //!
-//! Compiled under `proto-2026-07-28-rc` together with the Volga server + HTTP
+//! Compiled under MCP 2026-07-28 together with the Volga server + HTTP
 //! client and `di` (all pulled in by `server-full` / `client-full`).
 
 #![cfg(all(
-    feature = "proto-2026-07-28-rc",
+    not(feature = "legacy-spec"),
     feature = "http-server-volga",
     feature = "http-client",
     feature = "di"

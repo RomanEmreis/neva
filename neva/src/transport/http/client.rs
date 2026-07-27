@@ -69,7 +69,7 @@ const LAST_EVENT_ID: HeaderName = HeaderName::from_static("last-event-id");
 const SSE_RECONNECT_DELAY: Duration = Duration::from_secs(3);
 const STREAM_ENDED_BEFORE_RESPONSE: &str = "POST SSE stream ended before the response arrived";
 
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 fn routing_hints(msg: &Message) -> Option<(&str, Option<&str>)> {
     match msg {
         Message::Request(r) => Some((r.method.as_str(), name_param(r))),
@@ -78,7 +78,7 @@ fn routing_hints(msg: &Message) -> Option<(&str, Option<&str>)> {
     }
 }
 
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 fn name_param(req: &crate::types::Request) -> Option<&str> {
     if req.method != crate::types::tool::commands::CALL {
         return None;
@@ -90,7 +90,7 @@ pub(super) async fn connect(rt: ClientRuntimeContext, token: CancellationToken) 
     let session = Arc::new(McpSession::new(
         rt.url,
         token,
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         rt.peer_mode.clone(),
     ));
 
@@ -104,8 +104,8 @@ pub(super) async fn connect(rt: ClientRuntimeContext, token: CancellationToken) 
 
     // The SSE task arms itself only when a legacy `initialize` handshake
     // completes (`session.initialized()` fires exclusively for the
-    // `initialize` method) -- against an RC peer it stays parked until
-    // cancellation, so the stateless RC transport still issues only POSTs.
+    // `initialize` method) -- against a 2026-07-28 peer it stays parked until
+    // cancellation, so the stateless 2026-07-28 transport still issues only POSTs.
     tokio::join!(
         handle_connection(
             session.clone(),
@@ -193,13 +193,13 @@ fn build_post(
         resp = resp.header(MCP_SESSION_ID, session_id.to_string())
     }
 
-    // RC-peer routing headers: legacy servers never negotiated them, so
+    // 2026-07-28-peer routing headers: legacy servers never negotiated them, so
     // a peer that fell back to `initialize` gets the same wire shape a
-    // pure legacy client produces (no routing headers, no RC protocol
+    // pure legacy client produces (no routing headers, no 2026-07-28 protocol
     // version). Routing headers are exercised end-to-end via the
     // trace-context integration; unit-level hint extraction is tested in
     // `routing_hints_tests`.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     if !session.is_legacy() {
         if let Some((method, name)) = routing_hints(req) {
             resp = resp.header(crate::transport::http::MCP_METHOD, method);
@@ -209,7 +209,7 @@ fn build_post(
         }
         resp = resp.header(
             crate::transport::http::MCP_PROTOCOL_VERSION,
-            crate::RC_PROTOCOL_VERSION,
+            crate::LATEST_PROTOCOL_VERSION,
         );
     }
 
@@ -331,7 +331,7 @@ async fn send_request(
         // response would otherwise leave the originating request sitting in the
         // pending queue until it times out. Fail it now, id-bound, exactly like
         // the non-JSON-RPC reply path below. `InternalError` (not `ParseError`)
-        // on purpose: the peer clearly speaks RC, so this must not be mistaken
+        // on purpose: the peer clearly speaks 2026-07-28, so this must not be mistaken
         // for dual-mode fallback evidence.
         if !answered {
             #[cfg(feature = "tracing")]
@@ -388,7 +388,7 @@ async fn send_request(
 ///
 /// The code matters beyond diagnostics: `ParseError` is one of the
 /// dual-mode fallback triggers (issue #84), so it must be produced *only*
-/// for replies that genuinely suggest "this peer doesn't know the RC
+/// for replies that genuinely suggest "this peer doesn't know the 2026-07-28
 /// method/route" -- an allowlist, not a catch-all:
 ///
 /// * any `2xx` -- a legacy peer answering `server/discover` on the wire but
@@ -402,9 +402,9 @@ async fn send_request(
 /// peer's protocol generation and must surface as-is
 /// (`InternalError`, like "Connection closed"):
 /// `401`/`403`/`407` (authentication -- otherwise a failed login against a
-/// valid RC server reads as "legacy"), `429` (rate limit) and every `5xx`
+/// valid 2026-07-28 server reads as "legacy"), `429` (rate limit) and every `5xx`
 /// (reverse-proxy outage, gateway timeout). Treating those as legacy
-/// evidence would silently drop the RC headers, retry `initialize` into
+/// evidence would silently drop the 2026-07-28 headers, retry `initialize` into
 /// the same outage, and bury the real cause.
 #[inline]
 fn parse_failure(status: reqwest::StatusCode, err: &impl std::fmt::Display) -> (ErrorCode, String) {
@@ -765,7 +765,7 @@ mod tests {
         Arc::new(McpSession::new(
             ServiceUrl::default(),
             CancellationToken::new(),
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             Default::default(),
         ))
     }
@@ -776,7 +776,7 @@ mod tests {
     /// Only statuses that actually suggest an unknown method/route may
     /// yield `ParseError` -- the dual-mode fallback trigger. Upstream
     /// failures (auth, rate limit, 5xx) must stay `InternalError` so a
-    /// valid RC peer is never mistaken for a legacy one.
+    /// valid 2026-07-28 peer is never mistaken for a legacy one.
     #[test]
     fn parse_failure_classifies_statuses() {
         let cases = [
@@ -1019,7 +1019,7 @@ mod tests {
 }
 
 #[cfg(test)]
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 mod routing_hints_tests {
     use super::routing_hints;
     use crate::types::notification::Notification;

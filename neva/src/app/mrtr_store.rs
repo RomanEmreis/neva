@@ -1,5 +1,5 @@
 //! Idempotency store for MRTR final-round replay protection
-//! (`proto-2026-07-28-rc`).
+//! (MCP 2026-07-28).
 //!
 //! The stateless MRTR transport (see [`crate::types::mrtr`]) signs all
 //! cross-round progress into the `requestState` blob the client echoes on each
@@ -38,7 +38,7 @@ use std::sync::Arc;
 
 /// A store that remembers the final response of a committed MRTR `requestState`
 /// so a lost-response retry returns the cached result instead of re-running the
-/// handler (`proto-2026-07-28-rc`).
+/// handler (MCP 2026-07-28).
 ///
 /// Implement this to back MRTR idempotency with a shared store across a
 /// multi-instance deployment; the entry key is the `requestState` sealed segment
@@ -86,7 +86,7 @@ pub trait RequestStateStore: Send + Sync {
 }
 
 /// The default per-process [`RequestStateStore`], backed by a concurrent map
-/// with lazy TTL eviction (`proto-2026-07-28-rc`).
+/// with lazy TTL eviction (MCP 2026-07-28).
 ///
 /// Entries are bounded by their TTL (the state's `exp`, <= the configured
 /// `requestState` TTL, 300s by default) and evicted opportunistically on access,

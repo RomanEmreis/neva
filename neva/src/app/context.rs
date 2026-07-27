@@ -6,11 +6,11 @@ use super::{
 };
 use crate::error::{Error, ErrorCode};
 use crate::transport::Sender;
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+#[cfg(feature = "legacy-spec")]
 use crate::types::notification::Notification;
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+#[cfg(feature = "legacy-spec")]
 use crate::types::root::{ListRootsRequestParams, ListRootsResult};
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+#[cfg(feature = "legacy-spec")]
 use crate::types::sampling::{CreateMessageRequestParams, CreateMessageResult};
 use crate::{
     middleware::{MwContext, Next},
@@ -24,11 +24,11 @@ use crate::{
         resource::SubscribeRequestParams,
     },
 };
-// `RequestId` is only referenced by the server->client request paths (non-RC
-// elicitation/sampling) and the task API; under the stateless RC build without
+// `RequestId` is only referenced by the server->client request paths (legacy
+// elicitation/sampling) and the task API; under the stateless 2026-07-28 build without
 // tasks it is unused -- including in tests, whose `RequestId` uses live in
 // modules carrying those very same gates.
-#[cfg(any(not(feature = "proto-2026-07-28-rc"), feature = "tasks"))]
+#[cfg(any(feature = "legacy-spec", feature = "tasks"))]
 use crate::types::RequestId;
 use std::{
     collections::HashMap,
@@ -62,14 +62,14 @@ pub(crate) type ToolOrTaskResponse = Either<CreateTaskResult, CallToolResponse>;
 type RequestHandlers = HashMap<String, RequestHandler<Response>>;
 
 /// Boxed deferred-commit future (see [`Context::on_commit`]).
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 pub(crate) type CommitFut =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + Send>>;
 
 /// Per-dispatch MRTR state: the replay log of answers available to the
 /// handler this round, the single input it newly requested, plus the
 /// `once`/`memo`/`on_commit` bookkeeping.
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 #[derive(Default)]
 pub(crate) struct MrtrCtx {
     /// Answers available this round (prior answers decoded from
@@ -98,7 +98,7 @@ pub(crate) struct MrtrCtx {
     pub(crate) commits: std::sync::Mutex<Vec<CommitFut>>,
 }
 
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 impl std::fmt::Debug for MrtrCtx {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MrtrCtx")
@@ -111,7 +111,7 @@ impl std::fmt::Debug for MrtrCtx {
     }
 }
 
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 impl MrtrCtx {
     /// Returns the cached answer for `key`, or records the request and returns
     /// the MRTR "input required" sentinel error to unwind the handler.
@@ -178,12 +178,12 @@ impl MrtrCtx {
     }
 }
 
-/// The execution substrate the current RC dispatch is running on. Elicitation
+/// The execution substrate the current 2026-07-28 dispatch is running on. Elicitation
 /// and the `once`/`memo`/`on_commit` helpers dispatch on this so the stateless
 /// MRTR machinery and the stateful task machinery never mix: a bare call uses
 /// `requestState` re-run, a task-augmented call suspends a live background
 /// future. The two are different substrates, not one with a flag.
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 #[derive(Clone, Default)]
 pub(crate) enum ExecMode {
     /// Not an elicitable dispatch (or no special execution context).
@@ -202,11 +202,11 @@ pub(crate) enum ExecMode {
 }
 
 /// Per-dispatch state for a background, task-augmented tool call
-/// (`proto-2026-07-28-rc` + `tasks`): just the task id (also the
+/// (MCP 2026-07-28 + `tasks`): just the task id (also the
 /// session-independent resume key) and whether the tool's task support is
 /// `Required`. No MRTR key, `requestState`, or replay log -- tasks run on the
 /// stateful substrate, not MRTR, so the MRTR effect helpers do not apply here.
-#[cfg(all(feature = "proto-2026-07-28-rc", feature = "tasks"))]
+#[cfg(all(not(feature = "legacy-spec"), feature = "tasks"))]
 #[derive(Default)]
 pub(crate) struct TaskExec {
     /// The server-generated task id (also the session-independent resume key).
@@ -218,7 +218,7 @@ pub(crate) struct TaskExec {
     pub(crate) required: bool,
 }
 
-#[cfg(all(feature = "proto-2026-07-28-rc", feature = "tasks"))]
+#[cfg(all(not(feature = "legacy-spec"), feature = "tasks"))]
 impl TaskExec {
     /// Creates a task execution context for `id`.
     pub(crate) fn new(id: String, required: bool) -> Self {
@@ -226,19 +226,19 @@ impl TaskExec {
     }
 }
 
-/// Task-scoped API for a task-augmented call (`proto-2026-07-28-rc` + `tasks`).
+/// Task-scoped API for a task-augmented call (MCP 2026-07-28 + `tasks`).
 ///
 /// Obtained via [`Context::task`]; mirrors the client's `Client::task()` builder.
 /// Its methods operate on the stateful task substrate (suspend/resume) and error
 /// when the current dispatch is not task-augmented -- keeping the task and MRTR
 /// substrates explicitly separate.
-#[cfg(all(feature = "proto-2026-07-28-rc", feature = "tasks"))]
+#[cfg(all(not(feature = "legacy-spec"), feature = "tasks"))]
 #[derive(Debug)]
 pub struct TaskContext<'a> {
     ctx: &'a mut Context,
 }
 
-#[cfg(all(feature = "proto-2026-07-28-rc", feature = "tasks"))]
+#[cfg(all(not(feature = "legacy-spec"), feature = "tasks"))]
 impl TaskContext<'_> {
     /// Requests input from the client and suspends the background task until the
     /// answer arrives.
@@ -249,7 +249,7 @@ impl TaskContext<'_> {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(all(feature = "server-macros", feature = "proto-2026-07-28-rc", feature = "tasks"))] {
+    /// # #[cfg(all(feature = "server-macros", not(feature = "legacy-spec"), feature = "tasks"))] {
     /// # use neva::{Context, error::Error, types::elicitation::ElicitRequestParams};
     ///
     /// # async fn f(mut ctx: Context, params: ElicitRequestParams) -> Result<(), Error> {
@@ -318,14 +318,14 @@ pub struct Context {
     /// Represents a queue of pending requests
     ///
     /// Only read by [`Context::send_request`] (server->client requests), which
-    /// the stateless RC build does not use.
-    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
+    /// the stateless 2026-07-28 build does not use.
+    #[cfg_attr(not(feature = "legacy-spec"), allow(dead_code))]
     pending: RequestQueue,
 
     /// Represents a sender that depends on selected transport protocol
     ///
-    /// See [`Self::pending`] for why this is dead under the RC.
-    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
+    /// See [`Self::pending`] for why this is dead under MCP 2026-07-28.
+    #[cfg_attr(not(feature = "legacy-spec"), allow(dead_code))]
     sender: TransportProtoSender,
 
     /// Represents a timeout for the current request
@@ -334,7 +334,7 @@ pub struct Context {
     /// Execution substrate for this dispatch (set by the server dispatch layer:
     /// `Mrtr` for a stateless elicitable call, `Task` for a background
     /// task-augmented call, `None` otherwise).
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub(crate) exec: ExecMode,
 
     /// Represents a DI scope
@@ -406,7 +406,7 @@ impl ServerRuntime {
             sender: self.sender.clone(),
             options: self.options.clone(),
             timeout: self.options.request_timeout,
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             exec: ExecMode::None,
             #[cfg(feature = "di")]
             scope: None,
@@ -429,7 +429,7 @@ impl ServerRuntime {
             sender: self.sender.clone(),
             options: self.options.clone(),
             timeout: self.options.request_timeout,
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             exec: ExecMode::None,
             #[cfg(feature = "di")]
             scope: None,
@@ -478,7 +478,7 @@ impl Context {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(all(feature = "server-macros", not(feature = "proto-2026-07-28-rc")))] {
+    /// # #[cfg(all(feature = "server-macros", feature = "legacy-spec"))] {
     /// use neva::prelude::*;
     ///
     /// #[tool]
@@ -541,7 +541,7 @@ impl Context {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(all(feature = "server-macros", not(feature = "proto-2026-07-28-rc")))] {
+    /// # #[cfg(all(feature = "server-macros", feature = "legacy-spec"))] {
     /// use neva::prelude::*;
     ///
     /// #[tool]
@@ -577,7 +577,7 @@ impl Context {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(all(feature = "server-macros", not(feature = "proto-2026-07-28-rc")))] {
+    /// # #[cfg(all(feature = "server-macros", feature = "legacy-spec"))] {
     /// use neva::prelude::*;
     ///
     /// #[tool]
@@ -796,15 +796,15 @@ impl Context {
                     let task_id = task.id.clone();
 
                     // The tool runs in this spawned task on the *stateful* task
-                    // substrate -- not MRTR. Under the RC it gets a `Task`
+                    // substrate -- not MRTR. Under MCP 2026-07-28 it gets a `Task`
                     // execution context (no MRTR key / `requestState`): elicitation
                     // goes through `ctx.task().elicit(...)`, which suspends on the
                     // task tracker (resumed by a client answer keyed by the task
                     // id). The MRTR effect helpers (`once`/`memo`/`on_commit`) do
                     // not apply on this substrate (see their docs).
-                    #[cfg(all(feature = "proto-2026-07-28-rc", feature = "tasks"))]
+                    #[cfg(all(not(feature = "legacy-spec"), feature = "tasks"))]
                     let required = task_support.is_some_and(|ts| ts == TaskSupport::Required);
-                    #[cfg(all(feature = "proto-2026-07-28-rc", feature = "tasks"))]
+                    #[cfg(all(not(feature = "legacy-spec"), feature = "tasks"))]
                     let ctx = Context {
                         exec: ExecMode::Task(std::sync::Arc::new(TaskExec::new(
                             task_id.clone(),
@@ -812,7 +812,7 @@ impl Context {
                         ))),
                         ..self
                     };
-                    #[cfg(not(all(feature = "proto-2026-07-28-rc", feature = "tasks")))]
+                    #[cfg(not(all(not(feature = "legacy-spec"), feature = "tasks")))]
                     let ctx = self;
 
                     tokio::spawn(async move {
@@ -855,7 +855,7 @@ impl Context {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(all(feature = "server-macros", not(feature = "proto-2026-07-28-rc")))] {
+    /// # #[cfg(all(feature = "server-macros", feature = "legacy-spec"))] {
     /// use neva::{Context, error::Error, tool};
     ///
     /// #[tool]
@@ -868,7 +868,7 @@ impl Context {
     /// }
     /// # }
     /// ```
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[cfg(feature = "legacy-spec")]
     pub async fn list_roots(&mut self) -> Result<ListRootsResult, Error> {
         let method = crate::types::root::commands::LIST;
         let req = Request::new(
@@ -903,7 +903,7 @@ impl Context {
     /// }
     /// # }
     /// ```
-    #[cfg(all(not(feature = "tasks"), not(feature = "proto-2026-07-28-rc")))]
+    #[cfg(all(not(feature = "tasks"), feature = "legacy-spec"))]
     pub async fn sample(
         &mut self,
         params: CreateMessageRequestParams,
@@ -941,7 +941,7 @@ impl Context {
     /// }
     /// # }
     /// ```
-    #[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     pub async fn sample(
         &mut self,
         params: CreateMessageRequestParams,
@@ -979,7 +979,7 @@ impl Context {
     /// }
     /// # }
     /// ```
-    #[cfg(all(not(feature = "tasks"), not(feature = "proto-2026-07-28-rc")))]
+    #[cfg(all(not(feature = "tasks"), feature = "legacy-spec"))]
     pub async fn elicit(&mut self, params: ElicitRequestParams) -> Result<ElicitResult, Error> {
         let method = crate::types::elicitation::commands::CREATE;
         let req = Request::new(
@@ -991,7 +991,7 @@ impl Context {
         self.send_request(req).await?.into_result()
     }
 
-    /// Requests elicitation input from the client (MRTR, `proto-2026-07-28-rc`).
+    /// Requests elicitation input from the client (MRTR, MCP 2026-07-28).
     ///
     /// On the first dispatch the answer for `key` is absent: the request is
     /// recorded and an internal sentinel error is returned, which the server
@@ -1004,7 +1004,7 @@ impl Context {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(all(feature = "server-macros", feature = "proto-2026-07-28-rc"))] {
+    /// # #[cfg(all(feature = "server-macros", not(feature = "legacy-spec")))] {
     /// use neva::{Context, error::Error, types::elicitation::ElicitRequestParams, tool};
     ///
     /// #[tool]
@@ -1017,7 +1017,7 @@ impl Context {
     /// }
     /// # }
     /// ```
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub async fn elicit(
         &mut self,
         key: impl Into<String>,
@@ -1044,7 +1044,7 @@ impl Context {
         }
     }
 
-    /// Requests an LLM completion from the client (MRTR, `proto-2026-07-28-rc`).
+    /// Requests an LLM completion from the client (MRTR, MCP 2026-07-28).
     ///
     /// Same re-run/replay semantics as [`Self::elicit`]: on the first dispatch
     /// the answer for `key` is absent, so the request is recorded and the
@@ -1065,7 +1065,7 @@ impl Context {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(all(feature = "server-macros", feature = "proto-2026-07-28-rc"))] {
+    /// # #[cfg(all(feature = "server-macros", not(feature = "legacy-spec")))] {
     /// use neva::{Context, error::Error, tool};
     /// use neva::types::sampling::{CreateMessageRequestParams, SamplingMessage};
     ///
@@ -1079,7 +1079,7 @@ impl Context {
     /// }
     /// # }
     /// ```
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[deprecated(
         note = "sampling is deprecated in MCP 2026-07-28; it returns as an MRTR input-request kind only for migration"
     )]
@@ -1097,7 +1097,7 @@ impl Context {
     }
 
     /// Asks the client which filesystem roots it exposes (MRTR,
-    /// `proto-2026-07-28-rc`).
+    /// MCP 2026-07-28).
     ///
     /// Same re-run/replay semantics as [`Self::elicit`] -- see [`Self::sample`]
     /// for the round-trip caveat.
@@ -1109,7 +1109,7 @@ impl Context {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(all(feature = "server-macros", feature = "proto-2026-07-28-rc"))] {
+    /// # #[cfg(all(feature = "server-macros", not(feature = "legacy-spec")))] {
     /// use neva::{Context, error::Error, tool};
     ///
     /// #[tool]
@@ -1120,7 +1120,7 @@ impl Context {
     /// }
     /// # }
     /// ```
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[deprecated(
         note = "roots are deprecated in MCP 2026-07-28; they return as an MRTR input-request kind only for migration"
     )]
@@ -1139,7 +1139,7 @@ impl Context {
     /// The shared body behind [`Self::elicit`] / [`Self::sample`] /
     /// [`Self::list_roots`]: every input kind rides the same MRTR substrate,
     /// so only the envelope and the result type differ.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     fn request_input<T: serde::de::DeserializeOwned>(
         &self,
         key: impl Into<String>,
@@ -1161,7 +1161,7 @@ impl Context {
     }
 
     /// Returns whether the current dispatch is a task-augmented call
-    /// (`proto-2026-07-28-rc`).
+    /// (MCP 2026-07-28).
     ///
     /// Use this to branch in a `TaskSupport::Optional` tool that wants to elicit
     /// on both substrates: `ctx.task().elicit(params)` when `true`, the MRTR
@@ -1169,7 +1169,7 @@ impl Context {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(all(feature = "server-macros", feature = "proto-2026-07-28-rc", feature = "tasks"))] {
+    /// # #[cfg(all(feature = "server-macros", not(feature = "legacy-spec"), feature = "tasks"))] {
     /// # use neva::{Context, error::Error, types::elicitation::ElicitRequestParams};
     /// # async fn f(mut ctx: Context, params: ElicitRequestParams) -> Result<(), Error> {
     /// let _ans = if ctx.is_task() {
@@ -1180,7 +1180,7 @@ impl Context {
     /// # Ok(()) }
     /// # }
     /// ```
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub fn is_task(&self) -> bool {
         #[cfg(feature = "tasks")]
         {
@@ -1193,7 +1193,7 @@ impl Context {
     }
 
     /// Returns the task-scoped API for a task-augmented call
-    /// (`proto-2026-07-28-rc` + `tasks`).
+    /// (MCP 2026-07-28 + `tasks`).
     ///
     /// Mirrors the client's `Client::task()` builder. Its methods operate on the
     /// stateful task substrate and error when the current dispatch is *not*
@@ -1201,14 +1201,14 @@ impl Context {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(all(feature = "server-macros", feature = "proto-2026-07-28-rc", feature = "tasks"))] {
+    /// # #[cfg(all(feature = "server-macros", not(feature = "legacy-spec"), feature = "tasks"))] {
     /// # use neva::{Context, error::Error, types::elicitation::ElicitRequestParams};
     /// # async fn f(mut ctx: Context, params: ElicitRequestParams) -> Result<(), Error> {
     /// let _ans = ctx.task().elicit(params).await?;
     /// # Ok(()) }
     /// # }
     /// ```
-    #[cfg(all(feature = "proto-2026-07-28-rc", feature = "tasks"))]
+    #[cfg(all(not(feature = "legacy-spec"), feature = "tasks"))]
     pub fn task(&mut self) -> TaskContext<'_> {
         TaskContext { ctx: self }
     }
@@ -1221,7 +1221,7 @@ impl Context {
     /// background future then awaits the answer, which the dispatch layer routes
     /// to `TaskTracker::provide_input` when the client posts a `Response` whose
     /// id is this task id.
-    #[cfg(all(feature = "proto-2026-07-28-rc", feature = "tasks"))]
+    #[cfg(all(not(feature = "legacy-spec"), feature = "tasks"))]
     async fn task_elicit(
         &mut self,
         task_id: String,
@@ -1253,7 +1253,7 @@ impl Context {
         resp.into_result()
     }
 
-    /// Runs `effect` at most once across MRTR rounds (`proto-2026-07-28-rc`).
+    /// Runs `effect` at most once across MRTR rounds (MCP 2026-07-28).
     ///
     /// On a replay (the key was recorded in a prior round) the future is
     /// dropped unpolled and `Ok(false)` is returned. On a miss the future is
@@ -1271,14 +1271,14 @@ impl Context {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(all(feature = "server-macros", feature = "proto-2026-07-28-rc"))] {
+    /// # #[cfg(all(feature = "server-macros", not(feature = "legacy-spec")))] {
     /// # use neva::{Context, error::Error};
     /// # async fn f(ctx: Context) -> Result<(), Error> {
     /// ctx.once("emit_metric", async { Ok(()) }).await?;
     /// # Ok(()) }
     /// # }
     /// ```
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub async fn once<F>(&self, key: impl Into<String>, effect: F) -> Result<bool, Error>
     where
         F: std::future::Future<Output = Result<(), Error>>,
@@ -1311,7 +1311,7 @@ impl Context {
     }
 
     /// Computes `compute` at most once across MRTR rounds and caches the
-    /// serialized value in `requestState` (`proto-2026-07-28-rc`).
+    /// serialized value in `requestState` (MCP 2026-07-28).
     ///
     /// On a replay the cached value is deserialized and returned (the future is
     /// dropped unpolled). On a miss the future is awaited, the value serialized
@@ -1322,14 +1322,14 @@ impl Context {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(all(feature = "server-macros", feature = "proto-2026-07-28-rc"))] {
+    /// # #[cfg(all(feature = "server-macros", not(feature = "legacy-spec")))] {
     /// # use neva::{Context, error::Error};
     /// # async fn f(ctx: Context) -> Result<(), Error> {
     /// let n: i32 = ctx.memo("answer", async { Ok(42) }).await?;
     /// # let _ = n; Ok(()) }
     /// # }
     /// ```
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub async fn memo<T, F>(&self, key: impl Into<String>, compute: F) -> Result<T, Error>
     where
         T: serde::Serialize + serde::de::DeserializeOwned,
@@ -1362,7 +1362,7 @@ impl Context {
     }
 
     /// Registers `effect` to run **exactly once**, when the handler reaches its
-    /// final (non-`input_required`) result (`proto-2026-07-28-rc`).
+    /// final (non-`input_required`) result (MCP 2026-07-28).
     ///
     /// Commits are awaited in registration order before the final response is
     /// sent; the first `Err` becomes the response error. They do **not** run on
@@ -1387,14 +1387,14 @@ impl Context {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(all(feature = "server-macros", feature = "proto-2026-07-28-rc"))] {
+    /// # #[cfg(all(feature = "server-macros", not(feature = "legacy-spec")))] {
     /// # use neva::{Context, error::Error};
     /// # async fn f(ctx: Context) {
     /// ctx.on_commit(async move { Ok(()) });
     /// # }
     /// # }
     /// ```
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub fn on_commit<F>(&self, effect: F)
     where
         F: std::future::Future<Output = Result<(), Error>> + Send + 'static,
@@ -1453,7 +1453,7 @@ impl Context {
     /// }
     /// # }
     /// ```
-    #[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     pub async fn elicit(&mut self, params: ElicitRequestParams) -> Result<ElicitResult, Error> {
         let related_task = params.related_task();
 
@@ -1600,7 +1600,7 @@ impl Context {
 
     #[inline]
     #[cfg(feature = "tasks")]
-    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
+    #[cfg_attr(not(feature = "legacy-spec"), allow(dead_code))]
     async fn send_maybe_task_augmented_request<T: DeserializeOwned>(
         &mut self,
         req: Request,
@@ -1617,11 +1617,11 @@ impl Context {
 
     /// Sends a [`Request`] to a client
     ///
-    /// Server->client requests (non-RC elicitation/sampling/roots and the task
-    /// API). The stateless RC transport has no out-of-band server->client
+    /// Server->client requests (legacy elicitation/sampling/roots and the task
+    /// API). The stateless 2026-07-28 transport has no out-of-band server->client
     /// channel, so this is unused there.
     #[inline]
-    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
+    #[cfg_attr(not(feature = "legacy-spec"), allow(dead_code))]
     async fn send_request(&mut self, mut req: Request) -> Result<Response, Error> {
         if let Some(session_id) = self.session_id {
             req.session_id = Some(session_id);
@@ -1653,19 +1653,19 @@ impl Context {
 
     /// Sends a notification to a client.
     ///
-    /// Under the stateless `proto-2026-07-28-rc` transport there is no
+    /// Under the stateless MCP 2026-07-28 transport there is no
     /// out-of-band server->client channel, so this is a no-op: progress,
     /// list-changed, resource-updated, task-status and elicitation
     /// notifications are inert and clients poll instead.
     #[inline]
     async fn send_notification(
         &mut self,
-        #[cfg_attr(feature = "proto-2026-07-28-rc", allow(unused_variables))] method: &str,
-        #[cfg_attr(feature = "proto-2026-07-28-rc", allow(unused_variables))] params: Option<
+        #[cfg_attr(not(feature = "legacy-spec"), allow(unused_variables))] method: &str,
+        #[cfg_attr(not(feature = "legacy-spec"), allow(unused_variables))] params: Option<
             serde_json::Value,
         >,
     ) -> Result<(), Error> {
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         {
             // No out-of-band server->client channel on the stateless transport,
             // so this is an intentional no-op. Surface it once at debug so a
@@ -1675,11 +1675,11 @@ impl Context {
             #[cfg(feature = "tracing")]
             tracing::debug!(
                 method,
-                "notifications are not delivered on the stateless proto-2026-07-28-rc transport; clients poll instead"
+                "notifications are not delivered on the stateless 2026-07-28 transport; clients poll instead"
             );
             Ok(())
         }
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        #[cfg(feature = "legacy-spec")]
         {
             let mut notification = Notification::new(method, params);
             if let Some(session_id) = self.session_id {
@@ -1776,14 +1776,14 @@ mod missing_resource_error_tests {
     #[test]
     fn missing_resource_uses_spec_version_code() {
         // The constant the emitters use must match the spec.
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         assert_eq!(i32::from(ErrorCode::RESOURCE_NOT_FOUND), -32602);
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        #[cfg(feature = "legacy-spec")]
         assert_eq!(i32::from(ErrorCode::RESOURCE_NOT_FOUND), -32002);
     }
 }
 
-#[cfg(all(test, feature = "proto-2026-07-28-rc"))]
+#[cfg(all(test, not(feature = "legacy-spec")))]
 mod mrtr_tests {
     use super::*;
     use crate::types::elicitation::{ElicitRequestParams, ElicitResult, ElicitationAction};

@@ -1,11 +1,11 @@
-//! RC-only end-to-end check that the `#[neva::tool]` macro emits valid JSON
+//! 2026-07-28-only end-to-end check that the `#[neva::tool]` macro emits valid JSON
 //! Schema 2020-12 `inputSchema` / `outputSchema`. Compiled only under
-//! `proto-2026-07-28-rc` together with the Volga server + HTTP client (both
+//! MCP 2026-07-28 together with the Volga server + HTTP client (both
 //! pulled in by `server-full` / `client-full`). This is the sole `#[tool]`
-//! call-site compiled in the RC CI configuration.
+//! call-site compiled in the default CI configuration.
 
 #![cfg(all(
-    feature = "proto-2026-07-28-rc",
+    not(feature = "legacy-spec"),
     feature = "server-macros",
     feature = "http-server-volga",
     feature = "http-client"
@@ -85,7 +85,7 @@ async fn tool_macro_emits_json_schema_2020() {
         .expect("test client");
     let url = format!("http://{addr}/mcp");
 
-    // Stateless RC transport: no handshake/session -- a single `tools/list`
+    // Stateless 2026-07-28 transport: no handshake/session -- a single `tools/list`
     // POST carrying the required `MCP-Protocol-Version` header is enough.
     let list_body = serde_json::json!({
         "jsonrpc": "2.0",

@@ -20,7 +20,7 @@ use {
     std::{future::Future, sync::Arc},
 };
 
-#[cfg(all(feature = "server", not(feature = "proto-2026-07-28-rc")))]
+#[cfg(all(feature = "server", feature = "legacy-spec"))]
 use crate::json::JsonSchema;
 
 #[cfg(all(feature = "server", feature = "tasks"))]
@@ -74,9 +74,9 @@ pub struct Tool {
     /// > Note: Needs to a valid JSON schema object that additionally is of a type object.
     ///
     /// The concrete type is selected by the [`crate::types::ToolInputSchema`]
-    /// alias: the legacy typed `ToolSchema` under the default feature set,
-    /// or [`crate::types::schema_2020::InputSchema`] (a Value-shaped JSON
-    /// Schema 2020-12 wrapper) under the `proto-2026-07-28-rc` feature.
+    /// alias: the legacy typed `ToolSchema` under `legacy-spec`, or
+    /// [`crate::types::schema_2020::InputSchema`] (a Value-shaped JSON
+    /// Schema 2020-12 wrapper) in the default (MCP 2026-07-28) build.
     #[serde(rename = "inputSchema")]
     pub input_schema: crate::types::ToolInputSchema,
 
@@ -195,12 +195,12 @@ pub struct ListToolsResult {
     pub next_cursor: Option<Cursor>,
 
     /// Suggested TTL in milliseconds for caching this list result, when set by the server.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[serde(rename = "ttlMs", skip_serializing_if = "Option::is_none")]
     pub ttl_ms: Option<u64>,
 
     /// Suggested cache scope for this list result, when set by the server.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[serde(rename = "cacheScope", skip_serializing_if = "Option::is_none")]
     pub cache_scope: Option<crate::types::CacheScope>,
 }
@@ -236,7 +236,7 @@ pub struct CallToolRequestParams {
 }
 
 /// Represents an input schema
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+#[cfg(feature = "legacy-spec")]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ToolSchema {
     /// Schema object type
@@ -328,7 +328,7 @@ impl IntoResponse for ListToolsResult {
 #[cfg(feature = "server")]
 impl From<Vec<Tool>> for ListToolsResult {
     #[inline]
-    #[cfg_attr(not(feature = "proto-2026-07-28-rc"), allow(clippy::needless_update))]
+    #[cfg_attr(feature = "legacy-spec", allow(clippy::needless_update))]
     fn from(tools: Vec<Tool>) -> Self {
         Self {
             next_cursor: None,
@@ -341,7 +341,7 @@ impl From<Vec<Tool>> for ListToolsResult {
 #[cfg(feature = "server")]
 impl From<Page<'_, Tool>> for ListToolsResult {
     #[inline]
-    #[cfg_attr(not(feature = "proto-2026-07-28-rc"), allow(clippy::needless_update))]
+    #[cfg_attr(feature = "legacy-spec", allow(clippy::needless_update))]
     fn from(page: Page<'_, Tool>) -> Self {
         Self {
             next_cursor: page.next_cursor,
@@ -378,7 +378,7 @@ impl ListToolsResult {
     }
 }
 
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+#[cfg(feature = "legacy-spec")]
 impl Default for ToolSchema {
     #[inline]
     fn default() -> Self {
@@ -424,7 +424,7 @@ impl From<String> for TaskSupport {
     }
 }
 
-#[cfg(all(feature = "server", not(feature = "proto-2026-07-28-rc")))]
+#[cfg(all(feature = "server", feature = "legacy-spec"))]
 impl ToolSchema {
     /// Creates a new [`ToolSchema`] object
     #[inline]
@@ -450,7 +450,7 @@ impl ToolSchema {
     /// Builds a [`ToolSchema`] from a [`serde_json::Value`].
     ///
     /// Unlike [`crate::types::schema_2020::InputSchema::from_value`], which
-    /// is infallible because the RC schema type is a transparent
+    /// is infallible because the 2026-07-28 schema type is a transparent
     /// [`serde_json::Value`] newtype, this constructor is **fallible**:
     /// the legacy [`ToolSchema`] is a typed subset of JSON Schema and the
     /// supplied value must deserialize into that typed shape. Any
@@ -778,8 +778,8 @@ impl Debug for Tool {
 /// Builds a [`crate::types::ToolInputSchema`] from the typed argument map
 /// produced by [`ToolHandler::args`].
 ///
-/// Under the default feature set this returns the typed legacy
-/// `ToolSchema` verbatim. Under `proto-2026-07-28-rc` the legacy
+/// Under `legacy-spec` this returns the typed legacy `ToolSchema`
+/// verbatim. In the default (MCP 2026-07-28) build the legacy
 /// `ToolSchema` struct is absent, so this constructs an
 /// [`crate::types::schema_2020::InputSchema`] directly from the
 /// `Option<HashMap<String, SchemaProperty>>` by serializing each
@@ -791,11 +791,11 @@ impl Debug for Tool {
 fn build_input_schema_from_args(
     args: Option<HashMap<String, SchemaProperty>>,
 ) -> crate::types::ToolInputSchema {
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[cfg(feature = "legacy-spec")]
     {
         ToolSchema::new(args)
     }
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     {
         use serde_json::{Map, Value, json};
         let properties = args
@@ -862,13 +862,13 @@ impl Tool {
     /// > **Note:** Automatically generated schema will be overwritten
     ///
     /// The closure receives and returns a [`crate::types::ToolInputSchema`].
-    /// Under the default feature set this is the typed `ToolSchema`
-    /// (with builder methods like `with_prop`/`with_required`); under
-    /// `proto-2026-07-28-rc` it is
+    /// Under `legacy-spec` this is the typed `ToolSchema`
+    /// (with builder methods like `with_prop`/`with_required`); in the
+    /// default (MCP 2026-07-28) build it is
     /// [`crate::types::schema_2020::InputSchema`] (a Value-shaped JSON
     /// Schema 2020-12 wrapper). The schema model differs between flags,
-    /// so closure bodies that rely on the typed builder API are RC-incompatible
-    /// by design.
+    /// so closure bodies that rely on the typed builder API do not carry
+    /// across the two profiles by design.
     pub fn with_input_schema<F>(&mut self, config: F) -> &mut Self
     where
         F: FnOnce(crate::types::ToolInputSchema) -> crate::types::ToolInputSchema,
@@ -954,7 +954,7 @@ impl Tool {
     ///
     /// Under the legacy feature set the schema is the typed `ToolSchema`
     /// struct and is materialized via [`serde_json::to_value`]. Under
-    /// `proto-2026-07-28-rc` the schema is already a [`serde_json::Value`]
+    /// MCP 2026-07-28 the schema is already a [`serde_json::Value`]
     /// (wrapped by [`crate::types::schema_2020::InputSchema`]), so we borrow
     /// it directly via [`crate::types::schema_2020::InputSchema::as_value`]
     /// -- no re-serialization is needed.
@@ -966,9 +966,9 @@ impl Tool {
             ));
         };
 
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        #[cfg(feature = "legacy-spec")]
         let schema = serde_json::to_value(schema_ref).map_err(Into::<Error>::into)?;
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         let schema = schema_ref.as_value().clone();
 
         let validator =
@@ -1120,7 +1120,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[cfg(feature = "legacy-spec")]
     fn it_deserializes_input_schema() {
         let json = r#"{
             "properties": {
@@ -1137,7 +1137,7 @@ mod tests {
         assert!(schema.properties.is_some());
     }
 
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[cfg(feature = "legacy-spec")]
     #[derive(serde::Deserialize, schemars::JsonSchema)]
     #[allow(dead_code)]
     struct MyT {
@@ -1145,7 +1145,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[cfg(feature = "legacy-spec")]
     #[allow(deprecated)]
     fn from_schemars_matches_from_schema_legacy_name() {
         // The deprecated wrapper `from_schema_legacy` must delegate to
@@ -1165,7 +1165,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[cfg(feature = "legacy-spec")]
     fn from_schema_generic_constructor_works() {
         let s: ToolSchema = ToolSchema::from_schema::<MyT>();
         let props = s.properties.expect("properties should be set");
@@ -1174,7 +1174,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[cfg(feature = "legacy-spec")]
     fn from_value_round_trip() {
         let original = ToolSchema::default().with_prop("name", "a name", PropertyType::String);
         let value = serde_json::to_value(&original).expect("serializes");
@@ -1187,7 +1187,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[cfg(feature = "legacy-spec")]
     fn from_value_invalid_returns_error() {
         // A bare JSON string is not a valid ToolSchema (which expects
         // an object with a `type` discriminator). Deserialization must
@@ -1197,7 +1197,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     fn list_tools_result_serializes_cache_hints() {
         use crate::types::CacheScope;
         let r = ListToolsResult {
@@ -1216,7 +1216,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     fn list_tools_result_omits_cache_hints_when_none() {
         let r = ListToolsResult::default();
         let v = serde_json::to_value(&r).unwrap();

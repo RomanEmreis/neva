@@ -1,11 +1,11 @@
-//! Request-scoped logging over the RC stateless HTTP transport (MCP 2026-07-28).
+//! Request-scoped logging over the 2026-07-28 stateless HTTP transport (MCP 2026-07-28).
 //!
 //! A `POST` whose `_meta` carries `io.modelcontextprotocol/logLevel` gets a
 //! `text/event-stream` reply carrying the request's `notifications/message`
 //! followed by the response; a `POST` without it gets a plain JSON reply and no
 //! log notifications (the spec's suppression rule).
 #![cfg(all(
-    feature = "proto-2026-07-28-rc",
+    not(feature = "legacy-spec"),
     feature = "http-server-volga",
     feature = "http-client",
     feature = "tracing"

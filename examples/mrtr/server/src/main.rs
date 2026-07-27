@@ -1,4 +1,4 @@
-//! New-spec (MCP 2026-07-28 RC) example server.
+//! MCP 2026-07-28 example server.
 //!
 //! A single `place_order` tool shows the MRTR effect primitives across an
 //! elicitation round-trip: the handler re-runs top-to-bottom each round, yet
@@ -65,7 +65,7 @@ async fn place_order(mut ctx: Context) -> Result<String, Error> {
 
 #[tokio::main]
 async fn main() {
-    // Under RC neva does not install a global subscriber; do it here so the
+    // neva does not install a global subscriber here; do it so the
     // effect logs above are visible.
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())

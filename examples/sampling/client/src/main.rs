@@ -1,38 +1,37 @@
-use tracing_subscriber::prelude::*;
+//! MCP 2026-07-28 sampling example client.
+//!
+//! The sampling handler is still a handler -- but it is no longer a *push*
+//! endpoint. Under MCP 2026-07-28 it fulfils MRTR `sampling/createMessage` input
+//! requests inside the client's round-trip loop, so the caller of `call_tool`
+//! sees a single call. Registering one makes the client declare
+//! `clientCapabilities.sampling`; a server may only ask for a kind the client
+//! declared.
+//!
+//! Note the handler is wired with an explicit `map_sampling` rather than the
+//! `#[sampling]` attribute: that macro belongs to the legacy push model and is
+//! not available in the default (MCP 2026-07-28) build. An explicit, `#[allow(deprecated)]`
+//! call is also honest about the fact that this kind is deprecated on arrival.
+
 use neva::prelude::*;
+use neva::types::sampling::{CreateMessageRequestParams, CreateMessageResult};
+use tracing_subscriber::prelude::*;
 
-const ACCESS_TOKEN: &str =
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwiaXNzIjoic29tZSBpc3N1ZXIiLCJhdWQiOiJzb21lIGF1ZCIsImV4cCI6MH0.BYf42WI95BvIkpaXdTKKKvVtuVbcqQiZ1loXxSvNHBY";
+/// Stands in for a real model call.
+async fn complete(params: CreateMessageRequestParams) -> CreateMessageResult {
+    let prompt = params
+        .messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|content| content.as_text())
+        .map(|text| text.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    tracing::info!("🤖 model asked to complete: {prompt}");
 
-#[sampling]
-async fn sampling_handler(params: CreateMessageRequestParams) -> CreateMessageResult {
-    tracing::info!("Received sampling: {:?}", params);
-    
-    if params.tool_choice.is_some_and(|c| !c.is_none()) {
-        let prompts: Vec<&TextContent> = params.text().collect();
-        tracing::info!("Received prompts: {:?}", prompts);
-
-        CreateMessageResult::assistant()
-            .with_model("o3-mini")
-            .use_tools([
-                ("get_weather", ("city1", "London")),
-                ("get_weather", ("city2", "Paris"))
-            ])
-    } else {
-        let results: Vec<&ToolResult> = params.results().collect();
-        tracing::info!("Received tool results: {results:?}");
-
-        let response = 
-            r#"Based on the current weather data:
-               - **Paris**: 18°C and partly cloudy - quite pleasant!
-               - **London**: 15°C and rainy - you'll want an umbrella.
-               Paris has slightly warmer and drier conditions today."#;
-        
-        CreateMessageResult::assistant()
-            .with_model("o3-mini")
-            .with_content(response)
-            .end_turn()
-    }
+    CreateMessageResult::assistant()
+        .with_model("o3-mini")
+        .with_content("Revenue grew 12% with steady churn, though two outages need follow-up.")
+        .end_turn()
 }
 
 #[tokio::main]
@@ -41,25 +40,23 @@ async fn main() -> Result<(), Error> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let mut client = Client::new()
-        .with_options(|opt| opt
-            .with_sampling(|s| s.with_tools())
-            .with_http(|http| http
-                .bind("localhost:7878")
-                .with_tls(|tls| tls
-                    .with_certs_verification(false))
-                .with_auth(ACCESS_TOKEN)));
-    
+    let mut client = Client::new().with_options(|opt| {
+        opt.with_http(|http| http.bind("127.0.0.1:3002").with_endpoint("/mcp"))
+    });
+
+    // Deprecated on arrival, like the whole sampling kind -- the API stays for
+    // migration.
+    #[allow(deprecated)]
+    client.map_sampling(complete);
+
+    // `connect()` runs `server/discover` -- no `initialize` handshake under MCP 2026-07-28.
     client.connect().await?;
 
-    let args = [
-        ("city1", "London"),
-        ("city2", "Paris"),
-    ];
+    // One call from here; the MRTR round-trips happen inside.
     let result = client
-        .call_tool("generate_weather_report", args).await?;
-    
-    tracing::info!("Received result: {:?}", result.content);
+        .call_tool("summarize_report", [("topic", "EMEA")])
+        .await?;
+    tracing::info!("Result: {:?}", result.content);
 
     client.disconnect().await
 }
