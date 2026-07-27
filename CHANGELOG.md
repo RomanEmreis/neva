@@ -43,6 +43,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     `HttpEngine` contract); the axum/hyper/actix engine examples were updated
     to the two-arm match.
 
+* **`resultType` on every result** (MCP 2026-07-28, #97). The final spec makes
+  the discriminator mandatory on results, not just on MRTR continuations. neva
+  emitted it only on `InputRequiredResult`; now every success result carries
+  `resultType: "complete"` -- tools, prompts, resources, discover, completion,
+  tasks and anything a custom handler returns.
+  * Stamped centrally in `Response::success`, so it covers every `IntoResponse`
+    impl including `Json<T>` and the scalar ones. An existing discriminator is
+    never overwritten, which is how `input_required` survives the same funnel.
+    A non-object result has nowhere to put the field and is passed through.
+  * New `types::ResultType` (`Complete` / `InputRequired`) and
+    `Response::result_type()`, which applies the spec's compatibility rule:
+    an **absent** field reads as `Complete`, and so does any value neva does
+    not recognize. The client's MRTR detection now goes through it instead of
+    matching the raw JSON in two places.
+
 ### Added
 * **Request-scoped logging** (MCP 2026-07-28, #93). The 2026-07-28 spec
   removes only `logging/setLevel`; it keeps `notifications/message` as a

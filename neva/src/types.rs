@@ -41,6 +41,8 @@ pub use cursor::{Cursor, Page, Pagination};
 pub use helpers::{Json, Meta, PropertyType};
 pub use reference::Reference;
 pub use request::{Request, RequestId, RequestParamsMeta};
+#[cfg(not(feature = "legacy-spec"))]
+pub use response::ResultType;
 pub use response::{ErrorDetails, IntoResponse, Response};
 
 #[cfg(feature = "tasks")]

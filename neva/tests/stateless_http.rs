@@ -50,6 +50,9 @@ async fn stateless_discover_and_call() {
         body["result"]["protocolVersion"],
         serde_json::json!("2026-07-28")
     );
+    // Every result carries the mandatory `resultType` discriminator, including
+    // the discovery result.
+    assert_eq!(body["result"]["resultType"], serde_json::json!("complete"));
 
     // (c) stateless tool call with the protocol-version header, no session.
     let call = serde_json::json!({
@@ -70,6 +73,7 @@ async fn stateless_discover_and_call() {
             .and_then(|v| v.as_str()),
         Some("pong")
     );
+    assert_eq!(body["result"]["resultType"], serde_json::json!("complete"));
 
     // (d) missing protocol-version header -> JSON-RPC InvalidRequest.
     let resp = client

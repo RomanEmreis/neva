@@ -1109,12 +1109,12 @@ impl Client {
                 .await?;
 
             // MRTR only applies to success results carrying the
-            // `input_required` discriminator; anything else is final.
+            // `input_required` discriminator; anything else -- including a
+            // result with no `resultType` at all -- is final.
             let input_required_result = match &resp {
                 Response::Ok(ok)
                     if mrtr_method
-                        && ok.result.get("resultType")
-                            == Some(&serde_json::json!("input_required")) =>
+                        && resp.result_type() == Some(crate::types::ResultType::InputRequired) =>
                 {
                     serde_json::from_value::<crate::types::mrtr::InputRequiredResult>(
                         ok.result.clone(),
@@ -1471,12 +1471,7 @@ impl Client {
                 };
 
                 let is_input_required = shared::is_mrtr_method(method.as_str())
-                    && matches!(
-                        &resp,
-                        Response::Ok(ok)
-                            if ok.result.get("resultType")
-                                == Some(&serde_json::json!("input_required"))
-                    );
+                    && resp.result_type() == Some(crate::types::ResultType::InputRequired);
 
                 if !is_input_required {
                     slots[slot_i] = Slot::Done(resp);

@@ -104,6 +104,13 @@ async fn tool_elicits_then_completes_over_two_rounds() {
         Some("hello octocat"),
         "round 2 must complete: {r2}"
     );
+    // The two discriminators are the same field: round 1 says `input_required`,
+    // the final round says `complete`.
+    assert_eq!(
+        r2["result"]["resultType"],
+        serde_json::json!("complete"),
+        "round 2 must be tagged complete: {r2}"
+    );
 
     handle.abort();
 }
