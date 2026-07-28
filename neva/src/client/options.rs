@@ -249,11 +249,35 @@ impl McpOptions {
 
     /// Configures tasks capability
     #[cfg(feature = "tasks")]
+    #[cfg(feature = "legacy-spec")]
     pub fn with_tasks<T>(mut self, config: T) -> Self
     where
         T: FnOnce(ClientTasksCapability) -> ClientTasksCapability,
     {
         self.tasks_capability = Some(config(Default::default()));
+        self
+    }
+
+    /// Declares support for the Tasks extension.
+    ///
+    /// Under MCP 2026-07-28 the extension capability carries no settings --
+    /// declaring it at all is what tells the server this client can handle a
+    /// `CreateTaskResult` -- so this takes no configuration.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use neva::Client;
+    ///
+    /// let client = Client::new().with_options(|opt| opt.with_tasks());
+    /// # let _ = client;
+    /// ```
+    ///
+    /// Requires the `tasks` feature.
+    #[cfg(feature = "tasks")]
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn with_tasks(mut self) -> Self {
+        self.tasks_capability = Some(ClientTasksCapability::default());
         self
     }
 

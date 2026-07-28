@@ -43,6 +43,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     `HttpEngine` contract); the axum/hyper/actix engine examples were updated
     to the two-arm match.
 
+* **Tasks method realignment** (MCP 2026-07-28, #96). The final Tasks extension
+  ([`modelcontextprotocol/ext-tasks`](https://github.com/modelcontextprotocol/ext-tasks))
+  reshapes the whole surface, not just the method names. Under `legacy-spec`
+  the 2025-11-25 surface is unchanged.
+  * **Methods.** `tasks/list` and `tasks/result` are **removed**. `tasks/get`
+    becomes the single polling method and returns a `DetailedTask`: the status
+    plus, depending on it, the outstanding `inputRequests`, the terminal
+    `result`, or the `error`. `tasks/update` is **new** -- the client answers a
+    task's input requests with it, keyed to what `tasks/get` surfaced.
+    `tasks/cancel` now acknowledges with an empty result (cancellation is
+    cooperative, so the outcome is learned by polling).
+  * **`CreateTaskResult` is flat** (`Result & Task`), carrying `resultType:
+    "task"` -- the third discriminator value, joining `ResultType`. The task's
+    fields sit at the top level instead of under a nested `task` object.
+  * **Field renames.** `Task::ttl` serializes as `ttlMs` and `poll_interval` as
+    `pollIntervalMs`. `ttl` is now `Option<usize>`, matching the schema's
+    nullable "unlimited" case (it was documented as nullable but typed
+    non-null in both profiles).
+  * `notifications/tasks/status` is now `notifications/tasks`.
+  * **Capability.** The extension capability is an empty object: advertising it
+    *is* the declaration. The `cancel` / `list` / `requests` sub-tree and its
+    builders (`with_cancel`, `with_list`, `with_requests`, `with_tools`,
+    `with_elicitation`, `with_all`) are gone, and `with_tasks` takes no
+    closure -- `opt.with_tasks()`.
+  * `Mcp-Name` now carries `params.taskId` on the task methods, as the spec
+    requires for routing a task's calls to the instance holding its state.
+  * Client-hosted tasks are legacy-only: they existed to answer server->client
+    task-augmented requests, and MCP 2026-07-28 has no server->client requests.
+  * Not covered here: `subscriptions/listen`, which is how the spec has clients
+    opt into `notifications/tasks`. That mechanism does not exist in neva yet
+    and is tracked separately.
 * **`resultType` on every result** (MCP 2026-07-28, #97). The final spec makes
   the discriminator mandatory on results, not just on MRTR continuations. neva
   emitted it only on `InputRequiredResult`; now every success result carries

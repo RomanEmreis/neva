@@ -13,7 +13,9 @@ pub(crate) use requests_queue::RequestQueue;
 pub(crate) use sse_session_registry::SseSessionRegistry;
 #[cfg(all(feature = "tasks", feature = "server"))]
 pub(crate) use task_tracker::TaskHandle;
-#[cfg(feature = "tasks")]
+// The tracker backs the server's task substrate; a client only holds one to
+// host tasks for legacy server->client requests.
+#[cfg(all(feature = "tasks", any(feature = "server", feature = "legacy-spec")))]
 pub(crate) use task_tracker::TaskTracker;
 
 pub(crate) use arc_slice::ArcSlice;
@@ -42,7 +44,7 @@ mod requests_queue;
 mod sse_session_registry;
 #[cfg(feature = "tasks")]
 mod task_api;
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", any(feature = "server", feature = "legacy-spec")))]
 mod task_tracker;
 
 /// The future returned by neva's object-safe async traits -- a boxed,

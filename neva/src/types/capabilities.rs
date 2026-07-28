@@ -278,14 +278,17 @@ pub struct CompletionsCapability {
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ServerTasksCapability {
     /// Indicates whether this server supports `tasks/cancel`.
+    #[cfg(feature = "legacy-spec")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cancel: Option<TaskCancellationCapability>,
 
     /// Indicates whether this server supports `tasks/list`.
+    #[cfg(feature = "legacy-spec")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub list: Option<TaskListCapability>,
 
     /// Specifies which request types can be augmented with tasks.
+    #[cfg(feature = "legacy-spec")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requests: Option<ServerTaskRequestsCapability>,
 }
@@ -297,14 +300,17 @@ pub struct ServerTasksCapability {
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ClientTasksCapability {
     /// Indicates whether this client supports `tasks/cancel`.
+    #[cfg(feature = "legacy-spec")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cancel: Option<TaskCancellationCapability>,
 
     /// Indicates whether this client supports `tasks/list`.
+    #[cfg(feature = "legacy-spec")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub list: Option<TaskListCapability>,
 
     /// Specifies which request types can be augmented with tasks.
+    #[cfg(feature = "legacy-spec")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requests: Option<ClientTaskRequestsCapability>,
 }
@@ -312,7 +318,7 @@ pub struct ClientTasksCapability {
 /// Represents task cancellation capability configuration.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct TaskCancellationCapability {
     // Currently empty in the spec, but may be extended in the future
@@ -321,7 +327,7 @@ pub struct TaskCancellationCapability {
 /// Represents task list retrieval capability configuration.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct TaskListCapability {
     // Currently empty in the spec, but may be extended in the future
@@ -330,7 +336,7 @@ pub struct TaskListCapability {
 /// Specifies which request types can be augmented with tasks.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ServerTaskRequestsCapability {
     /// Specifies task support for tool-related requests.
@@ -341,7 +347,7 @@ pub struct ServerTaskRequestsCapability {
 /// Specifies which request types can be augmented with tasks.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ClientTaskRequestsCapability {
     /// Specifies task support for elicitation-related requests.
@@ -357,7 +363,7 @@ pub struct ClientTaskRequestsCapability {
 /// Specifies task support for tool-related requests.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ToolsTaskCapability {
     /// Indicates whether the server supports task-augmented `tools/call` requests.
@@ -368,7 +374,7 @@ pub struct ToolsTaskCapability {
 /// Specifies task support for elicitation-related requests.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ElicitationTaskCapability {
     /// Indicates whether the client supports task-augmented `elicitation/create` requests.
@@ -390,7 +396,7 @@ pub struct SamplingTaskCapability {
 /// Represents task support configuration for `tools/call` requests.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ToolsCallTaskCapability {
     // Currently empty in the spec, but may be extended in the future
@@ -399,7 +405,7 @@ pub struct ToolsCallTaskCapability {
 /// Represents task support configuration for `elicitation/create` requests.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ElicitationCreateTaskCapability {
     // Currently empty in the spec, but may be extended in the future
@@ -504,7 +510,7 @@ impl ElicitationCapability {
     }
 }
 
-#[cfg(all(feature = "server", feature = "tasks"))]
+#[cfg(all(feature = "server", feature = "tasks", feature = "legacy-spec"))]
 impl ServerTasksCapability {
     /// Specifies whether this server supports `tasks/cancel` requests
     pub fn with_cancel(mut self) -> Self {
@@ -538,7 +544,7 @@ impl ServerTasksCapability {
     }
 }
 
-#[cfg(all(feature = "client", feature = "tasks"))]
+#[cfg(all(feature = "client", feature = "tasks", feature = "legacy-spec"))]
 impl ClientTasksCapability {
     /// Specifies whether this client supports `tasks/cancel` requests
     pub fn with_cancel(mut self) -> Self {
@@ -585,7 +591,7 @@ impl ClientTasksCapability {
     }
 }
 
-#[cfg(all(feature = "server", feature = "tasks"))]
+#[cfg(all(feature = "server", feature = "tasks", feature = "legacy-spec"))]
 impl ServerTaskRequestsCapability {
     /// Specifies task support for tool-related requests.
     pub fn with_tools(mut self) -> Self {
@@ -596,7 +602,7 @@ impl ServerTaskRequestsCapability {
     }
 }
 
-#[cfg(all(feature = "client", feature = "tasks"))]
+#[cfg(all(feature = "client", feature = "tasks", feature = "legacy-spec"))]
 impl ClientTaskRequestsCapability {
     /// Specifies task support for elicitation-related requests.
     pub fn with_elicitation(mut self) -> Self {

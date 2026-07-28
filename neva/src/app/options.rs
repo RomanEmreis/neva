@@ -23,10 +23,12 @@ use crate::types::{
 
 #[cfg(feature = "tasks")]
 use crate::shared::{TaskHandle, TaskTracker};
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
+use crate::types::TaskPayload;
 #[cfg(all(feature = "tracing", feature = "legacy-spec"))]
 use crate::types::notification::LoggingLevel;
 #[cfg(feature = "tasks")]
-use crate::types::{ServerTasksCapability, Task, TaskPayload};
+use crate::types::{ServerTasksCapability, Task};
 
 #[cfg(all(feature = "tracing", feature = "legacy-spec"))]
 use tracing_subscriber::{Registry, filter::LevelFilter, reload::Handle};
@@ -329,19 +331,26 @@ impl McpOptions {
         self
     }
 
-    /// Configures tasks capability.
+    /// Enables the Tasks extension.
     ///
-    /// Under MCP 2026-07-28 tasks are an extension: this thin wrapper
-    /// keeps the existing ergonomics while registering the capability through
-    /// [`crate::app::extension::TasksExtension`] so it surfaces under
+    /// Under MCP 2026-07-28 tasks are an extension whose capability carries no
+    /// settings -- advertising it *is* the declaration -- so this takes no
+    /// configuration. It registers through
+    /// [`crate::app::extension::TasksExtension`], surfacing under
     /// `capabilities.extensions["io.modelcontextprotocol/tasks"]`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use neva::App;
+    ///
+    /// let app = App::new().with_options(|opt| opt.with_tasks());
+    /// # let _ = app;
+    /// ```
     #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
-    pub fn with_tasks<F>(mut self, config: F) -> Self
-    where
-        F: FnOnce(ServerTasksCapability) -> ServerTasksCapability,
-    {
+    pub fn with_tasks(mut self) -> Self {
         use crate::app::extension::{Extension, TasksExtension};
-        let capability = config(Default::default());
+        let capability = ServerTasksCapability::default();
         self.tasks_capability = Some(capability.clone());
         let ext = TasksExtension::new(capability);
         self.register_extension(ext.id(), ext.capability());
@@ -429,7 +438,7 @@ impl McpOptions {
     }
 
     /// Returns a list of currently running tasks
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     pub(crate) fn list_tasks(&self) -> Vec<Task> {
         self.tasks.tasks()
     }
@@ -447,13 +456,33 @@ impl McpOptions {
     }
 
     /// Retrieves the task status
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     pub(crate) fn get_task_status(&self, task_id: &str) -> Result<Task, Error> {
         self.tasks.get_status(task_id)
     }
 
+    /// Retrieves the full task state served by `tasks/get` (MCP 2026-07-28)
+    #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
+    pub(crate) fn get_task_state(
+        &self,
+        task_id: &str,
+    ) -> Result<crate::types::DetailedTask, Error> {
+        self.tasks.get_state(task_id)
+    }
+
+    /// Delivers client answers to a task's outstanding input requests
+    /// (`tasks/update`, MCP 2026-07-28)
+    #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
+    pub(crate) fn update_task(
+        &self,
+        task_id: &str,
+        responses: crate::types::mrtr::InputResponses,
+    ) -> Result<(), Error> {
+        self.tasks.provide_inputs(task_id, responses)
+    }
+
     /// Awaits the task result
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     pub(crate) async fn get_task_result(&self, task_id: &str) -> Result<TaskPayload, Error> {
         self.tasks.get_result(task_id).await
     }
@@ -713,7 +742,7 @@ impl McpOptions {
 
     /// Returns whether the server is configured to handle the "tasks/list" requests.
     #[inline]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     pub(crate) fn is_tasks_list_supported(&self) -> bool {
         self.tasks_capability
             .as_ref()
@@ -722,7 +751,7 @@ impl McpOptions {
 
     /// Returns whether the server is configured to handle the "tasks/cancel" requests.
     #[inline]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     pub(crate) fn is_tasks_cancellation_supported(&self) -> bool {
         self.tasks_capability
             .as_ref()
@@ -730,8 +759,19 @@ impl McpOptions {
     }
 
     /// Returns whether the server is configured to handle the task-augmented "tools/call" requests.
+    ///
+    /// Under MCP 2026-07-28 the Tasks extension capability carries no
+    /// per-request settings: advertising the extension at all is the
+    /// declaration, and the server decides per request whether to defer.
     #[inline]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
+    pub(crate) fn is_task_augmented_tool_call_supported(&self) -> bool {
+        self.tasks_capability.is_some()
+    }
+
+    /// Returns whether the server is configured to handle the task-augmented "tools/call" requests.
+    #[inline]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     pub(crate) fn is_task_augmented_tool_call_supported(&self) -> bool {
         self.tasks_capability
             .as_ref()

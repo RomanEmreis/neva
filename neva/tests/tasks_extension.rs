@@ -2,8 +2,10 @@
 //!
 //! Under MCP 2026-07-28 the tasks capability is advertised through the extensions
 //! map (`capabilities.extensions["io.modelcontextprotocol/tasks"]`) instead of
-//! the former top-level `capabilities.tasks` field, while the `tasks/*` wire
-//! methods are unchanged. Exercised over the stateless POST-only path.
+//! the former top-level `capabilities.tasks` field, and the method surface is
+//! `tasks/get` (polling, carrying the terminal result inline), `tasks/update`
+//! (answering input requests) and `tasks/cancel` -- with `tasks/list` and
+//! `tasks/result` gone. Exercised over the stateless POST-only path.
 #![cfg(all(
     not(feature = "legacy-spec"),
     feature = "tasks",
@@ -22,7 +24,7 @@ async fn tasks_capability_is_advertised_as_extension() {
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new().with_options(|opt| {
         opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
-            .with_tasks(|t| t.with_all())
+            .with_tasks()
     });
     app.map_tool("ping", || async move { "pong".to_string() });
     let handle = tokio::spawn(async move { app.run().await });
@@ -58,22 +60,42 @@ async fn tasks_capability_is_advertised_as_extension() {
         "no top-level capabilities.tasks under MCP 2026-07-28, got: {caps}"
     );
 
-    // (b) the tasks/* wire methods are unchanged and still dispatch.
-    let list = serde_json::json!({
-        "jsonrpc": "2.0", "id": 2, "method": "tasks/list", "params": {}
+    // (b) the removed methods no longer dispatch.
+    for gone in ["tasks/list", "tasks/result"] {
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": gone, "params": {}
+        });
+        let resp = client
+            .post(&url)
+            .header("MCP-Protocol-Version", "2026-07-28")
+            .json(&req)
+            .send()
+            .await
+            .expect("send failed");
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(
+            body["error"]["code"], -32601,
+            "{gone} must be gone under MCP 2026-07-28, got: {body}"
+        );
+    }
+
+    // (c) `tasks/update` is routable (an unknown task is a params error, not an
+    // unknown method).
+    let update = serde_json::json!({
+        "jsonrpc": "2.0", "id": 3, "method": "tasks/update",
+        "params": { "taskId": "nope", "inputResponses": {} }
     });
     let resp = client
         .post(&url)
         .header("MCP-Protocol-Version", "2026-07-28")
-        .json(&list)
+        .json(&update)
         .send()
         .await
-        .expect("tasks/list failed");
-    assert!(resp.status().is_success());
+        .expect("send failed");
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(
-        body["result"]["tasks"].is_array(),
-        "tasks/list should return a task array, got: {body}"
+    assert_eq!(
+        body["error"]["code"], -32602,
+        "tasks/update must dispatch, got: {body}"
     );
 
     handle.abort();
@@ -94,7 +116,7 @@ async fn task_augmented_tool_elicits_via_suspend_resume() {
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new().with_options(|opt| {
         opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
-            .with_tasks(|t| t.with_all())
+            .with_tasks()
     });
     app.map_tool("greet_task", |mut ctx: Context| async move {
         let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
@@ -165,7 +187,11 @@ async fn task_augmented_tool_elicits_via_suspend_resume() {
         }
     }))
     .await;
-    let task_id = r1["result"]["task"]["taskId"]
+    assert_eq!(
+        r1["result"]["resultType"], "task",
+        "a deferred result is tagged `task`, got: {r1}"
+    );
+    let task_id = r1["result"]["taskId"]
         .as_str()
         .unwrap_or_else(|| panic!("task id present, got: {r1}"))
         .to_string();
@@ -176,10 +202,33 @@ async fn task_augmented_tool_elicits_via_suspend_resume() {
         "task must enter input_required when the tool elicits"
     );
 
-    // 3. Deliver the answer as a Response keyed by the task id (no session).
+    // 3. `tasks/get` surfaces the outstanding ask; answer it with `tasks/update`
+    //    under the same key.
+    let g = post(serde_json::json!({
+        "jsonrpc": "2.0", "id": 3, "method": "tasks/get",
+        "params": { "taskId": task_id }
+    }))
+    .await;
+    let key = g["result"]["inputRequests"]
+        .as_object()
+        .unwrap_or_else(|| panic!("inputRequests present, got: {g}"))
+        .keys()
+        .next()
+        .expect("one outstanding ask")
+        .clone();
+    assert_eq!(
+        g["result"]["inputRequests"][&key]["method"], "elicitation/create",
+        "the ask is surfaced as a {{method, params}} envelope, got: {g}"
+    );
+
     post(serde_json::json!({
-        "jsonrpc": "2.0", "id": task_id,
-        "result": { "action": "accept", "content": { "name": "octocat" } }
+        "jsonrpc": "2.0", "id": 4, "method": "tasks/update",
+        "params": {
+            "taskId": task_id,
+            "inputResponses": {
+                key: { "action": "accept", "content": { "name": "octocat" } }
+            }
+        }
     }))
     .await;
 
@@ -189,16 +238,22 @@ async fn task_augmented_tool_elicits_via_suspend_resume() {
         "task must complete after the answer is delivered"
     );
 
-    // 5. The final result carries the elicited value, and the resumed body ran.
+    // 5. `tasks/get` carries the final result inline -- there is no
+    //    `tasks/result` to follow up with.
     let r = post(serde_json::json!({
-        "jsonrpc": "2.0", "id": 99, "method": "tasks/result",
+        "jsonrpc": "2.0", "id": 99, "method": "tasks/get",
         "params": { "taskId": task_id }
     }))
     .await;
     assert_eq!(
-        r.pointer("/result/content/0/text").and_then(|v| v.as_str()),
+        r.pointer("/result/result/content/0/text")
+            .and_then(|v| v.as_str()),
         Some("hello octocat"),
-        "final task result must carry the elicited value, got: {r}"
+        "a completed task carries its result inline, got: {r}"
+    );
+    assert_eq!(
+        r["result"]["resultType"], "complete",
+        "the `tasks/get` result itself is complete, got: {r}"
     );
     assert_eq!(
         TASK_COMMITS.load(Ordering::SeqCst),
@@ -217,7 +272,7 @@ async fn mrtr_elicit_inside_a_task_is_rejected_with_guidance() {
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new().with_options(|opt| {
         opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
-            .with_tasks(|t| t.with_all())
+            .with_tasks()
     });
     app.map_tool("bad_elicit", |mut ctx: Context| async move {
         let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
@@ -263,7 +318,11 @@ async fn mrtr_elicit_inside_a_task_is_rejected_with_guidance() {
         }
     }))
     .await;
-    let task_id = r1["result"]["task"]["taskId"]
+    assert_eq!(
+        r1["result"]["resultType"], "task",
+        "a deferred result is tagged `task`, got: {r1}"
+    );
+    let task_id = r1["result"]["taskId"]
         .as_str()
         .unwrap_or_else(|| panic!("task id present, got: {r1}"))
         .to_string();
@@ -272,11 +331,18 @@ async fn mrtr_elicit_inside_a_task_is_rejected_with_guidance() {
     let mut text = String::new();
     for _ in 0..100 {
         let r = post(serde_json::json!({
-            "jsonrpc": "2.0", "id": 2, "method": "tasks/result",
+            "jsonrpc": "2.0", "id": 2, "method": "tasks/get",
             "params": { "taskId": task_id }
         }))
         .await;
-        if let Some(t) = r.pointer("/result/content/0/text").and_then(|v| v.as_str()) {
+        // A *tool* error is a successful `tools/call` result carrying
+        // `isError`, not a JSON-RPC failure -- so it rides in the task's
+        // `result`, and the task itself completes. (`error` is reserved for a
+        // protocol-level failure during execution.)
+        if let Some(t) = r
+            .pointer("/result/result/content/0/text")
+            .and_then(|v| v.as_str())
+        {
             text = t.to_string();
             break;
         }
@@ -298,7 +364,7 @@ async fn mrtr_once_in_a_required_task_is_rejected() {
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new().with_options(|opt| {
         opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
-            .with_tasks(|t| t.with_all())
+            .with_tasks()
     });
     app.map_tool("bad_once", |ctx: Context| async move {
         ctx.once("x", async { Ok(()) }).await?;
@@ -336,7 +402,11 @@ async fn mrtr_once_in_a_required_task_is_rejected() {
         "params": { "name": "bad_once", "arguments": {}, "task": { "ttl": 60000 } }
     }))
     .await;
-    let task_id = r1["result"]["task"]["taskId"]
+    assert_eq!(
+        r1["result"]["resultType"], "task",
+        "a deferred result is tagged `task`, got: {r1}"
+    );
+    let task_id = r1["result"]["taskId"]
         .as_str()
         .unwrap_or_else(|| panic!("task id present, got: {r1}"))
         .to_string();
@@ -344,11 +414,18 @@ async fn mrtr_once_in_a_required_task_is_rejected() {
     let mut text = String::new();
     for _ in 0..100 {
         let r = post(serde_json::json!({
-            "jsonrpc": "2.0", "id": 2, "method": "tasks/result",
+            "jsonrpc": "2.0", "id": 2, "method": "tasks/get",
             "params": { "taskId": task_id }
         }))
         .await;
-        if let Some(t) = r.pointer("/result/content/0/text").and_then(|v| v.as_str()) {
+        // A *tool* error is a successful `tools/call` result carrying
+        // `isError`, not a JSON-RPC failure -- so it rides in the task's
+        // `result`, and the task itself completes. (`error` is reserved for a
+        // protocol-level failure during execution.)
+        if let Some(t) = r
+            .pointer("/result/result/content/0/text")
+            .and_then(|v| v.as_str())
+        {
             text = t.to_string();
             break;
         }

@@ -2,8 +2,11 @@
 
 use crate::{
     error::Error,
-    types::{Cursor, IntoResponse, Meta, Page, RequestId, Response},
+    types::{IntoResponse, Meta, RequestId, Response},
 };
+
+#[cfg(feature = "legacy-spec")]
+use crate::types::{Cursor, Page};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -27,24 +30,47 @@ const DEFAULT_TTL: usize = 30000;
 /// List of commands for Tasks
 pub mod commands {
     /// Command name that returns a list of tasks that are currently running on the server.
+    ///
+    /// Removed in MCP 2026-07-28: the final Tasks extension has no `tasks/list`.
+    #[cfg(feature = "legacy-spec")]
     pub const LIST: &str = "tasks/list";
 
     /// Command name that cancels a task on the server.
     pub const CANCEL: &str = "tasks/cancel";
 
     /// Command name that returns the result of a task.
+    ///
+    /// Removed in MCP 2026-07-28: result retrieval folded into
+    /// [`GET`], whose response carries the terminal `result` / `error` inline.
+    #[cfg(feature = "legacy-spec")]
     pub const RESULT: &str = "tasks/result";
 
-    /// Command name that returns the status of a task.
+    /// Command name that returns the state of a task.
+    ///
+    /// Under MCP 2026-07-28 this is the single polling method: the response is a
+    /// `DetailedTask` carrying the status *and*, for the relevant states, the
+    /// outstanding `inputRequests`, the terminal `result`, or the `error`.
+    /// Under `legacy-spec` it returns status only.
     pub const GET: &str = "tasks/get";
 
+    /// Command name that submits client responses to a task's outstanding
+    /// input requests (MCP 2026-07-28).
+    #[cfg(not(feature = "legacy-spec"))]
+    pub const UPDATE: &str = "tasks/update";
+
     /// Notification name that notifies the client about the status of a task.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub const STATUS: &str = "notifications/tasks";
+
+    /// Notification name that notifies the client about the status of a task.
+    #[cfg(feature = "legacy-spec")]
     pub const STATUS: &str = "notifications/tasks/status";
 }
 
 /// Represents a request to retrieve a list of tasks.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "legacy-spec")]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ListTasksRequestParams {
     /// An opaque token representing the current pagination position.
@@ -56,6 +82,7 @@ pub struct ListTasksRequestParams {
 /// Represents the response to a `tasks/list` request.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "legacy-spec")]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ListTasksResult {
     /// A list of tasks that the server currently runs.
@@ -94,6 +121,7 @@ pub struct GetTaskRequestParams {
 /// Represents a request to retrieve the result of a completed task.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(feature = "legacy-spec")]
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct GetTaskPayloadRequestParams {
     /// The task identifier to retrieve the result for.
@@ -101,12 +129,56 @@ pub struct GetTaskPayloadRequestParams {
     pub id: String,
 }
 
+/// Represents a request to submit responses to a task's outstanding input
+/// requests (`tasks/update`, MCP 2026-07-28).
+///
+/// A task that needs input moves to [`TaskStatus::InputRequired`] and surfaces
+/// the pending asks in [`DetailedTask::input_requests`]. The client answers
+/// them here rather than over a server-initiated channel -- there is none.
+#[cfg(not(feature = "legacy-spec"))]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateTaskRequestParams {
+    /// The task identifier to update.
+    #[serde(rename = "taskId")]
+    pub id: String,
+
+    /// Responses to outstanding input requests. Each key must match a
+    /// currently-outstanding [`DetailedTask::input_requests`] key; responses
+    /// for unknown or already-satisfied keys are ignored.
+    #[serde(rename = "inputResponses")]
+    pub input_responses: crate::types::mrtr::InputResponses,
+}
+
+/// Discriminator for [`CreateTaskResult`], always `"task"`.
+///
+/// The third `resultType` value alongside `"complete"` and
+/// `"input_required"`: it marks a result the server has deferred onto a task
+/// instead of answering inline.
+#[cfg(not(feature = "legacy-spec"))]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub enum CreateTaskTag {
+    /// The only variant.
+    #[default]
+    #[serde(rename = "task")]
+    Task,
+}
+
 /// Represents a response to a task-augmented request.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct CreateTaskResult {
-    /// Newly created task information
+    /// Discriminator, always `"task"` (MCP 2026-07-28).
+    #[cfg(not(feature = "legacy-spec"))]
+    #[serde(rename = "resultType")]
+    pub result_type: CreateTaskTag,
+
+    /// Newly created task information.
+    ///
+    /// Under MCP 2026-07-28 the spec defines this result as `Result & Task`,
+    /// so the task's own fields sit at the top level; `legacy-spec` keeps the
+    /// nested `task` object of the earlier revision.
+    #[cfg_attr(not(feature = "legacy-spec"), serde(flatten))]
     pub task: Task,
 
     /// Metadata reserved by MCP for protocol-level metadata.
@@ -135,8 +207,15 @@ pub struct Task {
     #[serde(rename = "lastUpdatedAt")]
     pub last_updated_at: DateTime<Utc>,
 
-    /// Time To Live: Actual retention duration from creation in milliseconds, null for unlimited.
-    pub ttl: usize,
+    /// Time To Live: actual retention duration from creation in milliseconds,
+    /// `None` for unlimited. The server may discard the task once it elapses,
+    /// and the value may change over the task's lifetime.
+    ///
+    /// Serialized as `ttlMs` under MCP 2026-07-28 and as `ttl` under
+    /// `legacy-spec`.
+    #[cfg_attr(not(feature = "legacy-spec"), serde(rename = "ttlMs"))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<usize>,
 
     /// Current task state.
     pub status: TaskStatus,
@@ -149,9 +228,57 @@ pub struct Task {
     #[serde(rename = "statusMessage", skip_serializing_if = "Option::is_none")]
     pub status_msg: Option<String>,
 
-    /// Suggested polling interval in milliseconds.
-    #[serde(rename = "pollInterval", skip_serializing_if = "Option::is_none")]
+    /// Suggested polling interval in milliseconds. Clients should honor it to
+    /// avoid overwhelming the server; it may change over the task's lifetime.
+    ///
+    /// Serialized as `pollIntervalMs` under MCP 2026-07-28 and as
+    /// `pollInterval` under `legacy-spec`.
+    #[cfg_attr(not(feature = "legacy-spec"), serde(rename = "pollIntervalMs"))]
+    #[cfg_attr(feature = "legacy-spec", serde(rename = "pollInterval"))]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub poll_interval: Option<usize>,
+}
+
+/// A task with its status-specific fields inlined -- the shape `tasks/get`
+/// returns and `notifications/tasks` carries (MCP 2026-07-28).
+///
+/// The spec models this as a union discriminated by [`Task::status`]:
+/// `input_required` carries [`Self::input_requests`], `completed` carries
+/// [`Self::result`], `failed` carries [`Self::error`], and `working` /
+/// `cancelled` carry neither. neva models it as one struct with optional
+/// fields so a peer that sends more than the status demands still parses.
+///
+/// # Examples
+///
+/// ```
+/// use neva::types::{DetailedTask, Task};
+///
+/// let task = DetailedTask::from(Task::new());
+/// assert!(task.result.is_none());
+/// ```
+#[cfg(not(feature = "legacy-spec"))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetailedTask {
+    /// The task's own fields, flattened to the top level per the schema.
+    #[serde(flatten)]
+    pub task: Task,
+
+    /// Outstanding server-to-client requests, present while the task is in
+    /// [`TaskStatus::InputRequired`]. Keys are answered through
+    /// [`UpdateTaskRequestParams::input_responses`].
+    #[serde(rename = "inputRequests", skip_serializing_if = "Option::is_none")]
+    pub input_requests: Option<crate::types::mrtr::InputRequests>,
+
+    /// The final result, present once the task reaches
+    /// [`TaskStatus::Completed`]. Matches the result type the original request
+    /// would have returned synchronously.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+
+    /// The JSON-RPC error that ended the task, present on
+    /// [`TaskStatus::Failed`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<Value>,
 }
 
 /// Represents the status of a task.
@@ -252,6 +379,49 @@ impl IntoResponse for CreateTaskResult {
     }
 }
 
+#[cfg(not(feature = "legacy-spec"))]
+impl IntoResponse for DetailedTask {
+    #[inline]
+    fn into_response(self, req_id: RequestId) -> Response {
+        match serde_json::to_value(self) {
+            Ok(v) => Response::success(req_id, v),
+            Err(err) => Response::error(req_id, err.into()),
+        }
+    }
+}
+
+#[cfg(not(feature = "legacy-spec"))]
+impl From<Task> for DetailedTask {
+    #[inline]
+    fn from(task: Task) -> Self {
+        Self {
+            task,
+            input_requests: None,
+            result: None,
+            error: None,
+        }
+    }
+}
+
+#[cfg(not(feature = "legacy-spec"))]
+impl Deref for DetailedTask {
+    type Target = Task;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.task
+    }
+}
+
+#[cfg(not(feature = "legacy-spec"))]
+impl DerefMut for DetailedTask {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.task
+    }
+}
+
+#[cfg(feature = "legacy-spec")]
 impl IntoResponse for ListTasksResult {
     #[inline]
     fn into_response(self, req_id: RequestId) -> Response {
@@ -262,6 +432,7 @@ impl IntoResponse for ListTasksResult {
     }
 }
 
+#[cfg(feature = "legacy-spec")]
 impl<const N: usize> From<[Task; N]> for ListTasksResult {
     #[inline]
     fn from(tasks: [Task; N]) -> Self {
@@ -272,6 +443,7 @@ impl<const N: usize> From<[Task; N]> for ListTasksResult {
     }
 }
 
+#[cfg(feature = "legacy-spec")]
 impl From<Vec<Task>> for ListTasksResult {
     #[inline]
     fn from(tasks: Vec<Task>) -> Self {
@@ -282,6 +454,7 @@ impl From<Vec<Task>> for ListTasksResult {
     }
 }
 
+#[cfg(feature = "legacy-spec")]
 impl From<Page<'_, Task>> for ListTasksResult {
     #[inline]
     fn from(page: Page<'_, Task>) -> Self {
@@ -306,7 +479,7 @@ impl From<Meta<RelatedTaskMetadata>> for RelatedTaskMetadata {
     }
 }
 
-#[cfg(feature = "server")]
+#[cfg(all(feature = "server", feature = "legacy-spec"))]
 impl FromHandlerParams for ListTasksRequestParams {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
@@ -333,8 +506,17 @@ impl FromHandlerParams for GetTaskRequestParams {
     }
 }
 
-#[cfg(feature = "server")]
+#[cfg(all(feature = "server", feature = "legacy-spec"))]
 impl FromHandlerParams for GetTaskPayloadRequestParams {
+    #[inline]
+    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
+        let req = Request::from_params(params)?;
+        Self::from_request(req)
+    }
+}
+
+#[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+impl FromHandlerParams for UpdateTaskRequestParams {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
         let req = Request::from_params(params)?;
@@ -356,7 +538,7 @@ impl From<TaskMetadata> for Task {
             id: uuid::Uuid::new_v4().to_string(),
             created_at: Utc::now(),
             last_updated_at: Utc::now(),
-            ttl: meta.ttl.unwrap_or(DEFAULT_TTL),
+            ttl: Some(meta.ttl.unwrap_or(DEFAULT_TTL)),
             status: TaskStatus::Working,
             status_msg: None,
             poll_interval: None,
@@ -364,6 +546,7 @@ impl From<TaskMetadata> for Task {
     }
 }
 
+#[cfg(feature = "legacy-spec")]
 impl ListTasksResult {
     /// Creates a new [`ListTasksResult`]
     #[inline]
@@ -375,7 +558,12 @@ impl ListTasksResult {
 impl CreateTaskResult {
     /// Creates a new [`CreateTaskResult`]
     pub fn new(task: Task) -> Self {
-        Self { task, meta: None }
+        Self {
+            #[cfg(not(feature = "legacy-spec"))]
+            result_type: CreateTaskTag::Task,
+            task,
+            meta: None,
+        }
     }
 }
 
@@ -387,7 +575,7 @@ impl Task {
             id: uuid::Uuid::new_v4().to_string(),
             created_at: Utc::now(),
             last_updated_at: Utc::now(),
-            ttl: DEFAULT_TTL,
+            ttl: Some(DEFAULT_TTL),
             status: TaskStatus::Working,
             status_msg: None,
             poll_interval: None,

@@ -46,10 +46,14 @@ pub use response::ResultType;
 pub use response::{ErrorDetails, IntoResponse, Response};
 
 #[cfg(feature = "tasks")]
+pub use capabilities::{ClientTasksCapability, ServerTasksCapability};
+// The sub-capability tree is gone in MCP 2026-07-28: the Tasks extension
+// capability is an empty object, with support implied by advertising it.
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 pub use capabilities::{
-    ClientTaskRequestsCapability, ClientTasksCapability, ElicitationCreateTaskCapability,
-    ElicitationTaskCapability, ServerTaskRequestsCapability, ServerTasksCapability,
-    TaskCancellationCapability, TaskListCapability, ToolsCallTaskCapability, ToolsTaskCapability,
+    ClientTaskRequestsCapability, ElicitationCreateTaskCapability, ElicitationTaskCapability,
+    ServerTaskRequestsCapability, TaskCancellationCapability, TaskListCapability,
+    ToolsCallTaskCapability, ToolsTaskCapability,
 };
 #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 pub use capabilities::{SamplingCreateMessageTaskCapability, SamplingTaskCapability};
@@ -136,10 +140,13 @@ pub use icon::{Icon, IconSize, IconTheme};
 
 #[cfg(feature = "tasks")]
 pub use task::{
-    CancelTaskRequestParams, CreateTaskResult, GetTaskPayloadRequestParams, GetTaskRequestParams,
-    ListTasksRequestParams, ListTasksResult, RelatedTaskMetadata, Task, TaskMetadata, TaskPayload,
-    TaskStatus,
+    CancelTaskRequestParams, CreateTaskResult, GetTaskRequestParams, RelatedTaskMetadata, Task,
+    TaskMetadata, TaskPayload, TaskStatus,
 };
+#[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
+pub use task::{CreateTaskTag, DetailedTask, UpdateTaskRequestParams};
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
+pub use task::{GetTaskPayloadRequestParams, ListTasksRequestParams, ListTasksResult};
 
 #[cfg(feature = "server")]
 pub use prompt::PromptHandler;

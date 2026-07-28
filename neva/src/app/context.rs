@@ -29,6 +29,7 @@ use crate::{
 // tasks it is unused -- including in tests, whose `RequestId` uses live in
 // modules carrying those very same gates.
 #[cfg(any(feature = "legacy-spec", feature = "tasks"))]
+#[cfg(feature = "legacy-spec")]
 use crate::types::RequestId;
 use std::{
     collections::HashMap,
@@ -40,16 +41,18 @@ use tokio::time::timeout;
 
 #[cfg(feature = "http-server")]
 use crate::transport::http::core::auth::{validate_permissions, validate_roles};
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
+use crate::types::{
+    CancelTaskRequestParams, Cursor, GetTaskPayloadRequestParams, GetTaskRequestParams,
+    ListTasksRequestParams, ListTasksResult, TaskPayload,
+};
 #[cfg(feature = "tasks")]
 use crate::{
     shared::Either,
-    types::{
-        CancelTaskRequestParams, CreateTaskResult, Cursor, GetTaskPayloadRequestParams,
-        GetTaskRequestParams, ListTasksRequestParams, ListTasksResult, Task, TaskPayload,
-        tool::TaskSupport,
-    },
+    types::{CreateTaskResult, Task, tool::TaskSupport},
 };
 #[cfg(feature = "tasks")]
+#[cfg(feature = "legacy-spec")]
 use serde::de::DeserializeOwned;
 #[cfg(feature = "di")]
 use volga_di::Container;
@@ -820,17 +823,38 @@ impl Context {
                             result = tool.call(params
                                 .with_task(&task_id)
                                 .with_context(ctx).into()) => {
-                                let resp = match result {
+                                // The outcome is stored *before* the status
+                                // flips, so a `tasks/get` that observes a
+                                // terminal status always sees the matching
+                                // `result` / `error` with it.
+                                #[cfg(not(feature = "legacy-spec"))]
+                                match result {
                                     Ok(result) => {
+                                        opt.tasks.set_outcome(
+                                            &task_id,
+                                            serde_json::to_value(result).map_err(Error::from),
+                                        );
                                         opt.tasks.complete(&task_id);
-                                        result
                                     },
                                     Err(err) => {
+                                        opt.tasks.set_outcome(&task_id, Err(err));
                                         opt.tasks.fail(&task_id);
-                                        CallToolResponse::error(err)
                                     }
-                                };
-                                handle.set_result(resp);
+                                }
+                                #[cfg(feature = "legacy-spec")]
+                                {
+                                    let resp = match result {
+                                        Ok(result) => {
+                                            opt.tasks.complete(&task_id);
+                                            result
+                                        },
+                                        Err(err) => {
+                                            opt.tasks.fail(&task_id);
+                                            CallToolResponse::error(err)
+                                        }
+                                    };
+                                    handle.set_result(resp);
+                                }
                             },
                             _ = handle.cancelled() => {}
                         }
@@ -1215,26 +1239,37 @@ impl Context {
 
     /// Suspends a task-augmented elicit until the client posts an answer.
     ///
-    /// Parks a resume slot keyed by the **task id** (not the session -- the
-    /// stateless transport mints a fresh session per POST), exposes the prompt
-    /// via `tasks/result`, and flips the task to `input_required`. The live
-    /// background future then awaits the answer, which the dispatch layer routes
-    /// to `TaskTracker::provide_input` when the client posts a `Response` whose
-    /// id is this task id.
+    /// Records the ask as an outstanding input request on the task and flips it
+    /// to `input_required`, so the next `tasks/get` surfaces it under
+    /// `inputRequests`. The live background future then awaits the answer,
+    /// which arrives as a `tasks/update` addressed to this task id and keyed by
+    /// the same key.
+    ///
+    /// The key is server-assigned and must be unique over the task's lifetime,
+    /// per the spec; it stays outstanding until answered, so a retried
+    /// `tasks/update` carrying it still matches.
     #[cfg(all(not(feature = "legacy-spec"), feature = "tasks"))]
     async fn task_elicit(
         &mut self,
         task_id: String,
         params: ElicitRequestParams,
     ) -> Result<ElicitResult, Error> {
-        let receiver = self.options.tasks.park_input(&task_id).ok_or_else(|| {
-            Error::new(ErrorCode::InternalError, "task not found for elicitation")
-        })?;
-        self.options.tasks.set_result(&task_id, params);
+        let key = uuid::Uuid::new_v4().to_string();
+        let receiver = self
+            .options
+            .tasks
+            .park_input(
+                &task_id,
+                key,
+                crate::types::mrtr::InputRequest::Elicitation(params),
+            )
+            .ok_or_else(|| {
+                Error::new(ErrorCode::InternalError, "task not found for elicitation")
+            })?;
         self.options.tasks.require_input(&task_id);
 
-        let resp = match timeout(self.timeout, receiver).await {
-            Ok(Ok(resp)) => resp,
+        let answer = match timeout(self.timeout, receiver).await {
+            Ok(Ok(answer)) => answer,
             Ok(Err(_)) => {
                 self.options.tasks.fail(&task_id);
                 return Err(Error::new(
@@ -1248,9 +1283,8 @@ impl Context {
             }
         };
 
-        // Answer received: resume working and return the elicited result.
-        self.options.tasks.reset(&task_id);
-        resp.into_result()
+        // `provide_inputs` already reset the task to `working`.
+        serde_json::from_value(answer).map_err(Error::from)
     }
 
     /// Runs `effect` at most once across MRTR rounds (MCP 2026-07-28).
@@ -1599,8 +1633,7 @@ impl Context {
     }
 
     #[inline]
-    #[cfg(feature = "tasks")]
-    #[cfg_attr(not(feature = "legacy-spec"), allow(dead_code))]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     async fn send_maybe_task_augmented_request<T: DeserializeOwned>(
         &mut self,
         req: Request,
@@ -1690,7 +1723,9 @@ impl Context {
     }
 }
 
-#[cfg(feature = "tasks")]
+// The server as requestor against a client-hosted task. MCP 2026-07-28 has no
+// server->client requests at all, so this whole direction is legacy-only.
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 impl crate::shared::TaskApi for Context {
     /// Retrieve task result from the client. If the task is not completed yet, waits until it completes or cancels.
     async fn get_task_result<T>(&mut self, id: impl Into<String>) -> Result<T, Error>

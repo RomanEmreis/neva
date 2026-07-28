@@ -24,19 +24,20 @@ use tokio::sync::RwLock;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-#[cfg(feature = "tasks")]
-use crate::types::CreateMessageRequestParams;
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 use crate::{
     shared::TaskTracker,
-    types::{
-        CancelTaskRequestParams, CreateTaskResult, ElicitRequestParams,
-        GetTaskPayloadRequestParams, GetTaskRequestParams, ListTasksRequestParams, ListTasksResult,
-        Pagination, Task,
-    },
+    types::{CreateMessageRequestParams, CreateTaskResult, ElicitRequestParams, Task},
+};
+// The client hosts tasks only for server->client task-augmented requests, and
+// MCP 2026-07-28 has no server->client requests at all.
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
+use crate::types::{
+    CancelTaskRequestParams, GetTaskPayloadRequestParams, GetTaskRequestParams,
+    ListTasksRequestParams, ListTasksResult, Pagination,
 };
 
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 const DEFAULT_PAGE_SIZE: usize = 10;
 
 struct Roots {
@@ -77,8 +78,8 @@ pub(super) struct RequestHandler {
     /// Represents a hash map of notification handlers
     notification_handler: Option<Arc<NotificationsHandler>>,
 
-    /// Task tracker for client sampling tasks.
-    #[cfg(feature = "tasks")]
+    /// Task tracker for client-hosted tasks (legacy server->client requests).
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     tasks: Arc<TaskTracker>,
 
     /// Which protocol generation the peer speaks (issue #84) -- shared with
@@ -153,7 +154,7 @@ impl RequestHandler {
             sampling_handler: options.sampling_handler.clone(),
             elicitation_handler: options.elicitation_handler.clone(),
             notification_handler: options.notification_handler.clone(),
-            #[cfg(feature = "tasks")]
+            #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
             tasks: Arc::new(TaskTracker::new()),
             #[cfg(not(feature = "legacy-spec"))]
             peer_mode: options.peer_mode.clone(),
@@ -277,7 +278,7 @@ impl RequestHandler {
 
     /// Sends the response to MCP server
     #[inline]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     pub(super) async fn send_response(&mut self, resp: Response) {
         send_response_impl(&mut self.sender, resp).await;
     }
@@ -305,7 +306,7 @@ impl RequestHandler {
         let elicitation_handler = self.elicitation_handler.clone();
         let notification_handler = self.notification_handler.clone();
 
-        #[cfg(feature = "tasks")]
+        #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
         let tasks = self.tasks.clone();
         #[cfg(not(feature = "legacy-spec"))]
         let peer_mode = self.peer_mode.clone();
@@ -320,7 +321,7 @@ impl RequestHandler {
                             &roots,
                             &sampling_handler,
                             &elicitation_handler,
-                            #[cfg(feature = "tasks")]
+                            #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
                             &tasks,
                             #[cfg(not(feature = "legacy-spec"))]
                             &peer_mode,
@@ -358,7 +359,7 @@ impl RequestHandler {
                             &sampling_handler,
                             &elicitation_handler,
                             &notification_handler,
-                            #[cfg(feature = "tasks")]
+                            #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
                             &tasks,
                             #[cfg(not(feature = "legacy-spec"))]
                             &peer_mode,
@@ -388,7 +389,7 @@ async fn dispatch_batch_deferred(
     sampling_handler: &Option<SamplingHandler>,
     elicitation_handler: &Option<ElicitationHandler>,
     notification_handler: &Option<Arc<NotificationsHandler>>,
-    #[cfg(feature = "tasks")] tasks: &Arc<TaskTracker>,
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))] tasks: &Arc<TaskTracker>,
     #[cfg(not(feature = "legacy-spec"))] peer_mode: &crate::shared::PeerMode,
 ) -> Vec<MessageEnvelope> {
     use futures_util::future::join_all;
@@ -402,7 +403,7 @@ async fn dispatch_batch_deferred(
                     roots,
                     sampling_handler,
                     elicitation_handler,
-                    #[cfg(feature = "tasks")]
+                    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
                     tasks,
                     #[cfg(not(feature = "legacy-spec"))]
                     peer_mode,
@@ -444,7 +445,7 @@ async fn dispatch_request(
     roots: &Arc<RwLock<Vec<Root>>>,
     sampling_handler: &Option<SamplingHandler>,
     elicitation_handler: &Option<ElicitationHandler>,
-    #[cfg(feature = "tasks")] tasks: &Arc<TaskTracker>,
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))] tasks: &Arc<TaskTracker>,
     #[cfg(not(feature = "legacy-spec"))] peer_mode: &crate::shared::PeerMode,
 ) -> Response {
     // The legacy build is legacy by construction; the 2026-07-28 build reads the
@@ -460,7 +461,7 @@ async fn dispatch_request(
             handle_sampling(
                 req,
                 sampling_handler,
-                #[cfg(feature = "tasks")]
+                #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
                 tasks,
             )
             .await
@@ -469,19 +470,19 @@ async fn dispatch_request(
             handle_elicitation(
                 req,
                 elicitation_handler,
-                #[cfg(feature = "tasks")]
+                #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
                 tasks,
             )
             .await
         }
         crate::types::root::commands::LIST if legacy_peer => handle_roots(req, roots).await,
-        #[cfg(feature = "tasks")]
+        #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
         crate::types::task::commands::RESULT => get_task_result(req, tasks).await,
-        #[cfg(feature = "tasks")]
+        #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
         crate::types::task::commands::LIST => handle_list_tasks(req, tasks),
-        #[cfg(feature = "tasks")]
+        #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
         crate::types::task::commands::CANCEL => cancel_task(req, tasks),
-        #[cfg(feature = "tasks")]
+        #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
         crate::types::task::commands::GET => get_task(req, tasks),
         _ => ErrorCode::MethodNotFound.into_response(req_id),
     }
@@ -512,7 +513,7 @@ async fn handle_roots(req: Request, roots: &Arc<RwLock<Vec<Root>>>) -> Response 
 }
 
 #[inline]
-#[cfg(not(feature = "tasks"))]
+#[cfg(any(not(feature = "tasks"), not(feature = "legacy-spec")))]
 async fn handle_sampling(req: Request, handler: &Option<SamplingHandler>) -> Response {
     let id = req.id();
     if let Some(handler) = &handler {
@@ -536,7 +537,7 @@ async fn handle_sampling(req: Request, handler: &Option<SamplingHandler>) -> Res
 }
 
 #[inline]
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 async fn handle_sampling(
     req: Request,
     handler: &Option<SamplingHandler>,
@@ -583,7 +584,7 @@ async fn handle_sampling(
 }
 
 #[inline]
-#[cfg(not(feature = "tasks"))]
+#[cfg(any(not(feature = "tasks"), not(feature = "legacy-spec")))]
 async fn handle_elicitation(req: Request, handler: &Option<ElicitationHandler>) -> Response {
     let id = req.id();
     if let Some(handler) = &handler {
@@ -607,7 +608,7 @@ async fn handle_elicitation(req: Request, handler: &Option<ElicitationHandler>) 
 }
 
 #[inline]
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 async fn handle_elicitation(
     req: Request,
     handler: &Option<ElicitationHandler>,
@@ -656,7 +657,7 @@ async fn handle_elicitation(
 }
 
 #[inline]
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 fn handle_list_tasks(req: Request, tasks: &Arc<TaskTracker>) -> Response {
     let id = req.id();
     let cursor = match req.params {
@@ -670,7 +671,7 @@ fn handle_list_tasks(req: Request, tasks: &Arc<TaskTracker>) -> Response {
 }
 
 #[inline]
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 fn cancel_task(req: Request, tasks: &Arc<TaskTracker>) -> Response {
     let id = req.id();
     let Some(params) = req.params else {
@@ -686,7 +687,7 @@ fn cancel_task(req: Request, tasks: &Arc<TaskTracker>) -> Response {
 }
 
 #[inline]
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 fn get_task(req: Request, tasks: &Arc<TaskTracker>) -> Response {
     let id = req.id();
     let Some(params) = req.params else {
@@ -702,7 +703,7 @@ fn get_task(req: Request, tasks: &Arc<TaskTracker>) -> Response {
 }
 
 #[inline]
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 async fn get_task_result(req: Request, tasks: &Arc<TaskTracker>) -> Response {
     let id = req.id();
     let Some(params) = req.params else {
@@ -872,7 +873,7 @@ mod tests {
             &sampling_handler,
             &elicitation_handler,
             &notification_handler,
-            #[cfg(feature = "tasks")]
+            #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
             &Arc::new(crate::shared::TaskTracker::default()),
             #[cfg(not(feature = "legacy-spec"))]
             &peer_mode,
@@ -921,7 +922,7 @@ mod tests {
                 &roots,
                 &sampling_handler,
                 &elicitation_handler,
-                #[cfg(feature = "tasks")]
+                #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
                 &Arc::new(crate::shared::TaskTracker::default()),
                 peer_mode,
             )
@@ -983,13 +984,13 @@ mod tests {
 
     // --- tasks/list omitted-vs-malformed params ---
 
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     fn make_tasks_request(params: Option<serde_json::Value>) -> Request {
         Request::new(Some(RequestId::Number(1)), "tasks/list", params)
     }
 
     #[test]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     fn tasks_list_omitted_params_returns_ok() {
         let tasks = Arc::new(crate::shared::TaskTracker::default());
         let req = make_tasks_request(None);
@@ -998,7 +999,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     fn tasks_list_empty_object_params_returns_ok() {
         let tasks = Arc::new(crate::shared::TaskTracker::default());
         let req = make_tasks_request(Some(serde_json::json!({})));
@@ -1007,7 +1008,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     fn tasks_list_malformed_cursor_returns_invalid_params() {
         let tasks = Arc::new(crate::shared::TaskTracker::default());
         let req = make_tasks_request(Some(serde_json::json!({"cursor": {"bad": "shape"}})));
@@ -1019,7 +1020,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     fn tasks_list_non_object_params_returns_invalid_params() {
         let tasks = Arc::new(crate::shared::TaskTracker::default());
         let req = make_tasks_request(Some(serde_json::json!("not_an_object")));

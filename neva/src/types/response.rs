@@ -27,6 +27,10 @@ pub(crate) const COMPLETE: &str = "complete";
 #[cfg(not(feature = "legacy-spec"))]
 pub(crate) const INPUT_REQUIRED: &str = "input_required";
 
+/// The `resultType` value marking a result the server deferred onto a task.
+#[cfg(all(not(feature = "legacy-spec"), feature = "tasks"))]
+pub(crate) const TASK: &str = "task";
+
 /// Discriminator carried by every MCP 2026-07-28 result.
 ///
 /// The spec makes `resultType` mandatory on results, but keeps an absent field
@@ -53,6 +57,12 @@ pub enum ResultType {
     /// [`InputRequiredResult`](crate::types::mrtr::InputRequiredResult).
     #[serde(rename = "input_required")]
     InputRequired,
+
+    /// `"task"` -- the server deferred the request onto a task instead of
+    /// answering inline; see [`CreateTaskResult`](crate::types::CreateTaskResult).
+    #[cfg(feature = "tasks")]
+    #[serde(rename = "task")]
+    Task,
 }
 
 /// Stamps `resultType: "complete"` onto a result object that does not already
@@ -222,6 +232,8 @@ impl Response {
         };
         Some(match ok.result.get(RESULT_TYPE).and_then(Value::as_str) {
             Some(INPUT_REQUIRED) => ResultType::InputRequired,
+            #[cfg(feature = "tasks")]
+            Some(TASK) => ResultType::Task,
             _ => ResultType::Complete,
         })
     }
@@ -488,13 +500,31 @@ mod result_type_per_type_tests {
     #[cfg(feature = "tasks")]
     #[test]
     fn task_results_carry_it() {
-        use crate::types::{CreateTaskResult, Task, TaskPayload};
+        use crate::types::{DetailedTask, Task, TaskPayload};
 
-        round_trip::<Task>(Task::default());
-        round_trip::<CreateTaskResult>(CreateTaskResult::default());
+        round_trip::<DetailedTask>(DetailedTask::from(Task::new()));
         // A payload wrapping an object gets the field; a payload wrapping a
         // scalar has nowhere to put it and is passed through (see
         // `a_non_object_result_is_passed_through`).
         round_trip::<TaskPayload>(TaskPayload(serde_json::json!({ "content": [] })));
+    }
+
+    /// `CreateTaskResult` is the one result that is *not* `complete`: it is the
+    /// third discriminator value, marking a request the server deferred.
+    #[cfg(feature = "tasks")]
+    #[test]
+    fn a_created_task_is_tagged_task_not_complete() {
+        use crate::types::{CreateTaskResult, Task};
+
+        let resp = CreateTaskResult::new(Task::new()).into_response(RequestId::Number(1));
+
+        assert_eq!(resp.result_type(), Some(ResultType::Task));
+
+        // ...and the task's own fields sit at the top level, per `Result & Task`.
+        let Response::Ok(ok) = &resp else {
+            panic!("expected a success response")
+        };
+        assert!(ok.result.get("taskId").is_some(), "got: {}", ok.result);
+        assert!(ok.result.get("task").is_none(), "must not be nested");
     }
 }

@@ -80,6 +80,20 @@ fn routing_hints(msg: &Message) -> Option<(&str, Option<&str>)> {
 
 #[cfg(not(feature = "legacy-spec"))]
 fn name_param(req: &crate::types::Request) -> Option<&str> {
+    // The Tasks extension requires `Mcp-Name` to carry `params.taskId` on
+    // `tasks/get` / `tasks/update` / `tasks/cancel`, so an intermediary can
+    // route every call for a task to the instance holding its state.
+    #[cfg(feature = "tasks")]
+    {
+        use crate::types::task::commands as tasks;
+        if matches!(
+            req.method.as_str(),
+            tasks::GET | tasks::UPDATE | tasks::CANCEL
+        ) {
+            return req.params.as_ref()?.as_object()?.get("taskId")?.as_str();
+        }
+    }
+
     if req.method != crate::types::tool::commands::CALL {
         return None;
     }

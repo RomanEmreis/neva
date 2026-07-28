@@ -25,7 +25,7 @@ async fn main() -> Result<(), Error> {
     let mut client = Client::new()
         .with_options(|opt| opt
             .with_timeout(std::time::Duration::from_secs(60))
-            .with_tasks(|t| t.with_all())
+            .with_tasks()
             .with_default_http());
     
     client.connect().await?;
@@ -48,9 +48,10 @@ async fn main() -> Result<(), Error> {
         .call_tool("endless_tool", ()).await;
     
     tracing::info!("Received result: {:?}", result);
-    
-    let result = client.list_tasks(None).await?;
-    tracing::info!("List of tasks: {:?}", result);
-    
+
+    // There is no `tasks/list` in MCP 2026-07-28: a task id is a durable handle
+    // the requestor already holds, so enumeration is the requestor's job. Poll
+    // an individual task with `tasks/get` instead.
+
     client.disconnect().await
 }

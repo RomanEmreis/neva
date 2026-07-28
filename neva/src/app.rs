@@ -31,10 +31,16 @@ use crate::types::{InitializeRequestParams, InitializeResult};
 use crate::types::{SubscribeRequestParams, UnsubscribeRequestParams};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
+use crate::types::Task;
 #[cfg(feature = "tasks")]
+use crate::types::{CancelTaskRequestParams, GetTaskRequestParams};
+#[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
+use crate::types::{DetailedTask, UpdateTaskRequestParams};
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 use crate::types::{
-    CancelTaskRequestParams, GetTaskPayloadRequestParams, GetTaskRequestParams,
-    ListTasksRequestParams, ListTasksResult, Task, TaskPayload, cursor::Pagination,
+    GetTaskPayloadRequestParams, ListTasksRequestParams, ListTasksResult, TaskPayload,
+    cursor::Pagination,
 };
 #[cfg(feature = "tasks")]
 use context::ToolOrTaskResponse;
@@ -148,10 +154,16 @@ impl App {
 
         #[cfg(feature = "tasks")]
         {
-            app.map_handler(crate::types::task::commands::LIST, Self::tasks);
-            app.map_handler(crate::types::task::commands::GET, Self::task);
-            app.map_handler(crate::types::task::commands::CANCEL, Self::cancel_task);
-            app.map_handler(crate::types::task::commands::RESULT, Self::task_result);
+            use crate::types::task::commands;
+            app.map_handler(commands::GET, Self::task);
+            app.map_handler(commands::CANCEL, Self::cancel_task);
+            #[cfg(not(feature = "legacy-spec"))]
+            app.map_handler(commands::UPDATE, Self::update_task);
+            #[cfg(feature = "legacy-spec")]
+            {
+                app.map_handler(commands::LIST, Self::tasks);
+                app.map_handler(commands::RESULT, Self::task_result);
+            }
         }
 
         app.map_handler(crate::commands::PING, Self::ping);
@@ -857,7 +869,10 @@ impl App {
     }
 
     /// Tasks request handler
-    #[cfg(feature = "tasks")]
+    ///
+    /// Not registered under MCP 2026-07-28: the final Tasks extension has no
+    /// `tasks/list`. A task id is a durable handle the requestor already holds.
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     async fn tasks(
         options: RuntimeMcpOptions,
         params: ListTasksRequestParams,
@@ -875,7 +890,21 @@ impl App {
     }
 
     /// A cancel task request handler
-    #[cfg(feature = "tasks")]
+    ///
+    /// Under MCP 2026-07-28 cancellation is cooperative and the reply is an
+    /// empty acknowledgement -- the requestor learns the outcome by polling
+    /// `tasks/get`, since the task may still reach a non-`cancelled` terminal
+    /// status. `legacy-spec` returns the cancelled [`Task`] instead.
+    #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
+    async fn cancel_task(
+        options: RuntimeMcpOptions,
+        params: CancelTaskRequestParams,
+    ) -> Result<(), Error> {
+        options.cancel_task(&params.id).map(|_| ())
+    }
+
+    /// A cancel task request handler
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     async fn cancel_task(
         options: RuntimeMcpOptions,
         params: CancelTaskRequestParams,
@@ -890,14 +919,43 @@ impl App {
         }
     }
 
+    /// A task state retrieval request handler
+    ///
+    /// Under MCP 2026-07-28 this is the single polling method: the reply
+    /// carries the status plus, depending on it, the outstanding
+    /// `inputRequests`, the terminal `result`, or the `error`.
+    #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
+    async fn task(
+        options: RuntimeMcpOptions,
+        params: GetTaskRequestParams,
+    ) -> Result<DetailedTask, Error> {
+        options.get_task_state(&params.id)
+    }
+
     /// A task status retrieval request handler
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     async fn task(options: RuntimeMcpOptions, params: GetTaskRequestParams) -> Result<Task, Error> {
         options.get_task_status(&params.id)
     }
 
+    /// A task input submission request handler (MCP 2026-07-28)
+    ///
+    /// Answers the task's outstanding input requests and acknowledges with an
+    /// empty result. Responses for unknown or already-satisfied keys are
+    /// ignored, per the spec.
+    #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
+    async fn update_task(
+        options: RuntimeMcpOptions,
+        params: UpdateTaskRequestParams,
+    ) -> Result<(), Error> {
+        options.update_task(&params.id, params.input_responses)
+    }
+
     /// A task result retrieval request handler
-    #[cfg(feature = "tasks")]
+    ///
+    /// Not registered under MCP 2026-07-28: result retrieval folded into
+    /// `tasks/get`.
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     async fn task_result(
         options: RuntimeMcpOptions,
         params: GetTaskPayloadRequestParams,
@@ -1415,29 +1473,11 @@ impl App {
         let resp_id = resp.id().clone();
         let session_id = resp.session_id().cloned();
 
-        // 2026-07-28 task-elicit resume: an answer to a suspended task `ctx.elicit` is
-        // correlated by the server-generated task id (the bare response id),
-        // *not* the session -- the stateless transport mints a fresh session per
-        // POST, so the session-keyed request queue could never match the
-        // suspend round. Try delivering to a parked task first; `provide_input`
-        // hands the response back when no task elicit is waiting, so non-task
-        // responses fall through to the request queue unchanged.
-        #[cfg(all(not(feature = "legacy-spec"), feature = "tasks"))]
-        let resp = match runtime
-            .options()
-            .tasks
-            .provide_input(&resp_id.to_string(), resp)
-        {
-            Ok(()) => {
-                let mut resp = Response::empty(resp_id);
-                if let Some(session_id) = session_id {
-                    resp = resp.set_session_id(session_id);
-                }
-                return resp;
-            }
-            Err(resp) => *resp,
-        };
-
+        // A suspended task `ctx.task().elicit` no longer resumes from an inbound
+        // `Response`: MCP 2026-07-28 routes the answer through `tasks/update`,
+        // which is a request handled by `App::update_task`. Responses arriving
+        // here are ordinary replies to server-initiated requests and go to the
+        // request queue unchanged.
         runtime.pending_requests().complete(resp);
 
         let mut resp = Response::empty(resp_id);

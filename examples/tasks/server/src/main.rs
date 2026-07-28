@@ -37,6 +37,6 @@ fn main() {
         .with_options(|opt| opt
             .with_name("Tasks Example Server")
             .with_default_http()
-            .with_tasks(|t| t.with_all()))
+            .with_tasks())
         .run_blocking();
 }

@@ -26,12 +26,16 @@ use std::{future::Future, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "tasks")]
+#[cfg(feature = "legacy-spec")]
 use serde::de::DeserializeOwned;
 
 #[cfg(feature = "tasks")]
+use crate::types::{CancelTaskRequestParams, GetTaskRequestParams, TaskMetadata};
+#[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
+use crate::types::{DetailedTask, UpdateTaskRequestParams};
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 use crate::types::{
-    CancelTaskRequestParams, GetTaskPayloadRequestParams, GetTaskRequestParams,
-    ListTasksRequestParams, ListTasksResult, Task, TaskMetadata, TaskPayload,
+    GetTaskPayloadRequestParams, ListTasksRequestParams, ListTasksResult, Task, TaskPayload,
 };
 
 pub mod batch;
@@ -1010,7 +1014,7 @@ impl Client {
 
     /// Returns whether the client supports cancelling tasks
     #[inline]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     fn is_client_support_cancelling_tasks(&self) -> bool {
         self.options
             .tasks_capability
@@ -1020,7 +1024,7 @@ impl Client {
 
     /// Returns whether the server supports cancelling tasks
     #[inline]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     fn is_server_support_cancelling_tasks(&self) -> bool {
         self.server_tasks_capability()
             .is_some_and(|c| c.cancel.is_some())
@@ -1028,7 +1032,7 @@ impl Client {
 
     /// Returns whether the server supports retrieving a task list
     #[inline]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     fn is_server_support_task_list(&self) -> bool {
         self.server_tasks_capability()
             .is_some_and(|c| c.list.is_some())
@@ -1036,7 +1040,7 @@ impl Client {
 
     /// Returns whether the client supports retrieving a task list
     #[inline]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     fn is_client_support_task_list(&self) -> bool {
         self.options
             .tasks_capability
@@ -1045,8 +1049,20 @@ impl Client {
     }
 
     /// Returns whether the server supports task-augmented tools
+    ///
+    /// Under MCP 2026-07-28 the Tasks extension capability carries no
+    /// per-request settings: a peer that advertises the extension at all
+    /// accepts task-augmented requests, and the server decides per request
+    /// whether to defer.
     #[inline]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
+    fn is_server_support_call_tool_with_tasks(&self) -> bool {
+        self.server_tasks_capability().is_some()
+    }
+
+    /// Returns whether the server supports task-augmented tools
+    #[inline]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     fn is_server_support_call_tool_with_tasks(&self) -> bool {
         self.server_tasks_capability()
             .and_then(|c| c.requests)
@@ -1520,9 +1536,11 @@ impl Client {
         Ok(out)
     }
 
-    /// Sends a request to the MCP server
+    /// Sends a response to the MCP server
+    ///
+    /// Only the legacy profile has server->client requests to answer.
     #[inline]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     async fn send_response(&mut self, req: Response) -> Result<(), Error> {
         self.handler
             .as_mut()
@@ -1602,7 +1620,75 @@ impl Client {
     }
 }
 
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
+impl shared::TaskApi for Client {
+    /// Retrieves the full task state: status plus, depending on it, the
+    /// outstanding input requests, the terminal result, or the error.
+    async fn get_task(&mut self, id: impl Into<String>) -> Result<DetailedTask, Error> {
+        let params = GetTaskRequestParams { id: id.into() };
+        self.command(crate::types::task::commands::GET, Some(params))
+            .await?
+            .into_result()
+    }
+
+    /// Submits responses to a task's outstanding input requests.
+    async fn update_task(
+        &mut self,
+        id: impl Into<String>,
+        responses: crate::types::mrtr::InputResponses,
+    ) -> Result<(), Error> {
+        let params = UpdateTaskRequestParams {
+            id: id.into(),
+            input_responses: responses,
+        };
+        self.command(crate::types::task::commands::UPDATE, Some(params))
+            .await
+            .map(|_| ())
+    }
+
+    /// Cancels a task that is currently running.
+    ///
+    /// The reply is an empty acknowledgement: cancellation is cooperative, so
+    /// the task may still reach a non-`cancelled` terminal status. Poll
+    /// `get_task` to learn the outcome.
+    async fn cancel_task(&mut self, id: impl Into<String>) -> Result<(), Error> {
+        let params = CancelTaskRequestParams { id: id.into() };
+        self.command(crate::types::task::commands::CANCEL, Some(params))
+            .await
+            .map(|_| ())
+    }
+
+    /// Answers one outstanding input request with the client's configured
+    /// handler for that kind.
+    async fn fulfil_input(
+        &mut self,
+        request: &crate::types::mrtr::InputRequest,
+    ) -> Result<serde_json::Value, Error> {
+        use crate::types::mrtr::InputRequest;
+
+        match request {
+            InputRequest::Elicitation(params) => {
+                let handler = self.options.elicitation_handler.as_ref().ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::InvalidRequest,
+                        "Client has no elicitation handler. Configure one with `Client::map_elicitation(...)`.",
+                    )
+                })?;
+                let result = handler(params.clone()).await;
+                serde_json::to_value(result).map_err(Into::into)
+            }
+            other => Err(Error::new(
+                ErrorCode::InvalidRequest,
+                format!(
+                    "Client cannot fulfil `{}` input requests on the task substrate",
+                    other.method()
+                ),
+            )),
+        }
+    }
+}
+
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 impl shared::TaskApi for Client {
     /// Retrieves task result. If the task is not completed yet, waits until it completes or cancels.
     async fn get_task_result<T>(&mut self, id: impl Into<String>) -> Result<T, Error>
