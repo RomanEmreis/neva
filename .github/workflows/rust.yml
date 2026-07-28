@@ -145,13 +145,17 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      # `--all-features` turns `legacy-spec` on, so it documents the legacy
+      # profile -- it is not a superset here, it is the other generation. The
+      # default profile, which is what docs.rs publishes, needs its own row or
+      # a broken link reachable only from it ships unnoticed.
       - name: Check docs build clean
-        run: cargo doc --no-deps --all-features
+        run: cargo doc --no-deps --features "server-full client-full"
       - name: Check docs build clean with legacy-spec
         run: cargo doc --no-deps --features "server-full client-full legacy-spec"
-      # The rows above have every feature on, so every intra-doc link resolves
-      # by construction. Slim rows catch docs that link to items a smaller
-      # feature set does not compile.
+      # The rows above have every feature of their generation on, so every
+      # intra-doc link resolves by construction. Slim rows catch docs that link
+      # to items a smaller feature set does not compile.
       - name: Check docs build clean on a slim server
         run: cargo doc --no-deps --features server
       - name: Check docs build clean on a slim client

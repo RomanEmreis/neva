@@ -247,6 +247,39 @@ impl Response {
         self
     }
 
+    /// Stamps the mandatory `resultType: "complete"` on a successful result
+    /// that does not already carry a discriminator.
+    ///
+    /// [`Self::success`] does this for a result built from a payload, but a
+    /// handler may return a [`Response`] it did not build -- one proxied from
+    /// an upstream peer, say -- and that reaches the wire through
+    /// [`IntoResponse`](crate::types::IntoResponse), which only re-ids it.
+    /// Both roads meet at the server's dispatch seam, so the guarantee is
+    /// re-asserted there rather than trusted to every producer.
+    ///
+    /// A result that already says what it is -- an
+    /// [`InputRequiredResult`](crate::types::mrtr::InputRequiredResult), a
+    /// deferred task -- keeps saying it.
+    ///
+    /// # Examples
+    /// ```
+    /// use neva::types::{Response, RequestId};
+    ///
+    /// let resp = Response::Ok(serde_json::from_value(serde_json::json!({
+    ///     "jsonrpc": "2.0", "id": 1, "result": { "content": [] }
+    /// })).unwrap());
+    ///
+    /// let resp = resp.with_result_type();
+    /// assert_eq!(resp.result_type(), Some(neva::types::ResultType::Complete));
+    /// ```
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn with_result_type(mut self) -> Self {
+        if let Response::Ok(ok) = &mut self {
+            ok.result = tag_complete(std::mem::take(&mut ok.result));
+        }
+        self
+    }
+
     /// Returns the `resultType` discriminator of a successful result, or
     /// `None` for an error response.
     ///
@@ -510,6 +543,42 @@ mod result_type_tests {
             });
 
         assert!(matches!(resp, Response::Err(_)));
+    }
+
+    /// A response the server did not build -- deserialized from an upstream
+    /// peer, returned as-is by a handler -- reaches the wire through
+    /// `IntoResponse`, which only re-ids it. The discriminator is mandatory
+    /// either way.
+    #[test]
+    fn a_preconstructed_response_gets_the_discriminator() {
+        let resp = parse(r#"{"jsonrpc":"2.0","id":1,"result":{"content":[]}}"#);
+        assert_eq!(
+            resp.result_type(),
+            Some(ResultType::Complete),
+            "an absent field already reads as complete"
+        );
+
+        let Response::Ok(ok) = resp.with_result_type() else {
+            panic!("a successful response")
+        };
+        assert_eq!(
+            ok.result["resultType"], "complete",
+            "...and it must also be written out"
+        );
+    }
+
+    /// A result that already says what it is keeps saying it -- the seam must
+    /// not overwrite an `input_required` or a deferred task.
+    #[test]
+    fn an_existing_discriminator_is_left_alone() {
+        let resp = parse(
+            r#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"input_required","inputRequests":{}}}"#,
+        );
+
+        let Response::Ok(ok) = resp.with_result_type() else {
+            panic!("a successful response")
+        };
+        assert_eq!(ok.result["resultType"], "input_required");
     }
 
     #[test]

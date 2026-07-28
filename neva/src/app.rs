@@ -1482,12 +1482,17 @@ impl App {
         };
 
         let mut resp = resp.into_response(req_id);
-        // Servers identify themselves on every result under MCP 2026-07-28
-        // (`serverInfo` left `DiscoverResult`), so it is stamped here, at the
-        // single seam every dispatched response passes through.
+        // The two things MCP 2026-07-28 puts on every result: the discriminator
+        // and the server's own identity (`serverInfo` left `DiscoverResult`).
+        // Both are stamped here, at the single seam every dispatched response
+        // passes through -- a handler that returns a `Response` it built
+        // elsewhere, or proxied from an upstream peer, reaches the wire without
+        // passing `Response::success`.
         #[cfg(not(feature = "legacy-spec"))]
         {
-            resp = resp.with_server_info(&options.implementation);
+            resp = resp
+                .with_result_type()
+                .with_server_info(&options.implementation);
         }
         if let Some(session_id) = session_id {
             resp = resp.set_session_id(session_id);
