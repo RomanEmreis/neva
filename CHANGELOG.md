@@ -75,6 +75,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     `io.modelcontextprotocol/protocolVersion` (it was header-only). A body that
     names a different version than the `MCP-Protocol-Version` header is
     rejected as a header mismatch.
+  * **Required `_meta` fields are enforced.** Both keys above are mandatory on
+    every request -- capabilities are declared per request precisely so a
+    stateless server never infers them from earlier traffic -- and the HTTP
+    server rejects a request missing either with `InvalidParams` (`-32602`) and
+    HTTP `400`, per the spec. Requests inside a batch are checked one by one.
+    An empty `clientCapabilities` object is a valid declaration, not an
+    omission. neva's own client has always sent both.
   * **Error codes.** `HeaderMismatch` (`-32020`),
     `MissingRequiredClientCapability` (`-32021`) and
     `UnsupportedProtocolVersion` (`-32022`) join `ErrorCode` at their

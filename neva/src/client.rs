@@ -1052,19 +1052,18 @@ impl Client {
     /// Resolves the server's tasks capability from the negotiated server
     /// capabilities (MCP 2026-07-28 build).
     ///
-    /// A 2026-07-28 peer advertises tasks through
-    /// `capabilities.extensions["io.modelcontextprotocol/tasks"]`; a
-    /// legacy peer reached via the dual-mode fallback advertises the
-    /// top-level `tasks` field of its `initialize` result -- both must
-    /// resolve, or task-augmented calls report no support after a
-    /// fallback.
+    /// Tasks are an extension here, so the one place they can be advertised is
+    /// `capabilities.extensions["io.modelcontextprotocol/tasks"]`. The
+    /// pre-2026-07-28 top-level `tasks` field is deliberately not read: it can
+    /// only come from a peer reached through the dual-mode fallback, whose task
+    /// protocol this build does not speak (see
+    /// [`Self::is_server_supports_tasks`]), so resolving it would only ever
+    /// promise support that cannot be delivered.
     #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
     fn server_tasks_capability(&self) -> Option<crate::types::ServerTasksCapability> {
-        let caps = self.server_capabilities.as_ref()?;
-        if let Some(tasks) = &caps.tasks {
-            return Some(tasks.clone());
-        }
-        caps.extensions
+        self.server_capabilities
+            .as_ref()?
+            .extensions
             .as_ref()
             .and_then(|ext| ext.get(crate::types::task::TASKS_EXTENSION_ID))
             .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -1079,13 +1078,17 @@ impl Client {
 
     /// Returns whether the server has task augmentation capabilities
     ///
-    /// A peer reached through the dual-mode fallback advertises tasks on the
-    /// *legacy* extension -- different method set (`tasks/result`,
-    /// `tasks/list`), a nested `CreateTaskResult`, and a differently named
-    /// status notification. None of that wire surface is compiled into this
-    /// build, so its capability is reported as unsupported rather than
-    /// answered with 2026-07-28 messages the peer cannot read. Talking tasks
-    /// to a legacy server needs a `legacy-spec` build.
+    /// A peer reached through the dual-mode fallback speaks the *legacy* task
+    /// protocol -- different method set (`tasks/result`, `tasks/list`), a
+    /// nested `CreateTaskResult`, a differently named status notification --
+    /// and none of that wire surface is compiled into this build. It is
+    /// reported as unsupported rather than answered with 2026-07-28 messages
+    /// it cannot read; talking tasks to a legacy server needs a `legacy-spec`
+    /// build, or the peers must simply agree on a generation. The peer check
+    /// is belt-and-braces on top of
+    /// [`Self::server_tasks_capability`](Self::server_tasks_capability) only
+    /// reading the 2026-07-28 form: it also covers a peer that advertises the
+    /// extension and then falls back.
     #[inline]
     #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
     fn is_server_supports_tasks(&self) -> bool {
@@ -2681,9 +2684,9 @@ mod roundtrip_tests {
     }
 }
 
-/// Both capability shapes -- a legacy peer's top-level `tasks` and a
-/// 2026-07-28 peer's `extensions` entry -- must parse. Whether task support is
-/// then *usable* is a separate question the negotiated peer mode answers.
+/// Task support in a 2026-07-28 build means one thing: the peer advertised the
+/// extension *and* stayed on the 2026-07-28 protocol. Generations do not mix
+/// for tasks -- run a `legacy-spec` build against a legacy server.
 #[cfg(all(test, feature = "tasks", not(feature = "legacy-spec")))]
 mod fallback_tasks_capability_tests {
     use super::*;
@@ -2697,20 +2700,30 @@ mod fallback_tasks_capability_tests {
         client
     }
 
-    /// A legacy peer's tasks are a different protocol -- `tasks/result`,
-    /// `tasks/list`, a nested `CreateTaskResult` -- none of which exists in
-    /// this build. Reporting support would send it 2026-07-28 messages it
-    /// cannot read.
+    /// The legacy top-level `tasks` field can only reach this build from a
+    /// fallback peer, whose task protocol it does not speak. Reading it would
+    /// promise support that ends in 2026-07-28 messages the peer cannot read.
     #[test]
-    fn a_fallback_peer_reports_no_task_support() {
+    fn a_legacy_top_level_tasks_capability_is_not_support() {
         let client = client_with_capabilities(json!({
             "tools": {},
             "tasks": { "requests": { "tools": { "call": {} } } }
         }));
-        assert!(
-            client.is_server_supports_tasks(),
-            "the capability itself parses"
-        );
+        assert!(!client.is_server_supports_tasks());
+        assert!(!client.is_server_support_call_tool_with_tasks());
+    }
+
+    /// And a peer that advertised the 2026-07-28 extension but then negotiated
+    /// the legacy protocol is no different.
+    #[test]
+    fn a_fallback_peer_reports_no_task_support() {
+        let client = client_with_capabilities(json!({
+            "tools": {},
+            "extensions": {
+                "io.modelcontextprotocol/tasks": { "requests": { "tools": { "call": {} } } }
+            }
+        }));
+        assert!(client.is_server_supports_tasks());
 
         client.options.peer_mode.set_legacy();
         assert!(!client.is_server_supports_tasks());
@@ -2718,16 +2731,7 @@ mod fallback_tasks_capability_tests {
     }
 
     #[test]
-    fn legacy_top_level_tasks_capability_resolves() {
-        let client = client_with_capabilities(json!({
-            "tools": {},
-            "tasks": { "requests": { "tools": { "call": {} } } }
-        }));
-        assert!(client.is_server_supports_tasks());
-    }
-
-    #[test]
-    fn extension_tasks_capability_still_resolves() {
+    fn the_extension_tasks_capability_resolves() {
         let client = client_with_capabilities(json!({
             "tools": {},
             "extensions": {

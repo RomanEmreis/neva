@@ -234,37 +234,27 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
         }
     };
 
-    // The body's `_meta` protocol version must agree with the header the gate
-    // above already validated. Stating two different versions is a header
-    // mismatch (-32020), not a version problem -- the server cannot tell which
-    // one the client meant. Batched requests are checked one by one: wrapping a
-    // request in an array must not be a way around the gate it would face on
-    // its own. The first offender decides the reply, since the status is
-    // per-response and the whole POST is rejected either way.
+    // Every request's `_meta` must carry the fields MCP 2026-07-28 makes
+    // mandatory, and the version it states must agree with the header the gate
+    // above already validated. Batched requests are checked one by one:
+    // wrapping a request in an array must not be a way around the gate it
+    // would face on its own. The first offender decides the reply, since the
+    // status is per-response and the whole POST is rejected either way.
     #[cfg(not(feature = "legacy-spec"))]
     {
-        let mismatch = match &msg {
-            Message::Request(r) => stated_version_mismatch(r).map(|v| (r.id(), v)),
+        let invalid = match &msg {
+            Message::Request(r) => request_meta_error(r).map(|err| (r.id(), err)),
             Message::Batch(batch) => batch.iter().find_map(|env| match env {
                 crate::types::MessageEnvelope::Request(r) => {
-                    stated_version_mismatch(r).map(|v| (r.id(), v))
+                    request_meta_error(r).map(|err| (r.id(), err))
                 }
                 _ => None,
             }),
             _ => None,
         };
 
-        if let Some((req_id, stated)) = mismatch {
-            let resp = Response::error(
-                req_id,
-                Error::new(
-                    ErrorCode::HeaderMismatch,
-                    format!(
-                        "_meta protocol version {stated} does not match the \
-                         MCP-Protocol-Version header"
-                    ),
-                ),
-            );
+        if let Some((req_id, err)) = invalid {
+            let resp = Response::error(req_id, err);
             return PostPrep::Reply(build_json_response(
                 http::StatusCode::BAD_REQUEST,
                 id,
@@ -590,19 +580,50 @@ fn get_or_create_mcp_session(
         .unwrap_or_else(uuid::Uuid::new_v4)
 }
 
-/// The protocol version a request states in its `_meta`, when that disagrees
-/// with the version this build speaks.
+/// Why a request's `_meta` is unacceptable, if it is.
 ///
-/// Returns `None` when the request states nothing -- the required-field check
-/// belongs to the dispatch layer, not to the header gate.
+/// Two rules, in order. MCP 2026-07-28 makes `protocolVersion` and
+/// `clientCapabilities` mandatory on every request -- capabilities are
+/// declared per request precisely so a stateless server never has to infer
+/// them from earlier traffic -- and a request missing either is malformed
+/// params (`-32602`). A request that does state a version must state *this*
+/// one: disagreeing with the `MCP-Protocol-Version` header is a header
+/// mismatch (`-32020`), not a version problem, because the server cannot tell
+/// which of the two the client meant.
+///
+/// Both answer `400 Bad Request`; the caller supplies the status.
 #[cfg(not(feature = "legacy-spec"))]
-fn stated_version_mismatch(req: &crate::types::Request) -> Option<&str> {
-    req.params
-        .as_ref()
-        .and_then(|p| p.get("_meta"))
-        .and_then(|m| m.get("io.modelcontextprotocol/protocolVersion"))
-        .and_then(|v| v.as_str())
-        .filter(|stated| *stated != crate::LATEST_PROTOCOL_VERSION)
+fn request_meta_error(req: &crate::types::Request) -> Option<Error> {
+    const REQUIRED: [&str; 2] = [
+        "io.modelcontextprotocol/protocolVersion",
+        "io.modelcontextprotocol/clientCapabilities",
+    ];
+
+    let meta = req.params.as_ref().and_then(|p| p.get("_meta"));
+
+    if let Some(missing) = REQUIRED
+        .into_iter()
+        .find(|key| meta.and_then(|m| m.get(key)).is_none())
+    {
+        return Some(Error::new(
+            ErrorCode::InvalidParams,
+            format!("request `_meta` is missing the required `{missing}` field"),
+        ));
+    }
+
+    let stated = meta
+        .and_then(|m| m.get(REQUIRED[0]))
+        .and_then(|v| v.as_str())?;
+
+    (stated != crate::LATEST_PROTOCOL_VERSION).then(|| {
+        Error::new(
+            ErrorCode::HeaderMismatch,
+            format!(
+                "_meta protocol version {stated} does not match the \
+                 MCP-Protocol-Version header"
+            ),
+        )
+    })
 }
 
 /// The HTTP status a dispatched JSON-RPC reply must be sent with.
@@ -897,7 +918,26 @@ mod tests {
         (ctx, inbound_rx)
     }
 
+    /// The `_meta` MCP 2026-07-28 requires on every request. Empty
+    /// capabilities are a valid declaration -- "no optional capabilities" --
+    /// which is what a bare test request means.
+    #[cfg(not(feature = "legacy-spec"))]
+    fn meta() -> serde_json::Value {
+        serde_json::json!({
+            "io.modelcontextprotocol/protocolVersion": crate::LATEST_PROTOCOL_VERSION,
+            "io.modelcontextprotocol/clientCapabilities": {}
+        })
+    }
+
     fn make_request_body(method: &str) -> Bytes {
+        #[cfg(not(feature = "legacy-spec"))]
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "id": 1,
+            "params": { "_meta": meta() }
+        });
+        #[cfg(feature = "legacy-spec")]
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "method": method,
@@ -989,7 +1029,10 @@ mod tests {
         let (ctx, _rx) = make_ctx();
         let body = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "tools/list",
-            "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2025-06-18" } }
+            "params": { "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2025-06-18",
+                "io.modelcontextprotocol/clientCapabilities": {}
+            } }
         });
         let req = post_builder()
             .body(bytes::Bytes::from(serde_json::to_vec(&body).unwrap()))
@@ -1000,6 +1043,71 @@ mod tests {
         assert_eq!(body["error"]["code"], -32020);
     }
 
+    /// `protocolVersion` and `clientCapabilities` are required on every
+    /// request -- capabilities per request, so a stateless server never infers
+    /// them from earlier traffic. Missing either is malformed params.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[tokio::test]
+    async fn rejects_a_request_missing_required_meta() {
+        let cases = [
+            // No `params` at all.
+            serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+            // `params`, but no `_meta`.
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}
+            }),
+            // Capabilities without a version.
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+                "params": { "_meta": { "io.modelcontextprotocol/clientCapabilities": {} } }
+            }),
+            // A version without capabilities.
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+                "params": { "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": crate::LATEST_PROTOCOL_VERSION
+                } }
+            }),
+        ];
+
+        for case in cases {
+            let (ctx, _rx) = make_ctx();
+            let req = post_builder()
+                .body(bytes::Bytes::from(serde_json::to_vec(&case).unwrap()))
+                .unwrap();
+            let resp = handle_post(req, &ctx).await;
+            assert_eq!(
+                resp.status(),
+                http::StatusCode::BAD_REQUEST,
+                "must answer 400: {case}"
+            );
+            let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+            assert_eq!(body["error"]["code"], -32602, "must be malformed params");
+        }
+    }
+
+    /// Empty capabilities are a declaration, not an omission.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[tokio::test]
+    async fn accepts_a_request_declaring_no_capabilities() {
+        let (ctx, _rx) = make_ctx();
+        let body = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+            "params": { "_meta": meta() }
+        });
+        let req = post_builder()
+            .body(bytes::Bytes::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let ctx = std::sync::Arc::new(ctx);
+        let ctx_clone = ctx.clone();
+        let _h = tokio::spawn(async move { handle_post(req, &ctx_clone).await });
+
+        // Not rejected in the preamble: it reaches dispatch and parks on its
+        // pending slot, which nothing in this test answers.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(ctx.pending.len(), 1);
+    }
+
     /// A batch must not be a way around the version gate a standalone request
     /// faces: the offending item is caught while the array is still unopened.
     #[cfg(not(feature = "legacy-spec"))]
@@ -1007,10 +1115,13 @@ mod tests {
     async fn rejects_batched_body_version_disagreeing_with_header() {
         let (ctx, _rx) = make_ctx();
         let body = serde_json::json!([
-            { "jsonrpc": "2.0", "id": 1, "method": "tools/list" },
+            { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": meta() } },
             {
                 "jsonrpc": "2.0", "id": 2, "method": "prompts/list",
-                "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2025-06-18" } }
+                "params": { "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2025-06-18",
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                } }
             }
         ]);
         let req = post_builder()

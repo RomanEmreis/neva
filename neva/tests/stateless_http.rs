@@ -30,7 +30,8 @@ async fn stateless_discover_and_call() {
 
     // (a) discover, no session header.
     let discover = serde_json::json!({
-        "jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": {}
+        "jsonrpc": "2.0", "id": 1, "method": "server/discover",
+        "params": { "_meta": meta() }
     });
     let resp = client
         .post(&url)
@@ -64,7 +65,7 @@ async fn stateless_discover_and_call() {
     // (c) stateless tool call with the protocol-version header, no session.
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-        "params": { "name": "ping", "arguments": {} }
+        "params": { "name": "ping", "arguments": {}, "_meta": meta() }
     });
     let resp = client
         .post(&url)
@@ -112,7 +113,10 @@ async fn stateless_discover_and_call() {
     );
 
     // (d3) `ping` is gone in MCP 2026-07-28.
-    let ping = serde_json::json!({ "jsonrpc": "2.0", "id": 5, "method": "ping" });
+    let ping = serde_json::json!({
+        "jsonrpc": "2.0", "id": 5, "method": "ping",
+        "params": { "_meta": meta() }
+    });
     let body: serde_json::Value = client
         .post(&url)
         .header("MCP-Protocol-Version", "2026-07-28")
@@ -135,6 +139,16 @@ async fn stateless_discover_and_call() {
     );
 
     handle.abort();
+}
+
+/// The `_meta` MCP 2026-07-28 requires on every request: the protocol version,
+/// and the capabilities this request is made under -- empty being the valid
+/// declaration of "no optional capabilities".
+fn meta() -> serde_json::Value {
+    serde_json::json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {}
+    })
 }
 
 fn pick_free_port() -> u16 {

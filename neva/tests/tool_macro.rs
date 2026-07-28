@@ -91,7 +91,7 @@ async fn tool_macro_emits_json_schema_2020() {
         "jsonrpc": "2.0",
         "id": 2,
         "method": "tools/list",
-        "params": {}
+        "params": { "_meta": meta() }
     });
     let resp = client
         .post(&url)
@@ -175,4 +175,14 @@ fn pick_free_port() -> u16 {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     port
+}
+
+/// The `_meta` MCP 2026-07-28 requires on every request: the protocol version,
+/// and the capabilities this request is made under -- empty being the valid
+/// declaration of "no optional capabilities".
+fn meta() -> serde_json::Value {
+    serde_json::json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {}
+    })
 }

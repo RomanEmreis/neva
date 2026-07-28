@@ -49,7 +49,7 @@ async fn tool_elicits_then_completes_over_two_rounds() {
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "greet", "arguments": {},
-            "_meta": { "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
     });
     let r1: serde_json::Value = client
         .post(&url)
@@ -82,7 +82,7 @@ async fn tool_elicits_then_completes_over_two_rounds() {
     let retry = serde_json::json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": { "name": "greet", "arguments": {},
-            "_meta": {
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
                 "io.modelcontextprotocol/clientCapabilities": { "elicitation": true },
                 "requestState": state,
                 "inputResponses": { key: { "action": "accept", "content": { "name": "octocat" } } }
@@ -166,7 +166,7 @@ async fn final_round_replay_is_idempotent_after_a_lost_response() {
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "greet", "arguments": {},
-            "_meta": { "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
     });
     let r1: serde_json::Value = client
         .post(&url)
@@ -194,7 +194,7 @@ async fn final_round_replay_is_idempotent_after_a_lost_response() {
     let retry = serde_json::json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": { "name": "greet", "arguments": {},
-            "_meta": {
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
                 "io.modelcontextprotocol/clientCapabilities": { "elicitation": true },
                 "requestState": state,
                 "inputResponses": { key: { "action": "accept", "content": { "name": "octocat" } } }
@@ -302,7 +302,7 @@ async fn concurrent_final_round_retries_commit_exactly_once() {
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "greet", "arguments": {},
-            "_meta": { "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
     });
     let r1: serde_json::Value = client
         .post(&url)
@@ -331,7 +331,7 @@ async fn concurrent_final_round_retries_commit_exactly_once() {
         serde_json::json!({
             "jsonrpc": "2.0", "id": id, "method": "tools/call",
             "params": { "name": "greet", "arguments": {},
-                "_meta": {
+                "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
                     "io.modelcontextprotocol/clientCapabilities": { "elicitation": true },
                     "requestState": state,
                     "inputResponses": { key.clone(): { "action": "accept", "content": { "name": "octocat" } } }
@@ -410,7 +410,7 @@ async fn distinct_answers_to_the_same_state_do_not_collide_in_the_cache() {
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "greet", "arguments": {},
-            "_meta": { "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
     });
     let r1: serde_json::Value = client
         .post(&url)
@@ -439,7 +439,7 @@ async fn distinct_answers_to_the_same_state_do_not_collide_in_the_cache() {
         serde_json::json!({
             "jsonrpc": "2.0", "id": id, "method": "tools/call",
             "params": { "name": "greet", "arguments": {},
-                "_meta": {
+                "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
                     "io.modelcontextprotocol/clientCapabilities": { "elicitation": true },
                     "requestState": state,
                     "inputResponses": { key.clone(): { "action": "accept", "content": { "name": name } } }
@@ -535,7 +535,7 @@ async fn effects_run_once_memo_caches_commit_fires_on_final_round() {
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "effectful", "arguments": {},
-            "_meta": { "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
     });
     let r1: serde_json::Value = client
         .post(&url)
@@ -581,7 +581,7 @@ async fn effects_run_once_memo_caches_commit_fires_on_final_round() {
     let retry = serde_json::json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": { "name": "effectful", "arguments": {},
-            "_meta": {
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
                 "io.modelcontextprotocol/clientCapabilities": { "elicitation": true },
                 "requestState": state,
                 "inputResponses": { key: { "action": "accept", "content": { "name": "octocat" } } }
@@ -652,7 +652,7 @@ async fn oversized_request_state_is_rejected() {
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "bloated", "arguments": {},
-            "_meta": { "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
     });
     let r1: serde_json::Value = client
         .post(&url)
@@ -711,7 +711,7 @@ async fn oversized_inbound_request_state_is_rejected_before_decoding() {
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "greet", "arguments": {},
-            "_meta": {
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
                 "io.modelcontextprotocol/clientCapabilities": { "elicitation": true },
                 "requestState": bogus_state
             } }
@@ -767,7 +767,7 @@ async fn replaying_request_state_against_a_different_request_is_rejected() {
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "greet", "arguments": {},
-            "_meta": { "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
     });
     let r1: serde_json::Value = client
         .post(&url)
@@ -789,7 +789,7 @@ async fn replaying_request_state_against_a_different_request_is_rejected() {
     let replay = serde_json::json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": { "name": "greet", "arguments": { "x": 1 },
-            "_meta": {
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
                 "io.modelcontextprotocol/clientCapabilities": { "elicitation": true },
                 "requestState": state
             } }
@@ -841,10 +841,15 @@ async fn eliciting_without_declared_capability_is_rejected() {
         .expect("test client");
     let url = format!("http://{addr}/mcp");
 
-    // No `clientCapabilities.elicitation` -> the server cannot ask for input.
+    // Capabilities are declared, but without elicitation -> the server cannot
+    // ask for input. An empty declaration is the point: the server must take
+    // it at face value rather than infer anything.
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": { "name": "greet", "arguments": {} }
+        "params": { "name": "greet", "arguments": {}, "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {}
+        } }
     });
     let r1: serde_json::Value = client
         .post(&url)
@@ -1273,7 +1278,7 @@ async fn tool_samples_then_completes_over_two_rounds() {
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "summarize", "arguments": {},
-            "_meta": { "io.modelcontextprotocol/clientCapabilities": { "sampling": true } } }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "sampling": true } } }
     });
     let r1: serde_json::Value = client
         .post(&url)
@@ -1307,7 +1312,7 @@ async fn tool_samples_then_completes_over_two_rounds() {
     let retry = serde_json::json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": { "name": "summarize", "arguments": {},
-            "_meta": {
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
                 "io.modelcontextprotocol/clientCapabilities": { "sampling": true },
                 "requestState": state,
                 "inputResponses": { key: {
@@ -1371,7 +1376,7 @@ async fn tool_lists_roots_then_completes_over_two_rounds() {
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "scan", "arguments": {},
-            "_meta": { "io.modelcontextprotocol/clientCapabilities": { "roots": true } } }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "roots": true } } }
     });
     let r1: serde_json::Value = client
         .post(&url)
@@ -1400,7 +1405,7 @@ async fn tool_lists_roots_then_completes_over_two_rounds() {
     let retry = serde_json::json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": { "name": "scan", "arguments": {},
-            "_meta": {
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
                 "io.modelcontextprotocol/clientCapabilities": { "roots": true },
                 "requestState": state,
                 "inputResponses": { key: {
@@ -1573,7 +1578,7 @@ async fn sampling_without_declared_capability_is_rejected() {
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "summarize", "arguments": {},
-            "_meta": { "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
     });
     let r1: serde_json::Value = client
         .post(&url)

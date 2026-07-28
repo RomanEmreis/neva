@@ -91,7 +91,9 @@ async fn request_scoped_logging_streams_over_post() {
         "params": {
             "name": "shout",
             "arguments": {},
-            "_meta": { "io.modelcontextprotocol/logLevel": "info" }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                    "io.modelcontextprotocol/logLevel": "info" }
         }
     });
     let resp = client
@@ -143,7 +145,7 @@ async fn request_scoped_logging_streams_over_post() {
     // (b) no `logLevel` -> plain JSON reply, no log notifications (suppressed).
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-        "params": { "name": "shout", "arguments": {} }
+        "params": { "name": "shout", "arguments": {}, "_meta": meta() }
     });
     let resp = client
         .post(&url)
@@ -179,12 +181,14 @@ async fn request_scoped_logging_streams_over_post() {
             "params": {
                 "name": "shout",
                 "arguments": {},
-                "_meta": { "io.modelcontextprotocol/logLevel": "info" }
+                "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                    "io.modelcontextprotocol/logLevel": "info" }
             }
         },
         {
             "jsonrpc": "2.0", "id": 4, "method": "tools/call",
-            "params": { "name": "shout", "arguments": {} }
+            "params": { "name": "shout", "arguments": {}, "_meta": meta() }
         }
     ]);
     let resp = client
@@ -222,7 +226,9 @@ async fn request_scoped_logging_streams_over_post() {
             "params": {
                 "name": tool,
                 "arguments": {},
-                "_meta": { "io.modelcontextprotocol/logLevel": "info" }
+                "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                    "io.modelcontextprotocol/logLevel": "info" }
             }
         })
     };
@@ -258,4 +264,13 @@ fn pick_free_port() -> u16 {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     port
+}
+
+/// The `_meta` MCP 2026-07-28 requires on every request. A request that does
+/// not opt into logging still has to declare its version and capabilities.
+fn meta() -> serde_json::Value {
+    serde_json::json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {}
+    })
 }

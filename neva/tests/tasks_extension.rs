@@ -38,7 +38,7 @@ async fn tasks_capability_is_advertised_as_extension() {
 
     // (a) discover advertises tasks under the extensions map, not top-level.
     let discover = serde_json::json!({
-        "jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": {}
+        "jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": { "_meta": meta() }
     });
     let resp = client
         .post(&url)
@@ -63,7 +63,7 @@ async fn tasks_capability_is_advertised_as_extension() {
     // (b) the removed methods no longer dispatch.
     for gone in ["tasks/list", "tasks/result"] {
         let req = serde_json::json!({
-            "jsonrpc": "2.0", "id": 2, "method": gone, "params": {}
+            "jsonrpc": "2.0", "id": 2, "method": gone, "params": { "_meta": meta() }
         });
         let resp = client
             .post(&url)
@@ -83,7 +83,7 @@ async fn tasks_capability_is_advertised_as_extension() {
     // unknown method).
     let update = serde_json::json!({
         "jsonrpc": "2.0", "id": 3, "method": "tasks/update",
-        "params": { "taskId": "nope", "inputResponses": {} }
+        "params": { "taskId": "nope", "inputResponses": {}, "_meta": meta() }
     });
     let resp = client
         .post(&url)
@@ -165,7 +165,7 @@ async fn task_augmented_tool_elicits_via_suspend_resume() {
             for _ in 0..100 {
                 let g = post(serde_json::json!({
                     "jsonrpc": "2.0", "id": 2, "method": "tasks/get",
-                    "params": { "taskId": task_id }
+                    "params": { "taskId": task_id, "_meta": meta() }
                 }))
                 .await;
                 if g["result"]["status"].as_str() == Some(target) {
@@ -183,7 +183,7 @@ async fn task_augmented_tool_elicits_via_suspend_resume() {
         "params": {
             "name": "greet_task", "arguments": {},
             "task": { "ttl": 60000 },
-            "_meta": { "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } }
         }
     }))
     .await;
@@ -206,7 +206,7 @@ async fn task_augmented_tool_elicits_via_suspend_resume() {
     //    under the same key.
     let g = post(serde_json::json!({
         "jsonrpc": "2.0", "id": 3, "method": "tasks/get",
-        "params": { "taskId": task_id }
+        "params": { "taskId": task_id, "_meta": meta() }
     }))
     .await;
     let key = g["result"]["inputRequests"]
@@ -225,6 +225,7 @@ async fn task_augmented_tool_elicits_via_suspend_resume() {
         "jsonrpc": "2.0", "id": 4, "method": "tasks/update",
         "params": {
             "taskId": task_id,
+            "_meta": meta(),
             "inputResponses": {
                 key: { "action": "accept", "content": { "name": "octocat" } }
             }
@@ -242,7 +243,7 @@ async fn task_augmented_tool_elicits_via_suspend_resume() {
     //    `tasks/result` to follow up with.
     let r = post(serde_json::json!({
         "jsonrpc": "2.0", "id": 99, "method": "tasks/get",
-        "params": { "taskId": task_id }
+        "params": { "taskId": task_id, "_meta": meta() }
     }))
     .await;
     assert_eq!(
@@ -314,7 +315,7 @@ async fn mrtr_elicit_inside_a_task_is_rejected_with_guidance() {
         "params": {
             "name": "bad_elicit", "arguments": {},
             "task": { "ttl": 60000 },
-            "_meta": { "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } }
         }
     }))
     .await;
@@ -332,7 +333,7 @@ async fn mrtr_elicit_inside_a_task_is_rejected_with_guidance() {
     for _ in 0..100 {
         let r = post(serde_json::json!({
             "jsonrpc": "2.0", "id": 2, "method": "tasks/get",
-            "params": { "taskId": task_id }
+            "params": { "taskId": task_id, "_meta": meta() }
         }))
         .await;
         // A *tool* error is a successful `tools/call` result carrying
@@ -399,7 +400,11 @@ async fn mrtr_once_in_a_required_task_is_rejected() {
 
     let r1 = post(serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": { "name": "bad_once", "arguments": {}, "task": { "ttl": 60000 } }
+        "params": {
+            "name": "bad_once", "arguments": {},
+            "task": { "ttl": 60000 },
+            "_meta": meta()
+        }
     }))
     .await;
     assert_eq!(
@@ -415,7 +420,7 @@ async fn mrtr_once_in_a_required_task_is_rejected() {
     for _ in 0..100 {
         let r = post(serde_json::json!({
             "jsonrpc": "2.0", "id": 2, "method": "tasks/get",
-            "params": { "taskId": task_id }
+            "params": { "taskId": task_id, "_meta": meta() }
         }))
         .await;
         // A *tool* error is a successful `tools/call` result carrying
@@ -444,4 +449,12 @@ fn pick_free_port() -> u16 {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     port
+}
+
+/// The `_meta` MCP 2026-07-28 requires on every request.
+fn meta() -> serde_json::Value {
+    serde_json::json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {}
+    })
 }
