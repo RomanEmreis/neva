@@ -167,7 +167,21 @@ where
                 api.update_task(&task_id, responses).await?;
             }
             TaskStatus::Working => {
-                let poll_interval = task.poll_interval.unwrap_or(DEFAULT_POLL_INTERVAL);
+                let poll_interval =
+                    u64::try_from(task.poll_interval.unwrap_or(DEFAULT_POLL_INTERVAL))
+                        .unwrap_or(u64::MAX);
+
+                // Never sleep past the deadline, however long an interval the
+                // server suggests: the task can be discarded mid-sleep, and the
+                // poll that follows would then answer "unknown task" instead of
+                // the TTL error -- skipping the cancellation on the way out.
+                // A remaining time of zero re-polls at once and ends the wait
+                // on the check above.
+                let nap = task.ttl.map_or(poll_interval, |ttl| {
+                    let remaining =
+                        (ttl as u128).saturating_sub(waiting_since.elapsed().as_millis());
+                    poll_interval.min(u64::try_from(remaining).unwrap_or(u64::MAX))
+                });
 
                 #[cfg(feature = "tracing")]
                 tracing::trace!(
@@ -176,7 +190,7 @@ where
                     waiting_since.elapsed().as_millis()
                 );
 
-                tokio::time::sleep(Duration::from_millis(poll_interval as u64)).await;
+                tokio::time::sleep(Duration::from_millis(nap)).await;
             }
         }
     }

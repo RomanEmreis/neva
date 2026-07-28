@@ -524,14 +524,21 @@ impl Client {
     /// }
     /// ```
     pub async fn list_tools(&mut self, cursor: Option<Cursor>) -> Result<ListToolsResult, Error> {
+        // A cursor-less call starts the listing over, so it replaces what the
+        // previous traversal registered rather than merging into it.
+        #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+        let fresh = cursor.is_none();
         let params = ListToolsRequestParams { cursor };
+
         #[allow(unused_mut)]
         let mut result: ListToolsResult = self
             .command(crate::types::tool::commands::LIST, Some(params))
             .await?
             .into_result()?;
+
         #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
-        self.register_param_headers(&mut result);
+        self.register_param_headers(&mut result, fresh);
+
         Ok(result)
     }
 
@@ -542,13 +549,22 @@ impl Client {
     /// must not take the whole listing down, and must not be callable either --
     /// so the offending tool is removed from the result the caller sees.
     ///
-    /// A refreshed listing replaces what a tool registered before, including
-    /// replacing it with nothing: a server that drops an annotation must stop
-    /// the client from mirroring that argument into a header, which a
-    /// leftover registration would keep doing.
+    /// A refreshed listing replaces what the previous one registered, including
+    /// replacing it with nothing: a server that drops an annotation -- or drops
+    /// the whole tool -- must stop the client from mirroring that argument into
+    /// a header, which a leftover registration would keep doing even though the
+    /// current listing no longer designates it.
+    ///
+    /// `fresh` marks the first page of a traversal, which clears the registry;
+    /// later pages accumulate onto it, since a tool absent from page two has
+    /// not been withdrawn, only listed elsewhere.
     #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
-    fn register_param_headers(&mut self, result: &mut ListToolsResult) {
+    fn register_param_headers(&mut self, result: &mut ListToolsResult, fresh: bool) {
         use crate::shared::param_headers;
+
+        if fresh {
+            self.options.param_headers.clear();
+        }
 
         result.tools.retain(|tool| {
             self.options.param_headers.remove(&*tool.name);
@@ -2681,6 +2697,100 @@ mod roundtrip_tests {
             client.server_info.is_some(),
             "the server identifies itself in every result's `_meta`"
         );
+    }
+}
+
+/// What the client will mirror into `Mcp-Param-*` headers is decided by the
+/// current listing and nothing else: a tool the server no longer designates --
+/// or no longer lists at all -- must stop sending its argument in a header.
+#[cfg(all(test, feature = "http-client", not(feature = "legacy-spec")))]
+mod param_header_registry_tests {
+    use super::*;
+
+    fn listing(tools: serde_json::Value) -> ListToolsResult {
+        serde_json::from_value(serde_json::json!({ "tools": tools })).expect("valid listing")
+    }
+
+    fn annotated(name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "inputSchema": {
+                "type": "object",
+                "properties": { "region": { "type": "string", "x-mcp-header": "Region" } }
+            }
+        })
+    }
+
+    fn plain(name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "inputSchema": { "type": "object", "properties": { "q": { "type": "string" } } }
+        })
+    }
+
+    #[test]
+    fn a_fresh_listing_forgets_a_tool_it_no_longer_lists() {
+        let mut client = Client::new();
+
+        let mut first = listing(serde_json::json!([annotated("search")]));
+        client.register_param_headers(&mut first, true);
+        assert!(client.options.param_headers.contains_key("search"));
+
+        // The tool is gone from the refreshed listing -- a later direct
+        // `call_tool("search", ..)` must not keep mirroring its argument.
+        let mut second = listing(serde_json::json!([plain("other")]));
+        client.register_param_headers(&mut second, true);
+        assert!(client.options.param_headers.is_empty());
+    }
+
+    #[test]
+    fn a_dropped_annotation_is_forgotten_on_the_same_tool() {
+        let mut client = Client::new();
+
+        let mut first = listing(serde_json::json!([annotated("search")]));
+        client.register_param_headers(&mut first, true);
+
+        let mut second = listing(serde_json::json!([plain("search")]));
+        client.register_param_headers(&mut second, true);
+        assert!(client.options.param_headers.is_empty());
+    }
+
+    #[test]
+    fn later_pages_accumulate_onto_the_traversal() {
+        let mut client = Client::new();
+
+        let mut page1 = listing(serde_json::json!([annotated("search")]));
+        client.register_param_headers(&mut page1, true);
+
+        // A tool absent from page two was not withdrawn, only listed earlier.
+        let mut page2 = listing(serde_json::json!([annotated("lookup")]));
+        client.register_param_headers(&mut page2, false);
+
+        assert!(client.options.param_headers.contains_key("search"));
+        assert!(client.options.param_headers.contains_key("lookup"));
+    }
+
+    #[test]
+    fn an_invalid_definition_drops_the_tool_and_its_registration() {
+        let mut client = Client::new();
+
+        let mut first = listing(serde_json::json!([annotated("search")]));
+        client.register_param_headers(&mut first, true);
+
+        // Same tool, now annotated somewhere the client cannot reach.
+        let mut second = listing(serde_json::json!([{
+            "name": "search",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "region": { "type": "array", "items": { "x-mcp-header": "Region" } }
+                }
+            }
+        }]));
+        client.register_param_headers(&mut second, true);
+
+        assert!(second.tools.is_empty(), "a malformed tool is not callable");
+        assert!(client.options.param_headers.is_empty());
     }
 }
 
