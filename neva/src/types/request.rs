@@ -230,6 +230,89 @@ impl Request {
         self.id.clone()
     }
 
+    /// Why this request's `_meta` is not acceptable under MCP 2026-07-28, if it
+    /// is not.
+    ///
+    /// `io.modelcontextprotocol/protocolVersion` (a string) and
+    /// `io.modelcontextprotocol/clientCapabilities` (an object) are required on
+    /// every request -- capabilities are declared per request precisely so a
+    /// stateless server never has to infer them from earlier traffic -- and a
+    /// request that omits either, or states it with the wrong JSON type, is
+    /// malformed params.
+    ///
+    /// This is a property of the message, not of how it arrived, so it belongs
+    /// to the request rather than to a transport: a stdio server owes the same
+    /// rejection an HTTP one does. The HTTP layer additionally checks the
+    /// stated version against the `MCP-Protocol-Version` header and answers
+    /// `400`, neither of which means anything off that transport.
+    ///
+    /// # Examples
+    /// ```
+    /// use neva::types::Request;
+    ///
+    /// let bare = Request::new(None, "tools/list", None::<()>);
+    /// assert!(bare.required_meta_error().is_some());
+    ///
+    /// let complete = Request::new(None, "tools/list", Some(serde_json::json!({
+    ///     "_meta": {
+    ///         "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    ///         "io.modelcontextprotocol/clientCapabilities": {}
+    ///     }
+    /// })));
+    /// assert!(complete.required_meta_error().is_none());
+    /// ```
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn required_meta_error(&self) -> Option<crate::error::Error> {
+        use crate::error::{Error, ErrorCode};
+
+        const VERSION: &str = "io.modelcontextprotocol/protocolVersion";
+        const CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
+
+        let meta = self.params.as_ref().and_then(|p| p.get("_meta"));
+        let malformed = |key: &str, expected: &str| {
+            Some(Error::new(
+                ErrorCode::InvalidParams,
+                format!("request `_meta` is missing the required `{key}` {expected}"),
+            ))
+        };
+
+        if meta
+            .and_then(|m| m.get(VERSION))
+            .and_then(|v| v.as_str())
+            .is_none()
+        {
+            return malformed(VERSION, "string");
+        }
+        if meta
+            .and_then(|m| m.get(CAPABILITIES))
+            .is_none_or(|v| !v.is_object())
+        {
+            return malformed(CAPABILITIES, "object");
+        }
+        None
+    }
+
+    /// The protocol version this request states in its `_meta`, if it states a
+    /// well-formed one.
+    ///
+    /// # Examples
+    /// ```
+    /// use neva::types::Request;
+    ///
+    /// let req = Request::new(None, "tools/list", Some(serde_json::json!({
+    ///     "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" }
+    /// })));
+    /// assert_eq!(req.stated_protocol_version(), Some("2026-07-28"));
+    /// ```
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn stated_protocol_version(&self) -> Option<&str> {
+        self.params
+            .as_ref()?
+            .get("_meta")?
+            .get("io.modelcontextprotocol/protocolVersion")?
+            .as_str()
+    }
+
     /// Returns the full id (session_id?/request_id)
     pub fn full_id(&self) -> RequestId {
         let id = self.id.clone();

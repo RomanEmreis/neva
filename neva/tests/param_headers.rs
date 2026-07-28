@@ -164,6 +164,75 @@ async fn a_header_without_the_argument_it_mirrors_is_rejected() {
     handle.abort();
 }
 
+/// A batch carries no routing headers at all -- one set cannot describe several
+/// calls -- so the server must not demand the mirrored ones from a batched
+/// call. Otherwise every batched call of an annotated tool would be rejected.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_batched_call_of_an_annotated_tool_still_runs() {
+    use neva::client::Client;
+
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app =
+        App::new().with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("query", |region: String| async move { region })
+        .with_input_schema(|_| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "region": { "type": "string", "x-mcp-header": "Region" }
+                }
+            })
+            .into()
+        });
+
+    let handle = tokio::spawn(async move { app.run().await });
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match tokio::net::TcpStream::connect(&addr).await {
+            Ok(_) => break,
+            Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await
+            }
+            Err(err) => panic!("server never became reachable: {err}"),
+        }
+    }
+
+    let mut client = Client::new().with_options(|opt| {
+        opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
+            .with_timeout(std::time::Duration::from_secs(5))
+    });
+    client.connect().await.expect("connect");
+
+    // The listing is what registers the annotation client-side.
+    let tools = client.list_tools(None).await.expect("tools/list");
+    assert_eq!(tools.tools.len(), 1, "the annotated tool must survive");
+
+    let responses = client
+        .batch()
+        .call_tool("query", [("region", "us-west1")])
+        .send()
+        .await
+        .expect("batch send");
+
+    assert_eq!(responses.len(), 1);
+    let result = responses
+        .into_iter()
+        .next()
+        .expect("one response")
+        .into_result::<serde_json::Value>()
+        .expect("the batched call must not be rejected for missing headers");
+    assert_eq!(
+        result.pointer("/content/0/text").and_then(|v| v.as_str()),
+        Some("us-west1"),
+        "got: {result}"
+    );
+
+    handle.abort();
+}
+
 fn pick_free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();

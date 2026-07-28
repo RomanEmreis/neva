@@ -82,15 +82,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     disagreeing header with `HeaderMismatch` (`-32020`) and HTTP `400`,
     decoding the `=?base64?...?=` sentinel before comparing. Without this an
     intermediary routing or rate-limiting on those headers could be bypassed by
-    a body naming a different tool. Routing headers on a batch are rejected
-    outright -- no single method or name describes one.
+    a body naming a different tool. A notification is not required to carry
+    `Mcp-Method`, but one that does must state its own method. Routing headers
+    on a batch are rejected outright -- no single method or name describes one,
+    so a batched call is neither expected to mirror its arguments nor checked
+    for having done so.
   * **Required `_meta` fields are enforced.** Both keys above are mandatory on
     every request -- capabilities are declared per request precisely so a
     stateless server never infers them from earlier traffic -- and the HTTP
     server rejects a request missing either with `InvalidParams` (`-32602`) and
     HTTP `400`, per the spec. Requests inside a batch are checked one by one.
     An empty `clientCapabilities` object is a valid declaration, not an
-    omission. neva's own client has always sent both.
+    omission. neva's own client has always sent both. The requirement is on the
+    message, not the transport, so `Request::required_meta_error` is public and
+    the dispatch seam enforces it for stdio too -- only the `400` is HTTP's.
   * **Error codes.** `HeaderMismatch` (`-32020`),
     `MissingRequiredClientCapability` (`-32021`) and
     `UnsupportedProtocolVersion` (`-32022`) join `ErrorCode` at their

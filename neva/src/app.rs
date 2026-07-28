@@ -1265,6 +1265,19 @@ impl App {
             .map(strip_meta)
             .unwrap_or(serde_json::Value::Null);
 
+        // The `_meta` fields MCP 2026-07-28 makes mandatory. The HTTP preamble
+        // rejects these earlier so it can attach the `400` the spec asks for;
+        // this seam is what every other transport gets, since the requirement
+        // is on the message and not on how it travelled.
+        #[cfg(not(feature = "legacy-spec"))]
+        if let Some(err) = req.required_meta_error() {
+            let mut resp = Response::error(req_id, err);
+            if let Some(session_id) = session_id {
+                resp = resp.set_session_id(session_id);
+            }
+            return resp;
+        }
+
         // The `Mcp-Param-*` half of header validation. The transport preamble
         // checks the standard routing headers, but these are defined by the
         // called tool's own `x-mcp-header` annotations -- which only this side
@@ -1652,6 +1665,16 @@ async fn param_header_error(
     use crate::transport::http::decode_header_value;
 
     if req.method != crate::types::tool::commands::CALL {
+        return None;
+    }
+
+    // Only a call that arrived as a single HTTP request has mirrored headers to
+    // check. `Mcp-Method` is the marker: the transport preamble requires it on
+    // every single request and rejects it on a batch, so its absence here means
+    // this call came in a batch (or off another transport entirely) and no
+    // header ever described it. Demanding one would reject every batched call
+    // of an annotated tool.
+    if !req.headers.contains_key(crate::transport::http::MCP_METHOD) {
         return None;
     }
 

@@ -111,6 +111,13 @@ fn name_param(req: &crate::types::Request) -> Option<String> {
 
 /// The `Mcp-Param-*` headers a `tools/call` mirrors, per the called tool's
 /// registered `x-mcp-header` annotations.
+///
+/// A batch mirrors nothing, for the same reason it carries no `Mcp-Method` or
+/// `Mcp-Name`: one set of headers cannot describe several calls, and two
+/// batched calls of the same tool would fight over one header name. Batching an
+/// annotated call therefore hides it from header-based routing -- the servers
+/// on the other end skip the matching check rather than reject it -- so a
+/// caller that needs an intermediary to see a call should send it on its own.
 #[cfg(not(feature = "legacy-spec"))]
 fn param_headers(
     msg: &Message,

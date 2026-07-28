@@ -292,6 +292,29 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
                     ),
                 )
             }),
+            // The spec requires `Mcp-Method` on requests, so a notification
+            // that omits it is conforming and is left alone. One that *states*
+            // a method has to state its own: clients do send it here, so an
+            // intermediary policing by `Mcp-Method` sees it, and a body saying
+            // otherwise is exactly the bypass the request path is guarded
+            // against. A notification has no id, so nothing is addressed.
+            Message::Notification(n) => headers
+                .get(crate::transport::http::MCP_METHOD)
+                .and_then(|v| v.to_str().ok())
+                .filter(|stated| *stated != n.method.as_str())
+                .map(|stated| {
+                    (
+                        RequestId::Null,
+                        Error::new(
+                            ErrorCode::HeaderMismatch,
+                            format!(
+                                "Header mismatch: Mcp-Method header value {stated:?} \
+                                 does not match body value {:?}",
+                                n.method
+                            ),
+                        ),
+                    )
+                }),
             _ => None,
         };
 
@@ -638,26 +661,15 @@ fn get_or_create_mcp_session(
 /// Both answer `400 Bad Request`; the caller supplies the status.
 #[cfg(not(feature = "legacy-spec"))]
 fn request_meta_error(req: &crate::types::Request) -> Option<Error> {
-    const VERSION: &str = "io.modelcontextprotocol/protocolVersion";
-    const CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
-
-    let meta = req.params.as_ref().and_then(|p| p.get("_meta"));
-    let field = |key: &str| meta.and_then(|m| m.get(key));
-
-    let malformed = |key: &str, expected: &str| {
-        Some(Error::new(
-            ErrorCode::InvalidParams,
-            format!("request `_meta` is missing the required `{key}` {expected}"),
-        ))
-    };
-
-    let Some(stated) = field(VERSION).and_then(|v| v.as_str()) else {
-        return malformed(VERSION, "string");
-    };
-    if field(CAPABILITIES).is_none_or(|v| !v.is_object()) {
-        return malformed(CAPABILITIES, "object");
+    // The required-field rule is a property of the message, so it lives on
+    // `Request` and is enforced again at the dispatch seam for the transports
+    // that have no preamble of their own. Catching it here is what earns it the
+    // `400` the spec mandates on HTTP.
+    if let Some(err) = req.required_meta_error() {
+        return Some(err);
     }
 
+    let stated = req.stated_protocol_version()?;
     (stated != crate::LATEST_PROTOCOL_VERSION).then(|| {
         Error::new(
             ErrorCode::HeaderMismatch,
@@ -1330,6 +1342,39 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_eq!(ctx.pending.len(), 1, "the request must reach dispatch");
+    }
+
+    /// A notification is not required to carry `Mcp-Method`, but one that does
+    /// is subject to the same agreement a request's is: clients send it, so an
+    /// intermediary polices by it.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[tokio::test]
+    async fn rejects_a_notification_whose_method_header_disagrees() {
+        let (ctx, _rx) = make_ctx();
+        let req = post_builder()
+            .header(crate::transport::http::MCP_METHOD, "notifications/progress")
+            .body(make_notification_body("notifications/cancelled"))
+            .unwrap();
+
+        let resp = handle_post(req, &ctx).await;
+        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+        assert_eq!(body["error"]["code"], -32020);
+        assert!(body["id"].is_null(), "a notification has no id: {body}");
+    }
+
+    /// ...and one that omits the header is conforming, since the spec requires
+    /// it on requests only.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[tokio::test]
+    async fn accepts_a_notification_without_a_method_header() {
+        let (ctx, _rx) = make_ctx();
+        let req = post_builder()
+            .body(make_notification_body("notifications/cancelled"))
+            .unwrap();
+
+        let resp = handle_post(req, &ctx).await;
+        assert_eq!(resp.status(), http::StatusCode::ACCEPTED);
     }
 
     /// No single method or name describes a batch, so a conforming client sends
