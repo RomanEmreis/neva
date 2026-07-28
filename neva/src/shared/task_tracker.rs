@@ -179,6 +179,16 @@ impl TaskTracker {
         self.cleanup_expired();
 
         if let Some(mut entry) = self.tasks.get_mut(id) {
+            // A terminal task is not cancellable -- cancelling asks a task to
+            // stop, it does not rewrite one that already stopped. Overwriting
+            // the status here would also hide the outcome, since `get_state`
+            // reports a `result` or `error` only under the status that owns it.
+            // Retention makes this reachable in two ways: a cancel racing the
+            // tool's own completion, and one sent against a task that finished
+            // long ago but is still inside its TTL.
+            if Self::is_terminal(&entry.task) {
+                return Ok(entry.task.clone());
+            }
             entry.token.cancel();
             entry.task = entry.task.clone().cancel();
             self.schedule_expiry(&entry.task);
@@ -1000,6 +1010,36 @@ mod tests {
         let result = tracker.provide_inputs("nonexistent", Default::default());
 
         assert_eq!(result.unwrap_err().code, ErrorCode::InvalidParams);
+    }
+
+    /// A cancel that arrives after the task already finished must not take the
+    /// outcome away: `get_state` reports a `result` only under `completed`, so
+    /// flipping the status would lose what the caller was polling for.
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+    #[test]
+    fn a_late_cancel_leaves_a_terminal_task_alone() {
+        for (finish, expected) in [(true, TaskStatus::Completed), (false, TaskStatus::Failed)] {
+            let tracker = TaskTracker::new();
+            let task = Task::new();
+            let task_id = task.id.clone();
+            let _handle = tracker.track(task);
+
+            if finish {
+                tracker.set_outcome(&task_id, Ok(serde_json::json!({ "content": [] })));
+                tracker.complete(&task_id);
+            } else {
+                tracker.set_outcome(&task_id, Err(Error::new(ErrorCode::InternalError, "boom")));
+                tracker.fail(&task_id);
+            }
+
+            let cancelled = tracker.cancel(&task_id).unwrap();
+            assert_eq!(cancelled.status, expected, "cancel must not rewrite it");
+
+            let state = tracker.get_state(&task_id).unwrap();
+            assert_eq!(state.status, expected);
+            assert_eq!(state.result.is_some(), finish, "the outcome survives");
+            assert_eq!(state.error.is_some(), !finish);
+        }
     }
 
     /// A cancelled task is `CancelledTask` on the wire -- status only. Neither
