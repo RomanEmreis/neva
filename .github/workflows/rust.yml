@@ -100,6 +100,11 @@ jobs:
       # `exclude`d members are invisible to `--workspace`, so each standalone
       # example workspace needs its own invocation. `roots` and `sampling`
       # additionally nest a `legacy/` workspace holding the legacy-spec variant.
+      #
+      # No `--locked` here: `examples/**/Cargo.lock` is deliberately untracked
+      # (see `.gitignore`), so there is nothing to lock against on a fresh
+      # checkout. Resolving afresh is the point of this step anyway -- it is
+      # what surfaces an upstream release the examples have not kept up with.
       - name: Check the standalone example workspaces
         run: |
           for dir in \
@@ -111,7 +116,7 @@ jobs:
             examples/tasks
           do
             echo "::group::$dir"
-            cargo check --locked --manifest-path "$dir/Cargo.toml" --all-targets
+            cargo check --manifest-path "$dir/Cargo.toml" --all-targets
             echo "::endgroup::"
           done
 
