@@ -90,12 +90,7 @@ pub(super) struct RequestHandler {
 }
 
 impl Roots {
-    fn new(
-        options: &McpOptions,
-        // Only the legacy build pushes `notifications/roots/list_changed`.
-        #[cfg_attr(not(feature = "legacy-spec"), allow(unused_variables))]
-        notifications_sender: &TransportProtoSender,
-    ) -> Self {
+    fn new(options: &McpOptions, notifications_sender: &TransportProtoSender) -> Self {
         let mut roots = Self {
             inner: Arc::new(RwLock::new(options.roots())),
             sender: None,
@@ -109,24 +104,30 @@ impl Roots {
             roots.sender = Some(tx);
 
             let roots = roots.inner.clone();
-            #[cfg(feature = "legacy-spec")]
             let mut sender = notifications_sender.clone();
+            // `notifications/roots/list_changed` is removed in MCP 2026-07-28:
+            // the server reads roots on the MRTR loop, so a change is simply
+            // picked up on the next ask. A peer reached through the dual-mode
+            // fallback speaks the legacy protocol, though, and negotiated
+            // `roots.listChanged` on it -- so whether to push is a property of
+            // the handshake outcome, not of how this build was compiled.
+            #[cfg(not(feature = "legacy-spec"))]
+            let peer_mode = options.peer_mode.clone();
             tokio::spawn(async move {
                 while let Some(new_roots) = rx.recv().await {
                     let mut current_roots = roots.write().await;
                     *current_roots = new_roots;
 
-                    // `notifications/roots/list_changed` is removed in MCP
-                    // 2026-07-28: the server reads roots on the MRTR loop, so a
-                    // change is simply picked up on the next ask.
-                    #[cfg(feature = "legacy-spec")]
-                    {
-                        let changed =
-                            Notification::new(crate::types::root::commands::LIST_CHANGED, None);
-                        if let Err(_err) = sender.send(changed.into()).await {
-                            #[cfg(feature = "tracing")]
-                            tracing::error!("Error sending notification: {:?}", _err);
-                        }
+                    #[cfg(not(feature = "legacy-spec"))]
+                    if !peer_mode.is_legacy() {
+                        continue;
+                    }
+
+                    let changed =
+                        Notification::new(crate::types::root::commands::LIST_CHANGED, None);
+                    if let Err(_err) = sender.send(changed.into()).await {
+                        #[cfg(feature = "tracing")]
+                        tracing::error!("Error sending notification: {:?}", _err);
                     }
                 }
             });

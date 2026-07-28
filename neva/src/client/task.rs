@@ -65,6 +65,20 @@ impl<'a> TaskBuilder<'a> {
         N: Into<String>,
         Args: IntoArgs,
     {
+        // Distinguished from a plain "no support" so the cause is actionable:
+        // the peer may well support tasks -- just not in a dialect this build
+        // speaks.
+        #[cfg(not(feature = "legacy-spec"))]
+        if self.client.is_legacy_peer() {
+            return Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "The peer negotiated the legacy protocol through the dual-mode \
+                 fallback, and its task wire shape is not compiled into this \
+                 build. Enable the `legacy-spec` feature to run task-augmented \
+                 requests against a legacy server.",
+            ));
+        }
+
         if !self.client.is_server_support_call_tool_with_tasks() {
             return Err(Error::new(
                 ErrorCode::InvalidRequest,

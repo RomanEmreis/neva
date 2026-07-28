@@ -1072,9 +1072,24 @@ impl Client {
 
     /// Returns whether the server has task augmentation capabilities
     #[inline]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     fn is_server_supports_tasks(&self) -> bool {
         self.server_tasks_capability().is_some()
+    }
+
+    /// Returns whether the server has task augmentation capabilities
+    ///
+    /// A peer reached through the dual-mode fallback advertises tasks on the
+    /// *legacy* extension -- different method set (`tasks/result`,
+    /// `tasks/list`), a nested `CreateTaskResult`, and a differently named
+    /// status notification. None of that wire surface is compiled into this
+    /// build, so its capability is reported as unsupported rather than
+    /// answered with 2026-07-28 messages the peer cannot read. Talking tasks
+    /// to a legacy server needs a `legacy-spec` build.
+    #[inline]
+    #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
+    fn is_server_supports_tasks(&self) -> bool {
+        !self.is_legacy_peer() && self.server_tasks_capability().is_some()
     }
 
     /// Returns whether the client supports cancelling tasks
@@ -1118,11 +1133,12 @@ impl Client {
     /// Under MCP 2026-07-28 the Tasks extension capability carries no
     /// per-request settings: a peer that advertises the extension at all
     /// accepts task-augmented requests, and the server decides per request
-    /// whether to defer.
+    /// whether to defer. A peer that fell back to the legacy protocol is
+    /// excluded -- see [`Self::is_server_supports_tasks`].
     #[inline]
     #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
     fn is_server_support_call_tool_with_tasks(&self) -> bool {
-        self.server_tasks_capability().is_some()
+        self.is_server_supports_tasks()
     }
 
     /// Returns whether the server supports task-augmented tools
@@ -2465,6 +2481,53 @@ mod dual_mode_tests {
         );
     }
 
+    /// `notifications/roots/list_changed` is gone from MCP 2026-07-28, but a
+    /// peer reached through the fallback negotiated `roots.listChanged` on the
+    /// legacy protocol -- and would otherwise hold a stale root list forever.
+    // Roots are deprecated under MCP 2026-07-28 -- which is exactly why the
+    // fallback still owes the legacy peer this notification.
+    #[allow(deprecated)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn roots_changes_are_pushed_to_a_fallback_peer() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        tokio::spawn(serve_legacy(
+            listener,
+            log.clone(),
+            DiscoverReply::MethodNotFound,
+        ));
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                .with_roots(|roots| roots.with_list_changed())
+                .with_timeout(std::time::Duration::from_secs(5))
+        });
+
+        client.connect().await.expect("fallback must connect");
+        assert!(client.is_legacy_peer(), "the mock is a legacy server");
+
+        client.add_root("file:///tmp/project", "Project");
+
+        // The push is fire-and-forget through a spawned task.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let seen = log
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .any(|r| r.contains("notifications/roots/list_changed"));
+            if seen {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "a legacy peer must be told its root list changed"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
     /// A protected 2026-07-28 endpoint replying `401` with a non-JSON body must
     /// surface the authentication failure, not be mistaken for a legacy
     /// peer -- otherwise the client silently drops the 2026-07-28 headers and
@@ -2618,9 +2681,9 @@ mod roundtrip_tests {
     }
 }
 
-/// After a dual-mode fallback, a legacy peer's top-level `tasks`
-/// capability must survive and resolve -- a 2026-07-28 peer's extension form
-/// must keep working too.
+/// Both capability shapes -- a legacy peer's top-level `tasks` and a
+/// 2026-07-28 peer's `extensions` entry -- must parse. Whether task support is
+/// then *usable* is a separate question the negotiated peer mode answers.
 #[cfg(all(test, feature = "tasks", not(feature = "legacy-spec")))]
 mod fallback_tasks_capability_tests {
     use super::*;
@@ -2632,6 +2695,26 @@ mod fallback_tasks_capability_tests {
         client.server_capabilities =
             Some(serde_json::from_value::<ServerCapabilities>(caps).expect("valid capabilities"));
         client
+    }
+
+    /// A legacy peer's tasks are a different protocol -- `tasks/result`,
+    /// `tasks/list`, a nested `CreateTaskResult` -- none of which exists in
+    /// this build. Reporting support would send it 2026-07-28 messages it
+    /// cannot read.
+    #[test]
+    fn a_fallback_peer_reports_no_task_support() {
+        let client = client_with_capabilities(json!({
+            "tools": {},
+            "tasks": { "requests": { "tools": { "call": {} } } }
+        }));
+        assert!(
+            client.is_server_supports_tasks(),
+            "the capability itself parses"
+        );
+
+        client.options.peer_mode.set_legacy();
+        assert!(!client.is_server_supports_tasks());
+        assert!(!client.is_server_support_call_tool_with_tasks());
     }
 
     #[test]
