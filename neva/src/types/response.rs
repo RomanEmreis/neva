@@ -74,7 +74,7 @@ pub enum ResultType {
 /// describes object-shaped results.
 #[cfg(not(feature = "legacy-spec"))]
 #[inline]
-fn tag_complete(mut result: Value) -> Value {
+pub(crate) fn tag_complete(mut result: Value) -> Value {
     if let Value::Object(map) = &mut result
         && !map.contains_key(RESULT_TYPE)
     {

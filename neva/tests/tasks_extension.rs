@@ -40,9 +40,7 @@ async fn tasks_capability_is_advertised_as_extension() {
     let discover = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": { "_meta": meta() }
     });
-    let resp = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let resp = routed(client.post(&url), &discover)
         .json(&discover)
         .send()
         .await
@@ -65,9 +63,7 @@ async fn tasks_capability_is_advertised_as_extension() {
         let req = serde_json::json!({
             "jsonrpc": "2.0", "id": 2, "method": gone, "params": { "_meta": meta() }
         });
-        let resp = client
-            .post(&url)
-            .header("MCP-Protocol-Version", "2026-07-28")
+        let resp = routed(client.post(&url), &req)
             .json(&req)
             .send()
             .await
@@ -85,9 +81,7 @@ async fn tasks_capability_is_advertised_as_extension() {
         "jsonrpc": "2.0", "id": 3, "method": "tasks/update",
         "params": { "taskId": "nope", "inputResponses": {}, "_meta": meta() }
     });
-    let resp = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let resp = routed(client.post(&url), &update)
         .json(&update)
         .send()
         .await
@@ -146,9 +140,7 @@ async fn task_augmented_tool_elicits_via_suspend_resume() {
         let client = client.clone();
         let url = url.clone();
         async move {
-            client
-                .post(&url)
-                .header("MCP-Protocol-Version", "2026-07-28")
+            routed(client.post(&url), &body)
                 .json(&body)
                 .send()
                 .await
@@ -297,9 +289,7 @@ async fn mrtr_elicit_inside_a_task_is_rejected_with_guidance() {
         let client = client.clone();
         let url = url.clone();
         async move {
-            client
-                .post(&url)
-                .header("MCP-Protocol-Version", "2026-07-28")
+            routed(client.post(&url), &body)
                 .json(&body)
                 .send()
                 .await
@@ -385,9 +375,7 @@ async fn mrtr_once_in_a_required_task_is_rejected() {
         let client = client.clone();
         let url = url.clone();
         async move {
-            client
-                .post(&url)
-                .header("MCP-Protocol-Version", "2026-07-28")
+            routed(client.post(&url), &body)
                 .json(&body)
                 .send()
                 .await
@@ -457,4 +445,23 @@ fn meta() -> serde_json::Value {
         "io.modelcontextprotocol/protocolVersion": "2026-07-28",
         "io.modelcontextprotocol/clientCapabilities": {}
     })
+}
+
+/// Attaches the routing headers MCP 2026-07-28 requires on every request, the
+/// way a conforming client derives them: from the body it is about to send.
+fn routed(req: reqwest::RequestBuilder, body: &serde_json::Value) -> reqwest::RequestBuilder {
+    let method = body["method"].as_str().unwrap_or_default();
+    let req = req
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", method);
+    let name = match method {
+        "tools/call" | "prompts/get" => body.pointer("/params/name"),
+        "resources/read" => body.pointer("/params/uri"),
+        "tasks/get" | "tasks/update" | "tasks/cancel" => body.pointer("/params/taskId"),
+        _ => None,
+    };
+    match name.and_then(|v| v.as_str()) {
+        Some(name) => req.header("Mcp-Name", name),
+        None => req,
+    }
 }

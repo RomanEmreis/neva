@@ -43,6 +43,11 @@ pub use reference::Reference;
 pub use request::{Request, RequestId, RequestParamsMeta};
 #[cfg(not(feature = "legacy-spec"))]
 pub use response::ResultType;
+/// Stamps the mandatory `resultType: "complete"` on a result that does not
+/// already carry a discriminator, for the paths that do not build a
+/// [`Response`] to get it (a task's stored terminal result).
+#[cfg(all(feature = "server", feature = "tasks", not(feature = "legacy-spec")))]
+pub(crate) use response::tag_complete;
 pub use response::{ErrorDetails, IntoResponse, Response};
 
 #[cfg(feature = "tasks")]

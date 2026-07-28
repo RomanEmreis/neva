@@ -94,7 +94,7 @@ fn name_param(req: &crate::types::Request) -> Option<String> {
             tasks::GET | tasks::UPDATE | tasks::CANCEL
         ) {
             let raw = req.params.as_ref()?.as_object()?.get("taskId")?.as_str()?;
-            return Some(encode_header_value(raw));
+            return Some(crate::transport::http::encode_header_value(raw));
         }
     }
 
@@ -106,39 +106,7 @@ fn name_param(req: &crate::types::Request) -> Option<String> {
 
     let raw = req.params.as_ref()?.as_object()?.get(field)?.as_str()?;
 
-    Some(encode_header_value(raw))
-}
-
-/// Marks a header value as Base64-encoded UTF-8: `=?base64?{value}?=`.
-#[cfg(not(feature = "legacy-spec"))]
-const B64_PREFIX: &str = "=?base64?";
-#[cfg(not(feature = "legacy-spec"))]
-const B64_SUFFIX: &str = "?=";
-
-/// Encodes `raw` for use as an HTTP header value, per the spec's value-encoding
-/// rules.
-///
-/// RFC 9110 limits field values to visible ASCII, space and horizontal tab,
-/// with no leading or trailing whitespace. Anything outside that -- and any
-/// plain value that would otherwise be mistaken for the sentinel -- travels
-/// Base64-encoded instead.
-#[cfg(not(feature = "legacy-spec"))]
-fn encode_header_value(raw: &str) -> String {
-    use base64::{Engine, engine::general_purpose::STANDARD};
-
-    let safe = !raw.is_empty()
-        && raw
-            .bytes()
-            .all(|b| b == b'\t' || (0x20..=0x7E).contains(&b))
-        && !raw.starts_with([' ', '\t'])
-        && !raw.ends_with([' ', '\t']);
-    let sentinel_lookalike = raw.starts_with(B64_PREFIX) && raw.ends_with(B64_SUFFIX);
-
-    if safe && !sentinel_lookalike {
-        raw.to_owned()
-    } else {
-        format!("{B64_PREFIX}{}{B64_SUFFIX}", STANDARD.encode(raw))
-    }
+    Some(crate::transport::http::encode_header_value(raw))
 }
 
 /// The `Mcp-Param-*` headers a `tools/call` mirrors, per the called tool's
@@ -295,7 +263,7 @@ fn build_post(
             }
         }
         for (name, value) in param_headers(req, param_registry) {
-            resp = resp.header(name, encode_header_value(&value));
+            resp = resp.header(name, crate::transport::http::encode_header_value(&value));
         }
         resp = resp.header(
             crate::transport::http::MCP_PROTOCOL_VERSION,
@@ -1126,7 +1094,8 @@ mod tests {
 #[cfg(test)]
 #[cfg(not(feature = "legacy-spec"))]
 mod routing_hints_tests {
-    use super::{encode_header_value, name_param, routing_hints};
+    use super::{name_param, routing_hints};
+    use crate::transport::http::encode_header_value;
     use crate::types::notification::Notification;
     use crate::types::{Message, Request, RequestId};
     use serde_json::json;

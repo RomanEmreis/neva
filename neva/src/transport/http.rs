@@ -54,13 +54,73 @@ pub(super) const MCP_SESSION_ID: &str = "Mcp-Session-Id";
 /// JSON-RPC method name carried on every outbound HTTP request under
 /// MCP 2026-07-28. Allows reverse proxies and load balancers to
 /// route without parsing the request body.
-#[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
-pub(super) const MCP_METHOD: &str = "Mcp-Method";
+///
+/// Visible to both sides: the client sends it, and the server must check it
+/// against the body it actually dispatches, or an intermediary's routing
+/// decision could be made on a method the body never invokes.
+#[cfg(not(feature = "legacy-spec"))]
+pub(crate) const MCP_METHOD: &str = "Mcp-Method";
 
-/// Entity name (today: tool name for `tools/call`) carried on every
-/// outbound HTTP request under MCP 2026-07-28.
+/// Entity name -- the tool/prompt name or resource URI -- carried on the
+/// requests that have one under MCP 2026-07-28. Validated server-side for
+/// the same reason as [`MCP_METHOD`].
+#[cfg(not(feature = "legacy-spec"))]
+pub(crate) const MCP_NAME: &str = "Mcp-Name";
+
+/// Marks a header value as Base64-encoded UTF-8: `=?base64?{value}?=`.
+#[cfg(not(feature = "legacy-spec"))]
+pub(crate) const B64_PREFIX: &str = "=?base64?";
+/// Closing half of [`B64_PREFIX`].
+#[cfg(not(feature = "legacy-spec"))]
+pub(crate) const B64_SUFFIX: &str = "?=";
+
+/// Encodes `raw` for use as an HTTP header value, per the spec's value-encoding
+/// rules.
+///
+/// RFC 9110 limits field values to visible ASCII, space and horizontal tab,
+/// with no leading or trailing whitespace. Anything outside that -- and any
+/// plain value that would otherwise be mistaken for the sentinel -- travels
+/// Base64-encoded instead.
 #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
-pub(super) const MCP_NAME: &str = "Mcp-Name";
+pub(crate) fn encode_header_value(raw: &str) -> String {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
+    let safe = !raw.is_empty()
+        && raw
+            .bytes()
+            .all(|b| b == b'\t' || (0x20..=0x7E).contains(&b))
+        && !raw.starts_with([' ', '\t'])
+        && !raw.ends_with([' ', '\t']);
+    let sentinel_lookalike = raw.starts_with(B64_PREFIX) && raw.ends_with(B64_SUFFIX);
+
+    if safe && !sentinel_lookalike {
+        raw.to_owned()
+    } else {
+        format!("{B64_PREFIX}{}{B64_SUFFIX}", STANDARD.encode(raw))
+    }
+}
+
+/// Reverses [`encode_header_value`], so a header can be compared to the body
+/// value it mirrors.
+///
+/// Returns `None` when the sentinel is present but its payload is not valid
+/// Base64-encoded UTF-8 -- the value claims an encoding it does not honor, and
+/// the caller must reject rather than guess.
+#[cfg(all(feature = "http-server", not(feature = "legacy-spec")))]
+pub(crate) fn decode_header_value(value: &str) -> Option<String> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
+    let Some(payload) = value
+        .strip_prefix(B64_PREFIX)
+        .and_then(|v| v.strip_suffix(B64_SUFFIX))
+    else {
+        return Some(value.to_owned());
+    };
+    STANDARD
+        .decode(payload)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+}
 
 /// Protocol-version routing header, required on every POST under
 /// MCP 2026-07-28. Lets proxies route and lets the server reject

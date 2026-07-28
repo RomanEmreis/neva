@@ -96,9 +96,7 @@ async fn request_scoped_logging_streams_over_post() {
                     "io.modelcontextprotocol/logLevel": "info" }
         }
     });
-    let resp = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let resp = routed(client.post(&url), &call)
         .header("Accept", "application/json, text/event-stream")
         .json(&call)
         .send()
@@ -147,9 +145,7 @@ async fn request_scoped_logging_streams_over_post() {
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": { "name": "shout", "arguments": {}, "_meta": meta() }
     });
-    let resp = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let resp = routed(client.post(&url), &call)
         .header("Accept", "application/json, text/event-stream")
         .json(&call)
         .send()
@@ -191,9 +187,7 @@ async fn request_scoped_logging_streams_over_post() {
             "params": { "name": "shout", "arguments": {}, "_meta": meta() }
         }
     ]);
-    let resp = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let resp = routed(client.post(&url), &batch)
         .header("Accept", "application/json, text/event-stream")
         .json(&batch)
         .send()
@@ -233,9 +227,7 @@ async fn request_scoped_logging_streams_over_post() {
         })
     };
     let send = |call: serde_json::Value| {
-        client
-            .post(&url)
-            .header("MCP-Protocol-Version", "2026-07-28")
+        routed(client.post(&url), &call)
             .header("Accept", "application/json, text/event-stream")
             .header("Mcp-Session-Id", shared_session.clone())
             .json(&call)
@@ -273,4 +265,24 @@ fn meta() -> serde_json::Value {
         "io.modelcontextprotocol/protocolVersion": "2026-07-28",
         "io.modelcontextprotocol/clientCapabilities": {}
     })
+}
+
+/// Attaches the routing headers MCP 2026-07-28 requires on every request, the
+/// way a conforming client derives them: from the body it is about to send. A
+/// batch carries none -- no single method or name describes it.
+fn routed(req: reqwest::RequestBuilder, body: &serde_json::Value) -> reqwest::RequestBuilder {
+    let req = req.header("MCP-Protocol-Version", "2026-07-28");
+    let Some(method) = body["method"].as_str() else {
+        return req;
+    };
+    let req = req.header("Mcp-Method", method);
+    let name = match method {
+        "tools/call" | "prompts/get" => body.pointer("/params/name"),
+        "resources/read" => body.pointer("/params/uri"),
+        _ => None,
+    };
+    match name.and_then(|v| v.as_str()) {
+        Some(name) => req.header("Mcp-Name", name),
+        None => req,
+    }
 }

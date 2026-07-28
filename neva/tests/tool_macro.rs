@@ -93,9 +93,7 @@ async fn tool_macro_emits_json_schema_2020() {
         "method": "tools/list",
         "params": { "_meta": meta() }
     });
-    let resp = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let resp = routed(client.post(&url), &list_body)
         .json(&list_body)
         .send()
         .await
@@ -185,4 +183,23 @@ fn meta() -> serde_json::Value {
         "io.modelcontextprotocol/protocolVersion": "2026-07-28",
         "io.modelcontextprotocol/clientCapabilities": {}
     })
+}
+
+/// Attaches the routing headers MCP 2026-07-28 requires on every request, the
+/// way a conforming client derives them: from the body it is about to send.
+fn routed(req: reqwest::RequestBuilder, body: &serde_json::Value) -> reqwest::RequestBuilder {
+    let method = body["method"].as_str().unwrap_or_default();
+    let req = req
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", method);
+    let name = match method {
+        "tools/call" | "prompts/get" => body.pointer("/params/name"),
+        "resources/read" => body.pointer("/params/uri"),
+        "tasks/get" | "tasks/update" | "tasks/cancel" => body.pointer("/params/taskId"),
+        _ => None,
+    };
+    match name.and_then(|v| v.as_str()) {
+        Some(name) => req.header("Mcp-Name", name),
+        None => req,
+    }
 }

@@ -263,6 +263,48 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
         }
     }
 
+    // The routing headers must describe the body they arrived with. An
+    // intermediary is entitled to route or police on `Mcp-Method` / `Mcp-Name`
+    // without parsing the body, so a server that dispatches a body naming a
+    // different tool than its headers do turns those headers into a bypass.
+    #[cfg(not(feature = "legacy-spec"))]
+    {
+        let invalid = match &msg {
+            Message::Request(r) => routing_header_error(r, &headers).map(|err| (r.id(), err)),
+            // A batch has no single method or name for a header to mirror, so a
+            // conforming client sends neither. One that arrives anyway cannot
+            // have been derived from this body -- and an intermediary that
+            // acted on it was answering about a request that is not in here.
+            Message::Batch(batch) => (headers.contains_key(crate::transport::http::MCP_METHOD)
+                || headers.contains_key(crate::transport::http::MCP_NAME))
+            .then(|| {
+                (
+                    batch
+                        .iter()
+                        .find_map(|env| match env {
+                            crate::types::MessageEnvelope::Request(r) => Some(r.id()),
+                            _ => None,
+                        })
+                        .unwrap_or(RequestId::Null),
+                    Error::new(
+                        ErrorCode::HeaderMismatch,
+                        "Mcp-Method / Mcp-Name cannot describe a batch and must be omitted",
+                    ),
+                )
+            }),
+            _ => None,
+        };
+
+        if let Some((req_id, err)) = invalid {
+            let resp = Response::error(req_id, err);
+            return PostPrep::Reply(build_json_response(
+                http::StatusCode::BAD_REQUEST,
+                id,
+                &Message::Response(resp),
+            ));
+        }
+    }
+
     // Passive W3C Trace Context recorder: when both MCP 2026-07-28
     // and `tracing` are enabled, record any `_meta.traceparent` /
     // `_meta.tracestate` / `_meta.baggage` on the active span.
@@ -627,6 +669,83 @@ fn request_meta_error(req: &crate::types::Request) -> Option<Error> {
     })
 }
 
+/// The body value `Mcp-Name` mirrors for `req`, if its method has one.
+///
+/// The spec requires the header on `tools/call`, `resources/read` and
+/// `prompts/get`; the Tasks extension adds `params.taskId` on its own methods.
+/// A method with no source here has nothing for the header to disagree with.
+#[cfg(not(feature = "legacy-spec"))]
+fn name_source(req: &crate::types::Request) -> Option<(&str, bool)> {
+    #[cfg(feature = "tasks")]
+    {
+        use crate::types::task::commands as tasks;
+        if matches!(
+            req.method.as_str(),
+            tasks::GET | tasks::UPDATE | tasks::CANCEL
+        ) {
+            // The extension defines the header but the core spec does not
+            // require it, so it is checked when sent and not demanded.
+            let raw = req.params.as_ref()?.as_object()?.get("taskId")?.as_str()?;
+            return Some((raw, false));
+        }
+    }
+
+    let field = match req.method.as_str() {
+        crate::types::tool::commands::CALL | crate::types::prompt::commands::GET => "name",
+        crate::types::resource::commands::READ => "uri",
+        _ => return None,
+    };
+    let raw = req.params.as_ref()?.as_object()?.get(field)?.as_str()?;
+    Some((raw, true))
+}
+
+/// Why a request's routing headers do not describe its body, if they do not.
+///
+/// `Mcp-Method` is required on every request; `Mcp-Name` on the three methods
+/// that name what they act on. Both must equal the body value they mirror,
+/// after decoding the Base64 sentinel -- a value that claims that encoding and
+/// does not honor it is rejected rather than compared raw.
+#[cfg(not(feature = "legacy-spec"))]
+fn routing_header_error(req: &crate::types::Request, headers: &HeaderMap) -> Option<Error> {
+    let mismatch = |header: &str, stated: &str, body: &str| {
+        Some(Error::new(
+            ErrorCode::HeaderMismatch,
+            format!(
+                "Header mismatch: {header} header value {stated:?} does not match body value {body:?}"
+            ),
+        ))
+    };
+    let missing = |header: &str| {
+        Some(Error::new(
+            ErrorCode::HeaderMismatch,
+            format!("Missing or malformed {header} header"),
+        ))
+    };
+
+    let method = crate::transport::http::MCP_METHOD;
+    match headers.get(method).and_then(|v| v.to_str().ok()) {
+        None => return missing(method),
+        Some(stated) if stated != req.method.as_str() => {
+            return mismatch(method, stated, &req.method);
+        }
+        Some(_) => {}
+    }
+
+    let name = crate::transport::http::MCP_NAME;
+    let stated = headers.get(name).and_then(|v| v.to_str().ok());
+    match (name_source(req), stated) {
+        (Some((_, true)), None) => missing(name),
+        (Some((body, _)), Some(stated)) => {
+            match crate::transport::http::decode_header_value(stated) {
+                Some(decoded) if decoded == body => None,
+                Some(decoded) => mismatch(name, &decoded, body),
+                None => missing(name),
+            }
+        }
+        _ => None,
+    }
+}
+
 /// The HTTP status a dispatched JSON-RPC reply must be sent with.
 ///
 /// Most application-level errors ride on `200 OK` -- JSON-RPC carries them in
@@ -964,6 +1083,17 @@ mod tests {
         b
     }
 
+    /// [`post_builder`] plus the `Mcp-Method` routing header, for the tests
+    /// whose body is a request the server is expected to dispatch.
+    fn post_builder_for(method: &str) -> http::request::Builder {
+        let b = post_builder();
+        #[cfg(not(feature = "legacy-spec"))]
+        let b = b.header(crate::transport::http::MCP_METHOD, method);
+        #[cfg(feature = "legacy-spec")]
+        let _ = method;
+        b
+    }
+
     #[cfg(not(feature = "legacy-spec"))]
     #[tokio::test]
     async fn rejects_missing_protocol_version() {
@@ -1113,7 +1243,7 @@ mod tests {
             "jsonrpc": "2.0", "id": 1, "method": "tools/list",
             "params": { "_meta": meta() }
         });
-        let req = post_builder()
+        let req = post_builder_for("tools/list")
             .body(bytes::Bytes::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
         let ctx = std::sync::Arc::new(ctx);
@@ -1124,6 +1254,106 @@ mod tests {
         // pending slot, which nothing in this test answers.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_eq!(ctx.pending.len(), 1);
+    }
+
+    /// An intermediary may route or police on `Mcp-Method` / `Mcp-Name` without
+    /// parsing the body. A server that dispatches a body those headers do not
+    /// describe turns them into a bypass, so header and body must agree.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[tokio::test]
+    async fn rejects_routing_headers_that_do_not_describe_the_body() {
+        let call = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "safe_tool", "arguments": {}, "_meta": meta() }
+        });
+
+        // (header name, header value) pairs to send instead of the honest ones.
+        let cases: Vec<Vec<(&str, &str)>> = vec![
+            // The body invokes a tool the headers do not name -- the bypass.
+            vec![("Mcp-Method", "tools/call"), ("Mcp-Name", "allowed_tool")],
+            // The body's method is not the one an intermediary was shown.
+            vec![("Mcp-Method", "tools/list"), ("Mcp-Name", "safe_tool")],
+            // Required headers missing outright.
+            vec![("Mcp-Name", "safe_tool")],
+            vec![("Mcp-Method", "tools/call")],
+            vec![],
+            // Sentinel claimed but not honored: not decodable, so not comparable.
+            vec![("Mcp-Method", "tools/call"), ("Mcp-Name", "=?base64?%%%?=")],
+        ];
+
+        for case in cases {
+            let (ctx, _rx) = make_ctx();
+            let mut req = post_builder();
+            for (name, value) in &case {
+                req = req.header(*name, *value);
+            }
+            let req = req
+                .body(bytes::Bytes::from(serde_json::to_vec(&call).unwrap()))
+                .unwrap();
+
+            let resp = handle_post(req, &ctx).await;
+            assert_eq!(
+                resp.status(),
+                http::StatusCode::BAD_REQUEST,
+                "must answer 400: {case:?}"
+            );
+            let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+            assert_eq!(body["error"]["code"], -32020, "must be a header mismatch");
+        }
+    }
+
+    /// A name that cannot ride as a plain header value travels Base64-encoded,
+    /// and the server compares what it decodes -- not the sentinel.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[tokio::test]
+    async fn accepts_a_base64_encoded_name_matching_the_body() {
+        let (ctx, _rx) = make_ctx();
+        let body = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "resources/read",
+            "params": { "uri": "file:///café.txt", "_meta": meta() }
+        });
+        let req = post_builder()
+            .header(crate::transport::http::MCP_METHOD, "resources/read")
+            // Spelled out rather than produced by the encoder: this asserts
+            // what the server accepts off the wire, not that the two helpers
+            // agree with each other.
+            .header(
+                crate::transport::http::MCP_NAME,
+                "=?base64?ZmlsZTovLy9jYWbDqS50eHQ=?=",
+            )
+            .body(bytes::Bytes::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let ctx = std::sync::Arc::new(ctx);
+        let ctx_clone = ctx.clone();
+        let _h = tokio::spawn(async move { handle_post(req, &ctx_clone).await });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(ctx.pending.len(), 1, "the request must reach dispatch");
+    }
+
+    /// No single method or name describes a batch, so a conforming client sends
+    /// neither -- and one that arrives cannot have come from this body.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[tokio::test]
+    async fn rejects_routing_headers_on_a_batch() {
+        let (ctx, _rx) = make_ctx();
+        let body = serde_json::json!([
+            { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": meta() } },
+            {
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": { "name": "evil", "arguments": {}, "_meta": meta() }
+            }
+        ]);
+        let req = post_builder()
+            .header(crate::transport::http::MCP_METHOD, "tools/list")
+            .body(bytes::Bytes::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let resp = handle_post(req, &ctx).await;
+        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+        assert_eq!(body["error"]["code"], -32020);
     }
 
     /// A batch must not be a way around the version gate a standalone request
@@ -1223,7 +1453,7 @@ mod tests {
     #[tokio::test]
     async fn init_request_pre_registers_session() {
         let (ctx, _rx) = make_ctx();
-        let req = post_builder()
+        let req = post_builder_for(crate::commands::INIT)
             .body(make_request_body(crate::commands::INIT))
             .unwrap();
         let ctx_arc = std::sync::Arc::new(ctx);

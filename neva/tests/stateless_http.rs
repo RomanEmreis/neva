@@ -33,9 +33,7 @@ async fn stateless_discover_and_call() {
         "jsonrpc": "2.0", "id": 1, "method": "server/discover",
         "params": { "_meta": meta() }
     });
-    let resp = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let resp = routed(client.post(&url), &discover)
         .json(&discover)
         .send()
         .await
@@ -67,9 +65,7 @@ async fn stateless_discover_and_call() {
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": { "name": "ping", "arguments": {}, "_meta": meta() }
     });
-    let resp = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let resp = routed(client.post(&url), &call)
         .json(&call)
         .send()
         .await
@@ -117,9 +113,7 @@ async fn stateless_discover_and_call() {
         "jsonrpc": "2.0", "id": 5, "method": "ping",
         "params": { "_meta": meta() }
     });
-    let body: serde_json::Value = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let body: serde_json::Value = routed(client.post(&url), &ping)
         .json(&ping)
         .send()
         .await
@@ -156,4 +150,23 @@ fn pick_free_port() -> u16 {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     port
+}
+
+/// Attaches the routing headers MCP 2026-07-28 requires on every request, the
+/// way a conforming client derives them: from the body it is about to send.
+fn routed(req: reqwest::RequestBuilder, body: &serde_json::Value) -> reqwest::RequestBuilder {
+    let method = body["method"].as_str().unwrap_or_default();
+    let req = req
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", method);
+    let name = match method {
+        "tools/call" | "prompts/get" => body.pointer("/params/name"),
+        "resources/read" => body.pointer("/params/uri"),
+        "tasks/get" | "tasks/update" | "tasks/cancel" => body.pointer("/params/taskId"),
+        _ => None,
+    };
+    match name.and_then(|v| v.as_str()) {
+        Some(name) => req.header("Mcp-Name", name),
+        None => req,
+    }
 }

@@ -90,6 +90,28 @@ impl Error {
         self
     }
 
+    /// The structured `data` payload this error carries, if any.
+    ///
+    /// Set by [`Self::with_data`] on the way out, and preserved on the way in:
+    /// an error decoded from a peer's response keeps what the peer sent, which
+    /// is where the MCP-allocated errors put the part that is actionable --
+    /// `supported` / `requested` on an unsupported version,
+    /// `requiredCapabilities` on a missing capability.
+    ///
+    /// # Example
+    /// ```
+    /// use neva::error::{Error, ErrorCode};
+    ///
+    /// let err = Error::new(ErrorCode::InvalidParams, "bad city")
+    ///     .with_data(serde_json::json!({ "field": "city" }));
+    ///
+    /// assert_eq!(err.data().and_then(|d| d.get("field")), Some(&"city".into()));
+    /// ```
+    #[inline]
+    pub fn data(&self) -> Option<&serde_json::Value> {
+        self.data.as_ref()
+    }
+
     /// Builds the internal MRTR "input required" sentinel error.
     ///
     /// Returned by `Context::elicit` on a cache miss to unwind the handler;

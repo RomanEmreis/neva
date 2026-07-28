@@ -338,6 +338,12 @@ impl TaskTracker {
     ///
     /// `Ok` lands in `result` (status `completed`), `Err` in `error`
     /// (status `failed`) as a JSON-RPC error object.
+    ///
+    /// The stored result *is* the result the original request would have
+    /// returned synchronously, so it carries the same mandatory `resultType`
+    /// discriminator -- it just never passes through
+    /// [`Response::success`](crate::types::Response::success), which is where
+    /// a directly-returned result is stamped.
     #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
     pub(crate) fn set_outcome(&self, id: &str, outcome: Result<serde_json::Value, Error>) {
         self.cleanup_expired();
@@ -349,7 +355,7 @@ impl TaskTracker {
             return;
         };
         match outcome {
-            Ok(result) => state.result = Some(result),
+            Ok(result) => state.result = Some(crate::types::tag_complete(result)),
             Err(err) => {
                 state.error = serde_json::to_value(crate::types::ErrorDetails::from(err)).ok()
             }
@@ -1057,8 +1063,35 @@ mod tests {
 
         let state = tracker.get_state(&task_id).unwrap();
         assert_eq!(state.status, TaskStatus::Completed);
-        assert_eq!(state.result, Some(serde_json::json!({ "content": [] })));
+        // The stored value is the result the request would have returned
+        // synchronously, so it carries the same mandatory discriminator -- it
+        // just never went through `Response::success` to get it.
+        assert_eq!(
+            state.result,
+            Some(serde_json::json!({ "content": [], "resultType": "complete" }))
+        );
         assert!(state.error.is_none());
+    }
+
+    /// A result that already says what it is keeps saying it.
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+    #[test]
+    fn set_outcome_keeps_an_existing_discriminator() {
+        let tracker = TaskTracker::new();
+        let task = Task::new();
+        let task_id = task.id.clone();
+        let _handle = tracker.track(task);
+
+        tracker.set_outcome(
+            &task_id,
+            Ok(serde_json::json!({ "resultType": "input_required" })),
+        );
+        tracker.complete(&task_id);
+
+        assert_eq!(
+            tracker.get_state(&task_id).unwrap().result,
+            Some(serde_json::json!({ "resultType": "input_required" }))
+        );
     }
 
     #[cfg(all(feature = "server", not(feature = "legacy-spec")))]

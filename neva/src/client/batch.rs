@@ -178,7 +178,33 @@ impl<'a> BatchBuilder<'a> {
     /// Returns [`Error`] if the client is not connected, the batch is empty,
     /// or any response channel is closed or times out.
     pub async fn send(self) -> Result<Vec<Response>, Error> {
-        self.client.call_batch(self.items).await
+        // Which returned slot answers which method: `call_batch` keeps requests
+        // in order and gives notifications no slot.
+        #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+        let methods = self
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                MessageEnvelope::Request(req) => Some(req.method.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        #[allow(unused_mut)]
+        let mut responses = self.client.call_batch(self.items).await?;
+
+        // A batched listing registers its `x-mcp-header` annotations and drops
+        // its malformed tools exactly as `Client::list_tools` does -- the
+        // annotations bind what a later `tools/call` must mirror into headers,
+        // and where the listing came from does not change that.
+        #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+        for (method, resp) in methods.iter().zip(responses.iter_mut()) {
+            if method == crate::types::tool::commands::LIST {
+                self.client.register_batched_tools(resp);
+            }
+        }
+
+        Ok(responses)
     }
 
     /// Returns the next globally-unique [`RequestId`] from the client's handler,

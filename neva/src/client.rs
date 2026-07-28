@@ -542,6 +542,25 @@ impl Client {
         Ok(result)
     }
 
+    /// Runs a batched `tools/list` response through the same registry update a
+    /// direct [`Self::list_tools`] performs, rewriting the response in place so
+    /// the caller never sees a tool the client refuses to call.
+    ///
+    /// A batched listing is always a fresh traversal: [`BatchBuilder`] enqueues
+    /// it without a cursor. A response that does not parse as a listing is left
+    /// alone -- it is the caller's to interpret, and it registers nothing.
+    #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+    pub(super) fn register_batched_tools(&mut self, resp: &mut Response) {
+        let Response::Ok(ok) = resp else { return };
+        let Ok(mut result) = serde_json::from_value::<ListToolsResult>(ok.result.clone()) else {
+            return;
+        };
+        self.register_param_headers(&mut result, true);
+        if let Ok(value) = serde_json::to_value(&result) {
+            ok.result = value;
+        }
+    }
+
     /// Records each tool's `x-mcp-header` annotations and drops any tool whose
     /// annotations are invalid.
     ///
@@ -2752,6 +2771,65 @@ mod param_header_registry_tests {
 
         let mut second = listing(serde_json::json!([plain("search")]));
         client.register_param_headers(&mut second, true);
+        assert!(client.options.param_headers.is_empty());
+    }
+
+    /// Where a listing came from does not change what it binds: a batched
+    /// `tools/list` registers and filters exactly as a direct one does.
+    #[test]
+    fn a_batched_listing_registers_and_filters() {
+        let mut client = Client::new();
+
+        let mut resp = Response::success(
+            RequestId::Number(1),
+            serde_json::json!({
+                "tools": [
+                    annotated("search"),
+                    {
+                        "name": "broken",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "p": { "type": "array", "items": { "x-mcp-header": "P" } }
+                            }
+                        }
+                    }
+                ]
+            }),
+        );
+        client.register_batched_tools(&mut resp);
+
+        assert!(client.options.param_headers.contains_key("search"));
+        assert!(!client.options.param_headers.contains_key("broken"));
+
+        // The caller must not be handed a tool the client refuses to call.
+        let Response::Ok(ok) = &resp else {
+            panic!("a successful listing")
+        };
+        let tools = ok.result["tools"].as_array().expect("tools array");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], "search");
+    }
+
+    /// A slot that is not a listing is the caller's to interpret.
+    #[test]
+    fn a_non_listing_response_is_left_alone() {
+        let mut client = Client::new();
+        let mut resp = Response::success(
+            RequestId::Number(1),
+            serde_json::json!({ "content": [{ "type": "text", "text": "hi" }] }),
+        );
+        let before = match &resp {
+            Response::Ok(ok) => ok.result.clone(),
+            Response::Err(_) => panic!("a successful response"),
+        };
+
+        client.register_batched_tools(&mut resp);
+
+        let Response::Ok(ok) = &resp else {
+            panic!("a successful response")
+        };
+        assert_eq!(ok.result, before);
         assert!(client.options.param_headers.is_empty());
     }
 
