@@ -371,22 +371,38 @@ impl TaskTracker {
 
         let mut detailed = crate::types::DetailedTask::from(entry.task.clone());
         if let Ok(state) = entry.state.lock() {
-            detailed.result = state.result.clone();
-            detailed.error = state.error.clone();
-            if !state.inputs.is_empty() {
-                detailed.input_requests = Some(
-                    state
-                        .inputs
-                        .iter()
-                        .map(|(key, pending)| (key.clone(), pending.request.clone()))
-                        .collect(),
-                );
+            // The wire shape is discriminated by status: `inputRequests` belongs
+            // to `input_required`, `result` to `completed`, `error` to `failed`,
+            // and a cancelled task carries none of them. The state can outlive
+            // the status it was recorded under -- a task cancelled while parked
+            // on `ctx.task().elicit` keeps its pending input, and a tool that
+            // races the cancellation records an outcome -- so what is reported
+            // is decided by the status, not by what happens to be stored.
+            match detailed.status {
+                TaskStatus::InputRequired if !state.inputs.is_empty() => {
+                    detailed.input_requests = Some(
+                        state
+                            .inputs
+                            .iter()
+                            .map(|(key, pending)| (key.clone(), pending.request.clone()))
+                            .collect(),
+                    );
+                }
+                TaskStatus::Completed => detailed.result = state.result.clone(),
+                TaskStatus::Failed => detailed.error = state.error.clone(),
+                _ => {}
             }
         }
         Ok(detailed)
     }
 
     /// Retrieves the task status
+    ///
+    /// The status alone is a legacy shape: MCP 2026-07-28 reports a task -- to
+    /// `tasks/get` and to `notifications/tasks` alike -- as the full
+    /// [`DetailedTask`](crate::types::DetailedTask) that [`Self::get_state`]
+    /// builds.
+    #[cfg(any(feature = "legacy-spec", test))]
     pub(crate) fn get_status(&self, id: &str) -> Result<Task, Error> {
         self.cleanup_expired();
 
@@ -978,6 +994,54 @@ mod tests {
         let result = tracker.provide_inputs("nonexistent", Default::default());
 
         assert_eq!(result.unwrap_err().code, ErrorCode::InvalidParams);
+    }
+
+    /// A cancelled task is `CancelledTask` on the wire -- status only. Neither
+    /// an input request it was parked on nor an outcome its tool raced to
+    /// record may leak into that shape.
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+    #[test]
+    fn get_state_hides_state_a_cancelled_task_may_not_carry() {
+        let tracker = TaskTracker::new();
+        let task = Task::new();
+        let task_id = task.id.clone();
+        let _handle = tracker.track(task);
+
+        let _rx = tracker
+            .park_input(&task_id, "k1".into(), elicit_request())
+            .expect("parked");
+        tracker.require_input(&task_id);
+        tracker.set_outcome(&task_id, Ok(serde_json::json!({ "content": [] })));
+        tracker.cancel(&task_id).unwrap();
+
+        let state = tracker.get_state(&task_id).unwrap();
+        assert_eq!(state.status, TaskStatus::Cancelled);
+        assert!(state.input_requests.is_none());
+        assert!(state.result.is_none());
+        assert!(state.error.is_none());
+    }
+
+    /// A failed task carries `error` -- and not an input request it never
+    /// answered before failing.
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+    #[test]
+    fn get_state_hides_pending_inputs_of_a_failed_task() {
+        let tracker = TaskTracker::new();
+        let task = Task::new();
+        let task_id = task.id.clone();
+        let _handle = tracker.track(task);
+
+        let _rx = tracker
+            .park_input(&task_id, "k1".into(), elicit_request())
+            .expect("parked");
+        tracker.require_input(&task_id);
+        tracker.set_outcome(&task_id, Err(Error::new(ErrorCode::InternalError, "boom")));
+        tracker.fail(&task_id);
+
+        let state = tracker.get_state(&task_id).unwrap();
+        assert_eq!(state.status, TaskStatus::Failed);
+        assert!(state.input_requests.is_none());
+        assert_eq!(state.error.expect("error")["message"], "boom");
     }
 
     #[cfg(all(feature = "server", not(feature = "legacy-spec")))]

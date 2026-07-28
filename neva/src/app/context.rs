@@ -1558,7 +1558,21 @@ impl Context {
     }
 
     /// Sends notification that a task with `id` was changed.
-    #[cfg(feature = "tasks")]
+    ///
+    /// The payload is the same `DetailedTask` `tasks/get` answers with, since
+    /// `notifications/tasks` is what saves a subscribed client from polling:
+    /// a bare status would send it back to `tasks/get` for the
+    /// `inputRequests` / `result` / `error` the notification is meant to carry.
+    #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
+    pub async fn task_changed(&mut self, id: &str) -> Result<(), Error> {
+        let task = self.options.tasks.get_state(id)?;
+        let params = serde_json::to_value(task).ok();
+        self.send_notification(crate::types::task::commands::STATUS, params)
+            .await
+    }
+
+    /// Sends notification that a task with `id` was changed.
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     pub async fn task_changed(&mut self, id: &str) -> Result<(), Error> {
         let task = self.options.tasks.get_status(id)?;
         let params = serde_json::to_value(task).ok();

@@ -83,7 +83,7 @@ pub(crate) fn collect(
     let mut found = Vec::new();
     let mut seen: HashMap<String, ()> = HashMap::new();
     walk(input_schema, &mut Vec::new(), &mut found, &mut seen)?;
-    reject_unreachable(input_schema, &mut Vec::new())?;
+    reject_unreachable(input_schema, &found)?;
     Ok(found)
 }
 
@@ -132,47 +132,69 @@ fn walk(
     Ok(())
 }
 
-/// Fails if an annotation hides anywhere other than a `properties` chain --
-/// under `items`, a composition/conditional keyword, or a `$ref`.
+/// Fails if the schema carries an annotation anywhere [`walk`] would not have
+/// reached -- the schema root itself, under `items` or a composition keyword,
+/// behind `additionalProperties` / `patternProperties`, inside `$defs`, and so
+/// on.
+///
+/// Stated the other way round: every annotation in the document must be one
+/// [`walk`] just collected. Enumerating the ways a schema can nest would leave
+/// the next JSON Schema keyword silently unguarded, and an annotation the
+/// client cannot honor must fail the tool rather than be quietly ignored.
 fn reject_unreachable(
     schema: &serde_json::Value,
-    path: &mut Vec<String>,
+    found: &[ParamHeader],
 ) -> Result<(), ParamHeaderError> {
-    const OFF_PATH: [&str; 9] = [
-        "items", "oneOf", "anyOf", "allOf", "not", "if", "then", "else", "$defs",
-    ];
+    let reachable = found
+        .iter()
+        .map(|h| location_of(&h.path))
+        .collect::<std::collections::HashSet<_>>();
 
-    if let Some(obj) = schema.as_object() {
-        for key in OFF_PATH {
-            if let Some(sub) = obj.get(key)
-                && contains_annotation(sub)
-            {
-                return Err(ParamHeaderError::Unreachable(if path.is_empty() {
-                    key.to_owned()
-                } else {
-                    format!("{}.{key}", path.join("."))
-                }));
-            }
-        }
-        if let Some(props) = obj.get("properties").and_then(|p| p.as_object()) {
-            for (name, prop) in props {
-                path.push(name.clone());
-                reject_unreachable(prop, path)?;
-                path.pop();
-            }
-        }
+    let mut all = Vec::new();
+    scan(schema, &mut Vec::new(), &mut all);
+
+    match all.into_iter().find(|loc| !reachable.contains(loc)) {
+        Some(loc) if loc.is_empty() => Err(ParamHeaderError::Unreachable("<root>".to_owned())),
+        Some(loc) => Err(ParamHeaderError::Unreachable(loc)),
+        None => Ok(()),
     }
-    Ok(())
 }
 
-/// Whether `value` carries the annotation anywhere beneath it.
-fn contains_annotation(value: &serde_json::Value) -> bool {
+/// The document location of a property [`walk`] reached, in the same form
+/// [`scan`] reports: `properties/target/properties/region`.
+fn location_of(path: &[String]) -> String {
+    let mut loc = String::new();
+    for step in path {
+        loc.push_str("properties/");
+        loc.push_str(step);
+        loc.push('/');
+    }
+    loc.pop();
+    loc
+}
+
+/// Records the location of every annotated object in the document, wherever it
+/// sits -- the reachability check is what decides whether it was allowed there.
+fn scan(value: &serde_json::Value, at: &mut Vec<String>, out: &mut Vec<String>) {
     match value {
         serde_json::Value::Object(map) => {
-            map.contains_key(KEYWORD) || map.values().any(contains_annotation)
+            if map.contains_key(KEYWORD) {
+                out.push(at.join("/"));
+            }
+            for (key, sub) in map {
+                at.push(key.clone());
+                scan(sub, at, out);
+                at.pop();
+            }
         }
-        serde_json::Value::Array(items) => items.iter().any(contains_annotation),
-        _ => false,
+        serde_json::Value::Array(items) => {
+            for (i, sub) in items.iter().enumerate() {
+                at.push(i.to_string());
+                scan(sub, at, out);
+                at.pop();
+            }
+        }
+        _ => {}
     }
 }
 
@@ -277,6 +299,47 @@ mod tests {
             assert!(
                 matches!(collect(&schema), Err(ParamHeaderError::UnsupportedType(_))),
                 "{ty} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_an_annotation_at_the_schema_root() {
+        // Never visited by `walk`: the root is not a property of anything.
+        let schema = json!({
+            "type": "object",
+            "x-mcp-header": "Region",
+            "properties": { "region": { "type": "string" } }
+        });
+        assert!(matches!(
+            collect(&schema),
+            Err(ParamHeaderError::Unreachable(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_an_annotation_behind_a_dynamic_property_keyword() {
+        // These name no static property, so the client could never tell which
+        // argument to mirror -- and none of them is in a hand-written list of
+        // "off-path" keywords.
+        for key in [
+            "additionalProperties",
+            "patternProperties",
+            "propertyNames",
+            "unevaluatedProperties",
+            "dependentSchemas",
+            "$defs",
+            "definitions",
+        ] {
+            let schema = json!({
+                "type": "object",
+                "properties": {
+                    "p": { "type": "object", key: { "type": "string", "x-mcp-header": "P" } }
+                }
+            });
+            assert!(
+                matches!(collect(&schema), Err(ParamHeaderError::Unreachable(_))),
+                "{key} must be rejected"
             );
         }
     }
