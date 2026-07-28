@@ -143,7 +143,7 @@ pub async fn handle_post(req: HttpRequest, ctx: &HttpContext) -> HttpResponse {
                 return status_response(http::StatusCode::INTERNAL_SERVER_ERROR, id);
             }
             match resp_rx.await {
-                Ok(resp) => build_json_response(http::StatusCode::OK, id, &resp),
+                Ok(resp) => build_json_response(dispatched_status(&resp), id, &resp),
                 Err(_) => status_response(http::StatusCode::INTERNAL_SERVER_ERROR, id),
             }
         }
@@ -237,32 +237,40 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
     // The body's `_meta` protocol version must agree with the header the gate
     // above already validated. Stating two different versions is a header
     // mismatch (-32020), not a version problem -- the server cannot tell which
-    // one the client meant.
+    // one the client meant. Batched requests are checked one by one: wrapping a
+    // request in an array must not be a way around the gate it would face on
+    // its own. The first offender decides the reply, since the status is
+    // per-response and the whole POST is rejected either way.
     #[cfg(not(feature = "legacy-spec"))]
-    if let Message::Request(ref r) = msg
-        && let Some(stated) = r
-            .params
-            .as_ref()
-            .and_then(|p| p.get("_meta"))
-            .and_then(|m| m.get("io.modelcontextprotocol/protocolVersion"))
-            .and_then(|v| v.as_str())
-        && stated != crate::LATEST_PROTOCOL_VERSION
     {
-        let resp = Response::error(
-            r.id(),
-            Error::new(
-                ErrorCode::HeaderMismatch,
-                format!(
-                    "_meta protocol version {stated} does not match the \
-                     MCP-Protocol-Version header"
+        let mismatch = match &msg {
+            Message::Request(r) => stated_version_mismatch(r).map(|v| (r.id(), v)),
+            Message::Batch(batch) => batch.iter().find_map(|env| match env {
+                crate::types::MessageEnvelope::Request(r) => {
+                    stated_version_mismatch(r).map(|v| (r.id(), v))
+                }
+                _ => None,
+            }),
+            _ => None,
+        };
+
+        if let Some((req_id, stated)) = mismatch {
+            let resp = Response::error(
+                req_id,
+                Error::new(
+                    ErrorCode::HeaderMismatch,
+                    format!(
+                        "_meta protocol version {stated} does not match the \
+                         MCP-Protocol-Version header"
+                    ),
                 ),
-            ),
-        );
-        return PostPrep::Reply(build_json_response(
-            http::StatusCode::BAD_REQUEST,
-            id,
-            &Message::Response(resp),
-        ));
+            );
+            return PostPrep::Reply(build_json_response(
+                http::StatusCode::BAD_REQUEST,
+                id,
+                &Message::Response(resp),
+            ));
+        }
     }
 
     // Passive W3C Trace Context recorder: when both MCP 2026-07-28
@@ -361,7 +369,7 @@ async fn handle_post_streaming<E: HttpEngine>(
                 }
                 return match resp_rx.await {
                     Ok(resp) => StreamResponse::Complete(build_json_response(
-                        http::StatusCode::OK,
+                        dispatched_status(&resp),
                         id,
                         &resp,
                     )),
@@ -580,6 +588,54 @@ fn get_or_create_mcp_session(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| uuid::Uuid::parse_str(s).ok())
         .unwrap_or_else(uuid::Uuid::new_v4)
+}
+
+/// The protocol version a request states in its `_meta`, when that disagrees
+/// with the version this build speaks.
+///
+/// Returns `None` when the request states nothing -- the required-field check
+/// belongs to the dispatch layer, not to the header gate.
+#[cfg(not(feature = "legacy-spec"))]
+fn stated_version_mismatch(req: &crate::types::Request) -> Option<&str> {
+    req.params
+        .as_ref()
+        .and_then(|p| p.get("_meta"))
+        .and_then(|m| m.get("io.modelcontextprotocol/protocolVersion"))
+        .and_then(|v| v.as_str())
+        .filter(|stated| *stated != crate::LATEST_PROTOCOL_VERSION)
+}
+
+/// The HTTP status a dispatched JSON-RPC reply must be sent with.
+///
+/// Most application-level errors ride on `200 OK` -- JSON-RPC carries them in
+/// the body. The MCP-allocated protocol errors are the exception: the spec
+/// pins each of them to `400 Bad Request`, because they say the *request* was
+/// wrong, not that the method failed. `MissingRequiredClientCapability` is
+/// raised during dispatch rather than in the transport preamble, so the status
+/// has to be recovered here from the reply.
+///
+/// A batch keeps `200 OK` even when some of its items carry such an error: one
+/// status covers every item, and the per-item codes are in the body.
+#[cfg(not(feature = "legacy-spec"))]
+fn dispatched_status(msg: &Message) -> http::StatusCode {
+    match msg {
+        Message::Response(Response::Err(err)) => match err.error.code {
+            ErrorCode::HeaderMismatch
+            | ErrorCode::MissingRequiredClientCapability
+            | ErrorCode::UnsupportedProtocolVersion => http::StatusCode::BAD_REQUEST,
+            _ => http::StatusCode::OK,
+        },
+        _ => http::StatusCode::OK,
+    }
+}
+
+/// The HTTP status a dispatched JSON-RPC reply must be sent with.
+///
+/// The legacy profile has no status-bearing error codes: every dispatched
+/// reply is a `200 OK` with the error in the body.
+#[cfg(feature = "legacy-spec")]
+fn dispatched_status(_msg: &Message) -> http::StatusCode {
+    http::StatusCode::OK
 }
 
 fn build_json_response(
@@ -942,6 +998,59 @@ mod tests {
         assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
         let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
         assert_eq!(body["error"]["code"], -32020);
+    }
+
+    /// A batch must not be a way around the version gate a standalone request
+    /// faces: the offending item is caught while the array is still unopened.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[tokio::test]
+    async fn rejects_batched_body_version_disagreeing_with_header() {
+        let (ctx, _rx) = make_ctx();
+        let body = serde_json::json!([
+            { "jsonrpc": "2.0", "id": 1, "method": "tools/list" },
+            {
+                "jsonrpc": "2.0", "id": 2, "method": "prompts/list",
+                "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2025-06-18" } }
+            }
+        ]);
+        let req = post_builder()
+            .body(bytes::Bytes::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = handle_post(req, &ctx).await;
+        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+        assert_eq!(body["error"]["code"], -32020);
+        // The reply is addressed to the offending item, not the batch.
+        assert_eq!(body["id"], 2);
+    }
+
+    /// `-32021` is raised during dispatch rather than in the preamble, so the
+    /// mandated `400` has to be recovered from the reply on its way out.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn spec_error_codes_map_to_400() {
+        for code in [
+            ErrorCode::HeaderMismatch,
+            ErrorCode::MissingRequiredClientCapability,
+            ErrorCode::UnsupportedProtocolVersion,
+        ] {
+            let msg = Message::Response(Response::error(
+                RequestId::Number(1),
+                Error::new(code, "nope"),
+            ));
+            assert_eq!(
+                dispatched_status(&msg),
+                http::StatusCode::BAD_REQUEST,
+                "{code:?} must answer 400"
+            );
+        }
+
+        // An ordinary application error still rides on `200 OK`.
+        let msg = Message::Response(Response::error(
+            RequestId::Number(1),
+            Error::new(ErrorCode::InvalidParams, "nope"),
+        ));
+        assert_eq!(dispatched_status(&msg), http::StatusCode::OK);
     }
 
     #[tokio::test]

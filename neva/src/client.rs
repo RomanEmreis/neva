@@ -387,6 +387,10 @@ impl Client {
         // this client speaks is among them.
         let expected = self.expected_protocol_ver();
         if !result.supported_versions.iter().any(|v| v == expected) {
+            // `connect` has already started the transport; leaving it running
+            // would park background HTTP/SSE tasks behind a client that never
+            // completed its handshake.
+            self.cancel_transport();
             return Err(Error::new(
                 ErrorCode::UnsupportedProtocolVersion,
                 format!(
@@ -537,11 +541,17 @@ impl Client {
     /// The spec makes rejection per-tool on purpose: one malformed definition
     /// must not take the whole listing down, and must not be callable either --
     /// so the offending tool is removed from the result the caller sees.
+    ///
+    /// A refreshed listing replaces what a tool registered before, including
+    /// replacing it with nothing: a server that drops an annotation must stop
+    /// the client from mirroring that argument into a header, which a
+    /// leftover registration would keep doing.
     #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
     fn register_param_headers(&mut self, result: &mut ListToolsResult) {
         use crate::shared::param_headers;
 
         result.tools.retain(|tool| {
+            self.options.param_headers.remove(&*tool.name);
             let schema = match serde_json::to_value(&tool.input_schema) {
                 Ok(schema) => schema,
                 Err(_) => return true,
@@ -1203,6 +1213,7 @@ impl Client {
                 .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?
                 .send_request(req)
                 .await?;
+            self.record_server_info(&resp);
 
             // MRTR only applies to success results carrying the
             // `input_required` discriminator; anything else -- including a
@@ -1561,6 +1572,7 @@ impl Client {
             // their slot; `input_required` ones are fulfilled and re-issued.
             for (slot_i, resp) in round_slots.into_iter().zip(responses) {
                 let resp = resp?;
+                self.record_server_info(&resp);
                 let (method, original_params) = match &slots[slot_i] {
                     Slot::Pending {
                         method,
@@ -2439,6 +2451,10 @@ mod dual_mode_tests {
             !client.is_legacy_peer(),
             "a successful discovery must never mark the peer legacy"
         );
+        assert!(
+            client.handler.is_none() && client.cancellation_token.is_none(),
+            "a failed negotiation must not leave the transport running"
+        );
 
         let log = log
             .lock()
@@ -2591,6 +2607,14 @@ mod roundtrip_tests {
         let tools = client.list_tools(None).await.expect("tools/list");
         assert_eq!(tools.tools.len(), 1);
         assert_eq!(tools.tools[0].name, "echo");
+
+        // `serverInfo` left `DiscoverResult`: it now rides in every result's
+        // `_meta`, and the MRTR send path -- which every 2026-07-28 request
+        // takes -- is what has to pick it up.
+        assert!(
+            client.server_info.is_some(),
+            "the server identifies itself in every result's `_meta`"
+        );
     }
 }
 

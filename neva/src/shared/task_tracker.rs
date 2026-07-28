@@ -169,6 +169,30 @@ impl TaskTracker {
     }
 
     /// Cancels the task
+    ///
+    /// Cancellation is cooperative under MCP 2026-07-28: the entry stays until
+    /// its TTL expires so the requestor can keep polling `tasks/get` for the
+    /// outcome. A tool that wins the race with the cancellation token still
+    /// overwrites the status with its own terminal one, which the spec allows.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(crate) fn cancel(&self, id: &str) -> Result<Task, Error> {
+        self.cleanup_expired();
+
+        if let Some(mut entry) = self.tasks.get_mut(id) {
+            entry.token.cancel();
+            entry.task = entry.task.clone().cancel();
+            self.schedule_expiry(&entry.task);
+            Ok(entry.task.clone())
+        } else {
+            Err(Error::new(
+                ErrorCode::InvalidParams,
+                format!("Could not find task with id: {id}"),
+            ))
+        }
+    }
+
+    /// Cancels the task
+    #[cfg(feature = "legacy-spec")]
     pub(crate) fn cancel(&self, id: &str) -> Result<Task, Error> {
         self.cleanup_expired();
 
@@ -562,6 +586,7 @@ mod tests {
         assert_eq!(tasks.len(), 2);
     }
 
+    #[cfg(feature = "legacy-spec")]
     #[test]
     fn it_can_cancel_task() {
         let tracker = TaskTracker::new();
@@ -572,6 +597,39 @@ mod tests {
 
         let result = tracker.cancel(&task_id).unwrap();
         assert_eq!(result.status, TaskStatus::Cancelled);
+        assert!(tracker.get_status(&task_id).is_err());
+    }
+
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn it_can_cancel_task() {
+        let tracker = TaskTracker::new();
+        let task = Task::new();
+        let task_id = task.id.clone();
+
+        let _handle = tracker.track(task);
+
+        let result = tracker.cancel(&task_id).unwrap();
+        assert_eq!(result.status, TaskStatus::Cancelled);
+
+        // The entry survives cancellation: the requestor learns the outcome by
+        // polling `tasks/get`, which would otherwise answer `InvalidParams`.
+        let status = tracker.get_status(&task_id).expect("cancelled task kept");
+        assert_eq!(status.status, TaskStatus::Cancelled);
+    }
+
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn it_does_remove_expired_cancelled_tasks() {
+        let tracker = TaskTracker::new();
+        let task = Task::from(crate::types::TaskMetadata { ttl: Some(1) });
+        let task_id = task.id.clone();
+
+        let _handle = tracker.track(task);
+        tracker.cancel(&task_id).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
         assert!(tracker.get_status(&task_id).is_err());
     }
 
