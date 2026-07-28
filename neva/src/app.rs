@@ -1265,6 +1265,24 @@ impl App {
             .map(strip_meta)
             .unwrap_or(serde_json::Value::Null);
 
+        // The `Mcp-Param-*` half of header validation. The transport preamble
+        // checks the standard routing headers, but these are defined by the
+        // called tool's own `x-mcp-header` annotations -- which only this side
+        // of the channel knows -- so the check lands where the tool registry
+        // does. The resulting `-32020` picks up its mandated `400` from the
+        // transport's status mapping on the way out.
+        #[cfg(all(feature = "http-server", not(feature = "legacy-spec")))]
+        if let Some(err) = param_header_error(&req, &runtime.options()).await {
+            let mut resp = Response::error(req_id, err);
+            // The transport correlates a reply by `session_id`+`id`; a reply
+            // that leaves without one is never matched to the POST waiting for
+            // it. Every other return path down this function does the same.
+            if let Some(session_id) = session_id {
+                resp = resp.set_session_id(session_id);
+            }
+            return resp;
+        }
+
         #[cfg(not(feature = "http-server"))]
         let context = runtime.context(session_id);
 
@@ -1605,6 +1623,97 @@ fn strip_meta(params: &serde_json::Value) -> serde_json::Value {
         }
         other => other.clone(),
     }
+}
+
+/// Why a `tools/call`'s mirrored `Mcp-Param-*` headers do not describe its
+/// arguments, if they do not.
+///
+/// A tool may annotate arguments with `x-mcp-header`, and the client must then
+/// mirror each present value into `Mcp-Param-{name}`. An intermediary is
+/// entitled to route or rate-limit on those headers, so a header that says one
+/// tenant while the body says another has to be rejected rather than
+/// dispatched -- otherwise the annotation is a suggestion, not a control.
+///
+/// Each annotated argument is checked in both directions: a value in the body
+/// requires the header, a header requires the value, and both present must
+/// agree after decoding the Base64 sentinel. Headers naming an argument this
+/// tool does not annotate are none of the origin server's business -- the spec
+/// has unrecognized `Mcp-Param-*` forwarded and ignored.
+///
+/// A definition whose annotations are invalid yields no expectations at all:
+/// the malformed tool is the problem, and the client is already required to
+/// drop it rather than call it.
+#[cfg(all(feature = "http-server", not(feature = "legacy-spec")))]
+async fn param_header_error(
+    req: &Request,
+    options: &crate::app::options::RuntimeMcpOptions,
+) -> Option<Error> {
+    use crate::shared::param_headers;
+    use crate::transport::http::decode_header_value;
+
+    if req.method != crate::types::tool::commands::CALL {
+        return None;
+    }
+
+    let params = req.params.as_ref()?.as_object()?;
+    let name = params.get("name")?.as_str()?;
+    let tool = options.get_tool(name).await?;
+    let schema = serde_json::to_value(&tool.input_schema).ok()?;
+    let declared = param_headers::collect(&schema).ok()?;
+    if declared.is_empty() {
+        return None;
+    }
+
+    let args = params.get("arguments").cloned().unwrap_or_default();
+    let mirrored = param_headers::extract(&declared, &args);
+
+    let mismatch = |header: &str, stated: &str, body: &str| {
+        Some(Error::new(
+            ErrorCode::HeaderMismatch,
+            format!(
+                "Header mismatch: {header} header value {stated:?} does not match body value {body:?}"
+            ),
+        ))
+    };
+
+    for header in &declared {
+        let name = format!("{}{}", param_headers::PARAM_HEADER_PREFIX, header.header);
+        let stated = req.headers.get(&name).and_then(|v| v.to_str().ok());
+        let body = mirrored
+            .iter()
+            .find(|(mirrored, _)| *mirrored == name)
+            .map(|(_, value)| value.as_str());
+
+        match (stated, body) {
+            (None, None) => {}
+            (None, Some(body)) => {
+                return Some(Error::new(
+                    ErrorCode::HeaderMismatch,
+                    format!("Missing {name} header for the mirrored argument {body:?}"),
+                ));
+            }
+            (Some(stated), None) => {
+                return Some(Error::new(
+                    ErrorCode::HeaderMismatch,
+                    format!(
+                        "{name} header sent as {stated:?}, but the call carries no such argument"
+                    ),
+                ));
+            }
+            (Some(stated), Some(body)) => match decode_header_value(stated) {
+                Some(decoded) if decoded == body => {}
+                Some(decoded) => return mismatch(&name, &decoded, body),
+                None => {
+                    return Some(Error::new(
+                        ErrorCode::HeaderMismatch,
+                        format!("Malformed {name} header value"),
+                    ));
+                }
+            },
+        }
+    }
+
+    None
 }
 
 /// Decodes/verifies any incoming `requestState` and merges this round's

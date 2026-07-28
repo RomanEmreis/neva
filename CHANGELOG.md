@@ -75,6 +75,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     `io.modelcontextprotocol/protocolVersion` (it was header-only). A body that
     names a different version than the `MCP-Protocol-Version` header is
     rejected as a header mismatch.
+  * **Routing headers are validated against the body.** `Mcp-Method` is
+    required on every request and `Mcp-Name` on `tools/call`, `resources/read`
+    and `prompts/get`; a `tools/call` must also mirror each `x-mcp-header`
+    argument into `Mcp-Param-{name}`. The server now rejects a missing or
+    disagreeing header with `HeaderMismatch` (`-32020`) and HTTP `400`,
+    decoding the `=?base64?...?=` sentinel before comparing. Without this an
+    intermediary routing or rate-limiting on those headers could be bypassed by
+    a body naming a different tool. Routing headers on a batch are rejected
+    outright -- no single method or name describes one.
   * **Required `_meta` fields are enforced.** Both keys above are mandatory on
     every request -- capabilities are declared per request precisely so a
     stateless server never infers them from earlier traffic -- and the HTTP

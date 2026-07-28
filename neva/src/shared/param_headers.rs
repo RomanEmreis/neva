@@ -11,12 +11,15 @@
 //! change what a well-formed one sends.
 
 use std::collections::HashMap;
+#[cfg(feature = "http-client")]
 use std::sync::Arc;
 
 /// Tool name -> the arguments that tool mirrors into headers.
 ///
 /// Populated from `tools/list` and read on `tools/call`; shared by handle so
-/// the transport task sees what the client registered.
+/// the transport task sees what the client registered. Client-side only -- a
+/// server reads the annotations straight off the tool it already owns.
+#[cfg(feature = "http-client")]
 pub(crate) type Registry = Arc<dashmap::DashMap<String, Vec<ParamHeader>>>;
 
 /// The annotation keyword inside a property schema.
