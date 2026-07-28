@@ -104,10 +104,37 @@ where
         Either::Left(task_result) => task_result.task.id,
     };
 
-    let mut elapsed = 0;
+    // The server retains a task for `ttlMs` from *its* `createdAt` and drops it
+    // afterwards, so the wait has to be measured against the same wall clock or
+    // it outlives what it is waiting for. Measured locally and monotonically
+    // rather than as `now - createdAt`: `createdAt` is the server's clock, and
+    // a client running a few minutes ahead would otherwise declare every task
+    // expired on the first poll. The cost is starting the count a round-trip
+    // late, which errs toward waiting slightly longer than the server does.
+    let waiting_since = tokio::time::Instant::now();
 
     loop {
         let task = api.get_task(&task_id).await?;
+
+        // `ttlMs` may change over a task's lifetime, so it is re-read every
+        // poll. Terminal statuses are answered below whatever the clock says:
+        // a result that arrived is a result, even if it arrived late.
+        if matches!(task.status, TaskStatus::Working | TaskStatus::InputRequired)
+            && task
+                .ttl
+                .is_some_and(|ttl| waiting_since.elapsed().as_millis() >= ttl as u128)
+        {
+            #[cfg(feature = "tracing")]
+            tracing::trace!(logger = "neva", "Task TTL expired. Cancelling task.");
+
+            // Best-effort: the server may already have dropped the task, and
+            // that failure must not mask why the wait ended.
+            let _ = api.cancel_task(&task_id).await;
+            return Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "Task was cancelled: TTL expired",
+            ));
+        }
 
         match task.status {
             TaskStatus::Completed => {
@@ -140,26 +167,13 @@ where
                 api.update_task(&task_id, responses).await?;
             }
             TaskStatus::Working => {
-                // The TTL is only charged against `working` polls: a task that
-                // is waiting on *us* should not time itself out.
-                if task.ttl.is_some_and(|ttl| ttl <= elapsed) {
-                    #[cfg(feature = "tracing")]
-                    tracing::trace!(logger = "neva", "Task TTL expired. Cancelling task.");
-
-                    api.cancel_task(&task_id).await?;
-                    return Err(Error::new(
-                        ErrorCode::InvalidRequest,
-                        "Task was cancelled: TTL expired",
-                    ));
-                }
-
                 let poll_interval = task.poll_interval.unwrap_or(DEFAULT_POLL_INTERVAL);
-                elapsed += poll_interval;
 
                 #[cfg(feature = "tracing")]
                 tracing::trace!(
                     logger = "neva",
-                    "Waiting for task to complete. Elapsed: {elapsed}ms"
+                    "Waiting for task to complete. Elapsed: {}ms",
+                    waiting_since.elapsed().as_millis()
                 );
 
                 tokio::time::sleep(Duration::from_millis(poll_interval as u64)).await;

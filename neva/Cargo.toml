@@ -100,4 +100,9 @@ client = ["dep:windows", "dep:nix", "dep:jsonschema", "tokio/process", "tokio/si
 legacy-spec = ["neva_macros?/legacy-spec"]
 
 [package.metadata.docs.rs]
-all-features = true
+# Not `all-features`: that would turn on `legacy-spec`, which compiles the
+# 2026-07-28 surface *out*. docs.rs would then publish the legacy profile as if
+# it were the crate -- no `server/discover`, no MRTR, no `DetailedTask`, and
+# `with_mcp_version` presented as current. `full` is every feature except the
+# generation flag, which is the default build users get.
+features = ["full"]

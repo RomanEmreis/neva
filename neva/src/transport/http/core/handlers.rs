@@ -582,38 +582,39 @@ fn get_or_create_mcp_session(
 
 /// Why a request's `_meta` is unacceptable, if it is.
 ///
-/// Two rules, in order. MCP 2026-07-28 makes `protocolVersion` and
-/// `clientCapabilities` mandatory on every request -- capabilities are
-/// declared per request precisely so a stateless server never has to infer
-/// them from earlier traffic -- and a request missing either is malformed
-/// params (`-32602`). A request that does state a version must state *this*
-/// one: disagreeing with the `MCP-Protocol-Version` header is a header
-/// mismatch (`-32020`), not a version problem, because the server cannot tell
-/// which of the two the client meant.
+/// Two rules, in order. MCP 2026-07-28 makes `protocolVersion` (a string) and
+/// `clientCapabilities` (an object) mandatory on every request -- capabilities
+/// are declared per request precisely so a stateless server never has to infer
+/// them from earlier traffic. A request that omits either, or states it with
+/// the wrong JSON type, is malformed params (`-32602`): a version that is not
+/// a string cannot be compared against the header, and treating it as absent
+/// would let the next rule be skipped by sending a number. A version that *is*
+/// stated must be this one -- disagreeing with the `MCP-Protocol-Version`
+/// header is a header mismatch (`-32020`), not a version problem, because the
+/// server cannot tell which of the two the client meant.
 ///
 /// Both answer `400 Bad Request`; the caller supplies the status.
 #[cfg(not(feature = "legacy-spec"))]
 fn request_meta_error(req: &crate::types::Request) -> Option<Error> {
-    const REQUIRED: [&str; 2] = [
-        "io.modelcontextprotocol/protocolVersion",
-        "io.modelcontextprotocol/clientCapabilities",
-    ];
+    const VERSION: &str = "io.modelcontextprotocol/protocolVersion";
+    const CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
 
     let meta = req.params.as_ref().and_then(|p| p.get("_meta"));
+    let field = |key: &str| meta.and_then(|m| m.get(key));
 
-    if let Some(missing) = REQUIRED
-        .into_iter()
-        .find(|key| meta.and_then(|m| m.get(key)).is_none())
-    {
-        return Some(Error::new(
+    let malformed = |key: &str, expected: &str| {
+        Some(Error::new(
             ErrorCode::InvalidParams,
-            format!("request `_meta` is missing the required `{missing}` field"),
-        ));
-    }
+            format!("request `_meta` is missing the required `{key}` {expected}"),
+        ))
+    };
 
-    let stated = meta
-        .and_then(|m| m.get(REQUIRED[0]))
-        .and_then(|v| v.as_str())?;
+    let Some(stated) = field(VERSION).and_then(|v| v.as_str()) else {
+        return malformed(VERSION, "string");
+    };
+    if field(CAPABILITIES).is_none_or(|v| !v.is_object()) {
+        return malformed(CAPABILITIES, "object");
+    }
 
     (stated != crate::LATEST_PROTOCOL_VERSION).then(|| {
         Error::new(
@@ -1066,6 +1067,23 @@ mod tests {
                 "jsonrpc": "2.0", "id": 1, "method": "tools/list",
                 "params": { "_meta": {
                     "io.modelcontextprotocol/protocolVersion": crate::LATEST_PROTOCOL_VERSION
+                } }
+            }),
+            // Present, but not a string -- it cannot be compared against the
+            // header, and must not be a way past the mismatch check either.
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+                "params": { "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": 20260728,
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                } }
+            }),
+            // Capabilities that are not an object declare nothing.
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+                "params": { "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": crate::LATEST_PROTOCOL_VERSION,
+                    "io.modelcontextprotocol/clientCapabilities": "elicitation"
                 } }
             }),
         ];

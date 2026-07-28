@@ -4,9 +4,30 @@
 //! ## Dependencies
 //! ```toml
 //! [dependencies]
-//! neva = { version = "0.3.3", features = ["full"] }
+//! neva = { version = "0.5.0", features = ["full"] }
 //! tokio = { version = "1", features = ["full"] }
 //! ```
+//!
+//! ## Protocol generations
+//! This documentation describes the default build, which speaks
+//! **MCP 2026-07-28**.
+//!
+//! The `legacy-spec` feature selects the previous generation
+//! (MCP 2024-11-05 .. 2025-11-25) instead: the `initialize` handshake, the
+//! session-bound SSE transport, server-pushed sampling/roots/logging, and a
+//! top-level `tasks` capability. It is a *replacement*, not an addition -- it
+//! compiles the 2026-07-28 surface out, so `server/discover`, MRTR and
+//! `DetailedTask` are absent from a `legacy-spec` build, and the API items
+//! documented here are not the ones it exposes.
+//!
+//! One build therefore speaks one generation. A deployment that must serve
+//! both runs two servers, one per profile, on separate endpoints. A *client*
+//! is the exception: it cannot choose its peer, so a 2026-07-28 client falls
+//! back to the `initialize` handshake when `server/discover` is rejected, and
+//! from then on speaks the legacy protocol for the core primitives. Extensions
+//! are not covered by that fallback -- a task-augmented request against a peer
+//! that fell back is refused rather than sent in a dialect the peer cannot
+//! read.
 //!
 //! ## Example Server
 //! ```no_run
