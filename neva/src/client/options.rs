@@ -34,6 +34,9 @@ pub struct TraceContext {
     pub traceparent: String,
     /// Vendor-specific `tracestate`, when available.
     pub tracestate: Option<String>,
+    /// W3C `baggage` -- application-defined key/value context propagated
+    /// alongside the trace, when available.
+    pub baggage: Option<String>,
 }
 
 /// User-supplied callback that returns the current W3C Trace Context.
@@ -41,12 +44,17 @@ pub struct TraceContext {
 /// Invoked once per outbound request (before serialization). Return
 /// `None` to omit trace headers from this request.
 #[cfg(not(feature = "legacy-spec"))]
-pub type TraceContextProvider = std::sync::Arc<dyn Fn() -> Option<TraceContext> + Send + Sync>;
+pub type TraceContextProvider = Arc<dyn Fn() -> Option<TraceContext> + Send + Sync>;
 
 /// Represents MCP client configuration options
 pub struct McpOptions {
     /// Information of current client's implementation
     pub(crate) implementation: Implementation,
+
+    /// `x-mcp-header` annotations recorded from `tools/list`, shared with the
+    /// HTTP transport so a `tools/call` can mirror the designated arguments.
+    #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+    pub(crate) param_headers: crate::shared::param_headers::Registry,
 
     /// Request timeout
     pub(super) timeout: Duration,
@@ -134,6 +142,8 @@ impl Default for McpOptions {
         Self {
             timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT),
             implementation: Default::default(),
+            #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+            param_headers: Default::default(),
             roots: Default::default(),
             roots_capability: None,
             sampling_capability: None,
@@ -377,9 +387,10 @@ impl McpOptions {
         // variant at all) pass the transport through untouched.
         #[cfg(all(not(feature = "legacy-spec"), feature = "http-client"))]
         let transport = match transport {
-            TransportProto::HttpClient(http) => {
-                TransportProto::HttpClient(Box::new(http.with_peer_mode(self.peer_mode.clone())))
-            }
+            TransportProto::HttpClient(http) => TransportProto::HttpClient(Box::new(
+                http.with_peer_mode(self.peer_mode.clone())
+                    .with_param_headers(self.param_headers.clone()),
+            )),
             other => other,
         };
         transport
@@ -534,6 +545,7 @@ mod tests {
             Some(TraceContext {
                 traceparent: "tp".into(),
                 tracestate: Some("ts".into()),
+                baggage: Some("bg".into()),
             })
         });
         let tc = (opts.trace_context_provider.as_ref().unwrap())().unwrap();

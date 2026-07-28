@@ -70,7 +70,7 @@ const SSE_RECONNECT_DELAY: Duration = Duration::from_secs(3);
 const STREAM_ENDED_BEFORE_RESPONSE: &str = "POST SSE stream ended before the response arrived";
 
 #[cfg(not(feature = "legacy-spec"))]
-fn routing_hints(msg: &Message) -> Option<(&str, Option<&str>)> {
+fn routing_hints(msg: &Message) -> Option<(&str, Option<String>)> {
     match msg {
         Message::Request(r) => Some((r.method.as_str(), name_param(r))),
         Message::Notification(n) => Some((n.method.as_str(), None)),
@@ -78,11 +78,14 @@ fn routing_hints(msg: &Message) -> Option<(&str, Option<&str>)> {
     }
 }
 
+/// The `Mcp-Name` value for `req`, already header-encoded.
+///
+/// The spec requires the header on `tools/call`, `resources/read` and
+/// `prompts/get` (sourced from `params.name` / `params.uri`); the Tasks
+/// extension adds `params.taskId` on its own methods so an intermediary can
+/// route every call for a task to the instance holding its state.
 #[cfg(not(feature = "legacy-spec"))]
-fn name_param(req: &crate::types::Request) -> Option<&str> {
-    // The Tasks extension requires `Mcp-Name` to carry `params.taskId` on
-    // `tasks/get` / `tasks/update` / `tasks/cancel`, so an intermediary can
-    // route every call for a task to the instance holding its state.
+fn name_param(req: &crate::types::Request) -> Option<String> {
     #[cfg(feature = "tasks")]
     {
         use crate::types::task::commands as tasks;
@@ -90,14 +93,78 @@ fn name_param(req: &crate::types::Request) -> Option<&str> {
             req.method.as_str(),
             tasks::GET | tasks::UPDATE | tasks::CANCEL
         ) {
-            return req.params.as_ref()?.as_object()?.get("taskId")?.as_str();
+            let raw = req.params.as_ref()?.as_object()?.get("taskId")?.as_str()?;
+            return Some(encode_header_value(raw));
         }
     }
 
-    if req.method != crate::types::tool::commands::CALL {
-        return None;
+    let field = match req.method.as_str() {
+        crate::types::tool::commands::CALL | crate::types::prompt::commands::GET => "name",
+        crate::types::resource::commands::READ => "uri",
+        _ => return None,
+    };
+
+    let raw = req.params.as_ref()?.as_object()?.get(field)?.as_str()?;
+
+    Some(encode_header_value(raw))
+}
+
+/// Marks a header value as Base64-encoded UTF-8: `=?base64?{value}?=`.
+#[cfg(not(feature = "legacy-spec"))]
+const B64_PREFIX: &str = "=?base64?";
+#[cfg(not(feature = "legacy-spec"))]
+const B64_SUFFIX: &str = "?=";
+
+/// Encodes `raw` for use as an HTTP header value, per the spec's value-encoding
+/// rules.
+///
+/// RFC 9110 limits field values to visible ASCII, space and horizontal tab,
+/// with no leading or trailing whitespace. Anything outside that -- and any
+/// plain value that would otherwise be mistaken for the sentinel -- travels
+/// Base64-encoded instead.
+#[cfg(not(feature = "legacy-spec"))]
+fn encode_header_value(raw: &str) -> String {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
+    let safe = !raw.is_empty()
+        && raw
+            .bytes()
+            .all(|b| b == b'\t' || (0x20..=0x7E).contains(&b))
+        && !raw.starts_with([' ', '\t'])
+        && !raw.ends_with([' ', '\t']);
+    let sentinel_lookalike = raw.starts_with(B64_PREFIX) && raw.ends_with(B64_SUFFIX);
+
+    if safe && !sentinel_lookalike {
+        raw.to_owned()
+    } else {
+        format!("{B64_PREFIX}{}{B64_SUFFIX}", STANDARD.encode(raw))
     }
-    req.params.as_ref()?.as_object()?.get("name")?.as_str()
+}
+
+/// The `Mcp-Param-*` headers a `tools/call` mirrors, per the called tool's
+/// registered `x-mcp-header` annotations.
+#[cfg(not(feature = "legacy-spec"))]
+fn param_headers(
+    msg: &Message,
+    registry: &crate::shared::param_headers::Registry,
+) -> Vec<(String, String)> {
+    let Message::Request(req) = msg else {
+        return Vec::new();
+    };
+    if req.method != crate::types::tool::commands::CALL {
+        return Vec::new();
+    }
+    let Some(params) = req.params.as_ref().and_then(|p| p.as_object()) else {
+        return Vec::new();
+    };
+    let Some(name) = params.get("name").and_then(|n| n.as_str()) else {
+        return Vec::new();
+    };
+    let Some(entry) = registry.get(name) else {
+        return Vec::new();
+    };
+    let args = params.get("arguments").cloned().unwrap_or_default();
+    crate::shared::param_headers::extract(entry.value(), &args)
 }
 
 pub(super) async fn connect(rt: ClientRuntimeContext, token: CancellationToken) {
@@ -126,6 +193,8 @@ pub(super) async fn connect(rt: ClientRuntimeContext, token: CancellationToken) 
             rt.rx,
             rt.tx.clone(),
             auth.clone(),
+            #[cfg(not(feature = "legacy-spec"))]
+            rt.param_headers.clone(),
             #[cfg(feature = "client-tls")]
             rt.tls_config.clone()
         ),
@@ -144,6 +213,7 @@ async fn handle_connection(
     mut sender_rx: mpsc::Receiver<Message>,
     recv_tx: mpsc::Sender<Result<Message, Error>>,
     auth: ClientAuth,
+    #[cfg(not(feature = "legacy-spec"))] param_registry: crate::shared::param_headers::Registry,
     #[cfg(feature = "client-tls")] tls_config: Option<ClientTlsConfig>,
 ) {
     #[cfg(not(feature = "client-tls"))]
@@ -182,7 +252,9 @@ async fn handle_connection(
                     session.clone(),
                     req,
                     recv_tx.clone(),
-                    auth.clone()
+                    auth.clone(),
+                    #[cfg(not(feature = "legacy-spec"))]
+                    param_registry.clone(),
                 ));
             }
         }
@@ -196,6 +268,7 @@ fn build_post(
     session: &McpSession,
     req: &Message,
     bearer: Option<&str>,
+    #[cfg(not(feature = "legacy-spec"))] param_registry: &crate::shared::param_headers::Registry,
 ) -> RequestBuilder {
     let mut resp = client
         .post(session.url())
@@ -221,6 +294,9 @@ fn build_post(
                 resp = resp.header(crate::transport::http::MCP_NAME, n);
             }
         }
+        for (name, value) in param_headers(req, param_registry) {
+            resp = resp.header(name, encode_header_value(&value));
+        }
         resp = resp.header(
             crate::transport::http::MCP_PROTOCOL_VERSION,
             crate::LATEST_PROTOCOL_VERSION,
@@ -239,11 +315,19 @@ async fn send_request(
     req: Message,
     resp_tx: mpsc::Sender<Result<Message, Error>>,
     auth: ClientAuth,
+    #[cfg(not(feature = "legacy-spec"))] param_registry: crate::shared::param_headers::Registry,
 ) {
     let bearer = auth.fresh_bearer().await;
-    let resp = match build_post(&client, &session, &req, bearer.as_deref())
-        .send()
-        .await
+    let resp = match build_post(
+        &client,
+        &session,
+        &req,
+        bearer.as_deref(),
+        #[cfg(not(feature = "legacy-spec"))]
+        &param_registry,
+    )
+    .send()
+    .await
     {
         Ok(resp) => resp,
         Err(_err) => {
@@ -270,9 +354,16 @@ async fn send_request(
                 .await
             {
                 Ok(fresh) => {
-                    match build_post(&client, &session, &req, Some(&fresh))
-                        .send()
-                        .await
+                    match build_post(
+                        &client,
+                        &session,
+                        &req,
+                        Some(&fresh),
+                        #[cfg(not(feature = "legacy-spec"))]
+                        &param_registry,
+                    )
+                    .send()
+                    .await
                     {
                         Ok(retried) => retried,
                         Err(_err) => {
@@ -1035,7 +1126,7 @@ mod tests {
 #[cfg(test)]
 #[cfg(not(feature = "legacy-spec"))]
 mod routing_hints_tests {
-    use super::routing_hints;
+    use super::{encode_header_value, name_param, routing_hints};
     use crate::types::notification::Notification;
     use crate::types::{Message, Request, RequestId};
     use serde_json::json;
@@ -1059,7 +1150,54 @@ mod routing_hints_tests {
         let msg = Message::Request(req);
         let hints = routing_hints(&msg).unwrap();
         assert_eq!(hints.0, "tools/call");
-        assert_eq!(hints.1, Some("echo"));
+        assert_eq!(hints.1.as_deref(), Some("echo"));
+    }
+
+    /// The spec requires `Mcp-Name` on `tools/call`, `resources/read` and
+    /// `prompts/get`, sourced from `params.name` / `params.uri`.
+    #[test]
+    #[cfg(not(feature = "legacy-spec"))]
+    fn name_header_is_sourced_per_method() {
+        use crate::types::{Request, RequestId};
+        use serde_json::json;
+
+        let cases = [
+            ("tools/call", json!({ "name": "echo" }), Some("echo")),
+            (
+                "prompts/get",
+                json!({ "name": "greeting" }),
+                Some("greeting"),
+            ),
+            (
+                "resources/read",
+                json!({ "uri": "file:///a.txt" }),
+                Some("file:///a.txt"),
+            ),
+            ("tools/list", json!({}), None),
+        ];
+
+        for (method, params, expected) in cases {
+            let req = Request::new(Some(RequestId::Number(1)), method, Some(params));
+            assert_eq!(name_param(&req).as_deref(), expected, "method: {method}");
+        }
+    }
+
+    #[test]
+    #[cfg(not(feature = "legacy-spec"))]
+    fn header_values_are_encoded_when_not_ascii_safe() {
+        // Plain ASCII passes through...
+        assert_eq!(encode_header_value("us-west1"), "us-west1");
+        // ...anything else travels Base64 behind the sentinel.
+        assert_eq!(encode_header_value("caf\u{e9}"), "=?base64?Y2Fmw6k=?=");
+        assert_eq!(encode_header_value(" lead"), "=?base64?IGxlYWQ=?=");
+        assert_eq!(encode_header_value("trail "), "=?base64?dHJhaWwg?=");
+        assert_eq!(encode_header_value("a\nb"), "=?base64?YQpi?=");
+        // A plain value that looks like the sentinel must be encoded too, or a
+        // server would decode something the client never encoded.
+        assert_eq!(
+            encode_header_value("=?base64?zzz?="),
+            "=?base64?PT9iYXNlNjQ/enp6Pz0=?="
+        );
     }
 
     #[test]

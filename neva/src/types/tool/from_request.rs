@@ -83,6 +83,7 @@ mod tests {
             meta: Some(RequestParamsMeta {
                 progress_token: None,
                 traceparent: None,
+                baggage: None,
                 tracestate: None,
                 client_info: None,
                 #[cfg(not(feature = "legacy-spec"))]
@@ -116,6 +117,7 @@ mod tests {
             meta: Some(RequestParamsMeta {
                 progress_token: Some(ProgressToken::Number(5)),
                 traceparent: None,
+                baggage: None,
                 tracestate: None,
                 client_info: None,
                 #[cfg(not(feature = "legacy-spec"))]

@@ -86,6 +86,15 @@ pub struct RequestParamsMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tracestate: Option<String>,
 
+    /// W3C Baggage carrier, when set by the sender.
+    ///
+    /// The third key the spec reserves for OpenTelemetry propagation
+    /// alongside [`Self::traceparent`] / [`Self::tracestate`]; values follow
+    /// the [W3C Baggage](https://www.w3.org/TR/baggage/) format. Same
+    /// source-compatibility rationale as its companions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baggage: Option<String>,
+
     /// Client implementation info carried on every request under MCP
     /// 2026-07-28 (replaces the `initialize` handshake's `clientInfo`).
     ///

@@ -43,6 +43,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     `HttpEngine` contract); the axum/hyper/actix engine examples were updated
     to the two-arm match.
 
+* **Minor final-spec items** (MCP 2026-07-28, #99).
+  * **Deterministic `tools/list` order.** The spec asks servers to list tools in
+    a deterministic order (it lets clients cache, and improves LLM prompt-cache
+    hit rates). neva's registries were `HashMap`-backed, so the order was
+    arbitrary *and* cursor pagination could skip or repeat entries across
+    pages; they are `BTreeMap`-backed now, ordered by name.
+  * **`x-mcp-header`.** A server may annotate a tool's `inputSchema` property to
+    have the argument mirrored into an `Mcp-Param-{name}` header. Servers may
+    use it; clients **must** honor it, so the client now records the
+    annotations from `tools/list` and attaches the headers on `tools/call`.
+    Definitions that break the spec's constraints (non-token name, duplicate,
+    non-primitive type, or a property not statically reachable through
+    `properties`) cause the *tool* to be dropped from the listing, so one bad
+    definition cannot change what a good one sends. Streamable HTTP only --
+    other transports may ignore the annotation.
+  * **`Mcp-Name` on every method that requires it.** It was sent only for
+    `tools/call`; the spec also requires it on `resources/read` (`params.uri`)
+    and `prompts/get` (`params.name`). Values that are not safe ASCII -- and
+    plain values that would be mistaken for the marker -- now travel Base64
+    behind the `=?base64?...?=` sentinel.
+  * **`baggage`** joins `traceparent` / `tracestate` as a reserved `_meta` key
+    for OpenTelemetry propagation, on `TraceContext` and the passive recorder.
+  * **`includeContext`.** `thisServer` / `allServers` (and their builders) are
+    `#[deprecated]` in the default build; omit the field or use `none`.
 * **Wire conformance pack** (MCP 2026-07-28, #98). Assorted field/method/code
   mismatches against the final schema, all gated so `legacy-spec` is unchanged.
   * **`_meta` key naming.** Per-request client capabilities move from the bare

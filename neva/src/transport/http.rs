@@ -145,6 +145,8 @@ pub struct HttpClient {
     access_token: Option<Box<[u8]>>,
     #[cfg(not(feature = "legacy-spec"))]
     peer_mode: crate::shared::PeerMode,
+    #[cfg(all(not(feature = "legacy-spec"), feature = "http-client"))]
+    param_headers: crate::shared::param_headers::Registry,
     #[cfg(feature = "client-oauth")]
     oauth: Option<client::oauth::OAuthClientConfig>,
     #[cfg(feature = "client-tls")]
@@ -168,6 +170,8 @@ pub(super) struct ClientRuntimeContext {
     access_token: Option<Box<[u8]>>,
     #[cfg(not(feature = "legacy-spec"))]
     pub(super) peer_mode: crate::shared::PeerMode,
+    #[cfg(all(not(feature = "legacy-spec"), feature = "http-client"))]
+    pub(super) param_headers: crate::shared::param_headers::Registry,
     #[cfg(feature = "client-oauth")]
     oauth: Option<std::sync::Arc<client::oauth::OAuthSession>>,
     #[cfg(feature = "client-tls")]
@@ -234,6 +238,8 @@ impl Default for HttpClient {
             access_token: None,
             #[cfg(not(feature = "legacy-spec"))]
             peer_mode: Default::default(),
+            #[cfg(all(not(feature = "legacy-spec"), feature = "http-client"))]
+            param_headers: Default::default(),
             #[cfg(feature = "client-oauth")]
             oauth: None,
             #[cfg(feature = "client-tls")]
@@ -673,6 +679,17 @@ impl HttpClient {
         self
     }
 
+    /// Hands the `x-mcp-header` registry to this transport, so a `tools/call`
+    /// can mirror the designated arguments into `Mcp-Param-*` headers.
+    #[cfg(all(not(feature = "legacy-spec"), feature = "http-client"))]
+    pub(crate) fn with_param_headers(
+        mut self,
+        registry: crate::shared::param_headers::Registry,
+    ) -> Self {
+        self.param_headers = registry;
+        self
+    }
+
     /// Hands the dual-mode protocol switch to this transport (set by
     /// `McpOptions::transport`) so per-request headers follow the
     /// negotiated protocol generation.
@@ -746,6 +763,8 @@ impl HttpClient {
             access_token: self.access_token.take(),
             #[cfg(not(feature = "legacy-spec"))]
             peer_mode: self.peer_mode.clone(),
+            #[cfg(all(not(feature = "legacy-spec"), feature = "http-client"))]
+            param_headers: self.param_headers.clone(),
             #[cfg(feature = "client-oauth")]
             oauth,
             #[cfg(feature = "client-tls")]

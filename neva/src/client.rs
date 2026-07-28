@@ -521,9 +521,47 @@ impl Client {
     /// ```
     pub async fn list_tools(&mut self, cursor: Option<Cursor>) -> Result<ListToolsResult, Error> {
         let params = ListToolsRequestParams { cursor };
-        self.command(crate::types::tool::commands::LIST, Some(params))
+        #[allow(unused_mut)]
+        let mut result: ListToolsResult = self
+            .command(crate::types::tool::commands::LIST, Some(params))
             .await?
-            .into_result()
+            .into_result()?;
+        #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+        self.register_param_headers(&mut result);
+        Ok(result)
+    }
+
+    /// Records each tool's `x-mcp-header` annotations and drops any tool whose
+    /// annotations are invalid.
+    ///
+    /// The spec makes rejection per-tool on purpose: one malformed definition
+    /// must not take the whole listing down, and must not be callable either --
+    /// so the offending tool is removed from the result the caller sees.
+    #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+    fn register_param_headers(&mut self, result: &mut ListToolsResult) {
+        use crate::shared::param_headers;
+
+        result.tools.retain(|tool| {
+            let schema = match serde_json::to_value(&tool.input_schema) {
+                Ok(schema) => schema,
+                Err(_) => return true,
+            };
+            match param_headers::collect(&schema) {
+                Ok(headers) => {
+                    if !headers.is_empty() {
+                        self.options
+                            .param_headers
+                            .insert(tool.name.to_string(), headers);
+                    }
+                    true
+                }
+                Err(_err) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(logger = "neva", "Dropping tool `{}`: {_err}", tool.name);
+                    false
+                }
+            }
+        });
     }
 
     /// Requests a list of resources that MCP server provides
@@ -1248,6 +1286,7 @@ impl Client {
         {
             meta.traceparent = Some(tc.traceparent);
             meta.tracestate = tc.tracestate;
+            meta.baggage = tc.baggage;
         }
 
         // Request-scoped logging level (replaces the removed `logging/setLevel`).
@@ -1986,6 +2025,7 @@ mod tests {
                 Some(TraceContext {
                     traceparent: "tp".into(),
                     tracestate: Some("ts".into()),
+                    baggage: Some("bg".into()),
                 })
             })
         });

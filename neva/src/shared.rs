@@ -38,6 +38,10 @@ mod message_registry;
 #[cfg(feature = "http-client")]
 pub mod mt;
 mod one_or_many;
+// `x-mcp-header` is a client-side obligation on the Streamable HTTP transport;
+// clients on other transports may ignore the annotations entirely.
+#[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+pub(crate) mod param_headers;
 #[cfg(any(feature = "server", feature = "client"))]
 mod requests_queue;
 #[cfg(feature = "http-server")]

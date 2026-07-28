@@ -1,22 +1,28 @@
 //! Represents a generic-collection implementation that can be mutated during runtime
+//!
+//! Backed by a [`BTreeMap`] rather than a hash map: MCP 2026-07-28 asks servers
+//! to return `tools/list` in a deterministic order (it lets clients cache and
+//! improves LLM prompt-cache hit rates), and cursor pagination is only sound
+//! over a stable total order in the first place. Ordering by key gives both,
+//! and the registries are small enough that the lookup difference is noise.
 
 use crate::error::{Error, ErrorCode};
 use crate::types::Cursor;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use tokio::sync::RwLock;
 
 /// Generic collection with 2 states:
 /// - [`Collection::Init`] - initialization state can be mutated without blocking
 /// - [`Collection::Runtime`] - runtime state, the collection can be read by multiple readers and will blocked by only one writer
 pub(crate) enum Collection<T: Clone> {
-    Init(HashMap<String, T>),
-    Runtime(RwLock<HashMap<String, T>>),
+    Init(BTreeMap<String, T>),
+    Runtime(RwLock<BTreeMap<String, T>>),
 }
 
 impl<T: Clone> Collection<T> {
     /// Creates a new [`Collection`] in [`Collection::Init`] state
     pub(crate) fn new() -> Self {
-        Self::Init(HashMap::new())
+        Self::Init(BTreeMap::new())
     }
 
     /// Turns the [`Collection`] into [`Collection::Runtime`] state
@@ -120,9 +126,9 @@ impl<T: Clone> Collection<T> {
     }
 }
 
-impl<T: Clone> AsMut<HashMap<String, T>> for Collection<T> {
+impl<T: Clone> AsMut<BTreeMap<String, T>> for Collection<T> {
     #[inline]
-    fn as_mut(&mut self) -> &mut HashMap<String, T> {
+    fn as_mut(&mut self) -> &mut BTreeMap<String, T> {
         if let Self::Init(map) = self {
             map
         } else {
@@ -131,14 +137,66 @@ impl<T: Clone> AsMut<HashMap<String, T>> for Collection<T> {
     }
 }
 
-impl<T: Clone> AsRef<HashMap<String, T>> for Collection<T> {
+impl<T: Clone> AsRef<BTreeMap<String, T>> for Collection<T> {
     #[inline]
-    fn as_ref(&self) -> &HashMap<String, T> {
+    fn as_ref(&self) -> &BTreeMap<String, T> {
         if let Self::Init(map) = self {
             map
         } else {
             unreachable!()
         }
+    }
+}
+
+#[cfg(test)]
+mod ordering_tests {
+    use super::Collection;
+
+    /// MCP 2026-07-28: `tools/list` must come back in a deterministic order.
+    /// A hash map would satisfy neither "same order twice" across processes nor
+    /// sound cursor pagination.
+    #[tokio::test]
+    async fn values_are_ordered_by_key() {
+        let mut c = Collection::<u8>::new();
+        for name in ["zeta", "alpha", "mu", "beta"] {
+            c.as_mut().insert(name.to_string(), 0);
+        }
+        let c = c.into_runtime();
+
+        // The keys, in the order `values()` walks them.
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            seen.push(c.values().await.len());
+        }
+        assert_eq!(seen, [4, 4, 4, 4]);
+
+        let (page, cursor) = c.page_values(None, 2).await;
+        assert_eq!(page.len(), 2);
+        assert!(cursor.is_some());
+    }
+
+    #[tokio::test]
+    async fn pagination_walks_every_entry_exactly_once() {
+        let mut c = Collection::<String>::new();
+        for name in ["e", "a", "d", "b", "c"] {
+            c.as_mut().insert(name.to_string(), name.to_string());
+        }
+        let c = c.into_runtime();
+
+        let mut seen = Vec::new();
+        let mut cursor = None;
+        loop {
+            let (page, next) = c.page_values(cursor, 2).await;
+            seen.extend(page);
+            match next {
+                Some(n) => cursor = Some(n),
+                None => break,
+            }
+        }
+
+        // Sorted by key, no gaps and no repeats -- which is what makes a
+        // cursor over the collection meaningful at all.
+        assert_eq!(seen, ["a", "b", "c", "d", "e"]);
     }
 }
 

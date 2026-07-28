@@ -267,9 +267,10 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
 
     // Passive W3C Trace Context recorder: when both MCP 2026-07-28
     // and `tracing` are enabled, record any `_meta.traceparent` /
-    // `_meta.tracestate` on the active span. `Span::current().record(...)`
-    // is a no-op unless the caller's span declares these fields via
-    // `#[instrument(fields(traceparent, tracestate))]`.
+    // `_meta.tracestate` / `_meta.baggage` on the active span.
+    // `Span::current().record(...)` is a no-op unless the caller's span
+    // declares these fields via
+    // `#[instrument(fields(traceparent, tracestate, baggage))]`.
     #[cfg(all(not(feature = "legacy-spec"), feature = "tracing"))]
     if let Message::Request(ref r) = msg
         && let Some(meta) = r
@@ -283,6 +284,9 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
         }
         if let Some(ts) = meta.get("tracestate").and_then(|v| v.as_str()) {
             tracing::Span::current().record("tracestate", ts);
+        }
+        if let Some(bg) = meta.get("baggage").and_then(|v| v.as_str()) {
+            tracing::Span::current().record("baggage", bg);
         }
     }
 
