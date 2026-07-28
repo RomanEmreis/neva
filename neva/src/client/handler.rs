@@ -90,7 +90,12 @@ pub(super) struct RequestHandler {
 }
 
 impl Roots {
-    fn new(options: &McpOptions, notifications_sender: &TransportProtoSender) -> Self {
+    fn new(
+        options: &McpOptions,
+        // Only the legacy build pushes `notifications/roots/list_changed`.
+        #[cfg_attr(not(feature = "legacy-spec"), allow(unused_variables))]
+        notifications_sender: &TransportProtoSender,
+    ) -> Self {
         let mut roots = Self {
             inner: Arc::new(RwLock::new(options.roots())),
             sender: None,
@@ -104,17 +109,24 @@ impl Roots {
             roots.sender = Some(tx);
 
             let roots = roots.inner.clone();
+            #[cfg(feature = "legacy-spec")]
             let mut sender = notifications_sender.clone();
             tokio::spawn(async move {
                 while let Some(new_roots) = rx.recv().await {
                     let mut current_roots = roots.write().await;
                     *current_roots = new_roots;
 
-                    let changed =
-                        Notification::new(crate::types::root::commands::LIST_CHANGED, None);
-                    if let Err(_err) = sender.send(changed.into()).await {
-                        #[cfg(feature = "tracing")]
-                        tracing::error!("Error sending notification: {:?}", _err);
+                    // `notifications/roots/list_changed` is removed in MCP
+                    // 2026-07-28: the server reads roots on the MRTR loop, so a
+                    // change is simply picked up on the next ask.
+                    #[cfg(feature = "legacy-spec")]
+                    {
+                        let changed =
+                            Notification::new(crate::types::root::commands::LIST_CHANGED, None);
+                        if let Err(_err) = sender.send(changed.into()).await {
+                            #[cfg(feature = "tracing")]
+                            tracing::error!("Error sending notification: {:?}", _err);
+                        }
                     }
                 }
             });

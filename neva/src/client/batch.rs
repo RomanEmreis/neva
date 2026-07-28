@@ -150,6 +150,9 @@ impl<'a> BatchBuilder<'a> {
     }
 
     /// Enqueues a `ping` request.
+    ///
+    /// Removed in MCP 2026-07-28; available only under `legacy-spec`.
+    #[cfg(feature = "legacy-spec")]
     pub fn ping(mut self) -> Self {
         self.push_request(crate::commands::PING, None::<()>);
         self

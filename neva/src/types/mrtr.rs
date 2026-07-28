@@ -251,6 +251,20 @@ impl ClientMrtrCapabilities {
             InputRequest::Roots(_) => self.roots,
         }
     }
+
+    /// The capability set the server needs for `request`, as the
+    /// `requiredCapabilities` payload of a
+    /// [`MissingRequiredClientCapability`](crate::error::ErrorCode::MissingRequiredClientCapability)
+    /// error -- so the client is told what to declare, not just that something
+    /// was missing.
+    pub(crate) fn requiring(&self, request: &InputRequest) -> Self {
+        #[allow(deprecated)]
+        Self {
+            elicitation: matches!(request, InputRequest::Elicitation(_)),
+            sampling: matches!(request, InputRequest::Sampling(_)),
+            roots: matches!(request, InputRequest::Roots(_)),
+        }
+    }
 }
 
 /// Unit tag serializing as the constant string `"input_required"`.

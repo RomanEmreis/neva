@@ -183,7 +183,7 @@ async fn task_augmented_tool_elicits_via_suspend_resume() {
         "params": {
             "name": "greet_task", "arguments": {},
             "task": { "ttl": 60000 },
-            "_meta": { "clientCapabilities": { "elicitation": true } }
+            "_meta": { "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } }
         }
     }))
     .await;
@@ -314,7 +314,7 @@ async fn mrtr_elicit_inside_a_task_is_rejected_with_guidance() {
         "params": {
             "name": "bad_elicit", "arguments": {},
             "task": { "ttl": 60000 },
-            "_meta": { "clientCapabilities": { "elicitation": true } }
+            "_meta": { "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } }
         }
     }))
     .await;

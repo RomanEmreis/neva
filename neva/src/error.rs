@@ -16,6 +16,13 @@ type BoxError = Box<dyn StdError + Send + Sync>;
 pub struct Error {
     pub(crate) code: ErrorCode,
     inner: BoxError,
+    /// Structured payload carried into the JSON-RPC error object's `data`.
+    ///
+    /// MCP 2026-07-28 specifies a `data` shape for some errors (the supported
+    /// versions on an unsupported-version rejection, the capabilities a server
+    /// needs on a missing-capability rejection), so the code alone is not the
+    /// whole error.
+    pub(crate) data: Option<serde_json::Value>,
 }
 
 impl fmt::Display for Error {
@@ -35,6 +42,7 @@ impl From<serde_json::Error> for Error {
         Self {
             inner: err.into(),
             code: ErrorCode::ParseError,
+            data: None,
         }
     }
 }
@@ -44,6 +52,7 @@ impl From<IoError> for Error {
         Self {
             inner: err.into(),
             code: ErrorCode::InternalError,
+            data: None,
         }
     }
 }
@@ -61,7 +70,24 @@ impl Error {
         Self {
             inner: err.into(),
             code: code.try_into().unwrap_or_default(),
+            data: None,
         }
+    }
+
+    /// Attaches a structured `data` payload to this error.
+    ///
+    /// # Example
+    /// ```
+    /// use neva::error::{Error, ErrorCode};
+    ///
+    /// let err = Error::new(ErrorCode::InvalidParams, "bad city")
+    ///     .with_data(serde_json::json!({ "field": "city" }));
+    /// # let _ = err;
+    /// ```
+    #[inline]
+    pub fn with_data(mut self, data: serde_json::Value) -> Self {
+        self.data = Some(data);
+        self
     }
 
     /// Builds the internal MRTR "input required" sentinel error.

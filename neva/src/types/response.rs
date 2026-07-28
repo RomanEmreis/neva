@@ -204,6 +204,49 @@ impl Response {
         })
     }
 
+    /// Stamps the server's identity into the result's `_meta` under
+    /// `io.modelcontextprotocol/serverInfo` (MCP 2026-07-28).
+    ///
+    /// The final spec dropped `serverInfo` from `DiscoverResult` and instead
+    /// asks servers to identify themselves on *every* result, so this runs at
+    /// the dispatch seam rather than in any one result type. Error responses
+    /// and non-object results are left alone -- there is no `_meta` to write
+    /// to. An entry already present is not overwritten.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use neva::types::{Implementation, RequestId, Response};
+    ///
+    /// let info = Implementation {
+    ///     name: "my-server".into(),
+    ///     version: "1.0.0".into(),
+    ///     icons: None,
+    /// };
+    /// let resp = Response::success(RequestId::Number(1), serde_json::json!({}))
+    ///     .with_server_info(&info);
+    /// # let _ = resp;
+    /// ```
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn with_server_info(mut self, info: &crate::types::Implementation) -> Self {
+        const KEY: &str = "io.modelcontextprotocol/serverInfo";
+
+        if let Response::Ok(ok) = &mut self
+            && let Value::Object(result) = &mut ok.result
+        {
+            let meta = result
+                .entry("_meta")
+                .or_insert_with(|| Value::Object(Default::default()));
+            if let Value::Object(meta) = meta
+                && !meta.contains_key(KEY)
+                && let Ok(info) = serde_json::to_value(info)
+            {
+                meta.insert(KEY.into(), info);
+            }
+        }
+        self
+    }
+
     /// Returns the `resultType` discriminator of a successful result, or
     /// `None` for an error response.
     ///
@@ -409,6 +452,64 @@ mod result_type_tests {
         let resp = parse(r#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"whatever"}}"#);
 
         assert_eq!(resp.result_type(), Some(ResultType::Complete));
+    }
+
+    #[test]
+    fn server_info_is_stamped_into_result_meta() {
+        use crate::types::Implementation;
+
+        let resp = Response::success(RequestId::Number(1), serde_json::json!({ "tools": [] }))
+            .with_server_info(&Implementation {
+                name: "srv".into(),
+                version: "1.2.3".into(),
+                icons: None,
+            });
+        let Response::Ok(ok) = &resp else {
+            panic!("expected a success response")
+        };
+
+        let info = &ok.result["_meta"]["io.modelcontextprotocol/serverInfo"];
+        assert_eq!(info["name"], "srv");
+        assert_eq!(info["version"], "1.2.3");
+    }
+
+    #[test]
+    fn server_info_never_overwrites_an_existing_entry() {
+        use crate::types::Implementation;
+
+        let resp = Response::success(
+            RequestId::Number(1),
+            serde_json::json!({
+                "_meta": { "io.modelcontextprotocol/serverInfo": { "name": "kept", "version": "0" } }
+            }),
+        )
+        .with_server_info(&Implementation {
+            name: "srv".into(),
+            version: "1.2.3".into(),
+            icons: None,
+        });
+        let Response::Ok(ok) = &resp else {
+            panic!("expected a success response")
+        };
+
+        assert_eq!(
+            ok.result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            "kept"
+        );
+    }
+
+    #[test]
+    fn an_error_response_carries_no_server_info() {
+        use crate::types::Implementation;
+
+        let resp = Response::error(RequestId::Number(1), Error::new(-32603, "boom"))
+            .with_server_info(&Implementation {
+                name: "srv".into(),
+                version: "1.2.3".into(),
+                icons: None,
+            });
+
+        assert!(matches!(resp, Response::Err(_)));
     }
 
     #[test]

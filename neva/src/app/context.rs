@@ -20,7 +20,7 @@ use crate::{
         CallToolRequestParams, CallToolResponse, GetPromptRequestParams, GetPromptResult, Message,
         Prompt, ReadResourceRequestParams, ReadResourceResult, Request, Resource, Response, Tool,
         ToolResult, ToolUse, Uri,
-        elicitation::{ElicitRequestParams, ElicitResult, ElicitationCompleteParams},
+        elicitation::{ElicitRequestParams, ElicitResult},
         resource::SubscribeRequestParams,
     },
 };
@@ -1545,8 +1545,14 @@ impl Context {
     }
 
     /// Notifies the client that the elicitation with the `id` has been completed
+    ///
+    /// Removed in MCP 2026-07-28; available only under `legacy-spec`.
+    #[cfg(feature = "legacy-spec")]
     pub async fn complete_elicitation(&mut self, id: impl Into<String>) -> Result<(), Error> {
-        let params = serde_json::to_value(ElicitationCompleteParams::new(id)).ok();
+        let params = serde_json::to_value(
+            crate::types::elicitation::ElicitationCompleteParams::new(id),
+        )
+        .ok();
         self.send_notification(crate::types::elicitation::commands::COMPLETE, params)
             .await
     }

@@ -122,11 +122,32 @@ pub struct RequestParamsMeta {
     )]
     pub(crate) log_level: Option<crate::types::notification::LoggingLevel>,
 
+    /// The MCP protocol version this request is made under (MCP 2026-07-28).
+    ///
+    /// Required by the spec on every request. Over HTTP it must match the
+    /// `MCP-Protocol-Version` header, otherwise the server answers
+    /// [`ErrorCode::HeaderMismatch`](crate::error::ErrorCode::HeaderMismatch);
+    /// a version the server does not support draws
+    /// [`ErrorCode::UnsupportedProtocolVersion`](crate::error::ErrorCode::UnsupportedProtocolVersion).
+    ///
+    /// Modelled as `Option` so a legacy-shaped request still parses -- the
+    /// server treats an absent value as "not stated" rather than rejecting the
+    /// parse.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[serde(
+        rename = "io.modelcontextprotocol/protocolVersion",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) protocol_version: Option<String>,
+
     /// MRTR/stateless: client capabilities declared per-request (v1: a single
     /// `elicitation` flag) so the server can honor "MUST NOT send an input
     /// type the client didn't declare".
     #[cfg(not(feature = "legacy-spec"))]
-    #[serde(rename = "clientCapabilities", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "io.modelcontextprotocol/clientCapabilities",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub(crate) client_capabilities: Option<crate::types::mrtr::ClientMrtrCapabilities>,
 
     /// Represents metadata for associating messages with a task.

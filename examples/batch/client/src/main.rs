@@ -31,7 +31,6 @@ async fn main() -> Result<(), Error> {
         .read_resource("notes://daily")
         .read_resource("notes://weekly")
         .get_prompt("greeting", [("name", "Neva")])
-        .ping()
         .send()
         .await?;
 
@@ -44,8 +43,7 @@ async fn main() -> Result<(), Error> {
         add_result, 
         daily, 
         weekly, 
-        greeting, 
-        ping
+        greeting
     ] = responses.as_slice() else {
         return Err(Error::new(ErrorCode::InternalError, "unexpected number of responses"));
     };
@@ -80,7 +78,6 @@ async fn main() -> Result<(), Error> {
     let greeting_result = greeting.clone().into_result::<GetPromptResult>()?;
     tracing::info!("greeting(\"Neva\"):\n{:?}", greeting_result.messages);
 
-    tracing::info!("ping: {:?}", ping);
 
     client.disconnect().await
 }

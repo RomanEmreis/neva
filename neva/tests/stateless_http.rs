@@ -47,8 +47,15 @@ async fn stateless_discover_and_call() {
     );
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(
-        body["result"]["protocolVersion"],
-        serde_json::json!("2026-07-28")
+        body["result"]["supportedVersions"],
+        serde_json::json!(["2026-07-28"])
+    );
+    // `serverInfo` left the discovery result; the server identifies itself in
+    // every result's `_meta` instead.
+    assert!(body["result"].get("serverInfo").is_none(), "got: {body}");
+    assert_eq!(
+        body["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+        "neva"
     );
     // Every result carries the mandatory `resultType` discriminator, including
     // the discovery result.
@@ -75,15 +82,48 @@ async fn stateless_discover_and_call() {
     );
     assert_eq!(body["result"]["resultType"], serde_json::json!("complete"));
 
-    // (d) missing protocol-version header -> JSON-RPC InvalidRequest.
+    // (d) missing protocol-version header -> `HeaderMismatch`, HTTP 400.
     let resp = client
         .post(&url)
         .json(&call)
         .send()
         .await
         .expect("send failed");
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body.get("error").is_some(), "missing header must error");
+    assert_eq!(body["error"]["code"], -32020, "got: {body}");
+
+    // (d2) a version we do not speak -> `UnsupportedProtocolVersion`, and the
+    //      client is told what is on offer.
+    let resp = client
+        .post(&url)
+        .header("MCP-Protocol-Version", "1999-01-01")
+        .json(&call)
+        .send()
+        .await
+        .expect("send failed");
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], -32022, "got: {body}");
+    assert_eq!(body["error"]["data"]["requested"], "1999-01-01");
+    assert_eq!(
+        body["error"]["data"]["supported"],
+        serde_json::json!(["2026-07-28"])
+    );
+
+    // (d3) `ping` is gone in MCP 2026-07-28.
+    let ping = serde_json::json!({ "jsonrpc": "2.0", "id": 5, "method": "ping" });
+    let body: serde_json::Value = client
+        .post(&url)
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .json(&ping)
+        .send()
+        .await
+        .expect("send failed")
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["error"]["code"], -32601, "ping must be gone: {body}");
 
     // (e) GET and DELETE are not routed under the flag.
     let get = client.get(&url).send().await.expect("get failed");

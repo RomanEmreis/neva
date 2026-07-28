@@ -194,15 +194,23 @@ pub struct ListToolsResult {
     #[serde(rename = "nextCursor", skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<Cursor>,
 
-    /// Suggested TTL in milliseconds for caching this list result, when set by the server.
+    /// How long (in milliseconds) the client may cache this result before
+    /// re-fetching, analogous to HTTP `Cache-Control: max-age`.
+    ///
+    /// Mandatory under MCP 2026-07-28, not an optional hint: `0` means treat
+    /// the result as immediately stale. neva always emits it; on the way in a
+    /// peer that omits it is read as `0` rather than failing the parse.
     #[cfg(not(feature = "legacy-spec"))]
-    #[serde(rename = "ttlMs", skip_serializing_if = "Option::is_none")]
-    pub ttl_ms: Option<u64>,
+    #[serde(rename = "ttlMs", default)]
+    pub ttl_ms: u64,
 
-    /// Suggested cache scope for this list result, when set by the server.
+    /// Whether this result may be cached across authorization contexts.
+    ///
+    /// Mandatory under MCP 2026-07-28. Defaults to
+    /// [`CacheScope::Private`](crate::types::cache::CacheScope::Private).
     #[cfg(not(feature = "legacy-spec"))]
-    #[serde(rename = "cacheScope", skip_serializing_if = "Option::is_none")]
-    pub cache_scope: Option<crate::types::CacheScope>,
+    #[serde(rename = "cacheScope", default)]
+    pub cache_scope: crate::types::CacheScope,
 }
 
 /// Used by the client to invoke a tool provided by the server.
@@ -1196,31 +1204,30 @@ mod tests {
         assert!(result.is_err(), "expected Err for non-object value");
     }
 
+    /// `tools/list` is a `CacheableResult`, so both fields are mandatory and
+    /// present even when the server expressed no opinion.
     #[test]
     #[cfg(not(feature = "legacy-spec"))]
-    fn list_tools_result_serializes_cache_hints() {
+    fn list_tools_result_always_carries_cache_fields() {
         use crate::types::CacheScope;
+
+        let v = serde_json::to_value(ListToolsResult::default()).unwrap();
+        assert_eq!(v["ttlMs"], serde_json::json!(0));
+        assert_eq!(v["cacheScope"], serde_json::json!("private"));
+
         let r = ListToolsResult {
-            tools: vec![],
-            next_cursor: None,
-            ttl_ms: Some(60_000),
-            cache_scope: Some(CacheScope::Session),
+            ttl_ms: 60_000,
+            cache_scope: CacheScope::Public,
+            ..Default::default()
         };
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["ttlMs"], serde_json::json!(60_000));
-        assert_eq!(v["cacheScope"], serde_json::json!("session"));
+        assert_eq!(v["cacheScope"], serde_json::json!("public"));
 
-        let back: ListToolsResult = serde_json::from_value(v).unwrap();
-        assert_eq!(back.ttl_ms, Some(60_000));
-        assert_eq!(back.cache_scope, Some(CacheScope::Session));
-    }
-
-    #[test]
-    #[cfg(not(feature = "legacy-spec"))]
-    fn list_tools_result_omits_cache_hints_when_none() {
-        let r = ListToolsResult::default();
-        let v = serde_json::to_value(&r).unwrap();
-        assert!(v.get("ttlMs").is_none());
-        assert!(v.get("cacheScope").is_none());
+        // A peer that omits them still parses.
+        let back: ListToolsResult =
+            serde_json::from_value(serde_json::json!({ "tools": [] })).unwrap();
+        assert_eq!(back.ttl_ms, 0);
+        assert_eq!(back.cache_scope, CacheScope::Private);
     }
 }

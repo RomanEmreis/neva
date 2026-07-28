@@ -178,22 +178,36 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
     // rather than the whole compatibility list.
     #[cfg(not(feature = "legacy-spec"))]
     {
-        let latest_version = crate::PROTOCOL_VERSIONS.last().copied();
-        let ok = headers
+        let header = headers
             .get(crate::transport::http::MCP_PROTOCOL_VERSION)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| Some(v) == latest_version);
+            .and_then(|v| v.to_str().ok());
 
-        if !ok {
-            let resp = Response::error(
-                RequestId::Null,
+        // A missing or unreadable header is a header problem (-32020); a
+        // well-formed header naming a version this build does not speak is a
+        // version problem (-32022), and the client is told what is on offer so
+        // it can retry. Both answer `400 Bad Request` per the spec.
+        let err = match header {
+            None => Some(Error::new(
+                ErrorCode::HeaderMismatch,
+                "Missing or malformed MCP-Protocol-Version header",
+            )),
+            Some(v) if v != crate::LATEST_PROTOCOL_VERSION => Some(
                 Error::new(
-                    ErrorCode::InvalidRequest,
-                    "Missing or unsupported MCP-Protocol-Version header",
-                ),
-            );
+                    ErrorCode::UnsupportedProtocolVersion,
+                    format!("Unsupported MCP protocol version: {v}"),
+                )
+                .with_data(serde_json::json!({
+                    "supported": [crate::LATEST_PROTOCOL_VERSION],
+                    "requested": v,
+                })),
+            ),
+            Some(_) => None,
+        };
+
+        if let Some(err) = err {
+            let resp = Response::error(RequestId::Null, err);
             return PostPrep::Reply(build_json_response(
-                http::StatusCode::OK,
+                http::StatusCode::BAD_REQUEST,
                 id,
                 &Message::Response(resp),
             ));
@@ -219,6 +233,37 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
             ));
         }
     };
+
+    // The body's `_meta` protocol version must agree with the header the gate
+    // above already validated. Stating two different versions is a header
+    // mismatch (-32020), not a version problem -- the server cannot tell which
+    // one the client meant.
+    #[cfg(not(feature = "legacy-spec"))]
+    if let Message::Request(ref r) = msg
+        && let Some(stated) = r
+            .params
+            .as_ref()
+            .and_then(|p| p.get("_meta"))
+            .and_then(|m| m.get("io.modelcontextprotocol/protocolVersion"))
+            .and_then(|v| v.as_str())
+        && stated != crate::LATEST_PROTOCOL_VERSION
+    {
+        let resp = Response::error(
+            r.id(),
+            Error::new(
+                ErrorCode::HeaderMismatch,
+                format!(
+                    "_meta protocol version {stated} does not match the \
+                     MCP-Protocol-Version header"
+                ),
+            ),
+        );
+        return PostPrep::Reply(build_json_response(
+            http::StatusCode::BAD_REQUEST,
+            id,
+            &Message::Response(resp),
+        ));
+    }
 
     // Passive W3C Trace Context recorder: when both MCP 2026-07-28
     // and `tracing` are enabled, record any `_meta.traceparent` /
@@ -828,9 +873,10 @@ mod tests {
             .body(make_request_body("ping"))
             .unwrap();
         let resp = handle_post(req, &ctx).await;
-        assert_eq!(resp.status(), http::StatusCode::OK);
+        // A missing header is a header problem, and the spec mandates 400.
+        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
         let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
-        assert_eq!(body["error"]["code"], -32600);
+        assert_eq!(body["error"]["code"], -32020);
     }
 
     #[cfg(not(feature = "legacy-spec"))]
@@ -844,9 +890,16 @@ mod tests {
             .body(make_request_body("ping"))
             .unwrap();
         let resp = handle_post(req, &ctx).await;
-        assert_eq!(resp.status(), http::StatusCode::OK);
+        // A well-formed header naming a version we do not speak is a version
+        // problem, and the client is told what is on offer so it can retry.
+        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
         let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
-        assert_eq!(body["error"]["code"], -32600);
+        assert_eq!(body["error"]["code"], -32022);
+        assert_eq!(body["error"]["data"]["requested"], "1999-01-01");
+        assert_eq!(
+            body["error"]["data"]["supported"],
+            serde_json::json!(["2026-07-28"])
+        );
     }
 
     #[cfg(not(feature = "legacy-spec"))]
@@ -863,9 +916,28 @@ mod tests {
             .body(make_request_body("ping"))
             .unwrap();
         let resp = handle_post(req, &ctx).await;
-        assert_eq!(resp.status(), http::StatusCode::OK);
+        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
         let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
-        assert_eq!(body["error"]["code"], -32600);
+        assert_eq!(body["error"]["code"], -32022);
+    }
+
+    /// The header and the body's `_meta` must name the same version: stating
+    /// two is a header mismatch, since the server cannot tell which was meant.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[tokio::test]
+    async fn rejects_body_version_disagreeing_with_header() {
+        let (ctx, _rx) = make_ctx();
+        let body = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+            "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2025-06-18" } }
+        });
+        let req = post_builder()
+            .body(bytes::Bytes::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = handle_post(req, &ctx).await;
+        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+        assert_eq!(body["error"]["code"], -32020);
     }
 
     #[tokio::test]

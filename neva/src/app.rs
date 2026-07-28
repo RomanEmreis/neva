@@ -166,6 +166,7 @@ impl App {
             }
         }
 
+        #[cfg(feature = "legacy-spec")]
         app.map_handler(crate::commands::PING, Self::ping);
 
         #[cfg(all(feature = "tracing", feature = "legacy-spec"))]
@@ -848,6 +849,7 @@ impl App {
     }
 
     /// Ping request handler
+    #[cfg(feature = "legacy-spec")]
     async fn ping() {}
 
     /// A subscription to a resource change request handler
@@ -1449,6 +1451,13 @@ impl App {
         };
 
         let mut resp = resp.into_response(req_id);
+        // Servers identify themselves on every result under MCP 2026-07-28
+        // (`serverInfo` left `DiscoverResult`), so it is stamped here, at the
+        // single seam every dispatched response passes through.
+        #[cfg(not(feature = "legacy-spec"))]
+        {
+            resp = resp.with_server_info(&options.implementation);
+        }
         if let Some(session_id) = session_id {
             resp = resp.set_session_id(session_id);
         }
@@ -1727,12 +1736,15 @@ fn build_input_required(
     // it never declared would otherwise stall the round-trip.
     if !arc.client_capabilities.allows(&request) {
         return Err(Error::new(
-            ErrorCode::InvalidRequest,
+            ErrorCode::MissingRequiredClientCapability,
             format!(
                 "server requested `{}` but the client did not declare support",
                 request.method()
             ),
-        ));
+        )
+        .with_data(serde_json::json!({
+            "requiredCapabilities": arc.client_capabilities.requiring(&request),
+        })));
     }
 
     let memos = arc.memos.lock().map(|m| m.clone()).unwrap_or_default();
@@ -1890,7 +1902,7 @@ mod tests {
             let mut params = salient();
             params["_meta"] = serde_json::json!({
                 "requestState": state,
-                "clientCapabilities": { "elicitation": true }
+                "io.modelcontextprotocol/clientCapabilities": { "elicitation": true }
             });
             Request::new(Some(RequestId::Number(1)), METHOD, Some(params))
         }
@@ -1953,7 +1965,7 @@ mod tests {
                 })
                 .collect();
             let mut meta = serde_json::json!({
-                "clientCapabilities": { "elicitation": true },
+                "io.modelcontextprotocol/clientCapabilities": { "elicitation": true },
                 "inputResponses": responses,
             });
             if let Some(state) = state {

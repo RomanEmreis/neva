@@ -111,9 +111,11 @@ pub type ToolInputSchema = tool::ToolSchema;
 #[cfg(not(feature = "legacy-spec"))]
 pub type ToolInputSchema = schema_2020::InputSchema;
 
+#[cfg(feature = "legacy-spec")]
+pub use elicitation::ElicitationCompleteParams;
 pub use elicitation::{
     ElicitRequestFormParams, ElicitRequestParams, ElicitRequestUrlParams, ElicitResult,
-    ElicitationAction, ElicitationCompleteParams, ElicitationMode, UrlElicitationRequiredError,
+    ElicitationAction, ElicitationMode, UrlElicitationRequiredError,
 };
 pub use prompt::{
     GetPromptRequestParams, GetPromptResult, ListPromptsRequestParams, ListPromptsResult, Prompt,
@@ -487,28 +489,45 @@ pub struct DiscoverRequestParams {}
 /// # #[cfg(not(feature = "legacy-spec"))]
 /// # {
 /// use neva::types::DiscoverResult;
-/// let json = r#"{"protocolVersion":"2026-07-28","capabilities":{},"serverInfo":{"name":"s","version":"1"}}"#;
+/// let json = r#"{"supportedVersions":["2026-07-28"],"capabilities":{}}"#;
 /// let r: DiscoverResult = serde_json::from_str(json).unwrap();
-/// assert_eq!(r.protocol_ver, "2026-07-28");
+/// assert_eq!(r.supported_versions, ["2026-07-28"]);
 /// # }
 /// ```
 #[cfg(not(feature = "legacy-spec"))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoverResult {
-    /// The protocol version the server speaks.
-    #[serde(rename = "protocolVersion")]
-    pub protocol_ver: String,
+    /// The protocol versions this server supports; the client picks one from
+    /// the list for subsequent requests.
+    ///
+    /// Replaces the single `protocolVersion` of earlier drafts: discovery
+    /// advertises the whole set so the client can choose, rather than being
+    /// told one answer.
+    #[serde(rename = "supportedVersions")]
+    pub supported_versions: Vec<String>,
 
     /// The server's capabilities.
     pub capabilities: ServerCapabilities,
 
-    /// Information about the server implementation.
-    #[serde(rename = "serverInfo")]
-    pub server_info: Implementation,
-
     /// Optional instructions for using the server and its features.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+
+    /// How long (in milliseconds) the client may cache this result before
+    /// re-fetching, analogous to HTTP `Cache-Control: max-age`.
+    ///
+    /// Mandatory under MCP 2026-07-28, not an optional hint: `0` means treat
+    /// the result as immediately stale. neva always emits it; on the way in a
+    /// peer that omits it is read as `0` rather than failing the parse.
+    #[serde(rename = "ttlMs", default)]
+    pub ttl_ms: u64,
+
+    /// Whether this result may be cached across authorization contexts.
+    ///
+    /// Mandatory under MCP 2026-07-28. Defaults to
+    /// [`CacheScope::Private`].
+    #[serde(rename = "cacheScope", default)]
+    pub cache_scope: crate::types::CacheScope,
 }
 
 #[cfg(not(feature = "legacy-spec"))]
@@ -826,7 +845,7 @@ impl InitializeResult {
 impl DiscoverResult {
     pub(crate) fn new(options: &McpOptions) -> Self {
         Self {
-            protocol_ver: options.protocol_ver().into(),
+            supported_versions: vec![options.protocol_ver().into()],
             capabilities: ServerCapabilities {
                 tools: options.tools_capability(),
                 resources: options.resources_capability(),
@@ -840,8 +859,9 @@ impl DiscoverResult {
                 tasks: None,
                 experimental: None,
             },
-            server_info: options.implementation.clone(),
             instructions: None,
+            ttl_ms: cache::DEFAULT_TTL_MS,
+            cache_scope: CacheScope::Private,
         }
     }
 }
@@ -853,13 +873,16 @@ mod tests {
     #[cfg(not(feature = "legacy-spec"))]
     #[test]
     fn discover_result_roundtrips() {
-        let json = r#"{"protocolVersion":"2026-07-28","capabilities":{},"serverInfo":{"name":"s","version":"1"}}"#;
+        // Discovery advertises the *set* of supported versions and no longer
+        // carries `serverInfo` -- servers identify themselves in each result's
+        // `_meta` instead.
+        let json = r#"{"supportedVersions":["2026-07-28"],"capabilities":{}}"#;
         let parsed: DiscoverResult = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.protocol_ver, "2026-07-28");
-        assert_eq!(parsed.server_info.name, "s");
+        assert_eq!(parsed.supported_versions, ["2026-07-28"]);
         let back = serde_json::to_value(&parsed).unwrap();
-        assert_eq!(back["protocolVersion"], serde_json::json!("2026-07-28"));
-        assert_eq!(back["serverInfo"]["name"], serde_json::json!("s"));
+        assert_eq!(back["supportedVersions"], serde_json::json!(["2026-07-28"]));
+        assert!(back.get("serverInfo").is_none());
+        assert!(back.get("protocolVersion").is_none());
     }
 
     #[cfg(all(feature = "server", not(feature = "legacy-spec")))]

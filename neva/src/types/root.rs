@@ -9,6 +9,10 @@ pub mod commands {
     pub const LIST: &str = "roots/list";
 
     /// Notification name that indicates that the list of roots has changed.
+    ///
+    /// Removed in MCP 2026-07-28 along with the rest of the server-push
+    /// channel; roots are answered on the MRTR loop instead.
+    #[cfg(feature = "legacy-spec")]
     pub const LIST_CHANGED: &str = "notifications/roots/list_changed";
 }
 

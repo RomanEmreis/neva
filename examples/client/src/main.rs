@@ -32,11 +32,6 @@ async fn main() -> Result<(), Error> {
 
     client.connect().await?;
 
-    // Ping command
-    tracing::info!("--- PING ---");
-    let resp = client.ping().await?;
-    tracing::info!("{:?}", resp);
-
     // List tools
     tracing::info!("--- LIST TOOLS ---");
     let tools = client.list_tools(None).await?;

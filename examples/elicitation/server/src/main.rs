@@ -23,12 +23,11 @@ async fn pay_a_bill(mut ctx: Context) -> Result<String, Error> {
         "https://www.paypal.com/us/webapps/mpp/paypal-payment", 
         "Please pay your bill using PayPal.");
 
-    let elicitation_id = params.id.clone();
-    
+    // MCP 2026-07-28 removed `notifications/elicitation/complete`: the client
+    // signals completion by answering the input request, which is what
+    // `ctx.elicit` resumes on. There is nothing extra to send.
     ctx.elicit("bill", params.into()).await?;
-    
-    ctx.complete_elicitation(elicitation_id).await?;
-    
+
     Ok("Payment successful".to_string())
 }
 

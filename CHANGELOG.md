@@ -43,6 +43,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     `HttpEngine` contract); the axum/hyper/actix engine examples were updated
     to the two-arm match.
 
+* **Wire conformance pack** (MCP 2026-07-28, #98). Assorted field/method/code
+  mismatches against the final schema, all gated so `legacy-spec` is unchanged.
+  * **`_meta` key naming.** Per-request client capabilities move from the bare
+    `clientCapabilities` key to `io.modelcontextprotocol/clientCapabilities`,
+    and the protocol version now also rides in `_meta` as
+    `io.modelcontextprotocol/protocolVersion` (it was header-only). A body that
+    names a different version than the `MCP-Protocol-Version` header is
+    rejected as a header mismatch.
+  * **Error codes.** `HeaderMismatch` (`-32020`),
+    `MissingRequiredClientCapability` (`-32021`) and
+    `UnsupportedProtocolVersion` (`-32022`) join `ErrorCode` at their
+    spec-allocated numbers -- neva defined none of them and answered a version
+    mismatch with `InvalidRequest`. These carry the `data` payloads the spec
+    defines (`supported`/`requested`, `requiredCapabilities`), so `Error` grew
+    `with_data`. All three answer HTTP `400`, as the spec requires.
+  * **`CacheableResult`.** `ttlMs` and `cacheScope` are mandatory members
+    rather than optional hints, on `DiscoverResult`, `ReadResourceResult` and
+    all four list results. `CacheScope` is now `public`/`private` (it was
+    `session`/`connection`/`client`), defaulting to `private`. neva always
+    emits both; a peer that omits them still parses.
+  * **`server/discover` reshaped.** `protocolVersion` becomes
+    `supportedVersions: string[]` -- discovery advertises the whole set and the
+    client picks -- and `serverInfo` leaves the result entirely. Servers now
+    identify themselves in *every* result's `_meta` under
+    `io.modelcontextprotocol/serverInfo`; neva stamps it at the dispatch seam
+    and the client reads `Client::server_info` from there.
+  * **`notifications/roots/list_changed` is removed**, and URL elicitation
+    loses its `elicitationId`: with no server-initiated completion signal there
+    is nothing to correlate. A server that needs to track an elicitation across
+    retries encodes its own identifier in `requestState`.
+  * **`ping` is removed**, along with `Client::ping` and `BatchBuilder::ping`.
+  * **`notifications/elicitation/complete` is removed**, along with
+    `Context::complete_elicitation`, `Client::on_elicitation_completed` and
+    `ElicitationCompleteParams`. Answering the input request is the completion
+    signal.
 * **Tasks method realignment** (MCP 2026-07-28, #96). The final Tasks extension
   ([`modelcontextprotocol/ext-tasks`](https://github.com/modelcontextprotocol/ext-tasks))
   reshapes the whole surface, not just the method names. Under `legacy-spec`

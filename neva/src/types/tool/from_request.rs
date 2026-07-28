@@ -90,6 +90,8 @@ mod tests {
                 #[cfg(not(feature = "legacy-spec"))]
                 request_state: None,
                 #[cfg(not(feature = "legacy-spec"))]
+                protocol_version: None,
+                #[cfg(not(feature = "legacy-spec"))]
                 client_capabilities: None,
                 #[cfg(not(feature = "legacy-spec"))]
                 log_level: None,
@@ -120,6 +122,8 @@ mod tests {
                 input_responses: None,
                 #[cfg(not(feature = "legacy-spec"))]
                 request_state: None,
+                #[cfg(not(feature = "legacy-spec"))]
+                protocol_version: None,
                 #[cfg(not(feature = "legacy-spec"))]
                 client_capabilities: None,
                 #[cfg(not(feature = "legacy-spec"))]

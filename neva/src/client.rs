@@ -383,9 +383,22 @@ impl Client {
     /// reported protocol version and stores the capabilities.
     #[cfg(not(feature = "legacy-spec"))]
     fn apply_discover(&mut self, result: crate::types::DiscoverResult) -> Result<(), Error> {
-        self.validate_server_version(result.protocol_ver.as_str())?;
+        // Discovery advertises a *set*; the handshake succeeds when the version
+        // this client speaks is among them.
+        let expected = self.expected_protocol_ver();
+        if !result.supported_versions.iter().any(|v| v == expected) {
+            return Err(Error::new(
+                ErrorCode::UnsupportedProtocolVersion,
+                format!(
+                    "Server supports {:?} but the client speaks {expected}",
+                    result.supported_versions
+                ),
+            ));
+        }
         self.server_capabilities = Some(result.capabilities);
-        self.server_info = Some(result.server_info);
+        // `serverInfo` left `DiscoverResult` in the final spec: servers now
+        // report themselves in every result's `_meta`, so it is picked up from
+        // there instead.
         Ok(())
     }
 
@@ -443,6 +456,9 @@ impl Client {
     }
 
     /// Sends a ping to the MCP server
+    ///
+    /// Removed in MCP 2026-07-28; available only under `legacy-spec`.
+    #[cfg(feature = "legacy-spec")]
     pub async fn ping(&mut self) -> Result<Response, Error> {
         self.command::<()>(crate::commands::PING, None).await
     }
@@ -962,6 +978,7 @@ impl Client {
 
     /// Returns whether the client has elicitation capabilities
     #[inline]
+    #[cfg(feature = "legacy-spec")]
     fn is_elicitation_supported(&self) -> bool {
         self.options.elicitation_capability.as_ref().is_some()
     }
@@ -1092,11 +1109,36 @@ impl Client {
     /// Sends a request without the MRTR loop.
     #[inline]
     async fn plain_send_request(&mut self, req: Request) -> Result<Response, Error> {
-        self.handler
+        let resp = self
+            .handler
             .as_mut()
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?
             .send_request(req)
-            .await
+            .await?;
+        #[cfg(not(feature = "legacy-spec"))]
+        self.record_server_info(&resp);
+        Ok(resp)
+    }
+
+    /// Picks up `io.modelcontextprotocol/serverInfo` from a result's `_meta`.
+    ///
+    /// Under MCP 2026-07-28 the server identifies itself on every result rather
+    /// than once in a handshake, so the first result that carries it is what
+    /// populates [`Self::server_info`].
+    #[cfg(not(feature = "legacy-spec"))]
+    fn record_server_info(&mut self, resp: &Response) {
+        if self.server_info.is_some() {
+            return;
+        }
+        let Response::Ok(ok) = resp else { return };
+        if let Some(info) = ok
+            .result
+            .get("_meta")
+            .and_then(|m| m.get("io.modelcontextprotocol/serverInfo"))
+            .and_then(|v| serde_json::from_value::<Implementation>(v.clone()).ok())
+        {
+            self.server_info = Some(info);
+        }
     }
 
     /// Sends a request and transparently drives the MRTR loop: while the
@@ -1177,6 +1219,9 @@ impl Client {
     ) {
         let mut meta = req.meta().unwrap_or_default();
         meta.client_info = Some(self.options.implementation.clone());
+        // Required on every request under MCP 2026-07-28, and it must agree
+        // with the `MCP-Protocol-Version` header the HTTP transport sets.
+        meta.protocol_version = Some(self.expected_protocol_ver().to_string());
         // Each flag reflects what this client can actually fulfil right now: a
         // configured handler for elicitation/sampling, and -- since roots are
         // data rather than a handler -- a declared roots capability. That is
@@ -1277,7 +1322,7 @@ impl Client {
     ///     let responses = client
     ///         .batch()
     ///         .list_tools()
-    ///         .ping()
+    ///         .list_prompts()
     ///         .send()
     ///         .await?;
     ///
@@ -1910,8 +1955,15 @@ mod tests {
         let meta = &req.params.as_ref().expect("params present")["_meta"];
         // Without this injection a batched eliciting tools/call is rejected as
         // if the client did not support elicitation.
-        assert_eq!(meta["clientCapabilities"]["elicitation"], json!(true));
+        assert_eq!(
+            meta["io.modelcontextprotocol/clientCapabilities"]["elicitation"],
+            json!(true)
+        );
         assert!(meta["io.modelcontextprotocol/clientInfo"].is_object());
+        assert_eq!(
+            meta["io.modelcontextprotocol/protocolVersion"],
+            json!("2026-07-28")
+        );
 
         // The notification carries no params/_meta.
         let MessageEnvelope::Notification(notif) = &items[1] else {
@@ -2166,9 +2218,8 @@ mod dual_mode_tests {
                                 let body = rpc_result(
                                     &id,
                                     serde_json::json!({
-                                        "protocolVersion": "2099-01-01",
-                                        "capabilities": { "tools": {} },
-                                        "serverInfo": { "name": "future-mock", "version": "1.0.0" }
+                                        "supportedVersions": ["2099-01-01"],
+                                        "capabilities": { "tools": {} }
                                     }),
                                 );
                                 write_response(
@@ -2341,8 +2392,7 @@ mod dual_mode_tests {
             .await
             .expect_err("an unsupported 2026-07-28 version must fail the connect");
         assert!(
-            err.to_string()
-                .contains("Unsupported server protocol version"),
+            err.to_string().contains("but the client speaks"),
             "the real version error must surface, got: {err}"
         );
         assert!(

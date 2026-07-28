@@ -33,7 +33,7 @@ impl From<Error> for ErrorDetails {
         Self {
             code: err.code.wire_code(),
             message: err.to_string(),
-            data: None,
+            data: err.data.clone(),
         }
     }
 }

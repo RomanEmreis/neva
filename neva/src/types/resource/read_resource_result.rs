@@ -25,6 +25,24 @@ const CHUNK_SIZE: usize = 8192;
 pub struct ReadResourceResult {
     /// A list of ResourceContents that this resource contains.
     pub contents: Vec<ResourceContents>,
+
+    /// How long (in milliseconds) the client may cache this result before
+    /// re-fetching, analogous to HTTP `Cache-Control: max-age`.
+    ///
+    /// Mandatory under MCP 2026-07-28, not an optional hint: `0` means treat
+    /// the result as immediately stale. neva always emits it; on the way in a
+    /// peer that omits it is read as `0` rather than failing the parse.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[serde(rename = "ttlMs", default)]
+    pub ttl_ms: u64,
+
+    /// Whether this result may be cached across authorization contexts.
+    ///
+    /// Mandatory under MCP 2026-07-28. Defaults to
+    /// [`CacheScope::Private`](crate::types::cache::CacheScope::Private).
+    #[cfg(not(feature = "legacy-spec"))]
+    #[serde(rename = "cacheScope", default)]
+    pub cache_scope: crate::types::CacheScope,
 }
 
 /// Represents the content of a resource.
@@ -198,6 +216,10 @@ impl Default for ReadResourceResult {
     fn default() -> Self {
         Self {
             contents: Vec::with_capacity(8),
+            #[cfg(not(feature = "legacy-spec"))]
+            ttl_ms: crate::types::cache::DEFAULT_TTL_MS,
+            #[cfg(not(feature = "legacy-spec"))]
+            cache_scope: crate::types::CacheScope::Private,
         }
     }
 }
@@ -296,6 +318,10 @@ where
     fn from(content: T) -> Self {
         Self {
             contents: vec![content.into()],
+            #[cfg(not(feature = "legacy-spec"))]
+            ttl_ms: crate::types::cache::DEFAULT_TTL_MS,
+            #[cfg(not(feature = "legacy-spec"))]
+            cache_scope: crate::types::CacheScope::Private,
         }
     }
 }
@@ -326,6 +352,10 @@ where
     fn from(vec: Vec<T>) -> Self {
         Self {
             contents: vec.into_iter().map(Into::into).collect(),
+            #[cfg(not(feature = "legacy-spec"))]
+            ttl_ms: crate::types::cache::DEFAULT_TTL_MS,
+            #[cfg(not(feature = "legacy-spec"))]
+            cache_scope: crate::types::CacheScope::Private,
         }
     }
 }
@@ -339,6 +369,10 @@ where
     fn from(vec: [T; N]) -> Self {
         Self {
             contents: vec.into_iter().map(Into::into).collect(),
+            #[cfg(not(feature = "legacy-spec"))]
+            ttl_ms: crate::types::cache::DEFAULT_TTL_MS,
+            #[cfg(not(feature = "legacy-spec"))]
+            cache_scope: crate::types::CacheScope::Private,
         }
     }
 }
@@ -789,6 +823,18 @@ impl EmptyResourceContents {
 #[cfg(test)]
 #[cfg(feature = "server")]
 mod tests {
+    /// Wraps the expected `contents` payload with the cacheable-result fields
+    /// the default (MCP 2026-07-28) build always emits.
+    fn expect(contents: &str) -> String {
+        #[cfg(not(feature = "legacy-spec"))]
+        return format!(
+            "{},\"ttlMs\":0,\"cacheScope\":\"private\"}}",
+            contents.strip_suffix('}').expect("object literal")
+        );
+        #[cfg(feature = "legacy-spec")]
+        return contents.to_string();
+    }
+
     use super::*;
     use futures_util::StreamExt;
 
@@ -813,7 +859,9 @@ mod tests {
 
         assert_eq!(
             json,
-            r#"{"contents":[{"uri":"/res1","text":"test 1","mimeType":"plain/text"},{"uri":"/res1","text":"test 1","mimeType":"plain/text"}]}"#
+            expect(
+                r#"{"contents":[{"uri":"/res1","text":"test 1","mimeType":"plain/text"},{"uri":"/res1","text":"test 1","mimeType":"plain/text"}]}"#
+            )
         );
     }
 
@@ -828,7 +876,9 @@ mod tests {
 
         assert_eq!(
             json,
-            r#"{"contents":[{"uri":"/res1","text":"test 1","mimeType":"text/plain"},{"uri":"/res1","text":"test 1","mimeType":"text/plain"}]}"#
+            expect(
+                r#"{"contents":[{"uri":"/res1","text":"test 1","mimeType":"text/plain"},{"uri":"/res1","text":"test 1","mimeType":"text/plain"}]}"#
+            )
         );
     }
 
@@ -843,7 +893,9 @@ mod tests {
 
         assert_eq!(
             json,
-            r#"{"contents":[{"uri":"/res1","text":"test 1","mimeType":"json"},{"uri":"/res1","text":"test 1","mimeType":"json"}]}"#
+            expect(
+                r#"{"contents":[{"uri":"/res1","text":"test 1","mimeType":"json"},{"uri":"/res1","text":"test 1","mimeType":"json"}]}"#
+            )
         );
     }
 
@@ -858,7 +910,9 @@ mod tests {
 
         assert_eq!(
             json,
-            r#"{"contents":[{"uri":"/res1","text":"test 1","mimeType":"text/plain"},{"uri":"/res1","text":"test 1","mimeType":"text/plain"}]}"#
+            expect(
+                r#"{"contents":[{"uri":"/res1","text":"test 1","mimeType":"text/plain"},{"uri":"/res1","text":"test 1","mimeType":"text/plain"}]}"#
+            )
         );
     }
 
@@ -881,7 +935,9 @@ mod tests {
 
         assert_eq!(
             json,
-            r#"{"contents":[{"uri":"/res1","text":"test 1","mimeType":"json"},{"uri":"/res1","text":"test 1","mimeType":"json"}]}"#
+            expect(
+                r#"{"contents":[{"uri":"/res1","text":"test 1","mimeType":"json"},{"uri":"/res1","text":"test 1","mimeType":"json"}]}"#
+            )
         );
     }
 
@@ -894,7 +950,7 @@ mod tests {
 
         assert_eq!(
             json,
-            r#"{"contents":[{"uri":"/res","text":"test","mimeType":"text/plain"}]}"#
+            expect(r#"{"contents":[{"uri":"/res","text":"test","mimeType":"text/plain"}]}"#)
         );
     }
 
@@ -911,7 +967,9 @@ mod tests {
 
         assert_eq!(
             json,
-            r#"{"contents":[{"uri":"/res","text":"{\"age\":33,\"name\":\"John\"}","mimeType":"application/json"}]}"#
+            expect(
+                r#"{"contents":[{"uri":"/res","text":"{\"age\":33,\"name\":\"John\"}","mimeType":"application/json"}]}"#
+            )
         );
     }
 
