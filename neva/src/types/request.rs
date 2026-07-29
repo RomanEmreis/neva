@@ -133,11 +133,13 @@ pub struct RequestParamsMeta {
 
     /// The MCP protocol version this request is made under (MCP 2026-07-28).
     ///
-    /// Required by the spec on every request. Over HTTP it must match the
-    /// `MCP-Protocol-Version` header, otherwise the server answers
-    /// [`ErrorCode::HeaderMismatch`](crate::error::ErrorCode::HeaderMismatch);
-    /// a version the server does not support draws
-    /// [`ErrorCode::UnsupportedProtocolVersion`](crate::error::ErrorCode::UnsupportedProtocolVersion).
+    /// Required by the spec on every request. A version the server does not
+    /// support draws
+    /// [`ErrorCode::UnsupportedProtocolVersion`](crate::error::ErrorCode::UnsupportedProtocolVersion)
+    /// on any transport -- see [`Request::unsupported_version_error`]. Over
+    /// HTTP it must additionally match the `MCP-Protocol-Version` header, and
+    /// since that header is checked before the body is read, a value that
+    /// disagrees with it is by construction one the server does not support.
     ///
     /// Modelled as `Option` so a legacy-shaped request still parses -- the
     /// server treats an absent value as "not stated" rather than rejecting the
@@ -313,6 +315,55 @@ impl Request {
             .as_str()
     }
 
+    /// Why the protocol version this request states is one this build cannot
+    /// serve, if it is.
+    ///
+    /// `_meta.io.modelcontextprotocol/protocolVersion` names the version the
+    /// request is made under, and a server that does not speak it must answer
+    /// `UnsupportedProtocolVersion` (`-32022`) carrying what it does speak, so
+    /// the caller can pick from that list and retry.
+    ///
+    /// Like [`Self::required_meta_error`], this is a property of the message
+    /// and not of how it arrived: the version is stated in the body, so a stdio
+    /// server owes the same rejection an HTTP one does. What is transport
+    /// specific is only the `400` HTTP additionally mandates for it.
+    ///
+    /// A request stating no well-formed version has nothing to compare and is
+    /// [`Self::required_meta_error`]'s to reject.
+    ///
+    /// # Examples
+    /// ```
+    /// use neva::types::Request;
+    ///
+    /// let stale = Request::new(None, "tools/list", Some(serde_json::json!({
+    ///     "_meta": { "io.modelcontextprotocol/protocolVersion": "2025-06-18" }
+    /// })));
+    /// let err = stale.unsupported_version_error().expect("not served");
+    /// // The client is told what is on offer, not merely that it guessed wrong.
+    /// assert_eq!(err.data().unwrap()["requested"], "2025-06-18");
+    ///
+    /// let current = Request::new(None, "tools/list", Some(serde_json::json!({
+    ///     "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" }
+    /// })));
+    /// assert!(current.unsupported_version_error().is_none());
+    /// ```
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn unsupported_version_error(&self) -> Option<crate::error::Error> {
+        use crate::error::{Error, ErrorCode};
+
+        let stated = self.stated_protocol_version()?;
+        (stated != crate::LATEST_PROTOCOL_VERSION).then(|| {
+            Error::new(
+                ErrorCode::UnsupportedProtocolVersion,
+                format!("Unsupported MCP protocol version: {stated}"),
+            )
+            .with_data(serde_json::json!({
+                "supported": [crate::LATEST_PROTOCOL_VERSION],
+                "requested": stated,
+            }))
+        })
+    }
+
     /// Returns the full id (session_id?/request_id)
     pub fn full_id(&self) -> RequestId {
         let id = self.id.clone();
@@ -396,6 +447,53 @@ mod tests {
         let back: RequestParamsMeta = serde_json::from_value(v).unwrap();
         assert_eq!(back.traceparent.as_deref(), meta.traceparent.as_deref());
         assert_eq!(back.tracestate.as_deref(), meta.tracestate.as_deref());
+    }
+
+    /// The version is stated in the body, so the rule holds on every transport
+    /// -- a stdio server reaches it through the dispatch seam, which is the
+    /// only gate it has.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn a_version_this_build_does_not_serve_is_refused() {
+        use crate::error::ErrorCode;
+        use serde_json::json;
+
+        let with_version = |v: serde_json::Value| {
+            Request::new(
+                None,
+                "tools/list",
+                Some(json!({ "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": v,
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                } })),
+            )
+        };
+
+        let err = with_version(json!("2025-06-18"))
+            .unsupported_version_error()
+            .expect("a version this build does not speak");
+        assert_eq!(err.code, ErrorCode::UnsupportedProtocolVersion);
+        let data = err.data().expect("the retry data the spec specifies");
+        assert_eq!(data["requested"], "2025-06-18");
+        assert_eq!(data["supported"], json!([crate::LATEST_PROTOCOL_VERSION]));
+
+        assert!(
+            with_version(json!(crate::LATEST_PROTOCOL_VERSION))
+                .unsupported_version_error()
+                .is_none()
+        );
+        // Not a string is not a version: `required_meta_error` owns that, and
+        // this one must not double-report it as unsupported.
+        assert!(
+            with_version(json!(2026))
+                .unsupported_version_error()
+                .is_none()
+        );
+        assert!(
+            Request::new(None, "tools/list", None::<()>)
+                .unsupported_version_error()
+                .is_none()
+        );
     }
 
     #[test]

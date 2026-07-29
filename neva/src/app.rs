@@ -1265,12 +1265,16 @@ impl App {
             .map(strip_meta)
             .unwrap_or(serde_json::Value::Null);
 
-        // The `_meta` fields MCP 2026-07-28 makes mandatory. The HTTP preamble
-        // rejects these earlier so it can attach the `400` the spec asks for;
-        // this seam is what every other transport gets, since the requirement
-        // is on the message and not on how it travelled.
+        // What MCP 2026-07-28 requires of every request's `_meta`: the
+        // mandatory fields, and a protocol version this build actually speaks.
+        // The HTTP preamble rejects both earlier so it can attach the `400` the
+        // spec asks for; this seam is what every other transport gets, since
+        // the requirements are on the message and not on how it travelled.
         #[cfg(not(feature = "legacy-spec"))]
-        if let Some(err) = req.required_meta_error() {
+        if let Some(err) = req
+            .required_meta_error()
+            .or_else(|| req.unsupported_version_error())
+        {
             let mut resp = Response::error(req_id, err);
             if let Some(session_id) = session_id {
                 resp = resp.set_session_id(session_id);
