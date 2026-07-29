@@ -176,6 +176,13 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
     // advertising a legacy version must be rejected, not silently served
     // under MCP 2026-07-28. Compare against the fixed 2026-07-28 version (the last/only 2026-07-28 entry)
     // rather than the whole compatibility list.
+    //
+    // The verdict is reached here but delivered after the body is parsed: a
+    // JSON-RPC error reaches the caller only if it carries the id the caller is
+    // waiting on, and the id is in the body. Nothing between the two points
+    // depends on the version being right.
+    #[cfg(not(feature = "legacy-spec"))]
+    let version_err;
     #[cfg(not(feature = "legacy-spec"))]
     {
         let header = headers
@@ -186,7 +193,7 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
         // well-formed header naming a version this build does not speak is a
         // version problem (-32022), and the client is told what is on offer so
         // it can retry. Both answer `400 Bad Request` per the spec.
-        let err = match header {
+        version_err = match header {
             None => Some(Error::new(
                 ErrorCode::HeaderMismatch,
                 "Missing or malformed MCP-Protocol-Version header",
@@ -203,15 +210,6 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
             ),
             Some(_) => None,
         };
-
-        if let Some(err) = err {
-            let resp = Response::error(RequestId::Null, err);
-            return PostPrep::Reply(build_json_response(
-                http::StatusCode::BAD_REQUEST,
-                id,
-                &Message::Response(resp),
-            ));
-        }
     }
     // Engine-neutral claims pickup: any engine that decoded auth claims
     // for this request is expected to insert them as
@@ -225,6 +223,18 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
     let msg = match parse_message(&body) {
         Ok(msg) => msg,
         Err(code) => {
+            // A wrong version header outranks an unparseable body: the header
+            // is wrong whatever the body turns out to say, and its `400` is
+            // mandated. There is no id to correlate against here, which is
+            // precisely the case where none exists to be had.
+            #[cfg(not(feature = "legacy-spec"))]
+            if let Some(err) = version_err {
+                return PostPrep::Reply(build_json_response(
+                    http::StatusCode::BAD_REQUEST,
+                    id,
+                    &Message::Response(Response::error(RequestId::Null, err)),
+                ));
+            }
             let resp = Response::error(RequestId::Null, Error::from(code));
             return PostPrep::Reply(build_json_response(
                 http::StatusCode::OK,
@@ -233,6 +243,15 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
             ));
         }
     };
+
+    #[cfg(not(feature = "legacy-spec"))]
+    if let Some(err) = version_err {
+        return PostPrep::Reply(build_json_response(
+            http::StatusCode::BAD_REQUEST,
+            id,
+            &reject_post(&msg, err),
+        ));
+    }
 
     // Every request's `_meta` must carry the fields MCP 2026-07-28 makes
     // mandatory, and the version it states must agree with the header the gate
@@ -643,6 +662,57 @@ fn get_or_create_mcp_session(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| uuid::Uuid::parse_str(s).ok())
         .unwrap_or_else(uuid::Uuid::new_v4)
+}
+
+/// Addresses a whole-POST rejection to every request the POST carried.
+///
+/// A JSON-RPC error reaches its caller by id: the client resolves the pending
+/// request whose id the reply names, and nothing else. A reply carrying `null`
+/// therefore matches nothing -- the caller keeps waiting until it times out,
+/// and the error it was handed is never seen, which on a version mismatch
+/// costs it the one message that says what to do instead. A batch gets one
+/// error per request for the same reason: the client registered a slot for
+/// each of them.
+///
+/// Only for errors the whole POST shares, such as a transport header that was
+/// wrong for every request underneath it.
+#[cfg(not(feature = "legacy-spec"))]
+fn reject_post(msg: &Message, err: Error) -> Message {
+    use crate::types::{MessageBatch, MessageEnvelope};
+
+    // `Error` is not `Clone` -- its cause is a boxed `dyn StdError` -- and a
+    // batch needs one reply per request, all saying the same thing.
+    fn restate(err: &Error) -> Error {
+        let restated = Error::new(err.code, err.to_string());
+        match err.data() {
+            Some(data) => restated.with_data(data.clone()),
+            None => restated,
+        }
+    }
+
+    match msg {
+        Message::Request(req) => Message::Response(Response::error(req.id(), err)),
+        Message::Batch(batch) => {
+            let items = batch
+                .iter()
+                .filter_map(|env| match env {
+                    MessageEnvelope::Request(req) => Some(MessageEnvelope::Response(
+                        Response::error(req.id(), restate(&err)),
+                    )),
+                    // A notification is never answered, rejection included.
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+
+            MessageBatch::new(items)
+                .map(Message::Batch)
+                // Empty only when the batch was notifications throughout, and
+                // then there is no one to answer.
+                .unwrap_or_else(|_| Message::Response(Response::error(RequestId::Null, err)))
+        }
+        // A notification has no id to answer to.
+        _ => Message::Response(Response::error(RequestId::Null, err)),
+    }
 }
 
 /// Why a request's `_meta` is unacceptable, if it is.
@@ -1120,6 +1190,9 @@ mod tests {
         assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
         let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
         assert_eq!(body["error"]["code"], -32020);
+        // Addressed to the request that was rejected: a reply the client
+        // cannot correlate is one it waits out instead of reading.
+        assert_eq!(body["id"], 1);
     }
 
     #[cfg(not(feature = "legacy-spec"))]
@@ -1138,11 +1211,65 @@ mod tests {
         assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
         let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
         assert_eq!(body["error"]["code"], -32022);
+        assert_eq!(body["id"], 1);
         assert_eq!(body["error"]["data"]["requested"], "1999-01-01");
         assert_eq!(
             body["error"]["data"]["supported"],
             serde_json::json!(["2026-07-28"])
         );
+    }
+
+    /// A batch shares the header that was wrong, so every request under it is
+    /// answered -- each client slot is waiting on its own id.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[tokio::test]
+    async fn rejects_every_request_of_a_batch_on_a_bad_version() {
+        let (ctx, _rx) = make_ctx();
+        let body = serde_json::json!([
+            { "jsonrpc": "2.0", "method": "ping", "id": 1, "params": { "_meta": meta() } },
+            { "jsonrpc": "2.0", "method": "notifications/initialized" },
+            { "jsonrpc": "2.0", "method": "ping", "id": 2, "params": { "_meta": meta() } },
+        ]);
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(crate::transport::http::MCP_PROTOCOL_VERSION, "1999-01-01")
+            .body(Bytes::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let resp = handle_post(req, &ctx).await;
+        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+        let items = body.as_array().expect("a batch is answered with a batch");
+        // Two requests, two errors -- and nothing for the notification.
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["id"], 1);
+        assert_eq!(items[1]["id"], 2);
+        for item in items {
+            assert_eq!(item["error"]["code"], -32022);
+            assert_eq!(item["error"]["data"]["requested"], "1999-01-01");
+        }
+    }
+
+    /// A body that never parsed has no id to answer to, but the header was
+    /// still wrong -- and its status is the mandated one, not the parse
+    /// error's.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[tokio::test]
+    async fn a_bad_version_outranks_an_unparseable_body() {
+        let (ctx, _rx) = make_ctx();
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(crate::transport::http::MCP_PROTOCOL_VERSION, "1999-01-01")
+            .body(Bytes::from_static(b"{ not json"))
+            .unwrap();
+
+        let resp = handle_post(req, &ctx).await;
+        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+        assert_eq!(body["error"]["code"], -32022);
+        assert!(body["id"].is_null());
     }
 
     #[cfg(not(feature = "legacy-spec"))]

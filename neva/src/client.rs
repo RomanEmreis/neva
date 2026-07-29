@@ -577,16 +577,22 @@ impl Client {
     /// `fresh` marks the first page of a traversal, which clears the registry;
     /// later pages accumulate onto it, since a tool absent from page two has
     /// not been withdrawn, only listed elsewhere.
+    ///
+    /// The name of a rejected tool is remembered as well, so that hiding it
+    /// from the listing is not all that hiding it does -- see
+    /// [`Self::blocked_tool_error`].
     #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
     fn register_param_headers(&mut self, result: &mut ListToolsResult, fresh: bool) {
         use crate::shared::param_headers;
 
         if fresh {
             self.options.param_headers.clear();
+            self.options.rejected_tools.clear();
         }
 
         result.tools.retain(|tool| {
             self.options.param_headers.remove(&*tool.name);
+            self.options.rejected_tools.remove(&*tool.name);
             let schema = match serde_json::to_value(&tool.input_schema) {
                 Ok(schema) => schema,
                 Err(_) => return true,
@@ -603,10 +609,46 @@ impl Client {
                 Err(_err) => {
                     #[cfg(feature = "tracing")]
                     tracing::warn!(logger = "neva", "Dropping tool `{}`: {_err}", tool.name);
+                    self.options.rejected_tools.insert(tool.name.to_string());
                     false
                 }
             }
         });
+    }
+
+    /// Refuses a `tools/call` naming a tool the current listing withdrew for a
+    /// malformed `x-mcp-header` declaration.
+    ///
+    /// Dropping such a tool from `tools/list` is what the spec asks for, but on
+    /// its own it only hides the name: a caller holding one from somewhere else
+    /// -- hard-coded, cached, read off a log -- still reaches `call_tool`, and
+    /// since the declaration never parsed there are no annotations to mirror,
+    /// so the call would travel with none of the `Mcp-Param-*` headers it asked
+    /// for. An intermediary would see a call it cannot route or police, which
+    /// is the one outcome the annotation exists to prevent -- so the call is
+    /// refused instead of quietly sent unannotated.
+    ///
+    /// Only tools this client has seen rejected are known; one it never listed
+    /// cannot be recognized.
+    #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+    fn blocked_tool_error(&self, req: &Request) -> Option<Error> {
+        if self.options.rejected_tools.is_empty()
+            || req.method.as_str() != crate::types::tool::commands::CALL
+        {
+            return None;
+        }
+
+        let name = req.params.as_ref()?.get("name")?.as_str()?;
+        if !self.options.rejected_tools.contains(name) {
+            return None;
+        }
+
+        Some(Error::new(
+            ErrorCode::InvalidParams,
+            format!(
+                "Tool `{name}` was rejected for an invalid `x-mcp-header` declaration and cannot be called"
+            ),
+        ))
     }
 
     /// Requests a list of resources that MCP server provides
@@ -1192,6 +1234,13 @@ impl Client {
     /// Sends a request to the MCP server
     #[inline]
     async fn send_request(&mut self, req: Request) -> Result<Response, Error> {
+        // Checked at the send seam rather than in `call_tool`, so every way of
+        // reaching a tool -- the plain call, the task builder -- goes past it.
+        #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+        if let Some(err) = self.blocked_tool_error(&req) {
+            return Err(err);
+        }
+
         #[cfg(not(feature = "legacy-spec"))]
         {
             // A legacy peer (dual-mode fallback) never speaks MRTR -- its
@@ -1489,6 +1538,17 @@ impl Client {
         &mut self,
         items: Vec<MessageEnvelope>,
     ) -> Result<Vec<Response>, Error> {
+        // One blocked tool fails the whole batch, the same as a duplicate id
+        // does: the batch is one write, and there is no way to drop a single
+        // entry from it without silently changing what the caller asked for.
+        #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+        if let Some(err) = items.iter().find_map(|env| match env {
+            MessageEnvelope::Request(req) => self.blocked_tool_error(req),
+            _ => None,
+        }) {
+            return Err(err);
+        }
+
         // Under MCP 2026-07-28 a batched request may elicit just like a single send, so
         // the batch is driven through the same MRTR retry loop (see
         // `run_batch_with_mrtr`) rather than returning the protocol-intermediate
@@ -2869,6 +2929,76 @@ mod param_header_registry_tests {
 
         assert!(second.tools.is_empty(), "a malformed tool is not callable");
         assert!(client.options.param_headers.is_empty());
+    }
+
+    fn call(name: &str) -> Request {
+        Request::new(
+            Some(RequestId::Number(1)),
+            crate::types::tool::commands::CALL,
+            Some(serde_json::json!({ "name": name, "arguments": {} })),
+        )
+    }
+
+    /// Hiding the name from the listing is not enough on its own: a caller
+    /// holding it from anywhere else would otherwise reach the tool with none
+    /// of the headers its declaration asked for.
+    #[test]
+    fn a_rejected_tool_cannot_be_called_by_name() {
+        let mut client = Client::new();
+
+        let mut listed = listing(serde_json::json!([
+            annotated("search"),
+            {
+                "name": "broken",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "p": { "type": "array", "items": { "x-mcp-header": "P" } } }
+                }
+            }
+        ]));
+        client.register_param_headers(&mut listed, true);
+
+        let err = client
+            .blocked_tool_error(&call("broken"))
+            .expect("a rejected tool is refused");
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+        assert!(client.blocked_tool_error(&call("search")).is_none());
+        // Only `tools/call` names a tool.
+        assert!(
+            client
+                .blocked_tool_error(&Request::new(
+                    Some(RequestId::Number(1)),
+                    crate::types::tool::commands::LIST,
+                    Some(serde_json::json!({ "name": "broken" })),
+                ))
+                .is_none()
+        );
+    }
+
+    /// The block follows the listing: a definition the server fixed -- or
+    /// withdrew altogether -- is no longer the one being refused.
+    #[test]
+    fn a_fresh_listing_lifts_the_block() {
+        let mut client = Client::new();
+
+        let mut first = listing(serde_json::json!([{
+            "name": "broken",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "p": { "type": "array", "items": { "x-mcp-header": "P" } } }
+            }
+        }]));
+        client.register_param_headers(&mut first, true);
+        assert!(client.blocked_tool_error(&call("broken")).is_some());
+
+        let mut fixed = listing(serde_json::json!([annotated("broken")]));
+        client.register_param_headers(&mut fixed, true);
+        assert!(client.blocked_tool_error(&call("broken")).is_none());
+
+        client.register_param_headers(&mut first, true);
+        let mut gone = listing(serde_json::json!([plain("other")]));
+        client.register_param_headers(&mut gone, true);
+        assert!(client.blocked_tool_error(&call("broken")).is_none());
     }
 }
 

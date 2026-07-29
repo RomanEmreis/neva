@@ -56,6 +56,11 @@ pub struct McpOptions {
     #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
     pub(crate) param_headers: crate::shared::param_headers::Registry,
 
+    /// Tools the current listing withdrew over a malformed `x-mcp-header`
+    /// declaration, kept so a call naming one anyway can be refused.
+    #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+    pub(crate) rejected_tools: std::collections::HashSet<String>,
+
     /// Request timeout
     pub(super) timeout: Duration,
 
@@ -144,6 +149,8 @@ impl Default for McpOptions {
             implementation: Default::default(),
             #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
             param_headers: Default::default(),
+            #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+            rejected_tools: Default::default(),
             roots: Default::default(),
             roots_capability: None,
             sampling_capability: None,

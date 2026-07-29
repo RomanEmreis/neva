@@ -201,6 +201,31 @@ fn scan(value: &serde_json::Value, at: &mut Vec<String>, out: &mut Vec<String>) 
     }
 }
 
+/// The integer an annotated argument denotes, if it denotes one.
+///
+/// JSON Schema constrains the value and not how it was written, so `1` and
+/// `1.0` are the same integer and a validator accepts both. Reading only the
+/// integer-typed variants would drop the header for the second spelling --
+/// and since both peers extract the same way, the call would then travel with
+/// the annotation silently unhonored rather than rejected, which is the one
+/// outcome the annotation exists to prevent.
+///
+/// A float beyond the safe range the spec puts on annotated integers no longer
+/// carries the digits it was written with, so there is nothing truthful to
+/// mirror. Integer-typed values are exact and pass through as they came.
+fn integer_value(n: &serde_json::Number) -> Option<String> {
+    if n.is_i64() || n.is_u64() {
+        return Some(n.to_string());
+    }
+    let f = n.as_f64()?;
+    // 2^53 - 1, JavaScript's `Number.MAX_SAFE_INTEGER`. A non-finite value
+    // fails the `fract` test as well -- its fractional part is `NaN`.
+    if f.fract() != 0.0 || f.abs() > 9_007_199_254_740_991.0 {
+        return None;
+    }
+    Some((f as i64).to_string())
+}
+
 /// Reads the value each annotated property points at, skipping any that the
 /// call did not supply.
 pub(crate) fn extract(headers: &[ParamHeader], args: &serde_json::Value) -> Vec<(String, String)> {
@@ -214,7 +239,7 @@ pub(crate) fn extract(headers: &[ParamHeader], args: &serde_json::Value) -> Vec<
             let value = match cur {
                 serde_json::Value::String(s) => s.clone(),
                 serde_json::Value::Bool(b) => b.to_string(),
-                serde_json::Value::Number(n) if n.is_i64() || n.is_u64() => n.to_string(),
+                serde_json::Value::Number(n) => integer_value(n)?,
                 // Anything else was rejected at registration time; a peer that
                 // sends it anyway is simply not mirrored.
                 _ => return None,
@@ -413,5 +438,40 @@ mod tests {
             extract(&headers, &args),
             vec![("Mcp-Param-Region".to_string(), "eu-west1".to_string())]
         );
+    }
+
+    #[test]
+    fn extracts_an_integer_written_with_a_zero_fraction() {
+        // `1.0` validates against `"type": "integer"`, so the annotation has to
+        // be honored the same as for `1`.
+        let headers = vec![ParamHeader {
+            path: vec!["limit".into()],
+            header: "Limit".into(),
+        }];
+
+        for args in [json!({ "limit": 42.0 }), json!({ "limit": -42.0 })] {
+            let got = extract(&headers, &args);
+            assert_eq!(got.len(), 1, "{args} was dropped");
+            assert_eq!(got[0].0, "Mcp-Param-Limit");
+            assert!(
+                got[0].1 == "42" || got[0].1 == "-42",
+                "unexpected value {:?}",
+                got[0].1
+            );
+        }
+    }
+
+    #[test]
+    fn skips_fractional_and_unsafe_numbers() {
+        let headers = vec![ParamHeader {
+            path: vec!["limit".into()],
+            header: "Limit".into(),
+        }];
+
+        // A real fraction was rejected as `number` at registration time, and a
+        // float past 2^53 no longer holds the digits it was written with.
+        for args in [json!({ "limit": 1.5 }), json!({ "limit": 1e300 })] {
+            assert!(extract(&headers, &args).is_empty(), "{args} was mirrored");
+        }
     }
 }
