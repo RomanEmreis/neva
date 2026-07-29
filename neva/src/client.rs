@@ -630,7 +630,12 @@ impl Client {
     ///
     /// Only tools this client has seen rejected are known; one it never listed
     /// cannot be recognized.
+    ///
+    /// Sits on the send seam, so every request pays for it -- an empty set is
+    /// checked first precisely so that the requests it is not about (and, in a
+    /// healthy connection, all of them) stop at a single branch.
     #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+    #[inline]
     fn blocked_tool_error(&self, req: &Request) -> Option<Error> {
         if self.options.rejected_tools.is_empty()
             || req.method.as_str() != crate::types::tool::commands::CALL
