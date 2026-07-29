@@ -257,28 +257,42 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
     // mandatory, and the version it states must agree with the header the gate
     // above already validated. Batched requests are checked one by one:
     // wrapping a request in an array must not be a way around the gate it
-    // would face on its own. The first offender decides the reply, since the
-    // status is per-response and the whole POST is rejected either way.
+    // would face on its own.
+    //
+    // One offender rejects the whole POST -- these are conformance failures,
+    // not application errors, and the `400` the spec mandates for a header
+    // mismatch cannot be applied to half a POST. So every request in it is
+    // answered: the offenders with what is wrong with them, the rest with the
+    // fact that the POST they rode in on was not processed. Their callers are
+    // waiting on ids too.
     #[cfg(not(feature = "legacy-spec"))]
     {
         let invalid = match &msg {
-            Message::Request(r) => request_meta_error(r).map(|err| (r.id(), err)),
-            Message::Batch(batch) => batch.iter().find_map(|env| match env {
-                crate::types::MessageEnvelope::Request(r) => {
-                    request_meta_error(r).map(|err| (r.id(), err))
-                }
-                _ => None,
+            Message::Request(r) => request_meta_error(r).is_some(),
+            Message::Batch(batch) => batch.iter().any(|env| match env {
+                crate::types::MessageEnvelope::Request(r) => request_meta_error(r).is_some(),
+                _ => false,
             }),
-            _ => None,
+            _ => false,
         };
 
-        if let Some((req_id, err)) = invalid {
-            let resp = Response::error(req_id, err);
-            return PostPrep::Reply(build_json_response(
-                http::StatusCode::BAD_REQUEST,
-                id,
-                &Message::Response(resp),
-            ));
+        if invalid {
+            let reply = reject_post_each(&msg, |r| {
+                request_meta_error(r).unwrap_or_else(|| {
+                    Error::new(
+                        ErrorCode::InvalidRequest,
+                        "Not processed: another request in this batch was rejected",
+                    )
+                })
+            });
+
+            if let Some(reply) = reply {
+                return PostPrep::Reply(build_json_response(
+                    http::StatusCode::BAD_REQUEST,
+                    id,
+                    &reply,
+                ));
+            }
         }
     }
 
@@ -289,22 +303,19 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
     #[cfg(not(feature = "legacy-spec"))]
     {
         let invalid = match &msg {
-            Message::Request(r) => routing_header_error(r, &headers).map(|err| (r.id(), err)),
+            Message::Request(r) => routing_header_error(r, &headers)
+                .map(|err| Message::Response(Response::error(r.id(), err))),
             // A batch has no single method or name for a header to mirror, so a
             // conforming client sends neither. One that arrives anyway cannot
             // have been derived from this body -- and an intermediary that
             // acted on it was answering about a request that is not in here.
-            Message::Batch(batch) => (headers.contains_key(crate::transport::http::MCP_METHOD)
+            // The header was wrong for the whole batch, so the whole batch
+            // hears about it.
+            Message::Batch(_) => (headers.contains_key(crate::transport::http::MCP_METHOD)
                 || headers.contains_key(crate::transport::http::MCP_NAME))
             .then(|| {
-                (
-                    batch
-                        .iter()
-                        .find_map(|env| match env {
-                            crate::types::MessageEnvelope::Request(r) => Some(r.id()),
-                            _ => None,
-                        })
-                        .unwrap_or(RequestId::Null),
+                reject_post(
+                    &msg,
                     Error::new(
                         ErrorCode::HeaderMismatch,
                         "Mcp-Method / Mcp-Name cannot describe a batch and must be omitted",
@@ -322,7 +333,7 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
                 .and_then(|v| v.to_str().ok())
                 .filter(|stated| *stated != n.method.as_str())
                 .map(|stated| {
-                    (
+                    Message::Response(Response::error(
                         RequestId::Null,
                         Error::new(
                             ErrorCode::HeaderMismatch,
@@ -332,17 +343,16 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
                                 n.method
                             ),
                         ),
-                    )
+                    ))
                 }),
             _ => None,
         };
 
-        if let Some((req_id, err)) = invalid {
-            let resp = Response::error(req_id, err);
+        if let Some(reply) = invalid {
             return PostPrep::Reply(build_json_response(
                 http::StatusCode::BAD_REQUEST,
                 id,
-                &Message::Response(resp),
+                &reply,
             ));
         }
     }
@@ -664,7 +674,8 @@ fn get_or_create_mcp_session(
         .unwrap_or_else(uuid::Uuid::new_v4)
 }
 
-/// Addresses a whole-POST rejection to every request the POST carried.
+/// Addresses a whole-POST rejection to every request the POST carried, each
+/// with the verdict on itself.
 ///
 /// A JSON-RPC error reaches its caller by id: the client resolves the pending
 /// request whose id the reply names, and nothing else. A reply carrying `null`
@@ -672,47 +683,58 @@ fn get_or_create_mcp_session(
 /// and the error it was handed is never seen, which on a version mismatch
 /// costs it the one message that says what to do instead. A batch gets one
 /// error per request for the same reason: the client registered a slot for
-/// each of them.
+/// each of them, and answering only the offender leaves the rest of the batch
+/// hanging on a POST that has already been decided.
 ///
-/// Only for errors the whole POST shares, such as a transport header that was
-/// wrong for every request underneath it.
+/// `None` when the body carried no request at all -- a notification is never
+/// answered, rejection included.
 #[cfg(not(feature = "legacy-spec"))]
-fn reject_post(msg: &Message, err: Error) -> Message {
+fn reject_post_each(
+    msg: &Message,
+    verdict: impl Fn(&crate::types::Request) -> Error,
+) -> Option<Message> {
     use crate::types::{MessageBatch, MessageEnvelope};
 
-    // `Error` is not `Clone` -- its cause is a boxed `dyn StdError` -- and a
-    // batch needs one reply per request, all saying the same thing.
-    fn restate(err: &Error) -> Error {
-        let restated = Error::new(err.code, err.to_string());
-        match err.data() {
-            Some(data) => restated.with_data(data.clone()),
-            None => restated,
-        }
-    }
-
     match msg {
-        Message::Request(req) => Message::Response(Response::error(req.id(), err)),
+        Message::Request(req) => Some(Message::Response(Response::error(req.id(), verdict(req)))),
         Message::Batch(batch) => {
             let items = batch
                 .iter()
                 .filter_map(|env| match env {
                     MessageEnvelope::Request(req) => Some(MessageEnvelope::Response(
-                        Response::error(req.id(), restate(&err)),
+                        Response::error(req.id(), verdict(req)),
                     )),
-                    // A notification is never answered, rejection included.
                     _ => None,
                 })
                 .collect::<Vec<_>>();
 
-            MessageBatch::new(items)
-                .map(Message::Batch)
-                // Empty only when the batch was notifications throughout, and
-                // then there is no one to answer.
-                .unwrap_or_else(|_| Message::Response(Response::error(RequestId::Null, err)))
+            // Fails only on an empty vec, i.e. a batch of notifications
+            // throughout -- and then there is no one to answer.
+            MessageBatch::new(items).map(Message::Batch).ok()
         }
-        // A notification has no id to answer to.
-        _ => Message::Response(Response::error(RequestId::Null, err)),
+        _ => None,
     }
+}
+
+/// [`reject_post_each`] for a failure the whole POST shares -- a transport
+/// header that was wrong for every request underneath it -- where the verdict
+/// on each request is the same one.
+///
+/// Falls back to an unaddressed reply when there is no request to address:
+/// the POST is still answered, since the status is what carries the rejection.
+#[cfg(not(feature = "legacy-spec"))]
+fn reject_post(msg: &Message, err: Error) -> Message {
+    // `Error` is not `Clone` -- its cause is a boxed `dyn StdError` -- and a
+    // batch needs one reply per request, all saying the same thing.
+    let restated = reject_post_each(msg, |_| {
+        let copy = Error::new(err.code, err.to_string());
+        match err.data() {
+            Some(data) => copy.with_data(data.clone()),
+            None => copy,
+        }
+    });
+
+    restated.unwrap_or_else(|| Message::Response(Response::error(RequestId::Null, err)))
 }
 
 /// Why a request's `_meta` is unacceptable, if it is.
@@ -1525,7 +1547,15 @@ mod tests {
         let resp = handle_post(req, &ctx).await;
         assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
         let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
-        assert_eq!(body["error"]["code"], -32020);
+        // The header was wrong for the whole batch, so every item in it is
+        // told so -- each is a slot some caller is waiting on.
+        let items = body.as_array().expect("a batch is answered with a batch");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["id"], 1);
+        assert_eq!(items[1]["id"], 2);
+        for item in items {
+            assert_eq!(item["error"]["code"], -32020);
+        }
     }
 
     /// A batch must not be a way around the version gate a standalone request
@@ -1550,9 +1580,16 @@ mod tests {
         let resp = handle_post(req, &ctx).await;
         assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
         let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
-        assert_eq!(body["error"]["code"], -32020);
-        // The reply is addressed to the offending item, not the batch.
-        assert_eq!(body["id"], 2);
+        let items = body.as_array().expect("a batch is answered with a batch");
+        assert_eq!(items.len(), 2);
+
+        // The offender hears what is wrong with it...
+        assert_eq!(items[1]["id"], 2);
+        assert_eq!(items[1]["error"]["code"], -32020);
+        // ...and the item that rode in with it hears that the POST carrying it
+        // was not processed, rather than nothing at all.
+        assert_eq!(items[0]["id"], 1);
+        assert_eq!(items[0]["error"]["code"], -32600);
     }
 
     /// `-32021` is raised during dispatch rather than in the preamble, so the
