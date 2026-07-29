@@ -278,9 +278,15 @@ mod tests {
         let resp = result.into_response(RequestId::default());
         let json = serde_json::to_string(&resp).unwrap();
 
+        #[cfg(feature = "legacy-spec")]
         assert_eq!(
             json,
             r#"{"jsonrpc":"2.0","id":"(no id)","result":{"completion":{"has_more":false,"total":0,"values":[]}}}"#
+        );
+        #[cfg(not(feature = "legacy-spec"))]
+        assert_eq!(
+            json,
+            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"completion":{"has_more":false,"total":0,"values":[]},"resultType":"complete"}}"#
         );
     }
 

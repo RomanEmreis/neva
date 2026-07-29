@@ -1,4 +1,4 @@
-# MRTR (Multi Round-Trip Requests) Example -- MCP 2026-07-28 RC
+# MRTR (Multi Round-Trip Requests) Example -- MCP 2026-07-28
 
 A new-spec checkout flow over **stateless HTTP**. The server's single
 `place_order` tool elicits shipping details mid-handler and uses the MRTR effect

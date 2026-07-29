@@ -144,7 +144,7 @@ enum Line {
 ///
 /// A malformed **response** carrying an `id` belongs to a request this side
 /// is waiting on: it is reported as an id-bound `ParseError` so the pending
-/// request completes with the real cause. That is what makes the RC
+/// request completes with the real cause. That is what makes the 2026-07-28
 /// client's dual-mode fallback reachable over stdio -- it classifies such a
 /// rejection as "legacy peer" and retries `initialize`, which a timeout
 /// never could.
@@ -446,7 +446,7 @@ mod parse_line_tests {
 
     /// A JSON-RPC error whose code is outside neva's `ErrorCode` set (the
     /// TS SDK's `-32000`) is the exact reply a legacy server sends to the
-    /// RC client's pre-initialize `server/discover`. It must complete the
+    /// 2026-07-28 client's pre-initialize `server/discover`. It must complete the
     /// pending request as an id-bound `ParseError`, not kill the loop.
     #[test]
     fn unknown_error_code_becomes_an_id_bound_parse_error() {

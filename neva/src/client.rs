@@ -26,12 +26,16 @@ use std::{future::Future, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "tasks")]
+#[cfg(feature = "legacy-spec")]
 use serde::de::DeserializeOwned;
 
 #[cfg(feature = "tasks")]
+use crate::types::{CancelTaskRequestParams, GetTaskRequestParams, TaskMetadata};
+#[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
+use crate::types::{DetailedTask, UpdateTaskRequestParams};
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 use crate::types::{
-    CancelTaskRequestParams, GetTaskPayloadRequestParams, GetTaskRequestParams,
-    ListTasksRequestParams, ListTasksResult, Task, TaskMetadata, TaskPayload,
+    GetTaskPayloadRequestParams, ListTasksRequestParams, ListTasksResult, Task, TaskPayload,
 };
 
 pub mod batch;
@@ -118,7 +122,7 @@ impl Client {
     /// # }
     /// ```
     #[deprecated(
-        note = "Roots are deprecated in MCP 2026-07-28: the capability-driven `roots/list` request is gone and the ability is re-homed onto MRTR -- see `Context::list_roots`. Under the RC this configures what the client answers MRTR `roots/list` input requests with."
+        note = "Roots are deprecated in MCP 2026-07-28: the capability-driven `roots/list` request is gone and the ability is re-homed onto MRTR -- see `Context::list_roots`. Under MCP 2026-07-28 this configures what the client answers MRTR `roots/list` input requests with."
     )]
     #[allow(deprecated)]
     pub fn add_root(&mut self, uri: impl Into<Uri>, name: impl Into<String>) -> &mut Self {
@@ -145,7 +149,7 @@ impl Client {
     /// # }
     /// ```
     #[deprecated(
-        note = "Roots are deprecated in MCP 2026-07-28: the capability-driven `roots/list` request is gone and the ability is re-homed onto MRTR -- see `Context::list_roots`. Under the RC this configures what the client answers MRTR `roots/list` input requests with."
+        note = "Roots are deprecated in MCP 2026-07-28: the capability-driven `roots/list` request is gone and the ability is re-homed onto MRTR -- see `Context::list_roots`. Under MCP 2026-07-28 this configures what the client answers MRTR `roots/list` input requests with."
     )]
     #[allow(deprecated)]
     pub fn add_roots<T, I>(&mut self, roots: I) -> &mut Self
@@ -160,7 +164,7 @@ impl Client {
 
     /// Sends the "notifications/roots/list_changed" notification to the server
     #[deprecated(
-        note = "Roots are deprecated in MCP 2026-07-28: the capability-driven `roots/list` request is gone and the ability is re-homed onto MRTR -- see `Context::list_roots`. Under the RC this configures what the client answers MRTR `roots/list` input requests with."
+        note = "Roots are deprecated in MCP 2026-07-28: the capability-driven `roots/list` request is gone and the ability is re-homed onto MRTR -- see `Context::list_roots`. Under MCP 2026-07-28 this configures what the client answers MRTR `roots/list` input requests with."
     )]
     pub fn publish_roots_changed(&mut self) {
         if let Some(handler) = self.handler.as_mut() {
@@ -171,7 +175,7 @@ impl Client {
 
     /// Registers a handler that will be running when a "sampling/createMessage" request is received
     #[deprecated(
-        note = "Sampling is deprecated in MCP 2026-07-28: the capability-driven `sampling/createMessage` request is gone and the ability is re-homed onto MRTR -- see `Context::sample`. Under the RC this handler fulfils MRTR `sampling/createMessage` input requests."
+        note = "Sampling is deprecated in MCP 2026-07-28: the capability-driven `sampling/createMessage` request is gone and the ability is re-homed onto MRTR -- see `Context::sample`. Under MCP 2026-07-28 this handler fulfils MRTR `sampling/createMessage` input requests."
     )]
     pub fn map_sampling<F, R>(&mut self, handler: F) -> &mut Self
     where
@@ -261,20 +265,20 @@ impl Client {
 
     /// The protocol version this client expects from the connected peer.
     ///
-    /// Under the RC flag the RC expectation is pinned to
-    /// [`crate::RC_PROTOCOL_VERSION`]: a `with_mcp_version` override only
+    /// Under MCP 2026-07-28 the 2026-07-28 expectation is pinned to
+    /// [`crate::LATEST_PROTOCOL_VERSION`]: a `with_mcp_version` override only
     /// selects which legacy version the dual-mode fallback negotiates --
-    /// it must never make `server/discover` reject a valid RC server.
+    /// it must never make `server/discover` reject a valid 2026-07-28 server.
     fn expected_protocol_ver(&self) -> &'static str {
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         {
             if self.is_legacy_peer() {
                 self.options.legacy_protocol_ver()
             } else {
-                crate::RC_PROTOCOL_VERSION
+                crate::LATEST_PROTOCOL_VERSION
             }
         }
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        #[cfg(feature = "legacy-spec")]
         {
             self.options.protocol_ver()
         }
@@ -303,21 +307,21 @@ impl Client {
         Ok(())
     }
 
-    /// Sends `initialize` request to an MCP server (pre-RC handshake).
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    /// Sends `initialize` request to an MCP server (legacy handshake).
+    #[cfg(feature = "legacy-spec")]
     pub async fn init(&mut self) -> Result<(), Error> {
         self.legacy_init().await
     }
 
     /// The `initialize`/`initialized` handshake: the only handshake for
-    /// the legacy build, the dual-mode fallback for the RC build.
+    /// the legacy build, the dual-mode fallback for the 2026-07-28 build.
     async fn legacy_init(&mut self) -> Result<(), Error> {
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        #[cfg(feature = "legacy-spec")]
         let protocol_ver = self.options.protocol_ver().to_string();
-        // The fallback negotiates the newest pre-RC version -- offering
-        // the RC version to a server that just rejected `server/discover`
+        // The fallback negotiates the newest legacy version -- offering
+        // the 2026-07-28 version to a server that just rejected `server/discover`
         // would only get refused again.
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         let protocol_ver = self.options.legacy_protocol_ver().to_string();
 
         let params = InitializeRequestParams {
@@ -329,7 +333,7 @@ impl Client {
                 elicitation: self.options.elicitation_capability(),
                 #[cfg(feature = "tasks")]
                 tasks: self.options.tasks_capability(),
-                #[cfg(feature = "proto-2026-07-28-rc")]
+                #[cfg(not(feature = "legacy-spec"))]
                 extensions: None,
                 experimental: None,
             }),
@@ -354,11 +358,11 @@ impl Client {
             .await
     }
 
-    /// Discovers server capabilities via `server/discover` (MCP 2026-07-28 RC).
+    /// Discovers server capabilities via `server/discover` (MCP 2026-07-28).
     ///
     /// Replaces the `initialize`/`initialized` handshake. No `initialized`
     /// notification is sent -- the transport is stateless.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub async fn discover(&mut self) -> Result<(), Error> {
         let resp = self.send_request(Self::discover_request()).await?;
         let result = resp.into_result::<crate::types::DiscoverResult>()?;
@@ -366,7 +370,7 @@ impl Client {
     }
 
     /// Builds the `server/discover` request.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     fn discover_request() -> Request {
         Request::new(
             Some(RequestId::Uuid(uuid::Uuid::new_v4())),
@@ -377,28 +381,45 @@ impl Client {
 
     /// Applies a successful `server/discover` result: validates the
     /// reported protocol version and stores the capabilities.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     fn apply_discover(&mut self, result: crate::types::DiscoverResult) -> Result<(), Error> {
-        self.validate_server_version(result.protocol_ver.as_str())?;
+        // Discovery advertises a *set*; the handshake succeeds when the version
+        // this client speaks is among them.
+        let expected = self.expected_protocol_ver();
+        if !result.supported_versions.iter().any(|v| v == expected) {
+            // `connect` has already started the transport; leaving it running
+            // would park background HTTP/SSE tasks behind a client that never
+            // completed its handshake.
+            self.cancel_transport();
+            return Err(Error::new(
+                ErrorCode::UnsupportedProtocolVersion,
+                format!(
+                    "Server supports {:?} but the client speaks {expected}",
+                    result.supported_versions
+                ),
+            ));
+        }
         self.server_capabilities = Some(result.capabilities);
-        self.server_info = Some(result.server_info);
+        // `serverInfo` left `DiscoverResult` in the final spec: servers now
+        // report themselves in every result's `_meta`, so it is picked up from
+        // there instead.
         Ok(())
     }
 
     /// The dual-mode handshake (issue #84): tries `server/discover`
-    /// first and, when the server clearly doesn't speak the RC protocol,
+    /// first and, when the server clearly doesn't speak the 2026-07-28 protocol,
     /// falls back to the legacy `initialize` handshake and marks the
     /// peer as legacy -- subsequent traffic uses legacy semantics
-    /// (session header, SSE stream, no MRTR, no RC routing headers).
+    /// (session header, SSE stream, no MRTR, no 2026-07-28 routing headers).
     ///
     /// Only **wire-phase** failures classify for the fallback: transport
     /// errors and the server's JSON-RPC *error* reply. Once the server
     /// answers `server/discover` successfully, the peer has committed to
-    /// the RC protocol -- later local failures (a malformed result, an
+    /// the 2026-07-28 protocol -- later local failures (a malformed result, an
     /// unsupported/mismatched `protocolVersion`) surface as real errors
     /// instead of a misleading fallback attempt on a transport that
     /// version validation may already have cancelled.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub async fn init(&mut self) -> Result<(), Error> {
         let resp = match self.send_request(Self::discover_request()).await {
             Ok(resp) => resp,
@@ -420,7 +441,7 @@ impl Client {
 
     /// Runs the legacy half of the dual-mode handshake after a
     /// classified `server/discover` rejection.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     async fn fallback_init(&mut self, _err: &Error) -> Result<(), Error> {
         #[cfg(feature = "tracing")]
         tracing::info!(
@@ -433,12 +454,15 @@ impl Client {
 
     /// Whether the peer negotiated the legacy protocol through the
     /// dual-mode fallback.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     fn is_legacy_peer(&self) -> bool {
         self.options.peer_mode.is_legacy()
     }
 
     /// Sends a ping to the MCP server
+    ///
+    /// Removed in MCP 2026-07-28; available only under `legacy-spec`.
+    #[cfg(feature = "legacy-spec")]
     pub async fn ping(&mut self) -> Result<Response, Error> {
         self.command::<()>(crate::commands::PING, None).await
     }
@@ -500,10 +524,136 @@ impl Client {
     /// }
     /// ```
     pub async fn list_tools(&mut self, cursor: Option<Cursor>) -> Result<ListToolsResult, Error> {
+        // A cursor-less call starts the listing over, so it replaces what the
+        // previous traversal registered rather than merging into it.
+        #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+        let fresh = cursor.is_none();
         let params = ListToolsRequestParams { cursor };
-        self.command(crate::types::tool::commands::LIST, Some(params))
+
+        #[allow(unused_mut)]
+        let mut result: ListToolsResult = self
+            .command(crate::types::tool::commands::LIST, Some(params))
             .await?
-            .into_result()
+            .into_result()?;
+
+        #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+        self.register_param_headers(&mut result, fresh);
+
+        Ok(result)
+    }
+
+    /// Runs a batched `tools/list` response through the same registry update a
+    /// direct [`Self::list_tools`] performs, rewriting the response in place so
+    /// the caller never sees a tool the client refuses to call.
+    ///
+    /// A batched listing is always a fresh traversal: [`BatchBuilder`] enqueues
+    /// it without a cursor. A response that does not parse as a listing is left
+    /// alone -- it is the caller's to interpret, and it registers nothing.
+    #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+    pub(super) fn register_batched_tools(&mut self, resp: &mut Response) {
+        let Response::Ok(ok) = resp else { return };
+        let Ok(mut result) = serde_json::from_value::<ListToolsResult>(ok.result.clone()) else {
+            return;
+        };
+        self.register_param_headers(&mut result, true);
+        if let Ok(value) = serde_json::to_value(&result) {
+            ok.result = value;
+        }
+    }
+
+    /// Records each tool's `x-mcp-header` annotations and drops any tool whose
+    /// annotations are invalid.
+    ///
+    /// The spec makes rejection per-tool on purpose: one malformed definition
+    /// must not take the whole listing down, and must not be callable either --
+    /// so the offending tool is removed from the result the caller sees.
+    ///
+    /// A refreshed listing replaces what the previous one registered, including
+    /// replacing it with nothing: a server that drops an annotation -- or drops
+    /// the whole tool -- must stop the client from mirroring that argument into
+    /// a header, which a leftover registration would keep doing even though the
+    /// current listing no longer designates it.
+    ///
+    /// `fresh` marks the first page of a traversal, which clears the registry;
+    /// later pages accumulate onto it, since a tool absent from page two has
+    /// not been withdrawn, only listed elsewhere.
+    ///
+    /// The name of a rejected tool is remembered as well, so that hiding it
+    /// from the listing is not all that hiding it does -- see
+    /// [`Self::blocked_tool_error`].
+    #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+    fn register_param_headers(&mut self, result: &mut ListToolsResult, fresh: bool) {
+        use crate::shared::param_headers;
+
+        if fresh {
+            self.options.param_headers.clear();
+            self.options.rejected_tools.clear();
+        }
+
+        result.tools.retain(|tool| {
+            self.options.param_headers.remove(&*tool.name);
+            self.options.rejected_tools.remove(&*tool.name);
+            let schema = match serde_json::to_value(&tool.input_schema) {
+                Ok(schema) => schema,
+                Err(_) => return true,
+            };
+            match param_headers::collect(&schema) {
+                Ok(headers) => {
+                    if !headers.is_empty() {
+                        self.options
+                            .param_headers
+                            .insert(tool.name.to_string(), headers);
+                    }
+                    true
+                }
+                Err(_err) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(logger = "neva", "Dropping tool `{}`: {_err}", tool.name);
+                    self.options.rejected_tools.insert(tool.name.to_string());
+                    false
+                }
+            }
+        });
+    }
+
+    /// Refuses a `tools/call` naming a tool the current listing withdrew for a
+    /// malformed `x-mcp-header` declaration.
+    ///
+    /// Dropping such a tool from `tools/list` is what the spec asks for, but on
+    /// its own it only hides the name: a caller holding one from somewhere else
+    /// -- hard-coded, cached, read off a log -- still reaches `call_tool`, and
+    /// since the declaration never parsed there are no annotations to mirror,
+    /// so the call would travel with none of the `Mcp-Param-*` headers it asked
+    /// for. An intermediary would see a call it cannot route or police, which
+    /// is the one outcome the annotation exists to prevent -- so the call is
+    /// refused instead of quietly sent unannotated.
+    ///
+    /// Only tools this client has seen rejected are known; one it never listed
+    /// cannot be recognized.
+    ///
+    /// Sits on the send seam, so every request pays for it -- an empty set is
+    /// checked first precisely so that the requests it is not about (and, in a
+    /// healthy connection, all of them) stop at a single branch.
+    #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+    #[inline]
+    fn blocked_tool_error(&self, req: &Request) -> Option<Error> {
+        if self.options.rejected_tools.is_empty()
+            || req.method.as_str() != crate::types::tool::commands::CALL
+        {
+            return None;
+        }
+
+        let name = req.params.as_ref()?.get("name")?.as_str()?;
+        if !self.options.rejected_tools.contains(name) {
+            return None;
+        }
+
+        Some(Error::new(
+            ErrorCode::InvalidParams,
+            format!(
+                "Tool `{name}` was rejected for an invalid `x-mcp-header` declaration and cannot be called"
+            ),
+        ))
     }
 
     /// Requests a list of resources that MCP server provides
@@ -958,6 +1108,7 @@ impl Client {
 
     /// Returns whether the client has elicitation capabilities
     #[inline]
+    #[cfg(feature = "legacy-spec")]
     fn is_elicitation_supported(&self) -> bool {
         self.options.elicitation_capability.as_ref().is_some()
     }
@@ -970,10 +1121,10 @@ impl Client {
     }
 
     /// Resolves the server's tasks capability from the negotiated server
-    /// capabilities. Pre-RC it is the top-level `tasks` field; under
-    /// `proto-2026-07-28-rc` tasks are an extension, so it is read from
+    /// capabilities. Pre-2026-07-28 it is the top-level `tasks` field; under
+    /// MCP 2026-07-28 tasks are an extension, so it is read from
     /// `capabilities.extensions["io.modelcontextprotocol/tasks"]`.
-    #[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     fn server_tasks_capability(&self) -> Option<crate::types::ServerTasksCapability> {
         self.server_capabilities
             .as_ref()
@@ -981,21 +1132,20 @@ impl Client {
     }
 
     /// Resolves the server's tasks capability from the negotiated server
-    /// capabilities (MCP 2026-07-28 RC build).
+    /// capabilities (MCP 2026-07-28 build).
     ///
-    /// An RC peer advertises tasks through
-    /// `capabilities.extensions["io.modelcontextprotocol/tasks"]`; a
-    /// legacy peer reached via the dual-mode fallback advertises the
-    /// top-level `tasks` field of its `initialize` result -- both must
-    /// resolve, or task-augmented calls report no support after a
-    /// fallback.
-    #[cfg(all(feature = "tasks", feature = "proto-2026-07-28-rc"))]
+    /// Tasks are an extension here, so the one place they can be advertised is
+    /// `capabilities.extensions["io.modelcontextprotocol/tasks"]`. The
+    /// pre-2026-07-28 top-level `tasks` field is deliberately not read: it can
+    /// only come from a peer reached through the dual-mode fallback, whose task
+    /// protocol this build does not speak (see
+    /// [`Self::is_server_supports_tasks`]), so resolving it would only ever
+    /// promise support that cannot be delivered.
+    #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
     fn server_tasks_capability(&self) -> Option<crate::types::ServerTasksCapability> {
-        let caps = self.server_capabilities.as_ref()?;
-        if let Some(tasks) = &caps.tasks {
-            return Some(tasks.clone());
-        }
-        caps.extensions
+        self.server_capabilities
+            .as_ref()?
+            .extensions
             .as_ref()
             .and_then(|ext| ext.get(crate::types::task::TASKS_EXTENSION_ID))
             .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -1003,14 +1153,33 @@ impl Client {
 
     /// Returns whether the server has task augmentation capabilities
     #[inline]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     fn is_server_supports_tasks(&self) -> bool {
         self.server_tasks_capability().is_some()
     }
 
+    /// Returns whether the server has task augmentation capabilities
+    ///
+    /// A peer reached through the dual-mode fallback speaks the *legacy* task
+    /// protocol -- different method set (`tasks/result`, `tasks/list`), a
+    /// nested `CreateTaskResult`, a differently named status notification --
+    /// and none of that wire surface is compiled into this build. It is
+    /// reported as unsupported rather than answered with 2026-07-28 messages
+    /// it cannot read; talking tasks to a legacy server needs a `legacy-spec`
+    /// build, or the peers must simply agree on a generation. The peer check
+    /// is belt-and-braces on top of
+    /// [`Self::server_tasks_capability`](Self::server_tasks_capability) only
+    /// reading the 2026-07-28 form: it also covers a peer that advertises the
+    /// extension and then falls back.
+    #[inline]
+    #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
+    fn is_server_supports_tasks(&self) -> bool {
+        !self.is_legacy_peer() && self.server_tasks_capability().is_some()
+    }
+
     /// Returns whether the client supports cancelling tasks
     #[inline]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     fn is_client_support_cancelling_tasks(&self) -> bool {
         self.options
             .tasks_capability
@@ -1020,7 +1189,7 @@ impl Client {
 
     /// Returns whether the server supports cancelling tasks
     #[inline]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     fn is_server_support_cancelling_tasks(&self) -> bool {
         self.server_tasks_capability()
             .is_some_and(|c| c.cancel.is_some())
@@ -1028,7 +1197,7 @@ impl Client {
 
     /// Returns whether the server supports retrieving a task list
     #[inline]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     fn is_server_support_task_list(&self) -> bool {
         self.server_tasks_capability()
             .is_some_and(|c| c.list.is_some())
@@ -1036,7 +1205,7 @@ impl Client {
 
     /// Returns whether the client supports retrieving a task list
     #[inline]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     fn is_client_support_task_list(&self) -> bool {
         self.options
             .tasks_capability
@@ -1045,8 +1214,21 @@ impl Client {
     }
 
     /// Returns whether the server supports task-augmented tools
+    ///
+    /// Under MCP 2026-07-28 the Tasks extension capability carries no
+    /// per-request settings: a peer that advertises the extension at all
+    /// accepts task-augmented requests, and the server decides per request
+    /// whether to defer. A peer that fell back to the legacy protocol is
+    /// excluded -- see [`Self::is_server_supports_tasks`].
     #[inline]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
+    fn is_server_support_call_tool_with_tasks(&self) -> bool {
+        self.is_server_supports_tasks()
+    }
+
+    /// Returns whether the server supports task-augmented tools
+    #[inline]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     fn is_server_support_call_tool_with_tasks(&self) -> bool {
         self.server_tasks_capability()
             .and_then(|c| c.requests)
@@ -1057,7 +1239,14 @@ impl Client {
     /// Sends a request to the MCP server
     #[inline]
     async fn send_request(&mut self, req: Request) -> Result<Response, Error> {
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        // Checked at the send seam rather than in `call_tool`, so every way of
+        // reaching a tool -- the plain call, the task builder -- goes past it.
+        #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+        if let Some(err) = self.blocked_tool_error(&req) {
+            return Err(err);
+        }
+
+        #[cfg(not(feature = "legacy-spec"))]
         {
             // A legacy peer (dual-mode fallback) never speaks MRTR -- its
             // requests take the plain path, elicitation rides the legacy
@@ -1067,7 +1256,7 @@ impl Client {
             }
             self.run_with_mrtr(req).await
         }
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        #[cfg(feature = "legacy-spec")]
         {
             self.plain_send_request(req).await
         }
@@ -1076,18 +1265,43 @@ impl Client {
     /// Sends a request without the MRTR loop.
     #[inline]
     async fn plain_send_request(&mut self, req: Request) -> Result<Response, Error> {
-        self.handler
+        let resp = self
+            .handler
             .as_mut()
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?
             .send_request(req)
-            .await
+            .await?;
+        #[cfg(not(feature = "legacy-spec"))]
+        self.record_server_info(&resp);
+        Ok(resp)
+    }
+
+    /// Picks up `io.modelcontextprotocol/serverInfo` from a result's `_meta`.
+    ///
+    /// Under MCP 2026-07-28 the server identifies itself on every result rather
+    /// than once in a handshake, so the first result that carries it is what
+    /// populates [`Self::server_info`].
+    #[cfg(not(feature = "legacy-spec"))]
+    fn record_server_info(&mut self, resp: &Response) {
+        if self.server_info.is_some() {
+            return;
+        }
+        let Response::Ok(ok) = resp else { return };
+        if let Some(info) = ok
+            .result
+            .get("_meta")
+            .and_then(|m| m.get("io.modelcontextprotocol/serverInfo"))
+            .and_then(|v| serde_json::from_value::<Implementation>(v.clone()).ok())
+        {
+            self.server_info = Some(info);
+        }
     }
 
     /// Sends a request and transparently drives the MRTR loop: while the
     /// server responds with an `input_required` result, fulfil each
     /// elicitation via the configured handler and re-issue the original
     /// request (new id) with `inputResponses` + the echoed `requestState`.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     async fn run_with_mrtr(&mut self, req: Request) -> Result<Response, Error> {
         let max_rounds = self.options.max_mrtr_rounds;
         let method = req.method.clone();
@@ -1107,14 +1321,15 @@ impl Client {
                 .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?
                 .send_request(req)
                 .await?;
+            self.record_server_info(&resp);
 
             // MRTR only applies to success results carrying the
-            // `input_required` discriminator; anything else is final.
+            // `input_required` discriminator; anything else -- including a
+            // result with no `resultType` at all -- is final.
             let input_required_result = match &resp {
                 Response::Ok(ok)
                     if mrtr_method
-                        && ok.result.get("resultType")
-                            == Some(&serde_json::json!("input_required")) =>
+                        && resp.result_type() == Some(crate::types::ResultType::InputRequired) =>
                 {
                     serde_json::from_value::<crate::types::mrtr::InputRequiredResult>(
                         ok.result.clone(),
@@ -1149,10 +1364,10 @@ impl Client {
     ///
     /// Also populates W3C Trace Context (`traceparent` / `tracestate`) from the
     /// configured [`trace_context_provider`](crate::client::options::McpOptions::with_trace_context_provider),
-    /// when installed. This is the single assembly point for outbound RC `_meta`,
+    /// when installed. This is the single assembly point for outbound 2026-07-28 `_meta`,
     /// so both single sends (via [`Self::run_with_mrtr`]) and batched requests
     /// (via [`Self::run_batch_with_mrtr`]) carry trace context.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     fn apply_client_meta(
         &self,
         req: &mut Request,
@@ -1161,6 +1376,9 @@ impl Client {
     ) {
         let mut meta = req.meta().unwrap_or_default();
         meta.client_info = Some(self.options.implementation.clone());
+        // Required on every request under MCP 2026-07-28, and it must agree
+        // with the `MCP-Protocol-Version` header the HTTP transport sets.
+        meta.protocol_version = Some(self.expected_protocol_ver().to_string());
         // Each flag reflects what this client can actually fulfil right now: a
         // configured handler for elicitation/sampling, and -- since roots are
         // data rather than a handler -- a declared roots capability. That is
@@ -1187,6 +1405,7 @@ impl Client {
         {
             meta.traceparent = Some(tc.traceparent);
             meta.tracestate = tc.tracestate;
+            meta.baggage = tc.baggage;
         }
 
         // Request-scoped logging level (replaces the removed `logging/setLevel`).
@@ -1197,12 +1416,12 @@ impl Client {
         req.set_meta(meta);
     }
 
-    /// Applies the initial per-request RC client metadata (`clientInfo` /
+    /// Applies the initial per-request 2026-07-28 client metadata (`clientInfo` /
     /// `clientCapabilities`, plus trace context) to every [`Request`] in a
     /// batch. The MRTR re-run fields (`inputResponses` / `requestState`) stay
     /// `None` here -- they are filled per request on each retry round by
     /// [`Self::run_batch_with_mrtr`]. Notifications are left untouched.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     fn apply_client_meta_to_batch(&self, items: &mut [MessageEnvelope]) {
         for envelope in items {
             if let MessageEnvelope::Request(req) = envelope {
@@ -1215,11 +1434,11 @@ impl Client {
     /// raw result to echo back under the request's key.
     ///
     /// Sampling and roots are fulfilled here, on the MRTR loop -- *not* as
-    /// server-initiated pushes: under the RC there is no such channel. The
+    /// server-initiated pushes: under MCP 2026-07-28 there is no such channel. The
     /// client only ever gets asked for a kind it declared in
     /// [`ClientMrtrCapabilities`](crate::types::mrtr::ClientMrtrCapabilities),
     /// so a missing handler here means the server ignored those flags.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     async fn fulfil_input(
         &self,
         request: crate::types::mrtr::InputRequest,
@@ -1261,7 +1480,7 @@ impl Client {
     ///     let responses = client
     ///         .batch()
     ///         .list_tools()
-    ///         .ping()
+    ///         .list_prompts()
     ///         .send()
     ///         .await?;
     ///
@@ -1324,12 +1543,23 @@ impl Client {
         &mut self,
         items: Vec<MessageEnvelope>,
     ) -> Result<Vec<Response>, Error> {
-        // Under the RC a batched request may elicit just like a single send, so
+        // One blocked tool fails the whole batch, the same as a duplicate id
+        // does: the batch is one write, and there is no way to drop a single
+        // entry from it without silently changing what the caller asked for.
+        #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+        if let Some(err) = items.iter().find_map(|env| match env {
+            MessageEnvelope::Request(req) => self.blocked_tool_error(req),
+            _ => None,
+        }) {
+            return Err(err);
+        }
+
+        // Under MCP 2026-07-28 a batched request may elicit just like a single send, so
         // the batch is driven through the same MRTR retry loop (see
         // `run_batch_with_mrtr`) rather than returning the protocol-intermediate
         // `input_required` result as final. A legacy peer (dual-mode
         // fallback) never speaks MRTR and takes the plain path.
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         {
             if !self.is_legacy_peer() {
                 return self.run_batch_with_mrtr(items).await;
@@ -1363,7 +1593,7 @@ impl Client {
     /// request keeps its slot in the returned `Vec`, in input order;
     /// notifications (and any non-request envelopes) are sent once, in the
     /// first round, and produce no slot.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     async fn run_batch_with_mrtr(
         &mut self,
         items: Vec<MessageEnvelope>,
@@ -1461,6 +1691,7 @@ impl Client {
             // their slot; `input_required` ones are fulfilled and re-issued.
             for (slot_i, resp) in round_slots.into_iter().zip(responses) {
                 let resp = resp?;
+                self.record_server_info(&resp);
                 let (method, original_params) = match &slots[slot_i] {
                     Slot::Pending {
                         method,
@@ -1471,12 +1702,7 @@ impl Client {
                 };
 
                 let is_input_required = shared::is_mrtr_method(method.as_str())
-                    && matches!(
-                        &resp,
-                        Response::Ok(ok)
-                            if ok.result.get("resultType")
-                                == Some(&serde_json::json!("input_required"))
-                    );
+                    && resp.result_type() == Some(crate::types::ResultType::InputRequired);
 
                 if !is_input_required {
                     slots[slot_i] = Slot::Done(resp);
@@ -1525,9 +1751,11 @@ impl Client {
         Ok(out)
     }
 
-    /// Sends a request to the MCP server
+    /// Sends a response to the MCP server
+    ///
+    /// Only the legacy profile has server->client requests to answer.
     #[inline]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     async fn send_response(&mut self, req: Response) -> Result<(), Error> {
         self.handler
             .as_mut()
@@ -1607,7 +1835,75 @@ impl Client {
     }
 }
 
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
+impl shared::TaskApi for Client {
+    /// Retrieves the full task state: status plus, depending on it, the
+    /// outstanding input requests, the terminal result, or the error.
+    async fn get_task(&mut self, id: impl Into<String>) -> Result<DetailedTask, Error> {
+        let params = GetTaskRequestParams { id: id.into() };
+        self.command(crate::types::task::commands::GET, Some(params))
+            .await?
+            .into_result()
+    }
+
+    /// Submits responses to a task's outstanding input requests.
+    async fn update_task(
+        &mut self,
+        id: impl Into<String>,
+        responses: crate::types::mrtr::InputResponses,
+    ) -> Result<(), Error> {
+        let params = UpdateTaskRequestParams {
+            id: id.into(),
+            input_responses: responses,
+        };
+        self.command(crate::types::task::commands::UPDATE, Some(params))
+            .await
+            .map(|_| ())
+    }
+
+    /// Cancels a task that is currently running.
+    ///
+    /// The reply is an empty acknowledgement: cancellation is cooperative, so
+    /// the task may still reach a non-`cancelled` terminal status. Poll
+    /// `get_task` to learn the outcome.
+    async fn cancel_task(&mut self, id: impl Into<String>) -> Result<(), Error> {
+        let params = CancelTaskRequestParams { id: id.into() };
+        self.command(crate::types::task::commands::CANCEL, Some(params))
+            .await
+            .map(|_| ())
+    }
+
+    /// Answers one outstanding input request with the client's configured
+    /// handler for that kind.
+    async fn fulfil_input(
+        &mut self,
+        request: &crate::types::mrtr::InputRequest,
+    ) -> Result<serde_json::Value, Error> {
+        use crate::types::mrtr::InputRequest;
+
+        match request {
+            InputRequest::Elicitation(params) => {
+                let handler = self.options.elicitation_handler.as_ref().ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::InvalidRequest,
+                        "Client has no elicitation handler. Configure one with `Client::map_elicitation(...)`.",
+                    )
+                })?;
+                let result = handler(params.clone()).await;
+                serde_json::to_value(result).map_err(Into::into)
+            }
+            other => Err(Error::new(
+                ErrorCode::InvalidRequest,
+                format!(
+                    "Client cannot fulfil `{}` input requests on the task substrate",
+                    other.method()
+                ),
+            )),
+        }
+    }
+}
+
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 impl shared::TaskApi for Client {
     /// Retrieves task result. If the task is not completed yet, waits until it completes or cancels.
     async fn get_task_result<T>(&mut self, id: impl Into<String>) -> Result<T, Error>
@@ -1739,7 +2035,7 @@ async fn collect_batch_responses(
 /// The error for an input kind the server asked for but this client has no
 /// fulfiller for -- only reachable if the server ignored the declared
 /// [`ClientMrtrCapabilities`](crate::types::mrtr::ClientMrtrCapabilities).
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 fn no_fulfiller(kind: &str) -> Error {
     Error::new(
         ErrorCode::InvalidRequest,
@@ -1748,11 +2044,11 @@ fn no_fulfiller(kind: &str) -> Error {
 }
 
 /// Whether a `server/discover` failure means "this server doesn't speak
-/// the RC protocol" -- the dual-mode fallback triggers only then.
+/// the 2026-07-28 protocol" -- the dual-mode fallback triggers only then.
 ///
 /// * `MethodNotFound` -- a legacy server rejecting the unknown method
 ///   (neva's own legacy build answers exactly this);
-/// * `InvalidRequest` -- strict servers rejecting the RC request shape;
+/// * `InvalidRequest` -- strict servers rejecting the 2026-07-28 request shape;
 /// * `ParseError` -- a non-JSON-RPC reply (an HTTP 4xx page) or an error
 ///   code outside neva's `ErrorCode` set (e.g. the TS SDK's `-32000`
 ///   "server not initialized"), both of which surface as parse failures.
@@ -1760,7 +2056,7 @@ fn no_fulfiller(kind: &str) -> Error {
 /// Network-level failures (`Timeout`, `InternalError`/"Connection
 /// closed") are *not* triggers: the server never answered, so falling
 /// back would only mask the outage.
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 fn is_fallback_trigger(err: &Error) -> bool {
     matches!(
         err.code,
@@ -1800,7 +2096,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[test]
     fn batch_injects_rc_client_meta_per_request() {
         use serde_json::json;
@@ -1829,8 +2125,15 @@ mod tests {
         let meta = &req.params.as_ref().expect("params present")["_meta"];
         // Without this injection a batched eliciting tools/call is rejected as
         // if the client did not support elicitation.
-        assert_eq!(meta["clientCapabilities"]["elicitation"], json!(true));
+        assert_eq!(
+            meta["io.modelcontextprotocol/clientCapabilities"]["elicitation"],
+            json!(true)
+        );
         assert!(meta["io.modelcontextprotocol/clientInfo"].is_object());
+        assert_eq!(
+            meta["io.modelcontextprotocol/protocolVersion"],
+            json!("2026-07-28")
+        );
 
         // The notification carries no params/_meta.
         let MessageEnvelope::Notification(notif) = &items[1] else {
@@ -1839,10 +2142,10 @@ mod tests {
         assert!(notif.params.is_none());
     }
 
-    /// A configured trace-context provider is invoked during RC metadata
+    /// A configured trace-context provider is invoked during 2026-07-28 metadata
     /// assembly, so `_meta.traceparent`/`tracestate` reach the wire alongside
     /// `clientInfo` -- for both single sends and (via the same path) batches.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[test]
     fn apply_client_meta_injects_trace_context() {
         use crate::client::options::TraceContext;
@@ -1853,6 +2156,7 @@ mod tests {
                 Some(TraceContext {
                     traceparent: "tp".into(),
                     tracestate: Some("ts".into()),
+                    baggage: Some("bg".into()),
                 })
             })
         });
@@ -1867,12 +2171,12 @@ mod tests {
         let meta = &req.params.as_ref().expect("params present")["_meta"];
         assert_eq!(meta["traceparent"], json!("tp"));
         assert_eq!(meta["tracestate"], json!("ts"));
-        // Trace context is assembled alongside the rest of the RC metadata.
+        // Trace context is assembled alongside the rest of the 2026-07-28 metadata.
         assert!(meta["io.modelcontextprotocol/clientInfo"].is_object());
     }
 
     /// With no provider installed, no trace fields are emitted.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[test]
     fn apply_client_meta_omits_trace_context_without_provider() {
         use serde_json::json;
@@ -1891,7 +2195,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "proto-2026-07-28-rc"))]
+#[cfg(all(test, not(feature = "legacy-spec")))]
 mod fallback_trigger_tests {
     use super::*;
 
@@ -1916,11 +2220,11 @@ mod fallback_trigger_tests {
     }
 }
 
-/// The dual-mode "Done when" (issue #84): an RC client completes calls
+/// The dual-mode "Done when" (issue #84): a 2026-07-28 client completes calls
 /// against a 2025-11-25 server via the `initialize` fallback. The legacy
 /// server is a raw-HTTP mock because a legacy neva server cannot exist
-/// in an RC-flagged build.
-#[cfg(all(test, feature = "http-client", feature = "proto-2026-07-28-rc"))]
+/// in an 2026-07-28 build.
+#[cfg(all(test, feature = "http-client", not(feature = "legacy-spec")))]
 mod dual_mode_tests {
     use super::*;
     use std::sync::Mutex;
@@ -2085,9 +2389,8 @@ mod dual_mode_tests {
                                 let body = rpc_result(
                                     &id,
                                     serde_json::json!({
-                                        "protocolVersion": "2099-01-01",
-                                        "capabilities": { "tools": {} },
-                                        "serverInfo": { "name": "future-mock", "version": "1.0.0" }
+                                        "supportedVersions": ["2099-01-01"],
+                                        "capabilities": { "tools": {} }
                                     }),
                                 );
                                 write_response(
@@ -2132,7 +2435,7 @@ mod dual_mode_tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn rc_client_falls_back_to_initialize_against_legacy_server() {
+    async fn client_falls_back_to_initialize_against_legacy_server() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let log = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -2174,7 +2477,7 @@ mod dual_mode_tests {
             discover
                 .to_ascii_lowercase()
                 .contains("mcp-protocol-version"),
-            "the RC attempt carries the protocol-version header"
+            "the 2026-07-28 attempt carries the protocol-version header"
         );
 
         let init = log
@@ -2183,7 +2486,7 @@ mod dual_mode_tests {
             .expect("initialize must be sent after the rejection");
         assert!(
             init.contains("2025-11-25"),
-            "the fallback negotiates the newest pre-RC version"
+            "the fallback negotiates the newest legacy version"
         );
 
         let list = log
@@ -2193,11 +2496,11 @@ mod dual_mode_tests {
         let list_lower = list.to_ascii_lowercase();
         assert!(
             !list_lower.contains("mcp-protocol-version"),
-            "legacy peers must not receive the RC protocol-version header"
+            "legacy peers must not receive the 2026-07-28 protocol-version header"
         );
         assert!(
             !list_lower.contains("mcp-method:"),
-            "legacy peers must not receive RC routing headers"
+            "legacy peers must not receive 2026-07-28 routing headers"
         );
         assert!(
             list_lower.contains(&format!("mcp-session-id: {LEGACY_SESSION_ID}")),
@@ -2210,7 +2513,7 @@ mod dual_mode_tests {
     /// trigger the fallback: the transport completes the request with an
     /// id-bound `ParseError` response instead of a bare channel error.
     #[tokio::test(flavor = "multi_thread")]
-    async fn rc_client_falls_back_when_discover_gets_a_non_json_4xx() {
+    async fn client_falls_back_when_discover_gets_a_non_json_4xx() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let log = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -2236,7 +2539,7 @@ mod dual_mode_tests {
 
     /// A server that answers `server/discover` *successfully* but with a
     /// protocol version this build does not support has committed to the
-    /// RC path -- the client must surface the real version error, not
+    /// 2026-07-28 path -- the client must surface the real version error, not
     /// mark the peer legacy and chase `initialize` on a cancelled
     /// transport.
     #[tokio::test(flavor = "multi_thread")]
@@ -2258,15 +2561,18 @@ mod dual_mode_tests {
         let err = client
             .connect()
             .await
-            .expect_err("an unsupported RC version must fail the connect");
+            .expect_err("an unsupported 2026-07-28 version must fail the connect");
         assert!(
-            err.to_string()
-                .contains("Unsupported server protocol version"),
+            err.to_string().contains("but the client speaks"),
             "the real version error must surface, got: {err}"
         );
         assert!(
             !client.is_legacy_peer(),
             "a successful discovery must never mark the peer legacy"
+        );
+        assert!(
+            client.handler.is_none() && client.cancellation_token.is_none(),
+            "a failed negotiation must not leave the transport running"
         );
 
         let log = log
@@ -2278,9 +2584,56 @@ mod dual_mode_tests {
         );
     }
 
-    /// A protected RC endpoint replying `401` with a non-JSON body must
+    /// `notifications/roots/list_changed` is gone from MCP 2026-07-28, but a
+    /// peer reached through the fallback negotiated `roots.listChanged` on the
+    /// legacy protocol -- and would otherwise hold a stale root list forever.
+    // Roots are deprecated under MCP 2026-07-28 -- which is exactly why the
+    // fallback still owes the legacy peer this notification.
+    #[allow(deprecated)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn roots_changes_are_pushed_to_a_fallback_peer() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        tokio::spawn(serve_legacy(
+            listener,
+            log.clone(),
+            DiscoverReply::MethodNotFound,
+        ));
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                .with_roots(|roots| roots.with_list_changed())
+                .with_timeout(std::time::Duration::from_secs(5))
+        });
+
+        client.connect().await.expect("fallback must connect");
+        assert!(client.is_legacy_peer(), "the mock is a legacy server");
+
+        client.add_root("file:///tmp/project", "Project");
+
+        // The push is fire-and-forget through a spawned task.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let seen = log
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .any(|r| r.contains("notifications/roots/list_changed"));
+            if seen {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "a legacy peer must be told its root list changed"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    /// A protected 2026-07-28 endpoint replying `401` with a non-JSON body must
     /// surface the authentication failure, not be mistaken for a legacy
-    /// peer -- otherwise the client silently drops the RC headers and
+    /// peer -- otherwise the client silently drops the 2026-07-28 headers and
     /// retries `initialize`, masking the real cause.
     #[tokio::test(flavor = "multi_thread")]
     async fn unauthorized_discover_does_not_fall_back() {
@@ -2362,32 +2715,35 @@ mod dual_mode_tests {
         );
     }
 
-    /// A `with_mcp_version` legacy override must not leak into the RC
-    /// expectation: `server/discover` still expects the RC version, the
+    /// A `with_mcp_version` legacy override must not leak into the 2026-07-28
+    /// expectation: `server/discover` still expects the 2026-07-28 version, the
     /// override only selects the fallback's negotiated legacy version.
     #[test]
-    fn legacy_version_override_keeps_the_rc_expectation() {
+    fn legacy_version_override_keeps_the_latest_expectation() {
         let client = Client::new().with_options(|opt| opt.with_mcp_version("2025-06-18"));
-        assert_eq!(client.expected_protocol_ver(), crate::RC_PROTOCOL_VERSION);
+        assert_eq!(
+            client.expected_protocol_ver(),
+            crate::LATEST_PROTOCOL_VERSION
+        );
 
         client.options.peer_mode.set_legacy();
         assert_eq!(client.expected_protocol_ver(), "2025-06-18");
     }
 }
 
-/// The other half of the "Done when": against an RC server the client
+/// The other half of the "Done when": against a 2026-07-28 server the client
 /// keeps using `server/discover` (no fallback).
 #[cfg(all(
     test,
     feature = "http-client",
     feature = "http-server-volga",
-    feature = "proto-2026-07-28-rc"
+    not(feature = "legacy-spec")
 ))]
-mod rc_roundtrip_tests {
+mod roundtrip_tests {
     use super::*;
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn rc_client_discovers_rc_server() {
+    async fn client_discovers_a_2026_07_28_server() {
         let mut app = crate::App::new()
             .with_options(|opt| opt.with_http(|http| http.bind("127.0.0.1:39817")));
         app.map_tool("echo", |name: String| async move { name });
@@ -2402,7 +2758,7 @@ mod rc_roundtrip_tests {
                 Err(_) if tokio::time::Instant::now() < deadline => {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await
                 }
-                Err(err) => panic!("RC server never became reachable: {err}"),
+                Err(err) => panic!("2026-07-28 server never became reachable: {err}"),
             }
         }
 
@@ -2412,18 +2768,249 @@ mod rc_roundtrip_tests {
         });
 
         client.connect().await.expect("discover must succeed");
-        assert!(!client.is_legacy_peer(), "RC peers never fall back");
+        assert!(!client.is_legacy_peer(), "2026-07-28 peers never fall back");
 
         let tools = client.list_tools(None).await.expect("tools/list");
         assert_eq!(tools.tools.len(), 1);
         assert_eq!(tools.tools[0].name, "echo");
+
+        // `serverInfo` left `DiscoverResult`: it now rides in every result's
+        // `_meta`, and the MRTR send path -- which every 2026-07-28 request
+        // takes -- is what has to pick it up.
+        assert!(
+            client.server_info.is_some(),
+            "the server identifies itself in every result's `_meta`"
+        );
     }
 }
 
-/// After a dual-mode fallback, a legacy peer's top-level `tasks`
-/// capability must survive and resolve -- an RC peer's extension form
-/// must keep working too.
-#[cfg(all(test, feature = "tasks", feature = "proto-2026-07-28-rc"))]
+/// What the client will mirror into `Mcp-Param-*` headers is decided by the
+/// current listing and nothing else: a tool the server no longer designates --
+/// or no longer lists at all -- must stop sending its argument in a header.
+#[cfg(all(test, feature = "http-client", not(feature = "legacy-spec")))]
+mod param_header_registry_tests {
+    use super::*;
+
+    fn listing(tools: serde_json::Value) -> ListToolsResult {
+        serde_json::from_value(serde_json::json!({ "tools": tools })).expect("valid listing")
+    }
+
+    fn annotated(name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "inputSchema": {
+                "type": "object",
+                "properties": { "region": { "type": "string", "x-mcp-header": "Region" } }
+            }
+        })
+    }
+
+    fn plain(name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "inputSchema": { "type": "object", "properties": { "q": { "type": "string" } } }
+        })
+    }
+
+    #[test]
+    fn a_fresh_listing_forgets_a_tool_it_no_longer_lists() {
+        let mut client = Client::new();
+
+        let mut first = listing(serde_json::json!([annotated("search")]));
+        client.register_param_headers(&mut first, true);
+        assert!(client.options.param_headers.contains_key("search"));
+
+        // The tool is gone from the refreshed listing -- a later direct
+        // `call_tool("search", ..)` must not keep mirroring its argument.
+        let mut second = listing(serde_json::json!([plain("other")]));
+        client.register_param_headers(&mut second, true);
+        assert!(client.options.param_headers.is_empty());
+    }
+
+    #[test]
+    fn a_dropped_annotation_is_forgotten_on_the_same_tool() {
+        let mut client = Client::new();
+
+        let mut first = listing(serde_json::json!([annotated("search")]));
+        client.register_param_headers(&mut first, true);
+
+        let mut second = listing(serde_json::json!([plain("search")]));
+        client.register_param_headers(&mut second, true);
+        assert!(client.options.param_headers.is_empty());
+    }
+
+    /// Where a listing came from does not change what it binds: a batched
+    /// `tools/list` registers and filters exactly as a direct one does.
+    #[test]
+    fn a_batched_listing_registers_and_filters() {
+        let mut client = Client::new();
+
+        let mut resp = Response::success(
+            RequestId::Number(1),
+            serde_json::json!({
+                "tools": [
+                    annotated("search"),
+                    {
+                        "name": "broken",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "p": { "type": "array", "items": { "x-mcp-header": "P" } }
+                            }
+                        }
+                    }
+                ]
+            }),
+        );
+        client.register_batched_tools(&mut resp);
+
+        assert!(client.options.param_headers.contains_key("search"));
+        assert!(!client.options.param_headers.contains_key("broken"));
+
+        // The caller must not be handed a tool the client refuses to call.
+        let Response::Ok(ok) = &resp else {
+            panic!("a successful listing")
+        };
+        let tools = ok.result["tools"].as_array().expect("tools array");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], "search");
+    }
+
+    /// A slot that is not a listing is the caller's to interpret.
+    #[test]
+    fn a_non_listing_response_is_left_alone() {
+        let mut client = Client::new();
+        let mut resp = Response::success(
+            RequestId::Number(1),
+            serde_json::json!({ "content": [{ "type": "text", "text": "hi" }] }),
+        );
+        let before = match &resp {
+            Response::Ok(ok) => ok.result.clone(),
+            Response::Err(_) => panic!("a successful response"),
+        };
+
+        client.register_batched_tools(&mut resp);
+
+        let Response::Ok(ok) = &resp else {
+            panic!("a successful response")
+        };
+        assert_eq!(ok.result, before);
+        assert!(client.options.param_headers.is_empty());
+    }
+
+    #[test]
+    fn later_pages_accumulate_onto_the_traversal() {
+        let mut client = Client::new();
+
+        let mut page1 = listing(serde_json::json!([annotated("search")]));
+        client.register_param_headers(&mut page1, true);
+
+        // A tool absent from page two was not withdrawn, only listed earlier.
+        let mut page2 = listing(serde_json::json!([annotated("lookup")]));
+        client.register_param_headers(&mut page2, false);
+
+        assert!(client.options.param_headers.contains_key("search"));
+        assert!(client.options.param_headers.contains_key("lookup"));
+    }
+
+    #[test]
+    fn an_invalid_definition_drops_the_tool_and_its_registration() {
+        let mut client = Client::new();
+
+        let mut first = listing(serde_json::json!([annotated("search")]));
+        client.register_param_headers(&mut first, true);
+
+        // Same tool, now annotated somewhere the client cannot reach.
+        let mut second = listing(serde_json::json!([{
+            "name": "search",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "region": { "type": "array", "items": { "x-mcp-header": "Region" } }
+                }
+            }
+        }]));
+        client.register_param_headers(&mut second, true);
+
+        assert!(second.tools.is_empty(), "a malformed tool is not callable");
+        assert!(client.options.param_headers.is_empty());
+    }
+
+    fn call(name: &str) -> Request {
+        Request::new(
+            Some(RequestId::Number(1)),
+            crate::types::tool::commands::CALL,
+            Some(serde_json::json!({ "name": name, "arguments": {} })),
+        )
+    }
+
+    /// Hiding the name from the listing is not enough on its own: a caller
+    /// holding it from anywhere else would otherwise reach the tool with none
+    /// of the headers its declaration asked for.
+    #[test]
+    fn a_rejected_tool_cannot_be_called_by_name() {
+        let mut client = Client::new();
+
+        let mut listed = listing(serde_json::json!([
+            annotated("search"),
+            {
+                "name": "broken",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "p": { "type": "array", "items": { "x-mcp-header": "P" } } }
+                }
+            }
+        ]));
+        client.register_param_headers(&mut listed, true);
+
+        let err = client
+            .blocked_tool_error(&call("broken"))
+            .expect("a rejected tool is refused");
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+        assert!(client.blocked_tool_error(&call("search")).is_none());
+        // Only `tools/call` names a tool.
+        assert!(
+            client
+                .blocked_tool_error(&Request::new(
+                    Some(RequestId::Number(1)),
+                    crate::types::tool::commands::LIST,
+                    Some(serde_json::json!({ "name": "broken" })),
+                ))
+                .is_none()
+        );
+    }
+
+    /// The block follows the listing: a definition the server fixed -- or
+    /// withdrew altogether -- is no longer the one being refused.
+    #[test]
+    fn a_fresh_listing_lifts_the_block() {
+        let mut client = Client::new();
+
+        let mut first = listing(serde_json::json!([{
+            "name": "broken",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "p": { "type": "array", "items": { "x-mcp-header": "P" } } }
+            }
+        }]));
+        client.register_param_headers(&mut first, true);
+        assert!(client.blocked_tool_error(&call("broken")).is_some());
+
+        let mut fixed = listing(serde_json::json!([annotated("broken")]));
+        client.register_param_headers(&mut fixed, true);
+        assert!(client.blocked_tool_error(&call("broken")).is_none());
+
+        client.register_param_headers(&mut first, true);
+        let mut gone = listing(serde_json::json!([plain("other")]));
+        client.register_param_headers(&mut gone, true);
+        assert!(client.blocked_tool_error(&call("broken")).is_none());
+    }
+}
+
+/// Task support in a 2026-07-28 build means one thing: the peer advertised the
+/// extension *and* stayed on the 2026-07-28 protocol. Generations do not mix
+/// for tasks -- run a `legacy-spec` build against a legacy server.
+#[cfg(all(test, feature = "tasks", not(feature = "legacy-spec")))]
 mod fallback_tasks_capability_tests {
     use super::*;
     use crate::types::ServerCapabilities;
@@ -2436,17 +3023,38 @@ mod fallback_tasks_capability_tests {
         client
     }
 
+    /// The legacy top-level `tasks` field can only reach this build from a
+    /// fallback peer, whose task protocol it does not speak. Reading it would
+    /// promise support that ends in 2026-07-28 messages the peer cannot read.
     #[test]
-    fn legacy_top_level_tasks_capability_resolves() {
+    fn a_legacy_top_level_tasks_capability_is_not_support() {
         let client = client_with_capabilities(json!({
             "tools": {},
             "tasks": { "requests": { "tools": { "call": {} } } }
         }));
+        assert!(!client.is_server_supports_tasks());
+        assert!(!client.is_server_support_call_tool_with_tasks());
+    }
+
+    /// And a peer that advertised the 2026-07-28 extension but then negotiated
+    /// the legacy protocol is no different.
+    #[test]
+    fn a_fallback_peer_reports_no_task_support() {
+        let client = client_with_capabilities(json!({
+            "tools": {},
+            "extensions": {
+                "io.modelcontextprotocol/tasks": { "requests": { "tools": { "call": {} } } }
+            }
+        }));
         assert!(client.is_server_supports_tasks());
+
+        client.options.peer_mode.set_legacy();
+        assert!(!client.is_server_supports_tasks());
+        assert!(!client.is_server_support_call_tool_with_tasks());
     }
 
     #[test]
-    fn rc_extension_tasks_capability_still_resolves() {
+    fn the_extension_tasks_capability_resolves() {
         let client = client_with_capabilities(json!({
             "tools": {},
             "extensions": {

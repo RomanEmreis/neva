@@ -50,10 +50,9 @@ impl Extension for TasksExtension {
     fn register(self, app: &mut App) {
         use crate::types::task::commands;
         app.options.set_tasks_capability(self.capability);
-        app.map_handler(commands::LIST, App::tasks);
         app.map_handler(commands::GET, App::task);
         app.map_handler(commands::CANCEL, App::cancel_task);
-        app.map_handler(commands::RESULT, App::task_result);
+        app.map_handler(commands::UPDATE, App::update_task);
     }
 }
 
@@ -87,7 +86,7 @@ mod tests {
 
     #[test]
     fn with_tasks_thin_wrapper_registers_extension() {
-        let app = App::new().with_options(|opt| opt.with_tasks(|t| t.with_all()));
+        let app = App::new().with_options(|opt| opt.with_tasks());
         let exts = app
             .options
             .extensions()

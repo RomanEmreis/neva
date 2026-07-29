@@ -1,9 +1,8 @@
 //! Types and utilities for tracking tasks
 
 use crate::error::{Error, ErrorCode};
-use crate::types::{Task, TaskPayload, TaskStatus};
+use crate::types::{Task, TaskStatus};
 use chrono::Utc;
-use serde::Serialize;
 use std::{
     cmp::Ordering,
     collections::BinaryHeap,
@@ -12,12 +11,15 @@ use std::{
         atomic::{AtomicU64, Ordering as AtomicOrdering},
     },
 };
-use tokio::sync::watch::{Receiver, Sender, channel};
 use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
+#[cfg(feature = "legacy-spec")]
+use {
+    crate::types::TaskPayload,
+    serde::Serialize,
+    tokio::sync::watch::{Receiver, Sender, channel},
+};
 
-#[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
-use crate::types::Response;
-#[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+#[cfg(all(feature = "server", not(feature = "legacy-spec")))]
 use tokio::sync::oneshot;
 
 pub(crate) struct TaskTracker {
@@ -27,30 +29,59 @@ pub(crate) struct TaskTracker {
 }
 
 /// Alias for [`Option<TaskPayload>`]
+#[cfg(feature = "legacy-spec")]
 pub(crate) type MaybePayload = Option<TaskPayload>;
 
 /// Represents a task currently running on the server
 pub(crate) struct TaskEntry {
     task: Task,
     token: CancellationToken,
-    // Unused under `proto-2026-07-28-rc`: the task-coupled elicit path that
-    // fed results through `tx` is replaced by MRTR.
-    #[cfg(feature = "server")]
-    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
+    // The `tasks/result` watch channel. MCP 2026-07-28 has no `tasks/result`:
+    // the outcome is stored on the entry and reported by `tasks/get`.
+    #[cfg(all(feature = "server", feature = "legacy-spec"))]
     tx: Sender<MaybePayload>,
+    #[cfg(feature = "legacy-spec")]
     rx: Receiver<MaybePayload>,
-    /// RC task-elicit resume slot. Under the stateless transport a parked
-    /// `ctx.elicit` inside a task cannot be correlated by session (a fresh one
-    /// is minted per POST), so the answer is delivered by the server-generated
-    /// `task_id`: the elicit stores its oneshot sender here and an inbound
-    /// answer (a `Response` whose id is this `task_id`) takes and fulfills it.
-    #[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
-    input: Mutex<Option<oneshot::Sender<Response>>>,
+    /// MCP 2026-07-28 state that `tasks/get` reports beyond the bare status:
+    /// the terminal outcome and any outstanding input requests.
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+    state: Mutex<TaskState>,
+}
+
+/// The status-specific half of a [`DetailedTask`](crate::types::DetailedTask).
+///
+/// A task carries at most one of these at a time: pending `inputs` while it is
+/// `input_required`, then either `result` or `error` once it terminates.
+#[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+#[derive(Default)]
+struct TaskState {
+    /// Final result, set when the task completes successfully.
+    result: Option<serde_json::Value>,
+
+    /// JSON-RPC error, set when the task fails.
+    error: Option<serde_json::Value>,
+
+    /// Outstanding input requests, keyed as the client will echo them back in
+    /// `tasks/update`.
+    inputs: std::collections::HashMap<String, PendingInput>,
+}
+
+/// One outstanding input request plus the slot its answer resumes.
+///
+/// Under the stateless transport a suspended `ctx.task().elicit` cannot be
+/// correlated by session (a fresh one is minted per POST), so the answer
+/// arrives out-of-band as a `tasks/update` addressed to the task id and keyed
+/// by the same key `tasks/get` surfaced.
+#[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+struct PendingInput {
+    request: crate::types::mrtr::InputRequest,
+    tx: oneshot::Sender<serde_json::Value>,
 }
 
 /// Represents a handle to a task that can be used to cancel or get the result of the task.
 pub(crate) struct TaskHandle {
     token: CancellationToken,
+    #[cfg(feature = "legacy-spec")]
     tx: Sender<MaybePayload>,
 }
 
@@ -98,6 +129,7 @@ impl TaskTracker {
     }
 
     /// Returns a list of currently running tasks.
+    #[cfg(feature = "legacy-spec")]
     pub(crate) fn tasks(&self) -> Vec<Task> {
         self.cleanup_expired();
 
@@ -112,25 +144,65 @@ impl TaskTracker {
         self.cleanup_expired();
 
         let token = CancellationToken::new();
+        #[cfg(feature = "legacy-spec")]
         let (tx, rx) = channel(None);
 
         self.tasks.insert(
             task.id.clone(),
             TaskEntry {
                 token: token.clone(),
-                #[cfg(feature = "server")]
+                #[cfg(all(feature = "server", feature = "legacy-spec"))]
                 tx: tx.clone(),
                 task,
+                #[cfg(feature = "legacy-spec")]
                 rx,
-                #[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
-                input: Mutex::new(None),
+                #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+                state: Mutex::new(TaskState::default()),
             },
         );
 
-        TaskHandle { token, tx }
+        TaskHandle {
+            token,
+            #[cfg(feature = "legacy-spec")]
+            tx,
+        }
     }
 
     /// Cancels the task
+    ///
+    /// Cancellation is cooperative under MCP 2026-07-28: the entry stays until
+    /// its TTL expires so the requestor can keep polling `tasks/get` for the
+    /// outcome. A tool that wins the race with the cancellation token still
+    /// overwrites the status with its own terminal one, which the spec allows.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(crate) fn cancel(&self, id: &str) -> Result<Task, Error> {
+        self.cleanup_expired();
+
+        if let Some(mut entry) = self.tasks.get_mut(id) {
+            // A terminal task is not cancellable -- cancelling asks a task to
+            // stop, it does not rewrite one that already stopped. Overwriting
+            // the status here would also hide the outcome, since `get_state`
+            // reports a `result` or `error` only under the status that owns it.
+            // Retention makes this reachable in two ways: a cancel racing the
+            // tool's own completion, and one sent against a task that finished
+            // long ago but is still inside its TTL.
+            if Self::is_terminal(&entry.task) {
+                return Ok(entry.task.clone());
+            }
+            entry.token.cancel();
+            entry.task = entry.task.clone().cancel();
+            self.schedule_expiry(&entry.task);
+            Ok(entry.task.clone())
+        } else {
+            Err(Error::new(
+                ErrorCode::InvalidParams,
+                format!("Could not find task with id: {id}"),
+            ))
+        }
+    }
+
+    /// Cancels the task
+    #[cfg(feature = "legacy-spec")]
     pub(crate) fn cancel(&self, id: &str) -> Result<Task, Error> {
         self.cleanup_expired();
 
@@ -168,7 +240,7 @@ impl TaskTracker {
 
     /// Sets the task into `input_required` status
     #[cfg(feature = "server")]
-    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
+    #[cfg_attr(not(feature = "legacy-spec"), allow(dead_code))]
     pub(crate) fn require_input(&self, id: &str) {
         self.cleanup_expired();
 
@@ -178,8 +250,7 @@ impl TaskTracker {
     }
 
     /// Sets the task into `working` status
-    #[cfg(feature = "server")]
-    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
+    #[cfg(all(feature = "server", feature = "legacy-spec"))]
     pub(crate) fn reset(&self, id: &str) {
         self.cleanup_expired();
 
@@ -190,8 +261,7 @@ impl TaskTracker {
     }
 
     /// Sets the result of the [`Task`].
-    #[cfg(feature = "server")]
-    #[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
+    #[cfg(all(feature = "server", feature = "legacy-spec"))]
     pub(crate) fn set_result<T: Serialize>(&self, id: &str, result: T) {
         self.cleanup_expired();
 
@@ -208,39 +278,147 @@ impl TaskTracker {
         }
     }
 
-    /// Parks a task-elicit, returning a receiver fulfilled by a later
-    /// [`Self::provide_input`] for the same `id`. Replaces any previously parked
-    /// (unanswered) slot. Returns `None` if the task no longer exists.
-    #[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
-    pub(crate) fn park_input(&self, id: &str) -> Option<oneshot::Receiver<Response>> {
+    /// Records an outstanding input request under `key` and returns the
+    /// receiver a later [`Self::provide_inputs`] fulfills.
+    ///
+    /// Replaces any previously parked (unanswered) request under the same key.
+    /// Returns `None` if the task no longer exists.
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+    pub(crate) fn park_input(
+        &self,
+        id: &str,
+        key: String,
+        request: crate::types::mrtr::InputRequest,
+    ) -> Option<oneshot::Receiver<serde_json::Value>> {
         let entry = self.tasks.get(id)?;
         let (tx, rx) = oneshot::channel();
-        match entry.input.lock() {
-            Ok(mut slot) => {
-                *slot = Some(tx);
+        match entry.state.lock() {
+            Ok(mut state) => {
+                state.inputs.insert(key, PendingInput { request, tx });
                 Some(rx)
             }
             Err(_) => None,
         }
     }
 
-    /// Delivers a client-provided answer to a parked task-elicit, keyed by the
-    /// server-generated `task_id` (session-independent). Returns the `resp`
-    /// back (boxed) as `Err` when no elicit is parked for `id`, so the caller
-    /// can fall back to the session-keyed request queue for non-task responses.
-    #[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
-    pub(crate) fn provide_input(&self, id: &str, resp: Response) -> Result<(), Box<Response>> {
-        let Some(entry) = self.tasks.get(id) else {
-            return Err(Box::new(resp));
+    /// Delivers client answers to a task's outstanding input requests
+    /// (`tasks/update`).
+    ///
+    /// Keys that match nothing outstanding are ignored, per the spec -- a
+    /// retried `tasks/update` must not fail. The task returns to `working` once
+    /// no requests are left outstanding.
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+    pub(crate) fn provide_inputs(
+        &self,
+        id: &str,
+        responses: crate::types::mrtr::InputResponses,
+    ) -> Result<(), Error> {
+        self.cleanup_expired();
+
+        let mut entry = self.tasks.get_mut(id).ok_or_else(|| {
+            Error::new(
+                ErrorCode::InvalidParams,
+                format!("Could not find task with id: {id}"),
+            )
+        })?;
+
+        let outstanding = {
+            let Ok(mut state) = entry.state.lock() else {
+                return Err(Error::new(
+                    ErrorCode::InternalError,
+                    "Unable to update task inputs",
+                ));
+            };
+            for (key, value) in responses {
+                if let Some(pending) = state.inputs.remove(&key) {
+                    let _ = pending.tx.send(value);
+                }
+            }
+            state.inputs.len()
         };
-        let sender = entry.input.lock().ok().and_then(|mut slot| slot.take());
-        match sender {
-            Some(tx) => tx.send(resp).map_err(Box::new),
-            None => Err(Box::new(resp)),
+
+        // Still waiting on other keys: leave the task in `input_required`.
+        if outstanding == 0 && entry.task.status == TaskStatus::InputRequired {
+            entry.task.reset();
+        }
+        Ok(())
+    }
+
+    /// Stores the terminal outcome reported by `tasks/get`.
+    ///
+    /// `Ok` lands in `result` (status `completed`), `Err` in `error`
+    /// (status `failed`) as a JSON-RPC error object.
+    ///
+    /// The stored result *is* the result the original request would have
+    /// returned synchronously, so it carries the same mandatory `resultType`
+    /// discriminator -- it just never passes through
+    /// [`Response::success`](crate::types::Response::success), which is where
+    /// a directly-returned result is stamped.
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+    pub(crate) fn set_outcome(&self, id: &str, outcome: Result<serde_json::Value, Error>) {
+        self.cleanup_expired();
+
+        let Some(entry) = self.tasks.get(id) else {
+            return;
+        };
+        let Ok(mut state) = entry.state.lock() else {
+            return;
+        };
+        match outcome {
+            Ok(result) => state.result = Some(crate::types::tag_complete(result)),
+            Err(err) => {
+                state.error = serde_json::to_value(crate::types::ErrorDetails::from(err)).ok()
+            }
         }
     }
 
+    /// Retrieves the full task state served by `tasks/get`: the status plus the
+    /// outstanding input requests, the terminal result, or the error.
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+    pub(crate) fn get_state(&self, id: &str) -> Result<crate::types::DetailedTask, Error> {
+        self.cleanup_expired();
+
+        let entry = self.tasks.get(id).ok_or_else(|| {
+            Error::new(
+                ErrorCode::InvalidParams,
+                format!("Could not find task with id: {id}"),
+            )
+        })?;
+
+        let mut detailed = crate::types::DetailedTask::from(entry.task.clone());
+        if let Ok(state) = entry.state.lock() {
+            // The wire shape is discriminated by status: `inputRequests` belongs
+            // to `input_required`, `result` to `completed`, `error` to `failed`,
+            // and a cancelled task carries none of them. The state can outlive
+            // the status it was recorded under -- a task cancelled while parked
+            // on `ctx.task().elicit` keeps its pending input, and a tool that
+            // races the cancellation records an outcome -- so what is reported
+            // is decided by the status, not by what happens to be stored.
+            match detailed.status {
+                TaskStatus::InputRequired if !state.inputs.is_empty() => {
+                    detailed.input_requests = Some(
+                        state
+                            .inputs
+                            .iter()
+                            .map(|(key, pending)| (key.clone(), pending.request.clone()))
+                            .collect(),
+                    );
+                }
+                TaskStatus::Completed => detailed.result = state.result.clone(),
+                TaskStatus::Failed => detailed.error = state.error.clone(),
+                _ => {}
+            }
+        }
+        Ok(detailed)
+    }
+
     /// Retrieves the task status
+    ///
+    /// The status alone is a legacy shape: MCP 2026-07-28 reports a task -- to
+    /// `tasks/get` and to `notifications/tasks` alike -- as the full
+    /// [`DetailedTask`](crate::types::DetailedTask) that [`Self::get_state`]
+    /// builds.
+    #[cfg(any(feature = "legacy-spec", test))]
     pub(crate) fn get_status(&self, id: &str) -> Result<Task, Error> {
         self.cleanup_expired();
 
@@ -254,6 +432,7 @@ impl TaskTracker {
 
     /// Returns the task result if it is present,
     /// otherwise waits until the result is available or the task will be canceled.
+    #[cfg(feature = "legacy-spec")]
     pub(crate) async fn get_result(&self, id: &str) -> Result<TaskPayload, Error> {
         self.cleanup_expired();
 
@@ -350,7 +529,8 @@ impl TaskTracker {
 
     #[inline]
     fn task_deadline_ms(task: &Task) -> Option<i64> {
-        let ttl_ms = i64::try_from(task.ttl).unwrap_or(i64::MAX);
+        // `None` means unlimited retention: nothing to schedule.
+        let ttl_ms = i64::try_from(task.ttl?).unwrap_or(i64::MAX);
         task.created_at.timestamp_millis().checked_add(ttl_ms)
     }
 }
@@ -364,6 +544,7 @@ impl Default for TaskTracker {
 
 impl TaskHandle {
     /// Completes the [`Task`] and sets the result.
+    #[cfg(feature = "legacy-spec")]
     pub(crate) fn set_result<T: Serialize>(self, result: T) {
         let result = match serde_json::to_value(result) {
             Ok(result) => result,
@@ -402,9 +583,10 @@ mod tests {
     use crate::types::TaskStatus;
     use std::sync::Arc;
 
-    #[cfg(feature = "server")]
+    #[cfg(all(feature = "server", feature = "legacy-spec"))]
     use crate::types::CallToolResponse;
 
+    #[cfg(feature = "legacy-spec")]
     #[test]
     fn it_can_create_new_tracker() {
         let tracker = TaskTracker::new();
@@ -419,11 +601,10 @@ mod tests {
 
         let _handle = tracker.track(task);
 
-        let tasks = tracker.tasks();
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].id, task_id);
+        assert_eq!(tracker.get_status(&task_id).unwrap().id, task_id);
     }
 
+    #[cfg(feature = "legacy-spec")]
     #[test]
     fn it_can_return_list_of_tasks() {
         let tracker = TaskTracker::new();
@@ -437,6 +618,7 @@ mod tests {
         assert_eq!(tasks.len(), 2);
     }
 
+    #[cfg(feature = "legacy-spec")]
     #[test]
     fn it_can_cancel_task() {
         let tracker = TaskTracker::new();
@@ -447,7 +629,40 @@ mod tests {
 
         let result = tracker.cancel(&task_id).unwrap();
         assert_eq!(result.status, TaskStatus::Cancelled);
-        assert_eq!(tracker.tasks().len(), 0);
+        assert!(tracker.get_status(&task_id).is_err());
+    }
+
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn it_can_cancel_task() {
+        let tracker = TaskTracker::new();
+        let task = Task::new();
+        let task_id = task.id.clone();
+
+        let _handle = tracker.track(task);
+
+        let result = tracker.cancel(&task_id).unwrap();
+        assert_eq!(result.status, TaskStatus::Cancelled);
+
+        // The entry survives cancellation: the requestor learns the outcome by
+        // polling `tasks/get`, which would otherwise answer `InvalidParams`.
+        let status = tracker.get_status(&task_id).expect("cancelled task kept");
+        assert_eq!(status.status, TaskStatus::Cancelled);
+    }
+
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn it_does_remove_expired_cancelled_tasks() {
+        let tracker = TaskTracker::new();
+        let task = Task::from(crate::types::TaskMetadata { ttl: Some(1) });
+        let task_id = task.id.clone();
+
+        let _handle = tracker.track(task);
+        tracker.cancel(&task_id).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        assert!(tracker.get_status(&task_id).is_err());
     }
 
     #[test]
@@ -548,6 +763,7 @@ mod tests {
         assert_eq!(result.unwrap_err().code, ErrorCode::InvalidParams);
     }
 
+    #[cfg(feature = "legacy-spec")]
     #[tokio::test]
     async fn it_can_get_task_result_when_completed() {
         let tracker = TaskTracker::new();
@@ -565,6 +781,7 @@ mod tests {
         assert_eq!(result.0, "test_result");
     }
 
+    #[cfg(feature = "legacy-spec")]
     #[tokio::test]
     async fn it_does_return_result_immediately_when_already_available() {
         let tracker = TaskTracker::new();
@@ -578,6 +795,7 @@ mod tests {
         assert_eq!(result.0, "immediate_result");
     }
 
+    #[cfg(feature = "legacy-spec")]
     #[tokio::test]
     async fn it_does_return_error_when_getting_result_of_nonexistent_task() {
         let tracker = TaskTracker::new();
@@ -587,6 +805,7 @@ mod tests {
         assert_eq!(result.unwrap_err().code, ErrorCode::InvalidParams);
     }
 
+    #[cfg(feature = "legacy-spec")]
     #[tokio::test]
     async fn it_does_return_error_when_task_is_cancelled() {
         let tracker = TaskTracker::new();
@@ -611,6 +830,7 @@ mod tests {
         assert_eq!(result.unwrap_err().code, ErrorCode::InvalidRequest);
     }
 
+    #[cfg(feature = "legacy-spec")]
     #[tokio::test]
     async fn it_can_wait_for_result_with_multiple_updates() {
         let tracker = TaskTracker::new();
@@ -629,6 +849,7 @@ mod tests {
         assert_eq!(tracker.tasks().len(), 0);
     }
 
+    #[cfg(feature = "legacy-spec")]
     #[tokio::test]
     async fn it_does_remove_task_after_getting_result() {
         let tracker = TaskTracker::new();
@@ -687,6 +908,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "legacy-spec")]
     #[test]
     #[cfg(feature = "server")]
     fn it_can_handle_complex_payload_types() {
@@ -704,6 +926,7 @@ mod tests {
         assert_eq!(status.status, TaskStatus::Completed);
     }
 
+    #[cfg(feature = "legacy-spec")]
     #[tokio::test]
     async fn it_can_track_multiple_concurrent_tasks() {
         let tracker = TaskTracker::new();
@@ -725,44 +948,214 @@ mod tests {
         assert_eq!(tracker.tasks().len(), 0);
     }
 
-    #[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
     #[tokio::test]
-    async fn park_input_is_fulfilled_by_provide_input() {
-        use crate::types::{RequestId, Response};
-
+    async fn park_input_is_fulfilled_by_tasks_update() {
         let tracker = TaskTracker::new();
         let task = Task::new();
         let task_id = task.id.clone();
         let _handle = tracker.track(task);
 
-        let rx = tracker.park_input(&task_id).expect("parked");
-        let answer = Response::success(
-            RequestId::String(task_id.clone().into()),
-            serde_json::json!("ok"),
-        );
-        assert!(tracker.provide_input(&task_id, answer).is_ok());
+        let rx = tracker
+            .park_input(&task_id, "k1".into(), elicit_request())
+            .expect("parked");
+        tracker.require_input(&task_id);
+
+        // `tasks/get` surfaces the outstanding ask under the same key.
+        let state = tracker.get_state(&task_id).unwrap();
+        assert_eq!(state.status, TaskStatus::InputRequired);
+        assert!(state.input_requests.expect("asks").contains_key("k1"));
+
+        let mut answers = crate::types::mrtr::InputResponses::new();
+        answers.insert("k1".into(), serde_json::json!({ "action": "accept" }));
+        tracker.provide_inputs(&task_id, answers).unwrap();
 
         let got = rx.await.expect("answer delivered");
-        assert_eq!(got.id().to_string(), task_id);
+        assert_eq!(got, serde_json::json!({ "action": "accept" }));
+
+        // No asks left outstanding -> back to working, nothing surfaced.
+        let state = tracker.get_state(&task_id).unwrap();
+        assert_eq!(state.status, TaskStatus::Working);
+        assert!(state.input_requests.is_none());
     }
 
-    #[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
     #[test]
-    fn provide_input_hands_back_when_nothing_parked() {
-        use crate::types::{RequestId, Response};
-
+    fn provide_inputs_ignores_unknown_keys() {
         let tracker = TaskTracker::new();
         let task = Task::new();
         let task_id = task.id.clone();
         let _handle = tracker.track(task);
 
-        // Tracked but no parked elicit -> the response is handed back (boxed).
-        let answer = Response::success(RequestId::Number(1), serde_json::json!("x"));
-        assert!(tracker.provide_input(&task_id, answer).is_err());
+        let _rx = tracker
+            .park_input(&task_id, "k1".into(), elicit_request())
+            .expect("parked");
+        tracker.require_input(&task_id);
 
-        // Unknown task -> also handed back.
-        let answer = Response::success(RequestId::Number(2), serde_json::json!("x"));
-        assert!(tracker.provide_input("nonexistent", answer).is_err());
+        // A retried or stale `tasks/update` must not fail...
+        let mut answers = crate::types::mrtr::InputResponses::new();
+        answers.insert("nope".into(), serde_json::json!({}));
+        assert!(tracker.provide_inputs(&task_id, answers).is_ok());
+
+        // ...and must not resolve the still-outstanding ask.
+        let state = tracker.get_state(&task_id).unwrap();
+        assert_eq!(state.status, TaskStatus::InputRequired);
+        assert!(state.input_requests.expect("asks").contains_key("k1"));
+    }
+
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+    #[test]
+    fn provide_inputs_errors_for_unknown_task() {
+        let tracker = TaskTracker::new();
+        let result = tracker.provide_inputs("nonexistent", Default::default());
+
+        assert_eq!(result.unwrap_err().code, ErrorCode::InvalidParams);
+    }
+
+    /// A cancel that arrives after the task already finished must not take the
+    /// outcome away: `get_state` reports a `result` only under `completed`, so
+    /// flipping the status would lose what the caller was polling for.
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+    #[test]
+    fn a_late_cancel_leaves_a_terminal_task_alone() {
+        for (finish, expected) in [(true, TaskStatus::Completed), (false, TaskStatus::Failed)] {
+            let tracker = TaskTracker::new();
+            let task = Task::new();
+            let task_id = task.id.clone();
+            let _handle = tracker.track(task);
+
+            if finish {
+                tracker.set_outcome(&task_id, Ok(serde_json::json!({ "content": [] })));
+                tracker.complete(&task_id);
+            } else {
+                tracker.set_outcome(&task_id, Err(Error::new(ErrorCode::InternalError, "boom")));
+                tracker.fail(&task_id);
+            }
+
+            let cancelled = tracker.cancel(&task_id).unwrap();
+            assert_eq!(cancelled.status, expected, "cancel must not rewrite it");
+
+            let state = tracker.get_state(&task_id).unwrap();
+            assert_eq!(state.status, expected);
+            assert_eq!(state.result.is_some(), finish, "the outcome survives");
+            assert_eq!(state.error.is_some(), !finish);
+        }
+    }
+
+    /// A cancelled task is `CancelledTask` on the wire -- status only. Neither
+    /// an input request it was parked on nor an outcome its tool raced to
+    /// record may leak into that shape.
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+    #[test]
+    fn get_state_hides_state_a_cancelled_task_may_not_carry() {
+        let tracker = TaskTracker::new();
+        let task = Task::new();
+        let task_id = task.id.clone();
+        let _handle = tracker.track(task);
+
+        let _rx = tracker
+            .park_input(&task_id, "k1".into(), elicit_request())
+            .expect("parked");
+        tracker.require_input(&task_id);
+        tracker.set_outcome(&task_id, Ok(serde_json::json!({ "content": [] })));
+        tracker.cancel(&task_id).unwrap();
+
+        let state = tracker.get_state(&task_id).unwrap();
+        assert_eq!(state.status, TaskStatus::Cancelled);
+        assert!(state.input_requests.is_none());
+        assert!(state.result.is_none());
+        assert!(state.error.is_none());
+    }
+
+    /// A failed task carries `error` -- and not an input request it never
+    /// answered before failing.
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+    #[test]
+    fn get_state_hides_pending_inputs_of_a_failed_task() {
+        let tracker = TaskTracker::new();
+        let task = Task::new();
+        let task_id = task.id.clone();
+        let _handle = tracker.track(task);
+
+        let _rx = tracker
+            .park_input(&task_id, "k1".into(), elicit_request())
+            .expect("parked");
+        tracker.require_input(&task_id);
+        tracker.set_outcome(&task_id, Err(Error::new(ErrorCode::InternalError, "boom")));
+        tracker.fail(&task_id);
+
+        let state = tracker.get_state(&task_id).unwrap();
+        assert_eq!(state.status, TaskStatus::Failed);
+        assert!(state.input_requests.is_none());
+        assert_eq!(state.error.expect("error")["message"], "boom");
+    }
+
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+    #[test]
+    fn get_state_reports_the_terminal_outcome() {
+        let tracker = TaskTracker::new();
+        let task = Task::new();
+        let task_id = task.id.clone();
+        let _handle = tracker.track(task);
+
+        tracker.set_outcome(&task_id, Ok(serde_json::json!({ "content": [] })));
+        tracker.complete(&task_id);
+
+        let state = tracker.get_state(&task_id).unwrap();
+        assert_eq!(state.status, TaskStatus::Completed);
+        // The stored value is the result the request would have returned
+        // synchronously, so it carries the same mandatory discriminator -- it
+        // just never went through `Response::success` to get it.
+        assert_eq!(
+            state.result,
+            Some(serde_json::json!({ "content": [], "resultType": "complete" }))
+        );
+        assert!(state.error.is_none());
+    }
+
+    /// A result that already says what it is keeps saying it.
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+    #[test]
+    fn set_outcome_keeps_an_existing_discriminator() {
+        let tracker = TaskTracker::new();
+        let task = Task::new();
+        let task_id = task.id.clone();
+        let _handle = tracker.track(task);
+
+        tracker.set_outcome(
+            &task_id,
+            Ok(serde_json::json!({ "resultType": "input_required" })),
+        );
+        tracker.complete(&task_id);
+
+        assert_eq!(
+            tracker.get_state(&task_id).unwrap().result,
+            Some(serde_json::json!({ "resultType": "input_required" }))
+        );
+    }
+
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+    #[test]
+    fn get_state_reports_the_failure_error() {
+        let tracker = TaskTracker::new();
+        let task = Task::new();
+        let task_id = task.id.clone();
+        let _handle = tracker.track(task);
+
+        tracker.set_outcome(&task_id, Err(Error::new(ErrorCode::InternalError, "boom")));
+        tracker.fail(&task_id);
+
+        let state = tracker.get_state(&task_id).unwrap();
+        assert_eq!(state.status, TaskStatus::Failed);
+        assert!(state.result.is_none());
+        assert_eq!(state.error.expect("error")["message"], "boom");
+    }
+
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+    fn elicit_request() -> crate::types::mrtr::InputRequest {
+        crate::types::mrtr::InputRequest::Elicitation(
+            crate::types::ElicitRequestParams::form("Sure?").into(),
+        )
     }
 
     #[test]
@@ -793,6 +1186,5 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
 
         assert!(tracker.get_status(&task_id).is_err());
-        assert_eq!(tracker.tasks().len(), 0);
     }
 }

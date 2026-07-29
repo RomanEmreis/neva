@@ -22,19 +22,25 @@ use crate::types::{
     notification::{CancelledNotificationParams, Notification},
     resource::template::ResourceFunc,
 };
-// Subscribe/unsubscribe handlers exist only under the non-RC transport, which
-// can push `notifications/resources/updated`; the RC stateless build masks the
+// Subscribe/unsubscribe handlers exist only under the legacy transport, which
+// can push `notifications/resources/updated`; the 2026-07-28 stateless build masks the
 // capability and skips the handlers, so these params are unused there.
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+#[cfg(feature = "legacy-spec")]
 use crate::types::{InitializeRequestParams, InitializeResult};
-#[cfg(not(feature = "proto-2026-07-28-rc"))]
+#[cfg(feature = "legacy-spec")]
 use crate::types::{SubscribeRequestParams, UnsubscribeRequestParams};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
+use crate::types::Task;
 #[cfg(feature = "tasks")]
+use crate::types::{CancelTaskRequestParams, GetTaskRequestParams};
+#[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
+use crate::types::{DetailedTask, UpdateTaskRequestParams};
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 use crate::types::{
-    CancelTaskRequestParams, GetTaskPayloadRequestParams, GetTaskRequestParams,
-    ListTasksRequestParams, ListTasksResult, Task, TaskPayload, cursor::Pagination,
+    GetTaskPayloadRequestParams, ListTasksRequestParams, ListTasksResult, TaskPayload,
+    cursor::Pagination,
 };
 #[cfg(feature = "tasks")]
 use context::ToolOrTaskResponse;
@@ -45,7 +51,7 @@ use std::{
     sync::Arc,
 };
 
-#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+#[cfg(all(feature = "tracing", feature = "legacy-spec"))]
 use crate::types::notification::SetLevelRequestParams;
 #[cfg(feature = "tracing")]
 use tracing::Instrument;
@@ -54,11 +60,11 @@ use volga_di::{Container, ContainerBuilder};
 
 mod collection;
 pub mod context;
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 pub mod extension;
 mod greeter;
 pub(crate) mod handler;
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 pub mod mrtr_store;
 pub mod options;
 
@@ -107,9 +113,9 @@ impl App {
             container: ContainerBuilder::new(),
         };
 
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        #[cfg(feature = "legacy-spec")]
         app.map_handler(crate::commands::INIT, Self::init);
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         app.map_handler(crate::commands::DISCOVER, Self::discover);
         app.map_handler(
             crate::types::completion::commands::COMPLETE,
@@ -125,13 +131,13 @@ impl App {
             Self::resource_templates,
         );
         app.map_handler(crate::types::resource::commands::READ, Self::resource);
-        // The stateless `proto-2026-07-28-rc` transport cannot push
+        // The stateless MCP 2026-07-28 transport cannot push
         // `notifications/resources/updated`, so the `resources.subscribe`
         // capability is masked off (see `McpOptions::resources_capability`).
-        // Don't register subscribe/unsubscribe handlers under RC either, so the
+        // Don't register subscribe/unsubscribe handlers under MCP 2026-07-28 either, so the
         // advertised surface and the accepted methods stay in sync -- the server
         // won't accept a subscription it never announces.
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        #[cfg(feature = "legacy-spec")]
         {
             app.map_handler(
                 crate::types::resource::commands::SUBSCRIBE,
@@ -148,15 +154,22 @@ impl App {
 
         #[cfg(feature = "tasks")]
         {
-            app.map_handler(crate::types::task::commands::LIST, Self::tasks);
-            app.map_handler(crate::types::task::commands::GET, Self::task);
-            app.map_handler(crate::types::task::commands::CANCEL, Self::cancel_task);
-            app.map_handler(crate::types::task::commands::RESULT, Self::task_result);
+            use crate::types::task::commands;
+            app.map_handler(commands::GET, Self::task);
+            app.map_handler(commands::CANCEL, Self::cancel_task);
+            #[cfg(not(feature = "legacy-spec"))]
+            app.map_handler(commands::UPDATE, Self::update_task);
+            #[cfg(feature = "legacy-spec")]
+            {
+                app.map_handler(commands::LIST, Self::tasks);
+                app.map_handler(commands::RESULT, Self::task_result);
+            }
         }
 
+        #[cfg(feature = "legacy-spec")]
         app.map_handler(crate::commands::PING, Self::ping);
 
-        #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+        #[cfg(all(feature = "tracing", feature = "legacy-spec"))]
         app.map_handler(
             crate::types::notification::commands::SET_LOG_LEVEL,
             Self::set_log_level,
@@ -258,13 +271,13 @@ impl App {
             .print();
         }
 
-        // Multi-instance footgun guard: under the stateless RC HTTP transport an
+        // Multi-instance footgun guard: under the stateless 2026-07-28 HTTP transport an
         // MRTR retry can land on a different instance than the one that issued
         // the `requestState`. With the default ephemeral per-process secret that
         // retry fails `requestState` decryption/verification, which is a silent
         // prod failure. Warn at startup unless a shared secret was set explicitly.
         #[cfg(all(
-            feature = "proto-2026-07-28-rc",
+            not(feature = "legacy-spec"),
             feature = "http-server",
             feature = "tracing"
         ))]
@@ -327,7 +340,7 @@ impl App {
     }
 
     /// Sets the shared secret used to encrypt and authenticate MRTR
-    /// `requestState` (`proto-2026-07-28-rc`).
+    /// `requestState` (MCP 2026-07-28).
     ///
     /// The blob is sealed with ChaCha20-Poly1305 (AEAD) using a key derived from
     /// this secret, so the payload -- including any values a handler caches via
@@ -349,21 +362,21 @@ impl App {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(feature = "proto-2026-07-28-rc")] {
+    /// # #[cfg(not(feature = "legacy-spec"))] {
     /// use neva::App;
     ///
     /// let app = App::new()
     ///     .with_request_state_secret(b"shared-secret");
     /// # }
     /// ```
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub fn with_request_state_secret(mut self, secret: impl AsRef<[u8]>) -> Self {
         self.options.set_request_state_secret(secret.as_ref());
         self
     }
 
     /// Sets the keyring used to encrypt and authenticate MRTR `requestState`,
-    /// enabling zero-downtime key rotation (`proto-2026-07-28-rc`).
+    /// enabling zero-downtime key rotation (MCP 2026-07-28).
     ///
     /// New blobs are sealed with the key `active_kid` names and carry the kid
     /// on the wire (`v1.{kid}....`); an inbound blob is decrypted with whichever
@@ -379,7 +392,7 @@ impl App {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(feature = "proto-2026-07-28-rc")] {
+    /// # #[cfg(not(feature = "legacy-spec"))] {
     /// use neva::App;
     ///
     /// let app = App::new()
@@ -389,7 +402,7 @@ impl App {
     ///     ]);
     /// # }
     /// ```
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub fn with_request_state_keys<K, S>(
         mut self,
         active_kid: impl AsRef<str>,
@@ -406,7 +419,7 @@ impl App {
 
     /// Sets the maximum encoded `requestState` size (bytes). When a round-trip
     /// would emit a larger blob, the server returns an error result instead
-    /// (`proto-2026-07-28-rc`).
+    /// (MCP 2026-07-28).
     ///
     /// Defaults to 8 KiB. Lower it to push handlers toward [`crate::Context::once`]
     /// (key-only) over [`crate::Context::memo`] (serialized value); raise it for
@@ -414,21 +427,21 @@ impl App {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(feature = "proto-2026-07-28-rc")] {
+    /// # #[cfg(not(feature = "legacy-spec"))] {
     /// use neva::App;
     ///
     /// let app = App::new()
     ///     .with_max_state_bytes(16 * 1024);
     /// # }
     /// ```
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub fn with_max_state_bytes(mut self, bytes: usize) -> Self {
         self.options.set_max_state_bytes(bytes);
         self
     }
 
     /// Sets the store backing MRTR final-round idempotency
-    /// (`proto-2026-07-28-rc`).
+    /// (MCP 2026-07-28).
     ///
     /// When the final round of an MRTR flow commits but its HTTP response is
     /// lost, the client retries the same `requestState`; the store lets the
@@ -445,7 +458,7 @@ impl App {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(feature = "proto-2026-07-28-rc")] {
+    /// # #[cfg(not(feature = "legacy-spec"))] {
     /// use neva::App;
     /// use neva::app::mrtr_store::InMemoryStateStore;
     ///
@@ -453,7 +466,7 @@ impl App {
     ///     .with_request_state_store(InMemoryStateStore::new());
     /// # }
     /// ```
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub fn with_request_state_store(
         mut self,
         store: impl crate::app::mrtr_store::RequestStateStore + 'static,
@@ -464,7 +477,7 @@ impl App {
     }
 
     /// Registers a protocol [`Extension`](crate::app::extension::Extension)
-    /// (MCP 2026-07-28 RC).
+    /// (MCP 2026-07-28).
     ///
     /// Records the extension's capability under its reverse-DNS id (surfaced by
     /// `server/discover` under `capabilities.extensions`) and lets it register
@@ -473,7 +486,7 @@ impl App {
     ///
     /// # Example
     /// ```no_run
-    /// # #[cfg(all(feature = "proto-2026-07-28-rc", feature = "tasks"))] {
+    /// # #[cfg(all(not(feature = "legacy-spec"), feature = "tasks"))] {
     /// use neva::App;
     /// use neva::app::extension::TasksExtension;
     /// use neva::types::ServerTasksCapability;
@@ -481,7 +494,7 @@ impl App {
     ///     .with_extension(TasksExtension::new(ServerTasksCapability::default()));
     /// # }
     /// ```
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub fn with_extension<E: crate::app::extension::Extension>(mut self, ext: E) -> Self {
         self.options.register_extension(ext.id(), ext.capability());
         ext.register(&mut self);
@@ -719,8 +732,8 @@ impl App {
         self
     }
 
-    /// Connection initialization handler (pre-RC handshake).
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    /// Connection initialization handler (legacy handshake).
+    #[cfg(feature = "legacy-spec")]
     async fn init(
         options: RuntimeMcpOptions,
         _params: InitializeRequestParams,
@@ -728,8 +741,8 @@ impl App {
         Ok(InitializeResult::new(&options))
     }
 
-    /// Stateless capability discovery handler (MCP 2026-07-28 RC).
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    /// Stateless capability discovery handler (MCP 2026-07-28).
+    #[cfg(not(feature = "legacy-spec"))]
     async fn discover(
         options: RuntimeMcpOptions,
         _params: crate::types::DiscoverRequestParams,
@@ -744,7 +757,7 @@ impl App {
     }
 
     /// Tools request handler
-    #[cfg_attr(not(feature = "proto-2026-07-28-rc"), allow(clippy::needless_update))]
+    #[cfg_attr(feature = "legacy-spec", allow(clippy::needless_update))]
     async fn tools(options: RuntimeMcpOptions, params: ListToolsRequestParams) -> ListToolsResult {
         let (tools, next_cursor) = options
             .list_tools_page(params.cursor, DEFAULT_PAGE_SIZE)
@@ -757,7 +770,7 @@ impl App {
     }
 
     /// Resources request handler
-    #[cfg_attr(not(feature = "proto-2026-07-28-rc"), allow(clippy::needless_update))]
+    #[cfg_attr(feature = "legacy-spec", allow(clippy::needless_update))]
     async fn resources(
         options: RuntimeMcpOptions,
         params: ListResourcesRequestParams,
@@ -773,7 +786,7 @@ impl App {
     }
 
     /// Resource templates request handler
-    #[cfg_attr(not(feature = "proto-2026-07-28-rc"), allow(clippy::needless_update))]
+    #[cfg_attr(feature = "legacy-spec", allow(clippy::needless_update))]
     async fn resource_templates(
         options: RuntimeMcpOptions,
         params: ListResourceTemplatesRequestParams,
@@ -789,7 +802,7 @@ impl App {
     }
 
     /// Prompts request handler
-    #[cfg_attr(not(feature = "proto-2026-07-28-rc"), allow(clippy::needless_update))]
+    #[cfg_attr(feature = "legacy-spec", allow(clippy::needless_update))]
     async fn prompts(
         options: RuntimeMcpOptions,
         params: ListPromptsRequestParams,
@@ -836,28 +849,32 @@ impl App {
     }
 
     /// Ping request handler
+    #[cfg(feature = "legacy-spec")]
     async fn ping() {}
 
     /// A subscription to a resource change request handler
     ///
-    /// Not registered under `proto-2026-07-28-rc`: the stateless transport
+    /// Not registered under MCP 2026-07-28: the stateless transport
     /// cannot push `notifications/resources/updated`, so subscriptions are not
     /// advertised and the method is not accepted.
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[cfg(feature = "legacy-spec")]
     async fn resource_subscribe(mut ctx: Context, params: SubscribeRequestParams) {
         ctx.subscribe_to_resource(params.uri);
     }
 
     /// An unsubscription to from resource change request handler
     ///
-    /// Not registered under `proto-2026-07-28-rc`; see [`Self::resource_subscribe`].
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    /// Not registered under MCP 2026-07-28; see [`Self::resource_subscribe`].
+    #[cfg(feature = "legacy-spec")]
     async fn resource_unsubscribe(mut ctx: Context, params: UnsubscribeRequestParams) {
         ctx.unsubscribe_from_resource(&params.uri);
     }
 
     /// Tasks request handler
-    #[cfg(feature = "tasks")]
+    ///
+    /// Not registered under MCP 2026-07-28: the final Tasks extension has no
+    /// `tasks/list`. A task id is a durable handle the requestor already holds.
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     async fn tasks(
         options: RuntimeMcpOptions,
         params: ListTasksRequestParams,
@@ -875,7 +892,21 @@ impl App {
     }
 
     /// A cancel task request handler
-    #[cfg(feature = "tasks")]
+    ///
+    /// Under MCP 2026-07-28 cancellation is cooperative and the reply is an
+    /// empty acknowledgement -- the requestor learns the outcome by polling
+    /// `tasks/get`, since the task may still reach a non-`cancelled` terminal
+    /// status. `legacy-spec` returns the cancelled [`Task`] instead.
+    #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
+    async fn cancel_task(
+        options: RuntimeMcpOptions,
+        params: CancelTaskRequestParams,
+    ) -> Result<(), Error> {
+        options.cancel_task(&params.id).map(|_| ())
+    }
+
+    /// A cancel task request handler
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     async fn cancel_task(
         options: RuntimeMcpOptions,
         params: CancelTaskRequestParams,
@@ -890,14 +921,43 @@ impl App {
         }
     }
 
+    /// A task state retrieval request handler
+    ///
+    /// Under MCP 2026-07-28 this is the single polling method: the reply
+    /// carries the status plus, depending on it, the outstanding
+    /// `inputRequests`, the terminal `result`, or the `error`.
+    #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
+    async fn task(
+        options: RuntimeMcpOptions,
+        params: GetTaskRequestParams,
+    ) -> Result<DetailedTask, Error> {
+        options.get_task_state(&params.id)
+    }
+
     /// A task status retrieval request handler
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     async fn task(options: RuntimeMcpOptions, params: GetTaskRequestParams) -> Result<Task, Error> {
         options.get_task_status(&params.id)
     }
 
+    /// A task input submission request handler (MCP 2026-07-28)
+    ///
+    /// Answers the task's outstanding input requests and acknowledges with an
+    /// empty result. Responses for unknown or already-satisfied keys are
+    /// ignored, per the spec.
+    #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
+    async fn update_task(
+        options: RuntimeMcpOptions,
+        params: UpdateTaskRequestParams,
+    ) -> Result<(), Error> {
+        options.update_task(&params.id, params.input_responses)
+    }
+
     /// A task result retrieval request handler
-    #[cfg(feature = "tasks")]
+    ///
+    /// Not registered under MCP 2026-07-28: result retrieval folded into
+    /// `tasks/get`.
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     async fn task_result(
         options: RuntimeMcpOptions,
         params: GetTaskPayloadRequestParams,
@@ -907,7 +967,7 @@ impl App {
 
     /// Sets the logging level
     #[allow(deprecated)]
-    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+    #[cfg(all(feature = "tracing", feature = "legacy-spec"))]
     async fn set_log_level(
         options: RuntimeMcpOptions,
         params: SetLevelRequestParams,
@@ -925,12 +985,12 @@ impl App {
 
     #[cfg(feature = "tracing")]
     async fn tracing_middleware(ctx: MwContext, next: Next) -> Response {
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        #[cfg(feature = "legacy-spec")]
         let span = create_tracing_span(ctx.session_id().cloned());
-        // RC: the request-scoped logging level rides on the originating
+        // 2026-07-28: the request-scoped logging level rides on the originating
         // request's `_meta`. Stamp it onto the span so the notification layer
         // can decide which `notifications/message` to deliver for this request.
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         let span = {
             let log_level = ctx
                 .request()
@@ -948,7 +1008,7 @@ impl App {
         // response know no more notifications are coming, so logs emitted by
         // user middleware after `next(ctx)` still make it onto the stream.
         #[cfg(all(
-            feature = "proto-2026-07-28-rc",
+            not(feature = "legacy-spec"),
             feature = "tracing",
             feature = "http-server"
         ))]
@@ -972,7 +1032,7 @@ impl App {
         // the request-scoped SSE response stays open until every inner request
         // and its middleware have finished. See `App::execute`.
         #[cfg(all(
-            feature = "proto-2026-07-28-rc",
+            not(feature = "legacy-spec"),
             feature = "tracing",
             feature = "http-server"
         ))]
@@ -1194,16 +1254,51 @@ impl App {
 
         // MRTR pre-capture: method + salient params (params minus `_meta`),
         // needed after `req`/`context` are moved into `handler.call`.
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         let mrtr_method = shared::is_mrtr_method(&req.method);
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         let req_method = req.method.clone();
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         let salient_params = req
             .params
             .as_ref()
             .map(strip_meta)
             .unwrap_or(serde_json::Value::Null);
+
+        // What MCP 2026-07-28 requires of every request's `_meta`: the
+        // mandatory fields, and a protocol version this build actually speaks.
+        // The HTTP preamble rejects both earlier so it can attach the `400` the
+        // spec asks for; this seam is what every other transport gets, since
+        // the requirements are on the message and not on how it travelled.
+        #[cfg(not(feature = "legacy-spec"))]
+        if let Some(err) = req
+            .required_meta_error()
+            .or_else(|| req.unsupported_version_error())
+        {
+            let mut resp = Response::error(req_id, err);
+            if let Some(session_id) = session_id {
+                resp = resp.set_session_id(session_id);
+            }
+            return resp;
+        }
+
+        // The `Mcp-Param-*` half of header validation. The transport preamble
+        // checks the standard routing headers, but these are defined by the
+        // called tool's own `x-mcp-header` annotations -- which only this side
+        // of the channel knows -- so the check lands where the tool registry
+        // does. The resulting `-32020` picks up its mandated `400` from the
+        // transport's status mapping on the way out.
+        #[cfg(all(feature = "http-server", not(feature = "legacy-spec")))]
+        if let Some(err) = param_header_error(&req, &runtime.options()).await {
+            let mut resp = Response::error(req_id, err);
+            // The transport correlates a reply by `session_id`+`id`; a reply
+            // that leaves without one is never matched to the POST waiting for
+            // it. Every other return path down this function does the same.
+            if let Some(session_id) = session_id {
+                resp = resp.set_session_id(session_id);
+            }
+            return resp;
+        }
 
         #[cfg(not(feature = "http-server"))]
         let context = runtime.context(session_id);
@@ -1224,9 +1319,9 @@ impl App {
 
         // MRTR seed: decode/verify any incoming `requestState`, merge this
         // round's `inputResponses`, and attach the replay state to the context.
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         let mut context = context;
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         let (mrtr_arc, mrtr_principal) = if mrtr_method {
             #[cfg(feature = "http-server")]
             let principal = context
@@ -1273,7 +1368,7 @@ impl App {
         // those apart, while a genuine lost-response retry -- same state *and*
         // same answers -- still hits. Only committed *final* rounds are ever
         // cached, so a hit here is by construction a replay of one.
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         let state_tag: Option<String> = if mrtr_method {
             req.meta().and_then(|m| {
                 let tag = m
@@ -1301,12 +1396,12 @@ impl App {
         // Dropping it early (e.g. rewriting to `let _ = ...reserve().await;`)
         // releases the lock immediately and reopens the concurrent-retry race;
         // the explicit, self-describing name guards against that refactor.
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         let _reservation_guard_held_through_commit = match state_tag.as_deref() {
             Some(tag) => Some(options.request_state_store().reserve(tag).await),
             None => None,
         };
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         if let Some(tag) = state_tag.as_deref()
             && let Some(cached) = options.request_state_store().get(tag).await
         {
@@ -1343,9 +1438,9 @@ impl App {
         // what the handler returned. The pending flag -- not the sentinel error
         // -- is the reliable signal, because tool/prompt/resource wrappers fold
         // a handler `Err` into an in-band error result before we see it.
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         let mut cache_final = false;
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         let resp = match (mrtr_method, mrtr_arc) {
             (true, Some(arc)) => {
                 let has_pending = arc.pending.lock().map(|p| p.is_some()).unwrap_or(false);
@@ -1391,6 +1486,18 @@ impl App {
         };
 
         let mut resp = resp.into_response(req_id);
+        // The two things MCP 2026-07-28 puts on every result: the discriminator
+        // and the server's own identity (`serverInfo` left `DiscoverResult`).
+        // Both are stamped here, at the single seam every dispatched response
+        // passes through -- a handler that returns a `Response` it built
+        // elsewhere, or proxied from an upstream peer, reaches the wire without
+        // passing `Response::success`.
+        #[cfg(not(feature = "legacy-spec"))]
+        {
+            resp = resp
+                .with_result_type()
+                .with_server_info(&options.implementation);
+        }
         if let Some(session_id) = session_id {
             resp = resp.set_session_id(session_id);
         }
@@ -1400,7 +1507,7 @@ impl App {
         // until the state's own expiry window (`now + ttl`, an upper bound on
         // its remaining life), after which a retry is rejected as expired before
         // reaching the store.
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         if cache_final && let Some(tag) = state_tag.as_deref() {
             let exp = crate::types::mrtr::state::now_secs() + options.request_state_ttl_secs();
             options
@@ -1415,29 +1522,11 @@ impl App {
         let resp_id = resp.id().clone();
         let session_id = resp.session_id().cloned();
 
-        // RC task-elicit resume: an answer to a suspended task `ctx.elicit` is
-        // correlated by the server-generated task id (the bare response id),
-        // *not* the session -- the stateless transport mints a fresh session per
-        // POST, so the session-keyed request queue could never match the
-        // suspend round. Try delivering to a parked task first; `provide_input`
-        // hands the response back when no task elicit is waiting, so non-task
-        // responses fall through to the request queue unchanged.
-        #[cfg(all(feature = "proto-2026-07-28-rc", feature = "tasks"))]
-        let resp = match runtime
-            .options()
-            .tasks
-            .provide_input(&resp_id.to_string(), resp)
-        {
-            Ok(()) => {
-                let mut resp = Response::empty(resp_id);
-                if let Some(session_id) = session_id {
-                    resp = resp.set_session_id(session_id);
-                }
-                return resp;
-            }
-            Err(resp) => *resp,
-        };
-
+        // A suspended task `ctx.task().elicit` no longer resumes from an inbound
+        // `Response`: MCP 2026-07-28 routes the answer through `tasks/update`,
+        // which is a request handled by `App::update_task`. Responses arriving
+        // here are ordinary replies to server-initiated requests and go to the
+        // request queue unchanged.
         runtime.pending_requests().complete(resp);
 
         let mut resp = Response::empty(resp_id);
@@ -1481,14 +1570,14 @@ impl App {
 /// ones user middleware emitted after `next(ctx)` -- has been queued, so it can
 /// drain them and close with the final response.
 #[cfg(all(
-    feature = "proto-2026-07-28-rc",
+    not(feature = "legacy-spec"),
     feature = "tracing",
     feature = "http-server"
 ))]
 struct RequestSinkGuard(Option<uuid::Uuid>);
 
 #[cfg(all(
-    feature = "proto-2026-07-28-rc",
+    not(feature = "legacy-spec"),
     feature = "tracing",
     feature = "http-server"
 ))]
@@ -1502,8 +1591,8 @@ impl Drop for RequestSinkGuard {
 
 /// Builds the per-request tracing span carrying the session id.
 ///
-/// See the RC variant below for why the span is created at `ERROR`.
-#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+/// See the 2026-07-28 variant below for why the span is created at `ERROR`.
+#[cfg(all(feature = "tracing", feature = "legacy-spec"))]
 fn create_tracing_span(session_id: Option<uuid::Uuid>) -> tracing::Span {
     if let Some(mcp_session_id) = session_id {
         tracing::error_span!("request", mcp_session_id = mcp_session_id.to_string())
@@ -1512,7 +1601,7 @@ fn create_tracing_span(session_id: Option<uuid::Uuid>) -> tracing::Span {
     }
 }
 
-/// Builds the per-request tracing span, carrying the session id and (RC) the
+/// Builds the per-request tracing span, carrying the session id and (2026-07-28) the
 /// request-scoped logging level as span fields the notification layer reads.
 ///
 /// The span is created at `ERROR` -- the highest level -- so it is not itself
@@ -1523,7 +1612,7 @@ fn create_tracing_span(session_id: Option<uuid::Uuid>) -> tracing::Span {
 /// no `mcp_log_level` to filter against -- request-scoped logging would silently
 /// stop working. `ERROR` keeps the context observable for every event that the
 /// application's own threshold admits.
-#[cfg(all(feature = "tracing", feature = "proto-2026-07-28-rc"))]
+#[cfg(all(feature = "tracing", not(feature = "legacy-spec")))]
 fn create_tracing_span(
     session_id: Option<uuid::Uuid>,
     log_level: Option<crate::types::notification::LoggingLevel>,
@@ -1546,7 +1635,7 @@ fn create_tracing_span(
 
 /// Returns a clone of `params` with the `_meta` key removed, so the MRTR
 /// request-binding digest is stable across round-trips.
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 fn strip_meta(params: &serde_json::Value) -> serde_json::Value {
     match params {
         serde_json::Value::Object(map) => {
@@ -1558,9 +1647,110 @@ fn strip_meta(params: &serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Why a `tools/call`'s mirrored `Mcp-Param-*` headers do not describe its
+/// arguments, if they do not.
+///
+/// A tool may annotate arguments with `x-mcp-header`, and the client must then
+/// mirror each present value into `Mcp-Param-{name}`. An intermediary is
+/// entitled to route or rate-limit on those headers, so a header that says one
+/// tenant while the body says another has to be rejected rather than
+/// dispatched -- otherwise the annotation is a suggestion, not a control.
+///
+/// Each annotated argument is checked in both directions: a value in the body
+/// requires the header, a header requires the value, and both present must
+/// agree after decoding the Base64 sentinel. Headers naming an argument this
+/// tool does not annotate are none of the origin server's business -- the spec
+/// has unrecognized `Mcp-Param-*` forwarded and ignored.
+///
+/// A definition whose annotations are invalid yields no expectations at all:
+/// the malformed tool is the problem, and the client is already required to
+/// drop it rather than call it.
+#[cfg(all(feature = "http-server", not(feature = "legacy-spec")))]
+async fn param_header_error(
+    req: &Request,
+    options: &crate::app::options::RuntimeMcpOptions,
+) -> Option<Error> {
+    use crate::shared::param_headers;
+    use crate::transport::http::decode_header_value;
+
+    if req.method != crate::types::tool::commands::CALL {
+        return None;
+    }
+
+    // Only a call that arrived as a single HTTP request has mirrored headers to
+    // check. `Mcp-Method` is the marker: the transport preamble requires it on
+    // every single request and rejects it on a batch, so its absence here means
+    // this call came in a batch (or off another transport entirely) and no
+    // header ever described it. Demanding one would reject every batched call
+    // of an annotated tool.
+    if !req.headers.contains_key(crate::transport::http::MCP_METHOD) {
+        return None;
+    }
+
+    let params = req.params.as_ref()?.as_object()?;
+    let name = params.get("name")?.as_str()?;
+    let tool = options.get_tool(name).await?;
+    let schema = serde_json::to_value(&tool.input_schema).ok()?;
+    let declared = param_headers::collect(&schema).ok()?;
+    if declared.is_empty() {
+        return None;
+    }
+
+    let args = params.get("arguments").cloned().unwrap_or_default();
+    let mirrored = param_headers::extract(&declared, &args);
+
+    let mismatch = |header: &str, stated: &str, body: &str| {
+        Some(Error::new(
+            ErrorCode::HeaderMismatch,
+            format!(
+                "Header mismatch: {header} header value {stated:?} does not match body value {body:?}"
+            ),
+        ))
+    };
+
+    for header in &declared {
+        let name = format!("{}{}", param_headers::PARAM_HEADER_PREFIX, header.header);
+        let stated = req.headers.get(&name).and_then(|v| v.to_str().ok());
+        let body = mirrored
+            .iter()
+            .find(|(mirrored, _)| *mirrored == name)
+            .map(|(_, value)| value.as_str());
+
+        match (stated, body) {
+            (None, None) => {}
+            (None, Some(body)) => {
+                return Some(Error::new(
+                    ErrorCode::HeaderMismatch,
+                    format!("Missing {name} header for the mirrored argument {body:?}"),
+                ));
+            }
+            (Some(stated), None) => {
+                return Some(Error::new(
+                    ErrorCode::HeaderMismatch,
+                    format!(
+                        "{name} header sent as {stated:?}, but the call carries no such argument"
+                    ),
+                ));
+            }
+            (Some(stated), Some(body)) => match decode_header_value(stated) {
+                Some(decoded) if decoded == body => {}
+                Some(decoded) => return mismatch(&name, &decoded, body),
+                None => {
+                    return Some(Error::new(
+                        ErrorCode::HeaderMismatch,
+                        format!("Malformed {name} header value"),
+                    ));
+                }
+            },
+        }
+    }
+
+    None
+}
+
 /// Decodes/verifies any incoming `requestState` and merges this round's
 /// `inputResponses` into the replay log, producing the per-dispatch MRTR state.
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 fn seed_mrtr_ctx(
     req: &Request,
     method: &str,
@@ -1664,7 +1854,7 @@ fn seed_mrtr_ctx(
 
 /// Builds the `InputRequiredResult` for the input the handler requested,
 /// encoding a fresh encrypted `requestState`.
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 fn build_input_required(
     arc: &std::sync::Arc<crate::app::context::MrtrCtx>,
     method: &str,
@@ -1687,12 +1877,15 @@ fn build_input_required(
     // it never declared would otherwise stall the round-trip.
     if !arc.client_capabilities.allows(&request) {
         return Err(Error::new(
-            ErrorCode::InvalidRequest,
+            ErrorCode::MissingRequiredClientCapability,
             format!(
                 "server requested `{}` but the client did not declare support",
                 request.method()
             ),
-        ));
+        )
+        .with_data(serde_json::json!({
+            "requiredCapabilities": arc.client_capabilities.requiring(&request),
+        })));
     }
 
     let memos = arc.memos.lock().map(|m| m.clone()).unwrap_or_default();
@@ -1730,7 +1923,7 @@ fn build_input_required(
 /// so a plain `resp.is_ok()` check would still run commits on a failed call --
 /// applying irreversible side effects (DB writes, charges) registered via
 /// `ctx.on_commit(..)` even though the tool ultimately reported failure.
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 fn mrtr_should_commit(resp: &Result<Response, Error>) -> bool {
     match resp {
         Ok(Response::Ok(ok)) => ok.result.get("isError") != Some(&serde_json::Value::Bool(true)),
@@ -1749,7 +1942,7 @@ mod tests {
         assert!(app.greeting);
     }
 
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[test]
     fn with_max_state_bytes_sets_the_option() {
         let app = App::new().with_max_state_bytes(4096);
@@ -1760,7 +1953,7 @@ mod tests {
     /// event emitted while handling a request, so a common global threshold
     /// (`LevelFilter::WARN`) must not disable it: WARN/ERROR events stay enabled
     /// and would otherwise lose their `mcp_session_id` and `mcp_log_level`.
-    #[cfg(all(feature = "tracing", feature = "proto-2026-07-28-rc"))]
+    #[cfg(all(feature = "tracing", not(feature = "legacy-spec")))]
     #[test]
     fn request_span_survives_a_warning_only_filter() {
         use crate::types::notification::LoggingLevel;
@@ -1785,7 +1978,7 @@ mod tests {
     /// Deferred MRTR commits must run only for a genuine success -- never for a
     /// protocol-level error nor for an in-band tool error (`isError: true`),
     /// which tool wrappers fold a handler `Err` into.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[test]
     fn mrtr_should_commit_excludes_errors() {
         use crate::error::Error;
@@ -1825,7 +2018,7 @@ mod tests {
     /// exercises: an expired `requestState` and a principal-bound state replayed
     /// under a different principal. Driven deterministically (no clock advance,
     /// no auth harness) by hand-encoding the signed blob.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     mod mrtr_seed_guards {
         use crate::app::App;
         use crate::error::ErrorCode;
@@ -1850,7 +2043,7 @@ mod tests {
             let mut params = salient();
             params["_meta"] = serde_json::json!({
                 "requestState": state,
-                "clientCapabilities": { "elicitation": true }
+                "io.modelcontextprotocol/clientCapabilities": { "elicitation": true }
             });
             Request::new(Some(RequestId::Number(1)), METHOD, Some(params))
         }
@@ -1913,7 +2106,7 @@ mod tests {
                 })
                 .collect();
             let mut meta = serde_json::json!({
-                "clientCapabilities": { "elicitation": true },
+                "io.modelcontextprotocol/clientCapabilities": { "elicitation": true },
                 "inputResponses": responses,
             });
             if let Some(state) = state {
@@ -1991,15 +2184,15 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[test]
-    fn rc_registers_discover_not_initialize() {
+    fn registers_discover_not_initialize() {
         let app = App::new();
         assert!(app.handlers.contains_key(crate::commands::DISCOVER));
         assert!(!app.handlers.contains_key(crate::commands::INIT));
     }
 
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[cfg(feature = "legacy-spec")]
     #[test]
     fn default_registers_initialize() {
         let app = App::new();

@@ -44,7 +44,7 @@ async fn main() {
     App::new()
         .with_options(|opt| {
             opt.with_name("Progress Example Server")
-                .with_tasks(|tasks| tasks.with_all())
+                .with_tasks()
                 .with_default_http()
         })
         .run()

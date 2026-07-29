@@ -181,9 +181,9 @@ impl HttpEngine for VolgaEngine {
                     mcp.authorize(rules);
                 }
                 mcp.map_post("/", routes::post);
-                // Stateless RC transport has no SSE GET stream and no
+                // Stateless 2026-07-28 transport has no SSE GET stream and no
                 // session-termination DELETE -- only POST is routed.
-                #[cfg(not(feature = "proto-2026-07-28-rc"))]
+                #[cfg(feature = "legacy-spec")]
                 {
                     mcp.map_get("/", routes::get);
                     mcp.map_delete("/", routes::delete);

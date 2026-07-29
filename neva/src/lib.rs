@@ -4,9 +4,30 @@
 //! ## Dependencies
 //! ```toml
 //! [dependencies]
-//! neva = { version = "0.3.3", features = ["full"] }
+//! neva = { version = "0.5.0", features = ["full"] }
 //! tokio = { version = "1", features = ["full"] }
 //! ```
+//!
+//! ## Protocol generations
+//! This documentation describes the default build, which speaks
+//! **MCP 2026-07-28**.
+//!
+//! The `legacy-spec` feature selects the previous generation
+//! (MCP 2024-11-05 .. 2025-11-25) instead: the `initialize` handshake, the
+//! session-bound SSE transport, server-pushed sampling/roots/logging, and a
+//! top-level `tasks` capability. It is a *replacement*, not an addition -- it
+//! compiles the 2026-07-28 surface out, so `server/discover`, MRTR and
+//! `DetailedTask` are absent from a `legacy-spec` build, and the API items
+//! documented here are not the ones it exposes.
+//!
+//! One build therefore speaks one generation. A deployment that must serve
+//! both runs two servers, one per profile, on separate endpoints. A *client*
+//! is the exception: it cannot choose its peer, so a 2026-07-28 client falls
+//! back to the `initialize` handshake when `server/discover` is rejected, and
+//! from then on speaks the legacy protocol for the core primitives. Extensions
+//! are not covered by that fallback -- a task-augmented request against a peer
+//! that fell back is refused rather than sent in a dialect the peer cannot
+//! read.
 //!
 //! ## Example Server
 //! ```no_run
@@ -51,11 +72,11 @@
 //! # }
 //! ```
 
-#[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+#[cfg(all(feature = "server", not(feature = "legacy-spec")))]
 pub use app::extension::Extension;
-#[cfg(all(feature = "server", feature = "proto-2026-07-28-rc", feature = "tasks"))]
+#[cfg(all(feature = "server", not(feature = "legacy-spec"), feature = "tasks"))]
 pub use app::extension::TasksExtension;
-#[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+#[cfg(all(feature = "server", not(feature = "legacy-spec")))]
 pub use app::mrtr_store::{InMemoryStateStore, RequestStateStore};
 #[cfg(feature = "server")]
 pub use app::{App, context::Context};
@@ -83,7 +104,7 @@ pub mod types;
 pub use neva_macros::elicitation;
 #[cfg(feature = "macros")]
 pub use neva_macros::json_schema;
-#[cfg(all(feature = "client-macros", not(feature = "proto-2026-07-28-rc")))]
+#[cfg(all(feature = "client-macros", feature = "legacy-spec"))]
 pub use neva_macros::sampling;
 #[cfg(feature = "server-macros")]
 pub use neva_macros::{completion, handler, prompt, resource, resources, tool};
@@ -95,25 +116,30 @@ pub(crate) const PROTOCOL_VERSIONS: &[&str] = &[
     "2025-03-26",
     "2025-06-18",
     "2025-11-25",
-    #[cfg(feature = "proto-2026-07-28-rc")]
-    RC_PROTOCOL_VERSION,
+    #[cfg(not(feature = "legacy-spec"))]
+    LATEST_PROTOCOL_VERSION,
 ];
 
-/// The MCP 2026-07-28 RC protocol version string.
-#[cfg(feature = "proto-2026-07-28-rc")]
-pub(crate) const RC_PROTOCOL_VERSION: &str = "2026-07-28";
+/// The MCP protocol version this build targets by default (MCP 2026-07-28).
+///
+/// Compiled out under `legacy-spec`, where the newest supported generation is
+/// `2025-11-25`.
+#[cfg(not(feature = "legacy-spec"))]
+pub(crate) const LATEST_PROTOCOL_VERSION: &str = "2026-07-28";
 
-// Mutual-exclusion guard for `proto-*` generation flags.
+// Mutual-exclusion guard for protocol-generation flags.
 //
-// One pairwise `all(...)` lives in the `any(...)` body for every pair of
-// `proto-*` flags. Today only one such flag exists, so the body is empty
-// and the guard is dormant (`cfg(any())` with no operands evaluates to
-// `false`). When a second `proto-*` flag is introduced, append
-// `all(feature = "proto-A", feature = "proto-B")` to the list.
+// The default build targets MCP 2026-07-28; `legacy-spec` swaps in the
+// pre-2026-07-28 generations instead. One pairwise `all(...)` lives in the
+// `any(...)` body for every pair of mutually exclusive generation flags.
+// Today only `legacy-spec` exists, so the body is empty and the guard is
+// dormant (`cfg(any())` with no operands evaluates to `false`). When a future
+// `proto-*` generation flag is introduced, append
+// `all(feature = "legacy-spec", feature = "proto-A")` to the list.
 #[cfg(any(
-    // all(feature = "proto-2026-07-28-rc", feature = "proto-2027-XX-XX-rc"),
+    // all(feature = "legacy-spec", feature = "proto-2027-XX-XX"),
 ))]
-compile_error!("Only one `proto-*` feature flag may be enabled per build");
+compile_error!("Only one protocol-generation feature flag may be enabled per build");
 
 #[cfg(any(feature = "http-server", feature = "client-oauth"))]
 pub mod auth {
@@ -223,7 +249,7 @@ pub mod json {
 }
 
 /// Internal re-exports used by `neva_macros`-generated code. Not public API.
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 #[doc(hidden)]
 pub mod __macro_support {
     pub use crate::types::schema_2020::{
@@ -256,9 +282,9 @@ pub mod prelude {
         HttpContext, HttpEngine, HttpRequest, HttpResponse, HttpServer, StreamResponse, handlers,
     };
 
-    #[cfg(all(feature = "server", feature = "proto-2026-07-28-rc"))]
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
     pub use crate::app::extension::Extension;
-    #[cfg(all(feature = "server", feature = "proto-2026-07-28-rc", feature = "tasks"))]
+    #[cfg(all(feature = "server", not(feature = "legacy-spec"), feature = "tasks"))]
     pub use crate::app::extension::TasksExtension;
     #[cfg(feature = "server")]
     pub use crate::app::{App, context::Context, options};
@@ -272,7 +298,7 @@ pub mod prelude {
     pub use crate::elicitation;
     #[cfg(feature = "macros")]
     pub use crate::json_schema;
-    #[cfg(all(feature = "client-macros", not(feature = "proto-2026-07-28-rc")))]
+    #[cfg(all(feature = "client-macros", feature = "legacy-spec"))]
     pub use crate::sampling;
     #[cfg(feature = "server-macros")]
     pub use crate::{completion, handler, prompt, resource, resources, tool};
@@ -290,15 +316,18 @@ mod proto_versions_tests {
     use super::PROTOCOL_VERSIONS;
 
     #[test]
-    fn rc_version_listed_only_under_flag() {
-        let has_rc = PROTOCOL_VERSIONS.contains(&"2026-07-28");
-        let flag_on = cfg!(feature = "proto-2026-07-28-rc");
-        assert_eq!(has_rc, flag_on, "RC version listing must match the flag");
+    fn latest_version_listed_unless_legacy() {
+        let has_latest = PROTOCOL_VERSIONS.contains(&"2026-07-28");
+        let legacy = cfg!(feature = "legacy-spec");
+        assert_eq!(
+            has_latest, !legacy,
+            "2026-07-28 must be advertised unless `legacy-spec` is on"
+        );
     }
 
     #[test]
     fn stable_versions_always_listed() {
-        // Stable versions are PROTOCOL_VERSIONS minus the RC entry (when enabled).
+        // Older versions are PROTOCOL_VERSIONS minus the 2026-07-28 entry (when enabled).
         // Future stable additions land in PROTOCOL_VERSIONS and are automatically
         // covered by this test -- no need to update the test when new versions
         // are advertised.

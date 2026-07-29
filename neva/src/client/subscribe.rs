@@ -62,6 +62,7 @@ impl Client {
     }
 
     /// Maps a `handler` to the `notifications/elicitation/completed` event
+    #[cfg(feature = "legacy-spec")]
     pub fn on_elicitation_completed<F, R>(&mut self, handler: F)
     where
         F: Fn(Notification) -> R + Clone + Send + Sync + 'static,

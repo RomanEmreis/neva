@@ -1,0 +1,10 @@
+# The legacy examples are a workspace of their own, deliberately separate from
+# the default one next door: Cargo unifies features across the members it builds
+# together, so a single workspace would switch `legacy-spec` on for the
+# MCP 2026-07-28 crates too and they would stop compiling.
+[workspace]
+members = ["client", "server"]
+resolver = "2"
+
+[workspace.package]
+rust-version = "1.90.0"

@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## 0.5.0
 
 ### Changed (breaking)
+* **MCP 2026-07-28 is now the default protocol generation.** The
+  `proto-2026-07-28-rc` opt-in flag is gone; what it used to gate is what a
+  plain `neva` build now speaks. The previous default -- MCP 2024-11-05 ..
+  2025-11-25 -- moves behind a new **`legacy-spec`** feature. This is the
+  deliberate breaking change flagged since 0.4.0: the spec revision itself is
+  breaking, and neva follows it rather than freezing on the old wire.
+  * Migration: builds that enabled `proto-2026-07-28-rc` simply drop the flag.
+    Builds that relied on the old default add `features = ["legacy-spec"]`.
+  * `with_mcp_version` (server side) is available again -- under `legacy-spec`,
+    where version selection is meaningful. The default build pins `2026-07-28`.
+  * The `roots` and `sampling` examples swapped places: the MCP 2026-07-28
+    variants are now `examples/{roots,sampling}/{server,client}` and the legacy
+    ones moved to `examples/{roots,sampling}/legacy/{server,client}`.
+  * Note that `--all-features` enables `legacy-spec`, so it now exercises the
+    legacy profile; the default profile needs an explicit feature list
+    (e.g. `--features "server-full client-full"`).
 * **Unified streaming-capable POST seam** for HTTP engine adapters. Streamable
   HTTP has allowed a POST reply to be either a single JSON body or an SSE
   stream since spec revision 2025-03-26; neva's engine seam only modeled the
@@ -18,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   * `handlers::dispatch_post` returns
     `StreamResponse<impl Stream<Item = E::SseEvent>>` instead of
     `E::Response`: engines handle the same two-arm match their GET route
-    already has. Under `proto-2026-07-28-rc` + `tracing` the `Stream` arm
+    already has. In the default (MCP 2026-07-28) build with `tracing` the `Stream` arm
     carries request-scoped notifications followed by the response; other
     builds always produce `Complete` (no behavior change).
   * `handle_post` stays available as the JSON-only building block.
@@ -27,11 +43,137 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     `HttpEngine` contract); the axum/hyper/actix engine examples were updated
     to the two-arm match.
 
+* **Minor final-spec items** (MCP 2026-07-28, #99).
+  * **Deterministic `tools/list` order.** The spec asks servers to list tools in
+    a deterministic order (it lets clients cache, and improves LLM prompt-cache
+    hit rates). neva's registries were `HashMap`-backed, so the order was
+    arbitrary *and* cursor pagination could skip or repeat entries across
+    pages; they are `BTreeMap`-backed now, ordered by name.
+  * **`x-mcp-header`.** A server may annotate a tool's `inputSchema` property to
+    have the argument mirrored into an `Mcp-Param-{name}` header. Servers may
+    use it; clients **must** honor it, so the client now records the
+    annotations from `tools/list` and attaches the headers on `tools/call`.
+    Definitions that break the spec's constraints (non-token name, duplicate,
+    non-primitive type, or a property not statically reachable through
+    `properties`) cause the *tool* to be dropped from the listing, so one bad
+    definition cannot change what a good one sends. Streamable HTTP only --
+    other transports may ignore the annotation.
+  * **`Mcp-Name` on every method that requires it.** It was sent only for
+    `tools/call`; the spec also requires it on `resources/read` (`params.uri`)
+    and `prompts/get` (`params.name`). Values that are not safe ASCII -- and
+    plain values that would be mistaken for the marker -- now travel Base64
+    behind the `=?base64?...?=` sentinel.
+  * **`baggage`** joins `traceparent` / `tracestate` as a reserved `_meta` key
+    for OpenTelemetry propagation, on `TraceContext` and the passive recorder.
+  * **`includeContext`.** `thisServer` / `allServers` (and their builders) are
+    `#[deprecated]` in the default build; omit the field or use `none`.
+* **Wire conformance pack** (MCP 2026-07-28, #98). Assorted field/method/code
+  mismatches against the final schema, all gated so `legacy-spec` is unchanged.
+  * **`_meta` key naming.** Per-request client capabilities move from the bare
+    `clientCapabilities` key to `io.modelcontextprotocol/clientCapabilities`,
+    and the protocol version now also rides in `_meta` as
+    `io.modelcontextprotocol/protocolVersion` (it was header-only). A body that
+    names a different version than the `MCP-Protocol-Version` header is
+    rejected as a header mismatch.
+  * **Routing headers are validated against the body.** `Mcp-Method` is
+    required on every request and `Mcp-Name` on `tools/call`, `resources/read`
+    and `prompts/get`; a `tools/call` must also mirror each `x-mcp-header`
+    argument into `Mcp-Param-{name}`. The server now rejects a missing or
+    disagreeing header with `HeaderMismatch` (`-32020`) and HTTP `400`,
+    decoding the `=?base64?...?=` sentinel before comparing. Without this an
+    intermediary routing or rate-limiting on those headers could be bypassed by
+    a body naming a different tool. A notification is not required to carry
+    `Mcp-Method`, but one that does must state its own method. Routing headers
+    on a batch are rejected outright -- no single method or name describes one,
+    so a batched call is neither expected to mirror its arguments nor checked
+    for having done so.
+  * **Required `_meta` fields are enforced.** Both keys above are mandatory on
+    every request -- capabilities are declared per request precisely so a
+    stateless server never infers them from earlier traffic -- and the HTTP
+    server rejects a request missing either with `InvalidParams` (`-32602`) and
+    HTTP `400`, per the spec. Requests inside a batch are checked one by one.
+    An empty `clientCapabilities` object is a valid declaration, not an
+    omission. neva's own client has always sent both. The requirement is on the
+    message, not the transport, so `Request::required_meta_error` is public and
+    the dispatch seam enforces it for stdio too -- only the `400` is HTTP's.
+  * **Error codes.** `HeaderMismatch` (`-32020`),
+    `MissingRequiredClientCapability` (`-32021`) and
+    `UnsupportedProtocolVersion` (`-32022`) join `ErrorCode` at their
+    spec-allocated numbers -- neva defined none of them and answered a version
+    mismatch with `InvalidRequest`. These carry the `data` payloads the spec
+    defines (`supported`/`requested`, `requiredCapabilities`), so `Error` grew
+    `with_data`. All three answer HTTP `400`, as the spec requires.
+  * **`CacheableResult`.** `ttlMs` and `cacheScope` are mandatory members
+    rather than optional hints, on `DiscoverResult`, `ReadResourceResult` and
+    all four list results. `CacheScope` is now `public`/`private` (it was
+    `session`/`connection`/`client`), defaulting to `private`. neva always
+    emits both; a peer that omits them still parses.
+  * **`server/discover` reshaped.** `protocolVersion` becomes
+    `supportedVersions: string[]` -- discovery advertises the whole set and the
+    client picks -- and `serverInfo` leaves the result entirely. Servers now
+    identify themselves in *every* result's `_meta` under
+    `io.modelcontextprotocol/serverInfo`; neva stamps it at the dispatch seam
+    and the client reads `Client::server_info` from there.
+  * **`notifications/roots/list_changed` is removed**, and URL elicitation
+    loses its `elicitationId`: with no server-initiated completion signal there
+    is nothing to correlate. A server that needs to track an elicitation across
+    retries encodes its own identifier in `requestState`.
+  * **`ping` is removed**, along with `Client::ping` and `BatchBuilder::ping`.
+  * **`notifications/elicitation/complete` is removed**, along with
+    `Context::complete_elicitation`, `Client::on_elicitation_completed` and
+    `ElicitationCompleteParams`. Answering the input request is the completion
+    signal.
+* **Tasks method realignment** (MCP 2026-07-28, #96). The final Tasks extension
+  ([`modelcontextprotocol/ext-tasks`](https://github.com/modelcontextprotocol/ext-tasks))
+  reshapes the whole surface, not just the method names. Under `legacy-spec`
+  the 2025-11-25 surface is unchanged.
+  * **Methods.** `tasks/list` and `tasks/result` are **removed**. `tasks/get`
+    becomes the single polling method and returns a `DetailedTask`: the status
+    plus, depending on it, the outstanding `inputRequests`, the terminal
+    `result`, or the `error`. `tasks/update` is **new** -- the client answers a
+    task's input requests with it, keyed to what `tasks/get` surfaced.
+    `tasks/cancel` now acknowledges with an empty result (cancellation is
+    cooperative, so the outcome is learned by polling).
+  * **`CreateTaskResult` is flat** (`Result & Task`), carrying `resultType:
+    "task"` -- the third discriminator value, joining `ResultType`. The task's
+    fields sit at the top level instead of under a nested `task` object.
+  * **Field renames.** `Task::ttl` serializes as `ttlMs` and `poll_interval` as
+    `pollIntervalMs`. `ttl` is now `Option<usize>`, matching the schema's
+    nullable "unlimited" case (it was documented as nullable but typed
+    non-null in both profiles).
+  * `notifications/tasks/status` is now `notifications/tasks`.
+  * **Capability.** The extension capability is an empty object: advertising it
+    *is* the declaration. The `cancel` / `list` / `requests` sub-tree and its
+    builders (`with_cancel`, `with_list`, `with_requests`, `with_tools`,
+    `with_elicitation`, `with_all`) are gone, and `with_tasks` takes no
+    closure -- `opt.with_tasks()`.
+  * `Mcp-Name` now carries `params.taskId` on the task methods, as the spec
+    requires for routing a task's calls to the instance holding its state.
+  * Client-hosted tasks are legacy-only: they existed to answer server->client
+    task-augmented requests, and MCP 2026-07-28 has no server->client requests.
+  * Not covered here: `subscriptions/listen`, which is how the spec has clients
+    opt into `notifications/tasks`. That mechanism does not exist in neva yet
+    and is tracked separately.
+* **`resultType` on every result** (MCP 2026-07-28, #97). The final spec makes
+  the discriminator mandatory on results, not just on MRTR continuations. neva
+  emitted it only on `InputRequiredResult`; now every success result carries
+  `resultType: "complete"` -- tools, prompts, resources, discover, completion,
+  tasks and anything a custom handler returns.
+  * Stamped centrally in `Response::success`, so it covers every `IntoResponse`
+    impl including `Json<T>` and the scalar ones. An existing discriminator is
+    never overwritten, which is how `input_required` survives the same funnel.
+    A non-object result has nowhere to put the field and is passed through.
+  * New `types::ResultType` (`Complete` / `InputRequired`) and
+    `Response::result_type()`, which applies the spec's compatibility rule:
+    an **absent** field reads as `Complete`, and so does any value neva does
+    not recognize. The client's MRTR detection now goes through it instead of
+    matching the raw JSON in two places.
+
 ### Added
-* **Request-scoped logging** (`proto-2026-07-28-rc`, #93). The 2026-07-28 draft
+* **Request-scoped logging** (MCP 2026-07-28, #93). The 2026-07-28 spec
   removes only `logging/setLevel`; it keeps `notifications/message` as a
   deprecated, request-scoped log notification. neva had compiled the whole
-  logging surface out under the RC -- this brings the kept part back:
+  logging surface out -- this brings the kept part back:
   * The desired level rides per-request on
     `_meta["io.modelcontextprotocol/logLevel"]` (`RequestParamsMeta`) instead of
     a global `setLevel` handshake. While the server handles a request, it emits
@@ -46,8 +188,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   * Client API: `McpOptions::with_log_level` (via `Client::with_options`),
     `#[deprecated]` on arrival to mirror the schema. `LoggingLevel`/`LogMessage`
     stay undecorated.
-  * `logging/setLevel` and `with_logging`/`set_log_level` stay removed under the
-    RC.
+  * `logging/setLevel` and `with_logging`/`set_log_level` stay removed in the
+    default build.
   * Delivery: request-scoped notifications flow on the originating request's
     response stream, per the spec. Over **stdio** they interleave on stdout.
     Over the stateless **HTTP** transport, a `POST` that opts in (carries

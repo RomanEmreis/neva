@@ -15,6 +15,74 @@ pub use into_response::IntoResponse;
 mod error_details;
 mod into_response;
 
+/// The `resultType` discriminator MCP 2026-07-28 puts on every result.
+#[cfg(not(feature = "legacy-spec"))]
+pub(crate) const RESULT_TYPE: &str = "resultType";
+
+/// The `resultType` value marking a result as final.
+#[cfg(not(feature = "legacy-spec"))]
+pub(crate) const COMPLETE: &str = "complete";
+
+/// The `resultType` value marking a result as an MRTR continuation.
+#[cfg(not(feature = "legacy-spec"))]
+pub(crate) const INPUT_REQUIRED: &str = "input_required";
+
+/// The `resultType` value marking a result the server deferred onto a task.
+#[cfg(all(not(feature = "legacy-spec"), feature = "tasks"))]
+pub(crate) const TASK: &str = "task";
+
+/// Discriminator carried by every MCP 2026-07-28 result.
+///
+/// The spec makes `resultType` mandatory on results, but keeps an absent field
+/// readable as [`ResultType::Complete`] so a peer speaking an older revision
+/// still parses. neva applies that rule on the way in
+/// ([`Response::result_type`]) and emits the field on the way out.
+///
+/// # Examples
+///
+/// ```
+/// use neva::types::{RequestId, Response, ResultType};
+///
+/// let resp = Response::success(RequestId::Number(1), serde_json::json!({}));
+/// assert_eq!(resp.result_type(), Some(ResultType::Complete));
+/// ```
+#[cfg(not(feature = "legacy-spec"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResultType {
+    /// `"complete"` -- the result is final. Also what an absent field means.
+    #[serde(rename = "complete")]
+    Complete,
+
+    /// `"input_required"` -- the server needs more input; see
+    /// [`InputRequiredResult`](crate::types::mrtr::InputRequiredResult).
+    #[serde(rename = "input_required")]
+    InputRequired,
+
+    /// `"task"` -- the server deferred the request onto a task instead of
+    /// answering inline; see [`CreateTaskResult`](crate::types::CreateTaskResult).
+    #[cfg(feature = "tasks")]
+    #[serde(rename = "task")]
+    Task,
+}
+
+/// Stamps `resultType: "complete"` onto a result object that does not already
+/// carry a discriminator.
+///
+/// Non-object results (neva's scalar `IntoResponse` impls wrap those in an
+/// object, but a hand-rolled handler may return a bare array) are passed
+/// through untouched -- there is nowhere to put the field, and the spec only
+/// describes object-shaped results.
+#[cfg(not(feature = "legacy-spec"))]
+#[inline]
+pub(crate) fn tag_complete(mut result: Value) -> Value {
+    if let Value::Object(map) = &mut result
+        && !map.contains_key(RESULT_TYPE)
+    {
+        map.insert(RESULT_TYPE.into(), Value::String(COMPLETE.into()));
+    }
+    result
+}
+
 /// A response message in the JSON-RPC protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -85,7 +153,19 @@ impl From<Response> for Message {
 
 impl Response {
     /// Creates a successful response
+    // The `InputRequiredResult` link only resolves in a build that has MRTR, so
+    // the whole paragraph is attached only there.
+    #[cfg_attr(
+        not(feature = "legacy-spec"),
+        doc = "",
+        doc = "Under MCP 2026-07-28 the result is stamped with",
+        doc = "`resultType: \"complete\"` unless it already carries a discriminator --",
+        doc = "which is how [`InputRequiredResult`](crate::types::mrtr::InputRequiredResult)",
+        doc = "keeps its own `\"input_required\"` on the way out."
+    )]
     pub fn success(id: RequestId, result: Value) -> Self {
+        #[cfg(not(feature = "legacy-spec"))]
+        let result = tag_complete(result);
         Response::Ok(OkResponse {
             jsonrpc: JSONRPC_VERSION.to_string(),
             session_id: None,
@@ -98,13 +178,17 @@ impl Response {
 
     /// Creates a dummy successful response
     pub fn empty(id: RequestId) -> Self {
+        #[cfg(not(feature = "legacy-spec"))]
+        let result = json!({ RESULT_TYPE: COMPLETE });
+        #[cfg(feature = "legacy-spec")]
+        let result = json!({});
         Response::Ok(OkResponse {
             jsonrpc: JSONRPC_VERSION.to_string(),
             session_id: None,
             #[cfg(feature = "http-server")]
             headers: HeaderMap::new(),
             id,
-            result: json!({}),
+            result,
         })
     }
 
@@ -117,6 +201,116 @@ impl Response {
             headers: HeaderMap::with_capacity(8),
             id,
             error: error.into(),
+        })
+    }
+
+    /// Stamps the server's identity into the result's `_meta` under
+    /// `io.modelcontextprotocol/serverInfo` (MCP 2026-07-28).
+    ///
+    /// The final spec dropped `serverInfo` from `DiscoverResult` and instead
+    /// asks servers to identify themselves on *every* result, so this runs at
+    /// the dispatch seam rather than in any one result type. Error responses
+    /// and non-object results are left alone -- there is no `_meta` to write
+    /// to. An entry already present is not overwritten.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use neva::types::{Implementation, RequestId, Response};
+    ///
+    /// let info = Implementation {
+    ///     name: "my-server".into(),
+    ///     version: "1.0.0".into(),
+    ///     icons: None,
+    /// };
+    /// let resp = Response::success(RequestId::Number(1), serde_json::json!({}))
+    ///     .with_server_info(&info);
+    /// # let _ = resp;
+    /// ```
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn with_server_info(mut self, info: &crate::types::Implementation) -> Self {
+        const KEY: &str = "io.modelcontextprotocol/serverInfo";
+
+        if let Response::Ok(ok) = &mut self
+            && let Value::Object(result) = &mut ok.result
+        {
+            let meta = result
+                .entry("_meta")
+                .or_insert_with(|| Value::Object(Default::default()));
+            if let Value::Object(meta) = meta
+                && !meta.contains_key(KEY)
+                && let Ok(info) = serde_json::to_value(info)
+            {
+                meta.insert(KEY.into(), info);
+            }
+        }
+        self
+    }
+
+    /// Stamps the mandatory `resultType: "complete"` on a successful result
+    /// that does not already carry a discriminator.
+    ///
+    /// [`Self::success`] does this for a result built from a payload, but a
+    /// handler may return a [`Response`] it did not build -- one proxied from
+    /// an upstream peer, say -- and that reaches the wire through
+    /// [`IntoResponse`](crate::types::IntoResponse), which only re-ids it.
+    /// Both roads meet at the server's dispatch seam, so the guarantee is
+    /// re-asserted there rather than trusted to every producer.
+    ///
+    /// A result that already says what it is -- an
+    /// [`InputRequiredResult`](crate::types::mrtr::InputRequiredResult), a
+    /// deferred task -- keeps saying it.
+    ///
+    /// # Examples
+    /// ```
+    /// use neva::types::{Response, RequestId};
+    ///
+    /// let resp = Response::Ok(serde_json::from_value(serde_json::json!({
+    ///     "jsonrpc": "2.0", "id": 1, "result": { "content": [] }
+    /// })).unwrap());
+    ///
+    /// let resp = resp.with_result_type();
+    /// assert_eq!(resp.result_type(), Some(neva::types::ResultType::Complete));
+    /// ```
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn with_result_type(mut self) -> Self {
+        if let Response::Ok(ok) = &mut self {
+            ok.result = tag_complete(std::mem::take(&mut ok.result));
+        }
+        self
+    }
+
+    /// Returns the `resultType` discriminator of a successful result, or
+    /// `None` for an error response.
+    ///
+    /// An **absent** field reads as [`ResultType::Complete`] -- the spec's
+    /// backwards-compatibility rule, which is what lets a peer speaking an
+    /// older revision interoperate. So does any value neva does not recognize:
+    /// only `"input_required"` changes how a result is handled, and treating an
+    /// unknown discriminator as final is the safe reading (the alternative is
+    /// waiting for input nobody asked for).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use neva::types::{RequestId, Response, ResultType};
+    ///
+    /// // A legacy-shaped result without the field still reads as complete.
+    /// let legacy = serde_json::from_str::<Response>(
+    ///     r#"{"jsonrpc":"2.0","id":1,"result":{"content":[]}}"#
+    /// ).unwrap();
+    /// assert_eq!(legacy.result_type(), Some(ResultType::Complete));
+    /// ```
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn result_type(&self) -> Option<ResultType> {
+        let Response::Ok(ok) = self else {
+            return None;
+        };
+        Some(match ok.result.get(RESULT_TYPE).and_then(Value::as_str) {
+            Some(INPUT_REQUIRED) => ResultType::InputRequired,
+            #[cfg(feature = "tasks")]
+            Some(TASK) => ResultType::Task,
+            _ => ResultType::Complete,
         })
     }
 
@@ -195,7 +389,13 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
+        #[cfg(feature = "legacy-spec")]
         assert_eq!(json, r#"{"jsonrpc":"2.0","id":42,"result":{"key":"test"}}"#);
+        #[cfg(not(feature = "legacy-spec"))]
+        assert_eq!(
+            json,
+            r#"{"jsonrpc":"2.0","id":42,"result":{"key":"test","resultType":"complete"}}"#
+        );
     }
 
     #[test]
@@ -211,5 +411,290 @@ mod tests {
             json,
             r#"{"jsonrpc":"2.0","id":"id","error":{"code":-32603,"message":"some error message","data":null}}"#
         );
+    }
+}
+
+/// `resultType` -- the mandatory discriminator MCP 2026-07-28 puts on results.
+#[cfg(test)]
+#[cfg(not(feature = "legacy-spec"))]
+mod result_type_tests {
+    use super::{Response, ResultType};
+    use crate::{error::Error, types::RequestId};
+
+    fn parse(raw: &str) -> Response {
+        serde_json::from_str(raw).expect("a well-formed JSON-RPC response")
+    }
+
+    #[test]
+    fn every_success_result_is_stamped_complete() {
+        let resp = Response::success(RequestId::Number(1), serde_json::json!({ "tools": [] }));
+        let Response::Ok(ok) = &resp else {
+            panic!("expected a success response")
+        };
+
+        assert_eq!(ok.result["resultType"], serde_json::json!("complete"));
+        assert_eq!(resp.result_type(), Some(ResultType::Complete));
+    }
+
+    #[test]
+    fn an_empty_result_is_stamped_too() {
+        let resp = Response::empty(RequestId::Number(1));
+        let Response::Ok(ok) = &resp else {
+            panic!("expected a success response")
+        };
+
+        assert_eq!(ok.result, serde_json::json!({ "resultType": "complete" }));
+    }
+
+    #[test]
+    fn an_existing_discriminator_is_never_overwritten() {
+        // This is what keeps MRTR working: `InputRequiredResult` serializes its
+        // own `"input_required"` and goes through the same `success` funnel.
+        let resp = Response::success(
+            RequestId::Number(1),
+            serde_json::json!({ "resultType": "input_required", "requestState": "abc" }),
+        );
+
+        assert_eq!(resp.result_type(), Some(ResultType::InputRequired));
+    }
+
+    #[test]
+    fn a_non_object_result_is_passed_through() {
+        // Nowhere to put the field; the spec only describes object results.
+        let resp = Response::success(RequestId::Number(1), serde_json::json!([1, 2, 3]));
+        let Response::Ok(ok) = &resp else {
+            panic!("expected a success response")
+        };
+
+        assert_eq!(ok.result, serde_json::json!([1, 2, 3]));
+        assert_eq!(resp.result_type(), Some(ResultType::Complete));
+    }
+
+    #[test]
+    fn a_legacy_shaped_result_without_the_field_reads_as_complete() {
+        let resp = parse(r#"{"jsonrpc":"2.0","id":1,"result":{"content":[]}}"#);
+
+        assert_eq!(resp.result_type(), Some(ResultType::Complete));
+    }
+
+    #[test]
+    fn an_unrecognized_discriminator_reads_as_complete() {
+        // Only `"input_required"` changes how a result is handled. Anything
+        // else is final -- the safe reading, since the alternative is blocking
+        // on input nobody asked for.
+        let resp = parse(r#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"whatever"}}"#);
+
+        assert_eq!(resp.result_type(), Some(ResultType::Complete));
+    }
+
+    #[test]
+    fn server_info_is_stamped_into_result_meta() {
+        use crate::types::Implementation;
+
+        let resp = Response::success(RequestId::Number(1), serde_json::json!({ "tools": [] }))
+            .with_server_info(&Implementation {
+                name: "srv".into(),
+                version: "1.2.3".into(),
+                icons: None,
+            });
+        let Response::Ok(ok) = &resp else {
+            panic!("expected a success response")
+        };
+
+        let info = &ok.result["_meta"]["io.modelcontextprotocol/serverInfo"];
+        assert_eq!(info["name"], "srv");
+        assert_eq!(info["version"], "1.2.3");
+    }
+
+    #[test]
+    fn server_info_never_overwrites_an_existing_entry() {
+        use crate::types::Implementation;
+
+        let resp = Response::success(
+            RequestId::Number(1),
+            serde_json::json!({
+                "_meta": { "io.modelcontextprotocol/serverInfo": { "name": "kept", "version": "0" } }
+            }),
+        )
+        .with_server_info(&Implementation {
+            name: "srv".into(),
+            version: "1.2.3".into(),
+            icons: None,
+        });
+        let Response::Ok(ok) = &resp else {
+            panic!("expected a success response")
+        };
+
+        assert_eq!(
+            ok.result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            "kept"
+        );
+    }
+
+    #[test]
+    fn an_error_response_carries_no_server_info() {
+        use crate::types::Implementation;
+
+        let resp = Response::error(RequestId::Number(1), Error::new(-32603, "boom"))
+            .with_server_info(&Implementation {
+                name: "srv".into(),
+                version: "1.2.3".into(),
+                icons: None,
+            });
+
+        assert!(matches!(resp, Response::Err(_)));
+    }
+
+    /// A response the server did not build -- deserialized from an upstream
+    /// peer, returned as-is by a handler -- reaches the wire through
+    /// `IntoResponse`, which only re-ids it. The discriminator is mandatory
+    /// either way.
+    #[test]
+    fn a_preconstructed_response_gets_the_discriminator() {
+        let resp = parse(r#"{"jsonrpc":"2.0","id":1,"result":{"content":[]}}"#);
+        assert_eq!(
+            resp.result_type(),
+            Some(ResultType::Complete),
+            "an absent field already reads as complete"
+        );
+
+        let Response::Ok(ok) = resp.with_result_type() else {
+            panic!("a successful response")
+        };
+        assert_eq!(
+            ok.result["resultType"], "complete",
+            "...and it must also be written out"
+        );
+    }
+
+    /// A result that already says what it is keeps saying it -- the seam must
+    /// not overwrite an `input_required` or a deferred task.
+    #[test]
+    fn an_existing_discriminator_is_left_alone() {
+        let resp = parse(
+            r#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"input_required","inputRequests":{}}}"#,
+        );
+
+        let Response::Ok(ok) = resp.with_result_type() else {
+            panic!("a successful response")
+        };
+        assert_eq!(ok.result["resultType"], "input_required");
+    }
+
+    #[test]
+    fn an_error_response_has_no_result_type() {
+        let resp = Response::error(RequestId::Number(1), Error::new(-32603, "boom"));
+
+        assert_eq!(resp.result_type(), None);
+    }
+
+    #[test]
+    fn the_discriminator_survives_a_wire_round_trip() {
+        let resp = Response::success(RequestId::Number(1), serde_json::json!({ "tools": [] }));
+
+        let back = parse(&serde_json::to_string(&resp).unwrap());
+
+        assert_eq!(back.result_type(), Some(ResultType::Complete));
+    }
+}
+
+/// Every result type neva can put on the wire carries the discriminator, and
+/// still deserializes back into its own struct with the extra field present.
+#[cfg(test)]
+#[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+mod result_type_per_type_tests {
+    use super::{Response, ResultType};
+    use crate::types::{IntoResponse, RequestId};
+
+    /// Round-trips `result` through `IntoResponse` and back into `T`.
+    fn round_trip<T>(result: impl IntoResponse)
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let resp = result.into_response(RequestId::Number(1));
+
+        assert_eq!(
+            resp.result_type(),
+            Some(ResultType::Complete),
+            "result is missing the `complete` discriminator"
+        );
+
+        let wire = serde_json::to_string(&resp).unwrap();
+        let back: Response = serde_json::from_str(&wire).unwrap();
+
+        assert_eq!(back.result_type(), Some(ResultType::Complete));
+        back.into_result::<T>()
+            .expect("the typed result must still parse with `resultType` present");
+    }
+
+    #[test]
+    fn tools_results_carry_it() {
+        use crate::types::{CallToolResponse, ListToolsResult};
+
+        round_trip::<ListToolsResult>(ListToolsResult::default());
+        round_trip::<CallToolResponse>(CallToolResponse::new("ok"));
+    }
+
+    #[test]
+    fn prompts_results_carry_it() {
+        use crate::types::{GetPromptResult, ListPromptsResult};
+
+        round_trip::<ListPromptsResult>(ListPromptsResult::default());
+        round_trip::<GetPromptResult>(GetPromptResult::default());
+    }
+
+    #[test]
+    fn resources_results_carry_it() {
+        use crate::types::{ListResourceTemplatesResult, ListResourcesResult, ReadResourceResult};
+
+        round_trip::<ListResourcesResult>(ListResourcesResult::default());
+        round_trip::<ListResourceTemplatesResult>(ListResourceTemplatesResult::default());
+        round_trip::<ReadResourceResult>(ReadResourceResult::default());
+    }
+
+    #[test]
+    fn completion_results_carry_it() {
+        use crate::types::CompleteResult;
+
+        round_trip::<CompleteResult>(CompleteResult::default());
+    }
+
+    #[test]
+    fn discover_results_carry_it() {
+        use crate::app::options::McpOptions;
+        use crate::types::DiscoverResult;
+
+        round_trip::<DiscoverResult>(DiscoverResult::new(&McpOptions::default()));
+    }
+
+    #[cfg(feature = "tasks")]
+    #[test]
+    fn task_results_carry_it() {
+        use crate::types::{DetailedTask, Task, TaskPayload};
+
+        round_trip::<DetailedTask>(DetailedTask::from(Task::new()));
+        // A payload wrapping an object gets the field; a payload wrapping a
+        // scalar has nowhere to put it and is passed through (see
+        // `a_non_object_result_is_passed_through`).
+        round_trip::<TaskPayload>(TaskPayload(serde_json::json!({ "content": [] })));
+    }
+
+    /// `CreateTaskResult` is the one result that is *not* `complete`: it is the
+    /// third discriminator value, marking a request the server deferred.
+    #[cfg(feature = "tasks")]
+    #[test]
+    fn a_created_task_is_tagged_task_not_complete() {
+        use crate::types::{CreateTaskResult, Task};
+
+        let resp = CreateTaskResult::new(Task::new()).into_response(RequestId::Number(1));
+
+        assert_eq!(resp.result_type(), Some(ResultType::Task));
+
+        // ...and the task's own fields sit at the top level, per `Result & Task`.
+        let Response::Ok(ok) = &resp else {
+            panic!("expected a success response")
+        };
+        assert!(ok.result.get("taskId").is_some(), "got: {}", ok.result);
+        assert!(ok.result.get("task").is_none(), "must not be nested");
     }
 }

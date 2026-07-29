@@ -168,10 +168,30 @@ pub enum ContextInclusion {
     None,
 
     /// Indicates that context from the server that sent the request should be included.
+    ///
+    /// **Deprecated** as of MCP 2026-07-28 (SEP-2596): omit the field or use
+    /// [`Self::None`]. Scheduled for removal no later than the Sampling
+    /// feature itself.
+    #[cfg_attr(
+        not(feature = "legacy-spec"),
+        deprecated(
+            note = "`thisServer` is deprecated in MCP 2026-07-28; omit includeContext or use `none`"
+        )
+    )]
     #[serde(rename = "thisServer")]
     ThisServer,
 
     /// Indicates that context from all servers that the client is connected to should be included.
+    ///
+    /// **Deprecated** as of MCP 2026-07-28 (SEP-2596): omit the field or use
+    /// [`Self::None`]. Scheduled for removal no later than the Sampling
+    /// feature itself.
+    #[cfg_attr(
+        not(feature = "legacy-spec"),
+        deprecated(
+            note = "`allServers` is deprecated in MCP 2026-07-28; omit includeContext or use `none`"
+        )
+    )]
     #[serde(rename = "allServers")]
     AllServers,
 }
@@ -580,14 +600,38 @@ impl CreateMessageRequestParams {
     }
 
     /// Sets the [`ContextInclusion::ThisServer`] for this [`CreateMessageRequestParams`]
+    ///
+    /// **Deprecated** as of MCP 2026-07-28: omit `includeContext` or use
+    /// [`Self::with_no_ctx`].
+    #[cfg_attr(
+        not(feature = "legacy-spec"),
+        deprecated(
+            note = "`thisServer` is deprecated in MCP 2026-07-28; omit includeContext or use `with_no_ctx`"
+        )
+    )]
     pub fn with_this_server(mut self) -> Self {
-        self.include_context = Some(ContextInclusion::ThisServer);
+        #[allow(deprecated)]
+        {
+            self.include_context = Some(ContextInclusion::ThisServer);
+        }
         self
     }
 
     /// Sets the [`ContextInclusion::AllServers`] for this [`CreateMessageRequestParams`]
+    ///
+    /// **Deprecated** as of MCP 2026-07-28: omit `includeContext` or use
+    /// [`Self::with_no_ctx`].
+    #[cfg_attr(
+        not(feature = "legacy-spec"),
+        deprecated(
+            note = "`allServers` is deprecated in MCP 2026-07-28; omit includeContext or use `with_no_ctx`"
+        )
+    )]
     pub fn with_all_servers(mut self) -> Self {
-        self.include_context = Some(ContextInclusion::AllServers);
+        #[allow(deprecated)]
+        {
+            self.include_context = Some(ContextInclusion::AllServers);
+        }
         self
     }
 
@@ -858,6 +902,9 @@ mod tests {
     }
 
     #[test]
+    // The deprecated variants still have to work for the deprecation window,
+    // so the test keeps exercising them.
+    #[allow(deprecated)]
     fn it_sets_context_inclusion() {
         let params = CreateMessageRequestParams::new().with_no_ctx();
         assert!(matches!(

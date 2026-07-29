@@ -26,7 +26,7 @@ use super::engine::VolgaEngine;
 /// `POST /<endpoint>` -- JSON-RPC ingress.
 ///
 /// The same two-arm shape as [`get`]: `dispatch_post` yields a
-/// [`StreamResponse`], where `Stream` is a request-scoped SSE reply (RC:
+/// [`StreamResponse`], where `Stream` is a request-scoped SSE reply (2026-07-28:
 /// the request's `notifications/message` / `notifications/progress`
 /// followed by its response) and `Complete` is a single-body reply.
 /// Claims are attached inside [`VolgaEngine::adapt_request`], per the
@@ -46,9 +46,9 @@ pub(crate) async fn post(manager: Dc<HttpContext>, req: HttpRequest) -> HttpResu
 
 /// `DELETE /<endpoint>` -- explicit session termination.
 ///
-/// Not routed under `proto-2026-07-28-rc` (stateless: no sessions); kept
-/// compiled for the non-RC build.
-#[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
+/// Not routed under MCP 2026-07-28 (stateless: no sessions); kept
+/// compiled for the legacy build.
+#[cfg_attr(not(feature = "legacy-spec"), allow(dead_code))]
 pub(crate) async fn delete(manager: Dc<HttpContext>, req: HttpRequest) -> HttpResult {
     let neutral = VolgaEngine::adapt_request(req)
         .await
@@ -59,9 +59,9 @@ pub(crate) async fn delete(manager: Dc<HttpContext>, req: HttpRequest) -> HttpRe
 
 /// `GET /<endpoint>` -- SSE subscribe.
 ///
-/// Not routed under `proto-2026-07-28-rc` (stateless: no SSE GET stream);
-/// kept compiled for the non-RC build.
-#[cfg_attr(feature = "proto-2026-07-28-rc", allow(dead_code))]
+/// Not routed under MCP 2026-07-28 (stateless: no SSE GET stream);
+/// kept compiled for the legacy build.
+#[cfg_attr(not(feature = "legacy-spec"), allow(dead_code))]
 pub(crate) async fn get(manager: Dc<HttpContext>, req: HttpRequest) -> HttpResult {
     let outcome = handlers::dispatch_get_sse::<VolgaEngine>(req, &manager)
         .await

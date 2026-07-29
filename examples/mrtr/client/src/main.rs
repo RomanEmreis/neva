@@ -1,4 +1,4 @@
-//! New-spec (MCP 2026-07-28 RC) example client.
+//! MCP 2026-07-28 example client.
 //!
 //! Connects over stateless HTTP, runs `server/discover` on `connect()`, and
 //! calls `place_order`. The `#[elicitation]` handler answers the server's form
@@ -24,7 +24,7 @@ async fn shipping_handler(params: ElicitRequestParams) -> ElicitResult {
                 address: "1 Analytical Way".into(),
             })
             .into(),
-        // URL elicitation is part of the legacy push model, not stateless RC.
+        // URL elicitation is part of the legacy push model, not the stateless MCP 2026-07-28 transport.
         _ => ElicitResult::decline(),
     }
 }

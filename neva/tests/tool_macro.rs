@@ -1,11 +1,11 @@
-//! RC-only end-to-end check that the `#[neva::tool]` macro emits valid JSON
+//! 2026-07-28-only end-to-end check that the `#[neva::tool]` macro emits valid JSON
 //! Schema 2020-12 `inputSchema` / `outputSchema`. Compiled only under
-//! `proto-2026-07-28-rc` together with the Volga server + HTTP client (both
+//! MCP 2026-07-28 together with the Volga server + HTTP client (both
 //! pulled in by `server-full` / `client-full`). This is the sole `#[tool]`
-//! call-site compiled in the RC CI configuration.
+//! call-site compiled in the default CI configuration.
 
 #![cfg(all(
-    feature = "proto-2026-07-28-rc",
+    not(feature = "legacy-spec"),
     feature = "server-macros",
     feature = "http-server-volga",
     feature = "http-client"
@@ -85,17 +85,15 @@ async fn tool_macro_emits_json_schema_2020() {
         .expect("test client");
     let url = format!("http://{addr}/mcp");
 
-    // Stateless RC transport: no handshake/session -- a single `tools/list`
+    // Stateless 2026-07-28 transport: no handshake/session -- a single `tools/list`
     // POST carrying the required `MCP-Protocol-Version` header is enough.
     let list_body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 2,
         "method": "tools/list",
-        "params": {}
+        "params": { "_meta": meta() }
     });
-    let resp = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let resp = routed(client.post(&url), &list_body)
         .json(&list_body)
         .send()
         .await
@@ -175,4 +173,33 @@ fn pick_free_port() -> u16 {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     port
+}
+
+/// The `_meta` MCP 2026-07-28 requires on every request: the protocol version,
+/// and the capabilities this request is made under -- empty being the valid
+/// declaration of "no optional capabilities".
+fn meta() -> serde_json::Value {
+    serde_json::json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {}
+    })
+}
+
+/// Attaches the routing headers MCP 2026-07-28 requires on every request, the
+/// way a conforming client derives them: from the body it is about to send.
+fn routed(req: reqwest::RequestBuilder, body: &serde_json::Value) -> reqwest::RequestBuilder {
+    let method = body["method"].as_str().unwrap_or_default();
+    let req = req
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", method);
+    let name = match method {
+        "tools/call" | "prompts/get" => body.pointer("/params/name"),
+        "resources/read" => body.pointer("/params/uri"),
+        "tasks/get" | "tasks/update" | "tasks/cancel" => body.pointer("/params/taskId"),
+        _ => None,
+    };
+    match name.and_then(|v| v.as_str()) {
+        Some(name) => req.header("Mcp-Name", name),
+        None => req,
+    }
 }

@@ -23,20 +23,19 @@ use crate::types::{
 
 #[cfg(feature = "tasks")]
 use crate::shared::{TaskHandle, TaskTracker};
-#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
+use crate::types::TaskPayload;
+#[cfg(all(feature = "tracing", feature = "legacy-spec"))]
 use crate::types::notification::LoggingLevel;
 #[cfg(feature = "tasks")]
-use crate::types::{ServerTasksCapability, Task, TaskPayload};
+use crate::types::{ServerTasksCapability, Task};
 
-#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+#[cfg(all(feature = "tracing", feature = "legacy-spec"))]
 use tracing_subscriber::{Registry, filter::LevelFilter, reload::Handle};
 
-#[cfg(any(
-    feature = "tasks",
-    all(feature = "tracing", not(feature = "proto-2026-07-28-rc"))
-))]
+#[cfg(any(feature = "tasks", all(feature = "tracing", feature = "legacy-spec")))]
 use crate::error::Error;
-#[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+#[cfg(all(feature = "tracing", feature = "legacy-spec"))]
 use crate::error::ErrorCode;
 
 /// Represents MCP server options that are available in runtime
@@ -81,14 +80,14 @@ pub struct McpOptions {
     #[cfg(feature = "tasks")]
     tasks_capability: Option<ServerTasksCapability>,
 
-    /// Registered protocol extensions (MCP 2026-07-28 RC), keyed by reverse-DNS
+    /// Registered protocol extensions (MCP 2026-07-28), keyed by reverse-DNS
     /// id mapping to the extension's advertised capability value. Surfaced in
     /// `DiscoverResult` under `capabilities.extensions`.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     extensions: std::collections::HashMap<String, serde_json::Value>,
 
     /// The last logging level set by the client
-    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+    #[cfg(all(feature = "tracing", feature = "legacy-spec"))]
     log_level: Option<Handle<LevelFilter, Registry>>,
 
     /// An MCP version that server supports
@@ -113,7 +112,7 @@ pub struct McpOptions {
     /// must set shared key material via
     /// [`crate::App::with_request_state_secret`] or
     /// [`crate::App::with_request_state_keys`].
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     request_state_keys: crate::types::mrtr::state::StateKeyring,
 
     /// Whether [`Self::request_state_keys`] was set explicitly (vs the
@@ -121,7 +120,7 @@ pub struct McpOptions {
     /// multi-instance deployment footgun. Read only by the (tracing-gated)
     /// startup warning, so it is write-only in builds without an HTTP server
     /// or `tracing`.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[cfg_attr(
         not(all(feature = "http-server", feature = "tracing")),
         allow(dead_code)
@@ -129,18 +128,18 @@ pub struct McpOptions {
     request_state_secret_explicit: bool,
 
     /// TTL (seconds) embedded into MRTR `requestState`.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     request_state_ttl_secs: u64,
 
     /// Max encoded `requestState` blob length (bytes) before the server
     /// rejects the round-trip with "requestState too large".
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     max_state_bytes: usize,
 
     /// Store backing MRTR final-round idempotency. Defaults to a per-process
     /// in-memory cache; multi-instance deployments should set a shared store
     /// via [`crate::App::with_request_state_store`].
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     request_state_store: Arc<dyn crate::app::mrtr_store::RequestStateStore>,
 }
 
@@ -159,7 +158,7 @@ impl Debug for McpOptions {
         #[cfg(feature = "tasks")]
         dbg.field("tasks_capability", &self.tasks_capability);
 
-        #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+        #[cfg(all(feature = "tracing", feature = "legacy-spec"))]
         dbg.field("log_level", &self.log_level);
 
         dbg.finish()
@@ -183,17 +182,17 @@ impl Default for McpOptions {
             prompts_capability: Default::default(),
             #[cfg(feature = "tasks")]
             tasks_capability: Default::default(),
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             extensions: Default::default(),
             resource_routes: Default::default(),
             requests: Default::default(),
             resource_subscriptions: Default::default(),
             middlewares: None,
-            #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+            #[cfg(all(feature = "tracing", feature = "legacy-spec"))]
             log_level: Default::default(),
             #[cfg(feature = "tasks")]
             tasks: TaskTracker::new(),
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             request_state_keys: {
                 // Ephemeral random key from two v4 UUIDs (16 bytes each).
                 // Non-panicking; sufficient for single-instance/dev.
@@ -202,13 +201,13 @@ impl Default for McpOptions {
                 key[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
                 crate::types::mrtr::state::StateKeyring::single(&key)
             },
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             request_state_secret_explicit: false,
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             request_state_ttl_secs: 300,
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             max_state_bytes: 8 * 1024,
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             request_state_store: Arc::new(crate::app::mrtr_store::InMemoryStateStore::new()),
         }
     }
@@ -282,14 +281,14 @@ impl McpOptions {
 
     /// Specifies Model Context Protocol version
     ///
-    /// Default: last available protocol version
+    /// Default: last available legacy protocol version
     ///
-    /// Not available under `proto-2026-07-28-rc`: that flag compiles the server
-    /// as a pure 2026-07-28 RC peer (sampling/roots removed, stateless transport,
-    /// MRTR), so advertising an older version would claim a protocol the build
-    /// cannot actually serve. The RC version is fixed. When the RC graduates and
-    /// the flags invert, version selection returns under the legacy flag.
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    /// Available only under `legacy-spec`. The default build compiles the
+    /// server as a pure MCP 2026-07-28 peer (sampling/roots removed, stateless
+    /// transport, MRTR), so advertising an older version would claim a protocol
+    /// the build cannot actually serve -- there the version is fixed at
+    /// `2026-07-28`.
+    #[cfg(feature = "legacy-spec")]
     pub fn with_mcp_version(mut self, ver: &'static str) -> Self {
         self.protocol_ver = Some(ver);
         self
@@ -323,7 +322,7 @@ impl McpOptions {
     }
 
     /// Configures tasks capability
-    #[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     pub fn with_tasks<F>(mut self, config: F) -> Self
     where
         F: FnOnce(ServerTasksCapability) -> ServerTasksCapability,
@@ -332,19 +331,26 @@ impl McpOptions {
         self
     }
 
-    /// Configures tasks capability.
+    /// Enables the Tasks extension.
     ///
-    /// Under `proto-2026-07-28-rc` tasks are an extension: this thin wrapper
-    /// keeps the existing ergonomics while registering the capability through
-    /// [`crate::app::extension::TasksExtension`] so it surfaces under
+    /// Under MCP 2026-07-28 tasks are an extension whose capability carries no
+    /// settings -- advertising it *is* the declaration -- so this takes no
+    /// configuration. It registers through
+    /// [`crate::app::extension::TasksExtension`], surfacing under
     /// `capabilities.extensions["io.modelcontextprotocol/tasks"]`.
-    #[cfg(all(feature = "tasks", feature = "proto-2026-07-28-rc"))]
-    pub fn with_tasks<F>(mut self, config: F) -> Self
-    where
-        F: FnOnce(ServerTasksCapability) -> ServerTasksCapability,
-    {
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use neva::App;
+    ///
+    /// let app = App::new().with_options(|opt| opt.with_tasks());
+    /// # let _ = app;
+    /// ```
+    #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
+    pub fn with_tasks(mut self) -> Self {
         use crate::app::extension::{Extension, TasksExtension};
-        let capability = config(Default::default());
+        let capability = ServerTasksCapability::default();
         self.tasks_capability = Some(capability.clone());
         let ext = TasksExtension::new(capability);
         self.register_extension(ext.id(), ext.capability());
@@ -352,15 +358,15 @@ impl McpOptions {
     }
 
     /// Records an extension's advertised capability under its reverse-DNS id
-    /// (MCP 2026-07-28 RC). Used by [`crate::App::with_extension`] and by the
+    /// (MCP 2026-07-28). Used by [`crate::App::with_extension`] and by the
     /// `with_tasks` thin wrapper.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub(crate) fn register_extension(&mut self, id: &str, capability: serde_json::Value) {
         self.extensions.insert(id.into(), capability);
     }
 
     /// Sets the server tasks capability directly (used by the extension path).
-    #[cfg(all(feature = "tasks", feature = "proto-2026-07-28-rc"))]
+    #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
     pub(crate) fn set_tasks_capability(&mut self, capability: ServerTasksCapability) {
         self.tasks_capability = Some(capability);
     }
@@ -375,12 +381,12 @@ impl McpOptions {
 
     /// Configures a `tracing_subscriber::reload::Handle` that allows changing the [`LoggingLevel`] at runtime
     #[cfg_attr(
-        not(feature = "proto-2026-07-28-rc"),
+        feature = "legacy-spec",
         deprecated(
             note = "MCP server-side logging is removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
         )
     )]
-    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+    #[cfg(all(feature = "tracing", feature = "legacy-spec"))]
     pub fn with_logging(mut self, log_handle: Handle<LevelFilter, Registry>) -> Self {
         self.log_level = Some(log_handle);
         self
@@ -388,12 +394,12 @@ impl McpOptions {
 
     /// Sets the [`LoggingLevel`]
     #[cfg_attr(
-        not(feature = "proto-2026-07-28-rc"),
+        feature = "legacy-spec",
         deprecated(
             note = "MCP server-side logging is removed in MCP 2026-07-28; this method will be removed when the legacy flag is dropped."
         )
     )]
-    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+    #[cfg(all(feature = "tracing", feature = "legacy-spec"))]
     pub fn set_log_level(&self, level: LoggingLevel) -> Result<(), Error> {
         if let Some(handle) = &self.log_level {
             handle
@@ -404,7 +410,7 @@ impl McpOptions {
     }
 
     /// Returns current log level
-    #[cfg(all(feature = "tracing", not(feature = "proto-2026-07-28-rc")))]
+    #[cfg(all(feature = "tracing", feature = "legacy-spec"))]
     pub(crate) fn log_level(&self) -> Option<LoggingLevel> {
         match &self.log_level {
             None => None,
@@ -432,7 +438,7 @@ impl McpOptions {
     }
 
     /// Returns a list of currently running tasks
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     pub(crate) fn list_tasks(&self) -> Vec<Task> {
         self.tasks.tasks()
     }
@@ -450,13 +456,33 @@ impl McpOptions {
     }
 
     /// Retrieves the task status
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     pub(crate) fn get_task_status(&self, task_id: &str) -> Result<Task, Error> {
         self.tasks.get_status(task_id)
     }
 
+    /// Retrieves the full task state served by `tasks/get` (MCP 2026-07-28)
+    #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
+    pub(crate) fn get_task_state(
+        &self,
+        task_id: &str,
+    ) -> Result<crate::types::DetailedTask, Error> {
+        self.tasks.get_state(task_id)
+    }
+
+    /// Delivers client answers to a task's outstanding input requests
+    /// (`tasks/update`, MCP 2026-07-28)
+    #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
+    pub(crate) fn update_task(
+        &self,
+        task_id: &str,
+        responses: crate::types::mrtr::InputResponses,
+    ) -> Result<(), Error> {
+        self.tasks.provide_inputs(task_id, responses)
+    }
+
     /// Awaits the task result
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     pub(crate) async fn get_task_result(&self, task_id: &str) -> Result<TaskPayload, Error> {
         self.tasks.get_result(task_id).await
     }
@@ -614,11 +640,11 @@ impl McpOptions {
     pub(crate) fn tools_capability(&self) -> Option<ToolsCapability> {
         #[allow(unused_mut)]
         let mut cap = self.tools_capability.clone();
-        // The stateless `proto-2026-07-28-rc` transport cannot push
+        // The stateless MCP 2026-07-28 transport cannot push
         // `notifications/tools/list_changed`, so never advertise `listChanged`
-        // under RC -- clients refresh on cache-TTL / the next `tools/list`
+        // under MCP 2026-07-28 -- clients refresh on cache-TTL / the next `tools/list`
         // instead of relying on a push that will never arrive.
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         if let Some(c) = cap.as_mut() {
             c.list_changed = false;
         }
@@ -631,12 +657,12 @@ impl McpOptions {
     pub(crate) fn resources_capability(&self) -> Option<ResourcesCapability> {
         #[allow(unused_mut)]
         let mut cap = self.resources_capability.clone();
-        // The stateless `proto-2026-07-28-rc` transport cannot push
+        // The stateless MCP 2026-07-28 transport cannot push
         // `notifications/resources/updated` or `.../list_changed`, so mask both
-        // `subscribe` and `listChanged` under RC. Subscribe handlers are also
+        // `subscribe` and `listChanged` under MCP 2026-07-28. Subscribe handlers are also
         // not registered (see `App::new`), keeping the advertised surface and
         // the accepted methods in sync.
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         if let Some(c) = cap.as_mut() {
             c.subscribe = false;
             c.list_changed = false;
@@ -650,10 +676,10 @@ impl McpOptions {
     pub(crate) fn prompts_capability(&self) -> Option<PromptsCapability> {
         #[allow(unused_mut)]
         let mut cap = self.prompts_capability.clone();
-        // The stateless `proto-2026-07-28-rc` transport cannot push
+        // The stateless MCP 2026-07-28 transport cannot push
         // `notifications/prompts/list_changed`, so never advertise `listChanged`
-        // under RC -- see `tools_capability` for the rationale.
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        // under MCP 2026-07-28 -- see `tools_capability` for the rationale.
+        #[cfg(not(feature = "legacy-spec"))]
         if let Some(c) = cap.as_mut() {
             c.list_changed = false;
         }
@@ -663,15 +689,15 @@ impl McpOptions {
     /// Returns [`ServerTasksCapability`] if configured.
     ///
     /// Otherwise, returns `None`.
-    #[cfg(all(feature = "tasks", not(feature = "proto-2026-07-28-rc")))]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     pub(crate) fn tasks_capability(&self) -> Option<ServerTasksCapability> {
         self.tasks_capability.clone()
     }
 
     /// Returns the registered protocol extensions as a capability map
-    /// (MCP 2026-07-28 RC), or `None` when no extension is registered so the
+    /// (MCP 2026-07-28), or `None` when no extension is registered so the
     /// `capabilities.extensions` field is omitted on the wire.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub(crate) fn extensions(
         &self,
     ) -> Option<std::collections::HashMap<String, serde_json::Value>> {
@@ -716,7 +742,7 @@ impl McpOptions {
 
     /// Returns whether the server is configured to handle the "tasks/list" requests.
     #[inline]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     pub(crate) fn is_tasks_list_supported(&self) -> bool {
         self.tasks_capability
             .as_ref()
@@ -725,7 +751,7 @@ impl McpOptions {
 
     /// Returns whether the server is configured to handle the "tasks/cancel" requests.
     #[inline]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     pub(crate) fn is_tasks_cancellation_supported(&self) -> bool {
         self.tasks_capability
             .as_ref()
@@ -733,8 +759,19 @@ impl McpOptions {
     }
 
     /// Returns whether the server is configured to handle the task-augmented "tools/call" requests.
+    ///
+    /// Under MCP 2026-07-28 the Tasks extension capability carries no
+    /// per-request settings: advertising the extension at all is the
+    /// declaration, and the server decides per request whether to defer.
     #[inline]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
+    pub(crate) fn is_task_augmented_tool_call_supported(&self) -> bool {
+        self.tasks_capability.is_some()
+    }
+
+    /// Returns whether the server is configured to handle the task-augmented "tools/call" requests.
+    #[inline]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     pub(crate) fn is_task_augmented_tool_call_supported(&self) -> bool {
         self.tasks_capability
             .as_ref()
@@ -745,7 +782,7 @@ impl McpOptions {
 
     /// Sets the shared secret used to encrypt/authenticate MRTR `requestState`
     /// as a single-key ring under the default kid.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub(crate) fn set_request_state_secret(&mut self, key: &[u8]) {
         self.request_state_keys = crate::types::mrtr::state::StateKeyring::single(key);
         self.request_state_secret_explicit = true;
@@ -754,7 +791,7 @@ impl McpOptions {
     /// Sets the MRTR `requestState` keyring: new blobs are sealed under
     /// `active_kid`, inbound blobs decrypt with whichever accepted key their
     /// kid segment names.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub(crate) fn set_request_state_keys<K, S>(
         &mut self,
         active_kid: &str,
@@ -768,7 +805,7 @@ impl McpOptions {
     }
 
     /// Returns the MRTR `requestState` keyring (AEAD key material).
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub(crate) fn request_state_keys(&self) -> &crate::types::mrtr::state::StateKeyring {
         &self.request_state_keys
     }
@@ -779,7 +816,7 @@ impl McpOptions {
     /// Only compiled with `tracing`, where it backs the startup deployment
     /// warning in [`crate::App::run`]; without it the field has no reader.
     #[cfg(all(
-        feature = "proto-2026-07-28-rc",
+        not(feature = "legacy-spec"),
         feature = "http-server",
         feature = "tracing"
     ))]
@@ -789,7 +826,7 @@ impl McpOptions {
 
     /// Returns whether the configured transport is the HTTP server transport.
     #[cfg(all(
-        feature = "proto-2026-07-28-rc",
+        not(feature = "legacy-spec"),
         feature = "http-server",
         feature = "tracing"
     ))]
@@ -798,25 +835,25 @@ impl McpOptions {
     }
 
     /// Returns the MRTR `requestState` TTL in seconds.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub(crate) fn request_state_ttl_secs(&self) -> u64 {
         self.request_state_ttl_secs
     }
 
     /// Sets the max encoded `requestState` size in bytes.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub(crate) fn set_max_state_bytes(&mut self, bytes: usize) {
         self.max_state_bytes = bytes;
     }
 
     /// Returns the max encoded `requestState` size in bytes.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub(crate) fn max_state_bytes(&self) -> usize {
         self.max_state_bytes
     }
 
     /// Sets the MRTR final-round idempotency store.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub(crate) fn set_request_state_store(
         &mut self,
         store: Arc<dyn crate::app::mrtr_store::RequestStateStore>,
@@ -825,7 +862,7 @@ impl McpOptions {
     }
 
     /// Returns the MRTR final-round idempotency store.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub(crate) fn request_state_store(&self) -> &dyn crate::app::mrtr_store::RequestStateStore {
         self.request_state_store.as_ref()
     }
@@ -1059,11 +1096,11 @@ mod tests {
 
         let tools_capability = options.tools_capability().unwrap();
 
-        // Under the stateless RC transport `listChanged` is masked off because
+        // Under the stateless 2026-07-28 transport `listChanged` is masked off because
         // the server cannot push it; otherwise it round-trips the config.
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        #[cfg(feature = "legacy-spec")]
         assert!(tools_capability.list_changed);
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         assert!(!tools_capability.list_changed);
     }
 
@@ -1090,10 +1127,10 @@ mod tests {
 
         let resources_capability = options.resources_capability().unwrap();
 
-        // Masked off under the stateless RC transport (see `tools` test above).
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        // Masked off under the stateless 2026-07-28 transport (see `tools` test above).
+        #[cfg(feature = "legacy-spec")]
         assert!(resources_capability.list_changed);
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         assert!(!resources_capability.list_changed);
     }
 
@@ -1133,7 +1170,7 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "proto-2026-07-28-rc",
+        not(feature = "legacy-spec"),
         feature = "http-server",
         feature = "tracing"
     ))]
@@ -1144,7 +1181,7 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "proto-2026-07-28-rc",
+        not(feature = "legacy-spec"),
         feature = "http-server",
         feature = "tracing"
     ))]
@@ -1156,7 +1193,7 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "proto-2026-07-28-rc",
+        not(feature = "legacy-spec"),
         feature = "http-server",
         feature = "tracing"
     ))]
@@ -1173,10 +1210,10 @@ mod tests {
 
         let prompts_capability = options.prompts_capability().unwrap();
 
-        // Masked off under the stateless RC transport (see `tools` test above).
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        // Masked off under the stateless 2026-07-28 transport (see `tools` test above).
+        #[cfg(feature = "legacy-spec")]
         assert!(prompts_capability.list_changed);
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         assert!(!prompts_capability.list_changed);
     }
 

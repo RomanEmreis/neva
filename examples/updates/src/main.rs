@@ -35,7 +35,6 @@ async fn main() {
         opt.with_name("Updates Example Server")
             .with_stdio()
             .with_resources(|res| res.with_subscribe().with_list_changed())
-            .with_mcp_version("2024-11-05")
     });
 
     for i in 0..10 {

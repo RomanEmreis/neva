@@ -73,7 +73,7 @@ pub struct RequestParamsMeta {
     ///
     /// Always present in the struct for source-compatibility across feature
     /// configurations. The semantic interpretation (W3C Trace Context, MCP
-    /// 2026-07-28) is meaningful under `proto-2026-07-28-rc`; older peers
+    /// 2026-07-28) is meaningful under MCP 2026-07-28; older peers
     /// silently ignore the field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub traceparent: Option<String>,
@@ -86,12 +86,21 @@ pub struct RequestParamsMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tracestate: Option<String>,
 
+    /// W3C Baggage carrier, when set by the sender.
+    ///
+    /// The third key the spec reserves for OpenTelemetry propagation
+    /// alongside [`Self::traceparent`] / [`Self::tracestate`]; values follow
+    /// the [W3C Baggage](https://www.w3.org/TR/baggage/) format. Same
+    /// source-compatibility rationale as its companions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baggage: Option<String>,
+
     /// Client implementation info carried on every request under MCP
     /// 2026-07-28 (replaces the `initialize` handshake's `clientInfo`).
     ///
     /// Always present in the struct for source-compatibility across feature
     /// configurations, like the trace fields; only populated (and meaningful)
-    /// under `proto-2026-07-28-rc`. Older peers ignore it.
+    /// under MCP 2026-07-28. Older peers ignore it.
     #[serde(
         rename = "io.modelcontextprotocol/clientInfo",
         skip_serializing_if = "Option::is_none"
@@ -99,12 +108,12 @@ pub struct RequestParamsMeta {
     pub(crate) client_info: Option<super::Implementation>,
 
     /// MRTR: the client's results for a prior `InputRequiredResult`.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[serde(rename = "inputResponses", skip_serializing_if = "Option::is_none")]
     pub(crate) input_responses: Option<crate::types::mrtr::InputResponses>,
 
     /// MRTR: the opaque `requestState` echoed back from `InputRequiredResult`.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[serde(rename = "requestState", skip_serializing_if = "Option::is_none")]
     pub(crate) request_state: Option<String>,
 
@@ -115,18 +124,41 @@ pub struct RequestParamsMeta {
     /// replaces the removed global `logging/setLevel` handshake; the desired
     /// level now rides on the originating request's `_meta`. Deprecated in the
     /// 2026-07-28 draft together with the rest of the logging surface.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[serde(
         rename = "io.modelcontextprotocol/logLevel",
         skip_serializing_if = "Option::is_none"
     )]
     pub(crate) log_level: Option<crate::types::notification::LoggingLevel>,
 
+    /// The MCP protocol version this request is made under (MCP 2026-07-28).
+    ///
+    /// Required by the spec on every request. A version the server does not
+    /// support draws
+    /// [`ErrorCode::UnsupportedProtocolVersion`](crate::error::ErrorCode::UnsupportedProtocolVersion)
+    /// on any transport -- see [`Request::unsupported_version_error`]. Over
+    /// HTTP it must additionally match the `MCP-Protocol-Version` header, and
+    /// since that header is checked before the body is read, a value that
+    /// disagrees with it is by construction one the server does not support.
+    ///
+    /// Modelled as `Option` so a legacy-shaped request still parses -- the
+    /// server treats an absent value as "not stated" rather than rejecting the
+    /// parse.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[serde(
+        rename = "io.modelcontextprotocol/protocolVersion",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) protocol_version: Option<String>,
+
     /// MRTR/stateless: client capabilities declared per-request (v1: a single
     /// `elicitation` flag) so the server can honor "MUST NOT send an input
     /// type the client didn't declare".
-    #[cfg(feature = "proto-2026-07-28-rc")]
-    #[serde(rename = "clientCapabilities", skip_serializing_if = "Option::is_none")]
+    #[cfg(not(feature = "legacy-spec"))]
+    #[serde(
+        rename = "io.modelcontextprotocol/clientCapabilities",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub(crate) client_capabilities: Option<crate::types::mrtr::ClientMrtrCapabilities>,
 
     /// Represents metadata for associating messages with a task.
@@ -200,6 +232,138 @@ impl Request {
         self.id.clone()
     }
 
+    /// Why this request's `_meta` is not acceptable under MCP 2026-07-28, if it
+    /// is not.
+    ///
+    /// `io.modelcontextprotocol/protocolVersion` (a string) and
+    /// `io.modelcontextprotocol/clientCapabilities` (an object) are required on
+    /// every request -- capabilities are declared per request precisely so a
+    /// stateless server never has to infer them from earlier traffic -- and a
+    /// request that omits either, or states it with the wrong JSON type, is
+    /// malformed params.
+    ///
+    /// This is a property of the message, not of how it arrived, so it belongs
+    /// to the request rather than to a transport: a stdio server owes the same
+    /// rejection an HTTP one does. The HTTP layer additionally checks the
+    /// stated version against the `MCP-Protocol-Version` header and answers
+    /// `400`, neither of which means anything off that transport.
+    ///
+    /// # Examples
+    /// ```
+    /// use neva::types::Request;
+    ///
+    /// let bare = Request::new(None, "tools/list", None::<()>);
+    /// assert!(bare.required_meta_error().is_some());
+    ///
+    /// let complete = Request::new(None, "tools/list", Some(serde_json::json!({
+    ///     "_meta": {
+    ///         "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    ///         "io.modelcontextprotocol/clientCapabilities": {}
+    ///     }
+    /// })));
+    /// assert!(complete.required_meta_error().is_none());
+    /// ```
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn required_meta_error(&self) -> Option<crate::error::Error> {
+        use crate::error::{Error, ErrorCode};
+
+        const VERSION: &str = "io.modelcontextprotocol/protocolVersion";
+        const CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
+
+        let meta = self.params.as_ref().and_then(|p| p.get("_meta"));
+        let malformed = |key: &str, expected: &str| {
+            Some(Error::new(
+                ErrorCode::InvalidParams,
+                format!("request `_meta` is missing the required `{key}` {expected}"),
+            ))
+        };
+
+        if meta
+            .and_then(|m| m.get(VERSION))
+            .and_then(|v| v.as_str())
+            .is_none()
+        {
+            return malformed(VERSION, "string");
+        }
+        if meta
+            .and_then(|m| m.get(CAPABILITIES))
+            .is_none_or(|v| !v.is_object())
+        {
+            return malformed(CAPABILITIES, "object");
+        }
+        None
+    }
+
+    /// The protocol version this request states in its `_meta`, if it states a
+    /// well-formed one.
+    ///
+    /// # Examples
+    /// ```
+    /// use neva::types::Request;
+    ///
+    /// let req = Request::new(None, "tools/list", Some(serde_json::json!({
+    ///     "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" }
+    /// })));
+    /// assert_eq!(req.stated_protocol_version(), Some("2026-07-28"));
+    /// ```
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn stated_protocol_version(&self) -> Option<&str> {
+        self.params
+            .as_ref()?
+            .get("_meta")?
+            .get("io.modelcontextprotocol/protocolVersion")?
+            .as_str()
+    }
+
+    /// Why the protocol version this request states is one this build cannot
+    /// serve, if it is.
+    ///
+    /// `_meta.io.modelcontextprotocol/protocolVersion` names the version the
+    /// request is made under, and a server that does not speak it must answer
+    /// `UnsupportedProtocolVersion` (`-32022`) carrying what it does speak, so
+    /// the caller can pick from that list and retry.
+    ///
+    /// Like [`Self::required_meta_error`], this is a property of the message
+    /// and not of how it arrived: the version is stated in the body, so a stdio
+    /// server owes the same rejection an HTTP one does. What is transport
+    /// specific is only the `400` HTTP additionally mandates for it.
+    ///
+    /// A request stating no well-formed version has nothing to compare and is
+    /// [`Self::required_meta_error`]'s to reject.
+    ///
+    /// # Examples
+    /// ```
+    /// use neva::types::Request;
+    ///
+    /// let stale = Request::new(None, "tools/list", Some(serde_json::json!({
+    ///     "_meta": { "io.modelcontextprotocol/protocolVersion": "2025-06-18" }
+    /// })));
+    /// let err = stale.unsupported_version_error().expect("not served");
+    /// // The client is told what is on offer, not merely that it guessed wrong.
+    /// assert_eq!(err.data().unwrap()["requested"], "2025-06-18");
+    ///
+    /// let current = Request::new(None, "tools/list", Some(serde_json::json!({
+    ///     "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" }
+    /// })));
+    /// assert!(current.unsupported_version_error().is_none());
+    /// ```
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn unsupported_version_error(&self) -> Option<crate::error::Error> {
+        use crate::error::{Error, ErrorCode};
+
+        let stated = self.stated_protocol_version()?;
+        (stated != crate::LATEST_PROTOCOL_VERSION).then(|| {
+            Error::new(
+                ErrorCode::UnsupportedProtocolVersion,
+                format!("Unsupported MCP protocol version: {stated}"),
+            )
+            .with_data(serde_json::json!({
+                "supported": [crate::LATEST_PROTOCOL_VERSION],
+                "requested": stated,
+            }))
+        })
+    }
+
     /// Returns the full id (session_id?/request_id)
     pub fn full_id(&self) -> RequestId {
         let id = self.id.clone();
@@ -231,7 +395,7 @@ impl Request {
     /// `command("x", Some(vec![1, 2]))`) are left untouched: `_meta` has no
     /// place on a non-object JSON-RPC params value, and replacing it would
     /// silently drop the caller's payload, so metadata injection is skipped.
-    #[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+    #[cfg(all(feature = "client", not(feature = "legacy-spec")))]
     pub(crate) fn set_meta(&mut self, meta: RequestParamsMeta) {
         let Ok(serde_json::Value::Object(fields)) = serde_json::to_value(meta) else {
             return;
@@ -285,6 +449,53 @@ mod tests {
         assert_eq!(back.tracestate.as_deref(), meta.tracestate.as_deref());
     }
 
+    /// The version is stated in the body, so the rule holds on every transport
+    /// -- a stdio server reaches it through the dispatch seam, which is the
+    /// only gate it has.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn a_version_this_build_does_not_serve_is_refused() {
+        use crate::error::ErrorCode;
+        use serde_json::json;
+
+        let with_version = |v: serde_json::Value| {
+            Request::new(
+                None,
+                "tools/list",
+                Some(json!({ "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": v,
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                } })),
+            )
+        };
+
+        let err = with_version(json!("2025-06-18"))
+            .unsupported_version_error()
+            .expect("a version this build does not speak");
+        assert_eq!(err.code, ErrorCode::UnsupportedProtocolVersion);
+        let data = err.data().expect("the retry data the spec specifies");
+        assert_eq!(data["requested"], "2025-06-18");
+        assert_eq!(data["supported"], json!([crate::LATEST_PROTOCOL_VERSION]));
+
+        assert!(
+            with_version(json!(crate::LATEST_PROTOCOL_VERSION))
+                .unsupported_version_error()
+                .is_none()
+        );
+        // Not a string is not a version: `required_meta_error` owns that, and
+        // this one must not double-report it as unsupported.
+        assert!(
+            with_version(json!(2026))
+                .unsupported_version_error()
+                .is_none()
+        );
+        assert!(
+            Request::new(None, "tools/list", None::<()>)
+                .unsupported_version_error()
+                .is_none()
+        );
+    }
+
     #[test]
     fn meta_without_trace_context_omits_fields() {
         let meta = RequestParamsMeta::default();
@@ -293,7 +504,7 @@ mod tests {
         assert!(v.get("tracestate").is_none());
     }
 
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[test]
     fn log_level_roundtrips_under_spec_meta_key() {
         use crate::types::notification::LoggingLevel;
@@ -311,7 +522,7 @@ mod tests {
         assert_eq!(back.log_level, Some(LoggingLevel::Warning));
     }
 
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[test]
     fn absent_log_level_is_omitted() {
         let meta = RequestParamsMeta::default();
@@ -319,7 +530,7 @@ mod tests {
         assert!(v.get("io.modelcontextprotocol/logLevel").is_none());
     }
 
-    #[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+    #[cfg(all(feature = "client", not(feature = "legacy-spec")))]
     #[test]
     fn set_meta_writes_meta_and_preserves_params() {
         use serde_json::json;
@@ -346,7 +557,7 @@ mod tests {
         assert_eq!(req.params.expect("params present")["x"], json!(1));
     }
 
-    #[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+    #[cfg(all(feature = "client", not(feature = "legacy-spec")))]
     #[test]
     fn set_meta_preserves_unknown_meta_entries() {
         use serde_json::json;
@@ -379,7 +590,7 @@ mod tests {
         assert_eq!(params["name"], json!("echo"));
     }
 
-    #[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+    #[cfg(all(feature = "client", not(feature = "legacy-spec")))]
     #[test]
     fn set_meta_preserves_non_object_params() {
         use serde_json::json;
@@ -404,7 +615,7 @@ mod tests {
         assert_eq!(req.params, Some(json!("id")));
     }
 
-    #[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+    #[cfg(all(feature = "client", not(feature = "legacy-spec")))]
     #[test]
     fn set_meta_creates_params_when_absent() {
         let mut req = Request::new(Some(RequestId::Number(1)), "x", None::<serde_json::Value>);

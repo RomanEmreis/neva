@@ -1,10 +1,10 @@
-//! MRTR (elicitation) end-to-end over the stateless RC transport.
+//! MRTR (elicitation) end-to-end over the stateless 2026-07-28 transport.
 //!
 //! Drives the raw protocol so the two-round wire contract is asserted
 //! directly: round 1 `tools/call` -> `input_required` (+ `requestState`),
 //! round 2 retry (new id + `inputResponses` + echoed state) -> final result.
 #![cfg(all(
-    feature = "proto-2026-07-28-rc",
+    not(feature = "legacy-spec"),
     feature = "http-server-volga",
     feature = "http-client"
 ))]
@@ -49,11 +49,9 @@ async fn tool_elicits_then_completes_over_two_rounds() {
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "greet", "arguments": {},
-            "_meta": { "clientCapabilities": { "elicitation": true } } }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
     });
-    let r1: serde_json::Value = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let r1: serde_json::Value = routed(client.post(&url), &call)
         .json(&call)
         .send()
         .await
@@ -82,15 +80,13 @@ async fn tool_elicits_then_completes_over_two_rounds() {
     let retry = serde_json::json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": { "name": "greet", "arguments": {},
-            "_meta": {
-                "clientCapabilities": { "elicitation": true },
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": { "elicitation": true },
                 "requestState": state,
                 "inputResponses": { key: { "action": "accept", "content": { "name": "octocat" } } }
             } }
     });
-    let r2: serde_json::Value = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let r2: serde_json::Value = routed(client.post(&url), &retry)
         .json(&retry)
         .send()
         .await
@@ -103,6 +99,13 @@ async fn tool_elicits_then_completes_over_two_rounds() {
             .and_then(|v| v.as_str()),
         Some("hello octocat"),
         "round 2 must complete: {r2}"
+    );
+    // The two discriminators are the same field: round 1 says `input_required`,
+    // the final round says `complete`.
+    assert_eq!(
+        r2["result"]["resultType"],
+        serde_json::json!("complete"),
+        "round 2 must be tagged complete: {r2}"
     );
 
     handle.abort();
@@ -159,11 +162,9 @@ async fn final_round_replay_is_idempotent_after_a_lost_response() {
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "greet", "arguments": {},
-            "_meta": { "clientCapabilities": { "elicitation": true } } }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
     });
-    let r1: serde_json::Value = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let r1: serde_json::Value = routed(client.post(&url), &call)
         .json(&call)
         .send()
         .await
@@ -187,17 +188,15 @@ async fn final_round_replay_is_idempotent_after_a_lost_response() {
     let retry = serde_json::json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": { "name": "greet", "arguments": {},
-            "_meta": {
-                "clientCapabilities": { "elicitation": true },
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": { "elicitation": true },
                 "requestState": state,
                 "inputResponses": { key: { "action": "accept", "content": { "name": "octocat" } } }
             } }
     });
 
     // Round 2 (final): completes and runs the commit. Pretend the response is lost.
-    let r2: serde_json::Value = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let r2: serde_json::Value = routed(client.post(&url), &retry)
         .json(&retry)
         .send()
         .await
@@ -216,9 +215,7 @@ async fn final_round_replay_is_idempotent_after_a_lost_response() {
     // Lost-response retry: identical requestState + inputResponses, new id.
     let mut replay = retry.clone();
     replay["id"] = serde_json::json!(3);
-    let r3: serde_json::Value = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let r3: serde_json::Value = routed(client.post(&url), &replay)
         .json(&replay)
         .send()
         .await
@@ -295,11 +292,9 @@ async fn concurrent_final_round_retries_commit_exactly_once() {
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "greet", "arguments": {},
-            "_meta": { "clientCapabilities": { "elicitation": true } } }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
     });
-    let r1: serde_json::Value = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let r1: serde_json::Value = routed(client.post(&url), &call)
         .json(&call)
         .send()
         .await
@@ -324,8 +319,8 @@ async fn concurrent_final_round_retries_commit_exactly_once() {
         serde_json::json!({
             "jsonrpc": "2.0", "id": id, "method": "tools/call",
             "params": { "name": "greet", "arguments": {},
-                "_meta": {
-                    "clientCapabilities": { "elicitation": true },
+                "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": { "elicitation": true },
                     "requestState": state,
                     "inputResponses": { key.clone(): { "action": "accept", "content": { "name": "octocat" } } }
                 } }
@@ -335,9 +330,7 @@ async fn concurrent_final_round_retries_commit_exactly_once() {
         let client = client.clone();
         let url = url.clone();
         async move {
-            client
-                .post(&url)
-                .header("MCP-Protocol-Version", "2026-07-28")
+            routed(client.post(&url), &body)
                 .json(&body)
                 .send()
                 .await
@@ -403,11 +396,9 @@ async fn distinct_answers_to_the_same_state_do_not_collide_in_the_cache() {
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "greet", "arguments": {},
-            "_meta": { "clientCapabilities": { "elicitation": true } } }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
     });
-    let r1: serde_json::Value = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let r1: serde_json::Value = routed(client.post(&url), &call)
         .json(&call)
         .send()
         .await
@@ -432,8 +423,8 @@ async fn distinct_answers_to_the_same_state_do_not_collide_in_the_cache() {
         serde_json::json!({
             "jsonrpc": "2.0", "id": id, "method": "tools/call",
             "params": { "name": "greet", "arguments": {},
-                "_meta": {
-                    "clientCapabilities": { "elicitation": true },
+                "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": { "elicitation": true },
                     "requestState": state,
                     "inputResponses": { key.clone(): { "action": "accept", "content": { "name": name } } }
                 } }
@@ -444,9 +435,7 @@ async fn distinct_answers_to_the_same_state_do_not_collide_in_the_cache() {
         let client = client.clone();
         let url = url.clone();
         async move {
-            client
-                .post(&url)
-                .header("MCP-Protocol-Version", "2026-07-28")
+            routed(client.post(&url), &body)
                 .json(&body)
                 .send()
                 .await
@@ -528,11 +517,9 @@ async fn effects_run_once_memo_caches_commit_fires_on_final_round() {
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "effectful", "arguments": {},
-            "_meta": { "clientCapabilities": { "elicitation": true } } }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
     });
-    let r1: serde_json::Value = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let r1: serde_json::Value = routed(client.post(&url), &call)
         .json(&call)
         .send()
         .await
@@ -574,15 +561,13 @@ async fn effects_run_once_memo_caches_commit_fires_on_final_round() {
     let retry = serde_json::json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": { "name": "effectful", "arguments": {},
-            "_meta": {
-                "clientCapabilities": { "elicitation": true },
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": { "elicitation": true },
                 "requestState": state,
                 "inputResponses": { key: { "action": "accept", "content": { "name": "octocat" } } }
             } }
     });
-    let r2: serde_json::Value = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let r2: serde_json::Value = routed(client.post(&url), &retry)
         .json(&retry)
         .send()
         .await
@@ -645,11 +630,9 @@ async fn oversized_request_state_is_rejected() {
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "bloated", "arguments": {},
-            "_meta": { "clientCapabilities": { "elicitation": true } } }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
     });
-    let r1: serde_json::Value = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let r1: serde_json::Value = routed(client.post(&url), &call)
         .json(&call)
         .send()
         .await
@@ -704,14 +687,12 @@ async fn oversized_inbound_request_state_is_rejected_before_decoding() {
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "greet", "arguments": {},
-            "_meta": {
-                "clientCapabilities": { "elicitation": true },
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": { "elicitation": true },
                 "requestState": bogus_state
             } }
     });
-    let r1: serde_json::Value = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let r1: serde_json::Value = routed(client.post(&url), &call)
         .json(&call)
         .send()
         .await
@@ -760,11 +741,9 @@ async fn replaying_request_state_against_a_different_request_is_rejected() {
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "greet", "arguments": {},
-            "_meta": { "clientCapabilities": { "elicitation": true } } }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
     });
-    let r1: serde_json::Value = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let r1: serde_json::Value = routed(client.post(&url), &call)
         .json(&call)
         .send()
         .await
@@ -782,14 +761,12 @@ async fn replaying_request_state_against_a_different_request_is_rejected() {
     let replay = serde_json::json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": { "name": "greet", "arguments": { "x": 1 },
-            "_meta": {
-                "clientCapabilities": { "elicitation": true },
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": { "elicitation": true },
                 "requestState": state
             } }
     });
-    let r2: serde_json::Value = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let r2: serde_json::Value = routed(client.post(&url), &replay)
         .json(&replay)
         .send()
         .await
@@ -834,14 +811,17 @@ async fn eliciting_without_declared_capability_is_rejected() {
         .expect("test client");
     let url = format!("http://{addr}/mcp");
 
-    // No `clientCapabilities.elicitation` -> the server cannot ask for input.
+    // Capabilities are declared, but without elicitation -> the server cannot
+    // ask for input. An empty declaration is the point: the server must take
+    // it at face value rather than infer anything.
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": { "name": "greet", "arguments": {} }
+        "params": { "name": "greet", "arguments": {}, "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {}
+        } }
     });
-    let r1: serde_json::Value = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let r1: serde_json::Value = routed(client.post(&url), &call)
         .json(&call)
         .send()
         .await
@@ -1266,11 +1246,9 @@ async fn tool_samples_then_completes_over_two_rounds() {
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "summarize", "arguments": {},
-            "_meta": { "clientCapabilities": { "sampling": true } } }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "sampling": true } } }
     });
-    let r1: serde_json::Value = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let r1: serde_json::Value = routed(client.post(&url), &call)
         .json(&call)
         .send()
         .await
@@ -1300,8 +1278,8 @@ async fn tool_samples_then_completes_over_two_rounds() {
     let retry = serde_json::json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": { "name": "summarize", "arguments": {},
-            "_meta": {
-                "clientCapabilities": { "sampling": true },
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": { "sampling": true },
                 "requestState": state,
                 "inputResponses": { key: {
                     "role": "assistant",
@@ -1310,9 +1288,7 @@ async fn tool_samples_then_completes_over_two_rounds() {
                 } }
             } }
     });
-    let r2: serde_json::Value = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let r2: serde_json::Value = routed(client.post(&url), &retry)
         .json(&retry)
         .send()
         .await
@@ -1364,11 +1340,9 @@ async fn tool_lists_roots_then_completes_over_two_rounds() {
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "scan", "arguments": {},
-            "_meta": { "clientCapabilities": { "roots": true } } }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "roots": true } } }
     });
-    let r1: serde_json::Value = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let r1: serde_json::Value = routed(client.post(&url), &call)
         .json(&call)
         .send()
         .await
@@ -1393,17 +1367,15 @@ async fn tool_lists_roots_then_completes_over_two_rounds() {
     let retry = serde_json::json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": { "name": "scan", "arguments": {},
-            "_meta": {
-                "clientCapabilities": { "roots": true },
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": { "roots": true },
                 "requestState": state,
                 "inputResponses": { key: {
                     "roots": [{ "uri": "file:///work", "name": "work" }]
                 } }
             } }
     });
-    let r2: serde_json::Value = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let r2: serde_json::Value = routed(client.post(&url), &retry)
         .json(&retry)
         .send()
         .await
@@ -1566,11 +1538,9 @@ async fn sampling_without_declared_capability_is_rejected() {
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "summarize", "arguments": {},
-            "_meta": { "clientCapabilities": { "elicitation": true } } }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
     });
-    let r1: serde_json::Value = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let r1: serde_json::Value = routed(client.post(&url), &call)
         .json(&call)
         .send()
         .await
@@ -1597,4 +1567,23 @@ fn pick_free_port() -> u16 {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     port
+}
+
+/// Attaches the routing headers MCP 2026-07-28 requires on every request, the
+/// way a conforming client derives them: from the body it is about to send.
+fn routed(req: reqwest::RequestBuilder, body: &serde_json::Value) -> reqwest::RequestBuilder {
+    let method = body["method"].as_str().unwrap_or_default();
+    let req = req
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", method);
+    let name = match method {
+        "tools/call" | "prompts/get" => body.pointer("/params/name"),
+        "resources/read" => body.pointer("/params/uri"),
+        "tasks/get" | "tasks/update" | "tasks/cancel" => body.pointer("/params/taskId"),
+        _ => None,
+    };
+    match name.and_then(|v| v.as_str()) {
+        Some(name) => req.header("Mcp-Name", name),
+        None => req,
+    }
 }

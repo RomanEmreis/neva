@@ -83,15 +83,18 @@ mod tests {
             meta: Some(RequestParamsMeta {
                 progress_token: None,
                 traceparent: None,
+                baggage: None,
                 tracestate: None,
                 client_info: None,
-                #[cfg(feature = "proto-2026-07-28-rc")]
+                #[cfg(not(feature = "legacy-spec"))]
                 input_responses: None,
-                #[cfg(feature = "proto-2026-07-28-rc")]
+                #[cfg(not(feature = "legacy-spec"))]
                 request_state: None,
-                #[cfg(feature = "proto-2026-07-28-rc")]
+                #[cfg(not(feature = "legacy-spec"))]
+                protocol_version: None,
+                #[cfg(not(feature = "legacy-spec"))]
                 client_capabilities: None,
-                #[cfg(feature = "proto-2026-07-28-rc")]
+                #[cfg(not(feature = "legacy-spec"))]
                 log_level: None,
                 context: None,
                 #[cfg(feature = "tasks")]
@@ -114,15 +117,18 @@ mod tests {
             meta: Some(RequestParamsMeta {
                 progress_token: Some(ProgressToken::Number(5)),
                 traceparent: None,
+                baggage: None,
                 tracestate: None,
                 client_info: None,
-                #[cfg(feature = "proto-2026-07-28-rc")]
+                #[cfg(not(feature = "legacy-spec"))]
                 input_responses: None,
-                #[cfg(feature = "proto-2026-07-28-rc")]
+                #[cfg(not(feature = "legacy-spec"))]
                 request_state: None,
-                #[cfg(feature = "proto-2026-07-28-rc")]
+                #[cfg(not(feature = "legacy-spec"))]
+                protocol_version: None,
+                #[cfg(not(feature = "legacy-spec"))]
                 client_capabilities: None,
-                #[cfg(feature = "proto-2026-07-28-rc")]
+                #[cfg(not(feature = "legacy-spec"))]
                 log_level: None,
                 context: None,
                 #[cfg(feature = "tasks")]

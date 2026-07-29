@@ -1,4 +1,4 @@
-//! Multi Round-Trip Request (MRTR) wire types (MCP `proto-2026-07-28-rc`).
+//! Multi Round-Trip Request (MRTR) wire types (MCP 2026-07-28).
 //!
 //! A server processing `tools/call` / `prompts/get` / `resources/read` may
 //! reply with [`InputRequiredResult`] to request additional input before
@@ -249,6 +249,20 @@ impl ClientMrtrCapabilities {
             InputRequest::Elicitation(_) => self.elicitation,
             InputRequest::Sampling(_) => self.sampling,
             InputRequest::Roots(_) => self.roots,
+        }
+    }
+
+    /// The capability set the server needs for `request`, as the
+    /// `requiredCapabilities` payload of a
+    /// [`MissingRequiredClientCapability`](crate::error::ErrorCode::MissingRequiredClientCapability)
+    /// error -- so the client is told what to declare, not just that something
+    /// was missing.
+    pub(crate) fn requiring(&self, request: &InputRequest) -> Self {
+        #[allow(deprecated)]
+        Self {
+            elicitation: matches!(request, InputRequest::Elicitation(_)),
+            sampling: matches!(request, InputRequest::Sampling(_)),
+            roots: matches!(request, InputRequest::Roots(_)),
         }
     }
 }

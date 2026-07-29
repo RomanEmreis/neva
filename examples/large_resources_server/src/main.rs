@@ -51,7 +51,6 @@ async fn main() {
         .with_options(|opt| {
             opt.with_name("Large resource example server")
                 .with_default_http()
-                .with_mcp_version("2025-06-18")
         })
         .run()
         .await;

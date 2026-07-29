@@ -52,21 +52,81 @@ pub(crate) mod server;
 pub(super) const MCP_SESSION_ID: &str = "Mcp-Session-Id";
 
 /// JSON-RPC method name carried on every outbound HTTP request under
-/// `proto-2026-07-28-rc`. Allows reverse proxies and load balancers to
+/// MCP 2026-07-28. Allows reverse proxies and load balancers to
 /// route without parsing the request body.
-#[cfg(all(feature = "http-client", feature = "proto-2026-07-28-rc"))]
-pub(super) const MCP_METHOD: &str = "Mcp-Method";
+///
+/// Visible to both sides: the client sends it, and the server must check it
+/// against the body it actually dispatches, or an intermediary's routing
+/// decision could be made on a method the body never invokes.
+#[cfg(not(feature = "legacy-spec"))]
+pub(crate) const MCP_METHOD: &str = "Mcp-Method";
 
-/// Entity name (today: tool name for `tools/call`) carried on every
-/// outbound HTTP request under `proto-2026-07-28-rc`.
-#[cfg(all(feature = "http-client", feature = "proto-2026-07-28-rc"))]
-pub(super) const MCP_NAME: &str = "Mcp-Name";
+/// Entity name -- the tool/prompt name or resource URI -- carried on the
+/// requests that have one under MCP 2026-07-28. Validated server-side for
+/// the same reason as [`MCP_METHOD`].
+#[cfg(not(feature = "legacy-spec"))]
+pub(crate) const MCP_NAME: &str = "Mcp-Name";
+
+/// Marks a header value as Base64-encoded UTF-8: `=?base64?{value}?=`.
+#[cfg(not(feature = "legacy-spec"))]
+pub(crate) const B64_PREFIX: &str = "=?base64?";
+/// Closing half of [`B64_PREFIX`].
+#[cfg(not(feature = "legacy-spec"))]
+pub(crate) const B64_SUFFIX: &str = "?=";
+
+/// Encodes `raw` for use as an HTTP header value, per the spec's value-encoding
+/// rules.
+///
+/// RFC 9110 limits field values to visible ASCII, space and horizontal tab,
+/// with no leading or trailing whitespace. Anything outside that -- and any
+/// plain value that would otherwise be mistaken for the sentinel -- travels
+/// Base64-encoded instead.
+#[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+pub(crate) fn encode_header_value(raw: &str) -> String {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
+    let safe = !raw.is_empty()
+        && raw
+            .bytes()
+            .all(|b| b == b'\t' || (0x20..=0x7E).contains(&b))
+        && !raw.starts_with([' ', '\t'])
+        && !raw.ends_with([' ', '\t']);
+    let sentinel_lookalike = raw.starts_with(B64_PREFIX) && raw.ends_with(B64_SUFFIX);
+
+    if safe && !sentinel_lookalike {
+        raw.to_owned()
+    } else {
+        format!("{B64_PREFIX}{}{B64_SUFFIX}", STANDARD.encode(raw))
+    }
+}
+
+/// Reverses [`encode_header_value`], so a header can be compared to the body
+/// value it mirrors.
+///
+/// Returns `None` when the sentinel is present but its payload is not valid
+/// Base64-encoded UTF-8 -- the value claims an encoding it does not honor, and
+/// the caller must reject rather than guess.
+#[cfg(all(feature = "http-server", not(feature = "legacy-spec")))]
+pub(crate) fn decode_header_value(value: &str) -> Option<String> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
+    let Some(payload) = value
+        .strip_prefix(B64_PREFIX)
+        .and_then(|v| v.strip_suffix(B64_SUFFIX))
+    else {
+        return Some(value.to_owned());
+    };
+    STANDARD
+        .decode(payload)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+}
 
 /// Protocol-version routing header, required on every POST under
-/// `proto-2026-07-28-rc`. Lets proxies route and lets the server reject
+/// MCP 2026-07-28. Lets proxies route and lets the server reject
 /// mismatched clients. Visible to both client (sends it) and server
 /// (validates it), so it is not gated on `http-client`.
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 pub(crate) const MCP_PROTOCOL_VERSION: &str = "MCP-Protocol-Version";
 
 const DEFAULT_ADDR: &str = "127.0.0.1:3000";
@@ -143,8 +203,10 @@ where
 pub struct HttpClient {
     url: ServiceUrl,
     access_token: Option<Box<[u8]>>,
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     peer_mode: crate::shared::PeerMode,
+    #[cfg(all(not(feature = "legacy-spec"), feature = "http-client"))]
+    param_headers: crate::shared::param_headers::Registry,
     #[cfg(feature = "client-oauth")]
     oauth: Option<client::oauth::OAuthClientConfig>,
     #[cfg(feature = "client-tls")]
@@ -166,8 +228,10 @@ pub(super) struct ClientRuntimeContext {
     tx: Sender<Result<Message, Error>>,
     rx: Receiver<Message>,
     access_token: Option<Box<[u8]>>,
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub(super) peer_mode: crate::shared::PeerMode,
+    #[cfg(all(not(feature = "legacy-spec"), feature = "http-client"))]
+    pub(super) param_headers: crate::shared::param_headers::Registry,
     #[cfg(feature = "client-oauth")]
     oauth: Option<std::sync::Arc<client::oauth::OAuthSession>>,
     #[cfg(feature = "client-tls")]
@@ -232,8 +296,10 @@ impl Default for HttpClient {
         Self {
             url: ServiceUrl::default(),
             access_token: None,
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             peer_mode: Default::default(),
+            #[cfg(all(not(feature = "legacy-spec"), feature = "http-client"))]
+            param_headers: Default::default(),
             #[cfg(feature = "client-oauth")]
             oauth: None,
             #[cfg(feature = "client-tls")]
@@ -673,10 +739,21 @@ impl HttpClient {
         self
     }
 
+    /// Hands the `x-mcp-header` registry to this transport, so a `tools/call`
+    /// can mirror the designated arguments into `Mcp-Param-*` headers.
+    #[cfg(all(not(feature = "legacy-spec"), feature = "http-client"))]
+    pub(crate) fn with_param_headers(
+        mut self,
+        registry: crate::shared::param_headers::Registry,
+    ) -> Self {
+        self.param_headers = registry;
+        self
+    }
+
     /// Hands the dual-mode protocol switch to this transport (set by
     /// `McpOptions::transport`) so per-request headers follow the
     /// negotiated protocol generation.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub(crate) fn with_peer_mode(mut self, peer_mode: crate::shared::PeerMode) -> Self {
         self.peer_mode = peer_mode;
         self
@@ -744,8 +821,10 @@ impl HttpClient {
             tx: self.receiver.tx.clone(),
             rx: sender_rx,
             access_token: self.access_token.take(),
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             peer_mode: self.peer_mode.clone(),
+            #[cfg(all(not(feature = "legacy-spec"), feature = "http-client"))]
+            param_headers: self.param_headers.clone(),
             #[cfg(feature = "client-oauth")]
             oauth,
             #[cfg(feature = "client-tls")]

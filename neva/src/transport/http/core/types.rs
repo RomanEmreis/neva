@@ -98,7 +98,7 @@ pub trait Claims: std::fmt::Debug + Send + Sync + 'static {
     /// Authenticated subject (principal) for this request, if any.
     ///
     /// Used to bind MRTR `requestState` to the principal that produced it
-    /// under `proto-2026-07-28-rc`. Defaults to `None`.
+    /// under MCP 2026-07-28. Defaults to `None`.
     fn subject(&self) -> Option<&str> {
         None
     }

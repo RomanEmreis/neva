@@ -1,103 +1,80 @@
-use tracing_subscriber::prelude::*;
+//! MCP 2026-07-28 sampling example server.
+//!
+//! Under MCP 2026-07-28 there is no `sampling/createMessage` server->client *request*:
+//! the capability-driven push channel is gone. The ability was re-homed onto
+//! MRTR as an input-request kind, so the server borrows the client's model the
+//! same way it asks for elicitation input -- `ctx.sample(key, params)` -- and the
+//! completion replays from the encrypted `requestState` on the next round.
+//!
+//! Sampling is **deprecated on arrival**: it exists for migration, hence the
+//! explicit `#[allow(deprecated)]` at the call site.
+//!
+//! Because the handler re-runs from the top on every round-trip, the expensive
+//! work around the sampling point is guarded with the MRTR effect primitives --
+//! exactly as it would be around an elicitation point.
+
 use neva::prelude::*;
+use neva::types::sampling::{CreateMessageRequestParams, SamplingMessage};
+use tracing_subscriber::prelude::*;
 
 #[tool]
-async fn generate_weather_report(mut ctx: Context, city1: String, city2: String) -> Result<String, Error> {
-    let Some(tool) = ctx.find_tool("get_weather").await else {
-        return Err(ErrorCode::MethodNotFound.into());
-    };
+async fn summarize_report(mut ctx: Context, topic: String) -> Result<String, Error> {
+    tracing::info!("📝 summarize_report round starting...");
 
-    let prompt = ctx.prompt("weather", [
-        ("city1", city1),
-        ("city2", city2)
-    ]).await?;
-    
-    let msg = prompt.messages
-        .into_iter()
-        .next()
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams, "No prompt message found in prompt response."))?;
-    
-    let mut params = CreateMessageRequestParams::new()
-        .with_message(SamplingMessage::from(msg))
-        .with_sys_prompt("You are a helpful assistant.")
-        .with_tools([tool]);
-    
-    loop {
-        let result = ctx.sample(params.clone()).await?;
-        if result.stop_reason == Some(StopReason::ToolUse) {
-            let tools: Vec<ToolUse> = result.tools()
-                .cloned()
-                .collect();
-
-            let assistant_msg = tools
-                .iter()
-                .fold(SamplingMessage::assistant(), |msg, tool| msg.with(tool.clone()));
-
-            let tool_results = ctx.use_tools(tools).await;
-
-            let user_msg = tool_results
-                .into_iter()
-                .fold(SamplingMessage::user(), |msg, result| msg.with(result));
-
-            params = params
-                .with_message(assistant_msg)
-                .with_message(user_msg)
-                .with_tool_choice(ToolChoiceMode::None);
-        } else {
-            return Ok(format!("{:?}", result.content));
-        };
-    }
-}
-
-#[tool]
-async fn get_weather(city: String) -> Json<Weather> {
-    if city == "London" {
-        Json(Weather {
-            temperature: 15.0,
-            humidity: 80.0,
+    // memo: the "fetch" happens once and is replayed on the second round,
+    // even though everything above the sampling point re-executes.
+    let report: String = ctx
+        .memo("report", async {
+            tracing::info!("📚 fetching source report...");
+            Ok(format!(
+                "Q3 numbers for {topic}: revenue up 12%, churn flat, two outages."
+            ))
         })
-    } else {
-        Json(Weather {
-            temperature: 18.0,
-            humidity: 65.0,
-        })
-    }
-}
+        .await?;
 
-#[prompt]
-async fn weather(city1: String, city2: String) -> PromptMessage {
-    PromptMessage::user()
-        .with(format!("What's the weather like in {city1} and {city2}?"))
+    let params = CreateMessageRequestParams::new()
+        .with_sys_prompt("You are a concise analyst. Answer in one sentence.")
+        .with_message(SamplingMessage::user().with(format!("Summarize: {report}")))
+        .with_max_tokens(200);
+
+    // Round 1: no answer for "summary" yet, so this unwinds the handler and
+    // the server replies `input_required` with a `sampling/createMessage`
+    // envelope. Round 2: the client's `CreateMessageResult` is replayed.
+    #[allow(deprecated)]
+    let completion = ctx.sample("summary", params).await?;
+
+    let summary = completion
+        .content
+        .first()
+        .and_then(|content| content.as_text())
+        .map(|text| text.text.clone())
+        .unwrap_or_else(|| "(the client returned no text)".into());
+
+    // on_commit: runs exactly once, on the final round.
+    ctx.on_commit(async {
+        tracing::info!("🗄️  summary archived");
+        Ok(())
+    });
+
+    Ok(format!("[{}] {summary}", completion.model))
 }
 
 #[tokio::main]
 async fn main() {
+    // neva does not install a global subscriber here; do it so the
+    // per-round logs above are visible.
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
         .init();
-    
-    let secret = std::env::var("JWT_SECRET")
-        .expect("JWT_SECRET must be set");
-    
-    let http = HttpServer::new("localhost:7878")
-        .with_tls(|tls| tls
-            .with_dev_cert(DevCertMode::Auto))
-        .with_auth(|auth| auth
-            .validate_exp(false)
-            .with_aud(["some aud"])
-            .with_iss(["some issuer"])
-            .set_decoding_key(secret.as_bytes()));
-    
+
     App::new()
-        .with_options(|opt| opt
-            .with_name("Sampling Example Server")
-            .set_http(http))
+        // In production load a stable shared secret (env/secret store); the
+        // default is an ephemeral per-process key, fine for a single instance.
+        .with_request_state_secret(b"example-shared-secret")
+        .with_options(|opt| {
+            opt.with_name("Sampling Example Server")
+                .with_http(|http| http.bind("127.0.0.1:3002").with_endpoint("/mcp"))
+        })
         .run()
         .await;
-}
-
-#[json_schema(serde, debug)]
-struct Weather {
-    temperature: f32,
-    humidity: f32,
 }

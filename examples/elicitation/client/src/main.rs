@@ -40,14 +40,9 @@ async fn main() -> Result<(), Error> {
 
     client.connect().await?;
 
-    client.on_elicitation_completed(async |n| {
-        let Some(params) = n.params::<ElicitationCompleteParams>() else { 
-            tracing::error!("Unable to read params");
-            return;
-        };
-        tracing::info!("Elicitation {} has been completed.", params.id);
-    });
-    
+    // No `on_elicitation_completed` under MCP 2026-07-28: the notification is
+    // gone, and answering the URL elicitation *is* the completion signal.
+
     let result = client.call_tool("generate_business_card", ()).await?;
     tracing::info!("Received result: {:?}", result.content);
 

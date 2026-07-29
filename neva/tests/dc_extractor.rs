@@ -1,4 +1,4 @@
-//! RC end-to-end check that the `Dc<T>` DI extractor is **not** advertised as a
+//! 2026-07-28 end-to-end check that the `Dc<T>` DI extractor is **not** advertised as a
 //! tool/prompt argument and is resolved from the request context at call time.
 //!
 //! Regression test: `get_arg_type` used to classify the unknown `Dc<_>` type as
@@ -7,11 +7,11 @@
 //! bogus `repo` field). Resources were unaffected because their schema is
 //! derived from the URI template, not the function signature.
 //!
-//! Compiled under `proto-2026-07-28-rc` together with the Volga server + HTTP
+//! Compiled under MCP 2026-07-28 together with the Volga server + HTTP
 //! client and `di` (all pulled in by `server-full` / `client-full`).
 
 #![cfg(all(
-    feature = "proto-2026-07-28-rc",
+    not(feature = "legacy-spec"),
     feature = "http-server-volga",
     feature = "http-client",
     feature = "di"
@@ -66,11 +66,9 @@ async fn dc_extractor_is_injected_not_advertised() {
         "jsonrpc": "2.0",
         "id": 1,
         "method": "tools/list",
-        "params": {}
+        "params": { "_meta": meta() }
     });
-    let resp = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let resp = routed(client.post(&url), &list_body)
         .json(&list_body)
         .send()
         .await
@@ -130,11 +128,9 @@ async fn dc_extractor_is_injected_not_advertised() {
         "jsonrpc": "2.0",
         "id": 2,
         "method": "tools/call",
-        "params": { "name": "read_counter" }
+        "params": { "name": "read_counter", "_meta": meta() }
     });
-    let resp = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let resp = routed(client.post(&url), &call_body)
         .json(&call_body)
         .send()
         .await
@@ -152,11 +148,9 @@ async fn dc_extractor_is_injected_not_advertised() {
         "jsonrpc": "2.0",
         "id": 3,
         "method": "tools/call",
-        "params": { "name": "add_to_counter", "arguments": { "delta": 1 } }
+        "params": { "name": "add_to_counter", "arguments": { "delta": 1 }, "_meta": meta() }
     });
-    let resp = client
-        .post(&url)
-        .header("MCP-Protocol-Version", "2026-07-28")
+    let resp = routed(client.post(&url), &call_body)
         .json(&call_body)
         .send()
         .await
@@ -177,4 +171,33 @@ fn pick_free_port() -> u16 {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     port
+}
+
+/// The `_meta` MCP 2026-07-28 requires on every request: the protocol version,
+/// and the capabilities this request is made under -- empty being the valid
+/// declaration of "no optional capabilities".
+fn meta() -> serde_json::Value {
+    serde_json::json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {}
+    })
+}
+
+/// Attaches the routing headers MCP 2026-07-28 requires on every request, the
+/// way a conforming client derives them: from the body it is about to send.
+fn routed(req: reqwest::RequestBuilder, body: &serde_json::Value) -> reqwest::RequestBuilder {
+    let method = body["method"].as_str().unwrap_or_default();
+    let req = req
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", method);
+    let name = match method {
+        "tools/call" | "prompts/get" => body.pointer("/params/name"),
+        "resources/read" => body.pointer("/params/uri"),
+        "tasks/get" | "tasks/update" | "tasks/cancel" => body.pointer("/params/taskId"),
+        _ => None,
+    };
+    match name.and_then(|v| v.as_str()) {
+        Some(name) => req.header("Mcp-Name", name),
+        None => req,
+    }
 }

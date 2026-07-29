@@ -1,8 +1,9 @@
 //! Utilities for Elicitation
 
+#[cfg(feature = "legacy-spec")]
+use crate::types::notification::Notification;
 use crate::{
     error::{Error, ErrorCode},
-    types::notification::Notification,
     types::{ErrorDetails, IntoResponse, PropertyType, RequestId, Response, Schema},
 };
 use schemars::JsonSchema;
@@ -23,6 +24,10 @@ pub mod commands {
     pub const CREATE: &str = "elicitation/create";
 
     /// Notification name for indicates the completion of elicitation
+    ///
+    /// Removed in MCP 2026-07-28: URL elicitation completion is signalled by
+    /// the client answering the input request, not by a separate notification.
+    #[cfg(feature = "legacy-spec")]
     pub const COMPLETE: &str = "notifications/elicitation/complete";
 }
 
@@ -81,6 +86,13 @@ pub struct ElicitRequestUrlParams {
     /// The ID of the elicitation, which must be unique within the context of the server.
     ///
     /// The client **MUST** treat this ID as an opaque value.
+    ///
+    /// Removed in MCP 2026-07-28 together with
+    /// `notifications/elicitation/complete`: with no server-initiated
+    /// completion signal there is nothing to correlate. A server that needs to
+    /// track an elicitation across retries encodes its own identifier in
+    /// `requestState`.
+    #[cfg(feature = "legacy-spec")]
     #[serde(rename = "elicitationId")]
     pub id: String,
 
@@ -185,7 +197,10 @@ pub struct UrlElicitationRequiredError {
 /// Represents an optional notification from the server to the client, informing it of a completion
 /// of an out-of-band elicitation request.
 ///
+/// Removed in MCP 2026-07-28.
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details.
+#[cfg(feature = "legacy-spec")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ElicitationCompleteParams {
     /// The ID of the elicitation that completed.
@@ -352,6 +367,7 @@ impl ElicitRequestParams {
     #[inline]
     pub fn url(url: impl Into<Uri>, message: impl Into<String>) -> ElicitRequestUrlParams {
         ElicitRequestUrlParams {
+            #[cfg(feature = "legacy-spec")]
             id: uuid::Uuid::new_v4().to_string(),
             message: message.into(),
             url: url.into(),
@@ -717,6 +733,7 @@ impl UrlElicitationRequiredError {
     }
 }
 
+#[cfg(feature = "legacy-spec")]
 impl ElicitationCompleteParams {
     /// Creates a new [`ElicitationCompleteParams`]
     #[inline]
@@ -725,6 +742,7 @@ impl ElicitationCompleteParams {
     }
 }
 
+#[cfg(feature = "legacy-spec")]
 impl TryFrom<Notification> for ElicitationCompleteParams {
     type Error = Error;
 

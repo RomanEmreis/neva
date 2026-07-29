@@ -100,16 +100,29 @@ impl_into_response! {
 mod tests {
     use super::*;
 
+    /// Builds the serialized response each assertion expects around `result`.
+    ///
+    /// Under MCP 2026-07-28 every result carries `resultType: "complete"`, so
+    /// the discriminator is folded in here rather than into twenty literals --
+    /// re-serializing through [`serde_json::Value`] also keeps the key order
+    /// right whichever way the added key sorts.
+    fn expect(result: serde_json::Value) -> String {
+        #[cfg(not(feature = "legacy-spec"))]
+        let result = {
+            let mut result = result;
+            result["resultType"] = "complete".into();
+            result
+        };
+        format!(r#"{{"jsonrpc":"2.0","id":"(no id)","result":{result}}}"#)
+    }
+
     #[test]
     fn it_converts_str_into_response() {
         let resp = "test".into_response(RequestId::default());
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(
-            json,
-            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":"test"}}"#
-        );
+        assert_eq!(json, expect(serde_json::json!({"result":"test"})));
     }
 
     #[test]
@@ -118,10 +131,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(
-            json,
-            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":"test"}}"#
-        );
+        assert_eq!(json, expect(serde_json::json!({"result":"test"})));
     }
 
     #[test]
@@ -130,10 +140,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(
-            json,
-            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#
-        );
+        assert_eq!(json, expect(serde_json::json!({"result":1})));
     }
     #[test]
     fn it_converts_i16_into_response() {
@@ -141,10 +148,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(
-            json,
-            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#
-        );
+        assert_eq!(json, expect(serde_json::json!({"result":1})));
     }
 
     #[test]
@@ -153,10 +157,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(
-            json,
-            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#
-        );
+        assert_eq!(json, expect(serde_json::json!({"result":1})));
     }
 
     #[test]
@@ -165,10 +166,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(
-            json,
-            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#
-        );
+        assert_eq!(json, expect(serde_json::json!({"result":1})));
     }
 
     #[test]
@@ -177,10 +175,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(
-            json,
-            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#
-        );
+        assert_eq!(json, expect(serde_json::json!({"result":1})));
     }
 
     #[test]
@@ -189,10 +184,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(
-            json,
-            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#
-        );
+        assert_eq!(json, expect(serde_json::json!({"result":1})));
     }
 
     #[test]
@@ -201,10 +193,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(
-            json,
-            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#
-        );
+        assert_eq!(json, expect(serde_json::json!({"result":1})));
     }
 
     #[test]
@@ -213,10 +202,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(
-            json,
-            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#
-        );
+        assert_eq!(json, expect(serde_json::json!({"result":1})));
     }
 
     #[test]
@@ -225,10 +211,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(
-            json,
-            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#
-        );
+        assert_eq!(json, expect(serde_json::json!({"result":1})));
     }
 
     #[test]
@@ -237,10 +220,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(
-            json,
-            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#
-        );
+        assert_eq!(json, expect(serde_json::json!({"result":1})));
     }
 
     #[test]
@@ -249,10 +229,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(
-            json,
-            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#
-        );
+        assert_eq!(json, expect(serde_json::json!({"result":1})));
     }
 
     #[test]
@@ -261,10 +238,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(
-            json,
-            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1}}"#
-        );
+        assert_eq!(json, expect(serde_json::json!({"result":1})));
     }
 
     #[test]
@@ -273,10 +247,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(
-            json,
-            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1.5}}"#
-        );
+        assert_eq!(json, expect(serde_json::json!({"result":1.5})));
     }
 
     #[test]
@@ -285,10 +256,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(
-            json,
-            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":1.5}}"#
-        );
+        assert_eq!(json, expect(serde_json::json!({"result":1.5})));
     }
 
     #[test]
@@ -297,10 +265,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(
-            json,
-            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"result":true}}"#
-        );
+        assert_eq!(json, expect(serde_json::json!({"result":true})));
     }
 
     #[test]
@@ -312,10 +277,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(
-            json,
-            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"name":"test"}}"#
-        );
+        assert_eq!(json, expect(serde_json::json!({"name":"test"})));
     }
 
     #[test]
@@ -325,10 +287,7 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
 
-        assert_eq!(
-            json,
-            r#"{"jsonrpc":"2.0","id":"(no id)","result":{"some":"prop"}}"#
-        );
+        assert_eq!(json, expect(serde_json::json!({"some":"prop"})));
     }
 
     #[derive(Serialize)]

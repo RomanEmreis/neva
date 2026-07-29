@@ -1,8 +1,8 @@
 //! Macros for MCP server tools.
 //!
-//! # JSON Schema 2020-12 (`proto-2026-07-28-rc`)
+//! # JSON Schema 2020-12 (MCP 2026-07-28)
 //!
-//! Under the `proto-2026-07-28-rc` feature the generated `inputSchema` /
+//! Under MCP 2026-07-28 the generated `inputSchema` /
 //! `outputSchema` are full JSON Schema 2020-12 documents:
 //!
 //! - **Primitive arguments** (`String`, integers, `bool`, `Vec<_>`, ...) become
@@ -109,7 +109,7 @@ pub(crate) fn expand(
 
     // If no schema is provided, generate it automatically from function arguments.
     let input_schema_code = if let Some(schema_json) = input_schema {
-        if cfg!(feature = "proto-2026-07-28-rc") {
+        if cfg!(not(feature = "legacy-spec")) {
             quote! {
                 .with_input_schema(|_| {
                     neva::types::schema_2020::InputSchema::from_json_str(#schema_json).unwrap_or_default()
@@ -123,8 +123,8 @@ pub(crate) fn expand(
             }
         }
     } else if !no_schema {
-        if cfg!(feature = "proto-2026-07-28-rc") {
-            // RC: assemble a JSON Schema 2020-12 object schema via neva helpers
+        if cfg!(not(feature = "legacy-spec")) {
+            // 2026-07-28: assemble a JSON Schema 2020-12 object schema via neva helpers
             // so generated code never names `serde_json`. Primitive args use
             // `primitive_subschema`; object/custom args use
             // `__tool_arg_subschema!` (rich-or-fallback).
@@ -198,7 +198,7 @@ pub(crate) fn expand(
 
     // If no schema is provided, generate it automatically from the return type.
     let output_schema_code = if let Some(output_schema_json) = output_schema {
-        if cfg!(feature = "proto-2026-07-28-rc") {
+        if cfg!(not(feature = "legacy-spec")) {
             quote! {
                 .with_output_schema(|_| {
                     neva::types::schema_2020::InputSchema::from_json_str(#output_schema_json).unwrap_or_default()
@@ -221,7 +221,7 @@ pub(crate) fn expand(
                         Some(inner_type) => quote! { #inner_type },
                         None => quote! { #return_type },
                     };
-                    if cfg!(feature = "proto-2026-07-28-rc") {
+                    if cfg!(not(feature = "legacy-spec")) {
                         quote! {
                             .with_output_schema(|_| {
                                 neva::types::schema_2020::InputSchema::from_schema::<#target>()

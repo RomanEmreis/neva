@@ -13,7 +13,9 @@ pub(crate) use requests_queue::RequestQueue;
 pub(crate) use sse_session_registry::SseSessionRegistry;
 #[cfg(all(feature = "tasks", feature = "server"))]
 pub(crate) use task_tracker::TaskHandle;
-#[cfg(feature = "tasks")]
+// The tracker backs the server's task substrate; a client only holds one to
+// host tasks for legacy server->client requests.
+#[cfg(all(feature = "tasks", any(feature = "server", feature = "legacy-spec")))]
 pub(crate) use task_tracker::TaskTracker;
 
 pub(crate) use arc_slice::ArcSlice;
@@ -36,13 +38,22 @@ mod message_registry;
 #[cfg(feature = "http-client")]
 pub mod mt;
 mod one_or_many;
+// `x-mcp-header` is an obligation on both ends of the Streamable HTTP
+// transport: the client mirrors annotated arguments into headers, and the
+// server checks that what arrived in the headers is what the body actually
+// carries. Clients on other transports may ignore the annotations entirely.
+#[cfg(all(
+    any(feature = "http-client", feature = "http-server"),
+    not(feature = "legacy-spec")
+))]
+pub(crate) mod param_headers;
 #[cfg(any(feature = "server", feature = "client"))]
 mod requests_queue;
 #[cfg(feature = "http-server")]
 mod sse_session_registry;
 #[cfg(feature = "tasks")]
 mod task_api;
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", any(feature = "server", feature = "legacy-spec")))]
 mod task_tracker;
 
 /// The future returned by neva's object-safe async traits -- a boxed,
@@ -143,24 +154,24 @@ async fn wait_for_shutdown_signal_impl() -> std::io::Result<()> {
 /// Which protocol generation the connected peer speaks -- the runtime
 /// switch behind the dual-mode client (issue #84).
 ///
-/// An RC-flagged client starts in RC mode (`server/discover`, stateless,
+/// An 2026-07-28 client starts in 2026-07-28 mode (`server/discover`, stateless,
 /// MRTR) and flips to legacy exactly once, in `Client::connect`'s
 /// fallback, before any other traffic -- so nothing races the switch.
 /// The legacy build has no switch: it is legacy by construction.
 ///
 /// Cheap to clone; all clones observe the same flip.
-#[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+#[cfg(all(feature = "client", not(feature = "legacy-spec")))]
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PeerMode(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
-#[cfg(all(feature = "client", feature = "proto-2026-07-28-rc"))]
+#[cfg(all(feature = "client", not(feature = "legacy-spec")))]
 impl PeerMode {
-    /// Marks the peer as a legacy (pre-RC) server.
+    /// Marks the peer as a legacy (legacy) server.
     pub(crate) fn set_legacy(&self) {
         self.0.store(true, std::sync::atomic::Ordering::Release);
     }
 
-    /// Whether the peer speaks the legacy (pre-RC) protocol.
+    /// Whether the peer speaks the legacy (legacy) protocol.
     pub(crate) fn is_legacy(&self) -> bool {
         self.0.load(std::sync::atomic::Ordering::Acquire)
     }
@@ -168,7 +179,7 @@ impl PeerMode {
 
 /// MRTR-eligible client requests (the only ones that may receive an
 /// `InputRequiredResult`).
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 pub(crate) fn is_mrtr_method(method: &str) -> bool {
     matches!(
         method,

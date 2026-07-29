@@ -22,31 +22,44 @@ use crate::transport::http::HttpClient;
 const DEFAULT_REQUEST_TIMEOUT: u64 = 10; // 10 seconds
 
 /// Default cap on MRTR re-issue rounds for a single request or a batched one.
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 const DEFAULT_MAX_MRTR_ROUNDS: usize = 8;
 
 /// W3C Trace Context payload supplied by [`TraceContextProvider`] and
 /// injected into the outbound request's `_meta`.
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 #[derive(Debug, Clone)]
 pub struct TraceContext {
     /// `traceparent` carrier; always required when a context is returned.
     pub traceparent: String,
     /// Vendor-specific `tracestate`, when available.
     pub tracestate: Option<String>,
+    /// W3C `baggage` -- application-defined key/value context propagated
+    /// alongside the trace, when available.
+    pub baggage: Option<String>,
 }
 
 /// User-supplied callback that returns the current W3C Trace Context.
 ///
 /// Invoked once per outbound request (before serialization). Return
 /// `None` to omit trace headers from this request.
-#[cfg(feature = "proto-2026-07-28-rc")]
-pub type TraceContextProvider = std::sync::Arc<dyn Fn() -> Option<TraceContext> + Send + Sync>;
+#[cfg(not(feature = "legacy-spec"))]
+pub type TraceContextProvider = Arc<dyn Fn() -> Option<TraceContext> + Send + Sync>;
 
 /// Represents MCP client configuration options
 pub struct McpOptions {
     /// Information of current client's implementation
     pub(crate) implementation: Implementation,
+
+    /// `x-mcp-header` annotations recorded from `tools/list`, shared with the
+    /// HTTP transport so a `tools/call` can mirror the designated arguments.
+    #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+    pub(crate) param_headers: crate::shared::param_headers::Registry,
+
+    /// Tools the current listing withdrew over a malformed `x-mcp-header`
+    /// declaration, kept so a call naming one anyway can be refused.
+    #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+    pub(crate) rejected_tools: std::collections::HashSet<String>,
 
     /// Request timeout
     pub(super) timeout: Duration,
@@ -84,24 +97,24 @@ pub struct McpOptions {
 
     /// Optional W3C Trace Context provider. Invoked before each outbound
     /// request; the returned tuple is injected into the request's `_meta`.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub(crate) trace_context_provider: Option<TraceContextProvider>,
 
     /// Cap on MRTR re-issue rounds before the client gives up on a request
     /// (guards against a server that never converges).
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub(crate) max_mrtr_rounds: usize,
 
     /// The dual-mode runtime switch: which protocol generation the
     /// connected peer speaks. Shared with the transport so per-request
     /// behavior (headers) follows the handshake outcome.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub(crate) peer_mode: crate::shared::PeerMode,
 
     /// Request-scoped logging level attached to every outbound request's
     /// `_meta["io.modelcontextprotocol/logLevel"]` (MCP 2026-07-28). Replaces
     /// the removed global `logging/setLevel`.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub(crate) log_level: Option<crate::types::notification::LoggingLevel>,
 }
 
@@ -134,6 +147,10 @@ impl Default for McpOptions {
         Self {
             timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT),
             implementation: Default::default(),
+            #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+            param_headers: Default::default(),
+            #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+            rejected_tools: Default::default(),
             roots: Default::default(),
             roots_capability: None,
             sampling_capability: None,
@@ -145,13 +162,13 @@ impl Default for McpOptions {
             sampling_handler: None,
             elicitation_handler: None,
             notification_handler: None,
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             trace_context_provider: None,
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             max_mrtr_rounds: DEFAULT_MAX_MRTR_ROUNDS,
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             peer_mode: Default::default(),
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             log_level: None,
         }
     }
@@ -205,10 +222,10 @@ impl McpOptions {
     ///
     /// Default: last available protocol version
     ///
-    /// Under `proto-2026-07-28-rc` the RC version itself is fixed -- the
+    /// Under MCP 2026-07-28 the 2026-07-28 version itself is fixed -- the
     /// value set here only selects which **legacy** version the
     /// dual-mode fallback negotiates when a server rejects
-    /// `server/discover` (default: the newest pre-RC version).
+    /// `server/discover` (default: the newest legacy version).
     pub fn with_mcp_version(mut self, ver: &'static str) -> Self {
         self.protocol_ver = Some(ver);
         self
@@ -216,7 +233,7 @@ impl McpOptions {
 
     /// Configures Roots capability
     #[deprecated(
-        note = "Roots are deprecated in MCP 2026-07-28: the capability-driven `roots/list` request is gone and the ability is re-homed onto MRTR -- see `Context::list_roots`. Under the RC this configures what the client answers MRTR `roots/list` input requests with."
+        note = "Roots are deprecated in MCP 2026-07-28: the capability-driven `roots/list` request is gone and the ability is re-homed onto MRTR -- see `Context::list_roots`. Under MCP 2026-07-28 this configures what the client answers MRTR `roots/list` input requests with."
     )]
     pub fn with_roots<T>(mut self, config: T) -> Self
     where
@@ -249,11 +266,35 @@ impl McpOptions {
 
     /// Configures tasks capability
     #[cfg(feature = "tasks")]
+    #[cfg(feature = "legacy-spec")]
     pub fn with_tasks<T>(mut self, config: T) -> Self
     where
         T: FnOnce(ClientTasksCapability) -> ClientTasksCapability,
     {
         self.tasks_capability = Some(config(Default::default()));
+        self
+    }
+
+    /// Declares support for the Tasks extension.
+    ///
+    /// Under MCP 2026-07-28 the extension capability carries no settings --
+    /// declaring it at all is what tells the server this client can handle a
+    /// `CreateTaskResult` -- so this takes no configuration.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use neva::Client;
+    ///
+    /// let client = Client::new().with_options(|opt| opt.with_tasks());
+    /// # let _ = client;
+    /// ```
+    ///
+    /// Requires the `tasks` feature.
+    #[cfg(feature = "tasks")]
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn with_tasks(mut self) -> Self {
+        self.tasks_capability = Some(ClientTasksCapability::default());
         self
     }
 
@@ -284,7 +325,7 @@ impl McpOptions {
     /// let client = Client::new()
     ///     .with_options(|o| o.with_max_mrtr_rounds(16));
     /// ```
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub fn with_max_mrtr_rounds(mut self, rounds: usize) -> Self {
         self.max_mrtr_rounds = rounds;
         self
@@ -309,7 +350,7 @@ impl McpOptions {
     /// let client = Client::new()
     ///     .with_options(|o| o.with_log_level(LoggingLevel::Warning));
     /// ```
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[deprecated(
         note = "Request-scoped logging is deprecated in MCP 2026-07-28 and may be removed in a future revision."
     )]
@@ -320,7 +361,7 @@ impl McpOptions {
 
     /// Installs a W3C Trace Context provider. Called before each outbound
     /// request; the returned [`TraceContext`] is injected into `_meta`.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub fn with_trace_context_provider<F>(mut self, f: F) -> Self
     where
         F: Fn() -> Option<TraceContext> + Send + Sync + 'static,
@@ -331,10 +372,10 @@ impl McpOptions {
 
     /// Returns a Model Context Protocol version that client supports
     ///
-    /// Under `proto-2026-07-28-rc` the RC version is pinned and the
+    /// Under MCP 2026-07-28 the 2026-07-28 version is pinned and the
     /// legacy override is read via
     /// [`legacy_protocol_ver`](Self::legacy_protocol_ver) instead.
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[cfg(feature = "legacy-spec")]
     #[inline]
     pub(crate) fn protocol_ver(&self) -> &'static str {
         match self.protocol_ver {
@@ -349,29 +390,30 @@ impl McpOptions {
         // Hand the dual-mode switch to the HTTP transport so request
         // headers follow the negotiated protocol generation. Only the
         // HTTP transport carries them, so this is gated on `http-client`
-        // as well -- stdio-only RC clients (no `TransportProto::HttpClient`
+        // as well -- stdio-only 2026-07-28 clients (no `TransportProto::HttpClient`
         // variant at all) pass the transport through untouched.
-        #[cfg(all(feature = "proto-2026-07-28-rc", feature = "http-client"))]
+        #[cfg(all(not(feature = "legacy-spec"), feature = "http-client"))]
         let transport = match transport {
-            TransportProto::HttpClient(http) => {
-                TransportProto::HttpClient(Box::new(http.with_peer_mode(self.peer_mode.clone())))
-            }
+            TransportProto::HttpClient(http) => TransportProto::HttpClient(Box::new(
+                http.with_peer_mode(self.peer_mode.clone())
+                    .with_param_headers(self.param_headers.clone()),
+            )),
             other => other,
         };
         transport
     }
 
-    /// The newest pre-RC protocol version -- what the dual-mode fallback
+    /// The newest legacy protocol version -- what the dual-mode fallback
     /// negotiates with a legacy peer. Honors a legacy
     /// [`with_mcp_version`](Self::with_mcp_version) override.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub(crate) fn legacy_protocol_ver(&self) -> &'static str {
         match self.protocol_ver {
-            Some(ver) if ver != crate::RC_PROTOCOL_VERSION => ver,
+            Some(ver) if ver != crate::LATEST_PROTOCOL_VERSION => ver,
             _ => PROTOCOL_VERSIONS
                 .iter()
                 .rev()
-                .find(|ver| **ver != crate::RC_PROTOCOL_VERSION)
+                .find(|ver| **ver != crate::LATEST_PROTOCOL_VERSION)
                 .copied()
                 .unwrap_or("2025-11-25"),
         }
@@ -504,12 +546,13 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     fn trace_context_provider_can_be_installed() {
         let opts = McpOptions::default().with_trace_context_provider(|| {
             Some(TraceContext {
                 traceparent: "tp".into(),
                 tracestate: Some("ts".into()),
+                baggage: Some("bg".into()),
             })
         });
         let tc = (opts.trace_context_provider.as_ref().unwrap())().unwrap();

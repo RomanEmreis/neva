@@ -69,8 +69,8 @@ const LAST_EVENT_ID: HeaderName = HeaderName::from_static("last-event-id");
 const SSE_RECONNECT_DELAY: Duration = Duration::from_secs(3);
 const STREAM_ENDED_BEFORE_RESPONSE: &str = "POST SSE stream ended before the response arrived";
 
-#[cfg(feature = "proto-2026-07-28-rc")]
-fn routing_hints(msg: &Message) -> Option<(&str, Option<&str>)> {
+#[cfg(not(feature = "legacy-spec"))]
+fn routing_hints(msg: &Message) -> Option<(&str, Option<String>)> {
     match msg {
         Message::Request(r) => Some((r.method.as_str(), name_param(r))),
         Message::Notification(n) => Some((n.method.as_str(), None)),
@@ -78,19 +78,75 @@ fn routing_hints(msg: &Message) -> Option<(&str, Option<&str>)> {
     }
 }
 
-#[cfg(feature = "proto-2026-07-28-rc")]
-fn name_param(req: &crate::types::Request) -> Option<&str> {
-    if req.method != crate::types::tool::commands::CALL {
-        return None;
+/// The `Mcp-Name` value for `req`, already header-encoded.
+///
+/// The spec requires the header on `tools/call`, `resources/read` and
+/// `prompts/get` (sourced from `params.name` / `params.uri`); the Tasks
+/// extension adds `params.taskId` on its own methods so an intermediary can
+/// route every call for a task to the instance holding its state.
+#[cfg(not(feature = "legacy-spec"))]
+fn name_param(req: &crate::types::Request) -> Option<String> {
+    #[cfg(feature = "tasks")]
+    {
+        use crate::types::task::commands as tasks;
+        if matches!(
+            req.method.as_str(),
+            tasks::GET | tasks::UPDATE | tasks::CANCEL
+        ) {
+            let raw = req.params.as_ref()?.as_object()?.get("taskId")?.as_str()?;
+            return Some(crate::transport::http::encode_header_value(raw));
+        }
     }
-    req.params.as_ref()?.as_object()?.get("name")?.as_str()
+
+    let field = match req.method.as_str() {
+        crate::types::tool::commands::CALL | crate::types::prompt::commands::GET => "name",
+        crate::types::resource::commands::READ => "uri",
+        _ => return None,
+    };
+
+    let raw = req.params.as_ref()?.as_object()?.get(field)?.as_str()?;
+
+    Some(crate::transport::http::encode_header_value(raw))
+}
+
+/// The `Mcp-Param-*` headers a `tools/call` mirrors, per the called tool's
+/// registered `x-mcp-header` annotations.
+///
+/// A batch mirrors nothing, for the same reason it carries no `Mcp-Method` or
+/// `Mcp-Name`: one set of headers cannot describe several calls, and two
+/// batched calls of the same tool would fight over one header name. Batching an
+/// annotated call therefore hides it from header-based routing -- the servers
+/// on the other end skip the matching check rather than reject it -- so a
+/// caller that needs an intermediary to see a call should send it on its own.
+#[cfg(not(feature = "legacy-spec"))]
+fn param_headers(
+    msg: &Message,
+    registry: &crate::shared::param_headers::Registry,
+) -> Vec<(String, String)> {
+    let Message::Request(req) = msg else {
+        return Vec::new();
+    };
+    if req.method != crate::types::tool::commands::CALL {
+        return Vec::new();
+    }
+    let Some(params) = req.params.as_ref().and_then(|p| p.as_object()) else {
+        return Vec::new();
+    };
+    let Some(name) = params.get("name").and_then(|n| n.as_str()) else {
+        return Vec::new();
+    };
+    let Some(entry) = registry.get(name) else {
+        return Vec::new();
+    };
+    let args = params.get("arguments").cloned().unwrap_or_default();
+    crate::shared::param_headers::extract(entry.value(), &args)
 }
 
 pub(super) async fn connect(rt: ClientRuntimeContext, token: CancellationToken) {
     let session = Arc::new(McpSession::new(
         rt.url,
         token,
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         rt.peer_mode.clone(),
     ));
 
@@ -104,14 +160,16 @@ pub(super) async fn connect(rt: ClientRuntimeContext, token: CancellationToken) 
 
     // The SSE task arms itself only when a legacy `initialize` handshake
     // completes (`session.initialized()` fires exclusively for the
-    // `initialize` method) -- against an RC peer it stays parked until
-    // cancellation, so the stateless RC transport still issues only POSTs.
+    // `initialize` method) -- against a 2026-07-28 peer it stays parked until
+    // cancellation, so the stateless 2026-07-28 transport still issues only POSTs.
     tokio::join!(
         handle_connection(
             session.clone(),
             rt.rx,
             rt.tx.clone(),
             auth.clone(),
+            #[cfg(not(feature = "legacy-spec"))]
+            rt.param_headers.clone(),
             #[cfg(feature = "client-tls")]
             rt.tls_config.clone()
         ),
@@ -130,6 +188,7 @@ async fn handle_connection(
     mut sender_rx: mpsc::Receiver<Message>,
     recv_tx: mpsc::Sender<Result<Message, Error>>,
     auth: ClientAuth,
+    #[cfg(not(feature = "legacy-spec"))] param_registry: crate::shared::param_headers::Registry,
     #[cfg(feature = "client-tls")] tls_config: Option<ClientTlsConfig>,
 ) {
     #[cfg(not(feature = "client-tls"))]
@@ -168,7 +227,9 @@ async fn handle_connection(
                     session.clone(),
                     req,
                     recv_tx.clone(),
-                    auth.clone()
+                    auth.clone(),
+                    #[cfg(not(feature = "legacy-spec"))]
+                    param_registry.clone(),
                 ));
             }
         }
@@ -182,6 +243,7 @@ fn build_post(
     session: &McpSession,
     req: &Message,
     bearer: Option<&str>,
+    #[cfg(not(feature = "legacy-spec"))] param_registry: &crate::shared::param_headers::Registry,
 ) -> RequestBuilder {
     let mut resp = client
         .post(session.url())
@@ -193,13 +255,13 @@ fn build_post(
         resp = resp.header(MCP_SESSION_ID, session_id.to_string())
     }
 
-    // RC-peer routing headers: legacy servers never negotiated them, so
+    // 2026-07-28-peer routing headers: legacy servers never negotiated them, so
     // a peer that fell back to `initialize` gets the same wire shape a
-    // pure legacy client produces (no routing headers, no RC protocol
+    // pure legacy client produces (no routing headers, no 2026-07-28 protocol
     // version). Routing headers are exercised end-to-end via the
     // trace-context integration; unit-level hint extraction is tested in
     // `routing_hints_tests`.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     if !session.is_legacy() {
         if let Some((method, name)) = routing_hints(req) {
             resp = resp.header(crate::transport::http::MCP_METHOD, method);
@@ -207,9 +269,12 @@ fn build_post(
                 resp = resp.header(crate::transport::http::MCP_NAME, n);
             }
         }
+        for (name, value) in param_headers(req, param_registry) {
+            resp = resp.header(name, crate::transport::http::encode_header_value(&value));
+        }
         resp = resp.header(
             crate::transport::http::MCP_PROTOCOL_VERSION,
-            crate::RC_PROTOCOL_VERSION,
+            crate::LATEST_PROTOCOL_VERSION,
         );
     }
 
@@ -225,11 +290,19 @@ async fn send_request(
     req: Message,
     resp_tx: mpsc::Sender<Result<Message, Error>>,
     auth: ClientAuth,
+    #[cfg(not(feature = "legacy-spec"))] param_registry: crate::shared::param_headers::Registry,
 ) {
     let bearer = auth.fresh_bearer().await;
-    let resp = match build_post(&client, &session, &req, bearer.as_deref())
-        .send()
-        .await
+    let resp = match build_post(
+        &client,
+        &session,
+        &req,
+        bearer.as_deref(),
+        #[cfg(not(feature = "legacy-spec"))]
+        &param_registry,
+    )
+    .send()
+    .await
     {
         Ok(resp) => resp,
         Err(_err) => {
@@ -256,9 +329,16 @@ async fn send_request(
                 .await
             {
                 Ok(fresh) => {
-                    match build_post(&client, &session, &req, Some(&fresh))
-                        .send()
-                        .await
+                    match build_post(
+                        &client,
+                        &session,
+                        &req,
+                        Some(&fresh),
+                        #[cfg(not(feature = "legacy-spec"))]
+                        &param_registry,
+                    )
+                    .send()
+                    .await
                     {
                         Ok(retried) => retried,
                         Err(_err) => {
@@ -331,7 +411,7 @@ async fn send_request(
         // response would otherwise leave the originating request sitting in the
         // pending queue until it times out. Fail it now, id-bound, exactly like
         // the non-JSON-RPC reply path below. `InternalError` (not `ParseError`)
-        // on purpose: the peer clearly speaks RC, so this must not be mistaken
+        // on purpose: the peer clearly speaks 2026-07-28, so this must not be mistaken
         // for dual-mode fallback evidence.
         if !answered {
             #[cfg(feature = "tracing")]
@@ -388,7 +468,7 @@ async fn send_request(
 ///
 /// The code matters beyond diagnostics: `ParseError` is one of the
 /// dual-mode fallback triggers (issue #84), so it must be produced *only*
-/// for replies that genuinely suggest "this peer doesn't know the RC
+/// for replies that genuinely suggest "this peer doesn't know the 2026-07-28
 /// method/route" -- an allowlist, not a catch-all:
 ///
 /// * any `2xx` -- a legacy peer answering `server/discover` on the wire but
@@ -402,9 +482,9 @@ async fn send_request(
 /// peer's protocol generation and must surface as-is
 /// (`InternalError`, like "Connection closed"):
 /// `401`/`403`/`407` (authentication -- otherwise a failed login against a
-/// valid RC server reads as "legacy"), `429` (rate limit) and every `5xx`
+/// valid 2026-07-28 server reads as "legacy"), `429` (rate limit) and every `5xx`
 /// (reverse-proxy outage, gateway timeout). Treating those as legacy
-/// evidence would silently drop the RC headers, retry `initialize` into
+/// evidence would silently drop the 2026-07-28 headers, retry `initialize` into
 /// the same outage, and bury the real cause.
 #[inline]
 fn parse_failure(status: reqwest::StatusCode, err: &impl std::fmt::Display) -> (ErrorCode, String) {
@@ -765,7 +845,7 @@ mod tests {
         Arc::new(McpSession::new(
             ServiceUrl::default(),
             CancellationToken::new(),
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             Default::default(),
         ))
     }
@@ -776,7 +856,7 @@ mod tests {
     /// Only statuses that actually suggest an unknown method/route may
     /// yield `ParseError` -- the dual-mode fallback trigger. Upstream
     /// failures (auth, rate limit, 5xx) must stay `InternalError` so a
-    /// valid RC peer is never mistaken for a legacy one.
+    /// valid 2026-07-28 peer is never mistaken for a legacy one.
     #[test]
     fn parse_failure_classifies_statuses() {
         let cases = [
@@ -1019,9 +1099,10 @@ mod tests {
 }
 
 #[cfg(test)]
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 mod routing_hints_tests {
-    use super::routing_hints;
+    use super::{name_param, routing_hints};
+    use crate::transport::http::encode_header_value;
     use crate::types::notification::Notification;
     use crate::types::{Message, Request, RequestId};
     use serde_json::json;
@@ -1045,7 +1126,54 @@ mod routing_hints_tests {
         let msg = Message::Request(req);
         let hints = routing_hints(&msg).unwrap();
         assert_eq!(hints.0, "tools/call");
-        assert_eq!(hints.1, Some("echo"));
+        assert_eq!(hints.1.as_deref(), Some("echo"));
+    }
+
+    /// The spec requires `Mcp-Name` on `tools/call`, `resources/read` and
+    /// `prompts/get`, sourced from `params.name` / `params.uri`.
+    #[test]
+    #[cfg(not(feature = "legacy-spec"))]
+    fn name_header_is_sourced_per_method() {
+        use crate::types::{Request, RequestId};
+        use serde_json::json;
+
+        let cases = [
+            ("tools/call", json!({ "name": "echo" }), Some("echo")),
+            (
+                "prompts/get",
+                json!({ "name": "greeting" }),
+                Some("greeting"),
+            ),
+            (
+                "resources/read",
+                json!({ "uri": "file:///a.txt" }),
+                Some("file:///a.txt"),
+            ),
+            ("tools/list", json!({}), None),
+        ];
+
+        for (method, params, expected) in cases {
+            let req = Request::new(Some(RequestId::Number(1)), method, Some(params));
+            assert_eq!(name_param(&req).as_deref(), expected, "method: {method}");
+        }
+    }
+
+    #[test]
+    #[cfg(not(feature = "legacy-spec"))]
+    fn header_values_are_encoded_when_not_ascii_safe() {
+        // Plain ASCII passes through...
+        assert_eq!(encode_header_value("us-west1"), "us-west1");
+        // ...anything else travels Base64 behind the sentinel.
+        assert_eq!(encode_header_value("caf\u{e9}"), "=?base64?Y2Fmw6k=?=");
+        assert_eq!(encode_header_value(" lead"), "=?base64?IGxlYWQ=?=");
+        assert_eq!(encode_header_value("trail "), "=?base64?dHJhaWwg?=");
+        assert_eq!(encode_header_value("a\nb"), "=?base64?YQpi?=");
+        // A plain value that looks like the sentinel must be encoded too, or a
+        // server would decode something the client never encoded.
+        assert_eq!(
+            encode_header_value("=?base64?zzz?="),
+            "=?base64?PT9iYXNlNjQ/enp6Pz0=?="
+        );
     }
 
     #[test]

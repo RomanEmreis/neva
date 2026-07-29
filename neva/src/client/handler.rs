@@ -24,19 +24,20 @@ use tokio::sync::RwLock;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-#[cfg(feature = "tasks")]
-use crate::types::CreateMessageRequestParams;
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 use crate::{
     shared::TaskTracker,
-    types::{
-        CancelTaskRequestParams, CreateTaskResult, ElicitRequestParams,
-        GetTaskPayloadRequestParams, GetTaskRequestParams, ListTasksRequestParams, ListTasksResult,
-        Pagination, Task,
-    },
+    types::{CreateMessageRequestParams, CreateTaskResult, ElicitRequestParams, Task},
+};
+// The client hosts tasks only for server->client task-augmented requests, and
+// MCP 2026-07-28 has no server->client requests at all.
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
+use crate::types::{
+    CancelTaskRequestParams, GetTaskPayloadRequestParams, GetTaskRequestParams,
+    ListTasksRequestParams, ListTasksResult, Pagination,
 };
 
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 const DEFAULT_PAGE_SIZE: usize = 10;
 
 struct Roots {
@@ -77,14 +78,14 @@ pub(super) struct RequestHandler {
     /// Represents a hash map of notification handlers
     notification_handler: Option<Arc<NotificationsHandler>>,
 
-    /// Task tracker for client sampling tasks.
-    #[cfg(feature = "tasks")]
+    /// Task tracker for client-hosted tasks (legacy server->client requests).
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     tasks: Arc<TaskTracker>,
 
     /// Which protocol generation the peer speaks (issue #84) -- shared with
     /// [`Client`](crate::client::Client), so the dual-mode fallback's flip
     /// is observed by the receive loop.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     peer_mode: crate::shared::PeerMode,
 }
 
@@ -104,10 +105,23 @@ impl Roots {
 
             let roots = roots.inner.clone();
             let mut sender = notifications_sender.clone();
+            // `notifications/roots/list_changed` is removed in MCP 2026-07-28:
+            // the server reads roots on the MRTR loop, so a change is simply
+            // picked up on the next ask. A peer reached through the dual-mode
+            // fallback speaks the legacy protocol, though, and negotiated
+            // `roots.listChanged` on it -- so whether to push is a property of
+            // the handshake outcome, not of how this build was compiled.
+            #[cfg(not(feature = "legacy-spec"))]
+            let peer_mode = options.peer_mode.clone();
             tokio::spawn(async move {
                 while let Some(new_roots) = rx.recv().await {
                     let mut current_roots = roots.write().await;
                     *current_roots = new_roots;
+
+                    #[cfg(not(feature = "legacy-spec"))]
+                    if !peer_mode.is_legacy() {
+                        continue;
+                    }
 
                     let changed =
                         Notification::new(crate::types::root::commands::LIST_CHANGED, None);
@@ -153,9 +167,9 @@ impl RequestHandler {
             sampling_handler: options.sampling_handler.clone(),
             elicitation_handler: options.elicitation_handler.clone(),
             notification_handler: options.notification_handler.clone(),
-            #[cfg(feature = "tasks")]
+            #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
             tasks: Arc::new(TaskTracker::new()),
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             peer_mode: options.peer_mode.clone(),
         };
 
@@ -231,7 +245,7 @@ impl RequestHandler {
     /// per request (in input order). [`MessageEnvelope::Notification`] items
     /// are included in the wire payload but produce no receiver slot.
     ///
-    /// > **Note:** under `proto-2026-07-28-rc`, per-request client metadata
+    /// > **Note:** under MCP 2026-07-28, per-request client metadata
     /// > (`clientInfo` / `clientCapabilities`, plus `_meta.traceparent` /
     /// > `tracestate` when a trace-context provider is installed) is injected
     /// > upstream by
@@ -277,7 +291,7 @@ impl RequestHandler {
 
     /// Sends the response to MCP server
     #[inline]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     pub(super) async fn send_response(&mut self, resp: Response) {
         send_response_impl(&mut self.sender, resp).await;
     }
@@ -305,9 +319,9 @@ impl RequestHandler {
         let elicitation_handler = self.elicitation_handler.clone();
         let notification_handler = self.notification_handler.clone();
 
-        #[cfg(feature = "tasks")]
+        #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
         let tasks = self.tasks.clone();
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         let peer_mode = self.peer_mode.clone();
 
         tokio::task::spawn(async move {
@@ -320,9 +334,9 @@ impl RequestHandler {
                             &roots,
                             &sampling_handler,
                             &elicitation_handler,
-                            #[cfg(feature = "tasks")]
+                            #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
                             &tasks,
-                            #[cfg(feature = "proto-2026-07-28-rc")]
+                            #[cfg(not(feature = "legacy-spec"))]
                             &peer_mode,
                         )
                         .await;
@@ -358,9 +372,9 @@ impl RequestHandler {
                             &sampling_handler,
                             &elicitation_handler,
                             &notification_handler,
-                            #[cfg(feature = "tasks")]
+                            #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
                             &tasks,
-                            #[cfg(feature = "proto-2026-07-28-rc")]
+                            #[cfg(not(feature = "legacy-spec"))]
                             &peer_mode,
                         )
                         .await;
@@ -388,8 +402,8 @@ async fn dispatch_batch_deferred(
     sampling_handler: &Option<SamplingHandler>,
     elicitation_handler: &Option<ElicitationHandler>,
     notification_handler: &Option<Arc<NotificationsHandler>>,
-    #[cfg(feature = "tasks")] tasks: &Arc<TaskTracker>,
-    #[cfg(feature = "proto-2026-07-28-rc")] peer_mode: &crate::shared::PeerMode,
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))] tasks: &Arc<TaskTracker>,
+    #[cfg(not(feature = "legacy-spec"))] peer_mode: &crate::shared::PeerMode,
 ) -> Vec<MessageEnvelope> {
     use futures_util::future::join_all;
 
@@ -402,9 +416,9 @@ async fn dispatch_batch_deferred(
                     roots,
                     sampling_handler,
                     elicitation_handler,
-                    #[cfg(feature = "tasks")]
+                    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
                     tasks,
-                    #[cfg(feature = "proto-2026-07-28-rc")]
+                    #[cfg(not(feature = "legacy-spec"))]
                     peer_mode,
                 )
                 .await,
@@ -432,10 +446,10 @@ async fn send_response_impl(sender: &mut TransportProtoSender, resp: Response) {
 /// [`ErrorCode::MethodNotFound`] error response so the peer is never left
 /// waiting for a reply that will never arrive.
 ///
-/// Under `proto-2026-07-28-rc` the legacy server-initiated methods
+/// Under MCP 2026-07-28 the legacy server-initiated methods
 /// (`sampling/createMessage`, `roots/list`) are dispatched **only** once the
-/// dual-mode fallback (issue #84) has marked the peer legacy: an RC client
-/// advertises neither capability, so an RC peer asking for them is out of
+/// dual-mode fallback (issue #84) has marked the peer legacy: a 2026-07-28 client
+/// advertises neither capability, so a 2026-07-28 peer asking for them is out of
 /// contract and is answered `MethodNotFound` like any unknown method,
 /// instead of silently running the configured handler.
 #[inline]
@@ -444,14 +458,14 @@ async fn dispatch_request(
     roots: &Arc<RwLock<Vec<Root>>>,
     sampling_handler: &Option<SamplingHandler>,
     elicitation_handler: &Option<ElicitationHandler>,
-    #[cfg(feature = "tasks")] tasks: &Arc<TaskTracker>,
-    #[cfg(feature = "proto-2026-07-28-rc")] peer_mode: &crate::shared::PeerMode,
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))] tasks: &Arc<TaskTracker>,
+    #[cfg(not(feature = "legacy-spec"))] peer_mode: &crate::shared::PeerMode,
 ) -> Response {
-    // The legacy build is legacy by construction; the RC build reads the
+    // The legacy build is legacy by construction; the 2026-07-28 build reads the
     // switch per dispatch so a post-fallback flip is observed immediately.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     let legacy_peer = peer_mode.is_legacy();
-    #[cfg(not(feature = "proto-2026-07-28-rc"))]
+    #[cfg(feature = "legacy-spec")]
     let legacy_peer = true;
 
     let req_id = req.id();
@@ -460,7 +474,7 @@ async fn dispatch_request(
             handle_sampling(
                 req,
                 sampling_handler,
-                #[cfg(feature = "tasks")]
+                #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
                 tasks,
             )
             .await
@@ -469,19 +483,19 @@ async fn dispatch_request(
             handle_elicitation(
                 req,
                 elicitation_handler,
-                #[cfg(feature = "tasks")]
+                #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
                 tasks,
             )
             .await
         }
         crate::types::root::commands::LIST if legacy_peer => handle_roots(req, roots).await,
-        #[cfg(feature = "tasks")]
+        #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
         crate::types::task::commands::RESULT => get_task_result(req, tasks).await,
-        #[cfg(feature = "tasks")]
+        #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
         crate::types::task::commands::LIST => handle_list_tasks(req, tasks),
-        #[cfg(feature = "tasks")]
+        #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
         crate::types::task::commands::CANCEL => cancel_task(req, tasks),
-        #[cfg(feature = "tasks")]
+        #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
         crate::types::task::commands::GET => get_task(req, tasks),
         _ => ErrorCode::MethodNotFound.into_response(req_id),
     }
@@ -512,7 +526,7 @@ async fn handle_roots(req: Request, roots: &Arc<RwLock<Vec<Root>>>) -> Response 
 }
 
 #[inline]
-#[cfg(not(feature = "tasks"))]
+#[cfg(any(not(feature = "tasks"), not(feature = "legacy-spec")))]
 async fn handle_sampling(req: Request, handler: &Option<SamplingHandler>) -> Response {
     let id = req.id();
     if let Some(handler) = &handler {
@@ -536,7 +550,7 @@ async fn handle_sampling(req: Request, handler: &Option<SamplingHandler>) -> Res
 }
 
 #[inline]
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 async fn handle_sampling(
     req: Request,
     handler: &Option<SamplingHandler>,
@@ -583,7 +597,7 @@ async fn handle_sampling(
 }
 
 #[inline]
-#[cfg(not(feature = "tasks"))]
+#[cfg(any(not(feature = "tasks"), not(feature = "legacy-spec")))]
 async fn handle_elicitation(req: Request, handler: &Option<ElicitationHandler>) -> Response {
     let id = req.id();
     if let Some(handler) = &handler {
@@ -607,7 +621,7 @@ async fn handle_elicitation(req: Request, handler: &Option<ElicitationHandler>) 
 }
 
 #[inline]
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 async fn handle_elicitation(
     req: Request,
     handler: &Option<ElicitationHandler>,
@@ -656,7 +670,7 @@ async fn handle_elicitation(
 }
 
 #[inline]
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 fn handle_list_tasks(req: Request, tasks: &Arc<TaskTracker>) -> Response {
     let id = req.id();
     let cursor = match req.params {
@@ -670,7 +684,7 @@ fn handle_list_tasks(req: Request, tasks: &Arc<TaskTracker>) -> Response {
 }
 
 #[inline]
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 fn cancel_task(req: Request, tasks: &Arc<TaskTracker>) -> Response {
     let id = req.id();
     let Some(params) = req.params else {
@@ -686,7 +700,7 @@ fn cancel_task(req: Request, tasks: &Arc<TaskTracker>) -> Response {
 }
 
 #[inline]
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 fn get_task(req: Request, tasks: &Arc<TaskTracker>) -> Response {
     let id = req.id();
     let Some(params) = req.params else {
@@ -702,7 +716,7 @@ fn get_task(req: Request, tasks: &Arc<TaskTracker>) -> Response {
 }
 
 #[inline]
-#[cfg(feature = "tasks")]
+#[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 async fn get_task_result(req: Request, tasks: &Arc<TaskTracker>) -> Response {
     let id = req.id();
     let Some(params) = req.params else {
@@ -858,7 +872,7 @@ mod tests {
 
         // `sampling/createMessage` is a legacy server-initiated method, so
         // the dispatcher only runs the handler for a legacy peer.
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         let peer_mode = {
             let mode = crate::shared::PeerMode::default();
             mode.set_legacy();
@@ -872,9 +886,9 @@ mod tests {
             &sampling_handler,
             &elicitation_handler,
             &notification_handler,
-            #[cfg(feature = "tasks")]
+            #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
             &Arc::new(crate::shared::TaskTracker::default()),
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             &peer_mode,
         )
         .await;
@@ -886,11 +900,11 @@ mod tests {
         );
     }
 
-    /// Legacy server-initiated methods are out of contract for an RC peer:
+    /// Legacy server-initiated methods are out of contract for a 2026-07-28 peer:
     /// the client advertises neither `sampling` nor `roots`, so the
     /// configured handlers must stay unreachable until the dual-mode
     /// fallback marks the peer legacy.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[tokio::test]
     async fn legacy_server_push_is_gated_on_the_peer_mode() {
         use crate::types::sampling::{CreateMessageRequestParams, CreateMessageResult};
@@ -921,7 +935,7 @@ mod tests {
                 &roots,
                 &sampling_handler,
                 &elicitation_handler,
-                #[cfg(feature = "tasks")]
+                #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
                 &Arc::new(crate::shared::TaskTracker::default()),
                 peer_mode,
             )
@@ -934,7 +948,7 @@ mod tests {
         ] {
             let resp = dispatch(method, &peer_mode).await;
             let Response::Err(err) = resp else {
-                panic!("an RC peer must not reach the legacy `{method}` handler");
+                panic!("a 2026-07-28 peer must not reach the legacy `{method}` handler");
             };
             assert_eq!(err.error.code, ErrorCode::MethodNotFound);
         }
@@ -983,13 +997,13 @@ mod tests {
 
     // --- tasks/list omitted-vs-malformed params ---
 
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     fn make_tasks_request(params: Option<serde_json::Value>) -> Request {
         Request::new(Some(RequestId::Number(1)), "tasks/list", params)
     }
 
     #[test]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     fn tasks_list_omitted_params_returns_ok() {
         let tasks = Arc::new(crate::shared::TaskTracker::default());
         let req = make_tasks_request(None);
@@ -998,7 +1012,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     fn tasks_list_empty_object_params_returns_ok() {
         let tasks = Arc::new(crate::shared::TaskTracker::default());
         let req = make_tasks_request(Some(serde_json::json!({})));
@@ -1007,7 +1021,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     fn tasks_list_malformed_cursor_returns_invalid_params() {
         let tasks = Arc::new(crate::shared::TaskTracker::default());
         let req = make_tasks_request(Some(serde_json::json!({"cursor": {"bad": "shape"}})));
@@ -1019,7 +1033,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "tasks")]
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     fn tasks_list_non_object_params_returns_invalid_params() {
         let tasks = Arc::new(crate::shared::TaskTracker::default());
         let req = make_tasks_request(Some(serde_json::json!("not_an_object")));

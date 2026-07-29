@@ -30,6 +30,7 @@ default = []
 server = []
 client = []
 
-# Forwarded from neva. Switches the `#[tool]` macro to emit JSON Schema
-# 2020-12 (`InputSchema`) registration code instead of legacy `ToolSchema`.
-proto-2026-07-28-rc = []
+# Forwarded from neva. Switches the `#[tool]` macro back to emitting legacy
+# `ToolSchema` registration code instead of JSON Schema 2020-12
+# (`InputSchema`), which is what the default (MCP 2026-07-28) build emits.
+legacy-spec = []

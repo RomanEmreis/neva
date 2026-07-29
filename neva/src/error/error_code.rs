@@ -30,6 +30,29 @@ pub enum ErrorCode {
     /// The URL mode elicitation is required.
     UrlElicitationRequiredError = -32042,
 
+    /// The request's HTTP headers do not match the corresponding values in the
+    /// body, or a required header is missing or malformed (MCP 2026-07-28).
+    ///
+    /// Over HTTP the response status must be `400 Bad Request`.
+    #[cfg(not(feature = "legacy-spec"))]
+    HeaderMismatch = -32020,
+
+    /// Processing the request needs a capability the client did not declare in
+    /// its per-request `clientCapabilities` (MCP 2026-07-28).
+    ///
+    /// The error `data` carries `requiredCapabilities`. Over HTTP the response
+    /// status must be `400 Bad Request`.
+    #[cfg(not(feature = "legacy-spec"))]
+    MissingRequiredClientCapability = -32021,
+
+    /// The request's protocol version is unknown to or unsupported by the
+    /// server (MCP 2026-07-28).
+    ///
+    /// The error `data` carries `supported` and `requested`. Over HTTP the
+    /// response status must be `400 Bad Request`.
+    #[cfg(not(feature = "legacy-spec"))]
+    UnsupportedProtocolVersion = -32022,
+
     /// [Internal code] The request has been canceled
     RequestCancelled = -99999,
 
@@ -39,7 +62,7 @@ pub enum ErrorCode {
     /// [Internal code] A handler requested additional input via MRTR. Never
     /// sent on the wire as an error -- intercepted by the server dispatch layer
     /// and converted into an `InputRequiredResult`.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     InputRequired = -99997,
 }
 
@@ -63,9 +86,15 @@ impl TryFrom<i32> for ErrorCode {
             #[allow(deprecated)]
             -32002 => Ok(ErrorCode::ResourceNotFound),
             -32042 => Ok(ErrorCode::UrlElicitationRequiredError),
+            #[cfg(not(feature = "legacy-spec"))]
+            -32020 => Ok(ErrorCode::HeaderMismatch),
+            #[cfg(not(feature = "legacy-spec"))]
+            -32021 => Ok(ErrorCode::MissingRequiredClientCapability),
+            #[cfg(not(feature = "legacy-spec"))]
+            -32022 => Ok(ErrorCode::UnsupportedProtocolVersion),
             -99999 => Ok(ErrorCode::RequestCancelled),
             -99998 => Ok(ErrorCode::Timeout),
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             -99997 => Ok(ErrorCode::InputRequired),
             _ => Err(()),
         }
@@ -107,9 +136,17 @@ impl Display for ErrorCode {
             #[allow(deprecated)]
             ErrorCode::ResourceNotFound => write!(f, "Resource not found"),
             ErrorCode::UrlElicitationRequiredError => write!(f, "URL elicitation required error"),
+            #[cfg(not(feature = "legacy-spec"))]
+            ErrorCode::HeaderMismatch => write!(f, "Header mismatch"),
+            #[cfg(not(feature = "legacy-spec"))]
+            ErrorCode::MissingRequiredClientCapability => {
+                write!(f, "Missing required client capability")
+            }
+            #[cfg(not(feature = "legacy-spec"))]
+            ErrorCode::UnsupportedProtocolVersion => write!(f, "Unsupported protocol version"),
             ErrorCode::RequestCancelled => write!(f, "Request cancelled"),
             ErrorCode::Timeout => write!(f, "Request timed out"),
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             ErrorCode::InputRequired => write!(f, "Input required"),
         }
     }
@@ -129,9 +166,9 @@ impl ErrorCode {
     /// payload. This method maps them to [`ErrorCode::InternalError`] so callers can
     /// always serialise a spec-compliant code.
     ///
-    /// Under `proto-2026-07-28-rc` the deprecated [`Self::ResourceNotFound`]
+    /// Under MCP 2026-07-28 the deprecated [`Self::ResourceNotFound`]
     /// (`-32002`) is additionally remapped to [`Self::InvalidParams`] (`-32602`)
-    /// per the RC, so a user handler returning the old variant still serialises
+    /// per the 2026-07-28, so a user handler returning the old variant still serialises
     /// the spec-current code.
     ///
     /// All other standard codes are returned unchanged.
@@ -148,9 +185,9 @@ impl ErrorCode {
     pub fn wire_code(self) -> Self {
         match self {
             Self::RequestCancelled | Self::Timeout => Self::InternalError,
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             Self::InputRequired => Self::InternalError,
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             #[allow(deprecated)]
             Self::ResourceNotFound => Self::InvalidParams,
             other => other,
@@ -160,7 +197,7 @@ impl ErrorCode {
     /// Code to use for "resource not found" -- spec-version dependent.
     ///
     /// - Default build (pre-2026 spec): [`Self::ResourceNotFound`] (`-32002`).
-    /// - `proto-2026-07-28-rc`: [`Self::InvalidParams`] (`-32602`), per the RC.
+    /// - MCP 2026-07-28: [`Self::InvalidParams`] (`-32602`), per the 2026-07-28.
     ///
     /// This is the migration path for the now-deprecated
     /// [`Self::ResourceNotFound`] variant: reference this constant instead of
@@ -176,11 +213,11 @@ impl ErrorCode {
     /// let err = Error::new(ErrorCode::RESOURCE_NOT_FOUND, "no such resource");
     /// ```
     pub const RESOURCE_NOT_FOUND: Self = {
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         {
             Self::InvalidParams
         }
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        #[cfg(feature = "legacy-spec")]
         {
             #[allow(deprecated)]
             Self::ResourceNotFound
@@ -266,13 +303,13 @@ mod tests {
     #[test]
     #[allow(deprecated)]
     fn resource_not_found_wire_code_matches_spec_version() {
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         assert_eq!(
             ErrorCode::ResourceNotFound.wire_code(),
             ErrorCode::InvalidParams
         );
 
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        #[cfg(feature = "legacy-spec")]
         assert_eq!(
             ErrorCode::ResourceNotFound.wire_code(),
             ErrorCode::ResourceNotFound
@@ -281,14 +318,48 @@ mod tests {
 
     #[test]
     fn resource_not_found_alias_matches_spec_version() {
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         assert_eq!(ErrorCode::RESOURCE_NOT_FOUND, ErrorCode::InvalidParams);
 
-        #[cfg(not(feature = "proto-2026-07-28-rc"))]
+        #[cfg(feature = "legacy-spec")]
         {
             #[allow(deprecated)]
             let expected = ErrorCode::ResourceNotFound;
             assert_eq!(ErrorCode::RESOURCE_NOT_FOUND, expected);
+        }
+    }
+}
+
+/// The MCP-allocated error codes (`-32020`..) introduced in 2026-07-28.
+#[cfg(test)]
+#[cfg(not(feature = "legacy-spec"))]
+mod spec_error_code_tests {
+    use super::ErrorCode;
+
+    #[test]
+    fn codes_match_the_spec_allocation() {
+        // The spec allocates `-32020`.. sequentially to MCP-defined errors;
+        // `-32001`/`-32003`/`-32004` were the pre-final numbers and must not
+        // resurface.
+        assert_eq!(i32::from(ErrorCode::HeaderMismatch), -32020);
+        assert_eq!(
+            i32::from(ErrorCode::MissingRequiredClientCapability),
+            -32021
+        );
+        assert_eq!(i32::from(ErrorCode::UnsupportedProtocolVersion), -32022);
+    }
+
+    #[test]
+    fn codes_round_trip_through_the_wire() {
+        for code in [
+            ErrorCode::HeaderMismatch,
+            ErrorCode::MissingRequiredClientCapability,
+            ErrorCode::UnsupportedProtocolVersion,
+        ] {
+            // They sit inside the JSON-RPC reserved range, so they travel as
+            // themselves rather than being masked as an internal error.
+            assert_eq!(code.wire_code(), code);
+            assert_eq!(ErrorCode::try_from(i32::from(code)), Ok(code));
         }
     }
 }

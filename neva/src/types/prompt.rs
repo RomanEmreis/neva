@@ -167,15 +167,23 @@ pub struct ListPromptsResult {
     #[serde(rename = "nextCursor", skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<Cursor>,
 
-    /// Suggested TTL in milliseconds for caching this list result, when set by the server.
-    #[cfg(feature = "proto-2026-07-28-rc")]
-    #[serde(rename = "ttlMs", skip_serializing_if = "Option::is_none")]
-    pub ttl_ms: Option<u64>,
+    /// How long (in milliseconds) the client may cache this result before
+    /// re-fetching, analogous to HTTP `Cache-Control: max-age`.
+    ///
+    /// Mandatory under MCP 2026-07-28, not an optional hint: `0` means treat
+    /// the result as immediately stale. neva always emits it; on the way in a
+    /// peer that omits it is read as `0` rather than failing the parse.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[serde(rename = "ttlMs", default)]
+    pub ttl_ms: u64,
 
-    /// Suggested cache scope for this list result, when set by the server.
-    #[cfg(feature = "proto-2026-07-28-rc")]
-    #[serde(rename = "cacheScope", skip_serializing_if = "Option::is_none")]
-    pub cache_scope: Option<crate::types::CacheScope>,
+    /// Whether this result may be cached across authorization contexts.
+    ///
+    /// Mandatory under MCP 2026-07-28. Defaults to
+    /// [`CacheScope::Private`](crate::types::cache::CacheScope::Private).
+    #[cfg(not(feature = "legacy-spec"))]
+    #[serde(rename = "cacheScope", default)]
+    pub cache_scope: crate::types::CacheScope,
 }
 
 #[cfg(feature = "server")]
@@ -192,7 +200,7 @@ impl IntoResponse for ListPromptsResult {
 #[cfg(feature = "server")]
 impl From<Vec<Prompt>> for ListPromptsResult {
     #[inline]
-    #[cfg_attr(not(feature = "proto-2026-07-28-rc"), allow(clippy::needless_update))]
+    #[cfg_attr(feature = "legacy-spec", allow(clippy::needless_update))]
     fn from(prompts: Vec<Prompt>) -> Self {
         Self {
             next_cursor: None,
@@ -205,7 +213,7 @@ impl From<Vec<Prompt>> for ListPromptsResult {
 #[cfg(feature = "server")]
 impl From<Page<'_, Prompt>> for ListPromptsResult {
     #[inline]
-    #[cfg_attr(not(feature = "proto-2026-07-28-rc"), allow(clippy::needless_update))]
+    #[cfg_attr(feature = "legacy-spec", allow(clippy::needless_update))]
     fn from(page: Page<'_, Prompt>) -> Self {
         Self {
             next_cursor: page.next_cursor,

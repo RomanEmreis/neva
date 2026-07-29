@@ -192,11 +192,7 @@ async fn main() {
     let http = HttpServer::from_engine("127.0.0.1:3000", HyperEngine).with_endpoint("/mcp");
 
     App::new()
-        .with_options(|opt| {
-            opt.with_name("Hyper Example Server")
-                .set_http(http)
-                .with_mcp_version("2025-06-18")
-        })
+        .with_options(|opt| opt.with_name("Hyper Example Server").set_http(http))
         .run()
         .await;
 }

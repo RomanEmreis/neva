@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 /// Represents current MCP Session
 pub(super) struct McpSession {
     /// Dual-mode protocol switch -- legacy peers get legacy headers.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     peer_mode: crate::shared::PeerMode,
     initialized: Notify,
     sse_ready: Notify,
@@ -30,10 +30,10 @@ impl McpSession {
     pub(super) fn new(
         url: ServiceUrl,
         token: CancellationToken,
-        #[cfg(feature = "proto-2026-07-28-rc")] peer_mode: crate::shared::PeerMode,
+        #[cfg(not(feature = "legacy-spec"))] peer_mode: crate::shared::PeerMode,
     ) -> Self {
         Self {
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             peer_mode,
             initialized: Notify::new(),
             sse_ready: Notify::new(),
@@ -44,9 +44,9 @@ impl McpSession {
         }
     }
 
-    /// Whether the connected peer negotiated the legacy (pre-RC)
+    /// Whether the connected peer negotiated the legacy (legacy)
     /// protocol via the dual-mode fallback.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     pub(super) fn is_legacy(&self) -> bool {
         self.peer_mode.is_legacy()
     }
@@ -135,7 +135,7 @@ mod tests {
         McpSession::new(
             url,
             token,
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             Default::default(),
         )
     }

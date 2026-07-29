@@ -5,11 +5,11 @@
 
 // Exercises the stateful session model (init handshake, Mcp-Session-Id
 // round-trip, DELETE termination), which is replaced by the stateless
-// transport under `proto-2026-07-28-rc` (see `stateless_http_rc.rs`).
+// transport under MCP 2026-07-28 (see `stateless_http.rs`).
 #![cfg(all(
     feature = "http-server-volga",
     feature = "http-client",
-    not(feature = "proto-2026-07-28-rc")
+    feature = "legacy-spec"
 ))]
 
 use neva::App;

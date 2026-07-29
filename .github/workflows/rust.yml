@@ -41,12 +41,84 @@ jobs:
         run: cargo clippy --all-targets --features http-client -- -D warnings
       - name: Run all features client
         run: cargo clippy --all-targets --features client-full -- -D warnings
-      - name: Run server+client with proto-2026-07-28-rc
-        run: cargo clippy --all-targets --features "server-full client-full proto-2026-07-28-rc" -- -D warnings
-      - name: Run slim client with proto-2026-07-28-rc
-        run: cargo clippy --all-targets --features "client proto-2026-07-28-rc" -- -D warnings
-      - name: Run slim server with proto-2026-07-28-rc
-        run: cargo clippy --all-targets --features "server proto-2026-07-28-rc" -- -D warnings
+      - name: Run server+client
+        run: cargo clippy --all-targets --features "server-full client-full" -- -D warnings
+      # `--all-features` turns `legacy-spec` on, so the rows above cover the
+      # default (MCP 2026-07-28) profile and the rows below cover the legacy one.
+      - name: Run server+client with legacy-spec
+        run: cargo clippy --all-targets --features "server-full client-full legacy-spec" -- -D warnings
+      - name: Run slim client with legacy-spec
+        run: cargo clippy --all-targets --features "client legacy-spec" -- -D warnings
+      - name: Run slim server with legacy-spec
+        run: cargo clippy --all-targets --features "server legacy-spec" -- -D warnings
+
+  msrv_check:
+    runs-on: ubuntu-latest
+    needs: check_format
+
+    # Every other job runs on the runner's default stable toolchain, so the MSRV
+    # advertised by `rust-version` in the workspace manifest (and by the README
+    # badge) is otherwise never exercised. `--all-targets` pulls in dev-dependencies,
+    # which is where an MSRV regression is most likely to sneak in.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read MSRV from the workspace manifest
+        id: msrv
+        run: echo "version=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      # `full` is every feature except the generation flag, so this is the
+      # default (MCP 2026-07-28) profile; `--all-features` below turns
+      # `legacy-spec` on and therefore covers the legacy one instead.
+      - name: Check the published crates on MSRV
+        run: cargo check --locked --features neva/full --all-targets
+      - name: Check the published crates on MSRV with legacy-spec
+        run: cargo check --locked --all-features --all-targets
+
+  workspace_check:
+    runs-on: ubuntu-latest
+    needs: check_format
+
+    # `default-members` excludes `examples/*`, so no other job ever compiles them
+    # and a dependency bump can leave an example behind without failing CI.
+    # `--workspace` overrides `default-members` and covers every member.
+    #
+    # Not `--all-features`: that turns `legacy-spec` on, and feature unification
+    # would then hand it to every example in this workspace -- all of which are
+    # written against the default profile. `neva/full` is stated explicitly
+    # rather than left to the union of what the examples ask for, so removing
+    # one of them cannot silently shrink what this job compiles.
+    #
+    # The legacy examples are not in this workspace at all: they live in the
+    # `exclude`d sub-workspaces below, each pinning its own profile in its own
+    # manifest, which is why one profile per workspace is enough here.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the entire workspace, examples included
+        run: cargo check --locked --workspace --features neva/full --all-targets
+      # `exclude`d members are invisible to `--workspace`, so each standalone
+      # example workspace needs its own invocation. `roots` and `sampling`
+      # additionally nest a `legacy/` workspace holding the legacy-spec variant.
+      #
+      # No `--locked` here: `examples/**/Cargo.lock` is deliberately untracked
+      # (see `.gitignore`), so there is nothing to lock against on a fresh
+      # checkout. Resolving afresh is the point of this step anyway -- it is
+      # what surfaces an upstream release the examples have not kept up with.
+      - name: Check the standalone example workspaces
+        run: |
+          for dir in \
+            examples/batch \
+            examples/roots examples/roots/legacy \
+            examples/sampling examples/sampling/legacy \
+            examples/elicitation \
+            examples/mrtr \
+            examples/tasks
+          do
+            echo "::group::$dir"
+            cargo check --manifest-path "$dir/Cargo.toml" --all-targets
+            echo "::endgroup::"
+          done
 
   audit:
     runs-on: ubuntu-latest
@@ -73,19 +145,23 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      # `--all-features` turns `legacy-spec` on, so it documents the legacy
+      # profile -- it is not a superset here, it is the other generation. The
+      # default profile, which is what docs.rs publishes, needs its own row or
+      # a broken link reachable only from it ships unnoticed.
       - name: Check docs build clean
-        run: cargo doc --no-deps --all-features
-      - name: Check docs build clean with proto-2026-07-28-rc
-        run: cargo doc --no-deps --features "server-full client-full proto-2026-07-28-rc"
-      # The rows above have every feature on, so every intra-doc link resolves
-      # by construction. Slim rows catch docs that link to items a smaller
-      # feature set does not compile.
+        run: cargo doc --no-deps --features "server-full client-full"
+      - name: Check docs build clean with legacy-spec
+        run: cargo doc --no-deps --features "server-full client-full legacy-spec"
+      # The rows above have every feature of their generation on, so every
+      # intra-doc link resolves by construction. Slim rows catch docs that link
+      # to items a smaller feature set does not compile.
       - name: Check docs build clean on a slim server
         run: cargo doc --no-deps --features server
       - name: Check docs build clean on a slim client
         run: cargo doc --no-deps --features client
-      - name: Check docs build clean on a client-only RC build
-        run: cargo doc --no-deps --features "client proto-2026-07-28-rc"
+      - name: Check docs build clean on a client-only legacy build
+        run: cargo doc --no-deps --features "client legacy-spec"
 
   build:
     environment: CICD
@@ -102,5 +178,7 @@ jobs:
         run: cargo test --features server-full --verbose
       - name: Run client tests
         run: cargo test --features client-full --verbose
-      - name: Run tests with proto-2026-07-28-rc
-        run: cargo test --features "server-full client-full proto-2026-07-28-rc" --verbose
+      - name: Run server+client tests
+        run: cargo test --features "server-full client-full" --verbose
+      - name: Run tests with legacy-spec
+        run: cargo test --features "server-full client-full legacy-spec" --verbose

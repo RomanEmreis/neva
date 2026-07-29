@@ -1,9 +1,9 @@
 //! A generic tracing/logging formatting layer for notifications
 
 use crate::shared::MessageRegistry;
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 use crate::types::Message;
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 use crate::types::notification::LoggingLevel;
 use crate::types::notification::{Notification, formatter::build_notification};
 use once_cell::sync::Lazy;
@@ -21,22 +21,22 @@ use tracing_subscriber::{
 
 const MCP_SESSION_ID: &str = "mcp_session_id";
 
-/// Span field carrying the request-scoped minimum severity (RC), as the
+/// Span field carrying the request-scoped minimum severity (2026-07-28), as the
 /// [`LoggingLevel`] RFC-5424 severity rank rather than a redundant string.
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 pub(super) const MCP_LOG_LEVEL: &str = "mcp_log_level";
 
 pub(crate) static LOG_REGISTRY: Lazy<MessageRegistry> = Lazy::new(MessageRegistry::new);
 
-/// Per-request notification sinks for the RC stateless HTTP transport, keyed by
+/// Per-request notification sinks for the 2026-07-28 stateless HTTP transport, keyed by
 /// the per-`POST` session id (each stateless `POST` mints a fresh one).
 ///
-/// The RC transport has no `GET`/SSE stream, so request-scoped notifications
+/// The 2026-07-28 transport has no `GET`/SSE stream, so request-scoped notifications
 /// (`notifications/message`, `notifications/progress`) flow on the originating
 /// request's `POST` response stream instead. `handle_post` registers a sink
 /// before dispatch and drains it into that response; the notification layer
 /// routes events fired while handling the request to the matching sink.
-#[cfg(feature = "proto-2026-07-28-rc")]
+#[cfg(not(feature = "legacy-spec"))]
 pub(crate) static REQUEST_NOTIFICATIONS: Lazy<dashmap::DashMap<uuid::Uuid, Sender<Message>>> =
     Lazy::new(dashmap::DashMap::new);
 
@@ -45,7 +45,7 @@ pub(crate) static REQUEST_NOTIFICATIONS: Lazy<dashmap::DashMap<uuid::Uuid, Sende
 ///
 /// Only the HTTP server writes sinks; the layer (which may run client-side too)
 /// merely reads [`REQUEST_NOTIFICATIONS`], so these live behind `http-server`.
-#[cfg(all(feature = "proto-2026-07-28-rc", feature = "http-server"))]
+#[cfg(all(not(feature = "legacy-spec"), feature = "http-server"))]
 pub(crate) fn register_request_sink(
     id: uuid::Uuid,
     capacity: usize,
@@ -56,7 +56,7 @@ pub(crate) fn register_request_sink(
 }
 
 /// Removes the per-request notification sink for `id`.
-#[cfg(all(feature = "proto-2026-07-28-rc", feature = "http-server"))]
+#[cfg(all(not(feature = "legacy-spec"), feature = "http-server"))]
 pub(crate) fn unregister_request_sink(id: &uuid::Uuid) {
     REQUEST_NOTIFICATIONS.remove(id);
 }
@@ -66,9 +66,9 @@ pub(crate) fn unregister_request_sink(id: &uuid::Uuid) {
 /// This layer routes notifications to a connected client. On the legacy HTTP
 /// transport that is the session-scoped SSE `GET` stream.
 ///
-/// # MCP 2026-07-28 (`proto-2026-07-28-rc`)
+/// # MCP 2026-07-28
 ///
-/// The RC HTTP transport is stateless (no `GET`/SSE stream, no sessions), so
+/// The 2026-07-28 HTTP transport is stateless (no `GET`/SSE stream, no sessions), so
 /// request-scoped notifications flow on the *originating request's `POST`
 /// response stream*, per the spec. This layer routes each event to the
 /// per-request sink registered by the POST handler (keyed by the per-`POST`
@@ -151,12 +151,12 @@ where
                 .scope()
                 .find_map(|s| s.extensions().get::<uuid::Uuid>().cloned());
 
-            // RC: `logging/setLevel` is gone; the level is request-scoped. Deliver
+            // 2026-07-28: `logging/setLevel` is gone; the level is request-scoped. Deliver
             // a `notifications/message` only when the originating request carried
             // `io.modelcontextprotocol/logLevel` and this event is at or above
             // that severity. Without a requested level, log messages are
             // suppressed. Progress notifications are never gated this way.
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             if notification.method.as_str() == crate::types::notification::commands::MESSAGE {
                 let requested = span.scope().find_map(|s| {
                     s.extensions()
@@ -172,11 +172,11 @@ where
                 }
             }
 
-            // RC: request-scoped notifications flow on the originating request's
+            // 2026-07-28: request-scoped notifications flow on the originating request's
             // `POST` response stream (there is no session SSE `GET`). Route to the
             // per-request sink registered by `handle_post` for this `POST` session
             // id; fall through to the legacy session-SSE path otherwise.
-            #[cfg(feature = "proto-2026-07-28-rc")]
+            #[cfg(not(feature = "legacy-spec"))]
             if let Some(session_id) = notification.session_id
                 && let Some(sink) = REQUEST_NOTIFICATIONS.get(&session_id)
             {
@@ -194,7 +194,7 @@ where
 }
 
 /// A tracing [`Layer`] that only records the MCP span context (session id and,
-/// under MCP 2026-07-28, the request-scoped [`LoggingLevel`]) into a span's
+/// under MCP 2026-07-28, the request-scoped `LoggingLevel`) into a span's
 /// extensions.
 ///
 /// This is an optimization, not a requirement. The [`layer`] function's
@@ -233,7 +233,7 @@ pub fn span_context() -> SpanContextLayer {
     SpanContextLayer
 }
 
-/// Records the MCP `request` span fields (`mcp_session_id`, and under RC
+/// Records the MCP `request` span fields (`mcp_session_id`, and under MCP 2026-07-28
 /// `mcp_log_level`) into the span's typed extensions. Shared by [`MpscLayer`]
 /// and [`SpanContextLayer`] so both emission paths read an identical context.
 #[inline]
@@ -247,9 +247,9 @@ where
         if let Some(mcp_session_id) = visitor.session_id {
             span.extensions_mut().insert(mcp_session_id);
         }
-        // RC: remember the request-scoped minimum severity so the emission path
+        // 2026-07-28: remember the request-scoped minimum severity so the emission path
         // can filter `notifications/message` for events fired within this request.
-        #[cfg(feature = "proto-2026-07-28-rc")]
+        #[cfg(not(feature = "legacy-spec"))]
         if let Some(min) = visitor.min_severity {
             span.extensions_mut()
                 .insert(super::formatter::MinLogSeverity(min));
@@ -262,7 +262,7 @@ struct SpanVisitor {
     session_id: Option<uuid::Uuid>,
     /// Minimum severity requested for this request (`mcp_log_level` span field),
     /// carried as the level's RFC-5424 severity rank.
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     min_severity: Option<u8>,
 }
 
@@ -276,7 +276,7 @@ impl Visit for SpanVisitor {
         }
     }
 
-    #[cfg(feature = "proto-2026-07-28-rc")]
+    #[cfg(not(feature = "legacy-spec"))]
     #[inline]
     fn record_u64(&mut self, field: &Field, value: u64) {
         if field.name() == MCP_LOG_LEVEL {
@@ -300,10 +300,10 @@ impl Visit for SpanVisitor {
     }
 }
 
-// End-to-end coverage of RC request-scoped logging through the real tracing
+// End-to-end coverage of 2026-07-28 request-scoped logging through the real tracing
 // pipeline: the `span_context` layer records `mcp_log_level` into a span, and
 // `NotificationFormatter` filters `notifications/message` accordingly.
-#[cfg(all(test, feature = "proto-2026-07-28-rc"))]
+#[cfg(all(test, not(feature = "legacy-spec")))]
 mod tests {
     use crate::types::notification::{LoggingLevel, NotificationFormatter};
     use std::io::Write;
@@ -479,7 +479,7 @@ mod tests {
         assert_eq!(json["method"], "notifications/message");
         assert_eq!(json["params"]["data"]["message"], "nested message");
         // ...and it must not fall through to the legacy session-SSE registry,
-        // which has no reader on the RC stateless transport.
+        // which has no reader on the 2026-07-28 stateless transport.
         assert!(
             fallback_rx.try_recv().is_err(),
             "request-scoped notification leaked to the legacy path"
