@@ -73,13 +73,13 @@ pub async fn dispatch_post<E: HttpEngine>(
     ctx: &HttpContext,
 ) -> Result<StreamResponse<impl Stream<Item = E::SseEvent> + Send + 'static>, Error> {
     let neutral = E::adapt_request(req).await?;
-    #[cfg(all(not(feature = "legacy-spec"), feature = "tracing"))]
+    #[cfg(not(feature = "legacy-spec"))]
     {
         Ok(handle_post_streaming::<E>(neutral, ctx).await)
     }
-    // Under `legacy-spec` (or without tracing to source the notifications)
-    // every POST reply is a single body; the Stream arm is never produced.
-    #[cfg(not(all(not(feature = "legacy-spec"), feature = "tracing")))]
+    // Under `legacy-spec` every POST reply is a single body; the Stream arm is
+    // never produced.
+    #[cfg(feature = "legacy-spec")]
     {
         let resp = handle_post(neutral, ctx).await;
         Ok(StreamResponse::<stream::Empty<E::SseEvent>>::Complete(resp))
@@ -431,7 +431,7 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
 /// flow first (routed via the per-request sink), then the final response closes
 /// the stream. Otherwise the reply is a single JSON object (`Complete`),
 /// exactly as [`handle_post`].
-#[cfg(all(not(feature = "legacy-spec"), feature = "tracing"))]
+#[cfg(not(feature = "legacy-spec"))]
 async fn handle_post_streaming<E: HttpEngine>(
     req: HttpRequest,
     ctx: &HttpContext,
@@ -467,13 +467,11 @@ async fn handle_post_streaming<E: HttpEngine>(
             // Opted in: register the per-request notification sink (keyed by the
             // per-POST session id, which the tracing span carries) before the
             // runtime starts handling, then stream notifications + response.
-            let notif_rx = crate::types::notification::fmt::register_request_sink(
-                id,
-                ctx.sse_log_queue_capacity,
-            );
+            let notif_rx =
+                crate::types::notification::sink::register(id, ctx.sse_log_queue_capacity);
 
             if ctx.inbound_tx.send(Ok(msg)).await.is_err() {
-                crate::types::notification::fmt::unregister_request_sink(&id);
+                crate::types::notification::sink::unregister(&id);
                 ctx.pending.remove(&full_id);
                 return StreamResponse::Complete(status_response(
                     http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -493,15 +491,15 @@ async fn handle_post_streaming<E: HttpEngine>(
     }
 }
 
-/// Whether a message opts into request-scoped notifications: a request -- or,
-/// for a batch, *any* contained request -- carrying `logLevel` or
-/// `progressToken` in `_meta`.
+/// Whether a message opts into notifications on its own `POST` response
+/// stream: a `subscriptions/listen`, or a request -- or, for a batch, *any*
+/// contained request -- carrying `logLevel` or `progressToken` in `_meta`.
 ///
 /// Batches count because a client (e.g. via `Client::apply_client_meta_to_batch`)
 /// stamps the configured level onto every batched request; the inner requests
 /// share this POST's session id (copied in `execute_batch`), so their
 /// notifications route to the one sink and stream on this single response.
-#[cfg(all(not(feature = "legacy-spec"), feature = "tracing"))]
+#[cfg(not(feature = "legacy-spec"))]
 fn opts_into_notifications(msg: &Message) -> bool {
     match msg {
         Message::Request(r) => request_opts_in(r),
@@ -512,9 +510,14 @@ fn opts_into_notifications(msg: &Message) -> bool {
     }
 }
 
-/// Whether a single request carries `logLevel` or `progressToken` in `_meta`.
-#[cfg(all(not(feature = "legacy-spec"), feature = "tracing"))]
+/// Whether a single request needs the streaming reply: `subscriptions/listen`
+/// (whose whole point is a long-lived notification stream), or a request
+/// carrying `logLevel` or `progressToken` in `_meta`.
+#[cfg(not(feature = "legacy-spec"))]
 fn request_opts_in(req: &crate::types::Request) -> bool {
+    if req.method == crate::types::subscription::commands::LISTEN {
+        return true;
+    }
     req.params
         .as_ref()
         .and_then(|p| p.get("_meta"))
@@ -537,7 +540,7 @@ fn request_opts_in(req: &crate::types::Request) -> bool {
 ///
 /// Dropping the stream (end of body or client disconnect) unregisters the
 /// per-request sink and clears the pending entry.
-#[cfg(all(not(feature = "legacy-spec"), feature = "tracing"))]
+#[cfg(not(feature = "legacy-spec"))]
 fn post_notification_stream(
     id: uuid::Uuid,
     full_id: RequestId,
@@ -552,7 +555,7 @@ fn post_notification_stream(
     }
     impl Drop for Cleanup {
         fn drop(&mut self) {
-            crate::types::notification::fmt::unregister_request_sink(&self.id);
+            crate::types::notification::sink::unregister(&self.id);
             self.pending.remove(&self.full_id);
         }
     }

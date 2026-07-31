@@ -87,6 +87,10 @@ pub(super) struct RequestHandler {
     /// is observed by the receive loop.
     #[cfg(not(feature = "legacy-spec"))]
     peer_mode: crate::shared::PeerMode,
+
+    /// Callers waiting for a `subscriptions/listen` acknowledgment.
+    #[cfg(not(feature = "legacy-spec"))]
+    ack_waiters: crate::client::subscription::AckWaiters,
 }
 
 impl Roots {
@@ -171,6 +175,8 @@ impl RequestHandler {
             tasks: Arc::new(TaskTracker::new()),
             #[cfg(not(feature = "legacy-spec"))]
             peer_mode: options.peer_mode.clone(),
+            #[cfg(not(feature = "legacy-spec"))]
+            ack_waiters: Default::default(),
         };
 
         handler.start(rx)
@@ -236,6 +242,59 @@ impl RequestHandler {
                 }
             }
         }
+    }
+
+    /// Sends a `subscriptions/listen` request and returns the slot its final
+    /// response will arrive in.
+    ///
+    /// Unlike [`Self::send_request`] this does not await the reply and -- by
+    /// skipping [`RequestQueue::activate`] -- never starts the request TTL: a
+    /// subscription is answered only when it ends, which may be hours later.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(super) async fn send_listen(
+        &mut self,
+        request: Request,
+    ) -> Result<tokio::sync::oneshot::Receiver<PendingResponse>, Error> {
+        let id = request.id();
+        let receiver = self.pending.push(&id);
+        if let Err(err) = self.sender.send(request.into()).await {
+            let _ = self.pending.pop(&id);
+            return Err(err);
+        }
+        Ok(receiver)
+    }
+
+    /// Registers interest in the acknowledgment of the subscription `id`.
+    ///
+    /// Must be called *before* the `subscriptions/listen` request goes out --
+    /// the acknowledgment is the first message the server sends back, and the
+    /// receive loop drops one it has no waiter for.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(super) fn watch_ack(
+        &self,
+        id: &RequestId,
+    ) -> tokio::sync::oneshot::Receiver<crate::types::SubscriptionFilter> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.ack_waiters.insert(id.clone(), tx);
+        rx
+    }
+
+    /// Drops a pending acknowledgment waiter and its request slot, for a
+    /// subscription that never got off the ground.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(super) fn abandon_listen(&self, id: &RequestId) {
+        self.ack_waiters.remove(id);
+        let _ = self.pending.pop(id);
+    }
+
+    /// Returns a handle on the transport sender, so a [`Subscription`] can
+    /// cancel itself without borrowing the client.
+    ///
+    /// [`Subscription`]: crate::client::Subscription
+    #[cfg(not(feature = "legacy-spec"))]
+    #[inline]
+    pub(super) fn sender(&self) -> TransportProtoSender {
+        self.sender.clone()
     }
 
     /// Sends a batch of messages to the MCP server.
@@ -323,6 +382,8 @@ impl RequestHandler {
         let tasks = self.tasks.clone();
         #[cfg(not(feature = "legacy-spec"))]
         let peer_mode = self.peer_mode.clone();
+        #[cfg(not(feature = "legacy-spec"))]
+        let ack_waiters = self.ack_waiters.clone();
 
         tokio::task::spawn(async move {
             while let Ok(msg) = rx.recv().await {
@@ -343,6 +404,8 @@ impl RequestHandler {
                         send_response_impl(&mut sender, resp).await;
                     }
                     Message::Notification(notification) => {
+                        #[cfg(not(feature = "legacy-spec"))]
+                        complete_ack(&notification, &ack_waiters);
                         dispatch_notification(notification, &notification_handler).await;
                     }
                     Message::Batch(batch) => {
@@ -498,6 +561,30 @@ async fn dispatch_request(
         #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
         crate::types::task::commands::GET => get_task(req, tasks),
         _ => ErrorCode::MethodNotFound.into_response(req_id),
+    }
+}
+
+/// Completes the waiter for a `notifications/subscriptions/acknowledged`.
+///
+/// The acknowledgment is a protocol-level message, but it is still forwarded to
+/// the user's notification handlers afterwards -- a client that wants to watch
+/// its own subscriptions being established can subscribe to it like any other
+/// event.
+#[inline]
+#[cfg(not(feature = "legacy-spec"))]
+fn complete_ack(notification: &Notification, waiters: &crate::client::subscription::AckWaiters) {
+    if notification.method != crate::types::subscription::commands::ACKNOWLEDGED {
+        return;
+    }
+
+    let Ok((id, filter)) = crate::client::subscription::parse_ack(notification) else {
+        #[cfg(feature = "tracing")]
+        tracing::warn!(logger = "neva", "malformed subscription acknowledgment");
+        return;
+    };
+
+    if let Some((_, waiter)) = waiters.remove(&id) {
+        let _ = waiter.send(filter);
     }
 }
 

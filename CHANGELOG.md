@@ -5,6 +5,74 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.5.1
+
+### Added
+* **`subscriptions/listen`** (MCP 2026-07-28, #95). The final spec replaced the
+  HTTP `GET` stream *and* `resources/subscribe`/`unsubscribe` with one
+  long-lived request carrying a notification filter. This is how server-push
+  works again on the stateless transport, and it **retracts the note carried
+  since 0.4.x that "server-initiated notifications are inert; clients poll
+  instead"** -- that limitation described the RC, not the final spec.
+  * New `SubscriptionFilter` (`toolsListChanged` / `promptsListChanged` /
+    `resourcesListChanged` / `resourceSubscriptions`) with `intersection`,
+    `is_subset_of`, `supported_by` and `matches`, plus
+    `SubscriptionsListenRequestParams`, `SubscriptionsListenResult`,
+    `SubscriptionsAcknowledgedNotificationParams` and `SubscriptionMeta`.
+  * **Server:** `subscriptions/listen` is handled by neva itself -- there is no
+    handler to write. The accepted filter is the requested one narrowed to the
+    advertised capabilities, acknowledged first on the stream
+    (`notifications/subscriptions/acknowledged`), and every message carries
+    `_meta["io.modelcontextprotocol/subscriptionId"]`. `Context::add_tool`,
+    `remove_tool`, `add_prompt`, `remove_prompt`, `add_resource`,
+    `remove_resource` and `resource_updated` fan out to the streams that asked
+    for them; `Context::is_subscribed` now answers from the live streams. A
+    subscription ends on `notifications/cancelled`, on transport close, or on
+    server shutdown -- the last two after a graceful empty result.
+  * **Client:** `Client::listen(SubscriptionFilter)` returns a `Subscription`
+    once the server acknowledges, exposing `id()`, `requested()`,
+    `acknowledged()`, `is_fully_honored()`, `cancel()` and
+    `closed() -> SubscriptionEnd`. Notifications keep flowing to the handlers
+    registered with `Client::subscribe` / `on_tools_changed` /
+    `on_resource_changed`, so existing client code needs no change.
+  * Works on both transports: over HTTP the subscription rides the listen
+    `POST`'s own `text/event-stream` body (a client disconnect ends it); over
+    stdio it interleaves on stdout and ends on `notifications/cancelled`.
+  * New `examples/subscriptions/` (server + client over HTTP).
+
+### Changed (breaking)
+* **`listChanged` and `resources.subscribe` are advertised again.** Both were
+  masked off in the default build because nothing could deliver them; a listen
+  stream now can. Servers that configure `with_list_changed()` /
+  `with_subscribe()` start seeing those capabilities on the wire, and clients
+  narrow their listen filter against exactly what a server advertises.
+* **`resources/subscribe` / `resources/unsubscribe` are legacy-only.** The RPC
+  pair is not deleted by the spec, it is folded into
+  `SubscriptionFilter::resource_subscriptions` -- a subscription is now a URI on
+  a stream rather than server-side state.
+  * `Context::subscribe_to_resource` / `unsubscribe_from_resource` and
+    `resource::commands::{SUBSCRIBE, UNSUBSCRIBE}` are behind `legacy-spec`;
+    `UnsubscribeRequestParams` is behind `any(legacy-spec, client)`.
+    `SubscribeRequestParams` stays in both profiles -- it is the `{uri}` payload
+    of `notifications/resources/updated`.
+  * `Client::subscribe_to_resource` / `unsubscribe_from_resource` stay compiled
+    (the dual-mode fallback still reaches legacy peers) but now reject a
+    2026-07-28 peer with `MethodNotFound`. Use `Client::listen` with a
+    `resourceSubscriptions` entry instead.
+  * Migration: replace `client.subscribe_to_resource(uri)` with
+    `client.listen(SubscriptionFilter::new().with_resource(uri))`, and drop
+    `ctx.subscribe_to_resource(..)` from server handlers -- the client owns the
+    subscription now.
+
+### Changed
+* `ServerCapabilities` now derives `Default`, so a filter can be narrowed
+  against a partially-built capability set.
+* **The streaming `POST` reply no longer requires the `tracing` feature.**
+  `dispatch_post` produces the `StreamResponse::Stream` arm in any default-build
+  configuration -- a subscription stream is not a logging concern. Internally
+  the per-`POST` notification sink moved out of the `tracing`-gated
+  `notification::fmt` into a new internal `notification::sink`.
+
 ## 0.5.0
 
 ### Changed (breaking)
@@ -152,8 +220,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   * Client-hosted tasks are legacy-only: they existed to answer server->client
     task-augmented requests, and MCP 2026-07-28 has no server->client requests.
   * Not covered here: `subscriptions/listen`, which is how the spec has clients
-    opt into `notifications/tasks`. That mechanism does not exist in neva yet
-    and is tracked separately.
+    opt into `notifications/tasks`. It lands in 0.5.1, though the task category
+    itself is not in the filter yet.
 * **`resultType` on every result** (MCP 2026-07-28, #97). The final spec makes
   the discriminator mandatory on results, not just on MRTR continuations. neva
   emitted it only on `InputRequiredResult`; now every success result carries

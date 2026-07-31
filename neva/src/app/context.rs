@@ -6,12 +6,16 @@ use super::{
 };
 use crate::error::{Error, ErrorCode};
 use crate::transport::Sender;
-#[cfg(feature = "legacy-spec")]
 use crate::types::notification::Notification;
 #[cfg(feature = "legacy-spec")]
 use crate::types::root::{ListRootsRequestParams, ListRootsResult};
 #[cfg(feature = "legacy-spec")]
 use crate::types::sampling::{CreateMessageRequestParams, CreateMessageResult};
+#[cfg(not(feature = "legacy-spec"))]
+use crate::types::{
+    RequestId, SubscriptionFilter, SubscriptionsAcknowledgedNotificationParams,
+    SubscriptionsListenResult,
+};
 use crate::{
     middleware::{MwContext, Next},
     shared::{IntoArgs, RequestQueue},
@@ -24,6 +28,7 @@ use crate::{
         resource::SubscribeRequestParams,
     },
 };
+
 // `RequestId` is only referenced by the server->client request paths (legacy
 // elicitation/sampling) and the task API; under the stateless 2026-07-28 build without
 // tasks it is unused -- including in tests, whose `RequestId` uses live in
@@ -654,18 +659,49 @@ impl Context {
     }
 
     /// Adds a subscription to the resource with the [`Uri`]
+    ///
+    /// Legacy only: under MCP 2026-07-28 a per-resource subscription is a URI
+    /// in the `subscriptions/listen` filter, established by the client and
+    /// scoped to that stream, so there is nothing for the server to add.
+    #[cfg(feature = "legacy-spec")]
     pub fn subscribe_to_resource(&mut self, uri: impl Into<Uri>) {
         self.options.resource_subscriptions.insert(uri.into());
     }
 
     /// Removes a subscription to the resource with the [`Uri`]
+    ///
+    /// Legacy only; see [`Self::subscribe_to_resource`].
+    #[cfg(feature = "legacy-spec")]
     pub fn unsubscribe_from_resource(&mut self, uri: &Uri) {
         self.options.resource_subscriptions.remove(uri);
     }
 
     /// Returns `true` if there is a subscription to changes of the resource with the [`Uri`]
+    #[cfg(feature = "legacy-spec")]
     pub fn is_subscribed(&self, uri: &Uri) -> bool {
         self.options.resource_subscriptions.contains(uri)
+    }
+
+    /// Returns `true` if any live `subscriptions/listen` stream watches the
+    /// resource with the [`Uri`].
+    ///
+    /// # Examples
+    /// ```no_run
+    /// # #[cfg(all(feature = "server-macros", not(feature = "legacy-spec")))] {
+    /// use neva::prelude::*;
+    ///
+    /// #[tool]
+    /// async fn touch(ctx: Context) -> Result<(), Error> {
+    ///     if ctx.is_subscribed(&"res://config".into()) {
+    ///         // somebody is listening for this resource
+    ///     }
+    /// # Ok(())
+    /// }
+    /// # }
+    /// ```
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn is_subscribed(&self, uri: &Uri) -> bool {
+        self.options.subscriptions().is_resource_subscribed(uri)
     }
 
     /// Adds a new prompt and notifies clients
@@ -1706,29 +1742,33 @@ impl Context {
 
     /// Sends a notification to a client.
     ///
-    /// Under the stateless MCP 2026-07-28 transport there is no
-    /// out-of-band server->client channel, so this is a no-op: progress,
-    /// list-changed, resource-updated, task-status and elicitation
-    /// notifications are inert and clients poll instead.
+    /// Under MCP 2026-07-28 the only server->client channel is a
+    /// `subscriptions/listen` stream, so a subscribable notification
+    /// (`tools`/`prompts`/`resources` list-changed and `resources/updated`) is
+    /// fanned out to every stream whose filter admits it. The rest -- progress,
+    /// task status, elicitation -- are request-scoped and have no subscription
+    /// to travel on.
     #[inline]
     async fn send_notification(
         &mut self,
-        #[cfg_attr(not(feature = "legacy-spec"), allow(unused_variables))] method: &str,
-        #[cfg_attr(not(feature = "legacy-spec"), allow(unused_variables))] params: Option<
-            serde_json::Value,
-        >,
+        method: &str,
+        params: Option<serde_json::Value>,
     ) -> Result<(), Error> {
         #[cfg(not(feature = "legacy-spec"))]
         {
-            // No out-of-band server->client channel on the stateless transport,
-            // so this is an intentional no-op. Surface it once at debug so a
-            // server author who calls e.g. `resource_updated`/`add_tool` and
-            // expects a push isn't silently misled -- the masked capabilities
-            // already tell clients to poll instead.
+            if self
+                .options
+                .subscriptions()
+                .broadcast(method, params.as_ref())
+            {
+                return Ok(());
+            }
+            // Not a type a client can subscribe to. Surface it once at debug so
+            // a server author who expects a push isn't silently misled.
             #[cfg(feature = "tracing")]
             tracing::debug!(
                 method,
-                "notifications are not delivered on the stateless 2026-07-28 transport; clients poll instead"
+                "notification is not deliverable under MCP 2026-07-28: no subscription carries this type"
             );
             Ok(())
         }
@@ -1740,6 +1780,102 @@ impl Context {
             }
             self.sender.send(notification.into()).await
         }
+    }
+}
+
+/// The `subscriptions/listen` implementation (MCP 2026-07-28).
+#[cfg(not(feature = "legacy-spec"))]
+impl Context {
+    /// Opens a subscription and holds it until it ends.
+    ///
+    /// The returned future resolves when the client cancels the subscription,
+    /// the transport drops it, or the server shuts down; resolving is what
+    /// answers the long-lived `subscriptions/listen` request with its
+    /// graceful-close result.
+    pub(crate) async fn listen(
+        &self,
+        id: RequestId,
+        requested: SubscriptionFilter,
+    ) -> Result<SubscriptionsListenResult, Error> {
+        let accepted = requested.supported_by(&self.options.advertised_capabilities());
+        let (sink, pump) = self.subscription_sink();
+
+        // The acknowledgment MUST be the first message on the subscription, so
+        // it is queued before the entry goes live and any broadcast can reach
+        // it.
+        let ack = Notification::new(
+            crate::types::subscription::commands::ACKNOWLEDGED,
+            serde_json::to_value(SubscriptionsAcknowledgedNotificationParams::new(
+                id.clone(),
+                accepted.clone(),
+            ))
+            .ok(),
+        );
+        sink.send(Message::Notification(ack))
+            .await
+            .map_err(|_| Error::new(ErrorCode::InternalError, "Subscription stream is closed"))?;
+
+        let (token, guard) =
+            self.options
+                .subscriptions()
+                .register(id.clone(), accepted, sink.clone());
+
+        // Whichever comes first: the client cancelled this subscription, the
+        // stream went away under us (an HTTP client that closed the response
+        // body), or the server is shutting down.
+        let shutdown = self.options.shutdown_token();
+        tokio::select! {
+            _ = token.cancelled() => {},
+            _ = sink.closed() => {},
+            _ = shutdown.cancelled() => {},
+        }
+
+        // Deregistering and dropping this end closes the subscription's own
+        // channel, which is what lets the pump drain whatever is still queued
+        // and exit -- aborting it instead would drop those notifications on the
+        // floor a moment before the request answers.
+        drop(guard);
+        drop(sink);
+        if let Some(pump) = pump {
+            let _ = pump.await;
+        }
+
+        Ok(SubscriptionsListenResult::new(id))
+    }
+
+    /// Picks where this subscription's notifications go.
+    ///
+    /// Over HTTP that is the `POST` response sink the transport registered for
+    /// this request -- writing into it puts notifications straight onto the
+    /// long-lived response body, and its closure is how the handler learns the
+    /// client disconnected. Every other transport (stdio) gets a channel of its
+    /// own, pumped into the transport sender by the returned task.
+    fn subscription_sink(
+        &self,
+    ) -> (
+        tokio::sync::mpsc::Sender<Message>,
+        Option<tokio::task::JoinHandle<()>>,
+    ) {
+        #[cfg(feature = "http-server")]
+        if let Some(sink) = self
+            .session_id
+            .and_then(|id| crate::types::notification::sink::get(&id))
+        {
+            return (sink, None);
+        }
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(
+            crate::app::subscriptions::DEFAULT_SUBSCRIPTION_CAPACITY,
+        );
+        let mut sender = self.sender.clone();
+        let pump = tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                if sender.send(msg).await.is_err() {
+                    break;
+                }
+            }
+        });
+        (tx, Some(pump))
     }
 }
 

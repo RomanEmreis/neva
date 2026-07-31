@@ -18,6 +18,8 @@ use crate::types::{
     resource::{SubscribeRequestParams, UnsubscribeRequestParams},
 };
 use crate::types::{ClientCapabilities, InitializeRequestParams, InitializeResult};
+#[cfg(not(feature = "legacy-spec"))]
+use crate::types::{SubscriptionFilter, SubscriptionsListenRequestParams};
 use handler::RequestHandler;
 use options::McpOptions;
 use serde::Serialize;
@@ -43,10 +45,14 @@ mod handler;
 mod notification_handler;
 pub mod options;
 pub mod subscribe;
+#[cfg(not(feature = "legacy-spec"))]
+pub mod subscription;
 #[cfg(feature = "tasks")]
 pub mod task;
 
 pub use batch::BatchBuilder;
+#[cfg(not(feature = "legacy-spec"))]
+pub use subscription::{Subscription, SubscriptionEnd};
 #[cfg(feature = "tasks")]
 pub use task::TaskBuilder;
 
@@ -1010,8 +1016,112 @@ impl Client {
         self.send_request(request).await?.into_result()
     }
 
+    /// Opens a long-lived notification subscription (MCP 2026-07-28).
+    ///
+    /// Sends `subscriptions/listen` and returns once the server has
+    /// acknowledged the filter. Notifications delivered on the stream are
+    /// dispatched to the handlers registered with [`Self::subscribe`] and its
+    /// helpers ([`Self::on_tools_changed`] and friends), so those must be in
+    /// place before listening.
+    ///
+    /// The returned [`Subscription`] carries the accepted filter -- the server
+    /// silently drops types it does not advertise -- and ends the stream on
+    /// [`Subscription::cancel`].
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::{Client, error::Error, types::SubscriptionFilter};
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let mut client = Client::new();
+    ///     client.on_tools_changed(|_| async { println!("tools changed"); });
+    ///     client.connect().await?;
+    ///
+    ///     let subscription = client
+    ///         .listen(SubscriptionFilter::new().with_tools_changed())
+    ///         .await?;
+    ///
+    ///     println!("accepted: {:?}", subscription.acknowledged());
+    ///     Ok(())
+    /// }
+    /// ```
+    #[cfg(not(feature = "legacy-spec"))]
+    pub async fn listen(
+        &mut self,
+        notifications: SubscriptionFilter,
+    ) -> Result<Subscription, Error> {
+        if self.is_legacy_peer() {
+            return Err(Error::new(
+                ErrorCode::MethodNotFound,
+                "Peer speaks the legacy protocol; use subscribe_to_resource instead",
+            ));
+        }
+
+        let id = self.generate_id()?;
+        let mut request = Request::new(
+            Some(id.clone()),
+            crate::types::subscription::commands::LISTEN,
+            Some(SubscriptionsListenRequestParams::new(notifications.clone())),
+        );
+        self.apply_client_meta(&mut request, None, None);
+
+        let handler = self
+            .handler
+            .as_mut()
+            .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
+
+        // Watch for the acknowledgment before sending: it is the first thing
+        // the server puts on the stream, and the receive loop drops one nobody
+        // is waiting for.
+        let ack = handler.watch_ack(&id);
+        let sender = handler.sender();
+        let response = handler.send_listen(request).await.inspect_err(|_| {
+            self.handler
+                .as_ref()
+                .expect("handler was borrowed above")
+                .abandon_listen(&id)
+        })?;
+
+        let timeout = self.options.timeout;
+        let acknowledged = match tokio::time::timeout(timeout, ack).await {
+            Ok(Ok(filter)) => filter,
+            _ => {
+                self.handler
+                    .as_ref()
+                    .expect("handler was borrowed above")
+                    .abandon_listen(&id);
+                return Err(Error::new(
+                    ErrorCode::Timeout,
+                    "Subscription was not acknowledged",
+                ));
+            }
+        };
+
+        Ok(Subscription::new(
+            id,
+            notifications,
+            acknowledged,
+            response,
+            sender,
+        ))
+    }
+
     /// Subscribes to a resource on the server to receive notifications when it changes.
+    ///
+    /// Legacy only in effect: MCP 2026-07-28 folds per-resource subscriptions
+    /// into the `listen` filter, so against a 2026-07-28 peer this fails and
+    /// `listen` with a `resourceSubscriptions` entry is the way. The method
+    /// stays available because the dual-mode fallback still reaches legacy
+    /// peers.
     pub async fn subscribe_to_resource(&mut self, uri: impl Into<Uri>) -> Result<(), Error> {
+        #[cfg(not(feature = "legacy-spec"))]
+        if !self.is_legacy_peer() {
+            return Err(Error::new(
+                ErrorCode::MethodNotFound,
+                "resources/subscribe is legacy-only; use listen with a resource filter",
+            ));
+        }
         if !self.is_resource_subscription_supported() {
             return Err(Error::new(
                 ErrorCode::MethodNotFound,
@@ -1031,7 +1141,18 @@ impl Client {
     }
 
     /// Unsubscribes from a resource on the server to stop receiving notifications about its changes.
+    ///
+    /// Legacy only in effect; see [`Self::subscribe_to_resource`]. Under MCP
+    /// 2026-07-28 a subscription ends with the stream that carries it
+    /// (`Subscription::cancel`).
     pub async fn unsubscribe_from_resource(&mut self, uri: impl Into<Uri>) -> Result<(), Error> {
+        #[cfg(not(feature = "legacy-spec"))]
+        if !self.is_legacy_peer() {
+            return Err(Error::new(
+                ErrorCode::MethodNotFound,
+                "resources/unsubscribe is legacy-only; cancel the subscription instead",
+            ));
+        }
         if !self.is_resource_subscription_supported() {
             return Err(Error::new(
                 ErrorCode::MethodNotFound,

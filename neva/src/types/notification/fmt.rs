@@ -28,39 +28,6 @@ pub(super) const MCP_LOG_LEVEL: &str = "mcp_log_level";
 
 pub(crate) static LOG_REGISTRY: Lazy<MessageRegistry> = Lazy::new(MessageRegistry::new);
 
-/// Per-request notification sinks for the 2026-07-28 stateless HTTP transport, keyed by
-/// the per-`POST` session id (each stateless `POST` mints a fresh one).
-///
-/// The 2026-07-28 transport has no `GET`/SSE stream, so request-scoped notifications
-/// (`notifications/message`, `notifications/progress`) flow on the originating
-/// request's `POST` response stream instead. `handle_post` registers a sink
-/// before dispatch and drains it into that response; the notification layer
-/// routes events fired while handling the request to the matching sink.
-#[cfg(not(feature = "legacy-spec"))]
-pub(crate) static REQUEST_NOTIFICATIONS: Lazy<dashmap::DashMap<uuid::Uuid, Sender<Message>>> =
-    Lazy::new(dashmap::DashMap::new);
-
-/// Registers a per-request notification sink for `id` (the per-`POST` session
-/// id). Returns the receiving end for the `POST` response stream to drain.
-///
-/// Only the HTTP server writes sinks; the layer (which may run client-side too)
-/// merely reads [`REQUEST_NOTIFICATIONS`], so these live behind `http-server`.
-#[cfg(all(not(feature = "legacy-spec"), feature = "http-server"))]
-pub(crate) fn register_request_sink(
-    id: uuid::Uuid,
-    capacity: usize,
-) -> tokio::sync::mpsc::Receiver<Message> {
-    let (tx, rx) = channel::<Message>(capacity);
-    REQUEST_NOTIFICATIONS.insert(id, tx);
-    rx
-}
-
-/// Removes the per-request notification sink for `id`.
-#[cfg(all(not(feature = "legacy-spec"), feature = "http-server"))]
-pub(crate) fn unregister_request_sink(id: &uuid::Uuid) {
-    REQUEST_NOTIFICATIONS.remove(id);
-}
-
 /// Creates a custom tracing layer that delivers messages to MCP Client
 ///
 /// This layer routes notifications to a connected client. On the legacy HTTP
@@ -178,7 +145,7 @@ where
             // id; fall through to the legacy session-SSE path otherwise.
             #[cfg(not(feature = "legacy-spec"))]
             if let Some(session_id) = notification.session_id
-                && let Some(sink) = REQUEST_NOTIFICATIONS.get(&session_id)
+                && let Some(sink) = super::sink::REQUEST_NOTIFICATIONS.get(&session_id)
             {
                 let _ = sink.try_send(Message::Notification(notification));
                 return;
@@ -451,7 +418,7 @@ mod tests {
 
         let session_id = uuid::Uuid::new_v4();
         let (sink_tx, mut sink_rx) = tokio::sync::mpsc::channel::<Message>(8);
-        super::REQUEST_NOTIFICATIONS.insert(session_id, sink_tx);
+        super::super::sink::REQUEST_NOTIFICATIONS.insert(session_id, sink_tx);
 
         let (fallback_tx, mut fallback_rx) = tokio::sync::mpsc::channel::<Notification>(8);
         let subscriber = tracing_subscriber::registry().with(super::MpscLayer {
@@ -470,7 +437,7 @@ mod tests {
             tracing::warn!(logger = "tool", "nested message");
         });
 
-        super::REQUEST_NOTIFICATIONS.remove(&session_id);
+        super::super::sink::REQUEST_NOTIFICATIONS.remove(&session_id);
 
         let msg = sink_rx
             .try_recv()

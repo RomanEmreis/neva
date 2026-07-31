@@ -30,6 +30,11 @@ pub mod fmt;
 mod formatter;
 mod log_message;
 mod progress;
+#[cfg(all(
+    not(feature = "legacy-spec"),
+    any(feature = "tracing", feature = "http-server")
+))]
+pub(crate) mod sink;
 
 /// List of commands for Notifications
 pub mod commands {

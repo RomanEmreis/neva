@@ -22,11 +22,13 @@ use crate::types::{
     notification::{CancelledNotificationParams, Notification},
     resource::template::ResourceFunc,
 };
-// Subscribe/unsubscribe handlers exist only under the legacy transport, which
-// can push `notifications/resources/updated`; the 2026-07-28 stateless build masks the
-// capability and skips the handlers, so these params are unused there.
 #[cfg(feature = "legacy-spec")]
 use crate::types::{InitializeRequestParams, InitializeResult};
+// The subscribe/unsubscribe RPCs exist only under the legacy transport; MCP
+// 2026-07-28 folds them into the `subscriptions/listen` filter, so these params
+// are unused there.
+#[cfg(not(feature = "legacy-spec"))]
+use crate::types::{RequestId, SubscriptionsListenRequestParams, SubscriptionsListenResult};
 #[cfg(feature = "legacy-spec")]
 use crate::types::{SubscribeRequestParams, UnsubscribeRequestParams};
 use tokio_util::sync::CancellationToken;
@@ -67,6 +69,8 @@ pub(crate) mod handler;
 #[cfg(not(feature = "legacy-spec"))]
 pub mod mrtr_store;
 pub mod options;
+#[cfg(not(feature = "legacy-spec"))]
+pub(crate) mod subscriptions;
 
 const DEFAULT_PAGE_SIZE: usize = 10;
 
@@ -131,12 +135,10 @@ impl App {
             Self::resource_templates,
         );
         app.map_handler(crate::types::resource::commands::READ, Self::resource);
-        // The stateless MCP 2026-07-28 transport cannot push
-        // `notifications/resources/updated`, so the `resources.subscribe`
-        // capability is masked off (see `McpOptions::resources_capability`).
-        // Don't register subscribe/unsubscribe handlers under MCP 2026-07-28 either, so the
-        // advertised surface and the accepted methods stay in sync -- the server
-        // won't accept a subscription it never announces.
+        // MCP 2026-07-28 folds `resources/subscribe` into the
+        // `subscriptions/listen` filter: a per-resource subscription is a URI
+        // in `notifications.resourceSubscriptions`, scoped to that stream. The
+        // two RPCs stay legacy-only.
         #[cfg(feature = "legacy-spec")]
         {
             app.map_handler(
@@ -148,6 +150,11 @@ impl App {
                 Self::resource_unsubscribe,
             );
         }
+        #[cfg(not(feature = "legacy-spec"))]
+        app.map_handler(
+            crate::types::subscription::commands::LISTEN,
+            Self::subscriptions_listen,
+        );
 
         app.map_handler(crate::types::prompt::commands::LIST, Self::prompts);
         app.map_handler(crate::types::prompt::commands::GET, Self::prompt);
@@ -305,6 +312,11 @@ impl App {
         let mut transport = self.options.transport();
         let cancellation_token = transport.start();
         self.wait_for_shutdown_signal(cancellation_token.clone());
+        // Long-lived requests (`subscriptions/listen`) watch the same signal
+        // the dispatch loop breaks on, so they can close gracefully instead of
+        // being dropped mid-stream.
+        #[cfg(not(feature = "legacy-spec"))]
+        self.options.set_shutdown_token(cancellation_token.clone());
 
         let (sender, mut receiver) = transport.split();
         let runtime = ServerRuntime::new(
@@ -854,9 +866,8 @@ impl App {
 
     /// A subscription to a resource change request handler
     ///
-    /// Not registered under MCP 2026-07-28: the stateless transport
-    /// cannot push `notifications/resources/updated`, so subscriptions are not
-    /// advertised and the method is not accepted.
+    /// Not registered under MCP 2026-07-28, where the method is folded into the
+    /// `subscriptions/listen` filter; see [`Self::subscriptions_listen`].
     #[cfg(feature = "legacy-spec")]
     async fn resource_subscribe(mut ctx: Context, params: SubscribeRequestParams) {
         ctx.subscribe_to_resource(params.uri);
@@ -868,6 +879,21 @@ impl App {
     #[cfg(feature = "legacy-spec")]
     async fn resource_unsubscribe(mut ctx: Context, params: UnsubscribeRequestParams) {
         ctx.unsubscribe_from_resource(&params.uri);
+    }
+
+    /// A `subscriptions/listen` request handler (MCP 2026-07-28).
+    ///
+    /// The request stays open for the life of the subscription: the accepted
+    /// filter is acknowledged first, notifications matching it flow on the same
+    /// stream, and the reply -- an empty result carrying the subscription id --
+    /// is what marks a graceful close.
+    #[cfg(not(feature = "legacy-spec"))]
+    async fn subscriptions_listen(
+        ctx: Context,
+        id: RequestId,
+        params: SubscriptionsListenRequestParams,
+    ) -> Result<SubscriptionsListenResult, Error> {
+        ctx.listen(id, params.notifications).await
     }
 
     /// Tasks request handler
@@ -1007,11 +1033,7 @@ impl App {
         // middleware pipeline has run -- is what lets a request-scoped SSE POST
         // response know no more notifications are coming, so logs emitted by
         // user middleware after `next(ctx)` still make it onto the stream.
-        #[cfg(all(
-            not(feature = "legacy-spec"),
-            feature = "tracing",
-            feature = "http-server"
-        ))]
+        #[cfg(all(not(feature = "legacy-spec"), feature = "http-server"))]
         let _sink_guard = RequestSinkGuard(msg.session_id().copied());
         runtime.execute(msg).await;
     }
@@ -1031,11 +1053,7 @@ impl App {
         // `ServerRuntime::execute`, so they never close the shared sink early):
         // the request-scoped SSE response stays open until every inner request
         // and its middleware have finished. See `App::execute`.
-        #[cfg(all(
-            not(feature = "legacy-spec"),
-            feature = "tracing",
-            feature = "http-server"
-        ))]
+        #[cfg(all(not(feature = "legacy-spec"), feature = "http-server"))]
         let _sink_guard = RequestSinkGuard(batch_session_id);
         #[cfg(feature = "http-server")]
         let batch_headers = batch.headers.clone();
@@ -1544,6 +1562,14 @@ impl App {
                     && let Ok(params) =
                         serde_json::from_value::<CancelledNotificationParams>(params)
                 {
+                    // A cancel aimed at a `subscriptions/listen` ends that
+                    // subscription only. Cancelling the request itself would
+                    // race the handler for its own response and rob the client
+                    // of the graceful-close result.
+                    #[cfg(not(feature = "legacy-spec"))]
+                    if runtime.options().subscriptions().cancel(&params.request_id) {
+                        return;
+                    }
                     runtime.options().cancel_request(&params.request_id);
                 }
             }
@@ -1569,22 +1595,14 @@ impl App {
 /// response waits for: only then does it know every notification -- including
 /// ones user middleware emitted after `next(ctx)` -- has been queued, so it can
 /// drain them and close with the final response.
-#[cfg(all(
-    not(feature = "legacy-spec"),
-    feature = "tracing",
-    feature = "http-server"
-))]
+#[cfg(all(not(feature = "legacy-spec"), feature = "http-server"))]
 struct RequestSinkGuard(Option<uuid::Uuid>);
 
-#[cfg(all(
-    not(feature = "legacy-spec"),
-    feature = "tracing",
-    feature = "http-server"
-))]
+#[cfg(all(not(feature = "legacy-spec"), feature = "http-server"))]
 impl Drop for RequestSinkGuard {
     fn drop(&mut self) {
         if let Some(id) = self.0 {
-            crate::types::notification::fmt::unregister_request_sink(&id);
+            crate::types::notification::sink::unregister(&id);
         }
     }
 }

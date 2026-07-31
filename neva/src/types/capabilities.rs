@@ -162,7 +162,7 @@ pub struct ElicitationUrlCapability {
 /// > These capabilities are advertised to clients during the initialize handshake.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct ServerCapabilities {
     /// Present if the server offers any tools to call.
     #[serde(skip_serializing_if = "Option::is_none")]
