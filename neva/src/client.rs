@@ -3258,6 +3258,7 @@ mod fallback_tasks_capability_tests {
 #[cfg(all(test, feature = "http-client", not(feature = "legacy-spec")))]
 mod listen_rejection_tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
@@ -3432,6 +3433,93 @@ mod listen_rejection_tests {
         assert!(
             reported.contains("broader"),
             "the rejection must name the cause, got: {reported}"
+        );
+    }
+
+    /// Answers `server/discover` normally, then accepts the listen `POST` and
+    /// never replies at all -- headers included. Records whether that
+    /// connection was closed by the peer.
+    async fn serve_stalled_listen(listener: TcpListener, closed: Arc<AtomicBool>) {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let closed = closed.clone();
+            tokio::spawn(async move {
+                loop {
+                    let Some((_head, body)) = read_request(&mut stream).await else {
+                        return;
+                    };
+                    let msg: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                    let method = msg
+                        .get("method")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or_default();
+
+                    if method == crate::commands::DISCOVER {
+                        let reply = serde_json::json!({
+                            "jsonrpc": "2.0", "id": id,
+                            "result": {
+                                "supportedVersions": [crate::LATEST_PROTOCOL_VERSION],
+                                "capabilities": { "tools": { "listChanged": true } }
+                            }
+                        });
+                        write_json(&mut stream, &reply.to_string()).await;
+                        continue;
+                    }
+
+                    // Sit on the request without sending so much as a status
+                    // line, and watch for the client hanging up.
+                    let mut probe = [0u8; 1];
+                    let hung_up = tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        stream.read(&mut probe),
+                    )
+                    .await
+                    .is_ok_and(|read| matches!(read, Ok(0)));
+                    if hung_up {
+                        closed.store(true, AtomicOrdering::SeqCst);
+                    }
+                    return;
+                }
+            });
+        }
+    }
+
+    /// A subscription can be cancelled while the peer is still sitting on the
+    /// response headers -- establishment timing out is exactly that. The abort
+    /// handle has to exist by then, or the cancel finds nothing to close and the
+    /// task starts draining an orphaned stream once the headers finally arrive.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn listen_closes_a_stalled_request_on_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let closed = Arc::new(AtomicBool::new(false));
+        tokio::spawn(serve_stalled_listen(listener, closed.clone()));
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                // Short enough to keep the test quick, long enough to survive a
+                // loaded CI machine -- the assertion below waits far longer.
+                .with_timeout(std::time::Duration::from_secs(1))
+        });
+        client.connect().await.expect("connect");
+
+        client
+            .listen(crate::types::SubscriptionFilter::new().with_tools_changed())
+            .await
+            .expect_err("a stalled subscription must not establish");
+
+        // Giving up has to reach the wire: the peer sees the connection go away
+        // instead of holding a request nobody is waiting for.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !closed.load(AtomicOrdering::SeqCst) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(
+            closed.load(AtomicOrdering::SeqCst),
+            "abandoning an unacknowledged subscription must close its request"
         );
     }
 

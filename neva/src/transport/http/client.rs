@@ -299,8 +299,16 @@ async fn send_request(
     auth: ClientAuth,
     #[cfg(not(feature = "legacy-spec"))] param_registry: crate::shared::param_headers::Registry,
 ) {
+    // Registered *before* the request goes out: a subscription can be cancelled
+    // while the peer is still sitting on the response headers -- establishment
+    // timing out is exactly that case -- and a handle installed only once the
+    // body arrives would leave that cancel with nothing to abort, then start
+    // draining an orphaned stream when the headers finally land.
+    #[cfg(not(feature = "legacy-spec"))]
+    let (abort, _abort_guard) = track_listen(&req, &session);
+
     let bearer = auth.fresh_bearer().await;
-    let resp = match build_post(
+    let request = build_post(
         &client,
         &session,
         &req,
@@ -308,9 +316,19 @@ async fn send_request(
         #[cfg(not(feature = "legacy-spec"))]
         &param_registry,
     )
-    .send()
-    .await
-    {
+    .send();
+
+    #[cfg(not(feature = "legacy-spec"))]
+    let sent = tokio::select! {
+        sent = request => sent,
+        // Cancelled before the peer even replied: nothing to close, and no
+        // reply worth waiting for.
+        _ = wait_for_any(&abort) => return,
+    };
+    #[cfg(feature = "legacy-spec")]
+    let sent = request.await;
+
+    let resp = match sent {
         Ok(resp) => resp,
         Err(_err) => {
             #[cfg(feature = "tracing")]
@@ -414,25 +432,13 @@ async fn send_request(
         let stream = sse_stream::SseStream::from_bytes_stream(resp.bytes_stream());
 
         #[cfg(not(feature = "legacy-spec"))]
-        let answered = {
-            let abort = abort_handles(&req, &session);
-            let drained = tokio::select! {
-                answered = drain_post_sse(stream, &resp_tx) => Some(answered),
-                // Cancelled from this side: dropping `stream` closes the body,
-                // which is what tells the server the subscription is over. The
-                // request is deliberately left uncompleted -- the caller that
-                // cancelled already knows how this ended.
-                _ = wait_for_any(&abort) => None,
-            };
-
-            for id in request_ids(&req) {
-                session.untrack_stream(&id);
-            }
-
-            match drained {
-                Some(answered) => answered,
-                None => return,
-            }
+        let answered = tokio::select! {
+            answered = drain_post_sse(stream, &resp_tx) => answered,
+            // Cancelled from this side: dropping `stream` closes the body,
+            // which is what tells the server the subscription is over. The
+            // request is deliberately left uncompleted -- the caller that
+            // cancelled already knows how this ended.
+            _ = wait_for_any(&abort) => return,
         };
         #[cfg(feature = "legacy-spec")]
         let answered = drain_post_sse(stream, &resp_tx).await;
@@ -492,13 +498,57 @@ async fn send_request(
     }
 }
 
-/// Registers an abort handle per request id carried by `req`.
+/// Untracks a request's abort handles however [`send_request`] exits -- a
+/// transport error, a non-streaming reply, a cancel, or a panic.
 #[cfg(not(feature = "legacy-spec"))]
-fn abort_handles(req: &Message, session: &McpSession) -> Vec<CancellationToken> {
-    request_ids(req)
-        .into_iter()
-        .map(|id| session.track_stream(id))
-        .collect()
+struct AbortGuard {
+    session: Arc<McpSession>,
+    ids: Vec<crate::types::RequestId>,
+}
+
+#[cfg(not(feature = "legacy-spec"))]
+impl Drop for AbortGuard {
+    fn drop(&mut self) {
+        for id in &self.ids {
+            self.session.untrack_stream(id);
+        }
+    }
+}
+
+/// Registers abort handles for a request whose reply is a long-lived stream.
+///
+/// Only `subscriptions/listen` qualifies: every other request is answered and
+/// gone, so tracking one would be bookkeeping nobody reads. Returns no handles
+/// (and a guard with nothing to clean up) for anything else.
+#[cfg(not(feature = "legacy-spec"))]
+fn track_listen(req: &Message, session: &Arc<McpSession>) -> (Vec<CancellationToken>, AbortGuard) {
+    let is_listen = match req {
+        Message::Request(r) => r.method == crate::types::subscription::commands::LISTEN,
+        Message::Batch(batch) => batch.iter().any(|env| {
+            matches!(env, crate::types::MessageEnvelope::Request(r)
+                if r.method == crate::types::subscription::commands::LISTEN)
+        }),
+        _ => false,
+    };
+
+    let ids = if is_listen {
+        request_ids(req)
+    } else {
+        Vec::new()
+    };
+
+    let tokens = ids
+        .iter()
+        .map(|id| session.track_stream(id.clone()))
+        .collect();
+
+    (
+        tokens,
+        AbortGuard {
+            session: session.clone(),
+            ids,
+        },
+    )
 }
 
 /// Resolves as soon as any of `tokens` is cancelled, or never when empty.
