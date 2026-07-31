@@ -1820,7 +1820,7 @@ impl Context {
             ))
             .ok(),
         );
-        
+
         sink.send(Message::Notification(ack))
             .await
             .map_err(|_| Error::new(ErrorCode::InternalError, "Subscription stream is closed"))?;

@@ -131,7 +131,7 @@ impl SubscriptionRegistry {
         let Some(key) = matching.next() else {
             return false;
         };
-        
+
         if matching.next().is_some() {
             #[cfg(feature = "tracing")]
             tracing::warn!(
