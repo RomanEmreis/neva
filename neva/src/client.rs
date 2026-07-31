@@ -1076,25 +1076,59 @@ impl Client {
         // is waiting for.
         let ack = handler.watch_ack(&id);
         let sender = handler.sender();
-        let response = handler.send_listen(request).await.inspect_err(|_| {
+        let mut response = handler.send_listen(request).await.inspect_err(|_| {
             self.handler
                 .as_ref()
                 .expect("handler was borrowed above")
                 .abandon_listen(&id)
         })?;
 
+        // Race the acknowledgment against the request's own reply: a peer that
+        // rejects the subscription outright -- `MethodNotFound`, an
+        // authorization failure, invalid params -- answers instead of
+        // acknowledging, and waiting only on the acknowledgment would sit out
+        // the whole timeout and report that instead of the server's reason.
         let timeout = self.options.timeout;
-        let acknowledged = match tokio::time::timeout(timeout, ack).await {
+        let established = tokio::select! {
+            biased;
+            acknowledged = ack => Ok(acknowledged),
+            answered = &mut response => Err(match answered {
+                Ok(shared::PendingResponse::Response(resp)) => match resp {
+                    // An error reply is the server's own explanation; surface it.
+                    Response::Err(err) => err.error.into(),
+                    // A success reply this early is the graceful-close result
+                    // for a subscription that never carried anything.
+                    Response::Ok(_) => Error::new(
+                        ErrorCode::InternalError,
+                        "Subscription ended before it was acknowledged",
+                    ),
+                },
+                Ok(shared::PendingResponse::Timeout) | Err(_) => {
+                    Error::new(ErrorCode::Timeout, "Subscription was not acknowledged")
+                }
+            }),
+            _ = tokio::time::sleep(timeout) => Err(Error::new(
+                ErrorCode::Timeout,
+                "Subscription was not acknowledged",
+            )),
+        };
+
+        let acknowledged = match established {
             Ok(Ok(filter)) => filter,
-            _ => {
+            // The waiter's sender was dropped: the receive loop is gone.
+            Ok(Err(_)) => {
                 self.handler
                     .as_ref()
                     .expect("handler was borrowed above")
                     .abandon_listen(&id);
-                return Err(Error::new(
-                    ErrorCode::Timeout,
-                    "Subscription was not acknowledged",
-                ));
+                return Err(Error::new(ErrorCode::InternalError, "Connection closed"));
+            }
+            Err(err) => {
+                self.handler
+                    .as_ref()
+                    .expect("handler was borrowed above")
+                    .abandon_listen(&id);
+                return Err(err);
             }
         };
 
@@ -3189,5 +3223,137 @@ mod fallback_tasks_capability_tests {
     fn no_tasks_capability_resolves_to_none() {
         let client = client_with_capabilities(json!({ "tools": {} }));
         assert!(!client.is_server_supports_tasks());
+    }
+}
+
+/// Establishing a subscription against a peer that answers instead of
+/// acknowledging. Driven by a raw-HTTP mock so the reply can be an outright
+/// rejection, which a real neva server -- whose `subscriptions/listen` handler
+/// is always registered -- never produces.
+#[cfg(all(test, feature = "http-client", not(feature = "legacy-spec")))]
+mod listen_rejection_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    const REASON: &str = "subscriptions are disabled here";
+
+    async fn read_request(stream: &mut TcpStream) -> Option<(String, String)> {
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 2048];
+        let header_end = loop {
+            let n = stream.read(&mut tmp).await.ok()?;
+            if n == 0 {
+                return None;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos + 4;
+            }
+            if buf.len() > 65536 {
+                return None;
+            }
+        };
+        let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+        let content_length = head
+            .lines()
+            .find_map(|l| {
+                l.to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .map(|v| v.trim().parse::<usize>().ok())
+            })
+            .flatten()
+            .unwrap_or(0);
+        while buf.len() < header_end + content_length {
+            let n = stream.read(&mut tmp).await.ok()?;
+            if n == 0 {
+                return None;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+        let body =
+            String::from_utf8_lossy(&buf[header_end..header_end + content_length]).to_string();
+        Some((head, body))
+    }
+
+    async fn write_json(stream: &mut TcpStream, body: &str) {
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(resp.as_bytes()).await;
+    }
+
+    /// Answers `server/discover` normally, then rejects `subscriptions/listen`
+    /// with a JSON-RPC error and never sends an acknowledgment.
+    async fn serve_rejecting(listener: TcpListener) {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                loop {
+                    let Some((_head, body)) = read_request(&mut stream).await else {
+                        return;
+                    };
+                    let msg: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                    let method = msg
+                        .get("method")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or_default();
+
+                    let reply = if method == crate::commands::DISCOVER {
+                        serde_json::json!({
+                            "jsonrpc": "2.0", "id": id,
+                            "result": {
+                                "supportedVersions": [crate::LATEST_PROTOCOL_VERSION],
+                                "capabilities": { "tools": { "listChanged": true } }
+                            }
+                        })
+                    } else {
+                        serde_json::json!({
+                            "jsonrpc": "2.0", "id": id,
+                            "error": { "code": -32600, "message": REASON }
+                        })
+                    };
+                    write_json(&mut stream, &reply.to_string()).await;
+                }
+            });
+        }
+    }
+
+    /// A rejected `subscriptions/listen` must surface the server's own error
+    /// immediately. Waiting only on the acknowledgment would sit out the full
+    /// request timeout and report *that* instead -- the peer's reason lost, and
+    /// the caller blocked for no reason.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn listen_surfaces_an_immediate_rejection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_rejecting(listener));
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                // Generous on purpose: a timeout would be unmistakable below.
+                .with_timeout(std::time::Duration::from_secs(30))
+        });
+        client.connect().await.expect("connect");
+
+        let started = tokio::time::Instant::now();
+        let err = client
+            .listen(crate::types::SubscriptionFilter::new().with_tools_changed())
+            .await
+            .expect_err("a rejected subscription must fail");
+
+        let reported = format!("{err:?}");
+        assert!(
+            reported.contains(REASON),
+            "the server's own error must survive, got: {reported}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the rejection must not wait out the request timeout"
+        );
     }
 }

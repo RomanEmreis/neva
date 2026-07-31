@@ -11,7 +11,10 @@ use crate::types::{
     Message, RequestId, SubscriptionFilter, SubscriptionMeta, Uri, notification::Notification,
 };
 use dashmap::DashMap;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 
@@ -22,9 +25,25 @@ use tokio_util::sync::CancellationToken;
 /// by `sse_log_queue_capacity`.
 pub(crate) const DEFAULT_SUBSCRIPTION_CAPACITY: usize = 64;
 
+/// Server-assigned key of a registry entry.
+///
+/// Deliberately *not* the JSON-RPC id of the listen request: that id is chosen
+/// by the peer, and every fresh neva client starts its counter at the same
+/// value, so two clients on one server routinely pick the same one. Keying on
+/// it would let a second client evict the first from this process-wide
+/// registry, silently stop its delivery, and have either client's teardown
+/// remove the other's entry.
+type Key = u64;
+
 /// One live subscription.
 #[derive(Debug)]
 struct Subscription {
+    /// The JSON-RPC id of the `subscriptions/listen` request, as the peer chose
+    /// it. Unique only within one client, so it identifies the subscription
+    /// *on the wire* (it is what `_meta` is tagged with) but never keys this
+    /// registry.
+    id: RequestId,
+
     /// The subset of the requested filter the server agreed to honor.
     accepted: SubscriptionFilter,
 
@@ -38,24 +57,24 @@ struct Subscription {
     token: CancellationToken,
 }
 
-/// Registry of live `subscriptions/listen` streams, keyed by the JSON-RPC id of
-/// the request that opened each one.
+/// Registry of live `subscriptions/listen` streams.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct SubscriptionRegistry {
-    entries: Arc<DashMap<RequestId, Subscription>>,
+    entries: Arc<DashMap<Key, Subscription>>,
+    next_key: Arc<AtomicU64>,
 }
 
 /// Removes a subscription from the registry when the `subscriptions/listen`
 /// handler ends, whatever ends it: cancellation, disconnect or a panic.
 #[derive(Debug)]
 pub(crate) struct SubscriptionGuard {
-    id: RequestId,
+    key: Key,
     registry: SubscriptionRegistry,
 }
 
 impl Drop for SubscriptionGuard {
     fn drop(&mut self) {
-        self.registry.entries.remove(&self.id);
+        self.registry.entries.remove(&self.key);
     }
 }
 
@@ -69,9 +88,11 @@ impl SubscriptionRegistry {
         sink: Sender<Message>,
     ) -> (CancellationToken, SubscriptionGuard) {
         let token = CancellationToken::new();
+        let key = self.next_key.fetch_add(1, Ordering::Relaxed);
         self.entries.insert(
-            id.clone(),
+            key,
             Subscription {
+                id,
                 accepted,
                 sink,
                 token: token.clone(),
@@ -80,19 +101,49 @@ impl SubscriptionRegistry {
         (
             token,
             SubscriptionGuard {
-                id,
+                key,
                 registry: self.clone(),
             },
         )
     }
 
-    /// Cancels the subscription opened by `id`, if there is one.
+    /// Cancels the subscription a `notifications/cancelled` names.
     ///
     /// Returns whether a subscription was found -- the caller uses that to tell
-    /// a `notifications/cancelled` aimed at a subscription apart from one aimed
-    /// at an ordinary in-flight request.
+    /// a cancel aimed at a subscription apart from one aimed at an ordinary
+    /// in-flight request.
+    ///
+    /// A bare request id is only unique *within* one client, and over HTTP the
+    /// cancel arrives on its own `POST`, carrying no evidence of who opened the
+    /// stream. So when two clients happen to have picked the same id -- which
+    /// is routine, every fresh neva client starts its counter at the same value
+    /// -- this refuses rather than guessing which one to end. Those clients
+    /// cancel by closing the stream instead, which is what the spec prescribes
+    /// over HTTP; stdio, where a bare id *is* unambiguous, is where
+    /// `notifications/cancelled` is the prescribed mechanism.
     pub(crate) fn cancel(&self, id: &RequestId) -> bool {
-        match self.entries.get(id) {
+        let mut matching = self
+            .entries
+            .iter()
+            .filter(|entry| entry.id == *id)
+            .map(|entry| *entry.key());
+
+        let Some(key) = matching.next() else {
+            return false;
+        };
+        
+        if matching.next().is_some() {
+            #[cfg(feature = "tracing")]
+            tracing::warn!(
+                logger = "neva",
+                subscription = %id,
+                "ignoring a subscription cancel: the id names more than one live stream"
+            );
+            return false;
+        }
+        drop(matching);
+
+        match self.entries.get(&key) {
             Some(entry) => {
                 entry.token.cancel();
                 true
@@ -133,7 +184,7 @@ impl SubscriptionRegistry {
             if !entry.accepted.matches(method, uri.as_ref()) {
                 continue;
             }
-            let notification = Notification::new(method, Some(tag(params, entry.key().clone())));
+            let notification = Notification::new(method, Some(tag(params, entry.id.clone())));
             if entry
                 .sink
                 .try_send(Message::Notification(notification))
@@ -143,7 +194,7 @@ impl SubscriptionRegistry {
                 tracing::warn!(
                     logger = "neva",
                     method,
-                    subscription = %entry.key(),
+                    subscription = %entry.id,
                     "dropped a notification: the subscription stream is full or closed"
                 );
             }
@@ -336,6 +387,83 @@ mod tests {
         registry.broadcast(tool::commands::LIST_CHANGED, None);
         assert!(rx.try_recv().is_err());
         assert!(!registry.cancel(&RequestId::Number(1)));
+    }
+
+    /// Two clients routinely pick the same JSON-RPC id -- every fresh neva
+    /// client starts its counter at the same value -- so the registry must not
+    /// be keyed on it: the second registration would evict the first, silently
+    /// ending its delivery.
+    #[tokio::test]
+    async fn it_keeps_two_clients_that_picked_the_same_id_apart() {
+        let registry = SubscriptionRegistry::default();
+        let (tx_a, mut rx_a) = channel::<Message>(8);
+        let (tx_b, mut rx_b) = channel::<Message>(8);
+
+        let (_ta, _ga) = registry.register(
+            RequestId::Number(1),
+            SubscriptionFilter::new().with_tools_changed(),
+            tx_a,
+        );
+        let (_tb, _gb) = registry.register(
+            RequestId::Number(1),
+            SubscriptionFilter::new().with_tools_changed(),
+            tx_b,
+        );
+
+        registry.broadcast(tool::commands::LIST_CHANGED, None);
+
+        // Both streams get it, and each is tagged with the id its own client
+        // chose -- which here happens to be the same one.
+        for rx in [&mut rx_a, &mut rx_b] {
+            let json = serde_json::to_value(rx.try_recv().unwrap()).unwrap();
+            assert_eq!(json["params"]["_meta"][SUBSCRIPTION_ID_KEY], 1);
+        }
+    }
+
+    /// ...and one client's teardown must not deregister the other's.
+    #[tokio::test]
+    async fn it_does_not_deregister_a_colliding_id_on_teardown() {
+        let registry = SubscriptionRegistry::default();
+        let (tx_a, _rx_a) = channel::<Message>(8);
+        let (tx_b, mut rx_b) = channel::<Message>(8);
+
+        let (_ta, guard_a) = registry.register(
+            RequestId::Number(1),
+            SubscriptionFilter::new().with_tools_changed(),
+            tx_a,
+        );
+        let (_tb, _gb) = registry.register(
+            RequestId::Number(1),
+            SubscriptionFilter::new().with_tools_changed(),
+            tx_b,
+        );
+
+        drop(guard_a);
+        registry.broadcast(tool::commands::LIST_CHANGED, None);
+
+        assert!(
+            rx_b.try_recv().is_ok(),
+            "the surviving subscription must still receive"
+        );
+    }
+
+    /// A cancel naming an id two clients happen to share must end neither: the
+    /// notification arrives on its own `POST` and says nothing about who sent
+    /// it, so guessing would let one client silence another.
+    #[tokio::test]
+    async fn it_refuses_an_ambiguous_cancel() {
+        let registry = SubscriptionRegistry::default();
+        let (tx_a, _rx_a) = channel::<Message>(8);
+        let (tx_b, _rx_b) = channel::<Message>(8);
+
+        let (token_a, _ga) =
+            registry.register(RequestId::Number(1), SubscriptionFilter::new(), tx_a);
+        let (token_b, _gb) =
+            registry.register(RequestId::Number(1), SubscriptionFilter::new(), tx_b);
+
+        assert!(!registry.cancel(&RequestId::Number(1)));
+        assert!(!token_a.is_cancelled());
+        assert!(!token_b.is_cancelled());
     }
 
     #[tokio::test]

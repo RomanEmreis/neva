@@ -27,8 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     `remove_tool`, `add_prompt`, `remove_prompt`, `add_resource`,
     `remove_resource` and `resource_updated` fan out to the streams that asked
     for them; `Context::is_subscribed` now answers from the live streams. A
-    subscription ends on `notifications/cancelled`, on transport close, or on
-    server shutdown -- the last two after a graceful empty result.
+    subscription ends on `notifications/cancelled` (stdio's mechanism; over
+    HTTP a bare request id is only unique within one client, so an id naming
+    more than one live stream is refused), on transport close, or on server
+    shutdown. Client cancel answers with the graceful empty result; on the
+    shutdown path that answer is best-effort, since the transport writers stop
+    on the same signal.
   * **Client:** `Client::listen(SubscriptionFilter)` returns a `Subscription`
     once the server acknowledges, exposing `id()`, `requested()`,
     `acknowledged()`, `is_fully_honored()`, `cancel()` and

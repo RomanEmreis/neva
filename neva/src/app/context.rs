@@ -1792,6 +1792,15 @@ impl Context {
     /// the transport drops it, or the server shuts down; resolving is what
     /// answers the long-lived `subscriptions/listen` request with its
     /// graceful-close result.
+    ///
+    /// On the shutdown path that answer is **best-effort**: both transports
+    /// break out of their writer loops on the same token (`biased` selects in
+    /// `http::core::dispatch` and `stdio`), so the result races a channel that
+    /// may already have stopped being read. The branch is still what stops the
+    /// handler from outliving the runtime, and a client that sees the stream
+    /// close without a result treats it as an abrupt end -- which is what the
+    /// spec prescribes, and subscriptions are not resumable anyway. Delivering
+    /// it reliably needs a drain phase ahead of the transport teardown.
     pub(crate) async fn listen(
         &self,
         id: RequestId,
@@ -1811,6 +1820,7 @@ impl Context {
             ))
             .ok(),
         );
+        
         sink.send(Message::Notification(ack))
             .await
             .map_err(|_| Error::new(ErrorCode::InternalError, "Subscription stream is closed"))?;
@@ -1822,7 +1832,8 @@ impl Context {
 
         // Whichever comes first: the client cancelled this subscription, the
         // stream went away under us (an HTTP client that closed the response
-        // body), or the server is shutting down.
+        // body), or the server is shutting down (see the best-effort caveat
+        // above).
         let shutdown = self.options.shutdown_token();
         tokio::select! {
             _ = token.cancelled() => {},
