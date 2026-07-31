@@ -1825,10 +1825,12 @@ impl Context {
             .await
             .map_err(|_| Error::new(ErrorCode::InternalError, "Subscription stream is closed"))?;
 
-        let (token, guard) =
-            self.options
-                .subscriptions()
-                .register(id.clone(), accepted, sink.clone());
+        let (token, guard) = self.options.subscriptions().register(
+            id.clone(),
+            self.session_id,
+            accepted,
+            sink.clone(),
+        );
 
         // Whichever comes first: the client cancelled this subscription, the
         // stream went away under us (an HTTP client that closed the response

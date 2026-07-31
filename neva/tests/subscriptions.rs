@@ -118,7 +118,9 @@ async fn subscription_streams_only_the_requested_notifications() {
     assert_eq!(updated["params"]["uri"], RESOURCE);
     assert_eq!(updated["params"]["_meta"][SUBSCRIPTION_ID_KEY], "sub-1");
 
-    // Cancelling ends the stream with the graceful-close result.
+    // Over HTTP a `notifications/cancelled` naming a bare id must NOT end the
+    // stream: it arrives on its own POST and proves nothing about who opened
+    // the subscription, while ids collide across clients routinely.
     let cancel = serde_json::json!({
         "jsonrpc": "2.0", "method": "notifications/cancelled",
         "params": { "requestId": "sub-1", "reason": "done" }
@@ -130,10 +132,20 @@ async fn subscription_streams_only_the_requested_notifications() {
         .await
         .expect("cancel failed");
 
-    let closed = next_message(&mut stream, &mut body).await;
-    assert_eq!(closed["id"], "sub-1");
-    assert_eq!(closed["result"]["_meta"][SUBSCRIPTION_ID_KEY], "sub-1");
-    assert_eq!(closed["result"]["resultType"], "complete");
+    call_tool(&client, &url, "grow", 5).await;
+    let still_live = next_message(&mut stream, &mut body).await;
+    assert_eq!(
+        still_live["method"], "notifications/tools/list_changed",
+        "a bare cancel must not end a session-bound subscription"
+    );
+
+    // Closing the stream is the mechanism the spec names on this transport.
+    drop(stream);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // The server survives it and keeps serving: the subscription was torn down,
+    // not the runtime.
+    call_tool(&client, &url, "grow", 6).await;
 
     handle.abort();
 }
@@ -243,6 +255,83 @@ async fn client_listen_delivers_to_registered_handlers() {
         seen.load(Ordering::SeqCst),
         1,
         "the registered handler must see the tools list change"
+    );
+
+    handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn client_cancel_ends_the_stream_over_http() {
+    // `Subscription::cancel` has to actually end the subscription on this
+    // transport, where the server cannot act on a bare `notifications/cancelled`
+    // -- the client closes its listen response body instead, and the handler
+    // observes that through its sink.
+    use neva::Client;
+    use neva::client::SubscriptionEnd;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let mut app = App::new().with_options(|opt| {
+        opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
+            .with_tools(|t| t.with_list_changed())
+    });
+    app.map_tool("grow", |mut ctx: neva::Context| async move {
+        ctx.add_tool(Tool::new(
+            format!("grown-{}", uuid::Uuid::new_v4()),
+            || async { "ok" },
+        ))
+        .await?;
+        Ok::<_, neva::error::Error>("grown".to_string())
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    await_reachable(&addr).await;
+
+    let seen = Arc::new(AtomicUsize::new(0));
+    let counter = seen.clone();
+
+    let mut client = Client::new().with_options(|opt| {
+        opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
+            .with_timeout(Duration::from_secs(5))
+    });
+    client.connect().await.expect("connect");
+    client.on_tools_changed(move |_| {
+        let counter = counter.clone();
+        async move {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+
+    let mut subscription = client
+        .listen(neva::types::SubscriptionFilter::new().with_tools_changed())
+        .await
+        .expect("listen");
+
+    client.call_tool("grow", ()).await.expect("first mutation");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while seen.load(Ordering::SeqCst) == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(seen.load(Ordering::SeqCst), 1, "the stream must be live");
+
+    subscription.cancel().await.expect("cancel");
+    // Cancelling closes the stream, so no final result comes back -- and
+    // `closed()` must say so instead of waiting one out.
+    let ended = tokio::time::timeout(Duration::from_secs(2), subscription.closed())
+        .await
+        .expect("closed() must not hang after a cancel");
+    assert!(matches!(ended, SubscriptionEnd::Cancelled), "got {ended:?}");
+
+    // Nothing arrives after the cancel.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    client.call_tool("grow", ()).await.expect("second mutation");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        1,
+        "a cancelled subscription must stop delivering"
     );
 
     handle.abort();

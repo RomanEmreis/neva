@@ -222,6 +222,13 @@ async fn handle_connection(
                     tracing::error!(logger = "neva", "Unexpected messaging error");
                     break;
                 };
+                // A cancel naming a request whose reply is a long-lived stream
+                // ends it the way this transport can: by closing the body. The
+                // notification still goes out -- a peer may want the reason --
+                // but the close is what the server acts on.
+                #[cfg(not(feature = "legacy-spec"))]
+                abort_cancelled_stream(&req, &session);
+
                 crate::spawn_fair!(send_request(
                     client.clone(),
                     session.clone(),
@@ -405,6 +412,29 @@ async fn send_request(
     // resolves the pending request on the response.
     if is_event_stream(resp.headers()) {
         let stream = sse_stream::SseStream::from_bytes_stream(resp.bytes_stream());
+
+        #[cfg(not(feature = "legacy-spec"))]
+        let answered = {
+            let abort = abort_handles(&req, &session);
+            let drained = tokio::select! {
+                answered = drain_post_sse(stream, &resp_tx) => Some(answered),
+                // Cancelled from this side: dropping `stream` closes the body,
+                // which is what tells the server the subscription is over. The
+                // request is deliberately left uncompleted -- the caller that
+                // cancelled already knows how this ended.
+                _ = wait_for_any(&abort) => None,
+            };
+
+            for id in request_ids(&req) {
+                session.untrack_stream(&id);
+            }
+
+            match drained {
+                Some(answered) => answered,
+                None => return,
+            }
+        };
+        #[cfg(feature = "legacy-spec")]
         let answered = drain_post_sse(stream, &resp_tx).await;
 
         // A truncated stream, an unparseable frame, or EOF before the final
@@ -459,6 +489,47 @@ async fn send_request(
                 }
             }
         }
+    }
+}
+
+/// Registers an abort handle per request id carried by `req`.
+#[cfg(not(feature = "legacy-spec"))]
+fn abort_handles(req: &Message, session: &McpSession) -> Vec<CancellationToken> {
+    request_ids(req)
+        .into_iter()
+        .map(|id| session.track_stream(id))
+        .collect()
+}
+
+/// Resolves as soon as any of `tokens` is cancelled, or never when empty.
+#[cfg(not(feature = "legacy-spec"))]
+async fn wait_for_any(tokens: &[CancellationToken]) {
+    if tokens.is_empty() {
+        std::future::pending::<()>().await;
+    }
+
+    futures_util::future::select_all(tokens.iter().map(|t| Box::pin(t.cancelled()))).await;
+}
+
+/// Aborts the streamed reply a `notifications/cancelled` names, if this session
+/// is carrying one.
+#[cfg(not(feature = "legacy-spec"))]
+fn abort_cancelled_stream(msg: &Message, session: &McpSession) {
+    let Message::Notification(notification) = msg else {
+        return;
+    };
+
+    if notification.method != crate::types::notification::commands::CANCELLED {
+        return;
+    }
+
+    if let Some(id) = notification
+        .params
+        .as_ref()
+        .and_then(|p| p.get("requestId"))
+        .and_then(|v| serde_json::from_value::<crate::types::RequestId>(v.clone()).ok())
+    {
+        session.abort_stream(&id);
     }
 }
 

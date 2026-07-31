@@ -44,6 +44,11 @@ struct Subscription {
     /// registry.
     id: RequestId,
 
+    /// Transport session this subscription is bound to: the per-`POST` session
+    /// id over HTTP, `None` over stdio. It is what scopes cancellation, see
+    /// [`SubscriptionRegistry::cancel`].
+    session_id: Option<uuid::Uuid>,
+
     /// The subset of the requested filter the server agreed to honor.
     accepted: SubscriptionFilter,
 
@@ -81,9 +86,12 @@ impl Drop for SubscriptionGuard {
 impl SubscriptionRegistry {
     /// Registers a subscription and returns its cancellation token together
     /// with the guard that deregisters it.
+    /// `session_id` is the transport session the subscription is bound to (the
+    /// per-`POST` session id over HTTP, `None` over stdio).
     pub(crate) fn register(
         &self,
         id: RequestId,
+        session_id: Option<uuid::Uuid>,
         accepted: SubscriptionFilter,
         sink: Sender<Message>,
     ) -> (CancellationToken, SubscriptionGuard) {
@@ -93,6 +101,7 @@ impl SubscriptionRegistry {
             key,
             Subscription {
                 id,
+                session_id,
                 accepted,
                 sink,
                 token: token.clone(),
@@ -107,49 +116,32 @@ impl SubscriptionRegistry {
         )
     }
 
-    /// Cancels the subscription a `notifications/cancelled` names.
+    /// Cancels the subscription a `notifications/cancelled` names, if this
+    /// notification is one that may reach it.
     ///
     /// Returns whether a subscription was found -- the caller uses that to tell
     /// a cancel aimed at a subscription apart from one aimed at an ordinary
     /// in-flight request.
     ///
-    /// A bare request id is only unique *within* one client, and over HTTP the
-    /// cancel arrives on its own `POST`, carrying no evidence of who opened the
-    /// stream. So when two clients happen to have picked the same id -- which
-    /// is routine, every fresh neva client starts its counter at the same value
-    /// -- this refuses rather than guessing which one to end. Those clients
-    /// cancel by closing the stream instead, which is what the spec prescribes
-    /// over HTTP; stdio, where a bare id *is* unambiguous, is where
-    /// `notifications/cancelled` is the prescribed mechanism.
+    /// Only subscriptions with no transport session binding can be cancelled
+    /// this way, which means stdio -- where one process serves one client, so a
+    /// bare request id is unambiguous, and where the spec names
+    /// `notifications/cancelled` as *the* mechanism. Over HTTP the cancel
+    /// arrives on its own `POST` and carries no evidence of who opened the
+    /// stream, while ids collide routinely (every fresh neva client starts its
+    /// counter at the same value); honoring it there would let one client end
+    /// another's subscription. HTTP clients cancel by closing the stream, which
+    /// the handler observes through its sink -- neva's own client does exactly
+    /// that in `Subscription::cancel`.
     pub(crate) fn cancel(&self, id: &RequestId) -> bool {
-        let mut matching = self
-            .entries
-            .iter()
-            .filter(|entry| entry.id == *id)
-            .map(|entry| *entry.key());
-
-        let Some(key) = matching.next() else {
-            return false;
-        };
-
-        if matching.next().is_some() {
-            #[cfg(feature = "tracing")]
-            tracing::warn!(
-                logger = "neva",
-                subscription = %id,
-                "ignoring a subscription cancel: the id names more than one live stream"
-            );
-            return false;
-        }
-        drop(matching);
-
-        match self.entries.get(&key) {
-            Some(entry) => {
+        let mut found = false;
+        for entry in self.entries.iter() {
+            if entry.session_id.is_none() && entry.id == *id {
                 entry.token.cancel();
-                true
+                found = true;
             }
-            None => false,
         }
+        found
     }
 
     /// Returns whether any live subscription is watching `uri`.
@@ -252,7 +244,7 @@ mod tests {
     ) {
         let registry = SubscriptionRegistry::default();
         let (tx, rx) = channel::<Message>(8);
-        let (_token, guard) = registry.register(id, accepted, tx);
+        let (_token, guard) = registry.register(id, None, accepted, tx);
         (registry, rx, guard)
     }
 
@@ -341,11 +333,13 @@ mod tests {
 
         let (_t1, _g1) = registry.register(
             RequestId::Number(1),
+            None,
             SubscriptionFilter::new().with_tools_changed(),
             tx1,
         );
         let (_t2, _g2) = registry.register(
             RequestId::Number(2),
+            None,
             SubscriptionFilter::new().with_prompts_changed(),
             tx2,
         );
@@ -363,8 +357,10 @@ mod tests {
         let (tx1, _rx1) = channel::<Message>(8);
         let (tx2, _rx2) = channel::<Message>(8);
 
-        let (token1, _g1) = registry.register(RequestId::Number(1), SubscriptionFilter::new(), tx1);
-        let (token2, _g2) = registry.register(RequestId::Number(2), SubscriptionFilter::new(), tx2);
+        let (token1, _g1) =
+            registry.register(RequestId::Number(1), None, SubscriptionFilter::new(), tx1);
+        let (token2, _g2) =
+            registry.register(RequestId::Number(2), None, SubscriptionFilter::new(), tx2);
 
         assert!(registry.cancel(&RequestId::Number(1)));
         assert!(token1.is_cancelled());
@@ -378,6 +374,7 @@ mod tests {
         let (tx, mut rx) = channel::<Message>(8);
         let (_token, guard) = registry.register(
             RequestId::Number(1),
+            None,
             SubscriptionFilter::new().with_tools_changed(),
             tx,
         );
@@ -401,11 +398,13 @@ mod tests {
 
         let (_ta, _ga) = registry.register(
             RequestId::Number(1),
+            Some(uuid::Uuid::new_v4()),
             SubscriptionFilter::new().with_tools_changed(),
             tx_a,
         );
         let (_tb, _gb) = registry.register(
             RequestId::Number(1),
+            Some(uuid::Uuid::new_v4()),
             SubscriptionFilter::new().with_tools_changed(),
             tx_b,
         );
@@ -429,11 +428,13 @@ mod tests {
 
         let (_ta, guard_a) = registry.register(
             RequestId::Number(1),
+            Some(uuid::Uuid::new_v4()),
             SubscriptionFilter::new().with_tools_changed(),
             tx_a,
         );
         let (_tb, _gb) = registry.register(
             RequestId::Number(1),
+            Some(uuid::Uuid::new_v4()),
             SubscriptionFilter::new().with_tools_changed(),
             tx_b,
         );
@@ -447,19 +448,28 @@ mod tests {
         );
     }
 
-    /// A cancel naming an id two clients happen to share must end neither: the
-    /// notification arrives on its own `POST` and says nothing about who sent
-    /// it, so guessing would let one client silence another.
+    /// A `notifications/cancelled` must not reach a session-bound (HTTP)
+    /// subscription: it arrives on its own `POST` and says nothing about who
+    /// sent it, while ids collide routinely -- honoring it would let one client
+    /// silence another. Those clients cancel by closing the stream.
     #[tokio::test]
-    async fn it_refuses_an_ambiguous_cancel() {
+    async fn it_refuses_to_cancel_a_session_bound_subscription() {
         let registry = SubscriptionRegistry::default();
         let (tx_a, _rx_a) = channel::<Message>(8);
         let (tx_b, _rx_b) = channel::<Message>(8);
 
-        let (token_a, _ga) =
-            registry.register(RequestId::Number(1), SubscriptionFilter::new(), tx_a);
-        let (token_b, _gb) =
-            registry.register(RequestId::Number(1), SubscriptionFilter::new(), tx_b);
+        let (token_a, _ga) = registry.register(
+            RequestId::Number(1),
+            Some(uuid::Uuid::new_v4()),
+            SubscriptionFilter::new(),
+            tx_a,
+        );
+        let (token_b, _gb) = registry.register(
+            RequestId::Number(1),
+            Some(uuid::Uuid::new_v4()),
+            SubscriptionFilter::new(),
+            tx_b,
+        );
 
         assert!(!registry.cancel(&RequestId::Number(1)));
         assert!(!token_a.is_cancelled());

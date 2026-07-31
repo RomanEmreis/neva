@@ -27,18 +27,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     `remove_tool`, `add_prompt`, `remove_prompt`, `add_resource`,
     `remove_resource` and `resource_updated` fan out to the streams that asked
     for them; `Context::is_subscribed` now answers from the live streams. A
-    subscription ends on `notifications/cancelled` (stdio's mechanism; over
-    HTTP a bare request id is only unique within one client, so an id naming
-    more than one live stream is refused), on transport close, or on server
-    shutdown. Client cancel answers with the graceful empty result; on the
-    shutdown path that answer is best-effort, since the transport writers stop
-    on the same signal.
+    subscription ends on `notifications/cancelled` (stdio's mechanism, and
+    stdio's only -- over HTTP that notification travels on its own `POST` and
+    proves nothing about who opened the stream, while request ids collide
+    across clients routinely), on the client closing the stream (HTTP's
+    mechanism), on transport close, or on server shutdown. The registry is
+    keyed server-side, not by the peer's request id, so colliding ids cannot
+    evict or cancel each other's subscriptions.
   * **Client:** `Client::listen(SubscriptionFilter)` returns a `Subscription`
     once the server acknowledges, exposing `id()`, `requested()`,
     `acknowledged()`, `is_fully_honored()`, `cancel()` and
-    `closed() -> SubscriptionEnd`. Notifications keep flowing to the handlers
-    registered with `Client::subscribe` / `on_tools_changed` /
-    `on_resource_changed`, so existing client code needs no change.
+    `closed() -> SubscriptionEnd` (`Graceful` / `Cancelled` / `Abrupt`).
+    Notifications keep flowing to the handlers registered with
+    `Client::subscribe` / `on_tools_changed` / `on_resource_changed`, so
+    existing client code needs no change.
+  * Establishment races the acknowledgment against the request's own reply, so
+    a peer that rejects the subscription outright surfaces *its* error instead
+    of a timeout; an acknowledgment broader than the filter that was requested
+    is refused outright. `cancel()` ends the stream on both transports --
+    over HTTP by closing the listen response body, which is what the server
+    acts on -- and so does giving up on an unacknowledged one, which would
+    otherwise leave the peer streaming into a subscription the caller was told
+    had failed.
   * Works on both transports: over HTTP the subscription rides the listen
     `POST`'s own `text/event-stream` body (a client disconnect ends it); over
     stdio it interleaves on stdout and ends on `notifications/cancelled`.

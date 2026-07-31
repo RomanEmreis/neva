@@ -18,6 +18,17 @@ pub(super) struct McpSession {
     session_id: OnceCell<uuid::Uuid>,
     last_event_id: RwLock<Option<String>>,
     cancellation_token: CancellationToken,
+
+    /// Abort handles for in-flight requests whose reply is a long-lived stream
+    /// (`subscriptions/listen`).
+    ///
+    /// A subscription is ended over HTTP by closing its response body -- that
+    /// is the spec's cancellation mechanism on this transport, and the only one
+    /// that works, since a `notifications/cancelled` travels on its own `POST`
+    /// and carries no evidence of which stream it belongs to. Cancelling the
+    /// token here drops the body without disturbing the rest of the session.
+    #[cfg(not(feature = "legacy-spec"))]
+    streams: dashmap::DashMap<crate::types::RequestId, CancellationToken>,
 }
 
 impl McpSession {
@@ -41,6 +52,36 @@ impl McpSession {
             last_event_id: RwLock::new(None),
             cancellation_token: token,
             url: Arc::from(url.to_url()),
+            #[cfg(not(feature = "legacy-spec"))]
+            streams: dashmap::DashMap::new(),
+        }
+    }
+
+    /// Registers an abort handle for the in-flight request `id` and returns it.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(super) fn track_stream(&self, id: crate::types::RequestId) -> CancellationToken {
+        let token = CancellationToken::new();
+        self.streams.insert(id, token.clone());
+        token
+    }
+
+    /// Drops the abort handle for `id`, once its reply has been read.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(super) fn untrack_stream(&self, id: &crate::types::RequestId) {
+        self.streams.remove(id);
+    }
+
+    /// Aborts the in-flight request `id`, closing its response body.
+    ///
+    /// Returns whether there was one to abort.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(super) fn abort_stream(&self, id: &crate::types::RequestId) -> bool {
+        match self.streams.remove(id) {
+            Some((_, token)) => {
+                token.cancel();
+                true
+            }
+            None => false,
         }
     }
 

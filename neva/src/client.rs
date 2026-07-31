@@ -1076,12 +1076,14 @@ impl Client {
         // is waiting for.
         let ack = handler.watch_ack(&id);
         let sender = handler.sender();
-        let mut response = handler.send_listen(request).await.inspect_err(|_| {
-            self.handler
-                .as_ref()
-                .expect("handler was borrowed above")
-                .abandon_listen(&id)
-        })?;
+        let listen = handler.send_listen(request).await;
+        let mut response = match listen {
+            Ok(response) => response,
+            Err(err) => {
+                self.abandon_listen(&id).await;
+                return Err(err);
+            }
+        };
 
         // Race the acknowledgment against the request's own reply: a peer that
         // rejects the subscription outright -- `MethodNotFound`, an
@@ -1117,20 +1119,27 @@ impl Client {
             Ok(Ok(filter)) => filter,
             // The waiter's sender was dropped: the receive loop is gone.
             Ok(Err(_)) => {
-                self.handler
-                    .as_ref()
-                    .expect("handler was borrowed above")
-                    .abandon_listen(&id);
+                self.abandon_listen(&id).await;
                 return Err(Error::new(ErrorCode::InternalError, "Connection closed"));
             }
             Err(err) => {
-                self.handler
-                    .as_ref()
-                    .expect("handler was borrowed above")
-                    .abandon_listen(&id);
+                self.abandon_listen(&id).await;
                 return Err(err);
             }
         };
+
+        // The server may narrow the filter -- that is the whole point of the
+        // acknowledgment -- but it must not widen it. Notifications are
+        // dispatched to the client's own handlers with no per-subscription
+        // filtering, so an acknowledgment claiming a category or URI this call
+        // never asked for would deliver events outside the requested scope.
+        if !acknowledged.is_subset_of(&notifications) {
+            self.abandon_listen(&id).await;
+            return Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "Server acknowledged a subscription broader than the one requested",
+            ));
+        }
 
         Ok(Subscription::new(
             id,
@@ -1139,6 +1148,23 @@ impl Client {
             response,
             sender,
         ))
+    }
+
+    /// Gives up on a subscription that never got established.
+    ///
+    /// Dropping the local bookkeeping is not enough: the peer may be holding
+    /// the listen response open (that is precisely the case when establishment
+    /// times out), and a stream nobody is waiting for would keep draining --
+    /// its notifications reaching this client's handlers for a subscription
+    /// `listen` reported as failed, with the server-side entry alive for as
+    /// long as the connection is. So this cancels it exactly like
+    /// [`Subscription::cancel`] does.
+    #[cfg(not(feature = "legacy-spec"))]
+    async fn abandon_listen(&mut self, id: &RequestId) {
+        if let Some(handler) = self.handler.as_mut() {
+            handler.forget_listen(id);
+            let _ = handler.send_notification(subscription::cancelled(id)).await;
+        }
     }
 
     /// Subscribes to a resource on the server to receive notifications when it changes.
@@ -3226,10 +3252,9 @@ mod fallback_tasks_capability_tests {
     }
 }
 
-/// Establishing a subscription against a peer that answers instead of
-/// acknowledging. Driven by a raw-HTTP mock so the reply can be an outright
-/// rejection, which a real neva server -- whose `subscriptions/listen` handler
-/// is always registered -- never produces.
+/// Establishing a subscription against a peer that misbehaves: answering
+/// instead of acknowledging, or acknowledging more than was asked for. Driven
+/// by a raw-HTTP mock, since a real neva server produces neither.
 #[cfg(all(test, feature = "http-client", not(feature = "legacy-spec")))]
 mod listen_rejection_tests {
     use super::*;
@@ -3321,6 +3346,93 @@ mod listen_rejection_tests {
                 }
             });
         }
+    }
+
+    /// Answers `server/discover` normally, then acknowledges the subscription
+    /// with a *broader* filter than the client asked for.
+    async fn serve_overbroad_ack(listener: TcpListener) {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                loop {
+                    let Some((_head, body)) = read_request(&mut stream).await else {
+                        return;
+                    };
+                    let msg: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                    let method = msg
+                        .get("method")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or_default();
+
+                    if method == crate::commands::DISCOVER {
+                        let reply = serde_json::json!({
+                            "jsonrpc": "2.0", "id": id,
+                            "result": {
+                                "supportedVersions": [crate::LATEST_PROTOCOL_VERSION],
+                                "capabilities": {
+                                    "tools": { "listChanged": true },
+                                    "prompts": { "listChanged": true }
+                                }
+                            }
+                        });
+                        write_json(&mut stream, &reply.to_string()).await;
+                        continue;
+                    }
+
+                    // The client asked for tools only; claim prompts as well.
+                    let ack = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/subscriptions/acknowledged",
+                        "params": {
+                            "notifications": {
+                                "toolsListChanged": true,
+                                "promptsListChanged": true
+                            },
+                            "_meta": { crate::types::SUBSCRIPTION_ID_KEY: id }
+                        }
+                    });
+                    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\r\n";
+                    let _ = stream.write_all(head.as_bytes()).await;
+                    let _ = stream
+                        .write_all(format!("data: {ack}\n\n").as_bytes())
+                        .await;
+                    // Hold the stream open, the way a real subscription would.
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    return;
+                }
+            });
+        }
+    }
+
+    /// An acknowledgment may narrow the requested filter -- that is what it is
+    /// for -- but never widen it. Notifications reach the client's global
+    /// handlers with no per-subscription filtering, so accepting an overbroad
+    /// acknowledgment would deliver events this call never asked for.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn listen_rejects_an_overbroad_acknowledgment() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_overbroad_ack(listener));
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                .with_timeout(std::time::Duration::from_secs(5))
+        });
+        client.connect().await.expect("connect");
+
+        let err = client
+            .listen(crate::types::SubscriptionFilter::new().with_tools_changed())
+            .await
+            .expect_err("an overbroad acknowledgment must be rejected");
+
+        let reported = format!("{err:?}");
+        assert!(
+            reported.contains("broader"),
+            "the rejection must name the cause, got: {reported}"
+        );
     }
 
     /// A rejected `subscriptions/listen` must surface the server's own error

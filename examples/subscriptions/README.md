@@ -32,10 +32,10 @@ subscription 1 established
 accepted filter: SubscriptionFilter { tools_list_changed: true, ... resource_subscriptions: [res://config] }
 the tool list changed -- time to re-list
 resource updated: {"_meta": {"io.modelcontextprotocol/subscriptionId": 1}, "uri": "res://config"}
-subscription ended: Graceful(...)
+subscription ended: Cancelled
 ```
 
-Three things this shows:
+Four things this shows:
 
 * **The server writes no subscription code.** `subscriptions/listen` is handled
   by neva; the server only calls `ctx.add_tool` and `ctx.resource_updated`, and
@@ -47,6 +47,11 @@ Three things this shows:
 * **Every message carries `io.modelcontextprotocol/subscriptionId`.** That is
   what lets a client demultiplex several subscriptions sharing one channel,
   which on stdio is always the case.
+* **Cancelling closes the stream.** That is the spec's mechanism over HTTP, and
+  the only sound one: a `notifications/cancelled` travels on its own POST and
+  proves nothing about who opened the subscription. So the end state is
+  `Cancelled` rather than `Graceful` -- there is no channel left for a final
+  result, and none is expected.
 
 Notifications are dispatched to the handlers registered *before* listening
 (`on_tools_changed`, `on_resource_changed`); the `Subscription` handle is about

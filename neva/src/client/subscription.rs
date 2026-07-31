@@ -31,6 +31,12 @@ pub enum SubscriptionEnd {
     /// timeout, or a server that died. Subscriptions are not resumable, so a
     /// client that wants to keep listening re-sends `subscriptions/listen`.
     Abrupt,
+
+    /// This client ended it via [`Subscription::cancel`].
+    ///
+    /// Over HTTP that closes the stream, which is the spec's cancellation
+    /// mechanism there -- so no final result comes back, and none is expected.
+    Cancelled,
 }
 
 /// A live `subscriptions/listen` stream.
@@ -69,6 +75,7 @@ pub struct Subscription {
     acknowledged: SubscriptionFilter,
     response: oneshot::Receiver<PendingResponse>,
     sender: TransportProtoSender,
+    cancelled: bool,
 }
 
 impl std::fmt::Debug for Subscription {
@@ -96,6 +103,7 @@ impl Subscription {
             acknowledged,
             response,
             sender,
+            cancelled: false,
         }
     }
 
@@ -134,19 +142,19 @@ impl Subscription {
     /// which ends the stream server-side. Await [`Self::closed`] afterwards to
     /// see the graceful-close result.
     pub async fn cancel(&mut self) -> Result<(), Error> {
-        let params = CancelledNotificationParams {
-            request_id: self.id.clone(),
-            reason: Some("subscription cancelled by the client".into()),
-        };
-        let notification = Notification::new(
-            crate::types::notification::commands::CANCELLED,
-            serde_json::to_value(params).ok(),
-        );
-        self.sender.send(notification.into()).await
+        self.cancelled = true;
+        self.sender.send(cancelled(&self.id).into()).await
     }
 
     /// Waits for the subscription to end and reports how.
     pub async fn closed(self) -> SubscriptionEnd {
+        // A cancel this client issued needs no waiting: over HTTP it closed the
+        // stream, so the peer has nowhere to send a final result and awaiting
+        // one would hang until the request timeout.
+        if self.cancelled {
+            return SubscriptionEnd::Cancelled;
+        }
+
         match self.response.await {
             Ok(PendingResponse::Response(resp)) => match resp.into_result() {
                 Ok(result) => SubscriptionEnd::Graceful(result),
@@ -155,6 +163,24 @@ impl Subscription {
             _ => SubscriptionEnd::Abrupt,
         }
     }
+}
+
+/// Builds the `notifications/cancelled` that ends a subscription.
+///
+/// Over stdio this is the mechanism the spec names. Over HTTP the spec has the
+/// client close the stream instead -- so there the transport reads this same
+/// notification as its cue to drop the listen response body, and the server
+/// learns of the cancellation from the close rather than from the message.
+pub(super) fn cancelled(id: &RequestId) -> Notification {
+    let params = CancelledNotificationParams {
+        request_id: id.clone(),
+        reason: Some("subscription cancelled by the client".into()),
+    };
+
+    Notification::new(
+        crate::types::notification::commands::CANCELLED,
+        serde_json::to_value(params).ok(),
+    )
 }
 
 /// Reads the acknowledged filter and its subscription id out of a

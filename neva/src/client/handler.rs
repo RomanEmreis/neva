@@ -281,8 +281,11 @@ impl RequestHandler {
 
     /// Drops a pending acknowledgment waiter and its request slot, for a
     /// subscription that never got off the ground.
+    ///
+    /// Local bookkeeping only -- ending the stream itself is the caller's job
+    /// (see `Client::abandon_listen`).
     #[cfg(not(feature = "legacy-spec"))]
-    pub(super) fn abandon_listen(&self, id: &RequestId) {
+    pub(super) fn forget_listen(&self, id: &RequestId) {
         self.ack_waiters.remove(id);
         let _ = self.pending.pop(id);
     }
