@@ -6,7 +6,6 @@
 //! about the stream's lifecycle, not its contents.
 
 use neva::prelude::*;
-use neva::types::SubscriptionFilter;
 use std::time::Duration;
 use tracing_subscriber::prelude::*;
 

@@ -38,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   * Works on both transports: over HTTP the subscription rides the listen
     `POST`'s own `text/event-stream` body (a client disconnect ends it); over
     stdio it interleaves on stdout and ends on `notifications/cancelled`.
+  * `Subscription` and `SubscriptionEnd` are re-exported from `neva::prelude`
+    alongside `Client`; the filter types arrive there with the rest of
+    `neva::types`.
   * New `examples/subscriptions/` (server + client over HTTP).
 
 ### Changed (breaking)
