@@ -94,7 +94,7 @@ pub(super) struct RequestHandler {
 
     /// What each live subscription is allowed to deliver.
     #[cfg(not(feature = "legacy-spec"))]
-    subscription_filters: crate::client::subscription::SubscriptionFilters,
+    subscription_filters: crate::client::subscription::SubscriptionStates,
 }
 
 impl Roots {
@@ -283,12 +283,17 @@ impl RequestHandler {
     ) -> tokio::sync::oneshot::Receiver<crate::types::SubscriptionFilter> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.ack_waiters.insert(id.clone(), tx);
-        // Seeded with what was *requested*, before the request goes out: a
-        // notification can arrive between the acknowledgment and `listen`
-        // returning, and it must be checked against something no broader than
-        // the ask. The acknowledgment narrows this the moment it lands.
-        self.subscription_filters
-            .insert(id.clone(), requested.clone());
+        // Recorded before the request goes out, and recorded as *pending*: the
+        // acknowledgment is required to be the first message on the stream, so
+        // anything tagged with this id that arrives ahead of it is delivered by
+        // a subscription that does not exist yet -- and may never, if the peer
+        // rejects the listen or simply never answers. The requested filter
+        // rides along because the acknowledgment narrows it rather than
+        // replacing it.
+        self.subscription_filters.insert(
+            id.clone(),
+            crate::client::subscription::SubscriptionState::Pending(requested.clone()),
+        );
 
         rx
     }
@@ -656,7 +661,7 @@ async fn dispatch_request(
 fn complete_ack(
     notification: &Notification,
     waiters: &crate::client::subscription::AckWaiters,
-    filters: &crate::client::subscription::SubscriptionFilters,
+    filters: &crate::client::subscription::SubscriptionStates,
 ) {
     if notification.method != crate::types::subscription::commands::ACKNOWLEDGED {
         return;
@@ -668,13 +673,10 @@ fn complete_ack(
         return;
     };
 
-    // Narrow the seeded filter to what was acknowledged. Intersecting rather
-    // than replacing keeps a peer that acknowledges *more* than was asked from
-    // widening what this stream may deliver in the window before `listen`
-    // rejects it outright.
+    // This is the handshake completing: the subscription stops being pending
+    // and starts admitting what it narrowed to.
     if let Some(mut entry) = filters.get_mut(&id) {
-        let narrowed = entry.intersection(&filter);
-        *entry = narrowed;
+        entry.acknowledge(&filter);
     }
 
     if let Some((_, waiter)) = waiters.remove(&id) {
@@ -690,7 +692,11 @@ fn complete_ack(
 /// promise is enforced here, at the one place that can, in two parts.
 ///
 /// A notification carrying a subscription id must be one that subscription
-/// acknowledged. One *without* a usable id must not be a subscribable type at
+/// acknowledged -- which also means there has to *be* an acknowledgment: the
+/// handshake requires it to come first, and a subscription still pending may
+/// yet be rejected, leaving handlers to have seen events from a stream
+/// `Client::listen` reports as never established. One *without* a usable id
+/// must not be a subscribable type at
 /// all: under MCP 2026-07-28 those travel on a subscription and nowhere else,
 /// so an untagged (or unparseably tagged) `tools/list_changed` is a category
 /// nothing in this client asked for, arriving with nothing to check it against.
@@ -702,7 +708,7 @@ fn complete_ack(
 #[inline]
 fn admitted(
     notification: &Notification,
-    filters: &crate::client::subscription::SubscriptionFilters,
+    filters: &crate::client::subscription::SubscriptionStates,
     peer_mode: &crate::shared::PeerMode,
 ) -> bool {
     // The acknowledgment is the subscription's own handshake, not one of the
@@ -738,9 +744,11 @@ fn admitted(
         .and_then(|uri| uri.as_str())
         .map(crate::types::Uri::from);
 
-    let admitted = filters
-        .get(&id)
-        .is_some_and(|filter| filter.matches(&notification.method, uri.as_ref()));
+    let admitted = filters.get(&id).is_some_and(|state| {
+        state
+            .established()
+            .is_some_and(|filter| filter.matches(&notification.method, uri.as_ref()))
+    });
 
     #[cfg(feature = "tracing")]
     if !admitted {
@@ -748,7 +756,7 @@ fn admitted(
             logger = "neva",
             method = %notification.method,
             subscription = %id,
-            "dropping a notification outside its subscription's acknowledged filter"
+            "dropping a notification its subscription has not acknowledged"
         );
     }
 
@@ -1274,10 +1282,14 @@ mod tests {
     fn admitted_requires_a_subscription_id_from_a_2026_07_28_peer() {
         use crate::types::SUBSCRIPTION_ID_KEY;
 
-        let filters = crate::client::subscription::SubscriptionFilters::default();
+        use crate::client::subscription::SubscriptionState;
+
+        let filters = crate::client::subscription::SubscriptionStates::default();
         filters.insert(
             RequestId::Number(1),
-            crate::types::SubscriptionFilter::new().with_tools_changed(),
+            SubscriptionState::Established(
+                crate::types::SubscriptionFilter::new().with_tools_changed(),
+            ),
         );
 
         let tagged = Notification::new(
@@ -1313,6 +1325,43 @@ mod tests {
         // subscriptions, so nothing it pushes is tagged.
         peer.set_legacy();
         assert!(admitted(&untagged, &filters, &peer));
+    }
+
+    /// The acknowledgment is required to be the first message on a
+    /// subscription. Until it lands, the subscription may still be rejected or
+    /// never answered, so anything tagged with its id would be an event from a
+    /// stream `Client::listen` goes on to report as never established.
+    #[test]
+    #[cfg(not(feature = "legacy-spec"))]
+    fn admitted_refuses_a_subscription_that_has_not_acknowledged_yet() {
+        use crate::client::subscription::SubscriptionState;
+        use crate::types::{SUBSCRIPTION_ID_KEY, SubscriptionFilter};
+
+        let requested = SubscriptionFilter::new().with_tools_changed();
+        let filters = crate::client::subscription::SubscriptionStates::default();
+        filters.insert(
+            RequestId::Number(1),
+            SubscriptionState::Pending(requested.clone()),
+        );
+
+        let tagged = Notification::new(
+            crate::types::tool::commands::LIST_CHANGED,
+            Some(serde_json::json!({ "_meta": { SUBSCRIPTION_ID_KEY: 1 } })),
+        );
+        let peer = crate::shared::PeerMode::default();
+
+        assert!(
+            !admitted(&tagged, &filters, &peer),
+            "nothing may be delivered before the acknowledgment, however well tagged"
+        );
+
+        // ...and the same notification is admitted once the handshake completes.
+        filters
+            .get_mut(&RequestId::Number(1))
+            .expect("the subscription is tracked")
+            .acknowledge(&requested);
+
+        assert!(admitted(&tagged, &filters, &peer));
     }
 
     #[test]

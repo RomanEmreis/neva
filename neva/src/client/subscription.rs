@@ -20,14 +20,58 @@ use tokio::sync::oneshot;
 /// return once the server has confirmed the filter.
 pub(super) type AckWaiters = Arc<DashMap<RequestId, oneshot::Sender<SubscriptionFilter>>>;
 
-/// The filter each live subscription is allowed to deliver, keyed by its
+/// Where each subscription this client opened stands, keyed by its
 /// subscription id.
 ///
 /// The acknowledgment is a promise about what the stream will carry, and a
-/// noncompliant peer can break it *after* acknowledging correctly. Notifications
-/// go to the client's global handlers, so nothing downstream would notice; the
-/// receive loop checks each tagged notification against this instead.
-pub(super) type SubscriptionFilters = Arc<DashMap<RequestId, SubscriptionFilter>>;
+/// noncompliant peer can break it in either direction: by sending something
+/// outside the accepted filter after acknowledging correctly, or by sending
+/// anything at all before acknowledging. Notifications go to the client's
+/// global handlers, so nothing downstream would notice; the receive loop checks
+/// each tagged notification against this instead.
+pub(super) type SubscriptionStates = Arc<DashMap<RequestId, SubscriptionState>>;
+
+/// How far along a subscription's handshake is, and what it may deliver.
+#[derive(Debug, Clone)]
+pub(super) enum SubscriptionState {
+    /// The `subscriptions/listen` request is out and nothing has come back.
+    ///
+    /// Nothing may be delivered yet: the acknowledgment is required to be the
+    /// first message on the stream, and this subscription may still be
+    /// rejected outright or never acknowledged at all -- in which case
+    /// [`Client::listen`](crate::Client::listen) reports a failure that the
+    /// user's handlers would already have seen events from.
+    ///
+    /// Carries the *requested* filter, which the acknowledgment narrows.
+    Pending(SubscriptionFilter),
+
+    /// Acknowledged: what the subscription is allowed to carry from here on.
+    Established(SubscriptionFilter),
+}
+
+impl SubscriptionState {
+    /// The accepted filter, once there is one.
+    pub(super) fn established(&self) -> Option<&SubscriptionFilter> {
+        match self {
+            Self::Established(filter) => Some(filter),
+            Self::Pending(_) => None,
+        }
+    }
+
+    /// Narrows the requested filter to what the peer acknowledged, and marks
+    /// the subscription established.
+    ///
+    /// Intersecting rather than replacing keeps a peer that acknowledges *more*
+    /// than was asked from widening what this stream may deliver in the window
+    /// before `listen` rejects it outright. A second acknowledgment for a
+    /// subscription that already has one changes nothing: the handshake happens
+    /// once.
+    pub(super) fn acknowledge(&mut self, acknowledged: &SubscriptionFilter) {
+        if let Self::Pending(requested) = self {
+            *self = Self::Established(requested.intersection(acknowledged));
+        }
+    }
+}
 
 /// How a subscription stream ended.
 #[derive(Debug)]
@@ -255,14 +299,14 @@ impl Drop for Subscription {
 pub(super) struct SubscriptionRelease {
     pending: crate::shared::RequestQueue,
     ack_waiters: AckWaiters,
-    filters: SubscriptionFilters,
+    filters: SubscriptionStates,
 }
 
 impl SubscriptionRelease {
     pub(super) fn new(
         pending: crate::shared::RequestQueue,
         ack_waiters: AckWaiters,
-        filters: SubscriptionFilters,
+        filters: SubscriptionStates,
     ) -> Self {
         Self {
             pending,

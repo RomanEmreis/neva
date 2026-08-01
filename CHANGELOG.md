@@ -57,10 +57,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     connection is gone, since a cancel that never reached the wire ended
     nothing.
   * Tagged notifications are checked against the filter their subscription
-    acknowledged, and dropped if they fall outside it. The acknowledgment is a
-    promise about the whole stream, not just its first message, and nothing
-    downstream could tell -- notifications reach the client's global handlers,
-    which know nothing about subscriptions. A subscribable type arriving
+    acknowledged, and dropped if they fall outside it -- or if there is no
+    acknowledgment yet. The acknowledgment is a promise about the whole stream,
+    not just its first message, and it has to *be* first: a subscription still
+    pending may yet be rejected, and delivering its events would report through
+    the handlers what `Client::listen` goes on to report as failed. Nothing
+    downstream could tell either way -- notifications reach the client's global
+    handlers, which know nothing about subscriptions. A subscribable type arriving
     *without* a usable subscription id is dropped too: under MCP 2026-07-28
     those travel on a subscription and nowhere else, so an untagged
     `tools/list_changed` has nothing to be checked against. Untagged

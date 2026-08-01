@@ -3776,6 +3776,100 @@ mod listen_rejection_tests {
         );
     }
 
+    /// Answers `server/discover` normally, then puts a correctly tagged,
+    /// in-filter notification on the stream *ahead* of the acknowledgment.
+    async fn serve_notification_before_ack(listener: TcpListener) {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                loop {
+                    let Some((_head, body)) = read_request(&mut stream).await else {
+                        return;
+                    };
+                    let msg: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                    let method = msg
+                        .get("method")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or_default();
+
+                    if method == crate::commands::DISCOVER {
+                        let reply = serde_json::json!({
+                            "jsonrpc": "2.0", "id": id,
+                            "result": {
+                                "supportedVersions": [crate::LATEST_PROTOCOL_VERSION],
+                                "capabilities": { "tools": { "listChanged": true } }
+                            }
+                        });
+                        write_json(&mut stream, &reply.to_string()).await;
+                        continue;
+                    }
+
+                    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\r\n";
+                    let _ = stream.write_all(head.as_bytes()).await;
+
+                    // Correctly tagged, squarely inside what was requested --
+                    // and out of order.
+                    let early = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": crate::types::tool::commands::LIST_CHANGED,
+                        "params": { "_meta": { crate::types::SUBSCRIPTION_ID_KEY: id } }
+                    });
+                    let _ = stream
+                        .write_all(format!("data: {early}\n\n").as_bytes())
+                        .await;
+
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    return;
+                }
+            });
+        }
+    }
+
+    /// The acknowledgment comes first or the subscription is not established.
+    /// A peer that streams before acknowledging is streaming from a
+    /// subscription `listen` goes on to report as failed -- its events must not
+    /// have reached the handlers in the meantime.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn notifications_before_the_acknowledgment_are_dropped() {
+        use std::sync::atomic::AtomicUsize;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_notification_before_ack(listener));
+
+        let tools = Arc::new(AtomicUsize::new(0));
+        let seen = tools.clone();
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                // Short: the peer never acknowledges, so establishment ends
+                // by timing out, and the test is about what reached the
+                // handlers meanwhile.
+                .with_timeout(std::time::Duration::from_secs(2))
+        });
+        client.connect().await.expect("connect");
+        client.subscribe(crate::types::tool::commands::LIST_CHANGED, move |_| {
+            let seen = seen.clone();
+            async move {
+                seen.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        });
+
+        client
+            .listen(crate::types::SubscriptionFilter::new().with_tools_changed())
+            .await
+            .expect_err("a peer that never acknowledges must not establish");
+
+        assert_eq!(
+            tools.load(AtomicOrdering::SeqCst),
+            0,
+            "a notification sent before the acknowledgment must be dropped"
+        );
+    }
+
     /// Answers `server/discover` normally, acknowledges the subscription, then
     /// pushes a subscribable notification with no subscription id on it.
     async fn serve_untagged_notification(listener: TcpListener) {
