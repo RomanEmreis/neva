@@ -38,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     once the server acknowledges, exposing `id()`, `requested()`,
     `acknowledged()`, `is_fully_honored()`, `cancel()` and
     `closed() -> SubscriptionEnd` (`Graceful` / `Cancelled` / `Abrupt`).
+    Dropping the handle ends the subscription too, so one that falls out of
+    scope cannot leave the peer streaming into handlers nothing can stop.
     Notifications keep flowing to the handlers registered with
     `Client::subscribe` / `on_tools_changed` / `on_resource_changed`, so
     existing client code needs no change.

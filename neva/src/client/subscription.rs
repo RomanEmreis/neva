@@ -75,7 +75,10 @@ pub struct Subscription {
     acknowledged: SubscriptionFilter,
     response: oneshot::Receiver<PendingResponse>,
     sender: TransportProtoSender,
+    /// This client cancelled it -- what [`Subscription::closed`] reports.
     cancelled: bool,
+    /// Teardown is already done or unnecessary, so [`Drop`] has nothing to do.
+    settled: bool,
 }
 
 impl std::fmt::Debug for Subscription {
@@ -104,6 +107,7 @@ impl Subscription {
             response,
             sender,
             cancelled: false,
+            settled: false,
         }
     }
 
@@ -139,15 +143,17 @@ impl Subscription {
     /// Cancels the subscription.
     ///
     /// Sends `notifications/cancelled` for the `subscriptions/listen` request,
-    /// which ends the stream server-side. Await [`Self::closed`] afterwards to
-    /// see the graceful-close result.
+    /// which ends the subscription server-side -- directly over stdio, and over
+    /// HTTP by way of the transport closing the listen response body. Await
+    /// [`Self::closed`] afterwards to confirm how it ended.
     pub async fn cancel(&mut self) -> Result<(), Error> {
         self.cancelled = true;
+        self.settled = true;
         self.sender.send(cancelled(&self.id).into()).await
     }
 
     /// Waits for the subscription to end and reports how.
-    pub async fn closed(self) -> SubscriptionEnd {
+    pub async fn closed(mut self) -> SubscriptionEnd {
         // A cancel this client issued needs no waiting: over HTTP it closed the
         // stream, so the peer has nowhere to send a final result and awaiting
         // one would hang until the request timeout.
@@ -155,13 +161,47 @@ impl Subscription {
             return SubscriptionEnd::Cancelled;
         }
 
-        match self.response.await {
+        let end = match (&mut self.response).await {
             Ok(PendingResponse::Response(resp)) => match resp.into_result() {
                 Ok(result) => SubscriptionEnd::Graceful(result),
                 Err(_) => SubscriptionEnd::Abrupt,
             },
             _ => SubscriptionEnd::Abrupt,
+        };
+        // However it ended, it ended: the peer is not streaming any more, so
+        // the `Drop` below has nothing left to cancel.
+        self.settled = true;
+        end
+    }
+}
+
+/// Dropping the handle ends the subscription.
+///
+/// Without this, letting a `Subscription` fall out of scope would leave the
+/// peer streaming into a client that has no way left to stop it: over HTTP the
+/// transport task keeps draining the response body, over stdio the server keeps
+/// the entry registered, and either way the notifications go on reaching the
+/// handlers registered with [`Client::subscribe`](crate::Client::subscribe).
+///
+/// Best-effort by necessity -- `Drop` cannot await, so the cancellation is
+/// handed to the runtime. Outside a runtime there is nothing to hand it to and
+/// the subscription ends with the connection instead; call
+/// [`Self::cancel`] when the ending has to be observable.
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
         }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+
+        let mut sender = self.sender.clone();
+        let notification = cancelled(&self.id);
+
+        runtime.spawn(async move {
+            let _ = sender.send(notification.into()).await;
+        });
     }
 }
 

@@ -291,6 +291,14 @@ fn build_post(
     resp
 }
 
+/// Sends one message, racing the whole exchange against a cancellation of the
+/// subscription it opens (if it opens one).
+///
+/// The race wraps *everything* rather than individual awaits: a cancel can land
+/// while the token is being refreshed, while an authorization flow runs, while
+/// the peer sits on the response headers, or mid-stream. Dropping the inner
+/// future at any of those points drops the request and its response body, which
+/// is exactly the close the server reads as "this subscription is over".
 async fn send_request(
     client: reqwest::Client,
     session: Arc<McpSession>,
@@ -307,8 +315,39 @@ async fn send_request(
     #[cfg(not(feature = "legacy-spec"))]
     let (abort, _abort_guard) = track_listen(&req, &session);
 
+    #[cfg(not(feature = "legacy-spec"))]
+    if !abort.is_empty() {
+        tokio::select! {
+            _ = exchange(client, session, req, resp_tx, auth, param_registry) => {}
+            _ = wait_for_any(&abort) => {}
+        }
+        return;
+    }
+
+    exchange(
+        client,
+        session,
+        req,
+        resp_tx,
+        auth,
+        #[cfg(not(feature = "legacy-spec"))]
+        param_registry,
+    )
+    .await
+}
+
+/// The exchange itself: send, handle a managed-OAuth retry, then read the reply
+/// (a single body, or a stream drained into the receive loop).
+async fn exchange(
+    client: reqwest::Client,
+    session: Arc<McpSession>,
+    req: Message,
+    resp_tx: mpsc::Sender<Result<Message, Error>>,
+    auth: ClientAuth,
+    #[cfg(not(feature = "legacy-spec"))] param_registry: crate::shared::param_headers::Registry,
+) {
     let bearer = auth.fresh_bearer().await;
-    let request = build_post(
+    let sent = build_post(
         &client,
         &session,
         &req,
@@ -316,17 +355,8 @@ async fn send_request(
         #[cfg(not(feature = "legacy-spec"))]
         &param_registry,
     )
-    .send();
-
-    #[cfg(not(feature = "legacy-spec"))]
-    let sent = tokio::select! {
-        sent = request => sent,
-        // Cancelled before the peer even replied: nothing to close, and no
-        // reply worth waiting for.
-        _ = wait_for_any(&abort) => return,
-    };
-    #[cfg(feature = "legacy-spec")]
-    let sent = request.await;
+    .send()
+    .await;
 
     let resp = match sent {
         Ok(resp) => resp,
@@ -431,16 +461,6 @@ async fn send_request(
     if is_event_stream(resp.headers()) {
         let stream = sse_stream::SseStream::from_bytes_stream(resp.bytes_stream());
 
-        #[cfg(not(feature = "legacy-spec"))]
-        let answered = tokio::select! {
-            answered = drain_post_sse(stream, &resp_tx) => answered,
-            // Cancelled from this side: dropping `stream` closes the body,
-            // which is what tells the server the subscription is over. The
-            // request is deliberately left uncompleted -- the caller that
-            // cancelled already knows how this ended.
-            _ = wait_for_any(&abort) => return,
-        };
-        #[cfg(feature = "legacy-spec")]
         let answered = drain_post_sse(stream, &resp_tx).await;
 
         // A truncated stream, an unparseable frame, or EOF before the final

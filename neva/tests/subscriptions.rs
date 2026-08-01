@@ -337,6 +337,74 @@ async fn client_cancel_ends_the_stream_over_http() {
     handle.abort();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_the_handle_ends_the_subscription() {
+    // A `Subscription` that falls out of scope without `cancel()` must not leave
+    // the peer streaming: there is no handle left to stop it, but its
+    // notifications would still reach the client's registered handlers.
+    use neva::Client;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let mut app = App::new().with_options(|opt| {
+        opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
+            .with_tools(|t| t.with_list_changed())
+    });
+    app.map_tool("grow", |mut ctx: neva::Context| async move {
+        ctx.add_tool(Tool::new(
+            format!("grown-{}", uuid::Uuid::new_v4()),
+            || async { "ok" },
+        ))
+        .await?;
+        Ok::<_, neva::error::Error>("grown".to_string())
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    await_reachable(&addr).await;
+
+    let seen = Arc::new(AtomicUsize::new(0));
+    let counter = seen.clone();
+
+    let mut client = Client::new().with_options(|opt| {
+        opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
+            .with_timeout(Duration::from_secs(5))
+    });
+    client.connect().await.expect("connect");
+    client.on_tools_changed(move |_| {
+        let counter = counter.clone();
+        async move {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+
+    {
+        let _subscription = client
+            .listen(neva::types::SubscriptionFilter::new().with_tools_changed())
+            .await
+            .expect("listen");
+
+        client.call_tool("grow", ()).await.expect("first mutation");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while seen.load(Ordering::SeqCst) == 0 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(seen.load(Ordering::SeqCst), 1, "the stream must be live");
+    } // <- handle dropped here, with no cancel() and no closed()
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    client.call_tool("grow", ()).await.expect("second mutation");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        1,
+        "a dropped subscription must stop delivering"
+    );
+
+    handle.abort();
+}
+
 async fn await_reachable(addr: &str) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
