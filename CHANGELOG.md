@@ -23,7 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     handler to write. The accepted filter is the requested one narrowed to the
     advertised capabilities, acknowledged first on the stream
     (`notifications/subscriptions/acknowledged`), and every message carries
-    `_meta["io.modelcontextprotocol/subscriptionId"]`. `Context::add_tool`,
+    `_meta["io.modelcontextprotocol/subscriptionId"]`. "First" holds against
+    both things that could displace it: the acknowledgment is queued and the
+    registry entry published with no await in between, so a mutation racing the
+    handshake cannot be dropped by a subscription the client has already been
+    told is live; and over HTTP the listen `POST` body carries the subscription
+    only -- request-scoped `notifications/message` stay off it, where
+    middleware logging before `next(ctx)` would otherwise land ahead of the
+    acknowledgment. `Context::add_tool`,
     `remove_tool`, `add_prompt`, `remove_prompt`, `add_resource`,
     `remove_resource` and `resource_updated` fan out to the streams that asked
     for them; `Context::is_subscribed` now answers from the live streams. A
@@ -116,6 +123,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   fails every still-pending request on the way out. Over HTTP the receiver
   holds a sender clone of its own channel, so the loop never ended by itself
   and outlived the connection it served; a disconnect now ends both.
+* **A `subscriptions/listen` `POST` body no longer carries request-scoped log
+  messages.** A listen request stamped with `_meta.logLevel` (which neva's own
+  client does for every request when a level is configured) used to stream
+  `notifications/message` on the subscription's body. That body is the
+  subscription's stream, and anything emitted before the handler runs -- user
+  middleware logging ahead of `next(ctx)`, most directly -- arrived before the
+  acknowledgment. Logging on every other request is unchanged.
 * **The streaming `POST` reply no longer requires the `tracing` feature.**
   `dispatch_post` produces the `StreamResponse::Stream` arm in any default-build
   configuration -- a subscription stream is not a logging concern. Internally

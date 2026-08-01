@@ -147,7 +147,20 @@ where
             if let Some(session_id) = notification.session_id
                 && let Some(sink) = super::sink::REQUEST_NOTIFICATIONS.get(&session_id)
             {
-                let _ = sink.try_send(Message::Notification(notification));
+                // A `subscriptions/listen` body is the subscription's stream:
+                // its first message must be the acknowledgment, and what
+                // follows must belong to the subscription. A log message
+                // emitted by middleware wrapped around the handler would
+                // otherwise be queued before `Context::listen` ever runs, and
+                // arrive ahead of the acknowledgment.
+                if sink.subscription
+                    && notification.method.as_str() == crate::types::notification::commands::MESSAGE
+                {
+                    return;
+                }
+
+                let _ = sink.tx.try_send(Message::Notification(notification));
+
                 return;
             }
 
@@ -418,7 +431,13 @@ mod tests {
 
         let session_id = uuid::Uuid::new_v4();
         let (sink_tx, mut sink_rx) = tokio::sync::mpsc::channel::<Message>(8);
-        super::super::sink::REQUEST_NOTIFICATIONS.insert(session_id, sink_tx);
+        super::super::sink::REQUEST_NOTIFICATIONS.insert(
+            session_id,
+            super::super::sink::RequestSink {
+                tx: sink_tx,
+                subscription: false,
+            },
+        );
 
         let (fallback_tx, mut fallback_rx) = tokio::sync::mpsc::channel::<Notification>(8);
         let subscriber = tracing_subscriber::registry().with(super::MpscLayer {

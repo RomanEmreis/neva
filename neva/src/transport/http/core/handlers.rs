@@ -467,8 +467,11 @@ async fn handle_post_streaming<E: HttpEngine>(
             // Opted in: register the per-request notification sink (keyed by the
             // per-POST session id, which the tracing span carries) before the
             // runtime starts handling, then stream notifications + response.
-            let notif_rx =
-                crate::types::notification::sink::register(id, ctx.sse_log_queue_capacity);
+            let notif_rx = crate::types::notification::sink::register(
+                id,
+                ctx.sse_log_queue_capacity,
+                is_subscription_stream(&msg),
+            );
 
             if ctx.inbound_tx.send(Ok(msg)).await.is_err() {
                 crate::types::notification::sink::unregister(&id);
@@ -508,6 +511,18 @@ fn opts_into_notifications(msg: &Message) -> bool {
         ),
         _ => false,
     }
+}
+
+/// Whether this `POST` body *is* a subscription stream rather than a request's
+/// own notification stream.
+///
+/// The distinction decides what may be written to it: a subscription stream
+/// opens with the acknowledgment and carries that subscription's notifications,
+/// so request-scoped log messages stay off it.
+#[cfg(not(feature = "legacy-spec"))]
+fn is_subscription_stream(msg: &Message) -> bool {
+    matches!(msg, Message::Request(r)
+        if r.method == crate::types::subscription::commands::LISTEN)
 }
 
 /// Whether a single request needs the streaming reply: `subscriptions/listen`

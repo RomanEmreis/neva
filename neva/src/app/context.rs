@@ -1821,9 +1821,30 @@ impl Context {
             .ok(),
         );
 
-        sink.send(Message::Notification(ack))
-            .await
-            .map_err(|_| Error::new(ErrorCode::InternalError, "Subscription stream is closed"))?;
+        // `try_send`, deliberately, not `send().await`: an await between
+        // queueing the acknowledgment and registering the entry is a window in
+        // which the client has been told the subscription is established while
+        // nothing can reach it, so a concurrent mutation broadcasting in that
+        // window would be dropped for good. Nothing else can write to this sink
+        // until `register` publishes the entry, so queueing first and
+        // registering second -- with no await in between -- is what makes
+        // "acknowledgment first" and "no lost events" hold at the same time.
+        //
+        // The sink is empty at this point -- a listen `POST` body carries no
+        // request-scoped logging (see `notification::sink::RequestSink`) and a
+        // subscription reports no progress -- so `Full` here means a sink far
+        // too small to carry a subscription at all, and says so.
+        sink.try_send(Message::Notification(ack)).map_err(|err| {
+            use tokio::sync::mpsc::error::TrySendError;
+            match err {
+                TrySendError::Closed(_) => {
+                    Error::new(ErrorCode::InternalError, "Subscription stream is closed")
+                }
+                TrySendError::Full(_) => {
+                    Error::new(ErrorCode::InternalError, "Subscription stream is full")
+                }
+            }
+        })?;
 
         let (token, guard) = self.options.subscriptions().register(
             id.clone(),
