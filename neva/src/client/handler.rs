@@ -298,18 +298,6 @@ impl RequestHandler {
         rx
     }
 
-    /// Drops a pending acknowledgment waiter and its request slot, for a
-    /// subscription that never got off the ground.
-    ///
-    /// Local bookkeeping only -- ending the stream itself is the caller's job
-    /// (see `Client::abandon_listen`).
-    #[cfg(not(feature = "legacy-spec"))]
-    pub(super) fn forget_listen(&self, id: &RequestId) {
-        self.ack_waiters.remove(id);
-        self.subscription_filters.remove(id);
-        let _ = self.pending.pop(id);
-    }
-
     /// Everything a [`Subscription`] needs to release its own bookkeeping once
     /// its stream is over.
     ///
@@ -673,10 +661,19 @@ fn complete_ack(
         return;
     };
 
-    // This is the handshake completing: the subscription stops being pending
-    // and starts admitting what it narrowed to.
-    if let Some(mut entry) = filters.get_mut(&id) {
-        entry.acknowledge(&filter);
+    // The handshake completing -- unless the acknowledgment is one `listen`
+    // will refuse, in which case the subscription stays pending and delivers
+    // nothing while the waiter below carries the acknowledgment on to be
+    // rejected.
+    if let Some(mut entry) = filters.get_mut(&id)
+        && !entry.acknowledge(&filter)
+    {
+        #[cfg(feature = "tracing")]
+        tracing::warn!(
+            logger = "neva",
+            subscription = %id,
+            "not establishing a subscription on an acknowledgment broader than its request"
+        );
     }
 
     if let Some((_, waiter)) = waiters.remove(&id) {
@@ -1355,11 +1352,31 @@ mod tests {
             "nothing may be delivered before the acknowledgment, however well tagged"
         );
 
+        // An acknowledgment broader than the request establishes nothing:
+        // `Client::listen` refuses it, so admitting even the requested
+        // categories would deliver events from a subscription the caller is
+        // told never opened.
+        let overbroad = SubscriptionFilter::new()
+            .with_tools_changed()
+            .with_prompts_changed();
+        assert!(
+            !filters
+                .get_mut(&RequestId::Number(1))
+                .expect("the subscription is tracked")
+                .acknowledge(&overbroad)
+        );
+        assert!(
+            !admitted(&tagged, &filters, &peer),
+            "an acknowledgment `listen` will reject must not establish the subscription"
+        );
+
         // ...and the same notification is admitted once the handshake completes.
-        filters
-            .get_mut(&RequestId::Number(1))
-            .expect("the subscription is tracked")
-            .acknowledge(&requested);
+        assert!(
+            filters
+                .get_mut(&RequestId::Number(1))
+                .expect("the subscription is tracked")
+                .acknowledge(&requested)
+        );
 
         assert!(admitted(&tagged, &filters, &peer));
     }

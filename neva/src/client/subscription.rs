@@ -58,18 +58,30 @@ impl SubscriptionState {
         }
     }
 
-    /// Narrows the requested filter to what the peer acknowledged, and marks
-    /// the subscription established.
+    /// Establishes the subscription on an acknowledgment the client accepts,
+    /// narrowed to what was actually asked for. Returns whether it did.
     ///
-    /// Intersecting rather than replacing keeps a peer that acknowledges *more*
-    /// than was asked from widening what this stream may deliver in the window
-    /// before `listen` rejects it outright. A second acknowledgment for a
-    /// subscription that already has one changes nothing: the handshake happens
-    /// once.
-    pub(super) fn acknowledge(&mut self, acknowledged: &SubscriptionFilter) {
-        if let Self::Pending(requested) = self {
-            *self = Self::Established(requested.intersection(acknowledged));
+    /// An acknowledgment *broader* than the request is a protocol violation and
+    /// [`Client::listen`](crate::Client::listen) rejects the subscription over
+    /// it -- so this leaves the state pending rather than establishing
+    /// something about to be refused. Merely intersecting the filter would not
+    /// do: it keeps the extra category out, but the requested categories would
+    /// still be delivered in the window before `listen` returns its error, from
+    /// a subscription the caller is then told never opened.
+    ///
+    /// A second acknowledgment for a subscription that already has one changes
+    /// nothing: the handshake happens once.
+    pub(super) fn acknowledge(&mut self, acknowledged: &SubscriptionFilter) -> bool {
+        let Self::Pending(requested) = self else {
+            return false;
+        };
+
+        if !acknowledged.is_subset_of(requested) {
+            return false;
         }
+
+        *self = Self::Established(requested.intersection(acknowledged));
+        true
     }
 }
 
@@ -395,6 +407,13 @@ impl EstablishmentGuard {
     /// The stream is now the returned [`Subscription`]'s to end.
     pub(super) fn disarm(mut self) {
         self.armed = false;
+    }
+
+    /// Drops the bookkeeping without telling the peer anything, for a request
+    /// that never reached the wire.
+    pub(super) fn forget(mut self) {
+        self.armed = false;
+        self.release.release(&self.id);
     }
 
     /// Ends an establishment that failed, awaiting the cancellation rather than

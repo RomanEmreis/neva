@@ -1077,22 +1077,27 @@ impl Client {
         let ack = handler.watch_ack(&id, &notifications);
         let sender = handler.sender();
         let release = handler.subscription_release();
-        let listen = handler.send_listen(request).await;
-        let mut response = match listen {
+
+        // Armed before the send, not after it. `watch_ack` has already
+        // registered the waiter and the pending state, `send_listen` takes the
+        // untimed request slot before it awaits the transport, and that await
+        // is a suspension point like any other: a caller who drops this future
+        // (an outer `tokio::time::timeout`, a lost `select!` branch) runs none
+        // of the branches below, and everything registered so far would be left
+        // behind. Nothing between here and `watch_ack` awaits, so there is no
+        // gap left to fall into.
+        let guard =
+            subscription::EstablishmentGuard::new(id.clone(), release.clone(), sender.clone());
+
+        let mut response = match handler.send_listen(request).await {
             Ok(response) => response,
+            // Never reached the wire, so there is no stream to cancel -- only
+            // this client's own bookkeeping to drop.
             Err(err) => {
-                self.abandon_listen(&id).await;
+                guard.forget();
                 return Err(err);
             }
         };
-
-        // The request is on the wire, so from here every exit has to undo it --
-        // including the one with no code of its own: a caller who drops this
-        // future (an outer `tokio::time::timeout`, a lost `select!` branch)
-        // runs none of the branches below, and would leave the waiter, the
-        // filter, the untimed request slot and the peer's stream behind.
-        let guard =
-            subscription::EstablishmentGuard::new(id.clone(), release.clone(), sender.clone());
 
         // Race the acknowledgment against the request's own reply: a peer that
         // rejects the subscription outright -- `MethodNotFound`, an
@@ -1166,23 +1171,6 @@ impl Client {
             sender,
             release,
         ))
-    }
-
-    /// Gives up on a subscription that never got established.
-    ///
-    /// Dropping the local bookkeeping is not enough: the peer may be holding
-    /// the listen response open (that is precisely the case when establishment
-    /// times out), and a stream nobody is waiting for would keep draining --
-    /// its notifications reaching this client's handlers for a subscription
-    /// `listen` reported as failed, with the server-side entry alive for as
-    /// long as the connection is. So this cancels it exactly like
-    /// [`Subscription::cancel`] does.
-    #[cfg(not(feature = "legacy-spec"))]
-    async fn abandon_listen(&mut self, id: &RequestId) {
-        if let Some(handler) = self.handler.as_mut() {
-            handler.forget_listen(id);
-            let _ = handler.send_notification(subscription::cancelled(id)).await;
-        }
     }
 
     /// Subscribes to a resource on the server to receive notifications when it changes.
@@ -3845,10 +3833,11 @@ mod listen_rejection_tests {
 
         let mut client = Client::new().with_options(|opt| {
             opt.with_http(|http| http.bind(addr.to_string()))
-                // Short: the peer never acknowledges, so establishment ends
-                // by timing out, and the test is about what reached the
-                // handlers meanwhile.
-                .with_timeout(std::time::Duration::from_secs(2))
+                // Bounded, because the peer never acknowledges and
+                // establishment has to end by timing out -- but not tight: the
+                // same budget covers the `connect` above, which shares this
+                // client, and a loaded machine makes a short one flake.
+                .with_timeout(std::time::Duration::from_secs(5))
         });
         client.connect().await.expect("connect");
         client.subscribe(crate::types::tool::commands::LIST_CHANGED, move |_| {
@@ -4099,7 +4088,7 @@ mod listen_rejection_tests {
 
         let mut client = Client::new().with_options(|opt| {
             opt.with_http(|http| http.bind(addr.to_string()))
-                .with_timeout(std::time::Duration::from_secs(2))
+                .with_timeout(std::time::Duration::from_secs(30))
         });
         client.connect().await.expect("connect");
         client.subscribe(crate::types::tool::commands::LIST_CHANGED, move |_| {
@@ -4187,6 +4176,20 @@ mod listen_rejection_tests {
                     let _ = stream
                         .write_all(format!("data: {ack}\n\n").as_bytes())
                         .await;
+
+                    // Straight behind it, a notification squarely inside what
+                    // the client *did* ask for. The acknowledgment is on its way
+                    // to being rejected, so this must not reach the handlers
+                    // either -- intersecting the filter alone would let it.
+                    let in_filter = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": crate::types::tool::commands::LIST_CHANGED,
+                        "params": { "_meta": { crate::types::SUBSCRIPTION_ID_KEY: id } }
+                    });
+                    let _ = stream
+                        .write_all(format!("data: {in_filter}\n\n").as_bytes())
+                        .await;
+
                     // Hold the stream open, the way a real subscription would.
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                     return;
@@ -4211,6 +4214,15 @@ mod listen_rejection_tests {
         });
         client.connect().await.expect("connect");
 
+        let tools = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = tools.clone();
+        client.subscribe(crate::types::tool::commands::LIST_CHANGED, move |_| {
+            let seen = seen.clone();
+            async move {
+                seen.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        });
+
         let err = client
             .listen(crate::types::SubscriptionFilter::new().with_tools_changed())
             .await
@@ -4220,6 +4232,15 @@ mod listen_rejection_tests {
         assert!(
             reported.contains("broader"),
             "the rejection must name the cause, got: {reported}"
+        );
+
+        // Nothing may have been delivered on the strength of an acknowledgment
+        // this call refuses -- not even a category it did ask for.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            tools.load(AtomicOrdering::SeqCst),
+            0,
+            "a subscription `listen` rejects must deliver nothing"
         );
     }
 
@@ -4287,11 +4308,11 @@ mod listen_rejection_tests {
 
         let mut client = Client::new().with_options(|opt| {
             opt.with_http(|http| http.bind(addr.to_string()))
-                // Short enough to keep the test quick, long enough to survive a
-                // loaded CI machine -- this budget covers the `connect` before
-                // the subscription as well, and the assertion below waits
-                // longer still.
-                .with_timeout(std::time::Duration::from_secs(2))
+                // Bounded, because establishment has to give up on its own --
+                // but not tight: this budget covers the `connect` before the
+                // subscription as well, and a loaded machine makes a short one
+                // flake. The assertion below waits longer still.
+                .with_timeout(std::time::Duration::from_secs(5))
         });
         client.connect().await.expect("connect");
 

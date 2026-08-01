@@ -62,9 +62,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   * Tagged notifications are checked against the filter their subscription
     acknowledged, and dropped if they fall outside it -- or if there is no
     acknowledgment yet. The acknowledgment is a promise about the whole stream,
-    not just its first message, and it has to *be* first: a subscription still
-    pending may yet be rejected, and delivering its events would report through
-    the handlers what `Client::listen` goes on to report as failed. Nothing
+    not just its first message, and it has to *be* first -- and be one this
+    client accepts: a subscription stays pending until then, since an
+    acknowledgment `listen` is about to refuse as overbroad would otherwise
+    deliver the requested categories in the meantime, from a subscription the
+    caller is then told never opened. Nothing
     downstream could tell either way -- notifications reach the client's global
     handlers, which know nothing about subscriptions. A subscribable type arriving
     *without* a usable subscription id is dropped too: under MCP 2026-07-28
@@ -89,8 +91,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     otherwise leave the peer streaming into a subscription the caller was told
     had failed. Giving up includes dropping the `listen` future itself (an
     outer `tokio::time::timeout`, a lost `select!` branch): the establishment
-    is guarded, so a caller that never sees a result still ends what it
-    started. The transport registers a listen's abort handle in its connection
+    is guarded from before the request is written -- the waiter, the untimed
+    request slot and the pending state all exist by then -- so a caller that
+    never sees a result still ends what it started. The transport registers a listen's abort handle in its connection
     loop rather than in the task it spawns, so a cancel written right behind
     its listen -- which is exactly what giving up writes -- is ordered by the
     wire rather than by the scheduler.
