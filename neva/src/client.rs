@@ -1106,9 +1106,14 @@ impl Client {
                         "Subscription ended before it was acknowledged",
                     ),
                 },
-                Ok(shared::PendingResponse::Timeout) | Err(_) => {
+                Ok(shared::PendingResponse::Timeout) => {
                     Error::new(ErrorCode::Timeout, "Subscription was not acknowledged")
                 }
+                // The slot's sender was dropped: the receive loop released it
+                // on its way out, so the transport is gone. That is a lost
+                // connection, not a peer that would not acknowledge, and
+                // callers act on the two differently.
+                Err(_) => Error::new(ErrorCode::InternalError, "Connection closed"),
             }),
             _ = tokio::time::sleep(timeout) => Err(Error::new(
                 ErrorCode::Timeout,
@@ -3578,6 +3583,146 @@ mod listen_rejection_tests {
         );
     }
 
+    /// Answers `server/discover` normally, acknowledges the subscription, then
+    /// pushes a subscribable notification with no subscription id on it.
+    async fn serve_untagged_notification(listener: TcpListener) {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                loop {
+                    let Some((_head, body)) = read_request(&mut stream).await else {
+                        return;
+                    };
+                    let msg: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                    let method = msg
+                        .get("method")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or_default();
+
+                    if method == crate::commands::DISCOVER {
+                        let reply = serde_json::json!({
+                            "jsonrpc": "2.0", "id": id,
+                            "result": {
+                                "supportedVersions": [crate::LATEST_PROTOCOL_VERSION],
+                                "capabilities": { "tools": { "listChanged": true } }
+                            }
+                        });
+                        write_json(&mut stream, &reply.to_string()).await;
+                        continue;
+                    }
+
+                    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\r\n";
+                    let _ = stream.write_all(head.as_bytes()).await;
+
+                    let ack = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/subscriptions/acknowledged",
+                        "params": {
+                            "notifications": { "toolsListChanged": true },
+                            "_meta": { crate::types::SUBSCRIPTION_ID_KEY: id }
+                        }
+                    });
+                    let _ = stream
+                        .write_all(format!("data: {ack}\n\n").as_bytes())
+                        .await;
+
+                    // In the accepted filter, but with nothing tying it to the
+                    // subscription that accepted it.
+                    let untagged = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": crate::types::tool::commands::LIST_CHANGED
+                    });
+                    let _ = stream
+                        .write_all(format!("data: {untagged}\n\n").as_bytes())
+                        .await;
+
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    return;
+                }
+            });
+        }
+    }
+
+    /// Under MCP 2026-07-28 a subscribable notification travels on a
+    /// subscription and nowhere else. One that arrives without a subscription
+    /// id has nothing to check it against, so it cannot be admitted just
+    /// because the client happens to have asked for that category somewhere.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn untagged_subscribable_notifications_are_dropped() {
+        use std::sync::atomic::AtomicUsize;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_untagged_notification(listener));
+
+        let tools = Arc::new(AtomicUsize::new(0));
+        let seen = tools.clone();
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                .with_timeout(std::time::Duration::from_secs(5))
+        });
+        client.connect().await.expect("connect");
+        client.subscribe(crate::types::tool::commands::LIST_CHANGED, move |_| {
+            let seen = seen.clone();
+            async move {
+                seen.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        });
+
+        let _subscription = client
+            .listen(crate::types::SubscriptionFilter::new().with_tools_changed())
+            .await
+            .expect("listen");
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        assert_eq!(
+            tools.load(AtomicOrdering::SeqCst),
+            0,
+            "a subscription-only notification with no subscription id must be dropped"
+        );
+    }
+
+    /// A transport that dies while `listen` is still waiting for its
+    /// acknowledgment is a lost connection, not a peer that would not
+    /// acknowledge -- and callers act on those differently.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn listen_reports_a_lost_transport_as_a_connection_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_stalled_listen(
+            listener,
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                // Long enough that a timeout cannot be what ends the wait.
+                .with_timeout(std::time::Duration::from_secs(30))
+        });
+        client.connect().await.expect("connect");
+
+        let token = client.handler.as_ref().expect("connected").cancellation();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            token.cancel();
+        });
+
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.listen(crate::types::SubscriptionFilter::new().with_tools_changed()),
+        )
+        .await
+        .expect("a dead transport must not be waited out")
+        .expect_err("a dead transport cannot establish a subscription");
+
+        assert_eq!(err.code, ErrorCode::InternalError, "got {err:?}");
+    }
+
     /// Answers `server/discover` normally, then delivers the whole
     /// subscription -- acknowledgment, an in-filter notification and an
     /// off-filter one -- inside a single JSON-RPC batch.
@@ -3856,8 +4001,10 @@ mod listen_rejection_tests {
         let mut client = Client::new().with_options(|opt| {
             opt.with_http(|http| http.bind(addr.to_string()))
                 // Short enough to keep the test quick, long enough to survive a
-                // loaded CI machine -- the assertion below waits far longer.
-                .with_timeout(std::time::Duration::from_secs(1))
+                // loaded CI machine -- this budget covers the `connect` before
+                // the subscription as well, and the assertion below waits
+                // longer still.
+                .with_timeout(std::time::Duration::from_secs(2))
         });
         client.connect().await.expect("connect");
 

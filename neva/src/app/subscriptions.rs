@@ -9,6 +9,7 @@
 
 use crate::types::{
     Message, RequestId, SubscriptionFilter, SubscriptionMeta, Uri, notification::Notification,
+    subscription::is_subscribable,
 };
 use dashmap::DashMap;
 use std::sync::{
@@ -193,20 +194,6 @@ impl SubscriptionRegistry {
         }
         true
     }
-}
-
-/// Whether `method` is one of the notification types a `subscriptions/listen`
-/// filter can opt in to.
-fn is_subscribable(method: &str) -> bool {
-    use crate::types::{prompt, resource, tool};
-
-    matches!(
-        method,
-        tool::commands::LIST_CHANGED
-            | prompt::commands::LIST_CHANGED
-            | resource::commands::LIST_CHANGED
-            | resource::commands::UPDATED
-    )
 }
 
 /// Stamps `_meta.io.modelcontextprotocol/subscriptionId` onto a copy of

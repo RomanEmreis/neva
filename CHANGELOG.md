@@ -51,17 +51,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     acknowledged, and dropped if they fall outside it. The acknowledgment is a
     promise about the whole stream, not just its first message, and nothing
     downstream could tell -- notifications reach the client's global handlers,
-    which know nothing about subscriptions. Untagged ones (request-scoped
-    progress and log messages) pass through untouched. Batching changes none of
-    this: an acknowledgment or a tagged notification inside a JSON-RPC batch
-    goes through the same gate a standalone one does.
+    which know nothing about subscriptions. A subscribable type arriving
+    *without* a usable subscription id is dropped too: under MCP 2026-07-28
+    those travel on a subscription and nowhere else, so an untagged
+    `tools/list_changed` has nothing to be checked against. Untagged
+    request-scoped notifications (progress and log messages) pass through
+    untouched, as does everything from a peer the dual-mode fallback landed on,
+    which has no subscriptions to tag with. Batching changes none of this: an
+    acknowledgment or a tagged notification inside a JSON-RPC batch goes
+    through the same gate a standalone one does.
     Notifications keep flowing to the handlers registered with
     `Client::subscribe` / `on_tools_changed` / `on_resource_changed`, so
     existing client code needs no change.
   * Establishment races the acknowledgment against the request's own reply, so
     a peer that rejects the subscription outright surfaces *its* error instead
-    of a timeout; an acknowledgment broader than the filter that was requested
-    is refused outright. `cancel()` ends the stream on both transports --
+    of a timeout, and a transport that dies mid-establishment reports
+    `Connection closed` rather than a timeout it never waited out; an
+    acknowledgment broader than the filter that was requested is refused
+    outright. `cancel()` ends the stream on both transports --
     over HTTP by closing the listen response body, which is what the server
     acts on -- and so does giving up on an unacknowledged one, which would
     otherwise leave the peer streaming into a subscription the caller was told

@@ -457,7 +457,7 @@ impl RequestHandler {
                         #[cfg(not(feature = "legacy-spec"))]
                         {
                             complete_ack(&notification, &ack_waiters, &subscription_filters);
-                            if !admitted(&notification, &subscription_filters) {
+                            if !admitted(&notification, &subscription_filters, &peer_mode) {
                                 continue;
                             }
                         }
@@ -492,7 +492,7 @@ impl RequestHandler {
                                         &subscription_filters,
                                     );
 
-                                    if admitted(&notification, &subscription_filters) {
+                                    if admitted(&notification, &subscription_filters, &peer_mode) {
                                         deferred.push(MessageEnvelope::Notification(notification));
                                     }
                                 }
@@ -682,41 +682,59 @@ fn complete_ack(
     }
 }
 
-/// Whether a notification tagged with a subscription id is one that
-/// subscription may carry.
+/// Whether a notification belongs on this client's stream at all.
 ///
 /// The spec forbids a server from sending a type the client did not request,
 /// but nothing downstream would notice if it did: notifications go straight to
 /// the client's global handlers, which know nothing about subscriptions. So the
-/// promise is enforced here, at the one place that can. Untagged notifications
-/// -- request-scoped progress and log messages -- belong to no subscription and
-/// pass through untouched.
+/// promise is enforced here, at the one place that can, in two parts.
+///
+/// A notification carrying a subscription id must be one that subscription
+/// acknowledged. One *without* a usable id must not be a subscribable type at
+/// all: under MCP 2026-07-28 those travel on a subscription and nowhere else,
+/// so an untagged (or unparseably tagged) `tools/list_changed` is a category
+/// nothing in this client asked for, arriving with nothing to check it against.
+/// Untagged request-scoped notifications -- progress and log messages -- belong
+/// to no subscription and pass through untouched, as do all of them when the
+/// dual-mode fallback has landed on a legacy peer, which pushes list-changed
+/// notifications on its own and has no subscriptions to tag them with.
 #[cfg(not(feature = "legacy-spec"))]
 #[inline]
 fn admitted(
     notification: &Notification,
     filters: &crate::client::subscription::SubscriptionFilters,
+    peer_mode: &crate::shared::PeerMode,
 ) -> bool {
-    let Some(params) = notification.params.as_ref() else {
-        return true;
-    };
-
-    let Some(id) = params
-        .get("_meta")
-        .and_then(|meta| meta.get(crate::types::SUBSCRIPTION_ID_KEY))
-        .and_then(|id| serde_json::from_value::<RequestId>(id.clone()).ok())
-    else {
-        return true;
-    };
-
     // The acknowledgment is the subscription's own handshake, not one of the
     // categories a filter selects.
     if notification.method == crate::types::subscription::commands::ACKNOWLEDGED {
         return true;
     }
 
+    let params = notification.params.as_ref();
+    let tagged = params
+        .and_then(|params| params.get("_meta"))
+        .and_then(|meta| meta.get(crate::types::SUBSCRIPTION_ID_KEY))
+        .and_then(|id| serde_json::from_value::<RequestId>(id.clone()).ok());
+
+    let Some(id) = tagged else {
+        let admitted = peer_mode.is_legacy()
+            || !crate::types::subscription::is_subscribable(&notification.method);
+
+        #[cfg(feature = "tracing")]
+        if !admitted {
+            tracing::warn!(
+                logger = "neva",
+                method = %notification.method,
+                "dropping a subscription-only notification that carries no usable subscription id"
+            );
+        }
+
+        return admitted;
+    };
+
     let uri = params
-        .get("uri")
+        .and_then(|params| params.get("uri"))
         .and_then(|uri| uri.as_str())
         .map(crate::types::Uri::from);
 
@@ -1244,6 +1262,57 @@ mod tests {
         // Duplicate ID -- should fail
         let err = validate_batch_ids(&[req(1), req(2), req(1)]).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidRequest);
+    }
+
+    /// Under MCP 2026-07-28 a subscribable notification travels on a
+    /// subscription and nowhere else, so one arriving without a usable id has
+    /// nothing to be checked against and no subscription to belong to. A peer
+    /// reached through the dual-mode fallback is the exception: it pushes
+    /// list-changed notifications on its own and has no ids to tag them with.
+    #[test]
+    #[cfg(not(feature = "legacy-spec"))]
+    fn admitted_requires_a_subscription_id_from_a_2026_07_28_peer() {
+        use crate::types::SUBSCRIPTION_ID_KEY;
+
+        let filters = crate::client::subscription::SubscriptionFilters::default();
+        filters.insert(
+            RequestId::Number(1),
+            crate::types::SubscriptionFilter::new().with_tools_changed(),
+        );
+
+        let tagged = Notification::new(
+            crate::types::tool::commands::LIST_CHANGED,
+            Some(serde_json::json!({ "_meta": { SUBSCRIPTION_ID_KEY: 1 } })),
+        );
+        let untagged = Notification::new(crate::types::tool::commands::LIST_CHANGED, None);
+        let mistagged = Notification::new(
+            crate::types::tool::commands::LIST_CHANGED,
+            Some(serde_json::json!({ "_meta": { SUBSCRIPTION_ID_KEY: { "not": "an id" } } })),
+        );
+        let progress = Notification::new(
+            crate::types::notification::commands::PROGRESS,
+            Some(serde_json::json!({ "progress": 1 })),
+        );
+
+        let peer = crate::shared::PeerMode::default();
+        assert!(admitted(&tagged, &filters, &peer));
+        assert!(
+            !admitted(&untagged, &filters, &peer),
+            "a subscription-only notification must carry a subscription id"
+        );
+        assert!(
+            !admitted(&mistagged, &filters, &peer),
+            "and one that cannot be parsed is no id at all"
+        );
+        assert!(
+            admitted(&progress, &filters, &peer),
+            "request-scoped notifications belong to no subscription"
+        );
+
+        // The dual-mode fallback landed on a legacy peer: it has no
+        // subscriptions, so nothing it pushes is tagged.
+        peer.set_legacy();
+        assert!(admitted(&untagged, &filters, &peer));
     }
 
     #[test]

@@ -38,6 +38,27 @@ fn is_false(flag: &bool) -> bool {
     !*flag
 }
 
+/// Whether `method` is one of the notification types a [`SubscriptionFilter`]
+/// can opt in to.
+///
+/// Shared by both ends of the wire, and for opposite reasons: the server uses
+/// it to tell "nobody is listening" from "this never travels on a
+/// subscription" (progress, task status and elicitation notifications stay
+/// request-scoped), the client to tell which arrivals are required to carry a
+/// subscription id.
+#[inline]
+pub(crate) fn is_subscribable(method: &str) -> bool {
+    use crate::types::{prompt, resource, tool};
+
+    matches!(
+        method,
+        tool::commands::LIST_CHANGED
+            | prompt::commands::LIST_CHANGED
+            | resource::commands::LIST_CHANGED
+            | resource::commands::UPDATED
+    )
+}
+
 /// Notification categories a client opts in to on a `subscriptions/listen`
 /// stream.
 ///
