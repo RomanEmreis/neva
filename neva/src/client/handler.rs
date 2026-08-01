@@ -657,7 +657,7 @@ fn admitted(
     let Some(params) = notification.params.as_ref() else {
         return true;
     };
-    
+
     let Some(id) = params
         .get("_meta")
         .and_then(|meta| meta.get(crate::types::SUBSCRIPTION_ID_KEY))
