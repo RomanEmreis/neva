@@ -317,9 +317,15 @@ async fn send_request(
 
     #[cfg(not(feature = "legacy-spec"))]
     if !abort.is_empty() {
+        // The session token belongs in this race too: `Client::disconnect`
+        // cancels it and the connection loop exits, but a listen POST is the
+        // one request nothing else stops -- it would go on draining its body,
+        // holding the server-side subscription open past the disconnect.
+        let session_token = session.cancellation_token();
         tokio::select! {
             _ = exchange(client, session, req, resp_tx, auth, param_registry) => {}
             _ = wait_for_any(&abort) => {}
+            _ = session_token.cancelled() => {}
         }
         return;
     }
@@ -537,24 +543,18 @@ impl Drop for AbortGuard {
 
 /// Registers abort handles for a request whose reply is a long-lived stream.
 ///
-/// Only `subscriptions/listen` qualifies: every other request is answered and
-/// gone, so tracking one would be bookkeeping nobody reads. Returns no handles
-/// (and a guard with nothing to clean up) for anything else.
+/// Only a standalone `subscriptions/listen` qualifies: every other request is
+/// answered and gone, so tracking one would be bookkeeping nobody reads, and a
+/// batched listen never reaches the transport (`send_batch` rejects it, having
+/// no handle to give it a lifetime). Returns no handles (and a guard with
+/// nothing to clean up) for anything else.
 #[cfg(not(feature = "legacy-spec"))]
 fn track_listen(req: &Message, session: &Arc<McpSession>) -> (Vec<CancellationToken>, AbortGuard) {
-    let is_listen = match req {
-        Message::Request(r) => r.method == crate::types::subscription::commands::LISTEN,
-        Message::Batch(batch) => batch.iter().any(|env| {
-            matches!(env, crate::types::MessageEnvelope::Request(r)
-                if r.method == crate::types::subscription::commands::LISTEN)
-        }),
-        _ => false,
-    };
-
-    let ids = if is_listen {
-        request_ids(req)
-    } else {
-        Vec::new()
+    let ids = match req {
+        Message::Request(r) if r.method == crate::types::subscription::commands::LISTEN => {
+            request_ids(req)
+        }
+        _ => Vec::new(),
     };
 
     let tokens = ids

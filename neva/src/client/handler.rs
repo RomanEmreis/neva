@@ -352,6 +352,8 @@ impl RequestHandler {
         items: Vec<MessageEnvelope>,
     ) -> Result<Vec<(RequestId, tokio::sync::oneshot::Receiver<PendingResponse>)>, Error> {
         validate_batch_ids(&items)?;
+        #[cfg(not(feature = "legacy-spec"))]
+        validate_no_listen(&items)?;
 
         let mut receivers = Vec::new();
         let mut envelopes = Vec::new();
@@ -408,6 +410,7 @@ impl RequestHandler {
         let sampling_handler = self.sampling_handler.clone();
         let elicitation_handler = self.elicitation_handler.clone();
         let notification_handler = self.notification_handler.clone();
+        let token = self.token.clone();
 
         #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
         let tasks = self.tasks.clone();
@@ -419,7 +422,21 @@ impl RequestHandler {
         let subscription_filters = self.subscription_filters.clone();
 
         tokio::task::spawn(async move {
-            while let Ok(msg) = rx.recv().await {
+            loop {
+                // Cancellation is a first-class exit here, not just an EOF the
+                // receiver happens to report: over HTTP the receiver holds a
+                // sender clone of its own channel, so `recv` never ends by
+                // itself and a disconnect would otherwise leave this task
+                // running against a transport that is already gone.
+                let msg = tokio::select! {
+                    biased;
+                    _ = token.cancelled() => break,
+                    msg = rx.recv() => match msg {
+                        Ok(msg) => msg,
+                        Err(_) => break,
+                    },
+                };
+
                 match msg {
                     Message::Response(resp) => pending.complete(resp),
                     Message::Request(req) => {
@@ -460,6 +477,25 @@ impl RequestHandler {
                         for envelope in batch {
                             match envelope {
                                 MessageEnvelope::Response(resp) => pending.complete(resp),
+                                // A batched notification is still a
+                                // notification: an acknowledgment arriving this
+                                // way has to resolve `listen`, and a tagged
+                                // notification has to face the same filter it
+                                // would on its own. Batching is a framing
+                                // choice of the peer's, not a way around the
+                                // subscription's scope.
+                                #[cfg(not(feature = "legacy-spec"))]
+                                MessageEnvelope::Notification(notification) => {
+                                    complete_ack(
+                                        &notification,
+                                        &ack_waiters,
+                                        &subscription_filters,
+                                    );
+
+                                    if admitted(&notification, &subscription_filters) {
+                                        deferred.push(MessageEnvelope::Notification(notification));
+                                    }
+                                }
                                 other => deferred.push(other),
                             }
                         }
@@ -491,6 +527,13 @@ impl RequestHandler {
                     }
                 }
             }
+            // The transport is gone -- a stdio peer exited, or the connection
+            // was cancelled -- so nothing can complete these any more. Left
+            // alone, a `subscriptions/listen` slot would hold its holder
+            // forever: it carries no TTL to expire it, and `Subscription::closed`
+            // awaits exactly this receiver. Dropping the senders resolves them
+            // as `SubscriptionEnd::Abrupt`, which is what happened.
+            pending.abandon_all();
         });
         self
     }
@@ -948,6 +991,32 @@ fn validate_batch_ids(items: &[MessageEnvelope]) -> Result<(), Error> {
     Ok(())
 }
 
+/// Rejects a `subscriptions/listen` placed in a batch.
+///
+/// A batch slot is an ordinary request slot: it activates the TTL and hands
+/// back a plain [`Response`], with no acknowledgment waiter, no accepted
+/// filter, and no [`Subscription`] handle. There would be nothing to cancel the
+/// stream with and nothing to close it on timeout, so the subscription would
+/// outlive the call that opened it, server-side and on the wire both.
+///
+/// [`Subscription`]: crate::client::Subscription
+#[inline]
+#[cfg(not(feature = "legacy-spec"))]
+fn validate_no_listen(items: &[MessageEnvelope]) -> Result<(), Error> {
+    let listens = items.iter().any(|env| {
+        matches!(env, MessageEnvelope::Request(req)
+            if req.method == crate::types::subscription::commands::LISTEN)
+    });
+
+    if listens {
+        return Err(Error::new(
+            ErrorCode::InvalidRequest,
+            "batch contains `subscriptions/listen`; open subscriptions with `Client::listen`",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1174,6 +1243,23 @@ mod tests {
 
         // Duplicate ID -- should fail
         let err = validate_batch_ids(&[req(1), req(2), req(1)]).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    #[cfg(not(feature = "legacy-spec"))]
+    fn validate_no_listen_rejects_a_batched_subscription() {
+        let listen = MessageEnvelope::Request(Request::new(
+            Some(RequestId::Number(1)),
+            crate::types::subscription::commands::LISTEN,
+            None::<()>,
+        ));
+        let ping =
+            MessageEnvelope::Request(Request::new(Some(RequestId::Number(2)), "ping", None::<()>));
+
+        assert!(validate_no_listen(std::slice::from_ref(&ping)).is_ok());
+
+        let err = validate_no_listen(&[ping, listen]).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidRequest);
     }
 

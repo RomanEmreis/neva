@@ -3541,6 +3541,132 @@ mod listen_rejection_tests {
         );
     }
 
+    /// Answers `server/discover` normally, then delivers the whole
+    /// subscription -- acknowledgment, an in-filter notification and an
+    /// off-filter one -- inside a single JSON-RPC batch.
+    async fn serve_batched_frames(listener: TcpListener) {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+
+            tokio::spawn(async move {
+                loop {
+                    let Some((_head, body)) = read_request(&mut stream).await else {
+                        return;
+                    };
+
+                    let msg: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                    let method = msg
+                        .get("method")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or_default();
+
+                    if method == crate::commands::DISCOVER {
+                        let reply = serde_json::json!({
+                            "jsonrpc": "2.0", "id": id,
+                            "result": {
+                                "supportedVersions": [crate::LATEST_PROTOCOL_VERSION],
+                                "capabilities": {
+                                    "tools": { "listChanged": true },
+                                    "prompts": { "listChanged": true }
+                                }
+                            }
+                        });
+
+                        write_json(&mut stream, &reply.to_string()).await;
+                        continue;
+                    }
+
+                    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\r\n";
+                    let _ = stream.write_all(head.as_bytes()).await;
+
+                    let batch = serde_json::json!([
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "notifications/subscriptions/acknowledged",
+                            "params": {
+                                "notifications": { "toolsListChanged": true },
+                                "_meta": { crate::types::SUBSCRIPTION_ID_KEY: id }
+                            }
+                        },
+                        {
+                            "jsonrpc": "2.0",
+                            "method": crate::types::tool::commands::LIST_CHANGED,
+                            "params": { "_meta": { crate::types::SUBSCRIPTION_ID_KEY: id } }
+                        },
+                        {
+                            "jsonrpc": "2.0",
+                            "method": crate::types::prompt::commands::LIST_CHANGED,
+                            "params": { "_meta": { crate::types::SUBSCRIPTION_ID_KEY: id } }
+                        }
+                    ]);
+                    let _ = stream
+                        .write_all(format!("data: {batch}\n\n").as_bytes())
+                        .await;
+
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    return;
+                }
+            });
+        }
+    }
+
+    /// Batching is a framing choice of the peer's. An acknowledgment sent that
+    /// way still has to establish the subscription, and a tagged notification
+    /// sent that way still has to face the filter it was accepted under.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn batched_subscription_frames_go_through_the_same_gate() {
+        use std::sync::atomic::AtomicUsize;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_batched_frames(listener));
+
+        let tools = Arc::new(AtomicUsize::new(0));
+        let prompts = Arc::new(AtomicUsize::new(0));
+        let (tools_seen, prompts_seen) = (tools.clone(), prompts.clone());
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                .with_timeout(std::time::Duration::from_secs(2))
+        });
+        client.connect().await.expect("connect");
+        client.subscribe(crate::types::tool::commands::LIST_CHANGED, move |_| {
+            let seen = tools_seen.clone();
+            async move {
+                seen.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        });
+        client.subscribe(crate::types::prompt::commands::LIST_CHANGED, move |_| {
+            let seen = prompts_seen.clone();
+            async move {
+                seen.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        });
+
+        // A batched acknowledgment has to resolve `listen`, not leave it
+        // waiting out the establishment timeout.
+        let _subscription = client
+            .listen(crate::types::SubscriptionFilter::new().with_tools_changed())
+            .await
+            .expect("a batched acknowledgment must establish the subscription");
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        assert_eq!(
+            tools.load(AtomicOrdering::SeqCst),
+            1,
+            "an in-filter batched notification must be delivered"
+        );
+        assert_eq!(
+            prompts.load(AtomicOrdering::SeqCst),
+            0,
+            "an off-filter batched notification must be dropped"
+        );
+    }
+
     /// Answers `server/discover` normally, then acknowledges the subscription
     /// with a *broader* filter than the client asked for.
     async fn serve_overbroad_ack(listener: TcpListener) {

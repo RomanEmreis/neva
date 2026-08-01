@@ -405,6 +405,84 @@ async fn dropping_the_handle_ends_the_subscription() {
     handle.abort();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn disconnecting_ends_the_subscription_abruptly() {
+    // Disconnecting takes the transport out from under a live subscription:
+    // client-side its final result can never arrive, so `closed()` has to say
+    // `Abrupt` rather than await one that is not coming; server-side the listen
+    // POST has to close, or the subscription outlives the client that opened it.
+    use neva::Client;
+    use neva::client::SubscriptionEnd;
+
+    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let mut app = App::new().with_options(|opt| {
+        opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
+            .with_tools(|t| t.with_list_changed())
+            .with_resources(|r| r.with_list_changed().with_subscribe())
+    });
+    app.map_tool("watched", |ctx: neva::Context| async move {
+        Ok::<_, neva::error::Error>(ctx.is_subscribed(&"res://config".into()).to_string())
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    await_reachable(&addr).await;
+
+    let mut observer = Client::new().with_options(|opt| {
+        opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
+            .with_timeout(Duration::from_secs(5))
+    });
+    observer.connect().await.expect("observer connect");
+
+    let mut client = Client::new().with_options(|opt| {
+        opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
+            .with_timeout(Duration::from_secs(5))
+    });
+    client.connect().await.expect("connect");
+
+    let subscription = client
+        .listen(neva::types::SubscriptionFilter::new().with_resource("res://config"))
+        .await
+        .expect("listen");
+    assert_eq!(
+        watched(&mut observer).await,
+        Some("true".into()),
+        "the server must see the subscription while it is live"
+    );
+
+    client.disconnect().await.expect("disconnect");
+
+    let ended = tokio::time::timeout(Duration::from_secs(5), subscription.closed())
+        .await
+        .expect("closed() must not hang once the transport is gone");
+    assert!(matches!(ended, SubscriptionEnd::Abrupt), "got {ended:?}");
+
+    // The listen POST closing is what tells the server the subscription is
+    // over. Without it the entry stays registered and the server goes on
+    // broadcasting into a client that disconnected.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if watched(&mut observer).await.as_deref() == Some("false") {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the subscription outlived the client that opened it"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    handle.abort();
+}
+
+/// Asks the server whether anything is currently listening for `res://config`.
+async fn watched(client: &mut neva::Client) -> Option<String> {
+    let resp = client.call_tool("watched", ()).await.expect("watched call");
+    resp.content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.to_string())
+}
+
 async fn await_reachable(addr: &str) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {

@@ -41,13 +41,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     Dropping the handle ends the subscription too, so one that falls out of
     scope cannot leave the peer streaming into handlers nothing can stop;
     either way its request slot is released, since a cancelled stream is never
-    answered and those slots carry no TTL.
+    answered and those slots carry no TTL. `Client::disconnect` ends every live
+    subscription: the listen `POST` closes, so the server drops its entry, and
+    `closed()` reports `Abrupt` rather than awaiting a result the transport can
+    no longer carry.
   * Tagged notifications are checked against the filter their subscription
     acknowledged, and dropped if they fall outside it. The acknowledgment is a
     promise about the whole stream, not just its first message, and nothing
     downstream could tell -- notifications reach the client's global handlers,
     which know nothing about subscriptions. Untagged ones (request-scoped
-    progress and log messages) pass through untouched.
+    progress and log messages) pass through untouched. Batching changes none of
+    this: an acknowledgment or a tagged notification inside a JSON-RPC batch
+    goes through the same gate a standalone one does.
     Notifications keep flowing to the handlers registered with
     `Client::subscribe` / `on_tools_changed` / `on_resource_changed`, so
     existing client code needs no change.
@@ -59,6 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     acts on -- and so does giving up on an unacknowledged one, which would
     otherwise leave the peer streaming into a subscription the caller was told
     had failed.
+  * `Client::call_batch` rejects a batched `subscriptions/listen` with
+    `InvalidRequest`. A batch slot is an ordinary request slot -- finite TTL, a
+    plain `Response`, no handle -- so a subscription opened that way would have
+    nothing to cancel it and would outlive the call that made it.
   * Works on both transports: over HTTP the subscription rides the listen
     `POST`'s own `text/event-stream` body (a client disconnect ends it); over
     stdio it interleaves on stdout and ends on `notifications/cancelled`.
@@ -94,6 +103,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 * `ServerCapabilities` now derives `Default`, so a filter can be narrowed
   against a partially-built capability set.
+* **The client's receive loop now stops when the transport is cancelled**, and
+  fails every still-pending request on the way out. Over HTTP the receiver
+  holds a sender clone of its own channel, so the loop never ended by itself
+  and outlived the connection it served; a disconnect now ends both.
 * **The streaming `POST` reply no longer requires the `tracing` feature.**
   `dispatch_post` produces the `StreamResponse::Stream` arm in any default-build
   configuration -- a subscription stream is not a logging concern. Internally

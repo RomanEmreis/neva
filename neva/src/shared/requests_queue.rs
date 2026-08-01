@@ -226,6 +226,24 @@ impl RequestQueue {
         self.pending.len()
     }
 
+    /// Drops every queued request, closing the receiver each one is awaited on.
+    ///
+    /// For when no response can arrive any more -- the receive loop has stopped
+    /// because the transport is gone. Waiting out the TTL would be pointless
+    /// for ordinary requests and endless for a `subscriptions/listen` slot,
+    /// which has no TTL at all: its holder would await a stream end that is
+    /// never coming.
+    #[inline]
+    // Its only caller is the client's receive loop; a server-only build has no
+    // receive loop to stop.
+    #[cfg_attr(not(feature = "client"), allow(dead_code))]
+    pub(crate) fn abandon_all(&self) {
+        self.pending.clear();
+        if let Ok(mut expirations) = self.expirations.lock() {
+            expirations.clear();
+        }
+    }
+
     /// Takes a [`Response`] and completes the request if it's still pending
     #[inline]
     pub(crate) fn complete(&self, resp: Response) {
