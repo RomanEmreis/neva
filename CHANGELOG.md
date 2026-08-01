@@ -76,7 +76,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     untouched, as does everything from a peer the dual-mode fallback landed on,
     which has no subscriptions to tag with. Batching changes none of this: an
     acknowledgment or a tagged notification inside a JSON-RPC batch goes
-    through the same gate a standalone one does.
+    through the same gate a standalone one does, and the HTTP transport no
+    longer treats such a batch as the request's terminal reply -- only a batch
+    that carries a response is one, so a stream dying before the real answer
+    still fails its (untimed) listen slot instead of looking orderly.
     Notifications keep flowing to the handlers registered with
     `Client::subscribe` / `on_tools_changed` / `on_resource_changed`, so
     existing client code needs no change.

@@ -372,6 +372,21 @@ impl MessageBatch {
             .iter()
             .any(|e| matches!(e, MessageEnvelope::Response(Response::Err(_))))
     }
+
+    /// Returns `true` if the batch contains at least one
+    /// [`MessageEnvelope::Response`].
+    ///
+    /// Used by the HTTP client to tell a batch that *answers* a request from
+    /// one that merely carries notifications -- a subscription stream may
+    /// deliver its acknowledgment and its events batched, and mistaking those
+    /// for the terminal reply would make a truncated stream look orderly.
+    #[inline]
+    #[cfg(feature = "http-client")]
+    pub(crate) fn has_responses(&self) -> bool {
+        self.items
+            .iter()
+            .any(|e| matches!(e, MessageEnvelope::Response(_)))
+    }
 }
 
 impl IntoIterator for MessageBatch {

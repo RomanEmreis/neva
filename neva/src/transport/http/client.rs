@@ -944,9 +944,15 @@ async fn handle_msg(
 
 /// Forwards one frame of a request-scoped SSE `POST` reply to the receive loop.
 ///
-/// Returns `true` only for the *terminal* reply -- a response or a batch
-/// response -- so the caller can tell an orderly stream end from a truncated one
-/// (notifications, and frames that fail to parse, return `false`).
+/// Returns `true` only for the *terminal* reply -- a response, or a batch that
+/// carries one -- so the caller can tell an orderly stream end from a truncated
+/// one (notifications, and frames that fail to parse, return `false`).
+///
+/// A batch is not terminal by virtue of being a batch: a subscription stream
+/// may deliver its acknowledgment and its events batched, and treating those as
+/// the answer would make a stream that dies before the real response look
+/// orderly -- leaving a listen slot, which carries no TTL, with nothing to fail
+/// it and `Subscription::closed` waiting on a result that is never coming.
 async fn forward_sse_message(
     event: sse_stream::Sse,
     resp_tx: &mpsc::Sender<Result<Message, Error>>,
@@ -954,6 +960,7 @@ async fn forward_sse_message(
     let Some(data) = event.data else {
         return false;
     };
+
     let msg = match serde_json::from_str::<Message>(&data) {
         Ok(msg) => msg,
         Err(_err) => {
@@ -962,12 +969,19 @@ async fn forward_sse_message(
             return false;
         }
     };
-    let terminal = matches!(msg, Message::Response(_) | Message::Batch(_));
+
+    let terminal = match &msg {
+        Message::Response(_) => true,
+        Message::Batch(batch) => batch.has_responses(),
+        _ => false,
+    };
+
     if let Err(_err) = resp_tx.send(Ok(msg)).await {
         #[cfg(feature = "tracing")]
         tracing::error!(logger = "neva", "Failed to send response: {}", _err);
         return false;
     }
+
     terminal
 }
 
@@ -1208,6 +1222,20 @@ mod tests {
             ),
             (r#"{"jsonrpc":"2.0","id":1,"result":{}}"#, true),
             (r#"[{"jsonrpc":"2.0","id":1,"result":{}}]"#, true),
+            // A batch is not terminal by virtue of being a batch: a
+            // subscription stream may deliver its acknowledgment and its events
+            // this way, and the response is still to come.
+            (
+                r#"[{"jsonrpc":"2.0","method":"notifications/subscriptions/acknowledged"},
+                    {"jsonrpc":"2.0","method":"notifications/tools/list_changed"}]"#,
+                false,
+            ),
+            // ...but one that carries a response among them is.
+            (
+                r#"[{"jsonrpc":"2.0","method":"notifications/message"},
+                    {"jsonrpc":"2.0","id":1,"result":{}}]"#,
+                true,
+            ),
         ];
 
         for (frame, terminal) in cases {
