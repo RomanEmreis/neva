@@ -46,7 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   * **Client:** `Client::listen(SubscriptionFilter)` returns a `Subscription`
     once the server acknowledges, exposing `id()`, `requested()`,
     `acknowledged()`, `is_fully_honored()`, `cancel()` and
-    `closed() -> SubscriptionEnd` (`Graceful` / `Cancelled` / `Abrupt`).
+    `closed() -> SubscriptionEnd` (`Graceful` / `Cancelled` / `Abrupt`). The
+    graceful result names the subscription it closes, and that name is checked:
+    a reply that closes a different one is reported as `Abrupt` rather than
+    handed to the caller.
     Dropping the handle ends the subscription too, so one that falls out of
     scope cannot leave the peer streaming into handlers nothing can stop;
     either way its request slot is released, since a cancelled stream is never

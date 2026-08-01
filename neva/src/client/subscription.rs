@@ -78,6 +78,10 @@ impl SubscriptionState {
 pub enum SubscriptionEnd {
     /// The server answered the `subscriptions/listen` request with its
     /// graceful-close result.
+    ///
+    /// The result names the subscription it closes, and that name is checked
+    /// against this one -- a reply that closes some other subscription is
+    /// reported as [`Self::Abrupt`] rather than passed on.
     Graceful(SubscriptionsListenResult),
 
     /// The stream went away without a final result -- a dropped connection, a
@@ -245,8 +249,14 @@ impl Subscription {
 
         let end = match (&mut self.response).await {
             Ok(PendingResponse::Response(resp)) => match resp.into_result() {
-                Ok(result) => SubscriptionEnd::Graceful(result),
-                Err(_) => SubscriptionEnd::Abrupt,
+                // The result names the subscription it closes, and it has to be
+                // this one. The outer JSON-RPC id already matched -- that is how
+                // the reply reached this slot -- so a different id in the
+                // payload is a peer contradicting itself, and `Graceful` would
+                // hand the caller a closing result belonging to some other
+                // stream.
+                Ok(result) if self.closes_this(&result) => SubscriptionEnd::Graceful(result),
+                _ => SubscriptionEnd::Abrupt,
             },
             _ => SubscriptionEnd::Abrupt,
         };
@@ -255,6 +265,24 @@ impl Subscription {
         self.settled = true;
         self.release.release(&self.id);
         end
+    }
+
+    /// Whether a graceful-close result is this subscription's own.
+    #[inline]
+    fn closes_this(&self, result: &SubscriptionsListenResult) -> bool {
+        let matches = result.meta.subscription_id == self.id;
+
+        #[cfg(feature = "tracing")]
+        if !matches {
+            tracing::warn!(
+                logger = "neva",
+                subscription = %self.id,
+                closed = %result.meta.subscription_id,
+                "the closing result names a different subscription"
+            );
+        }
+
+        matches
     }
 }
 
@@ -513,6 +541,34 @@ mod tests {
         let end = subscription.closed().await;
         assert!(matches!(end, SubscriptionEnd::Graceful(r)
             if r.meta.subscription_id == RequestId::Number(1)));
+    }
+
+    /// The outer JSON-RPC id is how the reply reached this slot, so a different
+    /// id inside the result is the peer contradicting itself -- and `Graceful`
+    /// would hand the caller a result that closes some other stream.
+    #[tokio::test]
+    async fn it_refuses_a_closing_result_for_another_subscription() {
+        let (tx, rx) = oneshot::channel();
+        let subscription = Subscription::new(
+            RequestId::Number(1),
+            SubscriptionFilter::new().with_tools_changed(),
+            SubscriptionFilter::new().with_tools_changed(),
+            rx,
+            TransportProtoSender::None,
+            release(),
+        );
+
+        let result = serde_json::json!({ "_meta": { SUBSCRIPTION_ID_KEY: 2 } });
+        tx.send(PendingResponse::Response(Response::success(
+            RequestId::Number(1),
+            result,
+        )))
+        .unwrap();
+
+        assert!(matches!(
+            subscription.closed().await,
+            SubscriptionEnd::Abrupt
+        ));
     }
 
     #[tokio::test]
