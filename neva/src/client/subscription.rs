@@ -159,15 +159,35 @@ impl Subscription {
     /// which ends the subscription server-side -- directly over stdio, and over
     /// HTTP by way of the transport closing the listen response body. Await
     /// [`Self::closed`] afterwards to confirm how it ended.
+    ///
+    /// # Errors
+    /// Returns [`Error`] if the notification cannot be sent -- the transport is
+    /// already gone, most likely because the client disconnected. The
+    /// subscription is over either way, but it ended with the connection rather
+    /// than by this call, and [`Self::closed`] reports
+    /// [`SubscriptionEnd::Abrupt`] accordingly.
     pub async fn cancel(&mut self) -> Result<(), Error> {
-        self.cancelled = true;
+        let sent = self.sender.send(cancelled(&self.id).into()).await;
+
+        // Settled either way: there is no second attempt worth making on a
+        // transport that just refused the first.
         self.settled = true;
+        // Cancelled only if the notification actually went out. A cancel that
+        // never reached the wire ended nothing -- the connection did -- and
+        // reporting `Cancelled` for it would tell callers a deliberate stop
+        // happened where a connection loss did, which is exactly the difference
+        // reconnect logic keys on.
+        self.cancelled = sent.is_ok();
+
         // No terminal response is coming for a stream this client closed, so the
-        // request slot has to go now -- otherwise a client that opens and
-        // cancels subscriptions in a loop grows the pending queue by one entry
-        // per cycle, and these slots carry no TTL to expire them.
+        // request slot has to go -- otherwise a client that opens and cancels
+        // subscriptions in a loop grows the pending queue by one entry per
+        // cycle, and these slots carry no TTL to expire them. Dropping the slot
+        // also closes the receiver `closed()` awaits, which is what resolves it
+        // to `Abrupt` when the send failed.
         self.release.release(&self.id);
-        self.sender.send(cancelled(&self.id).into()).await
+
+        sent
     }
 
     /// Waits for the subscription to end and reports how.

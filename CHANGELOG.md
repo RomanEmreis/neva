@@ -44,7 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     answered and those slots carry no TTL. `Client::disconnect` ends every live
     subscription: the listen `POST` closes, so the server drops its entry, and
     `closed()` reports `Abrupt` rather than awaiting a result the transport can
-    no longer carry.
+    no longer carry -- including when `cancel()` is what discovers the
+    connection is gone, since a cancel that never reached the wire ended
+    nothing.
   * Tagged notifications are checked against the filter their subscription
     acknowledged, and dropped if they fall outside it. The acknowledgment is a
     promise about the whole stream, not just its first message, and nothing

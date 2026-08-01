@@ -3390,6 +3390,43 @@ mod listen_rejection_tests {
         );
     }
 
+    /// A cancel that never reached the wire ended nothing -- the connection
+    /// did. Reporting `Cancelled` for it would tell the caller a deliberate
+    /// stop happened where a connection loss did, and reconnect logic keys on
+    /// exactly that difference.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelling_after_a_disconnect_reports_abrupt() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_offside_notification(listener));
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                .with_timeout(std::time::Duration::from_secs(5))
+        });
+        client.connect().await.expect("connect");
+
+        let mut subscription = client
+            .listen(crate::types::SubscriptionFilter::new().with_tools_changed())
+            .await
+            .expect("listen");
+
+        client.disconnect().await.expect("disconnect");
+
+        assert!(
+            subscription.cancel().await.is_err(),
+            "a cancel has nowhere to go once the transport is gone"
+        );
+
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(2), subscription.closed())
+            .await
+            .expect("closed() must not hang after a failed cancel");
+        assert!(
+            matches!(ended, crate::client::SubscriptionEnd::Abrupt),
+            "got {ended:?}"
+        );
+    }
+
     /// The same slot must come back when the handle is simply dropped.
     #[tokio::test(flavor = "multi_thread")]
     async fn dropping_the_handle_releases_the_request_slot() {
