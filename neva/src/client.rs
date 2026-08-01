@@ -1074,8 +1074,9 @@ impl Client {
         // Watch for the acknowledgment before sending: it is the first thing
         // the server puts on the stream, and the receive loop drops one nobody
         // is waiting for.
-        let ack = handler.watch_ack(&id);
+        let ack = handler.watch_ack(&id, &notifications);
         let sender = handler.sender();
+        let release = handler.subscription_release();
         let listen = handler.send_listen(request).await;
         let mut response = match listen {
             Ok(response) => response,
@@ -1147,6 +1148,7 @@ impl Client {
             acknowledged,
             response,
             sender,
+            release,
         ))
     }
 
@@ -3347,6 +3349,196 @@ mod listen_rejection_tests {
                 }
             });
         }
+    }
+
+    /// A cancelled subscription is never answered, so nothing completes its
+    /// request slot -- and those slots carry no TTL, because a subscription may
+    /// legitimately stay open for hours. Whoever gives up on one has to release
+    /// it, or a client that opens and cancels subscriptions in a loop grows the
+    /// pending queue by one entry per cycle.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelling_releases_the_request_slot() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_offside_notification(listener));
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                .with_timeout(std::time::Duration::from_secs(5))
+        });
+        client.connect().await.expect("connect");
+
+        let queued = |client: &Client| client.handler.as_ref().expect("connected").pending().len();
+
+        let idle = queued(&client);
+
+        let mut subscription = client
+            .listen(crate::types::SubscriptionFilter::new().with_tools_changed())
+            .await
+            .expect("listen");
+        assert_eq!(
+            queued(&client),
+            idle + 1,
+            "the live subscription holds one slot"
+        );
+
+        subscription.cancel().await.expect("cancel");
+        assert_eq!(
+            queued(&client),
+            idle,
+            "cancelling must release the subscription's slot"
+        );
+    }
+
+    /// The same slot must come back when the handle is simply dropped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropping_the_handle_releases_the_request_slot() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_offside_notification(listener));
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                .with_timeout(std::time::Duration::from_secs(5))
+        });
+        client.connect().await.expect("connect");
+
+        let queued = |client: &Client| client.handler.as_ref().expect("connected").pending().len();
+
+        let idle = queued(&client);
+        {
+            let _subscription = client
+                .listen(crate::types::SubscriptionFilter::new().with_tools_changed())
+                .await
+                .expect("listen");
+            assert_eq!(queued(&client), idle + 1);
+        }
+
+        assert_eq!(
+            queued(&client),
+            idle,
+            "dropping the handle must release the subscription's slot"
+        );
+    }
+
+    /// Acknowledges exactly what was asked for, then sends a tagged
+    /// notification of a category outside it.
+    async fn serve_offside_notification(listener: TcpListener) {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                loop {
+                    let Some((_head, body)) = read_request(&mut stream).await else {
+                        return;
+                    };
+                    let msg: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                    let method = msg
+                        .get("method")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or_default();
+
+                    if method == crate::commands::DISCOVER {
+                        let reply = serde_json::json!({
+                            "jsonrpc": "2.0", "id": id,
+                            "result": {
+                                "supportedVersions": [crate::LATEST_PROTOCOL_VERSION],
+                                "capabilities": {
+                                    "tools": { "listChanged": true },
+                                    "prompts": { "listChanged": true }
+                                }
+                            }
+                        });
+                        write_json(&mut stream, &reply.to_string()).await;
+                        continue;
+                    }
+
+                    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\r\n";
+                    let _ = stream.write_all(head.as_bytes()).await;
+
+                    // A correct acknowledgment: tools only, exactly as asked.
+                    let ack = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/subscriptions/acknowledged",
+                        "params": {
+                            "notifications": { "toolsListChanged": true },
+                            "_meta": { crate::types::SUBSCRIPTION_ID_KEY: id }
+                        }
+                    });
+                    let _ = stream
+                        .write_all(format!("data: {ack}\n\n").as_bytes())
+                        .await;
+
+                    // ...then a category the filter never selected.
+                    let offside = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": crate::types::prompt::commands::LIST_CHANGED,
+                        "params": { "_meta": { crate::types::SUBSCRIPTION_ID_KEY: id } }
+                    });
+                    let _ = stream
+                        .write_all(format!("data: {offside}\n\n").as_bytes())
+                        .await;
+
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    return;
+                }
+            });
+        }
+    }
+
+    /// A valid acknowledgment is a promise about the whole stream, not just its
+    /// first message. A peer that keeps it and then sends an off-filter
+    /// notification anyway must not reach the client's handlers -- they are
+    /// global and know nothing about which subscription a message came from.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn notifications_outside_the_acknowledged_filter_are_dropped() {
+        use std::sync::atomic::AtomicUsize;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_offside_notification(listener));
+
+        let tools = Arc::new(AtomicUsize::new(0));
+        let prompts = Arc::new(AtomicUsize::new(0));
+        let (tools_seen, prompts_seen) = (tools.clone(), prompts.clone());
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                .with_timeout(std::time::Duration::from_secs(5))
+        });
+        client.connect().await.expect("connect");
+        client.subscribe(crate::types::tool::commands::LIST_CHANGED, move |_| {
+            let seen = tools_seen.clone();
+            async move {
+                seen.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        });
+        client.subscribe(crate::types::prompt::commands::LIST_CHANGED, move |_| {
+            let seen = prompts_seen.clone();
+            async move {
+                seen.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        });
+
+        let _subscription = client
+            .listen(crate::types::SubscriptionFilter::new().with_tools_changed())
+            .await
+            .expect("listen");
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        assert_eq!(
+            prompts.load(AtomicOrdering::SeqCst),
+            0,
+            "a notification outside the acknowledged filter must be dropped"
+        );
+        assert_eq!(
+            tools.load(AtomicOrdering::SeqCst),
+            0,
+            "and the in-filter categories are unaffected (none were sent)"
+        );
     }
 
     /// Answers `server/discover` normally, then acknowledges the subscription

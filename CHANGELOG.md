@@ -39,7 +39,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     `acknowledged()`, `is_fully_honored()`, `cancel()` and
     `closed() -> SubscriptionEnd` (`Graceful` / `Cancelled` / `Abrupt`).
     Dropping the handle ends the subscription too, so one that falls out of
-    scope cannot leave the peer streaming into handlers nothing can stop.
+    scope cannot leave the peer streaming into handlers nothing can stop;
+    either way its request slot is released, since a cancelled stream is never
+    answered and those slots carry no TTL.
+  * Tagged notifications are checked against the filter their subscription
+    acknowledged, and dropped if they fall outside it. The acknowledgment is a
+    promise about the whole stream, not just its first message, and nothing
+    downstream could tell -- notifications reach the client's global handlers,
+    which know nothing about subscriptions. Untagged ones (request-scoped
+    progress and log messages) pass through untouched.
     Notifications keep flowing to the handlers registered with
     `Client::subscribe` / `on_tools_changed` / `on_resource_changed`, so
     existing client code needs no change.

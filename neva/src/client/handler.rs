@@ -91,6 +91,10 @@ pub(super) struct RequestHandler {
     /// Callers waiting for a `subscriptions/listen` acknowledgment.
     #[cfg(not(feature = "legacy-spec"))]
     ack_waiters: crate::client::subscription::AckWaiters,
+
+    /// What each live subscription is allowed to deliver.
+    #[cfg(not(feature = "legacy-spec"))]
+    subscription_filters: crate::client::subscription::SubscriptionFilters,
 }
 
 impl Roots {
@@ -177,6 +181,8 @@ impl RequestHandler {
             peer_mode: options.peer_mode.clone(),
             #[cfg(not(feature = "legacy-spec"))]
             ack_waiters: Default::default(),
+            #[cfg(not(feature = "legacy-spec"))]
+            subscription_filters: Default::default(),
         };
 
         handler.start(rx)
@@ -273,9 +279,17 @@ impl RequestHandler {
     pub(super) fn watch_ack(
         &self,
         id: &RequestId,
+        requested: &crate::types::SubscriptionFilter,
     ) -> tokio::sync::oneshot::Receiver<crate::types::SubscriptionFilter> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.ack_waiters.insert(id.clone(), tx);
+        // Seeded with what was *requested*, before the request goes out: a
+        // notification can arrive between the acknowledgment and `listen`
+        // returning, and it must be checked against something no broader than
+        // the ask. The acknowledgment narrows this the moment it lands.
+        self.subscription_filters
+            .insert(id.clone(), requested.clone());
+
         rx
     }
 
@@ -287,7 +301,21 @@ impl RequestHandler {
     #[cfg(not(feature = "legacy-spec"))]
     pub(super) fn forget_listen(&self, id: &RequestId) {
         self.ack_waiters.remove(id);
+        self.subscription_filters.remove(id);
         let _ = self.pending.pop(id);
+    }
+
+    /// Everything a [`Subscription`] needs to release its own bookkeeping once
+    /// its stream is over.
+    ///
+    /// [`Subscription`]: crate::client::Subscription
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(super) fn subscription_release(&self) -> crate::client::subscription::SubscriptionRelease {
+        crate::client::subscription::SubscriptionRelease::new(
+            self.pending.clone(),
+            self.ack_waiters.clone(),
+            self.subscription_filters.clone(),
+        )
     }
 
     /// Returns a handle on the transport sender, so a [`Subscription`] can
@@ -387,6 +415,8 @@ impl RequestHandler {
         let peer_mode = self.peer_mode.clone();
         #[cfg(not(feature = "legacy-spec"))]
         let ack_waiters = self.ack_waiters.clone();
+        #[cfg(not(feature = "legacy-spec"))]
+        let subscription_filters = self.subscription_filters.clone();
 
         tokio::task::spawn(async move {
             while let Ok(msg) = rx.recv().await {
@@ -408,7 +438,12 @@ impl RequestHandler {
                     }
                     Message::Notification(notification) => {
                         #[cfg(not(feature = "legacy-spec"))]
-                        complete_ack(&notification, &ack_waiters);
+                        {
+                            complete_ack(&notification, &ack_waiters, &subscription_filters);
+                            if !admitted(&notification, &subscription_filters) {
+                                continue;
+                            }
+                        }
                         dispatch_notification(notification, &notification_handler).await;
                     }
                     Message::Batch(batch) => {
@@ -575,7 +610,11 @@ async fn dispatch_request(
 /// event.
 #[inline]
 #[cfg(not(feature = "legacy-spec"))]
-fn complete_ack(notification: &Notification, waiters: &crate::client::subscription::AckWaiters) {
+fn complete_ack(
+    notification: &Notification,
+    waiters: &crate::client::subscription::AckWaiters,
+    filters: &crate::client::subscription::SubscriptionFilters,
+) {
     if notification.method != crate::types::subscription::commands::ACKNOWLEDGED {
         return;
     }
@@ -586,9 +625,73 @@ fn complete_ack(notification: &Notification, waiters: &crate::client::subscripti
         return;
     };
 
+    // Narrow the seeded filter to what was acknowledged. Intersecting rather
+    // than replacing keeps a peer that acknowledges *more* than was asked from
+    // widening what this stream may deliver in the window before `listen`
+    // rejects it outright.
+    if let Some(mut entry) = filters.get_mut(&id) {
+        let narrowed = entry.intersection(&filter);
+        *entry = narrowed;
+    }
+
     if let Some((_, waiter)) = waiters.remove(&id) {
         let _ = waiter.send(filter);
     }
+}
+
+/// Whether a notification tagged with a subscription id is one that
+/// subscription may carry.
+///
+/// The spec forbids a server from sending a type the client did not request,
+/// but nothing downstream would notice if it did: notifications go straight to
+/// the client's global handlers, which know nothing about subscriptions. So the
+/// promise is enforced here, at the one place that can. Untagged notifications
+/// -- request-scoped progress and log messages -- belong to no subscription and
+/// pass through untouched.
+#[cfg(not(feature = "legacy-spec"))]
+#[inline]
+fn admitted(
+    notification: &Notification,
+    filters: &crate::client::subscription::SubscriptionFilters,
+) -> bool {
+    let Some(params) = notification.params.as_ref() else {
+        return true;
+    };
+    
+    let Some(id) = params
+        .get("_meta")
+        .and_then(|meta| meta.get(crate::types::SUBSCRIPTION_ID_KEY))
+        .and_then(|id| serde_json::from_value::<RequestId>(id.clone()).ok())
+    else {
+        return true;
+    };
+
+    // The acknowledgment is the subscription's own handshake, not one of the
+    // categories a filter selects.
+    if notification.method == crate::types::subscription::commands::ACKNOWLEDGED {
+        return true;
+    }
+
+    let uri = params
+        .get("uri")
+        .and_then(|uri| uri.as_str())
+        .map(crate::types::Uri::from);
+
+    let admitted = filters
+        .get(&id)
+        .is_some_and(|filter| filter.matches(&notification.method, uri.as_ref()));
+
+    #[cfg(feature = "tracing")]
+    if !admitted {
+        tracing::warn!(
+            logger = "neva",
+            method = %notification.method,
+            subscription = %id,
+            "dropping a notification outside its subscription's acknowledged filter"
+        );
+    }
+
+    admitted
 }
 
 /// Forwards a [`Notification`] to the registered handler or traces it when

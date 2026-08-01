@@ -212,6 +212,20 @@ impl RequestQueue {
         self.pending.remove(id).map(|(_, handle)| handle)
     }
 
+    /// Returns how many requests are currently queued.
+    ///
+    /// Slots for long-lived requests (`subscriptions/listen`) carry no TTL, so
+    /// nothing sweeps them: whoever gives up on one has to release it. This is
+    /// how the tests hold that contract.
+    #[inline]
+    // Its callers are the subscription tests, which the legacy profile compiles
+    // out; the profile that keeps them is the one that needs this.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn len(&self) -> usize {
+        self.pending.len()
+    }
+
     /// Takes a [`Response`] and completes the request if it's still pending
     #[inline]
     pub(crate) fn complete(&self, resp: Response) {

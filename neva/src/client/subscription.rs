@@ -20,6 +20,15 @@ use tokio::sync::oneshot;
 /// return once the server has confirmed the filter.
 pub(super) type AckWaiters = Arc<DashMap<RequestId, oneshot::Sender<SubscriptionFilter>>>;
 
+/// The filter each live subscription is allowed to deliver, keyed by its
+/// subscription id.
+///
+/// The acknowledgment is a promise about what the stream will carry, and a
+/// noncompliant peer can break it *after* acknowledging correctly. Notifications
+/// go to the client's global handlers, so nothing downstream would notice; the
+/// receive loop checks each tagged notification against this instead.
+pub(super) type SubscriptionFilters = Arc<DashMap<RequestId, SubscriptionFilter>>;
+
 /// How a subscription stream ended.
 #[derive(Debug)]
 pub enum SubscriptionEnd {
@@ -75,6 +84,8 @@ pub struct Subscription {
     acknowledged: SubscriptionFilter,
     response: oneshot::Receiver<PendingResponse>,
     sender: TransportProtoSender,
+    /// Releases the request slot a cancelled subscription will never answer.
+    release: SubscriptionRelease,
     /// This client cancelled it -- what [`Subscription::closed`] reports.
     cancelled: bool,
     /// Teardown is already done or unnecessary, so [`Drop`] has nothing to do.
@@ -99,6 +110,7 @@ impl Subscription {
         acknowledged: SubscriptionFilter,
         response: oneshot::Receiver<PendingResponse>,
         sender: TransportProtoSender,
+        release: SubscriptionRelease,
     ) -> Self {
         Self {
             id,
@@ -106,6 +118,7 @@ impl Subscription {
             acknowledged,
             response,
             sender,
+            release,
             cancelled: false,
             settled: false,
         }
@@ -149,6 +162,11 @@ impl Subscription {
     pub async fn cancel(&mut self) -> Result<(), Error> {
         self.cancelled = true;
         self.settled = true;
+        // No terminal response is coming for a stream this client closed, so the
+        // request slot has to go now -- otherwise a client that opens and
+        // cancels subscriptions in a loop grows the pending queue by one entry
+        // per cycle, and these slots carry no TTL to expire them.
+        self.release.release(&self.id);
         self.sender.send(cancelled(&self.id).into()).await
     }
 
@@ -171,6 +189,7 @@ impl Subscription {
         // However it ended, it ended: the peer is not streaming any more, so
         // the `Drop` below has nothing left to cancel.
         self.settled = true;
+        self.release.release(&self.id);
         end
     }
 }
@@ -192,6 +211,8 @@ impl Drop for Subscription {
         if self.settled {
             return;
         }
+        self.release.release(&self.id);
+
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
@@ -202,6 +223,45 @@ impl Drop for Subscription {
         runtime.spawn(async move {
             let _ = sender.send(notification.into()).await;
         });
+    }
+}
+
+/// Frees the per-subscription bookkeeping a cancelled stream leaves behind: its
+/// request slot, its acknowledgment waiter, and its delivery filter.
+///
+/// Held by the [`Subscription`] so the handle can clean up on cancel or drop
+/// without borrowing the client it came from.
+#[derive(Clone)]
+pub(super) struct SubscriptionRelease {
+    pending: crate::shared::RequestQueue,
+    ack_waiters: AckWaiters,
+    filters: SubscriptionFilters,
+}
+
+impl SubscriptionRelease {
+    pub(super) fn new(
+        pending: crate::shared::RequestQueue,
+        ack_waiters: AckWaiters,
+        filters: SubscriptionFilters,
+    ) -> Self {
+        Self {
+            pending,
+            ack_waiters,
+            filters,
+        }
+    }
+
+    pub(super) fn release(&self, id: &RequestId) {
+        let _ = self.pending.pop(id);
+        self.ack_waiters.remove(id);
+        self.filters.remove(id);
+    }
+}
+
+impl std::fmt::Debug for SubscriptionRelease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubscriptionRelease")
+            .finish_non_exhaustive()
     }
 }
 
@@ -242,6 +302,14 @@ pub(super) fn parse_ack(
 mod tests {
     use super::*;
     use crate::types::{Response, SUBSCRIPTION_ID_KEY};
+
+    fn release() -> SubscriptionRelease {
+        SubscriptionRelease::new(
+            crate::shared::RequestQueue::new(std::time::Duration::from_secs(5)),
+            Default::default(),
+            Default::default(),
+        )
+    }
 
     fn ack(id: serde_json::Value, filter: serde_json::Value) -> Notification {
         Notification::new(
@@ -286,6 +354,7 @@ mod tests {
             SubscriptionFilter::new().with_tools_changed(),
             rx,
             TransportProtoSender::None,
+            release(),
         );
 
         let result = serde_json::json!({ "_meta": { SUBSCRIPTION_ID_KEY: 1 } });
@@ -309,6 +378,7 @@ mod tests {
             SubscriptionFilter::new(),
             rx,
             TransportProtoSender::None,
+            release(),
         );
 
         drop(tx);
@@ -330,6 +400,7 @@ mod tests {
             SubscriptionFilter::new().with_tools_changed(),
             rx,
             TransportProtoSender::None,
+            release(),
         );
 
         assert!(!subscription.is_fully_honored());
