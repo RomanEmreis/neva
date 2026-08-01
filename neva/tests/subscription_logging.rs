@@ -127,6 +127,41 @@ async fn a_listen_stream_opens_with_its_acknowledgment() {
          logging of the call that opened it; got {before:?}"
     );
 
+    // A listen inside a batch streams on the same kind of body under the same
+    // rule. neva's own client refuses to batch one -- there would be no handle
+    // to end the subscription with -- but this server takes what any peer
+    // sends, so the classification has to see through the batch.
+    let batched = serde_json::json!([{
+        "jsonrpc": "2.0", "id": "sub-2", "method": "subscriptions/listen",
+        "params": {
+            "notifications": { "toolsListChanged": true },
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {},
+                "io.modelcontextprotocol/logLevel": "info"
+            }
+        }
+    }]);
+    let mut batch_stream = client
+        .post(&url)
+        .header("MCP-Protocol-Version", "2026-07-28")
+        // No `Mcp-Method`: the server rejects one on a batch, since it cannot
+        // describe several requests at once.
+        .header("Accept", "application/json, text/event-stream")
+        .json(&batched)
+        .send()
+        .await
+        .expect("batched listen failed");
+
+    assert!(batch_stream.status().is_success());
+
+    let mut batch_body = String::new();
+    let first = next_message(&mut batch_stream, &mut batch_body).await;
+    assert_eq!(
+        first["method"], "notifications/subscriptions/acknowledged",
+        "a batched listen streams under the same rule, got {first}"
+    );
+
     handle.abort();
 }
 

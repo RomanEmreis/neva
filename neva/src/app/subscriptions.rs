@@ -16,7 +16,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::{Sender, error::TrySendError};
 use tokio_util::sync::CancellationToken;
 
 /// Notifications buffered per subscription before delivery starts dropping.
@@ -84,37 +84,87 @@ impl Drop for SubscriptionGuard {
     }
 }
 
+/// Why a subscription could not be opened.
+#[derive(Debug)]
+pub(crate) enum RegisterError {
+    /// The stream is gone -- the client disconnected before the handshake.
+    Closed,
+
+    /// The stream cannot take the acknowledgment. Since it is empty when
+    /// [`SubscriptionRegistry::register`] runs, this means a buffer too small
+    /// to carry a subscription at all.
+    Full,
+}
+
+impl From<TrySendError<Message>> for RegisterError {
+    fn from(err: TrySendError<Message>) -> Self {
+        match err {
+            TrySendError::Closed(_) => Self::Closed,
+            TrySendError::Full(_) => Self::Full,
+        }
+    }
+}
+
 impl SubscriptionRegistry {
-    /// Registers a subscription and returns its cancellation token together
-    /// with the guard that deregisters it.
+    /// Queues `ack` onto the subscription's stream and registers the
+    /// subscription, returning its cancellation token together with the guard
+    /// that deregisters it.
+    ///
     /// `session_id` is the transport session the subscription is bound to (the
     /// per-`POST` session id over HTTP, `None` over stdio).
+    ///
+    /// The acknowledgment is queued *here*, not by the caller, because the two
+    /// steps have to be atomic against [`Self::broadcast`] and only this type
+    /// can make them so. Both happen under the entry's write lock, which
+    /// `broadcast` must take to read the map, so every broadcast falls entirely
+    /// on one side or the other: before, when this subscription did not exist
+    /// yet and nothing was owed to it, or after, when its notification queues
+    /// behind an acknowledgment that is already in the stream.
+    ///
+    /// Doing it the obvious way instead -- queue the acknowledgment, then
+    /// register -- leaves a window that no amount of care in the caller closes:
+    /// the sink is drained concurrently (by the `POST` response stream over
+    /// HTTP, by the pump task over stdio), so the client can be reading the
+    /// acknowledgment off the wire while the entry still does not exist, and a
+    /// mutation in that instant is dropped by a subscription the client has
+    /// been told is live.
+    ///
+    /// # Errors
+    /// Returns [`RegisterError`] if the stream cannot take the acknowledgment.
+    /// Nothing is registered in that case: a subscription that cannot open is
+    /// not a subscription.
     pub(crate) fn register(
         &self,
         id: RequestId,
         session_id: Option<uuid::Uuid>,
         accepted: SubscriptionFilter,
         sink: Sender<Message>,
-    ) -> (CancellationToken, SubscriptionGuard) {
+        ack: Message,
+    ) -> Result<(CancellationToken, SubscriptionGuard), RegisterError> {
         let token = CancellationToken::new();
         let key = self.next_key.fetch_add(1, Ordering::Relaxed);
-        self.entries.insert(
-            key,
-            Subscription {
-                id,
-                session_id,
-                accepted,
-                sink,
-                token: token.clone(),
-            },
-        );
-        (
+
+        // Holds the shard's write lock for as long as it is alive, which is
+        // what makes the pair below atomic.
+        let slot = self.entries.entry(key);
+
+        sink.try_send(ack).map_err(RegisterError::from)?;
+
+        slot.insert(Subscription {
+            id,
+            session_id,
+            accepted,
+            sink,
+            token: token.clone(),
+        });
+
+        Ok((
             token,
             SubscriptionGuard {
                 key,
                 registry: self.clone(),
             },
-        )
+        ))
     }
 
     /// Cancels the subscription a `notifications/cancelled` names, if this
@@ -230,9 +280,47 @@ mod tests {
         SubscriptionGuard,
     ) {
         let registry = SubscriptionRegistry::default();
-        let (tx, rx) = channel::<Message>(8);
-        let (_token, guard) = registry.register(id, None, accepted, tx);
+        let (tx, mut rx) = channel::<Message>(8);
+        let (_token, guard) = register(&registry, id, None, accepted, tx, &mut rx);
         (registry, rx, guard)
+    }
+
+    /// Registers the way `Context::listen` does -- with the acknowledgment --
+    /// then takes it off the stream, so each test below is about what the
+    /// subscription carries *after* its handshake.
+    ///
+    /// Asserting on it here is the point: `register` queuing it is the only
+    /// thing that makes "acknowledgment first" hold against a broadcast racing
+    /// the registration.
+    fn register(
+        registry: &SubscriptionRegistry,
+        id: RequestId,
+        session_id: Option<uuid::Uuid>,
+        accepted: SubscriptionFilter,
+        tx: Sender<Message>,
+        rx: &mut tokio::sync::mpsc::Receiver<Message>,
+    ) -> (CancellationToken, SubscriptionGuard) {
+        let registered = registry
+            .register(id, session_id, accepted, tx, ack())
+            .expect("the sink must accept the acknowledgment");
+
+        let first = rx
+            .try_recv()
+            .expect("register must queue the acknowledgment");
+        assert_eq!(
+            method_of(&first),
+            crate::types::subscription::commands::ACKNOWLEDGED,
+            "the acknowledgment must be the first message on the stream"
+        );
+
+        registered
+    }
+
+    fn ack() -> Message {
+        Message::Notification(Notification::new(
+            crate::types::subscription::commands::ACKNOWLEDGED,
+            None,
+        ))
     }
 
     fn method_of(msg: &Message) -> String {
@@ -318,17 +406,21 @@ mod tests {
         let (tx1, mut rx1) = channel::<Message>(8);
         let (tx2, mut rx2) = channel::<Message>(8);
 
-        let (_t1, _g1) = registry.register(
+        let (_t1, _g1) = register(
+            &registry,
             RequestId::Number(1),
             None,
             SubscriptionFilter::new().with_tools_changed(),
             tx1,
+            &mut rx1,
         );
-        let (_t2, _g2) = registry.register(
+        let (_t2, _g2) = register(
+            &registry,
             RequestId::Number(2),
             None,
             SubscriptionFilter::new().with_prompts_changed(),
             tx2,
+            &mut rx2,
         );
 
         registry.broadcast(tool::commands::LIST_CHANGED, None);
@@ -341,13 +433,25 @@ mod tests {
     #[tokio::test]
     async fn it_cancels_only_the_named_subscription() {
         let registry = SubscriptionRegistry::default();
-        let (tx1, _rx1) = channel::<Message>(8);
-        let (tx2, _rx2) = channel::<Message>(8);
+        let (tx1, mut rx1) = channel::<Message>(8);
+        let (tx2, mut rx2) = channel::<Message>(8);
 
-        let (token1, _g1) =
-            registry.register(RequestId::Number(1), None, SubscriptionFilter::new(), tx1);
-        let (token2, _g2) =
-            registry.register(RequestId::Number(2), None, SubscriptionFilter::new(), tx2);
+        let (token1, _g1) = register(
+            &registry,
+            RequestId::Number(1),
+            None,
+            SubscriptionFilter::new(),
+            tx1,
+            &mut rx1,
+        );
+        let (token2, _g2) = register(
+            &registry,
+            RequestId::Number(2),
+            None,
+            SubscriptionFilter::new(),
+            tx2,
+            &mut rx2,
+        );
 
         assert!(registry.cancel(&RequestId::Number(1)));
         assert!(token1.is_cancelled());
@@ -359,11 +463,13 @@ mod tests {
     async fn it_deregisters_on_guard_drop() {
         let registry = SubscriptionRegistry::default();
         let (tx, mut rx) = channel::<Message>(8);
-        let (_token, guard) = registry.register(
+        let (_token, guard) = register(
+            &registry,
             RequestId::Number(1),
             None,
             SubscriptionFilter::new().with_tools_changed(),
             tx,
+            &mut rx,
         );
 
         drop(guard);
@@ -383,17 +489,21 @@ mod tests {
         let (tx_a, mut rx_a) = channel::<Message>(8);
         let (tx_b, mut rx_b) = channel::<Message>(8);
 
-        let (_ta, _ga) = registry.register(
+        let (_ta, _ga) = register(
+            &registry,
             RequestId::Number(1),
             Some(uuid::Uuid::new_v4()),
             SubscriptionFilter::new().with_tools_changed(),
             tx_a,
+            &mut rx_a,
         );
-        let (_tb, _gb) = registry.register(
+        let (_tb, _gb) = register(
+            &registry,
             RequestId::Number(1),
             Some(uuid::Uuid::new_v4()),
             SubscriptionFilter::new().with_tools_changed(),
             tx_b,
+            &mut rx_b,
         );
 
         registry.broadcast(tool::commands::LIST_CHANGED, None);
@@ -410,20 +520,24 @@ mod tests {
     #[tokio::test]
     async fn it_does_not_deregister_a_colliding_id_on_teardown() {
         let registry = SubscriptionRegistry::default();
-        let (tx_a, _rx_a) = channel::<Message>(8);
+        let (tx_a, mut rx_a) = channel::<Message>(8);
         let (tx_b, mut rx_b) = channel::<Message>(8);
 
-        let (_ta, guard_a) = registry.register(
+        let (_ta, guard_a) = register(
+            &registry,
             RequestId::Number(1),
             Some(uuid::Uuid::new_v4()),
             SubscriptionFilter::new().with_tools_changed(),
             tx_a,
+            &mut rx_a,
         );
-        let (_tb, _gb) = registry.register(
+        let (_tb, _gb) = register(
+            &registry,
             RequestId::Number(1),
             Some(uuid::Uuid::new_v4()),
             SubscriptionFilter::new().with_tools_changed(),
             tx_b,
+            &mut rx_b,
         );
 
         drop(guard_a);
@@ -442,20 +556,24 @@ mod tests {
     #[tokio::test]
     async fn it_refuses_to_cancel_a_session_bound_subscription() {
         let registry = SubscriptionRegistry::default();
-        let (tx_a, _rx_a) = channel::<Message>(8);
-        let (tx_b, _rx_b) = channel::<Message>(8);
+        let (tx_a, mut rx_a) = channel::<Message>(8);
+        let (tx_b, mut rx_b) = channel::<Message>(8);
 
-        let (token_a, _ga) = registry.register(
+        let (token_a, _ga) = register(
+            &registry,
             RequestId::Number(1),
             Some(uuid::Uuid::new_v4()),
             SubscriptionFilter::new(),
             tx_a,
+            &mut rx_a,
         );
-        let (token_b, _gb) = registry.register(
+        let (token_b, _gb) = register(
+            &registry,
             RequestId::Number(1),
             Some(uuid::Uuid::new_v4()),
             SubscriptionFilter::new(),
             tx_b,
+            &mut rx_b,
         );
 
         assert!(!registry.cancel(&RequestId::Number(1)));

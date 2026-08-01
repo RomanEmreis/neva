@@ -24,13 +24,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     advertised capabilities, acknowledged first on the stream
     (`notifications/subscriptions/acknowledged`), and every message carries
     `_meta["io.modelcontextprotocol/subscriptionId"]`. "First" holds against
-    both things that could displace it: the acknowledgment is queued and the
-    registry entry published with no await in between, so a mutation racing the
-    handshake cannot be dropped by a subscription the client has already been
-    told is live; and over HTTP the listen `POST` body carries the subscription
-    only -- request-scoped `notifications/message` stay off it, where
-    middleware logging before `next(ctx)` would otherwise land ahead of the
-    acknowledgment. `Context::add_tool`,
+    both things that could displace it. The registry queues the acknowledgment
+    itself, under the same lock that publishes the entry, so every broadcast
+    falls wholly on one side of the handshake: a mutation racing it either
+    predates the subscription or queues behind an acknowledgment already on the
+    stream -- the sink is drained concurrently, so no ordering the caller could
+    arrange would do. And over HTTP the listen `POST` body carries the
+    subscription only: request-scoped `notifications/message` stay off it,
+    where middleware logging before `next(ctx)` would otherwise land ahead of
+    the acknowledgment (a batched listen included). `Context::add_tool`,
     `remove_tool`, `add_prompt`, `remove_prompt`, `add_resource`,
     `remove_resource` and `resource_updated` fan out to the streams that asked
     for them; `Context::is_subscribed` now answers from the live streams. A
@@ -82,7 +84,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     had failed. Giving up includes dropping the `listen` future itself (an
     outer `tokio::time::timeout`, a lost `select!` branch): the establishment
     is guarded, so a caller that never sees a result still ends what it
-    started.
+    started. The transport registers a listen's abort handle in its connection
+    loop rather than in the task it spawns, so a cancel written right behind
+    its listen -- which is exactly what giving up writes -- is ordered by the
+    wire rather than by the scheduler.
   * `Client::call_batch` rejects a batched `subscriptions/listen` with
     `InvalidRequest`. A batch slot is an ordinary request slot -- finite TTL, a
     plain `Response`, no handle -- so a subscription opened that way would have

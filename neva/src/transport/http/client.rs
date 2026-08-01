@@ -229,6 +229,15 @@ async fn handle_connection(
                 #[cfg(not(feature = "legacy-spec"))]
                 abort_cancelled_stream(&req, &session);
 
+                // Tracked here rather than inside the spawned task, so that a
+                // cancel arriving right behind a listen -- which is exactly
+                // what a dropped `Client::listen` sends -- finds the handle.
+                // Registering it in the task would leave the ordering to the
+                // scheduler; registering it in this loop makes it the order the
+                // messages arrived in.
+                #[cfg(not(feature = "legacy-spec"))]
+                let abort = track_listen(&req, &session);
+
                 crate::spawn_fair!(send_request(
                     client.clone(),
                     session.clone(),
@@ -237,6 +246,8 @@ async fn handle_connection(
                     auth.clone(),
                     #[cfg(not(feature = "legacy-spec"))]
                     param_registry.clone(),
+                    #[cfg(not(feature = "legacy-spec"))]
+                    abort,
                 ));
             }
         }
@@ -299,6 +310,9 @@ fn build_post(
 /// the peer sits on the response headers, or mid-stream. Dropping the inner
 /// future at any of those points drops the request and its response body, which
 /// is exactly the close the server reads as "this subscription is over".
+///
+/// `abort` is handed in already registered -- see [`track_listen`] for why the
+/// registration cannot happen in here.
 async fn send_request(
     client: reqwest::Client,
     session: Arc<McpSession>,
@@ -306,17 +320,10 @@ async fn send_request(
     resp_tx: mpsc::Sender<Result<Message, Error>>,
     auth: ClientAuth,
     #[cfg(not(feature = "legacy-spec"))] param_registry: crate::shared::param_headers::Registry,
+    #[cfg(not(feature = "legacy-spec"))] abort: ListenAbort,
 ) {
-    // Registered *before* the request goes out: a subscription can be cancelled
-    // while the peer is still sitting on the response headers -- establishment
-    // timing out is exactly that case -- and a handle installed only once the
-    // body arrives would leave that cancel with nothing to abort, then start
-    // draining an orphaned stream when the headers finally land.
     #[cfg(not(feature = "legacy-spec"))]
-    let (abort, _abort_guard) = track_listen(&req, &session);
-
-    #[cfg(not(feature = "legacy-spec"))]
-    if !abort.is_empty() {
+    if abort.is_tracked() {
         // The session token belongs in this race too: `Client::disconnect`
         // cancels it and the connection loop exits, but a listen POST is the
         // one request nothing else stops -- it would go on draining its body,
@@ -324,7 +331,7 @@ async fn send_request(
         let session_token = session.cancellation_token();
         tokio::select! {
             _ = exchange(client, session, req, resp_tx, auth, param_registry) => {}
-            _ = wait_for_any(&abort) => {}
+            _ = abort.cancelled() => {}
             _ = session_token.cancelled() => {}
         }
         return;
@@ -524,16 +531,40 @@ async fn exchange(
     }
 }
 
-/// Untracks a request's abort handles however [`send_request`] exits -- a
-/// transport error, a non-streaming reply, a cancel, or a panic.
+/// A request's registered abort handles, and their untracking.
+///
+/// Carried into [`send_request`] rather than made there: registration has to
+/// happen in the connection loop, ahead of the spawn -- see [`track_listen`].
+/// Empty for everything that is not a listen.
 #[cfg(not(feature = "legacy-spec"))]
-struct AbortGuard {
+struct ListenAbort {
+    tokens: Vec<CancellationToken>,
     session: Arc<McpSession>,
     ids: Vec<crate::types::RequestId>,
 }
 
 #[cfg(not(feature = "legacy-spec"))]
-impl Drop for AbortGuard {
+impl ListenAbort {
+    /// Whether this request opens a stream worth aborting at all.
+    fn is_tracked(&self) -> bool {
+        !self.tokens.is_empty()
+    }
+
+    /// Resolves as soon as any of the handles is cancelled, or never when there
+    /// are none.
+    async fn cancelled(&self) {
+        if self.tokens.is_empty() {
+            std::future::pending::<()>().await;
+        }
+
+        futures_util::future::select_all(self.tokens.iter().map(|t| Box::pin(t.cancelled()))).await;
+    }
+}
+
+/// Untracks the handles however [`send_request`] exits -- a transport error, a
+/// non-streaming reply, a cancel, or a panic.
+#[cfg(not(feature = "legacy-spec"))]
+impl Drop for ListenAbort {
     fn drop(&mut self) {
         for id in &self.ids {
             self.session.untrack_stream(id);
@@ -543,13 +574,19 @@ impl Drop for AbortGuard {
 
 /// Registers abort handles for a request whose reply is a long-lived stream.
 ///
+/// Called from the connection loop *before* the request is spawned, not from
+/// the spawned task: a `notifications/cancelled` queued right behind a listen
+/// -- which is what a dropped `Client::listen` sends -- is read by the very
+/// next turn of that loop, and would find nothing to abort if registration were
+/// left to the scheduler. Registering here makes the order the order the
+/// messages were written in.
+///
 /// Only a standalone `subscriptions/listen` qualifies: every other request is
 /// answered and gone, so tracking one would be bookkeeping nobody reads, and a
 /// batched listen never reaches the transport (`send_batch` rejects it, having
-/// no handle to give it a lifetime). Returns no handles (and a guard with
-/// nothing to clean up) for anything else.
+/// no handle to give it a lifetime). Returns nothing tracked for anything else.
 #[cfg(not(feature = "legacy-spec"))]
-fn track_listen(req: &Message, session: &Arc<McpSession>) -> (Vec<CancellationToken>, AbortGuard) {
+fn track_listen(req: &Message, session: &Arc<McpSession>) -> ListenAbort {
     let ids = match req {
         Message::Request(r) if r.method == crate::types::subscription::commands::LISTEN => {
             request_ids(req)
@@ -562,23 +599,11 @@ fn track_listen(req: &Message, session: &Arc<McpSession>) -> (Vec<CancellationTo
         .map(|id| session.track_stream(id.clone()))
         .collect();
 
-    (
+    ListenAbort {
         tokens,
-        AbortGuard {
-            session: session.clone(),
-            ids,
-        },
-    )
-}
-
-/// Resolves as soon as any of `tokens` is cancelled, or never when empty.
-#[cfg(not(feature = "legacy-spec"))]
-async fn wait_for_any(tokens: &[CancellationToken]) {
-    if tokens.is_empty() {
-        std::future::pending::<()>().await;
+        session: session.clone(),
+        ids,
     }
-
-    futures_util::future::select_all(tokens.iter().map(|t| Box::pin(t.cancelled()))).await;
 }
 
 /// Aborts the streamed reply a `notifications/cancelled` names, if this session

@@ -519,10 +519,24 @@ fn opts_into_notifications(msg: &Message) -> bool {
 /// The distinction decides what may be written to it: a subscription stream
 /// opens with the acknowledgment and carries that subscription's notifications,
 /// so request-scoped log messages stay off it.
+///
+/// A batch counts if it contains a listen at all. neva's own client refuses to
+/// batch one -- a batch slot has no handle to end the subscription with -- but
+/// this server accepts what any peer sends, and a batched listen streams on
+/// this same body with the same ordering requirement.
 #[cfg(not(feature = "legacy-spec"))]
 fn is_subscription_stream(msg: &Message) -> bool {
-    matches!(msg, Message::Request(r)
-        if r.method == crate::types::subscription::commands::LISTEN)
+    fn is_listen(req: &crate::types::Request) -> bool {
+        req.method == crate::types::subscription::commands::LISTEN
+    }
+
+    match msg {
+        Message::Request(r) => is_listen(r),
+        Message::Batch(batch) => batch
+            .iter()
+            .any(|env| matches!(env, crate::types::MessageEnvelope::Request(r) if is_listen(r))),
+        _ => false,
+    }
 }
 
 /// Whether a single request needs the streaming reply: `subscriptions/listen`

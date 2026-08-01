@@ -1809,9 +1809,16 @@ impl Context {
         let accepted = requested.supported_by(&self.options.advertised_capabilities());
         let (sink, pump) = self.subscription_sink();
 
-        // The acknowledgment MUST be the first message on the subscription, so
-        // it is queued before the entry goes live and any broadcast can reach
-        // it.
+        // The acknowledgment MUST be the first message on the subscription.
+        // `register` is what queues it, together with publishing the entry:
+        // the two have to be atomic against a concurrent broadcast, and the
+        // registry is the only thing that can make them so -- see its docs for
+        // why doing it here instead cannot work, whatever the caller does.
+        //
+        // The sink is empty at this point -- a listen `POST` body carries no
+        // request-scoped logging (see `notification::sink::RequestSink`) and a
+        // subscription reports no progress -- so `Full` here means a sink far
+        // too small to carry a subscription at all, and says so.
         let ack = Notification::new(
             crate::types::subscription::commands::ACKNOWLEDGED,
             serde_json::to_value(SubscriptionsAcknowledgedNotificationParams::new(
@@ -1821,37 +1828,27 @@ impl Context {
             .ok(),
         );
 
-        // `try_send`, deliberately, not `send().await`: an await between
-        // queueing the acknowledgment and registering the entry is a window in
-        // which the client has been told the subscription is established while
-        // nothing can reach it, so a concurrent mutation broadcasting in that
-        // window would be dropped for good. Nothing else can write to this sink
-        // until `register` publishes the entry, so queueing first and
-        // registering second -- with no await in between -- is what makes
-        // "acknowledgment first" and "no lost events" hold at the same time.
-        //
-        // The sink is empty at this point -- a listen `POST` body carries no
-        // request-scoped logging (see `notification::sink::RequestSink`) and a
-        // subscription reports no progress -- so `Full` here means a sink far
-        // too small to carry a subscription at all, and says so.
-        sink.try_send(Message::Notification(ack)).map_err(|err| {
-            use tokio::sync::mpsc::error::TrySendError;
-            match err {
-                TrySendError::Closed(_) => {
-                    Error::new(ErrorCode::InternalError, "Subscription stream is closed")
+        let (token, guard) = self
+            .options
+            .subscriptions()
+            .register(
+                id.clone(),
+                self.session_id,
+                accepted,
+                sink.clone(),
+                Message::Notification(ack),
+            )
+            .map_err(|err| {
+                use crate::app::subscriptions::RegisterError;
+                match err {
+                    RegisterError::Closed => {
+                        Error::new(ErrorCode::InternalError, "Subscription stream is closed")
+                    }
+                    RegisterError::Full => {
+                        Error::new(ErrorCode::InternalError, "Subscription stream is full")
+                    }
                 }
-                TrySendError::Full(_) => {
-                    Error::new(ErrorCode::InternalError, "Subscription stream is full")
-                }
-            }
-        })?;
-
-        let (token, guard) = self.options.subscriptions().register(
-            id.clone(),
-            self.session_id,
-            accepted,
-            sink.clone(),
-        );
+            })?;
 
         // Whichever comes first: the client cancelled this subscription, the
         // stream went away under us (an HTTP client that closed the response

@@ -3406,6 +3406,137 @@ mod listen_rejection_tests {
         );
     }
 
+    /// A cancel written immediately behind a listen -- which is exactly what a
+    /// dropped establishment writes -- has to find the stream it names. The
+    /// abort handle is registered by the connection loop rather than by the
+    /// task it spawns, so the two are ordered by the wire, not by the
+    /// scheduler.
+    ///
+    /// A single worker on purpose: it pins the interleaving this is about.
+    /// Both messages are queued before the connection loop runs, so it reads
+    /// the cancel on the turn right after spawning the listen, while that task
+    /// has had no chance to run. (One worker rather than `current_thread`
+    /// because connecting uses `block_in_place`, which the current-thread
+    /// runtime refuses.)
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancel_queued_behind_a_listen_still_closes_the_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let opened = Arc::new(AtomicBool::new(false));
+        let hung_up = Arc::new(AtomicBool::new(false));
+        tokio::spawn(serve_orphan_watch(
+            listener,
+            opened.clone(),
+            hung_up.clone(),
+        ));
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                .with_timeout(std::time::Duration::from_secs(30))
+        });
+        client.connect().await.expect("connect");
+
+        use crate::transport::Sender as _;
+
+        let id = RequestId::Number(99);
+        let mut sender = client.handler.as_ref().expect("connected").sender();
+
+        let listen = Request::new(
+            Some(id.clone()),
+            crate::types::subscription::commands::LISTEN,
+            Some(SubscriptionsListenRequestParams::new(
+                crate::types::SubscriptionFilter::new().with_tools_changed(),
+            )),
+        );
+        sender.send(listen.into()).await.expect("send listen");
+        sender
+            .send(subscription::cancelled(&id).into())
+            .await
+            .expect("send cancel");
+
+        // The abort may land before the POST is even written, so what is
+        // asserted is the outcome rather than one particular mechanism: the
+        // peer must not be left holding this listen open. Without the fix the
+        // cancel finds no handle, the request goes out, and the stream drains
+        // for as long as the connection lives.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !hung_up.load(AtomicOrdering::SeqCst) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        assert!(
+            !opened.load(AtomicOrdering::SeqCst) || hung_up.load(AtomicOrdering::SeqCst),
+            "a cancel arriving right behind its listen left the peer holding an orphaned stream"
+        );
+    }
+
+    /// Answers `server/discover`, then holds any other request open and reports
+    /// both that it saw one and whether the client ever hung up on it.
+    async fn serve_orphan_watch(
+        listener: TcpListener,
+        opened: Arc<AtomicBool>,
+        hung_up: Arc<AtomicBool>,
+    ) {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (opened, hung_up) = (opened.clone(), hung_up.clone());
+            tokio::spawn(async move {
+                loop {
+                    let Some((_head, body)) = read_request(&mut stream).await else {
+                        return;
+                    };
+
+                    let msg: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                    let method = msg
+                        .get("method")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or_default();
+
+                    if method == crate::commands::DISCOVER {
+                        let reply = serde_json::json!({
+                            "jsonrpc": "2.0", "id": id,
+                            "result": {
+                                "supportedVersions": [crate::LATEST_PROTOCOL_VERSION],
+                                "capabilities": { "tools": { "listChanged": true } }
+                            }
+                        });
+                        write_json(&mut stream, &reply.to_string()).await;
+                        continue;
+                    }
+
+                    // Anything else -- the cancel notification travels on its
+                    // own `POST` -- is answered and forgotten; only the listen
+                    // is the stream this test is about.
+                    if method != crate::types::subscription::commands::LISTEN {
+                        let _ = stream
+                            .write_all(
+                                b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n",
+                            )
+                            .await;
+                        continue;
+                    }
+
+                    opened.store(true, AtomicOrdering::SeqCst);
+
+                    let mut probe = [0u8; 1];
+                    if let Ok(Ok(0)) = tokio::time::timeout(
+                        std::time::Duration::from_secs(3),
+                        stream.read(&mut probe),
+                    )
+                    .await
+                    {
+                        hung_up.store(true, AtomicOrdering::SeqCst);
+                    }
+
+                    return;
+                }
+            });
+        }
+    }
+
     /// A caller who drops the `listen` future -- an outer `timeout`, a lost
     /// `select!` branch -- runs none of the error paths inside it, so the
     /// bookkeeping and the peer's stream would be left behind by an
