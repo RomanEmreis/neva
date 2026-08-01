@@ -285,6 +285,88 @@ impl std::fmt::Debug for SubscriptionRelease {
     }
 }
 
+/// Undoes a `subscriptions/listen` that was sent but never became a
+/// [`Subscription`].
+///
+/// Between the send and the returned handle there is bookkeeping only an
+/// explicit ending releases -- the acknowledgment waiter, the accepted filter,
+/// and a request slot that carries no TTL -- and a peer already streaming into
+/// it. The error paths in [`Client::listen`](crate::Client::listen) can await
+/// that cleanup, but the caller dropping the whole `listen` future (an outer
+/// `tokio::time::timeout`, a lost `select!` branch) runs none of them: the
+/// future simply stops existing at its next suspension point. This guard is
+/// what still runs then.
+///
+/// Armed from the moment the request goes out until ownership passes to the
+/// handle ([`Self::disarm`]) or the establishment gives up ([`Self::abandon`]).
+pub(super) struct EstablishmentGuard {
+    id: RequestId,
+    release: SubscriptionRelease,
+    sender: TransportProtoSender,
+    armed: bool,
+}
+
+impl EstablishmentGuard {
+    pub(super) fn new(
+        id: RequestId,
+        release: SubscriptionRelease,
+        sender: TransportProtoSender,
+    ) -> Self {
+        Self {
+            id,
+            release,
+            sender,
+            armed: true,
+        }
+    }
+
+    /// The stream is now the returned [`Subscription`]'s to end.
+    pub(super) fn disarm(mut self) {
+        self.armed = false;
+    }
+
+    /// Ends an establishment that failed, awaiting the cancellation rather than
+    /// handing it to the runtime the way [`Drop`] must.
+    pub(super) async fn abandon(mut self) {
+        self.armed = false;
+        self.release.release(&self.id);
+        let _ = self.sender.send(cancelled(&self.id).into()).await;
+    }
+}
+
+/// Best-effort by necessity, exactly as for [`Subscription`]: `Drop` cannot
+/// await, so the cancellation goes to the runtime. Outside a runtime there is
+/// nothing to hand it to and the subscription ends with the connection instead.
+impl Drop for EstablishmentGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+
+        self.release.release(&self.id);
+
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+
+        let mut sender = self.sender.clone();
+        let notification = cancelled(&self.id);
+
+        runtime.spawn(async move {
+            let _ = sender.send(notification.into()).await;
+        });
+    }
+}
+
+impl std::fmt::Debug for EstablishmentGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EstablishmentGuard")
+            .field("id", &self.id)
+            .field("armed", &self.armed)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Builds the `notifications/cancelled` that ends a subscription.
 ///
 /// Over stdio this is the mechanism the spec names. Over HTTP the spec has the

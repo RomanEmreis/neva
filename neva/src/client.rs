@@ -1086,6 +1086,14 @@ impl Client {
             }
         };
 
+        // The request is on the wire, so from here every exit has to undo it --
+        // including the one with no code of its own: a caller who drops this
+        // future (an outer `tokio::time::timeout`, a lost `select!` branch)
+        // runs none of the branches below, and would leave the waiter, the
+        // filter, the untimed request slot and the peer's stream behind.
+        let guard =
+            subscription::EstablishmentGuard::new(id.clone(), release.clone(), sender.clone());
+
         // Race the acknowledgment against the request's own reply: a peer that
         // rejects the subscription outright -- `MethodNotFound`, an
         // authorization failure, invalid params -- answers instead of
@@ -1125,11 +1133,11 @@ impl Client {
             Ok(Ok(filter)) => filter,
             // The waiter's sender was dropped: the receive loop is gone.
             Ok(Err(_)) => {
-                self.abandon_listen(&id).await;
+                guard.abandon().await;
                 return Err(Error::new(ErrorCode::InternalError, "Connection closed"));
             }
             Err(err) => {
-                self.abandon_listen(&id).await;
+                guard.abandon().await;
                 return Err(err);
             }
         };
@@ -1140,12 +1148,15 @@ impl Client {
         // filtering, so an acknowledgment claiming a category or URI this call
         // never asked for would deliver events outside the requested scope.
         if !acknowledged.is_subset_of(&notifications) {
-            self.abandon_listen(&id).await;
+            guard.abandon().await;
             return Err(Error::new(
                 ErrorCode::InvalidRequest,
                 "Server acknowledged a subscription broader than the one requested",
             ));
         }
+
+        // The handle takes over from here.
+        guard.disarm();
 
         Ok(Subscription::new(
             id,
@@ -3392,6 +3403,57 @@ mod listen_rejection_tests {
             queued(&client),
             idle,
             "cancelling must release the subscription's slot"
+        );
+    }
+
+    /// A caller who drops the `listen` future -- an outer `timeout`, a lost
+    /// `select!` branch -- runs none of the error paths inside it, so the
+    /// bookkeeping and the peer's stream would be left behind by an
+    /// establishment that never returned anything to end them with.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropping_the_listen_future_abandons_the_subscription() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let closed = Arc::new(AtomicBool::new(false));
+        tokio::spawn(serve_stalled_listen(listener, closed.clone()));
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                // Far longer than this test waits: the establishment must be
+                // ended by the dropped future, not by `listen`'s own timeout.
+                .with_timeout(std::time::Duration::from_secs(30))
+        });
+        client.connect().await.expect("connect");
+
+        let queued = |client: &Client| client.handler.as_ref().expect("connected").pending().len();
+        let idle = queued(&client);
+
+        // The caller gives up on its own schedule and never sees a result.
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(300),
+                client.listen(crate::types::SubscriptionFilter::new().with_tools_changed()),
+            )
+            .await
+            .is_err(),
+            "the peer never acknowledges, so the outer timeout must fire"
+        );
+
+        assert_eq!(
+            queued(&client),
+            idle,
+            "a dropped establishment must release its request slot"
+        );
+
+        // And it has to reach the wire too: the peer is still holding the
+        // listen request open, waiting for someone who is no longer there.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !closed.load(AtomicOrdering::SeqCst) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(
+            closed.load(AtomicOrdering::SeqCst),
+            "a dropped establishment must close the stream it opened"
         );
     }
 

@@ -79,7 +79,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     over HTTP by closing the listen response body, which is what the server
     acts on -- and so does giving up on an unacknowledged one, which would
     otherwise leave the peer streaming into a subscription the caller was told
-    had failed.
+    had failed. Giving up includes dropping the `listen` future itself (an
+    outer `tokio::time::timeout`, a lost `select!` branch): the establishment
+    is guarded, so a caller that never sees a result still ends what it
+    started.
   * `Client::call_batch` rejects a batched `subscriptions/listen` with
     `InvalidRequest`. A batch slot is an ordinary request slot -- finite TTL, a
     plain `Response`, no handle -- so a subscription opened that way would have
