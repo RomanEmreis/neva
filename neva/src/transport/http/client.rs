@@ -473,8 +473,9 @@ async fn exchange(
     // resolves the pending request on the response.
     if is_event_stream(resp.headers()) {
         let stream = sse_stream::SseStream::from_bytes_stream(resp.bytes_stream());
+        let ids = request_ids(&req);
 
-        let answered = drain_post_sse(stream, &resp_tx).await;
+        let answered = drain_post_sse(stream, &resp_tx, &ids).await;
 
         // A truncated stream, an unparseable frame, or EOF before the final
         // response would otherwise leave the originating request sitting in the
@@ -485,7 +486,7 @@ async fn exchange(
         if !answered {
             #[cfg(feature = "tracing")]
             tracing::error!(logger = "neva", STREAM_ENDED_BEFORE_RESPONSE);
-            for id in request_ids(&req) {
+            for id in ids {
                 let resp = crate::types::Response::error(
                     id,
                     Error::new(ErrorCode::InternalError, STREAM_ENDED_BEFORE_RESPONSE),
@@ -851,8 +852,13 @@ async fn handle_sse_connection(
 /// it carries to the receive loop.
 ///
 /// Returns whether the terminal reply arrived, so the caller can fail the
-/// originating request when the stream ends without one.
-async fn drain_post_sse<S>(mut stream: S, resp_tx: &mpsc::Sender<Result<Message, Error>>) -> bool
+/// originating request when the stream ends without one. `ids` are the requests
+/// this `POST` carried -- a reply answers it only by answering one of them.
+async fn drain_post_sse<S>(
+    mut stream: S,
+    resp_tx: &mpsc::Sender<Result<Message, Error>>,
+    ids: &[crate::types::RequestId],
+) -> bool
 where
     S: futures_util::Stream<Item = Result<sse_stream::Sse, sse_stream::Error>> + Unpin,
 {
@@ -860,7 +866,7 @@ where
     while let Some(event) = stream.next().await {
         match event {
             Ok(sse) if is_message_event(&sse) => {
-                if forward_sse_message(sse, resp_tx).await {
+                if forward_sse_message(sse, resp_tx, ids).await {
                     answered = true;
                 }
             }
@@ -944,18 +950,22 @@ async fn handle_msg(
 
 /// Forwards one frame of a request-scoped SSE `POST` reply to the receive loop.
 ///
-/// Returns `true` only for the *terminal* reply -- a response, or a batch that
-/// carries one -- so the caller can tell an orderly stream end from a truncated
-/// one (notifications, and frames that fail to parse, return `false`).
+/// Returns `true` only for the *terminal* reply -- a response to one of `ids`,
+/// the requests this `POST` carried, whether standalone or inside a batch -- so
+/// the caller can tell an orderly stream end from a truncated one
+/// (notifications, and frames that fail to parse, return `false`).
 ///
-/// A batch is not terminal by virtue of being a batch: a subscription stream
-/// may deliver its acknowledgment and its events batched, and treating those as
-/// the answer would make a stream that dies before the real response look
-/// orderly -- leaving a listen slot, which carries no TTL, with nothing to fail
-/// it and `Subscription::closed` waiting on a result that is never coming.
+/// Both halves of that matter. A batch is not terminal by virtue of being a
+/// batch: a subscription stream may deliver its acknowledgment and its events
+/// batched. And a response is not terminal by virtue of being a response: one
+/// carrying an id this `POST` never sent cannot resolve its pending slot. Either
+/// mistake makes a stream that dies before the real response look orderly,
+/// leaving a listen slot -- which carries no TTL -- with nothing to fail it and
+/// `Subscription::closed` waiting on a result that is never coming.
 async fn forward_sse_message(
     event: sse_stream::Sse,
     resp_tx: &mpsc::Sender<Result<Message, Error>>,
+    ids: &[crate::types::RequestId],
 ) -> bool {
     let Some(data) = event.data else {
         return false;
@@ -970,9 +980,12 @@ async fn forward_sse_message(
         }
     };
 
+    let answers = |resp: &crate::types::Response| ids.contains(&resp.full_id());
     let terminal = match &msg {
-        Message::Response(_) => true,
-        Message::Batch(batch) => batch.has_responses(),
+        Message::Response(resp) => answers(resp),
+        Message::Batch(batch) => batch.iter().any(
+            |env| matches!(env, crate::types::MessageEnvelope::Response(resp) if answers(resp)),
+        ),
         _ => false,
     };
 
@@ -1187,7 +1200,12 @@ mod tests {
             Ok(sse_stream::Sse::default().event("message").data(response)),
         ];
         assert!(
-            drain_post_sse(futures_util::stream::iter(frames), &tx).await,
+            drain_post_sse(
+                futures_util::stream::iter(frames),
+                &tx,
+                &[crate::types::RequestId::Number(1)]
+            )
+            .await,
             "the POST stream must count as answered"
         );
         assert!(matches!(rx.try_recv(), Ok(Ok(Message::Notification(_)))));
@@ -1205,7 +1223,14 @@ mod tests {
                 .event("endpoint")
                 .data(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#)),
         ];
-        assert!(!drain_post_sse(futures_util::stream::iter(frames), &tx).await);
+        assert!(
+            !drain_post_sse(
+                futures_util::stream::iter(frames),
+                &tx,
+                &[crate::types::RequestId::Number(1)]
+            )
+            .await
+        );
         assert!(rx.try_recv().is_err(), "no frame should be delivered");
     }
 
@@ -1236,13 +1261,17 @@ mod tests {
                     {"jsonrpc":"2.0","id":1,"result":{}}]"#,
                 true,
             ),
+            // Nor is a response terminal by virtue of being a response: this
+            // `POST` never sent id 9, so nothing here can resolve its slot.
+            (r#"{"jsonrpc":"2.0","id":9,"result":{}}"#, false),
+            (r#"[{"jsonrpc":"2.0","id":9,"result":{}}]"#, false),
         ];
 
         for (frame, terminal) in cases {
             let (tx, mut rx) = mpsc::channel(1);
             let event = sse_stream::Sse::default().data(frame);
             assert_eq!(
-                forward_sse_message(event, &tx).await,
+                forward_sse_message(event, &tx, &[crate::types::RequestId::Number(1)]).await,
                 terminal,
                 "wrong terminal flag for {frame}"
             );
@@ -1254,7 +1283,7 @@ mod tests {
     async fn forward_sse_message_reports_unparseable_frame_as_unanswered() {
         let (tx, mut rx) = mpsc::channel(1);
         let event = sse_stream::Sse::default().data("not json");
-        assert!(!forward_sse_message(event, &tx).await);
+        assert!(!forward_sse_message(event, &tx, &[crate::types::RequestId::Number(1)]).await);
         assert!(
             rx.try_recv().is_err(),
             "a malformed frame must not reach the receive loop"
