@@ -414,12 +414,10 @@ mod tests {
     /// child span that carries no MCP fields of its own.
     #[tokio::test]
     async fn routes_events_from_nested_spans_to_the_request_sink() {
-        use crate::types::Message;
         use crate::types::notification::Notification;
 
         let session_id = uuid::Uuid::new_v4();
-        let (sink_tx, mut sink_rx) = tokio::sync::mpsc::channel::<Message>(8);
-        super::super::sink::REQUEST_NOTIFICATIONS.insert(session_id, sink_tx);
+        let mut sink_rx = super::super::sink::register(session_id, 8, false).await;
 
         let (fallback_tx, mut fallback_rx) = tokio::sync::mpsc::channel::<Notification>(8);
         let subscriber = tracing_subscriber::registry().with(super::MpscLayer {
@@ -438,7 +436,7 @@ mod tests {
             tracing::warn!(logger = "tool", "nested message");
         });
 
-        super::super::sink::REQUEST_NOTIFICATIONS.remove(&session_id);
+        super::super::sink::unregister(&session_id);
 
         let msg = sink_rx
             .try_recv()

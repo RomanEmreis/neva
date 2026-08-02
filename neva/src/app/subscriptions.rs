@@ -16,7 +16,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
-use tokio::sync::mpsc::{Sender, error::TrySendError};
+use tokio::sync::mpsc::{OwnedPermit, Sender};
 use tokio_util::sync::CancellationToken;
 
 /// Notifications buffered per subscription before delivery starts dropping.
@@ -84,27 +84,6 @@ impl Drop for SubscriptionGuard {
     }
 }
 
-/// Why a subscription could not be opened.
-#[derive(Debug)]
-pub(crate) enum RegisterError {
-    /// The stream is gone -- the client disconnected before the handshake.
-    Closed,
-
-    /// The stream cannot take the acknowledgment. Since it is empty when
-    /// [`SubscriptionRegistry::register`] runs, this means a buffer too small
-    /// to carry a subscription at all.
-    Full,
-}
-
-impl From<TrySendError<Message>> for RegisterError {
-    fn from(err: TrySendError<Message>) -> Self {
-        match err {
-            TrySendError::Closed(_) => Self::Closed,
-            TrySendError::Full(_) => Self::Full,
-        }
-    }
-}
-
 impl SubscriptionRegistry {
     /// Queues `ack` onto the subscription's stream and registers the
     /// subscription, returning its cancellation token together with the guard
@@ -129,10 +108,9 @@ impl SubscriptionRegistry {
     /// mutation in that instant is dropped by a subscription the client has
     /// been told is live.
     ///
-    /// # Errors
-    /// Returns [`RegisterError`] if the stream cannot take the acknowledgment.
-    /// Nothing is registered in that case: a subscription that cannot open is
-    /// not a subscription.
+    /// `ack_slot` is capacity reserved for the acknowledgment before anything
+    /// else could write to the body, so queueing it cannot fail and cannot be
+    /// crowded out by a noisy request.
     pub(crate) fn register(
         &self,
         id: RequestId,
@@ -140,7 +118,8 @@ impl SubscriptionRegistry {
         accepted: SubscriptionFilter,
         sink: Sender<Message>,
         ack: Message,
-    ) -> Result<(CancellationToken, SubscriptionGuard), RegisterError> {
+        ack_slot: OwnedPermit<Message>,
+    ) -> (CancellationToken, SubscriptionGuard) {
         let token = CancellationToken::new();
         let key = self.next_key.fetch_add(1, Ordering::Relaxed);
 
@@ -148,7 +127,7 @@ impl SubscriptionRegistry {
         // what makes the pair below atomic.
         let slot = self.entries.entry(key);
 
-        sink.try_send(ack).map_err(RegisterError::from)?;
+        ack_slot.send(ack);
 
         slot.insert(Subscription {
             id,
@@ -158,13 +137,13 @@ impl SubscriptionRegistry {
             token: token.clone(),
         });
 
-        Ok((
+        (
             token,
             SubscriptionGuard {
                 key,
                 registry: self.clone(),
             },
-        ))
+        )
     }
 
     /// Cancels the subscription a `notifications/cancelled` names, if this
@@ -271,7 +250,7 @@ mod tests {
     use crate::types::{prompt, resource, subscription::SUBSCRIPTION_ID_KEY, tool};
     use tokio::sync::mpsc::channel;
 
-    fn registry_with(
+    async fn registry_with(
         id: RequestId,
         accepted: SubscriptionFilter,
     ) -> (
@@ -281,7 +260,7 @@ mod tests {
     ) {
         let registry = SubscriptionRegistry::default();
         let (tx, mut rx) = channel::<Message>(8);
-        let (_token, guard) = register(&registry, id, None, accepted, tx, &mut rx);
+        let (_token, guard) = register(&registry, id, None, accepted, tx, &mut rx).await;
         (registry, rx, guard)
     }
 
@@ -292,7 +271,7 @@ mod tests {
     /// Asserting on it here is the point: `register` queuing it is the only
     /// thing that makes "acknowledgment first" hold against a broadcast racing
     /// the registration.
-    fn register(
+    async fn register(
         registry: &SubscriptionRegistry,
         id: RequestId,
         session_id: Option<uuid::Uuid>,
@@ -300,9 +279,12 @@ mod tests {
         tx: Sender<Message>,
         rx: &mut tokio::sync::mpsc::Receiver<Message>,
     ) -> (CancellationToken, SubscriptionGuard) {
-        let registered = registry
-            .register(id, session_id, accepted, tx, ack())
-            .expect("the sink must accept the acknowledgment");
+        let slot = tx
+            .clone()
+            .reserve_owned()
+            .await
+            .expect("the test sink must have room for the acknowledgment");
+        let registered = registry.register(id, session_id, accepted, tx, ack(), slot);
 
         let first = rx
             .try_recv()
@@ -335,7 +317,8 @@ mod tests {
         let (registry, mut rx, _guard) = registry_with(
             RequestId::Number(1),
             SubscriptionFilter::new().with_tools_changed(),
-        );
+        )
+        .await;
 
         assert!(registry.broadcast(prompt::commands::LIST_CHANGED, None));
         assert!(registry.broadcast(tool::commands::LIST_CHANGED, None));
@@ -353,7 +336,8 @@ mod tests {
         let (registry, mut rx, _guard) = registry_with(
             RequestId::String("sub-1".into()),
             SubscriptionFilter::new().with_tools_changed(),
-        );
+        )
+        .await;
 
         registry.broadcast(tool::commands::LIST_CHANGED, None);
 
@@ -367,7 +351,8 @@ mod tests {
         let (registry, mut rx, _guard) = registry_with(
             RequestId::Number(1),
             SubscriptionFilter::new().with_resource("res://a"),
-        );
+        )
+        .await;
 
         let params = serde_json::json!({ "uri": "res://a" });
         registry.broadcast(resource::commands::UPDATED, Some(&params));
@@ -382,7 +367,8 @@ mod tests {
         let (registry, mut rx, _guard) = registry_with(
             RequestId::Number(1),
             SubscriptionFilter::new().with_resource("res://a"),
-        );
+        )
+        .await;
 
         let other = serde_json::json!({ "uri": "res://b" });
         registry.broadcast(resource::commands::UPDATED, Some(&other));
@@ -413,7 +399,8 @@ mod tests {
             SubscriptionFilter::new().with_tools_changed(),
             tx1,
             &mut rx1,
-        );
+        )
+        .await;
         let (_t2, _g2) = register(
             &registry,
             RequestId::Number(2),
@@ -421,7 +408,8 @@ mod tests {
             SubscriptionFilter::new().with_prompts_changed(),
             tx2,
             &mut rx2,
-        );
+        )
+        .await;
 
         registry.broadcast(tool::commands::LIST_CHANGED, None);
 
@@ -443,7 +431,8 @@ mod tests {
             SubscriptionFilter::new(),
             tx1,
             &mut rx1,
-        );
+        )
+        .await;
         let (token2, _g2) = register(
             &registry,
             RequestId::Number(2),
@@ -451,7 +440,8 @@ mod tests {
             SubscriptionFilter::new(),
             tx2,
             &mut rx2,
-        );
+        )
+        .await;
 
         assert!(registry.cancel(&RequestId::Number(1)));
         assert!(token1.is_cancelled());
@@ -470,7 +460,8 @@ mod tests {
             SubscriptionFilter::new().with_tools_changed(),
             tx,
             &mut rx,
-        );
+        )
+        .await;
 
         drop(guard);
 
@@ -496,7 +487,8 @@ mod tests {
             SubscriptionFilter::new().with_tools_changed(),
             tx_a,
             &mut rx_a,
-        );
+        )
+        .await;
         let (_tb, _gb) = register(
             &registry,
             RequestId::Number(1),
@@ -504,7 +496,8 @@ mod tests {
             SubscriptionFilter::new().with_tools_changed(),
             tx_b,
             &mut rx_b,
-        );
+        )
+        .await;
 
         registry.broadcast(tool::commands::LIST_CHANGED, None);
 
@@ -530,7 +523,8 @@ mod tests {
             SubscriptionFilter::new().with_tools_changed(),
             tx_a,
             &mut rx_a,
-        );
+        )
+        .await;
         let (_tb, _gb) = register(
             &registry,
             RequestId::Number(1),
@@ -538,7 +532,8 @@ mod tests {
             SubscriptionFilter::new().with_tools_changed(),
             tx_b,
             &mut rx_b,
-        );
+        )
+        .await;
 
         drop(guard_a);
         registry.broadcast(tool::commands::LIST_CHANGED, None);
@@ -566,7 +561,8 @@ mod tests {
             SubscriptionFilter::new(),
             tx_a,
             &mut rx_a,
-        );
+        )
+        .await;
         let (token_b, _gb) = register(
             &registry,
             RequestId::Number(1),
@@ -574,7 +570,8 @@ mod tests {
             SubscriptionFilter::new(),
             tx_b,
             &mut rx_b,
-        );
+        )
+        .await;
 
         assert!(!registry.cancel(&RequestId::Number(1)));
         assert!(!token_a.is_cancelled());
@@ -586,7 +583,8 @@ mod tests {
         let (registry, _rx, _guard) = registry_with(
             RequestId::Number(1),
             SubscriptionFilter::new().with_resource("res://a"),
-        );
+        )
+        .await;
 
         assert!(registry.is_resource_subscribed(&Uri::from("res://a")));
         assert!(!registry.is_resource_subscribed(&Uri::from("res://b")));

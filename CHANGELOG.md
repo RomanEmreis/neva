@@ -37,7 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     and in a mixed batch they may belong to another request on the same body.
     The hold buffer is bounded by the sink's own capacity, and overflow past it
     is dropped rather than released early: the acknowledgment arriving first is
-    the requirement, the logs riding along are the accommodation.
+    the requirement, the logs riding along are the accommodation. Its room on
+    the body is reserved when the sink is registered, before any middleware can
+    run, so a request noisy enough to fill the buffer costs only the logs that
+    did not fit -- never the subscription itself.
     `Context::add_tool`,
     `remove_tool`, `add_prompt`, `remove_prompt`, `add_resource`,
     `remove_resource` and `resource_updated` fan out to the streams that asked

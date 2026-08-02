@@ -277,6 +277,70 @@ async fn a_flood_before_the_acknowledgment_never_displaces_it() {
     handle.abort();
 }
 
+/// The acknowledgment's room on the body is reserved before any middleware can
+/// run, so a burst that fills the sink outright cannot cost the subscription
+/// its handshake -- it only costs the logs that did not fit, which is what a
+/// bounded sink does anyway.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_burst_that_fills_the_sink_still_opens_the_subscription() {
+    install_subscriber();
+
+    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let mut app = App::new()
+        .with_options(|opt| {
+            opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp").with_sse_log_queue(1))
+                .with_tools(|t| t.with_list_changed())
+        })
+        // Synchronous, so nothing drains between them: with a capacity of one,
+        // the channel is full by the time the listen handler runs.
+        .wrap(|ctx, next| async move {
+            for i in 0..16 {
+                tracing::warn!(logger = "mw", "{MARKER}-{i}");
+            }
+            next(ctx).await
+        });
+    app.map_tool("ping", || async { "pong" });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
+    let url = format!("http://{addr}/mcp");
+
+    let listen = serde_json::json!({
+        "jsonrpc": "2.0", "id": "sub-1", "method": "subscriptions/listen",
+        "params": {
+            "notifications": { "toolsListChanged": true },
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {},
+                "io.modelcontextprotocol/logLevel": "info"
+            }
+        }
+    });
+    let mut stream = client
+        .post(&url)
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", "subscriptions/listen")
+        .header("Accept", "application/json, text/event-stream")
+        .json(&listen)
+        .send()
+        .await
+        .expect("listen failed");
+
+    let mut body = String::new();
+    let first = next_message(&mut stream, &mut body).await;
+    assert_eq!(
+        first["method"], "notifications/subscriptions/acknowledged",
+        "a full sink must not cost the subscription its acknowledgment, got {first}"
+    );
+
+    handle.abort();
+}
+
 /// The notification layer is the process-wide subscriber, so whichever test
 /// gets there first installs it -- both want the same one.
 fn install_subscriber() {

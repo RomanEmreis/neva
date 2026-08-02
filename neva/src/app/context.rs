@@ -1807,7 +1807,7 @@ impl Context {
         requested: SubscriptionFilter,
     ) -> Result<SubscriptionsListenResult, Error> {
         let accepted = requested.supported_by(&self.options.advertised_capabilities());
-        let (sink, pump) = self.subscription_sink()?;
+        let (sink, ack_slot, pump) = self.subscription_sink().await?;
 
         // The acknowledgment MUST be the first message on the subscription.
         // `register` is what queues it, together with publishing the entry:
@@ -1828,27 +1828,14 @@ impl Context {
             .ok(),
         );
 
-        let (token, guard) = self
-            .options
-            .subscriptions()
-            .register(
-                id.clone(),
-                self.session_id,
-                accepted,
-                sink.clone(),
-                Message::Notification(ack),
-            )
-            .map_err(|err| {
-                use crate::app::subscriptions::RegisterError;
-                match err {
-                    RegisterError::Closed => {
-                        Error::new(ErrorCode::InternalError, "Subscription stream is closed")
-                    }
-                    RegisterError::Full => {
-                        Error::new(ErrorCode::InternalError, "Subscription stream is full")
-                    }
-                }
-            })?;
+        let (token, guard) = self.options.subscriptions().register(
+            id.clone(),
+            self.session_id,
+            accepted,
+            sink.clone(),
+            Message::Notification(ack),
+            ack_slot,
+        );
 
         // Whichever comes first: the client cancelled this subscription, the
         // stream went away under us (an HTTP client that closed the response
@@ -1882,6 +1869,11 @@ impl Context {
     /// client disconnected. Every other transport (stdio) gets a channel of its
     /// own, pumped into the transport sender by the returned task.
     ///
+    /// Comes with the capacity slot reserved for the acknowledgment: over HTTP
+    /// the transport took it when it registered the sink, before any middleware
+    /// could log into the body, so a noisy request cannot leave the handshake
+    /// without room.
+    ///
     /// # Errors
     /// Returns [`Error`] for a request that came in over HTTP without a
     /// response stream to write to. A transport session id and no registered
@@ -1892,31 +1884,42 @@ impl Context {
     /// would go to the generic transport sender instead of this request's body,
     /// and since we would then hold the only receiver, the handler would never
     /// see the disconnect that ends it -- the entry would sit in the registry
-    /// until the server shut down.
-    fn subscription_sink(
+    /// until the server shut down. A registered sink whose reserved slot is
+    /// already gone fails the same way: two listens sharing one body cannot
+    /// both open it.
+    async fn subscription_sink(
         &self,
     ) -> Result<
         (
             tokio::sync::mpsc::Sender<Message>,
+            tokio::sync::mpsc::OwnedPermit<Message>,
             Option<tokio::task::JoinHandle<()>>,
         ),
         Error,
     > {
         #[cfg(feature = "http-server")]
         if let Some(session_id) = self.session_id {
-            return crate::types::notification::sink::get(&session_id)
-                .map(|sink| (sink, None))
-                .ok_or_else(|| {
-                    Error::new(
-                        ErrorCode::InternalError,
-                        "Subscriptions need a streaming response; this request has none",
-                    )
-                });
+            let stream = crate::types::notification::sink::get(&session_id).zip(
+                crate::types::notification::sink::take_ack_permit(&session_id),
+            );
+
+            return stream.map(|(sink, ack)| (sink, ack, None)).ok_or_else(|| {
+                Error::new(
+                    ErrorCode::InternalError,
+                    "Subscriptions need a streaming response; this request has none",
+                )
+            });
         }
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(
             crate::app::subscriptions::DEFAULT_SUBSCRIPTION_CAPACITY,
         );
+        // Immediate: nothing has written to this channel yet.
+        let ack =
+            tx.clone().reserve_owned().await.map_err(|_| {
+                Error::new(ErrorCode::InternalError, "Subscription stream is closed")
+            })?;
+
         let mut sender = self.sender.clone();
         let pump = tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
@@ -1925,7 +1928,7 @@ impl Context {
                 }
             }
         });
-        Ok((tx, Some(pump)))
+        Ok((tx, ack, Some(pump)))
     }
 }
 
@@ -2186,6 +2189,7 @@ mod subscription_sink_tests {
     async fn it_refuses_an_http_request_with_no_response_stream() {
         let err = ctx(Some(uuid::Uuid::new_v4()))
             .subscription_sink()
+            .await
             .expect_err("a subscription needs a stream to write to");
 
         assert_eq!(err.code, ErrorCode::InternalError);
@@ -2196,10 +2200,11 @@ mod subscription_sink_tests {
     #[tokio::test]
     async fn it_uses_the_registered_response_sink() {
         let session_id = uuid::Uuid::new_v4();
-        let _rx = crate::types::notification::sink::register(session_id, 4);
+        let _rx = crate::types::notification::sink::register(session_id, 4, true).await;
 
-        let (_sink, pump) = ctx(Some(session_id))
+        let (_sink, _ack, pump) = ctx(Some(session_id))
             .subscription_sink()
+            .await
             .expect("the registered sink must be used");
 
         assert!(pump.is_none(), "the response body needs no pump task");
@@ -2211,8 +2216,9 @@ mod subscription_sink_tests {
     /// through a pump of its own.
     #[tokio::test]
     async fn it_pumps_into_the_transport_without_a_session() {
-        let (_sink, pump) = ctx(None)
+        let (_sink, _ack, pump) = ctx(None)
             .subscription_sink()
+            .await
             .expect("stdio always has somewhere to write");
 
         assert!(pump.is_some(), "stdio needs a pump task");
