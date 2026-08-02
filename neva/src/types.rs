@@ -126,11 +126,13 @@ pub use prompt::{
     GetPromptRequestParams, GetPromptResult, ListPromptsRequestParams, ListPromptsResult, Prompt,
     PromptArgument, PromptMessage,
 };
+#[cfg(any(feature = "legacy-spec", feature = "client"))]
+pub use resource::UnsubscribeRequestParams;
 pub use resource::{
     BlobResourceContents, ListResourceTemplatesRequestParams, ListResourceTemplatesResult,
     ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams, ReadResourceResult,
     Resource, ResourceContents, ResourceTemplate, SubscribeRequestParams, TextResourceContents,
-    UnsubscribeRequestParams, Uri,
+    Uri,
 };
 #[cfg(any(feature = "legacy-spec", feature = "client"))]
 pub use sampling::{
@@ -141,6 +143,12 @@ pub use schema::{
     BooleanSchema, LegacyTitledEnumSchema, NumberSchema, Schema, StringFormat, StringSchema,
     TitledMultiSelectEnumSchema, TitledSingleSelectEnumSchema, UntitledMultiSelectEnumSchema,
     UntitledSingleSelectEnumSchema,
+};
+#[cfg(not(feature = "legacy-spec"))]
+pub use subscription::{
+    SUBSCRIPTION_ID_KEY, SubscriptionFilter, SubscriptionMeta,
+    SubscriptionsAcknowledgedNotificationParams, SubscriptionsListenRequestParams,
+    SubscriptionsListenResult,
 };
 
 pub use icon::{Icon, IconSize, IconTheme};
@@ -191,6 +199,8 @@ pub mod root;
 pub mod sampling;
 mod schema;
 pub mod schema_2020;
+#[cfg(not(feature = "legacy-spec"))]
+pub mod subscription;
 #[cfg(feature = "tasks")]
 pub mod task;
 pub mod tool;
@@ -892,10 +902,11 @@ mod tests {
 
     #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
     #[test]
-    fn discover_masks_push_capabilities_under_stateless_transport() {
-        // Even when the server explicitly configures listChanged + subscribe,
-        // the stateless 2026-07-28 transport cannot push, so `DiscoverResult` must not
-        // advertise capabilities clients can never rely on.
+    fn discover_advertises_push_capabilities_backed_by_subscriptions() {
+        // `subscriptions/listen` is how MCP 2026-07-28 delivers these, so a
+        // configured `listChanged` / `subscribe` is a promise the server can
+        // keep and must advertise -- clients narrow their listen filter against
+        // exactly this.
         let options = McpOptions::default()
             .with_tools(|t| t.with_list_changed())
             .with_resources(|r| r.with_subscribe().with_list_changed())
@@ -904,10 +915,10 @@ mod tests {
         let discover = DiscoverResult::new(&options);
         let caps = serde_json::to_value(&discover.capabilities).unwrap();
 
-        assert_eq!(caps["tools"]["listChanged"], serde_json::json!(false));
-        assert_eq!(caps["resources"]["subscribe"], serde_json::json!(false));
-        assert_eq!(caps["resources"]["listChanged"], serde_json::json!(false));
-        assert_eq!(caps["prompts"]["listChanged"], serde_json::json!(false));
+        assert_eq!(caps["tools"]["listChanged"], serde_json::json!(true));
+        assert_eq!(caps["resources"]["subscribe"], serde_json::json!(true));
+        assert_eq!(caps["resources"]["listChanged"], serde_json::json!(true));
+        assert_eq!(caps["prompts"]["listChanged"], serde_json::json!(true));
     }
 
     /// The `logging` capability must be advertised iff the `logging/setLevel`

@@ -73,13 +73,13 @@ pub async fn dispatch_post<E: HttpEngine>(
     ctx: &HttpContext,
 ) -> Result<StreamResponse<impl Stream<Item = E::SseEvent> + Send + 'static>, Error> {
     let neutral = E::adapt_request(req).await?;
-    #[cfg(all(not(feature = "legacy-spec"), feature = "tracing"))]
+    #[cfg(not(feature = "legacy-spec"))]
     {
         Ok(handle_post_streaming::<E>(neutral, ctx).await)
     }
-    // Under `legacy-spec` (or without tracing to source the notifications)
-    // every POST reply is a single body; the Stream arm is never produced.
-    #[cfg(not(all(not(feature = "legacy-spec"), feature = "tracing")))]
+    // Under `legacy-spec` every POST reply is a single body; the Stream arm is
+    // never produced.
+    #[cfg(feature = "legacy-spec")]
     {
         let resp = handle_post(neutral, ctx).await;
         Ok(StreamResponse::<stream::Empty<E::SseEvent>>::Complete(resp))
@@ -431,7 +431,7 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
 /// flow first (routed via the per-request sink), then the final response closes
 /// the stream. Otherwise the reply is a single JSON object (`Complete`),
 /// exactly as [`handle_post`].
-#[cfg(all(not(feature = "legacy-spec"), feature = "tracing"))]
+#[cfg(not(feature = "legacy-spec"))]
 async fn handle_post_streaming<E: HttpEngine>(
     req: HttpRequest,
     ctx: &HttpContext,
@@ -467,13 +467,16 @@ async fn handle_post_streaming<E: HttpEngine>(
             // Opted in: register the per-request notification sink (keyed by the
             // per-POST session id, which the tracing span carries) before the
             // runtime starts handling, then stream notifications + response.
-            let notif_rx = crate::types::notification::fmt::register_request_sink(
+            let hold_for_ack = is_subscription_stream(&msg);
+            let notif_rx = crate::types::notification::sink::register(
                 id,
                 ctx.sse_log_queue_capacity,
-            );
+                hold_for_ack,
+            )
+            .await;
 
             if ctx.inbound_tx.send(Ok(msg)).await.is_err() {
-                crate::types::notification::fmt::unregister_request_sink(&id);
+                crate::types::notification::sink::unregister(&id);
                 ctx.pending.remove(&full_id);
                 return StreamResponse::Complete(status_response(
                     http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -481,9 +484,16 @@ async fn handle_post_streaming<E: HttpEngine>(
                 ));
             }
 
-            let stream =
-                post_notification_stream(id, full_id, ctx.pending.clone(), notif_rx, resp_rx)
-                    .map(|msg| E::ephemeral_event(&msg));
+            let stream = post_notification_stream(
+                id,
+                full_id,
+                ctx.pending.clone(),
+                notif_rx,
+                resp_rx,
+                hold_for_ack,
+                ctx.sse_log_queue_capacity,
+            )
+            .map(|msg| E::ephemeral_event(&msg));
 
             StreamResponse::Stream {
                 headers: HeaderMap::new(),
@@ -493,15 +503,15 @@ async fn handle_post_streaming<E: HttpEngine>(
     }
 }
 
-/// Whether a message opts into request-scoped notifications: a request -- or,
-/// for a batch, *any* contained request -- carrying `logLevel` or
-/// `progressToken` in `_meta`.
+/// Whether a message opts into notifications on its own `POST` response
+/// stream: a `subscriptions/listen`, or a request -- or, for a batch, *any*
+/// contained request -- carrying `logLevel` or `progressToken` in `_meta`.
 ///
 /// Batches count because a client (e.g. via `Client::apply_client_meta_to_batch`)
 /// stamps the configured level onto every batched request; the inner requests
 /// share this POST's session id (copied in `execute_batch`), so their
 /// notifications route to the one sink and stream on this single response.
-#[cfg(all(not(feature = "legacy-spec"), feature = "tracing"))]
+#[cfg(not(feature = "legacy-spec"))]
 fn opts_into_notifications(msg: &Message) -> bool {
     match msg {
         Message::Request(r) => request_opts_in(r),
@@ -512,9 +522,40 @@ fn opts_into_notifications(msg: &Message) -> bool {
     }
 }
 
-/// Whether a single request carries `logLevel` or `progressToken` in `_meta`.
-#[cfg(all(not(feature = "legacy-spec"), feature = "tracing"))]
+/// Whether this `POST` body *is* a subscription stream rather than a request's
+/// own notification stream.
+///
+/// The distinction decides what may be written to it: a subscription stream
+/// opens with the acknowledgment and carries that subscription's notifications,
+/// so request-scoped log messages stay off it.
+///
+/// A batch counts if it contains a listen at all. neva's own client refuses to
+/// batch one -- a batch slot has no handle to end the subscription with -- but
+/// this server accepts what any peer sends, and a batched listen streams on
+/// this same body with the same ordering requirement.
+#[cfg(not(feature = "legacy-spec"))]
+fn is_subscription_stream(msg: &Message) -> bool {
+    fn is_listen(req: &crate::types::Request) -> bool {
+        req.method == crate::types::subscription::commands::LISTEN
+    }
+
+    match msg {
+        Message::Request(r) => is_listen(r),
+        Message::Batch(batch) => batch
+            .iter()
+            .any(|env| matches!(env, crate::types::MessageEnvelope::Request(r) if is_listen(r))),
+        _ => false,
+    }
+}
+
+/// Whether a single request needs the streaming reply: `subscriptions/listen`
+/// (whose whole point is a long-lived notification stream), or a request
+/// carrying `logLevel` or `progressToken` in `_meta`.
+#[cfg(not(feature = "legacy-spec"))]
 fn request_opts_in(req: &crate::types::Request) -> bool {
+    if req.method == crate::types::subscription::commands::LISTEN {
+        return true;
+    }
     req.params
         .as_ref()
         .and_then(|p| p.get("_meta"))
@@ -537,13 +578,26 @@ fn request_opts_in(req: &crate::types::Request) -> bool {
 ///
 /// Dropping the stream (end of body or client disconnect) unregisters the
 /// per-request sink and clears the pending entry.
-#[cfg(all(not(feature = "legacy-spec"), feature = "tracing"))]
+///
+/// `hold_for_ack` marks a body that carries a `subscriptions/listen`: there the
+/// acknowledgment MUST be the first message, and middleware logging ahead of
+/// `next(ctx)` is queued before `Context::listen` ever runs. Anything arriving
+/// before the acknowledgment is therefore held back and released right after
+/// it -- ordering the stream rather than dropping the messages, which matters
+/// because a mixed batch's other requests log here too, and their logs were
+/// explicitly asked for. `hold_limit` bounds that buffer at what the sink
+/// itself would have held; overflow past it is dropped rather than released,
+/// because the acknowledgment coming first is the requirement and the logs
+/// riding along are the accommodation.
+#[cfg(not(feature = "legacy-spec"))]
 fn post_notification_stream(
     id: uuid::Uuid,
     full_id: RequestId,
     pending: super::context::RequestMap,
     notif_rx: tokio::sync::mpsc::Receiver<Message>,
     resp_rx: tokio::sync::oneshot::Receiver<Message>,
+    hold_for_ack: bool,
+    hold_limit: usize,
 ) -> impl Stream<Item = Message> + Send {
     struct Cleanup {
         id: uuid::Uuid,
@@ -552,7 +606,7 @@ fn post_notification_stream(
     }
     impl Drop for Cleanup {
         fn drop(&mut self) {
-            crate::types::notification::fmt::unregister_request_sink(&self.id);
+            crate::types::notification::sink::unregister(&self.id);
             self.pending.remove(&self.full_id);
         }
     }
@@ -567,6 +621,21 @@ fn post_notification_stream(
         notifs_open: bool,
         /// Holds the cleanup guard until the stream is fully consumed.
         _cleanup: Cleanup,
+        /// Whether this is a subscription body whose acknowledgment has not
+        /// gone out yet.
+        awaiting_ack: bool,
+        /// Messages that arrived before the acknowledgment, in order.
+        held: std::collections::VecDeque<Message>,
+        /// How many of those to hold before giving up on ordering.
+        hold_limit: usize,
+        /// Ready to emit, ahead of the channels.
+        out: std::collections::VecDeque<Message>,
+    }
+
+    /// Whether a message is the acknowledgment that opens a subscription.
+    fn is_ack(msg: &Message) -> bool {
+        matches!(msg, Message::Notification(n)
+            if n.method == crate::types::subscription::commands::ACKNOWLEDGED)
     }
 
     /// What one poll of the two channels produced.
@@ -586,9 +655,18 @@ fn post_notification_stream(
             full_id,
             pending,
         },
+        awaiting_ack: hold_for_ack,
+        held: std::collections::VecDeque::new(),
+        hold_limit,
+        out: std::collections::VecDeque::new(),
     };
 
     stream::unfold(state, |mut state| async move {
+        // Anything already released goes out before either channel is polled.
+        if let Some(msg) = state.out.pop_front() {
+            return Some((msg, state));
+        }
+
         while state.notifs_open {
             // Split the borrows so both channels can be polled in one `select!`.
             let step = {
@@ -613,12 +691,46 @@ fn post_notification_stream(
             };
 
             match step {
+                Step::Notification(n) if state.awaiting_ack => {
+                    if is_ack(&n) {
+                        // The stream is open: the acknowledgment goes out now,
+                        // and what was waiting on it follows.
+                        state.awaiting_ack = false;
+                        state.out.append(&mut state.held);
+                        return Some((n, state));
+                    }
+                    // Bounded, so a handler that logs without end cannot grow
+                    // this: past the sink's own capacity the overflow is
+                    // dropped, exactly as the sink would have dropped it had
+                    // nothing been draining it. Releasing it instead would put
+                    // these messages ahead of the acknowledgment, and the
+                    // acknowledgment coming first is the requirement -- the
+                    // logs riding along are the accommodation.
+                    if state.held.len() < state.hold_limit {
+                        state.held.push_back(n);
+                    } else {
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!(
+                            logger = "neva",
+                            "dropped a notification queued before the subscription \
+                             acknowledgment: the pre-acknowledgment buffer is full"
+                        );
+                    }
+                }
                 Step::Notification(n) => return Some((n, state)),
-                Step::NotificationsClosed => state.notifs_open = false,
+                Step::NotificationsClosed => {
+                    state.notifs_open = false;
+                    state.awaiting_ack = false;
+                }
                 Step::Response(Some(resp)) => {
                     // Buffer it and keep draining until the pipeline is done.
                     state.response = Some(resp);
                     state.resp_rx = None;
+                    // The listen was answered without ever acknowledging --
+                    // rejected, most likely. Nothing is waiting on an
+                    // acknowledgment that is not coming.
+                    state.awaiting_ack = false;
+                    state.out.append(&mut state.held);
                 }
                 // The response channel was dropped: the runtime will never
                 // answer, so stop waiting on notifications and end the body
@@ -626,8 +738,16 @@ fn post_notification_stream(
                 Step::Response(None) => {
                     state.resp_rx = None;
                     state.notifs_open = false;
+                    state.awaiting_ack = false;
                 }
             }
+        }
+
+        // Whatever was still held has nowhere left to wait: release it ahead of
+        // the response.
+        state.out.append(&mut state.held);
+        if let Some(msg) = state.out.pop_front() {
+            return Some((msg, state));
         }
 
         // Pipeline finished and every notification is drained; close with the

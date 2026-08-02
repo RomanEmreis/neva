@@ -8,15 +8,16 @@ exclude = [
     "examples/sampling", 
     "examples/elicitation",
     "examples/mrtr",
+    "examples/subscriptions",
     "examples/tasks"
 ]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.5.1"
 license = "MIT"
 edition = "2024"
 rust-version = "1.90.0"
-authors = ["Roman Emreis <roman.emreis@outlook.com>"]
+authors = ["Roman Emreis <me@romanemreis.com>"]
 repository = "https://github.com/RomanEmreis/neva"
 homepage = "https://romanemreis.github.io/neva-docs/"
 documentation = "https://docs.rs/neva"
@@ -29,7 +30,7 @@ categories = [
 ]
 
 [workspace.dependencies]
-neva_macros = { path = "neva_macros", version = "0.5.0" }
+neva_macros = { path = "neva_macros", version = "0.5.1" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -6,12 +6,16 @@ use super::{
 };
 use crate::error::{Error, ErrorCode};
 use crate::transport::Sender;
-#[cfg(feature = "legacy-spec")]
 use crate::types::notification::Notification;
 #[cfg(feature = "legacy-spec")]
 use crate::types::root::{ListRootsRequestParams, ListRootsResult};
 #[cfg(feature = "legacy-spec")]
 use crate::types::sampling::{CreateMessageRequestParams, CreateMessageResult};
+#[cfg(not(feature = "legacy-spec"))]
+use crate::types::{
+    RequestId, SubscriptionFilter, SubscriptionsAcknowledgedNotificationParams,
+    SubscriptionsListenResult,
+};
 use crate::{
     middleware::{MwContext, Next},
     shared::{IntoArgs, RequestQueue},
@@ -24,6 +28,7 @@ use crate::{
         resource::SubscribeRequestParams,
     },
 };
+
 // `RequestId` is only referenced by the server->client request paths (legacy
 // elicitation/sampling) and the task API; under the stateless 2026-07-28 build without
 // tasks it is unused -- including in tests, whose `RequestId` uses live in
@@ -654,18 +659,49 @@ impl Context {
     }
 
     /// Adds a subscription to the resource with the [`Uri`]
+    ///
+    /// Legacy only: under MCP 2026-07-28 a per-resource subscription is a URI
+    /// in the `subscriptions/listen` filter, established by the client and
+    /// scoped to that stream, so there is nothing for the server to add.
+    #[cfg(feature = "legacy-spec")]
     pub fn subscribe_to_resource(&mut self, uri: impl Into<Uri>) {
         self.options.resource_subscriptions.insert(uri.into());
     }
 
     /// Removes a subscription to the resource with the [`Uri`]
+    ///
+    /// Legacy only; see [`Self::subscribe_to_resource`].
+    #[cfg(feature = "legacy-spec")]
     pub fn unsubscribe_from_resource(&mut self, uri: &Uri) {
         self.options.resource_subscriptions.remove(uri);
     }
 
     /// Returns `true` if there is a subscription to changes of the resource with the [`Uri`]
+    #[cfg(feature = "legacy-spec")]
     pub fn is_subscribed(&self, uri: &Uri) -> bool {
         self.options.resource_subscriptions.contains(uri)
+    }
+
+    /// Returns `true` if any live `subscriptions/listen` stream watches the
+    /// resource with the [`Uri`].
+    ///
+    /// # Examples
+    /// ```no_run
+    /// # #[cfg(all(feature = "server-macros", not(feature = "legacy-spec")))] {
+    /// use neva::prelude::*;
+    ///
+    /// #[tool]
+    /// async fn touch(ctx: Context) -> Result<(), Error> {
+    ///     if ctx.is_subscribed(&"res://config".into()) {
+    ///         // somebody is listening for this resource
+    ///     }
+    /// # Ok(())
+    /// }
+    /// # }
+    /// ```
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn is_subscribed(&self, uri: &Uri) -> bool {
+        self.options.subscriptions().is_resource_subscribed(uri)
     }
 
     /// Adds a new prompt and notifies clients
@@ -1706,29 +1742,33 @@ impl Context {
 
     /// Sends a notification to a client.
     ///
-    /// Under the stateless MCP 2026-07-28 transport there is no
-    /// out-of-band server->client channel, so this is a no-op: progress,
-    /// list-changed, resource-updated, task-status and elicitation
-    /// notifications are inert and clients poll instead.
+    /// Under MCP 2026-07-28 the only server->client channel is a
+    /// `subscriptions/listen` stream, so a subscribable notification
+    /// (`tools`/`prompts`/`resources` list-changed and `resources/updated`) is
+    /// fanned out to every stream whose filter admits it. The rest -- progress,
+    /// task status, elicitation -- are request-scoped and have no subscription
+    /// to travel on.
     #[inline]
     async fn send_notification(
         &mut self,
-        #[cfg_attr(not(feature = "legacy-spec"), allow(unused_variables))] method: &str,
-        #[cfg_attr(not(feature = "legacy-spec"), allow(unused_variables))] params: Option<
-            serde_json::Value,
-        >,
+        method: &str,
+        params: Option<serde_json::Value>,
     ) -> Result<(), Error> {
         #[cfg(not(feature = "legacy-spec"))]
         {
-            // No out-of-band server->client channel on the stateless transport,
-            // so this is an intentional no-op. Surface it once at debug so a
-            // server author who calls e.g. `resource_updated`/`add_tool` and
-            // expects a push isn't silently misled -- the masked capabilities
-            // already tell clients to poll instead.
+            if self
+                .options
+                .subscriptions()
+                .broadcast(method, params.as_ref())
+            {
+                return Ok(());
+            }
+            // Not a type a client can subscribe to. Surface it once at debug so
+            // a server author who expects a push isn't silently misled.
             #[cfg(feature = "tracing")]
             tracing::debug!(
                 method,
-                "notifications are not delivered on the stateless 2026-07-28 transport; clients poll instead"
+                "notification is not deliverable under MCP 2026-07-28: no subscription carries this type"
             );
             Ok(())
         }
@@ -1740,6 +1780,155 @@ impl Context {
             }
             self.sender.send(notification.into()).await
         }
+    }
+}
+
+/// The `subscriptions/listen` implementation (MCP 2026-07-28).
+#[cfg(not(feature = "legacy-spec"))]
+impl Context {
+    /// Opens a subscription and holds it until it ends.
+    ///
+    /// The returned future resolves when the client cancels the subscription,
+    /// the transport drops it, or the server shuts down; resolving is what
+    /// answers the long-lived `subscriptions/listen` request with its
+    /// graceful-close result.
+    ///
+    /// On the shutdown path that answer is **best-effort**: both transports
+    /// break out of their writer loops on the same token (`biased` selects in
+    /// `http::core::dispatch` and `stdio`), so the result races a channel that
+    /// may already have stopped being read. The branch is still what stops the
+    /// handler from outliving the runtime, and a client that sees the stream
+    /// close without a result treats it as an abrupt end -- which is what the
+    /// spec prescribes, and subscriptions are not resumable anyway. Delivering
+    /// it reliably needs a drain phase ahead of the transport teardown.
+    pub(crate) async fn listen(
+        &self,
+        id: RequestId,
+        requested: SubscriptionFilter,
+    ) -> Result<SubscriptionsListenResult, Error> {
+        let accepted = requested.supported_by(&self.options.advertised_capabilities());
+        let (sink, ack_slot, pump) = self.subscription_sink().await?;
+
+        // The acknowledgment MUST be the first message on the subscription.
+        // `register` is what queues it, together with publishing the entry:
+        // the two have to be atomic against a concurrent broadcast, and the
+        // registry is the only thing that can make them so -- see its docs for
+        // why doing it here instead cannot work, whatever the caller does.
+        //
+        // The sink is empty at this point -- a listen `POST` body carries no
+        // request-scoped logging (see `notification::sink::RequestSink`) and a
+        // subscription reports no progress -- so `Full` here means a sink far
+        // too small to carry a subscription at all, and says so.
+        let ack = Notification::new(
+            crate::types::subscription::commands::ACKNOWLEDGED,
+            serde_json::to_value(SubscriptionsAcknowledgedNotificationParams::new(
+                id.clone(),
+                accepted.clone(),
+            ))
+            .ok(),
+        );
+
+        let (token, guard) = self.options.subscriptions().register(
+            id.clone(),
+            self.session_id,
+            accepted,
+            sink.clone(),
+            Message::Notification(ack),
+            ack_slot,
+        );
+
+        // Whichever comes first: the client cancelled this subscription, the
+        // stream went away under us (an HTTP client that closed the response
+        // body), or the server is shutting down (see the best-effort caveat
+        // above).
+        let shutdown = self.options.shutdown_token();
+        tokio::select! {
+            _ = token.cancelled() => {},
+            _ = sink.closed() => {},
+            _ = shutdown.cancelled() => {},
+        }
+
+        // Deregistering and dropping this end closes the subscription's own
+        // channel, which is what lets the pump drain whatever is still queued
+        // and exit -- aborting it instead would drop those notifications on the
+        // floor a moment before the request answers.
+        drop(guard);
+        drop(sink);
+        if let Some(pump) = pump {
+            let _ = pump.await;
+        }
+
+        Ok(SubscriptionsListenResult::new(id))
+    }
+
+    /// Picks where this subscription's notifications go.
+    ///
+    /// Over HTTP that is the `POST` response sink the transport registered for
+    /// this request -- writing into it puts notifications straight onto the
+    /// long-lived response body, and its closure is how the handler learns the
+    /// client disconnected. Every other transport (stdio) gets a channel of its
+    /// own, pumped into the transport sender by the returned task.
+    ///
+    /// Comes with the capacity slot reserved for the acknowledgment: over HTTP
+    /// the transport took it when it registered the sink, before any middleware
+    /// could log into the body, so a noisy request cannot leave the handshake
+    /// without room.
+    ///
+    /// # Errors
+    /// Returns [`Error`] for a request that came in over HTTP without a
+    /// response stream to write to. A transport session id and no registered
+    /// sink means either an engine adapter that cannot stream (the JSON-only
+    /// `handlers::handle_post`) or a client that dropped the body before the
+    /// runtime got here -- and neither can carry a subscription. Falling back
+    /// to a channel of our own would be worse than failing: the acknowledgment
+    /// would go to the generic transport sender instead of this request's body,
+    /// and since we would then hold the only receiver, the handler would never
+    /// see the disconnect that ends it -- the entry would sit in the registry
+    /// until the server shut down. A registered sink whose reserved slot is
+    /// already gone fails the same way: two listens sharing one body cannot
+    /// both open it.
+    async fn subscription_sink(
+        &self,
+    ) -> Result<
+        (
+            tokio::sync::mpsc::Sender<Message>,
+            tokio::sync::mpsc::OwnedPermit<Message>,
+            Option<tokio::task::JoinHandle<()>>,
+        ),
+        Error,
+    > {
+        #[cfg(feature = "http-server")]
+        if let Some(session_id) = self.session_id {
+            let stream = crate::types::notification::sink::get(&session_id).zip(
+                crate::types::notification::sink::take_ack_permit(&session_id),
+            );
+
+            return stream.map(|(sink, ack)| (sink, ack, None)).ok_or_else(|| {
+                Error::new(
+                    ErrorCode::InternalError,
+                    "Subscriptions need a streaming response; this request has none",
+                )
+            });
+        }
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(
+            crate::app::subscriptions::DEFAULT_SUBSCRIPTION_CAPACITY,
+        );
+        // Immediate: nothing has written to this channel yet.
+        let ack =
+            tx.clone().reserve_owned().await.map_err(|_| {
+                Error::new(ErrorCode::InternalError, "Subscription stream is closed")
+            })?;
+
+        let mut sender = self.sender.clone();
+        let pump = tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                if sender.send(msg).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Ok((tx, ack, Some(pump)))
     }
 }
 
@@ -1968,5 +2157,70 @@ mod mrtr_tests {
         m.push_commit(Box::pin(async { Ok(()) }));
         m.push_commit(Box::pin(async { Ok(()) }));
         assert_eq!(m.commits.lock().unwrap().len(), 2);
+    }
+}
+
+#[cfg(all(test, not(feature = "legacy-spec"), feature = "http-server"))]
+mod subscription_sink_tests {
+    use super::*;
+
+    fn ctx(session_id: Option<uuid::Uuid>) -> Context {
+        Context {
+            session_id,
+            headers: HeaderMap::new(),
+            claims: None,
+            pending: RequestQueue::new(Duration::from_secs(5)),
+            sender: TransportProtoSender::None,
+            options: Arc::new(McpOptions::default()),
+            timeout: Duration::from_secs(5),
+            exec: ExecMode::None,
+            #[cfg(feature = "di")]
+            scope: None,
+        }
+    }
+
+    /// A transport session id and no registered sink means the request came in
+    /// over HTTP without a response stream -- a JSON-only engine adapter, or a
+    /// client that dropped the body first. Falling back to a channel of our own
+    /// would send the acknowledgment to the generic transport sender instead of
+    /// this request's body, and leave the handler holding the only receiver, so
+    /// the disconnect that ends the subscription would never arrive.
+    #[tokio::test]
+    async fn it_refuses_an_http_request_with_no_response_stream() {
+        let err = ctx(Some(uuid::Uuid::new_v4()))
+            .subscription_sink()
+            .await
+            .expect_err("a subscription needs a stream to write to");
+
+        assert_eq!(err.code, ErrorCode::InternalError);
+    }
+
+    /// The registered sink is used as is: it *is* the response body, so there
+    /// is nothing to pump.
+    #[tokio::test]
+    async fn it_uses_the_registered_response_sink() {
+        let session_id = uuid::Uuid::new_v4();
+        let _rx = crate::types::notification::sink::register(session_id, 4, true).await;
+
+        let (_sink, _ack, pump) = ctx(Some(session_id))
+            .subscription_sink()
+            .await
+            .expect("the registered sink must be used");
+
+        assert!(pump.is_none(), "the response body needs no pump task");
+        crate::types::notification::sink::unregister(&session_id);
+    }
+
+    /// Without a transport session there is no per-request body to write to --
+    /// that is stdio, where the subscription interleaves on the shared output
+    /// through a pump of its own.
+    #[tokio::test]
+    async fn it_pumps_into_the_transport_without_a_session() {
+        let (_sink, _ack, pump) = ctx(None)
+            .subscription_sink()
+            .await
+            .expect("stdio always has somewhere to write");
+
+        assert!(pump.is_some(), "stdio needs a pump task");
     }
 }

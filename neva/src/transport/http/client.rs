@@ -222,6 +222,22 @@ async fn handle_connection(
                     tracing::error!(logger = "neva", "Unexpected messaging error");
                     break;
                 };
+                // A cancel naming a request whose reply is a long-lived stream
+                // ends it the way this transport can: by closing the body. The
+                // notification still goes out -- a peer may want the reason --
+                // but the close is what the server acts on.
+                #[cfg(not(feature = "legacy-spec"))]
+                abort_cancelled_stream(&req, &session);
+
+                // Tracked here rather than inside the spawned task, so that a
+                // cancel arriving right behind a listen -- which is exactly
+                // what a dropped `Client::listen` sends -- finds the handle.
+                // Registering it in the task would leave the ordering to the
+                // scheduler; registering it in this loop makes it the order the
+                // messages arrived in.
+                #[cfg(not(feature = "legacy-spec"))]
+                let abort = track_listen(&req, &session);
+
                 crate::spawn_fair!(send_request(
                     client.clone(),
                     session.clone(),
@@ -230,6 +246,8 @@ async fn handle_connection(
                     auth.clone(),
                     #[cfg(not(feature = "legacy-spec"))]
                     param_registry.clone(),
+                    #[cfg(not(feature = "legacy-spec"))]
+                    abort,
                 ));
             }
         }
@@ -284,7 +302,56 @@ fn build_post(
     resp
 }
 
+/// Sends one message, racing the whole exchange against a cancellation of the
+/// subscription it opens (if it opens one).
+///
+/// The race wraps *everything* rather than individual awaits: a cancel can land
+/// while the token is being refreshed, while an authorization flow runs, while
+/// the peer sits on the response headers, or mid-stream. Dropping the inner
+/// future at any of those points drops the request and its response body, which
+/// is exactly the close the server reads as "this subscription is over".
+///
+/// `abort` is handed in already registered -- see [`track_listen`] for why the
+/// registration cannot happen in here.
 async fn send_request(
+    client: reqwest::Client,
+    session: Arc<McpSession>,
+    req: Message,
+    resp_tx: mpsc::Sender<Result<Message, Error>>,
+    auth: ClientAuth,
+    #[cfg(not(feature = "legacy-spec"))] param_registry: crate::shared::param_headers::Registry,
+    #[cfg(not(feature = "legacy-spec"))] abort: ListenAbort,
+) {
+    #[cfg(not(feature = "legacy-spec"))]
+    if abort.is_tracked() {
+        // The session token belongs in this race too: `Client::disconnect`
+        // cancels it and the connection loop exits, but a listen POST is the
+        // one request nothing else stops -- it would go on draining its body,
+        // holding the server-side subscription open past the disconnect.
+        let session_token = session.cancellation_token();
+        tokio::select! {
+            _ = exchange(client, session, req, resp_tx, auth, param_registry) => {}
+            _ = abort.cancelled() => {}
+            _ = session_token.cancelled() => {}
+        }
+        return;
+    }
+
+    exchange(
+        client,
+        session,
+        req,
+        resp_tx,
+        auth,
+        #[cfg(not(feature = "legacy-spec"))]
+        param_registry,
+    )
+    .await
+}
+
+/// The exchange itself: send, handle a managed-OAuth retry, then read the reply
+/// (a single body, or a stream drained into the receive loop).
+async fn exchange(
     client: reqwest::Client,
     session: Arc<McpSession>,
     req: Message,
@@ -293,7 +360,7 @@ async fn send_request(
     #[cfg(not(feature = "legacy-spec"))] param_registry: crate::shared::param_headers::Registry,
 ) {
     let bearer = auth.fresh_bearer().await;
-    let resp = match build_post(
+    let sent = build_post(
         &client,
         &session,
         &req,
@@ -302,8 +369,9 @@ async fn send_request(
         &param_registry,
     )
     .send()
-    .await
-    {
+    .await;
+
+    let resp = match sent {
         Ok(resp) => resp,
         Err(_err) => {
             #[cfg(feature = "tracing")]
@@ -405,7 +473,9 @@ async fn send_request(
     // resolves the pending request on the response.
     if is_event_stream(resp.headers()) {
         let stream = sse_stream::SseStream::from_bytes_stream(resp.bytes_stream());
-        let answered = drain_post_sse(stream, &resp_tx).await;
+        let ids = request_ids(&req);
+
+        let answered = drain_post_sse(stream, &resp_tx, &ids).await;
 
         // A truncated stream, an unparseable frame, or EOF before the final
         // response would otherwise leave the originating request sitting in the
@@ -416,7 +486,7 @@ async fn send_request(
         if !answered {
             #[cfg(feature = "tracing")]
             tracing::error!(logger = "neva", STREAM_ENDED_BEFORE_RESPONSE);
-            for id in request_ids(&req) {
+            for id in ids {
                 let resp = crate::types::Response::error(
                     id,
                     Error::new(ErrorCode::InternalError, STREAM_ENDED_BEFORE_RESPONSE),
@@ -459,6 +529,103 @@ async fn send_request(
                 }
             }
         }
+    }
+}
+
+/// A request's registered abort handles, and their untracking.
+///
+/// Carried into [`send_request`] rather than made there: registration has to
+/// happen in the connection loop, ahead of the spawn -- see [`track_listen`].
+/// Empty for everything that is not a listen.
+#[cfg(not(feature = "legacy-spec"))]
+struct ListenAbort {
+    tokens: Vec<CancellationToken>,
+    session: Arc<McpSession>,
+    ids: Vec<crate::types::RequestId>,
+}
+
+#[cfg(not(feature = "legacy-spec"))]
+impl ListenAbort {
+    /// Whether this request opens a stream worth aborting at all.
+    fn is_tracked(&self) -> bool {
+        !self.tokens.is_empty()
+    }
+
+    /// Resolves as soon as any of the handles is cancelled, or never when there
+    /// are none.
+    async fn cancelled(&self) {
+        if self.tokens.is_empty() {
+            std::future::pending::<()>().await;
+        }
+
+        futures_util::future::select_all(self.tokens.iter().map(|t| Box::pin(t.cancelled()))).await;
+    }
+}
+
+/// Untracks the handles however [`send_request`] exits -- a transport error, a
+/// non-streaming reply, a cancel, or a panic.
+#[cfg(not(feature = "legacy-spec"))]
+impl Drop for ListenAbort {
+    fn drop(&mut self) {
+        for id in &self.ids {
+            self.session.untrack_stream(id);
+        }
+    }
+}
+
+/// Registers abort handles for a request whose reply is a long-lived stream.
+///
+/// Called from the connection loop *before* the request is spawned, not from
+/// the spawned task: a `notifications/cancelled` queued right behind a listen
+/// -- which is what a dropped `Client::listen` sends -- is read by the very
+/// next turn of that loop, and would find nothing to abort if registration were
+/// left to the scheduler. Registering here makes the order the order the
+/// messages were written in.
+///
+/// Only a standalone `subscriptions/listen` qualifies: every other request is
+/// answered and gone, so tracking one would be bookkeeping nobody reads, and a
+/// batched listen never reaches the transport (`send_batch` rejects it, having
+/// no handle to give it a lifetime). Returns nothing tracked for anything else.
+#[cfg(not(feature = "legacy-spec"))]
+fn track_listen(req: &Message, session: &Arc<McpSession>) -> ListenAbort {
+    let ids = match req {
+        Message::Request(r) if r.method == crate::types::subscription::commands::LISTEN => {
+            request_ids(req)
+        }
+        _ => Vec::new(),
+    };
+
+    let tokens = ids
+        .iter()
+        .map(|id| session.track_stream(id.clone()))
+        .collect();
+
+    ListenAbort {
+        tokens,
+        session: session.clone(),
+        ids,
+    }
+}
+
+/// Aborts the streamed reply a `notifications/cancelled` names, if this session
+/// is carrying one.
+#[cfg(not(feature = "legacy-spec"))]
+fn abort_cancelled_stream(msg: &Message, session: &McpSession) {
+    let Message::Notification(notification) = msg else {
+        return;
+    };
+
+    if notification.method != crate::types::notification::commands::CANCELLED {
+        return;
+    }
+
+    if let Some(id) = notification
+        .params
+        .as_ref()
+        .and_then(|p| p.get("requestId"))
+        .and_then(|v| serde_json::from_value::<crate::types::RequestId>(v.clone()).ok())
+    {
+        session.abort_stream(&id);
     }
 }
 
@@ -685,8 +852,13 @@ async fn handle_sse_connection(
 /// it carries to the receive loop.
 ///
 /// Returns whether the terminal reply arrived, so the caller can fail the
-/// originating request when the stream ends without one.
-async fn drain_post_sse<S>(mut stream: S, resp_tx: &mpsc::Sender<Result<Message, Error>>) -> bool
+/// originating request when the stream ends without one. `ids` are the requests
+/// this `POST` carried -- a reply answers it only by answering one of them.
+async fn drain_post_sse<S>(
+    mut stream: S,
+    resp_tx: &mpsc::Sender<Result<Message, Error>>,
+    ids: &[crate::types::RequestId],
+) -> bool
 where
     S: futures_util::Stream<Item = Result<sse_stream::Sse, sse_stream::Error>> + Unpin,
 {
@@ -694,7 +866,7 @@ where
     while let Some(event) = stream.next().await {
         match event {
             Ok(sse) if is_message_event(&sse) => {
-                if forward_sse_message(sse, resp_tx).await {
+                if forward_sse_message(sse, resp_tx, ids).await {
                     answered = true;
                 }
             }
@@ -778,16 +950,27 @@ async fn handle_msg(
 
 /// Forwards one frame of a request-scoped SSE `POST` reply to the receive loop.
 ///
-/// Returns `true` only for the *terminal* reply -- a response or a batch
-/// response -- so the caller can tell an orderly stream end from a truncated one
+/// Returns `true` only for the *terminal* reply -- a response to one of `ids`,
+/// the requests this `POST` carried, whether standalone or inside a batch -- so
+/// the caller can tell an orderly stream end from a truncated one
 /// (notifications, and frames that fail to parse, return `false`).
+///
+/// Both halves of that matter. A batch is not terminal by virtue of being a
+/// batch: a subscription stream may deliver its acknowledgment and its events
+/// batched. And a response is not terminal by virtue of being a response: one
+/// carrying an id this `POST` never sent cannot resolve its pending slot. Either
+/// mistake makes a stream that dies before the real response look orderly,
+/// leaving a listen slot -- which carries no TTL -- with nothing to fail it and
+/// `Subscription::closed` waiting on a result that is never coming.
 async fn forward_sse_message(
     event: sse_stream::Sse,
     resp_tx: &mpsc::Sender<Result<Message, Error>>,
+    ids: &[crate::types::RequestId],
 ) -> bool {
     let Some(data) = event.data else {
         return false;
     };
+
     let msg = match serde_json::from_str::<Message>(&data) {
         Ok(msg) => msg,
         Err(_err) => {
@@ -796,12 +979,22 @@ async fn forward_sse_message(
             return false;
         }
     };
-    let terminal = matches!(msg, Message::Response(_) | Message::Batch(_));
+
+    let answers = |resp: &crate::types::Response| ids.contains(&resp.full_id());
+    let terminal = match &msg {
+        Message::Response(resp) => answers(resp),
+        Message::Batch(batch) => batch.iter().any(
+            |env| matches!(env, crate::types::MessageEnvelope::Response(resp) if answers(resp)),
+        ),
+        _ => false,
+    };
+
     if let Err(_err) = resp_tx.send(Ok(msg)).await {
         #[cfg(feature = "tracing")]
         tracing::error!(logger = "neva", "Failed to send response: {}", _err);
         return false;
     }
+
     terminal
 }
 
@@ -1007,7 +1200,12 @@ mod tests {
             Ok(sse_stream::Sse::default().event("message").data(response)),
         ];
         assert!(
-            drain_post_sse(futures_util::stream::iter(frames), &tx).await,
+            drain_post_sse(
+                futures_util::stream::iter(frames),
+                &tx,
+                &[crate::types::RequestId::Number(1)]
+            )
+            .await,
             "the POST stream must count as answered"
         );
         assert!(matches!(rx.try_recv(), Ok(Ok(Message::Notification(_)))));
@@ -1025,7 +1223,14 @@ mod tests {
                 .event("endpoint")
                 .data(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#)),
         ];
-        assert!(!drain_post_sse(futures_util::stream::iter(frames), &tx).await);
+        assert!(
+            !drain_post_sse(
+                futures_util::stream::iter(frames),
+                &tx,
+                &[crate::types::RequestId::Number(1)]
+            )
+            .await
+        );
         assert!(rx.try_recv().is_err(), "no frame should be delivered");
     }
 
@@ -1042,13 +1247,31 @@ mod tests {
             ),
             (r#"{"jsonrpc":"2.0","id":1,"result":{}}"#, true),
             (r#"[{"jsonrpc":"2.0","id":1,"result":{}}]"#, true),
+            // A batch is not terminal by virtue of being a batch: a
+            // subscription stream may deliver its acknowledgment and its events
+            // this way, and the response is still to come.
+            (
+                r#"[{"jsonrpc":"2.0","method":"notifications/subscriptions/acknowledged"},
+                    {"jsonrpc":"2.0","method":"notifications/tools/list_changed"}]"#,
+                false,
+            ),
+            // ...but one that carries a response among them is.
+            (
+                r#"[{"jsonrpc":"2.0","method":"notifications/message"},
+                    {"jsonrpc":"2.0","id":1,"result":{}}]"#,
+                true,
+            ),
+            // Nor is a response terminal by virtue of being a response: this
+            // `POST` never sent id 9, so nothing here can resolve its slot.
+            (r#"{"jsonrpc":"2.0","id":9,"result":{}}"#, false),
+            (r#"[{"jsonrpc":"2.0","id":9,"result":{}}]"#, false),
         ];
 
         for (frame, terminal) in cases {
             let (tx, mut rx) = mpsc::channel(1);
             let event = sse_stream::Sse::default().data(frame);
             assert_eq!(
-                forward_sse_message(event, &tx).await,
+                forward_sse_message(event, &tx, &[crate::types::RequestId::Number(1)]).await,
                 terminal,
                 "wrong terminal flag for {frame}"
             );
@@ -1060,7 +1283,7 @@ mod tests {
     async fn forward_sse_message_reports_unparseable_frame_as_unanswered() {
         let (tx, mut rx) = mpsc::channel(1);
         let event = sse_stream::Sse::default().data("not json");
-        assert!(!forward_sse_message(event, &tx).await);
+        assert!(!forward_sse_message(event, &tx, &[crate::types::RequestId::Number(1)]).await);
         assert!(
             rx.try_recv().is_err(),
             "a malformed frame must not reach the receive loop"

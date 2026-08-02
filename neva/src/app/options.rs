@@ -4,7 +4,9 @@ use crate::app::{collection::Collection, handler::RequestHandler};
 #[cfg(feature = "http-server")]
 use crate::transport::{HttpEngine, HttpServer};
 use crate::transport::{StdIoServer, TransportProto};
-use dashmap::{DashMap, DashSet};
+use dashmap::DashMap;
+#[cfg(feature = "legacy-spec")]
+use dashmap::DashSet;
 use std::fmt::{Debug, Formatter};
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
@@ -62,7 +64,21 @@ pub struct McpOptions {
     pub(super) resources_templates: Collection<ResourceTemplate>,
 
     /// Holds current subscriptions to resource changes
+    #[cfg(feature = "legacy-spec")]
     pub(super) resource_subscriptions: DashSet<Uri>,
+
+    /// Live `subscriptions/listen` streams (MCP 2026-07-28).
+    ///
+    /// Replaces [`Self::resource_subscriptions`]: a per-resource subscription
+    /// is now a URI inside a listen filter, scoped to that stream's lifetime.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(crate) subscriptions: crate::app::subscriptions::SubscriptionRegistry,
+
+    /// Cancelled when the server shuts down, so long-lived requests
+    /// (`subscriptions/listen`) can close gracefully instead of being dropped
+    /// mid-stream.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(crate) shutdown: CancellationToken,
 
     /// An ordered list of middlewares
     pub(super) middlewares: Option<Middlewares>,
@@ -186,7 +202,12 @@ impl Default for McpOptions {
             extensions: Default::default(),
             resource_routes: Default::default(),
             requests: Default::default(),
+            #[cfg(feature = "legacy-spec")]
             resource_subscriptions: Default::default(),
+            #[cfg(not(feature = "legacy-spec"))]
+            subscriptions: Default::default(),
+            #[cfg(not(feature = "legacy-spec"))]
+            shutdown: CancellationToken::new(),
             middlewares: None,
             #[cfg(all(feature = "tracing", feature = "legacy-spec"))]
             log_level: Default::default(),
@@ -638,52 +659,56 @@ impl McpOptions {
     /// If not configured but at least one [`Tool`] exists, returns [`Default`].
     /// Otherwise, returns `None`.
     pub(crate) fn tools_capability(&self) -> Option<ToolsCapability> {
-        #[allow(unused_mut)]
-        let mut cap = self.tools_capability.clone();
-        // The stateless MCP 2026-07-28 transport cannot push
-        // `notifications/tools/list_changed`, so never advertise `listChanged`
-        // under MCP 2026-07-28 -- clients refresh on cache-TTL / the next `tools/list`
-        // instead of relying on a push that will never arrive.
-        #[cfg(not(feature = "legacy-spec"))]
-        if let Some(c) = cap.as_mut() {
-            c.list_changed = false;
-        }
-        cap
+        self.tools_capability.clone()
     }
 
     /// Returns [`ResourcesCapability`] if configured.
     /// If not configured but at least one [`Resource`] or [`ResourceTemplate`] exists, returns [`Default`].
     /// Otherwise, returns `None`.
     pub(crate) fn resources_capability(&self) -> Option<ResourcesCapability> {
-        #[allow(unused_mut)]
-        let mut cap = self.resources_capability.clone();
-        // The stateless MCP 2026-07-28 transport cannot push
-        // `notifications/resources/updated` or `.../list_changed`, so mask both
-        // `subscribe` and `listChanged` under MCP 2026-07-28. Subscribe handlers are also
-        // not registered (see `App::new`), keeping the advertised surface and
-        // the accepted methods in sync.
-        #[cfg(not(feature = "legacy-spec"))]
-        if let Some(c) = cap.as_mut() {
-            c.subscribe = false;
-            c.list_changed = false;
-        }
-        cap
+        self.resources_capability.clone()
     }
 
     /// Returns [`PromptsCapability`] if configured.
     /// If not configured but at least one [`Prompt`] exists, returns [`Default`].
     /// Otherwise, returns `None`.
     pub(crate) fn prompts_capability(&self) -> Option<PromptsCapability> {
-        #[allow(unused_mut)]
-        let mut cap = self.prompts_capability.clone();
-        // The stateless MCP 2026-07-28 transport cannot push
-        // `notifications/prompts/list_changed`, so never advertise `listChanged`
-        // under MCP 2026-07-28 -- see `tools_capability` for the rationale.
-        #[cfg(not(feature = "legacy-spec"))]
-        if let Some(c) = cap.as_mut() {
-            c.list_changed = false;
+        self.prompts_capability.clone()
+    }
+
+    /// Returns the capabilities this server advertises, which is what a
+    /// `subscriptions/listen` filter is narrowed against: a client cannot
+    /// subscribe to a notification type the server never announced.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(crate) fn advertised_capabilities(&self) -> crate::types::ServerCapabilities {
+        crate::types::ServerCapabilities {
+            tools: self.tools_capability(),
+            resources: self.resources_capability(),
+            prompts: self.prompts_capability(),
+            ..Default::default()
         }
-        cap
+    }
+
+    /// Returns the registry of live `subscriptions/listen` streams.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[inline]
+    pub(crate) fn subscriptions(&self) -> &crate::app::subscriptions::SubscriptionRegistry {
+        &self.subscriptions
+    }
+
+    /// Returns the token cancelled when the server shuts down.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[inline]
+    pub(crate) fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.clone()
+    }
+
+    /// Points the server's shutdown token at the transport's, so long-lived
+    /// requests observe the same signal the dispatch loop does.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[inline]
+    pub(crate) fn set_shutdown_token(&mut self, token: CancellationToken) {
+        self.shutdown = token;
     }
 
     /// Returns [`ServerTasksCapability`] if configured.
@@ -1096,12 +1121,10 @@ mod tests {
 
         let tools_capability = options.tools_capability().unwrap();
 
-        // Under the stateless 2026-07-28 transport `listChanged` is masked off because
-        // the server cannot push it; otherwise it round-trips the config.
-        #[cfg(feature = "legacy-spec")]
+        // `listChanged` round-trips the config in both profiles: under MCP
+        // 2026-07-28 a `subscriptions/listen` stream delivers it, so the
+        // capability is honest again.
         assert!(tools_capability.list_changed);
-        #[cfg(not(feature = "legacy-spec"))]
-        assert!(!tools_capability.list_changed);
     }
 
     #[test]
@@ -1127,11 +1150,7 @@ mod tests {
 
         let resources_capability = options.resources_capability().unwrap();
 
-        // Masked off under the stateless 2026-07-28 transport (see `tools` test above).
-        #[cfg(feature = "legacy-spec")]
         assert!(resources_capability.list_changed);
-        #[cfg(not(feature = "legacy-spec"))]
-        assert!(!resources_capability.list_changed);
     }
 
     #[test]
@@ -1210,11 +1229,7 @@ mod tests {
 
         let prompts_capability = options.prompts_capability().unwrap();
 
-        // Masked off under the stateless 2026-07-28 transport (see `tools` test above).
-        #[cfg(feature = "legacy-spec")]
         assert!(prompts_capability.list_changed);
-        #[cfg(not(feature = "legacy-spec"))]
-        assert!(!prompts_capability.list_changed);
     }
 
     #[test]

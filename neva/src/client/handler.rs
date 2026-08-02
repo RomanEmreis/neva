@@ -87,6 +87,14 @@ pub(super) struct RequestHandler {
     /// is observed by the receive loop.
     #[cfg(not(feature = "legacy-spec"))]
     peer_mode: crate::shared::PeerMode,
+
+    /// Callers waiting for a `subscriptions/listen` acknowledgment.
+    #[cfg(not(feature = "legacy-spec"))]
+    ack_waiters: crate::client::subscription::AckWaiters,
+
+    /// What each live subscription is allowed to deliver.
+    #[cfg(not(feature = "legacy-spec"))]
+    subscription_filters: crate::client::subscription::SubscriptionStates,
 }
 
 impl Roots {
@@ -171,6 +179,10 @@ impl RequestHandler {
             tasks: Arc::new(TaskTracker::new()),
             #[cfg(not(feature = "legacy-spec"))]
             peer_mode: options.peer_mode.clone(),
+            #[cfg(not(feature = "legacy-spec"))]
+            ack_waiters: Default::default(),
+            #[cfg(not(feature = "legacy-spec"))]
+            subscription_filters: Default::default(),
         };
 
         handler.start(rx)
@@ -238,6 +250,77 @@ impl RequestHandler {
         }
     }
 
+    /// Sends a `subscriptions/listen` request and returns the slot its final
+    /// response will arrive in.
+    ///
+    /// Unlike [`Self::send_request`] this does not await the reply and -- by
+    /// skipping [`RequestQueue::activate`] -- never starts the request TTL: a
+    /// subscription is answered only when it ends, which may be hours later.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(super) async fn send_listen(
+        &mut self,
+        request: Request,
+    ) -> Result<tokio::sync::oneshot::Receiver<PendingResponse>, Error> {
+        let id = request.id();
+        let receiver = self.pending.push(&id);
+        if let Err(err) = self.sender.send(request.into()).await {
+            let _ = self.pending.pop(&id);
+            return Err(err);
+        }
+        Ok(receiver)
+    }
+
+    /// Registers interest in the acknowledgment of the subscription `id`.
+    ///
+    /// Must be called *before* the `subscriptions/listen` request goes out --
+    /// the acknowledgment is the first message the server sends back, and the
+    /// receive loop drops one it has no waiter for.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(super) fn watch_ack(
+        &self,
+        id: &RequestId,
+        requested: &crate::types::SubscriptionFilter,
+    ) -> tokio::sync::oneshot::Receiver<crate::types::SubscriptionFilter> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.ack_waiters.insert(id.clone(), tx);
+        // Recorded before the request goes out, and recorded as *pending*: the
+        // acknowledgment is required to be the first message on the stream, so
+        // anything tagged with this id that arrives ahead of it is delivered by
+        // a subscription that does not exist yet -- and may never, if the peer
+        // rejects the listen or simply never answers. The requested filter
+        // rides along because the acknowledgment narrows it rather than
+        // replacing it.
+        self.subscription_filters.insert(
+            id.clone(),
+            crate::client::subscription::SubscriptionState::Pending(requested.clone()),
+        );
+
+        rx
+    }
+
+    /// Everything a [`Subscription`] needs to release its own bookkeeping once
+    /// its stream is over.
+    ///
+    /// [`Subscription`]: crate::client::Subscription
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(super) fn subscription_release(&self) -> crate::client::subscription::SubscriptionRelease {
+        crate::client::subscription::SubscriptionRelease::new(
+            self.pending.clone(),
+            self.ack_waiters.clone(),
+            self.subscription_filters.clone(),
+        )
+    }
+
+    /// Returns a handle on the transport sender, so a [`Subscription`] can
+    /// cancel itself without borrowing the client.
+    ///
+    /// [`Subscription`]: crate::client::Subscription
+    #[cfg(not(feature = "legacy-spec"))]
+    #[inline]
+    pub(super) fn sender(&self) -> TransportProtoSender {
+        self.sender.clone()
+    }
+
     /// Sends a batch of messages to the MCP server.
     ///
     /// Registers all [`Request`] IDs in the pending queue upfront, sends
@@ -262,6 +345,8 @@ impl RequestHandler {
         items: Vec<MessageEnvelope>,
     ) -> Result<Vec<(RequestId, tokio::sync::oneshot::Receiver<PendingResponse>)>, Error> {
         validate_batch_ids(&items)?;
+        #[cfg(not(feature = "legacy-spec"))]
+        validate_no_listen(&items)?;
 
         let mut receivers = Vec::new();
         let mut envelopes = Vec::new();
@@ -318,14 +403,33 @@ impl RequestHandler {
         let sampling_handler = self.sampling_handler.clone();
         let elicitation_handler = self.elicitation_handler.clone();
         let notification_handler = self.notification_handler.clone();
+        let token = self.token.clone();
 
         #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
         let tasks = self.tasks.clone();
         #[cfg(not(feature = "legacy-spec"))]
         let peer_mode = self.peer_mode.clone();
+        #[cfg(not(feature = "legacy-spec"))]
+        let ack_waiters = self.ack_waiters.clone();
+        #[cfg(not(feature = "legacy-spec"))]
+        let subscription_filters = self.subscription_filters.clone();
 
         tokio::task::spawn(async move {
-            while let Ok(msg) = rx.recv().await {
+            loop {
+                // Cancellation is a first-class exit here, not just an EOF the
+                // receiver happens to report: over HTTP the receiver holds a
+                // sender clone of its own channel, so `recv` never ends by
+                // itself and a disconnect would otherwise leave this task
+                // running against a transport that is already gone.
+                let msg = tokio::select! {
+                    biased;
+                    _ = token.cancelled() => break,
+                    msg = rx.recv() => match msg {
+                        Ok(msg) => msg,
+                        Err(_) => break,
+                    },
+                };
+
                 match msg {
                     Message::Response(resp) => pending.complete(resp),
                     Message::Request(req) => {
@@ -343,6 +447,13 @@ impl RequestHandler {
                         send_response_impl(&mut sender, resp).await;
                     }
                     Message::Notification(notification) => {
+                        #[cfg(not(feature = "legacy-spec"))]
+                        {
+                            complete_ack(&notification, &ack_waiters, &subscription_filters);
+                            if !admitted(&notification, &subscription_filters, &peer_mode) {
+                                continue;
+                            }
+                        }
                         dispatch_notification(notification, &notification_handler).await;
                     }
                     Message::Batch(batch) => {
@@ -359,6 +470,25 @@ impl RequestHandler {
                         for envelope in batch {
                             match envelope {
                                 MessageEnvelope::Response(resp) => pending.complete(resp),
+                                // A batched notification is still a
+                                // notification: an acknowledgment arriving this
+                                // way has to resolve `listen`, and a tagged
+                                // notification has to face the same filter it
+                                // would on its own. Batching is a framing
+                                // choice of the peer's, not a way around the
+                                // subscription's scope.
+                                #[cfg(not(feature = "legacy-spec"))]
+                                MessageEnvelope::Notification(notification) => {
+                                    complete_ack(
+                                        &notification,
+                                        &ack_waiters,
+                                        &subscription_filters,
+                                    );
+
+                                    if admitted(&notification, &subscription_filters, &peer_mode) {
+                                        deferred.push(MessageEnvelope::Notification(notification));
+                                    }
+                                }
                                 other => deferred.push(other),
                             }
                         }
@@ -390,6 +520,13 @@ impl RequestHandler {
                     }
                 }
             }
+            // The transport is gone -- a stdio peer exited, or the connection
+            // was cancelled -- so nothing can complete these any more. Left
+            // alone, a `subscriptions/listen` slot would hold its holder
+            // forever: it carries no TTL to expire it, and `Subscription::closed`
+            // awaits exactly this receiver. Dropping the senders resolves them
+            // as `SubscriptionEnd::Abrupt`, which is what happened.
+            pending.abandon_all();
         });
         self
     }
@@ -499,6 +636,128 @@ async fn dispatch_request(
         crate::types::task::commands::GET => get_task(req, tasks),
         _ => ErrorCode::MethodNotFound.into_response(req_id),
     }
+}
+
+/// Completes the waiter for a `notifications/subscriptions/acknowledged`.
+///
+/// The acknowledgment is a protocol-level message, but it is still forwarded to
+/// the user's notification handlers afterwards -- a client that wants to watch
+/// its own subscriptions being established can subscribe to it like any other
+/// event.
+#[inline]
+#[cfg(not(feature = "legacy-spec"))]
+fn complete_ack(
+    notification: &Notification,
+    waiters: &crate::client::subscription::AckWaiters,
+    filters: &crate::client::subscription::SubscriptionStates,
+) {
+    if notification.method != crate::types::subscription::commands::ACKNOWLEDGED {
+        return;
+    }
+
+    let Ok((id, filter)) = crate::client::subscription::parse_ack(notification) else {
+        #[cfg(feature = "tracing")]
+        tracing::warn!(logger = "neva", "malformed subscription acknowledgment");
+        return;
+    };
+
+    // The handshake completing -- unless the acknowledgment is one `listen`
+    // will refuse, in which case the subscription stays pending and delivers
+    // nothing while the waiter below carries the acknowledgment on to be
+    // rejected.
+    if let Some(mut entry) = filters.get_mut(&id)
+        && !entry.acknowledge(&filter)
+    {
+        #[cfg(feature = "tracing")]
+        tracing::warn!(
+            logger = "neva",
+            subscription = %id,
+            "not establishing a subscription on an acknowledgment broader than its request"
+        );
+    }
+
+    if let Some((_, waiter)) = waiters.remove(&id) {
+        let _ = waiter.send(filter);
+    }
+}
+
+/// Whether a notification belongs on this client's stream at all.
+///
+/// The spec forbids a server from sending a type the client did not request,
+/// but nothing downstream would notice if it did: notifications go straight to
+/// the client's global handlers, which know nothing about subscriptions. So the
+/// promise is enforced here, at the one place that can, in two parts.
+///
+/// A notification carrying a subscription id must be one that subscription
+/// acknowledged -- which also means there has to *be* an acknowledgment: the
+/// handshake requires it to come first, and a subscription still pending may
+/// yet be rejected, leaving handlers to have seen events from a stream
+/// `Client::listen` reports as never established. One *without* a usable id
+/// must not be a subscribable type at
+/// all: under MCP 2026-07-28 those travel on a subscription and nowhere else,
+/// so an untagged (or unparseably tagged) `tools/list_changed` is a category
+/// nothing in this client asked for, arriving with nothing to check it against.
+/// Untagged request-scoped notifications -- progress and log messages -- belong
+/// to no subscription and pass through untouched, as do all of them when the
+/// dual-mode fallback has landed on a legacy peer, which pushes list-changed
+/// notifications on its own and has no subscriptions to tag them with.
+#[cfg(not(feature = "legacy-spec"))]
+#[inline]
+fn admitted(
+    notification: &Notification,
+    filters: &crate::client::subscription::SubscriptionStates,
+    peer_mode: &crate::shared::PeerMode,
+) -> bool {
+    // The acknowledgment is the subscription's own handshake, not one of the
+    // categories a filter selects.
+    if notification.method == crate::types::subscription::commands::ACKNOWLEDGED {
+        return true;
+    }
+
+    let params = notification.params.as_ref();
+    let tagged = params
+        .and_then(|params| params.get("_meta"))
+        .and_then(|meta| meta.get(crate::types::SUBSCRIPTION_ID_KEY))
+        .and_then(|id| serde_json::from_value::<RequestId>(id.clone()).ok());
+
+    let Some(id) = tagged else {
+        let admitted = peer_mode.is_legacy()
+            || !crate::types::subscription::is_subscribable(&notification.method);
+
+        #[cfg(feature = "tracing")]
+        if !admitted {
+            tracing::warn!(
+                logger = "neva",
+                method = %notification.method,
+                "dropping a subscription-only notification that carries no usable subscription id"
+            );
+        }
+
+        return admitted;
+    };
+
+    let uri = params
+        .and_then(|params| params.get("uri"))
+        .and_then(|uri| uri.as_str())
+        .map(crate::types::Uri::from);
+
+    let admitted = filters.get(&id).is_some_and(|state| {
+        state
+            .established()
+            .is_some_and(|filter| filter.matches(&notification.method, uri.as_ref()))
+    });
+
+    #[cfg(feature = "tracing")]
+    if !admitted {
+        tracing::warn!(
+            logger = "neva",
+            method = %notification.method,
+            subscription = %id,
+            "dropping a notification its subscription has not acknowledged"
+        );
+    }
+
+    admitted
 }
 
 /// Forwards a [`Notification`] to the registered handler or traces it when
@@ -755,6 +1014,32 @@ fn validate_batch_ids(items: &[MessageEnvelope]) -> Result<(), Error> {
     Ok(())
 }
 
+/// Rejects a `subscriptions/listen` placed in a batch.
+///
+/// A batch slot is an ordinary request slot: it activates the TTL and hands
+/// back a plain [`Response`], with no acknowledgment waiter, no accepted
+/// filter, and no [`Subscription`] handle. There would be nothing to cancel the
+/// stream with and nothing to close it on timeout, so the subscription would
+/// outlive the call that opened it, server-side and on the wire both.
+///
+/// [`Subscription`]: crate::client::Subscription
+#[inline]
+#[cfg(not(feature = "legacy-spec"))]
+fn validate_no_listen(items: &[MessageEnvelope]) -> Result<(), Error> {
+    let listens = items.iter().any(|env| {
+        matches!(env, MessageEnvelope::Request(req)
+            if req.method == crate::types::subscription::commands::LISTEN)
+    });
+
+    if listens {
+        return Err(Error::new(
+            ErrorCode::InvalidRequest,
+            "batch contains `subscriptions/listen`; open subscriptions with `Client::listen`",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -981,6 +1266,135 @@ mod tests {
 
         // Duplicate ID -- should fail
         let err = validate_batch_ids(&[req(1), req(2), req(1)]).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidRequest);
+    }
+
+    /// Under MCP 2026-07-28 a subscribable notification travels on a
+    /// subscription and nowhere else, so one arriving without a usable id has
+    /// nothing to be checked against and no subscription to belong to. A peer
+    /// reached through the dual-mode fallback is the exception: it pushes
+    /// list-changed notifications on its own and has no ids to tag them with.
+    #[test]
+    #[cfg(not(feature = "legacy-spec"))]
+    fn admitted_requires_a_subscription_id_from_a_2026_07_28_peer() {
+        use crate::types::SUBSCRIPTION_ID_KEY;
+
+        use crate::client::subscription::SubscriptionState;
+
+        let filters = crate::client::subscription::SubscriptionStates::default();
+        filters.insert(
+            RequestId::Number(1),
+            SubscriptionState::Established(
+                crate::types::SubscriptionFilter::new().with_tools_changed(),
+            ),
+        );
+
+        let tagged = Notification::new(
+            crate::types::tool::commands::LIST_CHANGED,
+            Some(serde_json::json!({ "_meta": { SUBSCRIPTION_ID_KEY: 1 } })),
+        );
+        let untagged = Notification::new(crate::types::tool::commands::LIST_CHANGED, None);
+        let mistagged = Notification::new(
+            crate::types::tool::commands::LIST_CHANGED,
+            Some(serde_json::json!({ "_meta": { SUBSCRIPTION_ID_KEY: { "not": "an id" } } })),
+        );
+        let progress = Notification::new(
+            crate::types::notification::commands::PROGRESS,
+            Some(serde_json::json!({ "progress": 1 })),
+        );
+
+        let peer = crate::shared::PeerMode::default();
+        assert!(admitted(&tagged, &filters, &peer));
+        assert!(
+            !admitted(&untagged, &filters, &peer),
+            "a subscription-only notification must carry a subscription id"
+        );
+        assert!(
+            !admitted(&mistagged, &filters, &peer),
+            "and one that cannot be parsed is no id at all"
+        );
+        assert!(
+            admitted(&progress, &filters, &peer),
+            "request-scoped notifications belong to no subscription"
+        );
+
+        // The dual-mode fallback landed on a legacy peer: it has no
+        // subscriptions, so nothing it pushes is tagged.
+        peer.set_legacy();
+        assert!(admitted(&untagged, &filters, &peer));
+    }
+
+    /// The acknowledgment is required to be the first message on a
+    /// subscription. Until it lands, the subscription may still be rejected or
+    /// never answered, so anything tagged with its id would be an event from a
+    /// stream `Client::listen` goes on to report as never established.
+    #[test]
+    #[cfg(not(feature = "legacy-spec"))]
+    fn admitted_refuses_a_subscription_that_has_not_acknowledged_yet() {
+        use crate::client::subscription::SubscriptionState;
+        use crate::types::{SUBSCRIPTION_ID_KEY, SubscriptionFilter};
+
+        let requested = SubscriptionFilter::new().with_tools_changed();
+        let filters = crate::client::subscription::SubscriptionStates::default();
+        filters.insert(
+            RequestId::Number(1),
+            SubscriptionState::Pending(requested.clone()),
+        );
+
+        let tagged = Notification::new(
+            crate::types::tool::commands::LIST_CHANGED,
+            Some(serde_json::json!({ "_meta": { SUBSCRIPTION_ID_KEY: 1 } })),
+        );
+        let peer = crate::shared::PeerMode::default();
+
+        assert!(
+            !admitted(&tagged, &filters, &peer),
+            "nothing may be delivered before the acknowledgment, however well tagged"
+        );
+
+        // An acknowledgment broader than the request establishes nothing:
+        // `Client::listen` refuses it, so admitting even the requested
+        // categories would deliver events from a subscription the caller is
+        // told never opened.
+        let overbroad = SubscriptionFilter::new()
+            .with_tools_changed()
+            .with_prompts_changed();
+        assert!(
+            !filters
+                .get_mut(&RequestId::Number(1))
+                .expect("the subscription is tracked")
+                .acknowledge(&overbroad)
+        );
+        assert!(
+            !admitted(&tagged, &filters, &peer),
+            "an acknowledgment `listen` will reject must not establish the subscription"
+        );
+
+        // ...and the same notification is admitted once the handshake completes.
+        assert!(
+            filters
+                .get_mut(&RequestId::Number(1))
+                .expect("the subscription is tracked")
+                .acknowledge(&requested)
+        );
+
+        assert!(admitted(&tagged, &filters, &peer));
+    }
+
+    #[test]
+    #[cfg(not(feature = "legacy-spec"))]
+    fn validate_no_listen_rejects_a_batched_subscription() {
+        let listen = MessageEnvelope::Request(Request::new(
+            Some(RequestId::Number(1)),
+            crate::types::subscription::commands::LISTEN,
+            None::<()>,
+        ));
+        let ping =
+            MessageEnvelope::Request(Request::new(Some(RequestId::Number(2)), "ping", None::<()>));
+
+        assert!(validate_no_listen(std::slice::from_ref(&ping)).is_ok());
+
+        let err = validate_no_listen(&[ping, listen]).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidRequest);
     }
 

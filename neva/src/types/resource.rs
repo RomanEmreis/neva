@@ -53,9 +53,21 @@ pub mod commands {
     pub const READ: &str = "resources/read";
 
     /// Command name that subscribes to resource updates.
+    ///
+    /// Legacy only. MCP 2026-07-28 does not delete per-resource subscriptions,
+    /// it folds them into the `subscriptions/listen` filter: a subscription is
+    /// a URI in `SubscriptionFilter::resource_subscriptions`, scoped to that
+    /// stream rather than to server-side state. The constant stays compiled in
+    /// a 2026-07-28 *client* build because the dual-mode fallback still speaks
+    /// to legacy peers.
+    #[cfg(any(feature = "legacy-spec", feature = "client"))]
     pub const SUBSCRIBE: &str = "resources/subscribe";
 
     /// Command name that unsubscribes from resource updates.
+    ///
+    /// Legacy only; see [`SUBSCRIBE`]. Under MCP 2026-07-28 a subscription ends
+    /// with the stream that carries it.
+    #[cfg(any(feature = "legacy-spec", feature = "client"))]
     pub const UNSUBSCRIBE: &str = "resources/unsubscribe";
 
     /// Notification name that indicates that the resource has been updated.
@@ -197,7 +209,10 @@ pub struct SubscribeRequestParams {
 /// Sent from the client to request not receiving updated notifications
 /// from the server whenever a primitive resource changes.
 ///
+/// Legacy only; see [`commands::UNSUBSCRIBE`].
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
+#[cfg(any(feature = "legacy-spec", feature = "client"))]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UnsubscribeRequestParams {
     /// The URI of the resource to unsubscribe from.
@@ -212,6 +227,7 @@ impl<T: Into<Uri>> From<T> for SubscribeRequestParams {
     }
 }
 
+#[cfg(any(feature = "legacy-spec", feature = "client"))]
 impl<T: Into<Uri>> From<T> for UnsubscribeRequestParams {
     #[inline]
     fn from(uri: T) -> Self {
@@ -296,7 +312,7 @@ impl FromHandlerParams for SubscribeRequestParams {
     }
 }
 
-#[cfg(feature = "server")]
+#[cfg(all(feature = "server", any(feature = "legacy-spec", feature = "client")))]
 impl FromHandlerParams for UnsubscribeRequestParams {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {

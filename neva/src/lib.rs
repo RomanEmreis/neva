@@ -293,6 +293,8 @@ pub mod prelude {
 
     #[cfg(feature = "client")]
     pub use crate::client::Client;
+    #[cfg(all(feature = "client", not(feature = "legacy-spec")))]
+    pub use crate::client::{Subscription, SubscriptionEnd};
 
     #[cfg(feature = "client-macros")]
     pub use crate::elicitation;
