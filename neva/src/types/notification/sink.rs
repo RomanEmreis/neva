@@ -32,7 +32,7 @@ pub(crate) struct RequestSink {
     /// valid. Reserving the slot up front, before any of that can run, is what
     /// makes the acknowledgment independent of how noisy the request is.
     // Only the HTTP server reserves and hands out this slot; a client-only
-    // build has the map (the layer reads it) but nothing that registers.
+    // build has the map (the layer reads it) but nothing that spends one.
     #[cfg_attr(not(feature = "http-server"), allow(dead_code))]
     ack: Option<OwnedPermit<Message>>,
 }
@@ -63,7 +63,9 @@ impl RequestSink {
 /// slot beyond `capacity`, reserved then and there for the acknowledgment, so
 /// the configured log capacity stays whole and the acknowledgment cannot be
 /// crowded out of it.
-#[cfg(feature = "http-server")]
+// Also compiled for the layer's own tests, which register a sink to route into
+// without an HTTP server to do it for them.
+#[cfg(any(feature = "http-server", all(test, feature = "tracing")))]
 pub(crate) async fn register(
     id: uuid::Uuid,
     capacity: usize,
@@ -89,7 +91,7 @@ pub(crate) fn take_ack_permit(id: &uuid::Uuid) -> Option<OwnedPermit<Message>> {
 }
 
 /// Removes the notification sink for `id`.
-#[cfg(feature = "http-server")]
+#[cfg(any(feature = "http-server", all(test, feature = "tracing")))]
 pub(crate) fn unregister(id: &uuid::Uuid) {
     REQUEST_NOTIFICATIONS.remove(id);
 }

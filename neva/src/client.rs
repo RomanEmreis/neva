@@ -1022,7 +1022,9 @@ impl Client {
     /// acknowledged the filter. Notifications delivered on the stream are
     /// dispatched to the handlers registered with [`Self::subscribe`] and its
     /// helpers ([`Self::on_tools_changed`] and friends), so those must be in
-    /// place before listening.
+    /// place before listening -- and, for the capability-gated helpers, after
+    /// [`Self::connect`], which is what discovers the capabilities they assert
+    /// on.
     ///
     /// The returned [`Subscription`] carries the accepted filter -- the server
     /// silently drops types it does not advertise -- and ends the stream on
@@ -1035,8 +1037,8 @@ impl Client {
     /// #[tokio::main]
     /// async fn main() -> Result<(), Error> {
     ///     let mut client = Client::new();
-    ///     client.on_tools_changed(|_| async { println!("tools changed"); });
     ///     client.connect().await?;
+    ///     client.on_tools_changed(|_| async { println!("tools changed"); });
     ///
     ///     let subscription = client
     ///         .listen(SubscriptionFilter::new().with_tools_changed())

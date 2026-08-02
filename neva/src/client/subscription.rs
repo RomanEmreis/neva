@@ -124,8 +124,10 @@ pub enum SubscriptionEnd {
 /// #[tokio::main]
 /// async fn main() -> Result<(), Error> {
 ///     let mut client = Client::new();
-///     client.on_tools_changed(|_| async { println!("tools changed"); });
 ///     client.connect().await?;
+///     // After `connect`: this helper asserts on the capabilities discovery
+///     // reports, and there are none until the handshake has run.
+///     client.on_tools_changed(|_| async { println!("tools changed"); });
 ///
 ///     let mut subscription = client
 ///         .listen(SubscriptionFilter::new().with_tools_changed())
