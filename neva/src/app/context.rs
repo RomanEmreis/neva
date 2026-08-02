@@ -1807,7 +1807,7 @@ impl Context {
         requested: SubscriptionFilter,
     ) -> Result<SubscriptionsListenResult, Error> {
         let accepted = requested.supported_by(&self.options.advertised_capabilities());
-        let (sink, pump) = self.subscription_sink();
+        let (sink, pump) = self.subscription_sink()?;
 
         // The acknowledgment MUST be the first message on the subscription.
         // `register` is what queues it, together with publishing the entry:
@@ -1881,18 +1881,37 @@ impl Context {
     /// long-lived response body, and its closure is how the handler learns the
     /// client disconnected. Every other transport (stdio) gets a channel of its
     /// own, pumped into the transport sender by the returned task.
+    ///
+    /// # Errors
+    /// Returns [`Error`] for a request that came in over HTTP without a
+    /// response stream to write to. A transport session id and no registered
+    /// sink means either an engine adapter that cannot stream (the JSON-only
+    /// `handlers::handle_post`) or a client that dropped the body before the
+    /// runtime got here -- and neither can carry a subscription. Falling back
+    /// to a channel of our own would be worse than failing: the acknowledgment
+    /// would go to the generic transport sender instead of this request's body,
+    /// and since we would then hold the only receiver, the handler would never
+    /// see the disconnect that ends it -- the entry would sit in the registry
+    /// until the server shut down.
     fn subscription_sink(
         &self,
-    ) -> (
-        tokio::sync::mpsc::Sender<Message>,
-        Option<tokio::task::JoinHandle<()>>,
-    ) {
+    ) -> Result<
+        (
+            tokio::sync::mpsc::Sender<Message>,
+            Option<tokio::task::JoinHandle<()>>,
+        ),
+        Error,
+    > {
         #[cfg(feature = "http-server")]
-        if let Some(sink) = self
-            .session_id
-            .and_then(|id| crate::types::notification::sink::get(&id))
-        {
-            return (sink, None);
+        if let Some(session_id) = self.session_id {
+            return crate::types::notification::sink::get(&session_id)
+                .map(|sink| (sink, None))
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::InternalError,
+                        "Subscriptions need a streaming response; this request has none",
+                    )
+                });
         }
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(
@@ -1906,7 +1925,7 @@ impl Context {
                 }
             }
         });
-        (tx, Some(pump))
+        Ok((tx, Some(pump)))
     }
 }
 
@@ -2135,5 +2154,67 @@ mod mrtr_tests {
         m.push_commit(Box::pin(async { Ok(()) }));
         m.push_commit(Box::pin(async { Ok(()) }));
         assert_eq!(m.commits.lock().unwrap().len(), 2);
+    }
+}
+
+#[cfg(all(test, not(feature = "legacy-spec"), feature = "http-server"))]
+mod subscription_sink_tests {
+    use super::*;
+
+    fn ctx(session_id: Option<uuid::Uuid>) -> Context {
+        Context {
+            session_id,
+            headers: HeaderMap::new(),
+            claims: None,
+            pending: RequestQueue::new(Duration::from_secs(5)),
+            sender: TransportProtoSender::None,
+            options: Arc::new(McpOptions::default()),
+            timeout: Duration::from_secs(5),
+            exec: ExecMode::None,
+            #[cfg(feature = "di")]
+            scope: None,
+        }
+    }
+
+    /// A transport session id and no registered sink means the request came in
+    /// over HTTP without a response stream -- a JSON-only engine adapter, or a
+    /// client that dropped the body first. Falling back to a channel of our own
+    /// would send the acknowledgment to the generic transport sender instead of
+    /// this request's body, and leave the handler holding the only receiver, so
+    /// the disconnect that ends the subscription would never arrive.
+    #[tokio::test]
+    async fn it_refuses_an_http_request_with_no_response_stream() {
+        let err = ctx(Some(uuid::Uuid::new_v4()))
+            .subscription_sink()
+            .expect_err("a subscription needs a stream to write to");
+
+        assert_eq!(err.code, ErrorCode::InternalError);
+    }
+
+    /// The registered sink is used as is: it *is* the response body, so there
+    /// is nothing to pump.
+    #[tokio::test]
+    async fn it_uses_the_registered_response_sink() {
+        let session_id = uuid::Uuid::new_v4();
+        let _rx = crate::types::notification::sink::register(session_id, 4, true);
+
+        let (_sink, pump) = ctx(Some(session_id))
+            .subscription_sink()
+            .expect("the registered sink must be used");
+
+        assert!(pump.is_none(), "the response body needs no pump task");
+        crate::types::notification::sink::unregister(&session_id);
+    }
+
+    /// Without a transport session there is no per-request body to write to --
+    /// that is stdio, where the subscription interleaves on the shared output
+    /// through a pump of its own.
+    #[tokio::test]
+    async fn it_pumps_into_the_transport_without_a_session() {
+        let (_sink, pump) = ctx(None)
+            .subscription_sink()
+            .expect("stdio always has somewhere to write");
+
+        assert!(pump.is_some(), "stdio needs a pump task");
     }
 }

@@ -104,6 +104,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     `InvalidRequest`. A batch slot is an ordinary request slot -- finite TTL, a
     plain `Response`, no handle -- so a subscription opened that way would have
     nothing to cancel it and would outlive the call that made it.
+  * A listen that arrives over HTTP without a response stream to write to --
+    an engine adapter that cannot stream (the JSON-only `handlers::handle_post`),
+    or a client that dropped the body first -- is answered with an error
+    instead of being served on a channel that goes nowhere.
   * Works on both transports: over HTTP the subscription rides the listen
     `POST`'s own `text/event-stream` body (a client disconnect ends it); over
     stdio it interleaves on stdout and ends on `notifications/cancelled`.
