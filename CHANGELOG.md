@@ -35,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     immediately after (a batched listen included). Held, not dropped: those
     request-scoped log messages were explicitly asked for via `_meta.logLevel`,
     and in a mixed batch they may belong to another request on the same body.
+    The hold buffer is bounded by the sink's own capacity, and overflow past it
+    is dropped rather than released early: the acknowledgment arriving first is
+    the requirement, the logs riding along are the accommodation.
     `Context::add_tool`,
     `remove_tool`, `add_prompt`, `remove_prompt`, `add_resource`,
     `remove_resource` and `resource_updated` fan out to the streams that asked

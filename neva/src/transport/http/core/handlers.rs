@@ -583,7 +583,9 @@ fn request_opts_in(req: &crate::types::Request) -> bool {
 /// it -- ordering the stream rather than dropping the messages, which matters
 /// because a mixed batch's other requests log here too, and their logs were
 /// explicitly asked for. `hold_limit` bounds that buffer at what the sink
-/// itself would have held, so a peer that never acknowledges cannot grow it.
+/// itself would have held; overflow past it is dropped rather than released,
+/// because the acknowledgment coming first is the requirement and the logs
+/// riding along are the accommodation.
 #[cfg(not(feature = "legacy-spec"))]
 fn post_notification_stream(
     id: uuid::Uuid,
@@ -694,16 +696,22 @@ fn post_notification_stream(
                         state.out.append(&mut state.held);
                         return Some((n, state));
                     }
-                    state.held.push_back(n);
-                    // A peer that never acknowledges must not make this grow
-                    // without end. Past the sink's own capacity the ordering is
-                    // lost anyway, so stop trying and let the messages through.
-                    if state.held.len() >= state.hold_limit {
-                        state.awaiting_ack = false;
-                        state.out.append(&mut state.held);
-                        if let Some(msg) = state.out.pop_front() {
-                            return Some((msg, state));
-                        }
+                    // Bounded, so a handler that logs without end cannot grow
+                    // this: past the sink's own capacity the overflow is
+                    // dropped, exactly as the sink would have dropped it had
+                    // nothing been draining it. Releasing it instead would put
+                    // these messages ahead of the acknowledgment, and the
+                    // acknowledgment coming first is the requirement -- the
+                    // logs riding along are the accommodation.
+                    if state.held.len() < state.hold_limit {
+                        state.held.push_back(n);
+                    } else {
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!(
+                            logger = "neva",
+                            "dropped a notification queued before the subscription \
+                             acknowledgment: the pre-acknowledgment buffer is full"
+                        );
                     }
                 }
                 Step::Notification(n) => return Some((n, state)),

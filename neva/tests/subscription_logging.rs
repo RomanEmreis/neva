@@ -26,10 +26,7 @@ const MARKER: &str = "logged-before-next";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_listen_stream_opens_with_its_acknowledgment() {
-    tracing_subscriber::registry()
-        .with(tracing::level_filters::LevelFilter::WARN)
-        .with(notification::fmt::layer())
-        .init();
+    install_subscriber();
 
     let addr = format!("127.0.0.1:{}", pick_free_port());
     let mut app = App::new()
@@ -163,6 +160,130 @@ async fn a_listen_stream_opens_with_its_acknowledgment() {
     );
 
     handle.abort();
+}
+
+/// The acknowledgment coming first is a MUST; the held logs riding along after
+/// it are an accommodation. A handler that floods the body before the listen
+/// handler runs must therefore lose the overflow, not the ordering.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flood_before_the_acknowledgment_never_displaces_it() {
+    const HELD: usize = 2;
+    const FLOOD: usize = 8;
+
+    install_subscriber();
+
+    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let mut app = App::new()
+        .with_options(|opt| {
+            opt.with_http(|http| {
+                http.bind(&addr)
+                    .with_endpoint("/mcp")
+                    .with_sse_log_queue(HELD)
+            })
+            .with_tools(|t| t.with_list_changed())
+        })
+        // Paced, not bursted: the stream drains each message into the hold
+        // buffer before the next arrives, so the buffer outgrows the channel
+        // while the channel itself never fills -- which is the only way to
+        // reach the limit with the acknowledgment still able to get through.
+        .wrap(|ctx, next| async move {
+            for i in 0..FLOOD {
+                tracing::warn!(logger = "mw", "{MARKER}-{i}");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            next(ctx).await
+        });
+    app.map_tool("grow", |mut ctx: neva::Context| async move {
+        ctx.add_tool(neva::types::Tool::new(
+            format!("grown-{}", uuid::Uuid::new_v4()),
+            || async { "ok" },
+        ))
+        .await?;
+        Ok::<_, neva::error::Error>("grown".to_string())
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
+    let url = format!("http://{addr}/mcp");
+
+    let listen = serde_json::json!({
+        "jsonrpc": "2.0", "id": "sub-1", "method": "subscriptions/listen",
+        "params": {
+            "notifications": { "toolsListChanged": true },
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {},
+                "io.modelcontextprotocol/logLevel": "info"
+            }
+        }
+    });
+    let mut stream = client
+        .post(&url)
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", "subscriptions/listen")
+        .header("Accept", "application/json, text/event-stream")
+        .json(&listen)
+        .send()
+        .await
+        .expect("listen failed");
+
+    let mut body = String::new();
+    let first = next_message(&mut stream, &mut body).await;
+    assert_eq!(
+        first["method"], "notifications/subscriptions/acknowledged",
+        "a flood before the acknowledgment must not displace it, got {first}"
+    );
+
+    // What is released after it is bounded: the buffer holds what the sink
+    // itself would have, and the rest is dropped rather than reordered.
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": { "name": "grow", "arguments": {}, "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {}
+        } }
+    });
+    let resp = client
+        .post(&url)
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", "tools/call")
+        .header("Mcp-Name", "grow")
+        .header("Accept", "application/json, text/event-stream")
+        .json(&call)
+        .send()
+        .await
+        .expect("grow failed");
+    let _ = resp.text().await;
+
+    let mut released = 0;
+    loop {
+        let msg = next_message(&mut stream, &mut body).await;
+        match msg["method"].as_str().unwrap_or_default() {
+            "notifications/message" => released += 1,
+            "notifications/tools/list_changed" => break,
+            other => panic!("unexpected frame on the subscription stream: {other}"),
+        }
+    }
+    assert!(
+        released <= HELD,
+        "the pre-acknowledgment buffer must stay bounded, got {released} of {FLOOD}"
+    );
+
+    handle.abort();
+}
+
+/// The notification layer is the process-wide subscriber, so whichever test
+/// gets there first installs it -- both want the same one.
+fn install_subscriber() {
+    let _ = tracing_subscriber::registry()
+        .with(tracing::level_filters::LevelFilter::WARN)
+        .with(notification::fmt::layer())
+        .try_init();
 }
 
 /// Pulls chunks off a live SSE body until one more complete `data:` frame is
