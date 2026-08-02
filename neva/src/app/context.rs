@@ -2196,7 +2196,7 @@ mod subscription_sink_tests {
     #[tokio::test]
     async fn it_uses_the_registered_response_sink() {
         let session_id = uuid::Uuid::new_v4();
-        let _rx = crate::types::notification::sink::register(session_id, 4, true);
+        let _rx = crate::types::notification::sink::register(session_id, 4);
 
         let (_sink, pump) = ctx(Some(session_id))
             .subscription_sink()

@@ -29,10 +29,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     falls wholly on one side of the handshake: a mutation racing it either
     predates the subscription or queues behind an acknowledgment already on the
     stream -- the sink is drained concurrently, so no ordering the caller could
-    arrange would do. And over HTTP the listen `POST` body carries the
-    subscription only: request-scoped `notifications/message` stay off it,
-    where middleware logging before `next(ctx)` would otherwise land ahead of
-    the acknowledgment (a batched listen included). `Context::add_tool`,
+    arrange would do. And over HTTP the listen `POST` body holds back whatever
+    reaches it before the acknowledgment -- middleware logging ahead of
+    `next(ctx)` is queued before `Context::listen` ever runs -- releasing it
+    immediately after (a batched listen included). Held, not dropped: those
+    request-scoped log messages were explicitly asked for via `_meta.logLevel`,
+    and in a mixed batch they may belong to another request on the same body.
+    `Context::add_tool`,
     `remove_tool`, `add_prompt`, `remove_prompt`, `add_resource`,
     `remove_resource` and `resource_updated` fan out to the streams that asked
     for them; `Context::is_subscribed` now answers from the live streams. A

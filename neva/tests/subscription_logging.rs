@@ -2,9 +2,11 @@
 //!
 //! The body of a listen `POST` is the subscription's stream: the
 //! acknowledgment MUST be its first message. Request-scoped
-//! `notifications/message` are a different mechanism on the same transport, and
-//! middleware wrapped around the handler emits them *before* the handler ever
-//! runs -- so they must not be written onto this body at all.
+//! `notifications/message` share the same body, and middleware wrapped around
+//! the handler emits them *before* the handler ever runs -- so they are held
+//! back until the acknowledgment goes out, then released. Held, not dropped:
+//! the client asked for them, and in a mixed batch they may belong to another
+//! request entirely.
 //!
 //! Its own file because the notification layer is installed as the process-wide
 //! default subscriber.
@@ -91,8 +93,15 @@ async fn a_listen_stream_opens_with_its_acknowledgment() {
         "the acknowledgment must be the first message on a subscription stream, got {first}"
     );
 
-    // And the log never appears later either: a subscription stream carries the
-    // subscription, not the request-scoped logging of the call that opened it.
+    // The log that preceded it is not lost -- it follows the acknowledgment
+    // rather than jumping ahead of it.
+    let logged = next_message(&mut stream, &mut body).await;
+    assert_eq!(
+        logged["method"], "notifications/message",
+        "the held log message must be released after the acknowledgment, got {logged}"
+    );
+    assert_eq!(logged["params"]["data"]["message"], MARKER);
+
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": { "name": "grow", "arguments": {}, "_meta": {
@@ -112,19 +121,10 @@ async fn a_listen_stream_opens_with_its_acknowledgment() {
         .expect("grow failed");
     let _ = resp.text().await;
 
-    let mut before = Vec::new();
-    loop {
-        let msg = next_message(&mut stream, &mut body).await;
-        let method = msg["method"].as_str().unwrap_or_default().to_owned();
-        if method == "notifications/tools/list_changed" {
-            break;
-        }
-        before.push(method);
-    }
-    assert!(
-        before.is_empty(),
-        "a subscription stream carries the subscription, not the request-scoped \
-         logging of the call that opened it; got {before:?}"
+    let next = next_message(&mut stream, &mut body).await;
+    assert_eq!(
+        next["method"], "notifications/tools/list_changed",
+        "the subscription's own notification must follow, got {next}"
     );
 
     // A listen inside a batch streams on the same kind of body under the same

@@ -16,47 +16,20 @@ use crate::types::Message;
 use std::sync::LazyLock;
 use tokio::sync::mpsc::Sender;
 
-/// One registered sink: where the `POST` body's messages go, and what kind of
-/// body it is.
-pub(crate) struct RequestSink {
-    /// The writing end of the response stream.
-    pub(crate) tx: Sender<Message>,
-
-    /// Whether this `POST` body is a `subscriptions/listen` stream.
-    ///
-    /// Such a body belongs to the subscription: its first message must be the
-    /// acknowledgment, and what follows must be that subscription's
-    /// notifications. Request-scoped log messages are not part of it, so they
-    /// are not written here -- see the `notifications/message` branch in
-    /// [`fmt`](super::fmt).
-    // That branch is the only reader, and it is the `tracing` layer: without
-    // the feature there is nothing producing request-scoped log messages to
-    // keep off the stream in the first place.
-    #[cfg_attr(not(feature = "tracing"), allow(dead_code))]
-    pub(crate) subscription: bool,
-}
-
 /// Live per-request notification sinks, keyed by the per-`POST` session id.
 ///
 /// Only the HTTP server registers sinks; the notification layer (which may run
 /// client-side too) merely reads the map, so the writers below are gated on
 /// `http-server` while the map itself is not.
-pub(crate) static REQUEST_NOTIFICATIONS: LazyLock<dashmap::DashMap<uuid::Uuid, RequestSink>> =
+pub(crate) static REQUEST_NOTIFICATIONS: LazyLock<dashmap::DashMap<uuid::Uuid, Sender<Message>>> =
     LazyLock::new(dashmap::DashMap::new);
 
 /// Registers a notification sink for `id` (the per-`POST` session id). Returns
 /// the receiving end for the `POST` response stream to drain.
-///
-/// `subscription` marks a `subscriptions/listen` body; see
-/// [`RequestSink::subscription`].
 #[cfg(feature = "http-server")]
-pub(crate) fn register(
-    id: uuid::Uuid,
-    capacity: usize,
-    subscription: bool,
-) -> tokio::sync::mpsc::Receiver<Message> {
+pub(crate) fn register(id: uuid::Uuid, capacity: usize) -> tokio::sync::mpsc::Receiver<Message> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Message>(capacity);
-    REQUEST_NOTIFICATIONS.insert(id, RequestSink { tx, subscription });
+    REQUEST_NOTIFICATIONS.insert(id, tx);
     rx
 }
 
@@ -74,7 +47,7 @@ pub(crate) fn unregister(id: &uuid::Uuid) {
 /// via [`Sender::closed`] -- how the handler learns the client disconnected.
 #[cfg(feature = "http-server")]
 pub(crate) fn get(id: &uuid::Uuid) -> Option<Sender<Message>> {
-    REQUEST_NOTIFICATIONS.get(id).map(|s| s.tx.clone())
+    REQUEST_NOTIFICATIONS.get(id).map(|s| s.clone())
 }
 
 #[cfg(all(test, feature = "http-server"))]
@@ -85,7 +58,7 @@ mod tests {
     #[tokio::test]
     async fn it_routes_to_a_registered_sink() {
         let id = uuid::Uuid::new_v4();
-        let mut rx = register(id, 4, false);
+        let mut rx = register(id, 4);
 
         let sink = get(&id).expect("sink should be registered");
         sink.send(Message::Notification(Notification::new("test", None)))
@@ -102,7 +75,7 @@ mod tests {
         // The disconnect signal a long-lived subscription waits on: the HTTP
         // response stream drops its receiver when the client goes away.
         let id = uuid::Uuid::new_v4();
-        let rx = register(id, 4, false);
+        let rx = register(id, 4);
 
         let sink = get(&id).expect("sink should be registered");
         drop(rx);
