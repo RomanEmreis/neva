@@ -198,6 +198,19 @@ impl ArgNames {
         }
     }
 
+    /// The slot `name` belongs to, if it names one.
+    ///
+    /// The inverse of [`Self::get`]: the declared names when there are any,
+    /// the positional fallback otherwise.
+    #[inline]
+    pub(crate) fn slot_of(&self, name: &str) -> Option<usize> {
+        match self.names.as_deref() {
+            Some(names) => names.iter().position(|declared| &**declared == name),
+            None => positional_slot(name),
+        }
+        .filter(|slot| *slot < self.arity)
+    }
+
     /// The first name declared more than once, if any.
     ///
     /// Two slots reading the same key is not a mistake that announces itself:

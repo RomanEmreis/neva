@@ -882,30 +882,35 @@ fn build_input_schema_from_args(
     }
 }
 
-/// Renames the auto-generated positional properties of `schema` to `names`.
+/// Renames the generated properties of `schema` from the names the arguments
+/// are currently read by to the names they are about to be read by.
 ///
-/// Only the `argN` keys [`build_input_schema_from_args`] produced are touched,
-/// so a hand-written schema (which has none) passes through untouched.
+/// Renaming *from the current names* rather than from the positional form is
+/// what lets [`Tool::with_arg_names`] be called more than once -- which
+/// `map_tool!` already does once on the caller's behalf. After the first call
+/// there are no `argN` properties left to find, and looking for them would
+/// leave the schema on the old names while the handler moved to the new ones.
 ///
-/// The rename happens in two passes -- take every positional property out,
-/// then put them all back under their declared names -- because a declared
-/// name may itself be a positional key: a handler is perfectly entitled to a
+/// Only keys `from` actually names are touched, so a hand-written schema
+/// (which has none of them) passes through untouched.
+///
+/// The rename happens in two passes -- take every source property out, then
+/// put them all back under their new names -- because a new name may be a
+/// source key for a *later* slot: a handler is perfectly entitled to a
 /// parameter called `arg1`. Renaming in place would drop that parameter's
-/// property on top of a source slot not yet moved.
+/// property on top of a source not yet moved.
 #[cfg(feature = "server")]
 #[inline]
-fn rename_positional_props(schema: &mut crate::types::ToolInputSchema, names: &ArgNames) {
-    use crate::types::helpers::extract::{positional_name, positional_slot};
-
+fn rename_args(schema: &mut crate::types::ToolInputSchema, from: &ArgNames, to: &ArgNames) {
     #[cfg(feature = "legacy-spec")]
     {
         if let Some(props) = schema.properties.as_mut() {
-            let taken = (0..names.len())
-                .map(|slot| props.remove(positional_name(slot)))
+            let taken = (0..to.len())
+                .map(|slot| props.remove(from.get(slot)))
                 .collect::<Vec<_>>();
             for (slot, prop) in taken.into_iter().enumerate() {
                 if let Some(prop) = prop {
-                    props.insert(names.get(slot).to_owned(), prop);
+                    props.insert(to.get(slot).to_owned(), prop);
                 }
             }
         }
@@ -913,8 +918,8 @@ fn rename_positional_props(schema: &mut crate::types::ToolInputSchema, names: &A
             // Each entry is visited once and tested against the name it came
             // in with, so a rewritten entry is never re-read as a source.
             for name in required.iter_mut() {
-                if let Some(slot) = positional_slot(name) {
-                    *name = names.get(slot).to_owned();
+                if let Some(slot) = from.slot_of(name) {
+                    *name = to.get(slot).to_owned();
                 }
             }
         }
@@ -925,19 +930,19 @@ fn rename_positional_props(schema: &mut crate::types::ToolInputSchema, names: &A
             return;
         };
         if let Some(props) = schema.get_mut("properties").and_then(Value::as_object_mut) {
-            let taken = (0..names.len())
-                .map(|slot| props.remove(positional_name(slot)))
+            let taken = (0..to.len())
+                .map(|slot| props.remove(from.get(slot)))
                 .collect::<Vec<_>>();
             for (slot, prop) in taken.into_iter().enumerate() {
                 if let Some(prop) = prop {
-                    props.insert(names.get(slot).to_owned(), prop);
+                    props.insert(to.get(slot).to_owned(), prop);
                 }
             }
         }
         if let Some(required) = schema.get_mut("required").and_then(Value::as_array_mut) {
             for name in required.iter_mut() {
-                if let Some(slot) = name.as_str().and_then(positional_slot) {
-                    *name = Value::String(names.get(slot).to_owned());
+                if let Some(slot) = name.as_str().and_then(|name| from.slot_of(name)) {
+                    *name = Value::String(to.get(slot).to_owned());
                 }
             }
         }
@@ -1055,8 +1060,9 @@ impl Tool {
         T: IntoIterator<Item = I>,
         I: Into<String>,
     {
-        self.arg_names = self.arg_names.declare(names);
-        rename_positional_props(&mut self.input_schema, &self.arg_names);
+        let declared = self.arg_names.declare(names);
+        rename_args(&mut self.input_schema, &self.arg_names, &declared);
+        self.arg_names = declared;
         self
     }
 
@@ -1598,6 +1604,41 @@ mod tests {
         tool.with_arg_names(["other", "arg0"]);
 
         assert_eq!(schema_props(&tool), ["arg0", "other"]);
+        assert!(tool.arg_name_conflict().is_none());
+    }
+
+    #[tokio::test]
+    async fn it_renames_again_when_names_are_redeclared() {
+        // `map_tool!` already declares names on the caller's behalf, so a
+        // second `with_arg_names` is an ordinary thing to do. By then there
+        // are no positional properties left to rename from -- the rename has
+        // to start from the names currently in force.
+        let mut tool = Tool::new(
+            "greet",
+            |a: String, b: i32| async move { format!("{a}{b}") },
+        );
+        tool.with_arg_names(["name", "age"]);
+        tool.with_arg_names(["who", "years"]);
+
+        assert_eq!(schema_props(&tool), ["who", "years"]);
+        assert_eq!(schema_required(&tool), ["who", "years"]);
+        assert!(tool.arg_name_conflict().is_none());
+
+        let resp = tool
+            .call(call_params([("years", json!(30)), ("who", json!("John"))]))
+            .await
+            .unwrap();
+
+        assert!(serde_json::to_string(&resp).unwrap().contains("John30"));
+    }
+
+    #[test]
+    fn it_swaps_declared_names_without_losing_a_property() {
+        let mut tool = Tool::new("f", |a: String, b: String| async move { format!("{a}{b}") });
+        tool.with_arg_names(["first", "second"]);
+        tool.with_arg_names(["second", "first"]);
+
+        assert_eq!(schema_props(&tool), ["first", "second"]);
         assert!(tool.arg_name_conflict().is_none());
     }
 

@@ -56,7 +56,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   successfully, and this reports them before serving instead of on a peer's
   first request. A schema that composes -- `$ref`, `allOf`, `oneOf`, a
   conditional branch -- may publish an argument the check cannot follow, so it
-  is left alone rather than failed on a guess.
+  is left alone rather than failed on a guess. `Context::add_tool` and
+  `Context::add_prompt` run the same check and refuse the insertion, since a
+  primitive registered while the server runs has no startup left to fail.
 * `ArgNames` and `FromHandlerArgs` in `neva::types`.
 
 ### Changed
