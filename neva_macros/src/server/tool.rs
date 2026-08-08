@@ -22,7 +22,7 @@
 
 use super::{
     get_arg_type, get_bool_param, get_exprs_arr, get_inner_type_from_generic, get_option_inner,
-    get_param_type, get_params_arr, get_str_param,
+    get_param_type, get_params_arr, get_str_param, param_idents_and_types,
 };
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -111,30 +111,21 @@ pub(crate) fn expand(
     //
     // Arguments are extracted from a call's `arguments` map by name, and these
     // are the only place the handler's own names survive to runtime -- Rust
-    // keeps no parameter names past compilation. Metadata-served parameters
-    // (`Context`, `Meta<_>`, `Dc<_>`, ...) are `none`-typed: they are neither
-    // published in the schema nor do they consume an argument slot, so they
-    // are skipped here for the same reason. An `Option<T>` parameter is an
-    // argument like any other -- it just need not be supplied.
-    let arg_names = function
-        .sig
-        .inputs
-        .iter()
-        .filter_map(|arg| match arg {
-            FnArg::Typed(pat_type) => match &*pat_type.pat {
-                Pat::Ident(pat_ident) if get_param_type(&pat_type.ty).0 != "none" => {
-                    Some(pat_ident.ident.to_string())
-                }
-                _ => None,
-            },
-            FnArg::Receiver(_) => None,
-        })
-        .collect::<Vec<_>>();
-
-    let arg_names_code = if arg_names.is_empty() {
+    // keeps no parameter names past compilation.
+    //
+    // Which parameters count is decided by `neva::__arg_names!` from the
+    // *resolved* type rather than here from its spelling: metadata-served
+    // parameters (`Context`, `Meta<_>`, `Dc<_>`) may reach the signature
+    // through a type alias, which this macro cannot see through but trait
+    // resolution can. Deciding it syntactically would name an argument
+    // `ToolHandler::args` does not count, and `App::run` refuses to start on
+    // exactly that disagreement.
+    let params = param_idents_and_types(function);
+    let arg_names_code = if params.is_empty() {
         quote! {}
     } else {
-        quote! { .with_arg_names([#(#arg_names),*]) }
+        let pairs = params.iter().map(|(name, ty)| quote! { #name: #ty });
+        quote! { .with_arg_names(neva::__arg_names!(#(#pairs),*)) }
     };
 
     // If no schema is provided, generate it automatically from function arguments.
@@ -158,14 +149,13 @@ pub(crate) fn expand(
             // so generated code never names `serde_json`. Primitive args use
             // `primitive_subschema`; object/custom args use
             // `__tool_arg_subschema!` (rich-or-fallback).
-            let mut prop_pairs = Vec::new();
-            let mut required = Vec::new();
+            let mut entries = Vec::new();
             for arg in &function.sig.inputs {
                 if let FnArg::Typed(pat_type) = arg
                     && let Pat::Ident(pat_ident) = &*pat_type.pat
                 {
                     let arg_name = pat_ident.ident.to_string();
-                    let (cat, is_required) = get_param_type(&pat_type.ty);
+                    let cat = get_param_type(&pat_type.ty).0;
                     if cat == "none" {
                         continue;
                     }
@@ -182,21 +172,32 @@ pub(crate) fn expand(
                         let json_type = if cat == "slice" { "array" } else { cat };
                         quote! { neva::__macro_support::primitive_subschema(#json_type) }
                     };
-                    prop_pairs.push(quote! { (#arg_name.to_string(), #prop_value) });
-                    if is_required {
-                        required.push(arg_name);
-                    }
+                    // Whether the parameter is an argument at all, and whether
+                    // it is required, are settled from the resolved type for
+                    // the same reason the names are: a type alias hides both
+                    // `Meta<_>` and `Option<_>` from a syntactic test, and a
+                    // schema that disagrees with `ToolHandler::args` describes
+                    // a call the handler will not read.
+                    let param_ty = &*pat_type.ty;
+                    entries.push(quote! {
+                        if <#param_ty as neva::__macro_support::IsArgument>::is_argument() {
+                            props.push((#arg_name.to_string(), #prop_value));
+                            if <#param_ty as neva::__macro_support::IsArgument>::is_required() {
+                                required.push(#arg_name.to_string());
+                            }
+                        }
+                    });
                 }
             }
-            if prop_pairs.is_empty() {
+            if entries.is_empty() {
                 quote! {}
             } else {
                 quote! {
                     .with_input_schema(|_| {
-                        neva::__macro_support::object_schema(
-                            ::std::vec![ #(#prop_pairs),* ],
-                            ::std::vec![ #(#required.to_string()),* ],
-                        )
+                        let mut props = ::std::vec::Vec::new();
+                        let mut required = ::std::vec::Vec::new();
+                        #(#entries)*
+                        neva::__macro_support::object_schema(props, required)
                     })
                 }
             }
@@ -207,22 +208,32 @@ pub(crate) fn expand(
                     && let Pat::Ident(pat_ident) = &*pat_type.pat
                 {
                     let arg_name = pat_ident.ident.to_string();
-                    let (arg_type, is_required) = get_param_type(&pat_type.ty);
+                    let arg_type = get_param_type(&pat_type.ty).0;
                     if arg_type == "none" {
                         continue;
                     }
-                    schema_entries.push(if is_required {
-                        quote! { .with_required(#arg_name, #arg_type, #arg_type) }
-                    } else {
-                        quote! { .with_prop(#arg_name, #arg_type, #arg_type) }
+                    // See the 2026-07-28 branch: which parameters are arguments,
+                    // and which of them are required, come from the resolved
+                    // type so the schema cannot disagree with the handler.
+                    let param_ty = &*pat_type.ty;
+                    schema_entries.push(quote! {
+                        let schema = if <#param_ty as neva::__macro_support::IsArgument>::is_argument() {
+                            if <#param_ty as neva::__macro_support::IsArgument>::is_required() {
+                                schema.with_required(#arg_name, #arg_type, #arg_type)
+                            } else {
+                                schema.with_prop(#arg_name, #arg_type, #arg_type)
+                            }
+                        } else {
+                            schema
+                        };
                     });
                 }
             }
             if !schema_entries.is_empty() {
                 quote! {
                     .with_input_schema(|schema| {
-                        schema
                         #(#schema_entries)*
+                        schema
                     })
                 }
             } else {

@@ -3,6 +3,7 @@
 use crate::Context;
 use crate::error::{Error, ErrorCode};
 use crate::shared::{ArcSlice, ArcStr};
+use crate::types::helpers::TypeCategory;
 use crate::types::request::RequestParamsMeta;
 use crate::types::{Meta, ProgressToken};
 use serde::de::DeserializeOwned;
@@ -393,8 +394,14 @@ impl RequestArgument for Context {
 /// consumes the next name and reads the value a peer sent under it. An absent
 /// key is offered to the type as `null`, so an `Option<T>` argument resolves
 /// to `None` instead of failing.
+///
+/// Whether an argument may be omitted is decided by its *type*
+/// ([`TypeCategory::is_optional`]), never by whether a synthetic `null`
+/// happens to deserialize into it: `serde_json::Value` and `()` accept `null`
+/// quite happily, and inferring optionality from that would let a required
+/// argument through as `Null` against the schema that declares it required.
 #[inline]
-pub(crate) fn extract_arg<T: RequestArgument<Error = Error>>(
+pub(crate) fn extract_arg<T: RequestArgument<Error = Error> + TypeCategory>(
     meta: &Option<RequestParamsMeta>,
     args: Option<&HashMap<String, Value>>,
     names: &ArgNames,
@@ -412,12 +419,11 @@ pub(crate) fn extract_arg<T: RequestArgument<Error = Error>>(
                         format!("invalid value for argument `{name}`: {err}"),
                     )
                 }),
-                None => T::extract(Payload::Args(Value::Null)).map_err(|_| {
-                    Error::new(
-                        ErrorCode::InvalidParams,
-                        format!("missing required argument `{name}`"),
-                    )
-                }),
+                None if T::is_optional() => T::extract(Payload::Args(Value::Null)),
+                None => Err(Error::new(
+                    ErrorCode::InvalidParams,
+                    format!("missing required argument `{name}`"),
+                )),
             }
         }
     }
@@ -432,7 +438,7 @@ impl<P: HandlerArgs> FromHandlerArgs<P> for () {
 
 macro_rules! impl_from_handler_args {
     ($($T:ident),+) => {
-        impl<P: HandlerArgs, $($T: RequestArgument<Error = Error>),+> FromHandlerArgs<P> for ($($T,)+) {
+        impl<P: HandlerArgs, $($T: RequestArgument<Error = Error> + TypeCategory),+> FromHandlerArgs<P> for ($($T,)+) {
             #[inline]
             fn from_args(params: P, names: &ArgNames) -> Result<Self, Error> {
                 let (args, meta) = params.into_parts();

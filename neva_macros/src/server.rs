@@ -141,6 +141,28 @@ pub(super) fn get_arg_type(t: &Type) -> &str {
     }
 }
 
+/// The `ident: Type` pairs of a handler's parameters, in declaration order.
+///
+/// Handed to `neva::__arg_names!` / `neva::__prompt_args!`, which decide which
+/// of them are arguments from the resolved type -- see the call sites for why
+/// that decision cannot be made here.
+pub(super) fn param_idents_and_types(function: &ItemFn) -> Vec<(syn::Ident, syn::Type)> {
+    function
+        .sig
+        .inputs
+        .iter()
+        .filter_map(|arg| match arg {
+            syn::FnArg::Typed(pat_type) => match &*pat_type.pat {
+                syn::Pat::Ident(pat_ident) => {
+                    Some((pat_ident.ident.clone(), (*pat_type.ty).clone()))
+                }
+                _ => None,
+            },
+            syn::FnArg::Receiver(_) => None,
+        })
+        .collect()
+}
+
 /// Describes a handler *parameter*: its schema category, and whether a call
 /// must supply it.
 ///

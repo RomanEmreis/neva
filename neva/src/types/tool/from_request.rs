@@ -115,6 +115,35 @@ mod tests {
     }
 
     #[test]
+    fn it_reports_a_missing_required_arg_that_would_accept_null() {
+        // `serde_json::Value` deserializes from `null` quite happily, so
+        // optionality cannot be inferred from a synthetic null failing: the
+        // argument is required and its absence has to be reported as such.
+        let params = params(Some(HashMap::new()));
+
+        let err = <(Value,)>::from_args(params, &ArgNames::new(["payload"])).unwrap_err();
+
+        assert_eq!(err.code, crate::error::ErrorCode::InvalidParams);
+        assert!(
+            err.to_string()
+                .contains("missing required argument `payload`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn it_reads_an_explicit_null_for_a_null_accepting_required_arg() {
+        // Sent explicitly, `null` is a value the argument accepts -- only its
+        // *absence* is the error.
+        let params = params(Some(HashMap::from([("payload".into(), Value::Null)])));
+
+        let (payload,): (Value,) =
+            FromHandlerArgs::from_args(params, &ArgNames::new(["payload"])).unwrap();
+
+        assert_eq!(payload, Value::Null);
+    }
+
+    #[test]
     fn it_reports_a_mistyped_arg_by_name() {
         let params = params(Some(HashMap::from([("age".into(), json!("thirty"))])));
 

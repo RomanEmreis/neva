@@ -82,6 +82,19 @@ async fn maybe_profile(profile: Option<Json<Profile>>) -> String {
     profile.map(|p| p.0.name).unwrap_or_default()
 }
 
+// A metadata parameter reaching the signature through a type alias. The macro
+// cannot see through the alias, so both the schema and the declared argument
+// names have to be settled by trait resolution -- otherwise the tool publishes
+// a `token` argument its handler never reads, and `App::run` refuses to start
+// on the disagreement.
+type Progress = neva::types::Meta<neva::types::ProgressToken>;
+
+#[neva::tool]
+async fn aliased(token: Progress, city: String) -> String {
+    let _ = token;
+    city
+}
+
 // Struct return via `Json<T>` -> output schema derived from the return type.
 #[neva::tool]
 async fn make_greeting(name: String) -> Json<Greeting> {
@@ -213,7 +226,19 @@ async fn tool_macro_emits_json_schema_2020() {
         "an all-optional tool requires nothing"
     );
 
-    // 7. An optional argument the call leaves out arrives as `None`.
+    // 7. An aliased metadata parameter is neither published nor named.
+    let aliased = by_name("aliased");
+    let props = aliased["inputSchema"]["properties"].as_object().unwrap();
+    assert_eq!(
+        props.keys().collect::<Vec<_>>(),
+        vec!["city"],
+        "an aliased `Meta<_>` must not be published: {aliased}"
+    );
+    let req: Vec<String> =
+        serde_json::from_value(aliased["inputSchema"]["required"].clone()).unwrap();
+    assert_eq!(req, vec!["city".to_string()]);
+
+    // 8. An optional argument the call leaves out arrives as `None`.
     for (args, expected) in [
         (serde_json::json!({ "name": "John" }), "John"),
         (
@@ -241,7 +266,7 @@ async fn tool_macro_emits_json_schema_2020() {
         );
     }
 
-    // 8. Arguments are read by name, so the order a peer happens to serialize
+    // 9. Arguments are read by name, so the order a peer happens to serialize
     // them in cannot reach the handler. JSON object members are unordered and
     // both spellings below are the same call.
     for args in [

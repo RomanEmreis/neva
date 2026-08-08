@@ -1119,51 +1119,67 @@ impl Tool {
         if arity == 0 {
             return None;
         }
+
         if self.arg_names.is_declared() {
             let declared = self.arg_names.len();
-            return (declared != arity).then(|| {
-                format!(
+            if declared != arity {
+                return Some(format!(
                     "tool `{}` declares {declared} argument name(s) but its handler takes \
                      {arity}. Name every argument the handler reads, metadata parameters \
                      (`Context`, `Meta<_>`, `Dc<_>`) excluded.",
                     self.name,
-                )
-            });
+                ));
+            }
         }
 
+        // Whichever names the handler reads by -- declared or positional --
+        // the schema has to ask peers for those very keys, or a call built
+        // faithfully from the schema still misses every argument.
+        //
+        // Only checked against a schema that lists its properties at the top
+        // level: one assembled from `$ref` or a composition keyword describes
+        // its arguments somewhere this cannot follow, and guessing there would
+        // fail a tool that is perfectly well-formed.
+        let properties = self.schema_properties()?;
         let missing = (0..arity)
-            .map(crate::types::helpers::extract::positional_name)
-            .find(|name| !self.schema_declares(name))?;
+            .map(|slot| self.arg_names.get(slot))
+            .find(|name| !properties(name))?;
 
-        Some(format!(
-            "tool `{}` publishes an inputSchema without the argument `{missing}` that its \
-             handler reads. A tool registered from a closure has no argument names -- Rust \
-             does not keep a closure's parameter names -- so it reads the positional `arg0`, \
-             `arg1`, ... keys, and replacing its schema renamed only what peers are told to \
-             send. Declare the names with `.with_arg_names([...])`, or register the tool with \
-             the `map_tool!` macro or the `#[tool]` attribute.",
-            self.name,
-        ))
+        Some(if self.arg_names.is_declared() {
+            format!(
+                "tool `{}` declares the argument `{missing}` but publishes an inputSchema \
+                 without it. A peer sends what the schema asks for, so the two have to name \
+                 the same arguments: either rename the schema property, or pass the schema's \
+                 own names to `.with_arg_names([...])`.",
+                self.name,
+            )
+        } else {
+            format!(
+                "tool `{}` publishes an inputSchema without the argument `{missing}` that its \
+                 handler reads. A tool registered from a closure has no argument names -- Rust \
+                 does not keep a closure's parameter names -- so it reads the positional `arg0`, \
+                 `arg1`, ... keys, and replacing its schema renamed only what peers are told to \
+                 send. Declare the names with `.with_arg_names([...])`, or register the tool with \
+                 the `map_tool!` macro or the `#[tool]` attribute.",
+                self.name,
+            )
+        })
     }
 
-    /// Whether the published input schema offers a property called `name`.
+    /// A predicate over the property names the input schema publishes, or
+    /// `None` when the schema does not list properties at the top level.
     #[inline]
-    fn schema_declares(&self, name: &str) -> bool {
+    fn schema_properties(&self) -> Option<impl Fn(&str) -> bool + '_> {
         #[cfg(feature = "legacy-spec")]
-        {
-            self.input_schema
-                .properties
-                .as_ref()
-                .is_some_and(|props| props.contains_key(name))
-        }
+        let props = self.input_schema.properties.as_ref()?;
         #[cfg(not(feature = "legacy-spec"))]
-        {
-            self.input_schema
-                .as_value()
-                .get("properties")
-                .and_then(Value::as_object)
-                .is_some_and(|props| props.contains_key(name))
-        }
+        let props = self
+            .input_schema
+            .as_value()
+            .get("properties")
+            .and_then(Value::as_object)?;
+
+        Some(move |name: &str| props.contains_key(name))
     }
 
     /// Invoke a tool

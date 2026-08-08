@@ -15,7 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   * An argument a peer omitted is offered to the handler as `null`, so an
     absent optional argument no longer errors on arrival.
   * `Meta<_>`, `Context` and `Dc<_>` parameters consume no argument slot, so
-    they can sit anywhere in the signature without shifting the rest.
+    they can sit anywhere in the signature without shifting the rest. The
+    `#[tool]` / `#[prompt]` macros classify them from the *resolved* type, so a
+    parameter reaching the signature through a type alias
+    (`type Token = Meta<ProgressToken>`) is recognised too.
+  * Whether an argument may be omitted is decided by its type, never by whether
+    a synthetic `null` happens to deserialize into it -- otherwise a required
+    `serde_json::Value` argument would silently arrive as `Null`.
 * **Tools registered from a closure publish one property per argument.** The
   generated `inputSchema` keyed its properties by *type name*, so
   `|a: i32, b: i32|` advertised a single `number` property and the second
@@ -40,9 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   registers the tool with `name` and `age` and skips metadata parameters.
 * `App::run` fails at startup when a tool's published `inputSchema` and its
   handler disagree about the arguments -- an overridden schema without
-  `with_arg_names`, or a miscounted declaration. Such a tool could never be
-  called successfully, and this reports it before serving instead of on a
-  peer's first call.
+  `with_arg_names`, a miscounted declaration, or declared names the schema does
+  not offer as properties. Such a tool could never be called successfully, and
+  this reports it before serving instead of on a peer's first call. A schema
+  that has no top-level `properties` (assembled from `$ref` or a composition
+  keyword) is left alone rather than failed on a guess.
 * `ArgNames` and `FromHandlerArgs` in `neva::types`.
 
 ### Changed

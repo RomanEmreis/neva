@@ -1,9 +1,9 @@
 //! Macros for MCP prompts
 
-use super::{get_bool_param, get_exprs_arr, get_param_type, get_params_arr, get_str_param};
+use super::{get_bool_param, get_exprs_arr, get_params_arr, get_str_param, param_idents_and_types};
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{FnArg, ItemFn, Meta, Pat, punctuated::Punctuated, token::Comma};
+use syn::{ItemFn, Meta, punctuated::Punctuated, token::Comma};
 
 pub(crate) fn expand(
     attr: &Punctuated<Meta, Comma>,
@@ -70,26 +70,18 @@ pub(crate) fn expand(
     let args_code = if let Some(args_json) = args {
         quote! { .with_args(neva::types::prompt::PromptArguments::from_json_str(#args_json)) }
     } else if !no_args {
-        let mut arg_entries = Vec::new();
-        for arg in &function.sig.inputs {
-            if let FnArg::Typed(pat_type) = arg
-                && let Pat::Ident(pat_ident) = &*pat_type.pat
-            {
-                let arg_name = pat_ident.ident.to_string();
-                // An `Option<T>` parameter is an argument the caller may leave
-                // out; it still occupies a slot and is still published.
-                let (arg_type, is_required) = get_param_type(&pat_type.ty);
-                if arg_type != "none" {
-                    arg_entries.push(quote! {
-                        neva::types::prompt::PromptArgument::named(#arg_name, #is_required)
-                    });
-                }
-            }
-        }
-        if !arg_entries.is_empty() {
-            quote! { .with_args([#(#arg_entries,)*]) }
-        } else {
+        // Which parameters are arguments, and which of those may be omitted,
+        // is decided by `neva::__prompt_args!` from the resolved type -- a
+        // metadata parameter or an `Option<T>` can reach the signature through
+        // a type alias this macro cannot see through. The published list is
+        // also what extraction reads by, so classifying it syntactically would
+        // shift every argument after the mis-classified one.
+        let params = param_idents_and_types(function);
+        if params.is_empty() {
             quote! {}
+        } else {
+            let pairs = params.iter().map(|(name, ty)| quote! { #name: #ty });
+            quote! { .with_args(neva::__prompt_args!(#(#pairs),*)) }
         }
     } else {
         quote! {}

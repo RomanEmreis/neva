@@ -269,6 +269,10 @@ pub mod __macro_support {
     pub trait IsArgument {
         /// Returns `true` when `Self` occupies an argument slot.
         fn is_argument() -> bool;
+
+        /// Returns `true` when a call must supply the argument -- that is,
+        /// when `Self` is not an `Option<T>`.
+        fn is_required() -> bool;
     }
 
     #[cfg(feature = "server")]
@@ -276,6 +280,11 @@ pub mod __macro_support {
         #[inline]
         fn is_argument() -> bool {
             T::category() != crate::types::PropertyType::None
+        }
+
+        #[inline]
+        fn is_required() -> bool {
+            !T::is_optional()
         }
     }
 }
@@ -348,11 +357,17 @@ macro_rules! map_tool {
 macro_rules! map_prompt {
     ($app:expr, $name:expr, |$($arg:ident : $ty:ty),* $(,)?| $body:expr) => {
         $app.map_prompt($name, move |$($arg: $ty),*| $body)
-            .with_args($crate::__arg_names!($($arg : $ty),*))
+            .with_args($crate::__prompt_args!($($arg : $ty),*))
     };
 }
 
 /// Collects the names of the value-carrying parameters. Not public API.
+///
+/// The filtering is by *resolved* type rather than by how the parameter was
+/// spelled, so a type alias for a metadata parameter (`type Token =
+/// Meta<ProgressToken>`) is dropped here exactly as `ToolHandler::args` drops
+/// it. A syntactic test could not see through the alias, and the two lists
+/// disagreeing is precisely what `App::run` refuses to start on.
 #[cfg(feature = "server")]
 #[doc(hidden)]
 #[macro_export]
@@ -365,6 +380,29 @@ macro_rules! __arg_names {
             }
         )*
         names
+    }};
+}
+
+/// Collects the value-carrying parameters as prompt arguments, carrying
+/// whether each must be supplied. Not public API.
+///
+/// See [`__arg_names`] for why the classification is by resolved type.
+#[cfg(feature = "server")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __prompt_args {
+    ($($arg:ident : $ty:ty),* $(,)?) => {{
+        type __PromptArg = $crate::types::prompt::PromptArgument;
+        let mut args: ::std::vec::Vec<__PromptArg> = ::std::vec::Vec::new();
+        $(
+            if <$ty as $crate::__macro_support::IsArgument>::is_argument() {
+                args.push(__PromptArg::named(
+                    ::core::stringify!($arg),
+                    <$ty as $crate::__macro_support::IsArgument>::is_required(),
+                ));
+            }
+        )*
+        args
     }};
 }
 

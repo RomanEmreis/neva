@@ -2080,6 +2080,34 @@ mod tests {
         assert_eq!(names.get(1), "age");
     }
 
+    #[tokio::test]
+    async fn map_prompt_macro_keeps_names_and_optionality() {
+        use crate::types::Role;
+
+        let mut app = App::new();
+        crate::map_prompt!(
+            app,
+            "analyze",
+            |ctx: crate::Context, lang: String, tone: Option<String>| async move {
+                let _ = ctx;
+                (format!("{lang} {tone:?}"), Role::User)
+            }
+        );
+
+        let prompt = app.options.prompts.as_ref().get("analyze").expect("prompt");
+        let args = prompt.args.as_ref().unwrap();
+
+        // `ctx` is served from the request, so it is neither published nor
+        // named; `tone` is published as an argument peers may leave out.
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0].name, "lang");
+        assert_eq!(args[0].required, Some(true));
+        assert_eq!(args[1].name, "tone");
+        assert_eq!(args[1].required, Some(false));
+        assert_eq!(prompt.arg_names.get(0), "lang");
+        assert_eq!(prompt.arg_names.get(1), "tone");
+    }
+
     #[test]
     fn a_bare_closure_publishes_the_names_it_reads() {
         let mut app = App::new();
@@ -2126,6 +2154,50 @@ mod tests {
             format!("{name} is {age}")
         })
         .with_arg_names(["name"]);
+
+        app.validate_tool_arg_names();
+    }
+
+    #[test]
+    #[should_panic(expected = "declares the argument `q` but publishes an inputSchema without it")]
+    fn startup_rejects_names_the_schema_does_not_offer() {
+        let mut app = App::new();
+        app.map_tool("search", |q: String| async move { q })
+            .with_input_schema(|_| {
+                const JSON: &str = r#"{"type":"object","properties":{"query":{"type":"string"}}}"#;
+                #[cfg(feature = "legacy-spec")]
+                {
+                    crate::types::tool::ToolSchema::from_json_str(JSON)
+                }
+                #[cfg(not(feature = "legacy-spec"))]
+                {
+                    crate::types::schema_2020::InputSchema::from_json_str(JSON).unwrap_or_default()
+                }
+            })
+            .with_arg_names(["q"]);
+
+        app.validate_tool_arg_names();
+    }
+
+    /// A schema that describes its arguments through `$ref` or a composition
+    /// keyword has no top-level `properties` to check against, and is left
+    /// alone rather than failed on a guess.
+    #[test]
+    fn startup_accepts_a_schema_without_top_level_properties() {
+        let mut app = App::new();
+        app.map_tool("search", |q: String| async move { q })
+            .with_input_schema(|_| {
+                const JSON: &str = r##"{"$ref": "#/$defs/Args"}"##;
+                #[cfg(feature = "legacy-spec")]
+                {
+                    crate::types::tool::ToolSchema::from_json_str(JSON)
+                }
+                #[cfg(not(feature = "legacy-spec"))]
+                {
+                    crate::types::schema_2020::InputSchema::from_json_str(JSON).unwrap_or_default()
+                }
+            })
+            .with_arg_names(["q"]);
 
         app.validate_tool_arg_names();
     }
