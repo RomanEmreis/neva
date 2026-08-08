@@ -1178,10 +1178,11 @@ impl Tool {
     /// rather than on a peer's first call.
     pub(crate) fn arg_name_conflict(&self) -> Option<String> {
         let arity = self.arg_names.arity();
-        if arity == 0 {
-            return None;
-        }
 
+        // A declaration is checked against the handler whatever the arity is.
+        // Zero is a real count, not an absence of one: names given to a
+        // handler that reads none are as much a miscount as too few names for
+        // one that reads several, and describe a tool just as broken.
         if self.arg_names.is_declared() {
             let declared = self.arg_names.len();
             if declared != arity {
@@ -1200,6 +1201,12 @@ impl Tool {
                     self.name,
                 ));
             }
+        }
+
+        // Past here every check reads an argument, so a handler that takes
+        // none has nothing left to disagree with the schema about.
+        if arity == 0 {
+            return None;
         }
 
         // Whichever names the handler reads by -- declared or positional --

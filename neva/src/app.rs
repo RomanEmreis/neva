@@ -2176,6 +2176,29 @@ mod tests {
         app.validate_arg_names();
     }
 
+    /// Zero is a count like any other: a name handed to a handler that reads
+    /// none is the same miscount as too few names for one that reads several.
+    #[test]
+    #[should_panic(expected = "declares 1 argument name(s) but its handler takes 0")]
+    fn startup_rejects_a_declaration_on_a_zero_arity_handler() {
+        let mut app = App::new();
+        app.map_tool("ping", || async { "pong" })
+            .with_arg_names(["value"]);
+
+        app.validate_arg_names();
+    }
+
+    /// The counterpart: naming nothing for a handler that reads nothing is a
+    /// declaration that agrees with its handler, and is left alone.
+    #[test]
+    fn startup_accepts_an_empty_declaration_on_a_zero_arity_handler() {
+        let mut app = App::new();
+        app.map_tool("ping", || async { "pong" })
+            .with_arg_names(Vec::<String>::new());
+
+        app.validate_arg_names();
+    }
+
     #[test]
     #[should_panic(expected = "declares the argument `q` but publishes an inputSchema without it")]
     fn startup_rejects_names_the_schema_does_not_offer() {
