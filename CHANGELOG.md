@@ -50,8 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * `App::run` fails at startup when a tool or prompt and its handler disagree
   about the arguments -- a tool whose schema was overridden without
   `with_arg_names`, a miscounted `with_arg_names`, declared names the schema
-  does not offer as properties, or a `Prompt::with_args` list that does not
-  cover every argument the handler takes. None of these could ever be called
+  does not offer as properties, a `Prompt::with_args` list that does not cover
+  every argument the handler takes, or the same name given to two arguments.
+  None of these could ever be called
   successfully, and this reports them before serving instead of on a peer's
   first request. A schema that composes -- `$ref`, `allOf`, `oneOf`, a
   conditional branch -- may publish an argument the check cannot follow, so it

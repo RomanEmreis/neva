@@ -2253,6 +2253,32 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "prompt `analyze` publishes the argument `topic` twice")]
+    fn startup_rejects_a_prompt_with_duplicate_arg_names() {
+        use crate::types::Role;
+
+        let mut app = App::new();
+        app.map_prompt("analyze", |topic: String, tone: String| async move {
+            (format!("{topic}{tone}"), Role::User)
+        })
+        .with_args(["topic", "topic"]);
+
+        app.validate_arg_names();
+    }
+
+    #[test]
+    #[should_panic(expected = "tool `greet` declares the argument name `name` twice")]
+    fn startup_rejects_a_tool_with_duplicate_arg_names() {
+        let mut app = App::new();
+        app.map_tool("greet", |first: String, last: String| async move {
+            format!("{first}{last}")
+        })
+        .with_arg_names(["name", "name"]);
+
+        app.validate_arg_names();
+    }
+
+    #[test]
     fn startup_accepts_a_prompt_that_publishes_every_arg() {
         use crate::types::Role;
 

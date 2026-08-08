@@ -522,14 +522,26 @@ impl Prompt {
     /// trailing parameters reading keys no peer was ever asked for. Worth
     /// catching at startup rather than on a peer's first request.
     pub(crate) fn arg_name_conflict(&self) -> Option<String> {
+        if !self.arg_names.is_declared() {
+            return None;
+        }
+
         let arity = self.arg_names.arity();
         let declared = self.arg_names.len();
-
-        (self.arg_names.is_declared() && declared != arity).then(|| {
-            format!(
+        if declared != arity {
+            return Some(format!(
                 "prompt `{}` publishes {declared} argument(s) but its handler takes {arity}. \
                  List every argument the handler reads, metadata parameters (`Context`, \
                  `Meta<_>`, `Dc<_>`) excluded.",
+                self.name,
+            ));
+        }
+
+        self.arg_names.duplicate().map(|duplicate| {
+            format!(
+                "prompt `{}` publishes the argument `{duplicate}` twice. Arguments are read \
+                 from a request by name, so two parameters sharing one name would both be \
+                 handed the same value.",
                 self.name,
             )
         })

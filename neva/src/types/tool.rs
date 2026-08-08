@@ -886,6 +886,12 @@ fn build_input_schema_from_args(
 ///
 /// Only the `argN` keys [`build_input_schema_from_args`] produced are touched,
 /// so a hand-written schema (which has none) passes through untouched.
+///
+/// The rename happens in two passes -- take every positional property out,
+/// then put them all back under their declared names -- because a declared
+/// name may itself be a positional key: a handler is perfectly entitled to a
+/// parameter called `arg1`. Renaming in place would drop that parameter's
+/// property on top of a source slot not yet moved.
 #[cfg(feature = "server")]
 #[inline]
 fn rename_positional_props(schema: &mut crate::types::ToolInputSchema, names: &ArgNames) {
@@ -894,13 +900,18 @@ fn rename_positional_props(schema: &mut crate::types::ToolInputSchema, names: &A
     #[cfg(feature = "legacy-spec")]
     {
         if let Some(props) = schema.properties.as_mut() {
-            for slot in 0..names.len() {
-                if let Some(prop) = props.remove(positional_name(slot)) {
+            let taken = (0..names.len())
+                .map(|slot| props.remove(positional_name(slot)))
+                .collect::<Vec<_>>();
+            for (slot, prop) in taken.into_iter().enumerate() {
+                if let Some(prop) = prop {
                     props.insert(names.get(slot).to_owned(), prop);
                 }
             }
         }
         if let Some(required) = schema.required.as_mut() {
+            // Each entry is visited once and tested against the name it came
+            // in with, so a rewritten entry is never re-read as a source.
             for name in required.iter_mut() {
                 if let Some(slot) = positional_slot(name) {
                     *name = names.get(slot).to_owned();
@@ -914,8 +925,11 @@ fn rename_positional_props(schema: &mut crate::types::ToolInputSchema, names: &A
             return;
         };
         if let Some(props) = schema.get_mut("properties").and_then(Value::as_object_mut) {
-            for slot in 0..names.len() {
-                if let Some(prop) = props.remove(positional_name(slot)) {
+            let taken = (0..names.len())
+                .map(|slot| props.remove(positional_name(slot)))
+                .collect::<Vec<_>>();
+            for (slot, prop) in taken.into_iter().enumerate() {
+                if let Some(prop) = prop {
                     props.insert(names.get(slot).to_owned(), prop);
                 }
             }
@@ -1127,6 +1141,14 @@ impl Tool {
                     "tool `{}` declares {declared} argument name(s) but its handler takes \
                      {arity}. Name every argument the handler reads, metadata parameters \
                      (`Context`, `Meta<_>`, `Dc<_>`) excluded.",
+                    self.name,
+                ));
+            }
+            if let Some(duplicate) = self.arg_names.duplicate() {
+                return Some(format!(
+                    "tool `{}` declares the argument name `{duplicate}` twice. Arguments are \
+                     read from a call by name, so two parameters sharing one name would both \
+                     be handed the same value.",
                     self.name,
                 ));
             }
@@ -1551,6 +1573,45 @@ mod tests {
         let tool = Tool::new("sum", |a: i32, b: i32| async move { a + b });
 
         assert_eq!(schema_props(&tool).len(), 2);
+    }
+
+    #[test]
+    fn it_renames_a_parameter_that_is_itself_named_after_a_slot() {
+        // Nothing stops a handler from calling a parameter `arg1`. Renaming
+        // the generated properties one at a time would drop `arg1`'s property
+        // onto the slot the *next* parameter still has to be moved out of.
+        let mut tool = Tool::new("f", |arg1: String, other: String| async move {
+            format!("{arg1}{other}")
+        });
+        tool.with_arg_names(["arg1", "other"]);
+
+        assert_eq!(schema_props(&tool), ["arg1", "other"]);
+        assert_eq!(schema_required(&tool), ["arg1", "other"]);
+        assert!(tool.arg_name_conflict().is_none());
+    }
+
+    #[test]
+    fn it_renames_when_a_declared_name_reuses_a_later_slot() {
+        let mut tool = Tool::new("f", |other: String, arg0: String| async move {
+            format!("{other}{arg0}")
+        });
+        tool.with_arg_names(["other", "arg0"]);
+
+        assert_eq!(schema_props(&tool), ["arg0", "other"]);
+        assert!(tool.arg_name_conflict().is_none());
+    }
+
+    #[test]
+    fn it_rejects_a_duplicate_declared_name() {
+        let mut tool = Tool::new("f", |a: String, b: String| async move { format!("{a}{b}") });
+        tool.with_arg_names(["value", "value"]);
+
+        let conflict = tool.arg_name_conflict().expect("must be reported");
+
+        assert!(
+            conflict.contains("declares the argument name `value` twice"),
+            "unexpected conflict: {conflict}"
+        );
     }
 
     #[test]

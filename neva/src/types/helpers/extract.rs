@@ -198,6 +198,21 @@ impl ArgNames {
         }
     }
 
+    /// The first name declared more than once, if any.
+    ///
+    /// Two slots reading the same key is not a mistake that announces itself:
+    /// the schema collapses to one property, and both parameters quietly
+    /// receive the same value rather than the call failing.
+    #[inline]
+    pub(crate) fn duplicate(&self) -> Option<&str> {
+        let names = self.names.as_deref()?;
+        let mut seen = std::collections::HashSet::with_capacity(names.len());
+        names
+            .iter()
+            .map(|name| &**name)
+            .find(|name| !seen.insert(*name))
+    }
+
     /// Returns `true` when no names were declared.
     ///
     /// # Examples
