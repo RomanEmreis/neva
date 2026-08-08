@@ -2222,10 +2222,13 @@ mod tests {
         app.validate_arg_names();
     }
 
-    /// `additionalProperties` left open admits names the map never listed.
+    /// Permitting further names is not the same as naming one. A schema left
+    /// open by `additionalProperties` still tells no peer to send `q`, so the
+    /// tool is as uncallable as with a closed schema and is still reported.
     #[test]
+    #[should_panic(expected = "declares the argument `q` but publishes an inputSchema without it")]
     #[cfg(not(feature = "legacy-spec"))]
-    fn startup_accepts_a_schema_left_open_to_further_properties() {
+    fn startup_checks_a_schema_left_open_to_further_properties() {
         let mut app = App::new();
         app.map_tool("search", |q: String| async move { q })
             .with_input_schema(|_| {
@@ -2239,8 +2242,33 @@ mod tests {
         app.validate_arg_names();
     }
 
-    /// `additionalProperties: false` is the spelling that *closes* the schema,
-    /// so the map really is exhaustive and the check still applies.
+    /// `propertyNames` constrains what names may appear; it declares none. It
+    /// is no reason to stop checking, least of all next to an
+    /// `additionalProperties: false` that closes the schema outright.
+    #[test]
+    #[should_panic(expected = "declares the argument `q` but publishes an inputSchema without it")]
+    #[cfg(not(feature = "legacy-spec"))]
+    fn startup_checks_a_schema_constraining_property_names() {
+        let mut app = App::new();
+        app.map_tool("search", |q: String| async move { q })
+            .with_input_schema(|_| {
+                crate::types::schema_2020::InputSchema::from_json_str(
+                    r#"{
+                        "type": "object",
+                        "properties": { "query": { "type": "string" } },
+                        "propertyNames": { "pattern": "^[a-z]+$" },
+                        "additionalProperties": false
+                    }"#,
+                )
+                .unwrap_or_default()
+            })
+            .with_arg_names(["q"]);
+
+        app.validate_arg_names();
+    }
+
+    /// `additionalProperties: false` closes the schema; the map is exhaustive
+    /// and the check applies as plainly as it does without the keyword.
     #[test]
     #[should_panic(expected = "declares the argument `q` but publishes an inputSchema without it")]
     #[cfg(not(feature = "legacy-spec"))]

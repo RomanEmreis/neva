@@ -318,16 +318,31 @@ impl StdIoReceiver {
     /// peer happened to send another line. Ctrl+C looked like it did nothing.
     ///
     /// A thread of our own is not the runtime's to wait for, so returning from
-    /// `main` ends the process while this thread is still parked in `read`.
-    /// Cancellation is still observed between lines, for a host that keeps
-    /// running after the server stops.
+    /// `main` ends the process while this thread is still parked in `read` --
+    /// which is also what [`tokio::io::stdin`]'s own documentation recommends
+    /// for interactive input, for this reason.
     ///
-    /// End of input leaves the dispatch loop waiting, exactly as it did
-    /// before: the receiver still holds a sender of its own, so the channel
-    /// never closes. That is a separate shortcoming of the stdio shutdown
-    /// path -- ending it properly means draining the handlers still in flight
-    /// so their answers are not thrown away -- and is deliberately not
-    /// conflated with the Ctrl+C fix here.
+    /// # What this does not solve
+    ///
+    /// A read already in progress still cannot be interrupted; tokio says as
+    /// much of its own stdin ("it is impossible to cancel that read"), and no
+    /// portable, safe API changes that. Cancellation is therefore observed
+    /// *between* lines. For a server that owns its process this is invisible:
+    /// nothing outlives the parked read. For a host that keeps running after
+    /// `App::run` returns it is not -- the parked thread stays attached to
+    /// stdin and swallows the next line before noticing it has nowhere to put
+    /// it, so a restarted server, or the host reading stdin itself, loses that
+    /// line.
+    ///
+    /// End of input has the mirror problem: the receiver still holds a sender
+    /// of its own, so the channel never closes and the dispatch loop waits on
+    /// input that can no longer come.
+    ///
+    /// Both belong to the same missing piece -- an stdio transport that can be
+    /// *shut down* rather than merely abandoned: drain the handlers still in
+    /// flight so their answers are not thrown away, close the stream, and hand
+    /// stdin back. Neither is introduced here, and neither is conflated with
+    /// the Ctrl+C fix.
     #[cfg(feature = "server")]
     pub(crate) fn start_blocking<T: std::io::BufRead + Send + 'static>(
         &self,
