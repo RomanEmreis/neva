@@ -792,7 +792,7 @@ impl Context {
             Some(prompt) => {
                 #[cfg(feature = "http-server")]
                 self.validate_claims(prompt.roles.as_deref(), prompt.permissions.as_deref())?;
-                prompt.call(params.with_context(self).into()).await
+                prompt.call(params.with_context(self)).await
             }
         }
     }
@@ -807,7 +807,7 @@ impl Context {
             Some(tool) => {
                 #[cfg(feature = "http-server")]
                 self.validate_claims(tool.roles.as_deref(), tool.permissions.as_deref())?;
-                tool.call(params.with_context(self).into()).await
+                tool.call(params.with_context(self)).await
             }
         }
     }
@@ -858,7 +858,7 @@ impl Context {
                         tokio::select! {
                             result = tool.call(params
                                 .with_task(&task_id)
-                                .with_context(ctx).into()) => {
+                                .with_context(ctx)) => {
                                 // The outcome is stored *before* the status
                                 // flips, so a `tasks/get` that observes a
                                 // terminal status always sees the matching
@@ -903,7 +903,7 @@ impl Context {
                         "Tool required task augmented call",
                     ))
                 } else {
-                    tool.call(params.with_context(self).into())
+                    tool.call(params.with_context(self))
                         .await
                         .map(Either::Right)
                 }

@@ -5,7 +5,7 @@ use crate::app::options::RuntimeMcpOptions;
 use crate::error::{Error, ErrorCode};
 use crate::shared::BoxFuture;
 use crate::types::{
-    CallToolRequestParams, CompleteRequestParams, GetPromptRequestParams, IntoResponse,
+    ArgNames, CallToolRequestParams, CompleteRequestParams, GetPromptRequestParams, IntoResponse,
     ListResourcesRequestParams, ReadResourceRequestParams, Request, RequestId, Response,
 };
 use std::future::Future;
@@ -14,32 +14,25 @@ use std::sync::Arc;
 /// Represents a specific registered handler
 pub(crate) type RequestHandler<T> = Arc<dyn Handler<T> + Send + Sync>;
 
+/// Parameters handed to a registered handler.
+///
+/// The `Tool` and `Prompt` variants carry the [`ArgNames`] of the primitive
+/// they were dispatched to, because extraction reads the request's
+/// `arguments` map by name and only the registered [`crate::types::Tool`] /
+/// [`crate::types::prompt::Prompt`] knows what its handler's arguments are
+/// called.
 #[derive(Debug)]
 pub enum HandlerParams {
     Request(Context, Request),
-    Tool(CallToolRequestParams),
+    Tool(CallToolRequestParams, ArgNames),
     Resource(ReadResourceRequestParams),
-    Prompt(GetPromptRequestParams),
-}
-
-impl From<CallToolRequestParams> for HandlerParams {
-    #[inline]
-    fn from(params: CallToolRequestParams) -> Self {
-        Self::Tool(params)
-    }
+    Prompt(GetPromptRequestParams, ArgNames),
 }
 
 impl From<ReadResourceRequestParams> for HandlerParams {
     #[inline]
     fn from(params: ReadResourceRequestParams) -> Self {
         Self::Resource(params)
-    }
-}
-
-impl From<GetPromptRequestParams> for HandlerParams {
-    #[inline]
-    fn from(params: GetPromptRequestParams) -> Self {
-        Self::Prompt(params)
     }
 }
 

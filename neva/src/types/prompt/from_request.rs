@@ -1,38 +1,69 @@
 use super::GetPromptRequestParams;
-use crate::error::Error;
-use crate::types::helpers::extract::{RequestArgument, extract_arg};
+use crate::types::helpers::extract::HandlerArgs;
+use crate::types::request::RequestParamsMeta;
+use serde_json::Value;
+use std::collections::HashMap;
 
-impl TryFrom<GetPromptRequestParams> for () {
-    type Error = Error;
-
+impl HandlerArgs for GetPromptRequestParams {
     #[inline]
-    fn try_from(_: GetPromptRequestParams) -> Result<Self, Self::Error> {
-        Ok(())
+    fn into_parts(self) -> (Option<HashMap<String, Value>>, Option<RequestParamsMeta>) {
+        (self.args, self.meta)
     }
 }
 
-macro_rules! impl_from_get_prompt_params {
-    ($($T: ident),*) => {
-        impl<$($T: RequestArgument<Error = Error>),+> TryFrom<GetPromptRequestParams> for ($($T,)+) {
-            type Error = Error;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ArgNames, FromHandlerArgs};
+    use serde_json::json;
 
-            #[inline]
-            fn try_from(params: GetPromptRequestParams) -> Result<Self, Self::Error> {
-                let args = params.args.unwrap_or_default();
-                let mut iter = args.iter();
-                let tuple = (
-                    $(
-                        extract_arg::<$T>(&params.meta, &mut iter)?,
-                    )*
-                );
-                Ok(tuple)
-            }
-        }
+    #[test]
+    fn it_publishes_an_optional_arg_as_not_required() {
+        use crate::types::prompt::Prompt;
+
+        let prompt = Prompt::new(
+            "analyze",
+            |topic: String, tone: Option<String>| async move {
+                (format!("{topic}/{tone:?}"), crate::types::Role::User)
+            },
+        );
+        let args = prompt.args.as_ref().unwrap();
+
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0].required, Some(true));
+        assert_eq!(args[1].required, Some(false));
+    }
+
+    #[test]
+    fn it_resolves_an_absent_optional_arg_to_none() {
+        let params = GetPromptRequestParams {
+            name: "analyze".into(),
+            args: Some(HashMap::from([("topic".into(), json!("rust"))])),
+            meta: None,
+        };
+
+        let (topic, tone): (String, Option<String>) =
+            FromHandlerArgs::from_args(params, &ArgNames::new(["topic", "tone"])).unwrap();
+
+        assert_eq!(topic, "rust");
+        assert_eq!(tone, None);
+    }
+
+    #[test]
+    fn it_extracts_args_by_declared_name() {
+        let params = GetPromptRequestParams {
+            name: "prompt".into(),
+            args: Some(HashMap::from([
+                ("tone".into(), json!("formal")),
+                ("topic".into(), json!("rust")),
+            ])),
+            meta: None,
+        };
+
+        let (topic, tone): (String, String) =
+            FromHandlerArgs::from_args(params, &ArgNames::new(["topic", "tone"])).unwrap();
+
+        assert_eq!(topic, "rust");
+        assert_eq!(tone, "formal");
     }
 }
-
-impl_from_get_prompt_params! { T1 }
-impl_from_get_prompt_params! { T1, T2 }
-impl_from_get_prompt_params! { T1, T2, T3 }
-impl_from_get_prompt_params! { T1, T2, T3, T4 }
-impl_from_get_prompt_params! { T1, T2, T3, T4, T5 }

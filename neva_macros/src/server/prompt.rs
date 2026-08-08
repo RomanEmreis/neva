@@ -1,6 +1,6 @@
 //! Macros for MCP prompts
 
-use super::{get_arg_type, get_bool_param, get_exprs_arr, get_params_arr, get_str_param};
+use super::{get_bool_param, get_exprs_arr, get_param_type, get_params_arr, get_str_param};
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{FnArg, ItemFn, Meta, Pat, punctuated::Punctuated, token::Comma};
@@ -76,10 +76,12 @@ pub(crate) fn expand(
                 && let Pat::Ident(pat_ident) = &*pat_type.pat
             {
                 let arg_name = pat_ident.ident.to_string();
-                let arg_type = get_arg_type(&pat_type.ty);
-                if !arg_type.eq("none") {
+                // An `Option<T>` parameter is an argument the caller may leave
+                // out; it still occupies a slot and is still published.
+                let (arg_type, is_required) = get_param_type(&pat_type.ty);
+                if arg_type != "none" {
                     arg_entries.push(quote! {
-                        #arg_name
+                        neva::types::prompt::PromptArgument::named(#arg_name, #is_required)
                     });
                 }
             }

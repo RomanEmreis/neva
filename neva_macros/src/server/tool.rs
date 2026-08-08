@@ -21,8 +21,8 @@
 //!   configuration).
 
 use super::{
-    get_arg_type, get_bool_param, get_exprs_arr, get_inner_type_from_generic, get_params_arr,
-    get_str_param,
+    get_arg_type, get_bool_param, get_exprs_arr, get_inner_type_from_generic, get_option_inner,
+    get_param_type, get_params_arr, get_str_param,
 };
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -107,6 +107,36 @@ pub(crate) fn expand(
         quote! { .with_title(#title) }
     });
 
+    // The names of the value-carrying parameters, in declaration order.
+    //
+    // Arguments are extracted from a call's `arguments` map by name, and these
+    // are the only place the handler's own names survive to runtime -- Rust
+    // keeps no parameter names past compilation. Metadata-served parameters
+    // (`Context`, `Meta<_>`, `Dc<_>`, ...) are `none`-typed: they are neither
+    // published in the schema nor do they consume an argument slot, so they
+    // are skipped here for the same reason. An `Option<T>` parameter is an
+    // argument like any other -- it just need not be supplied.
+    let arg_names = function
+        .sig
+        .inputs
+        .iter()
+        .filter_map(|arg| match arg {
+            FnArg::Typed(pat_type) => match &*pat_type.pat {
+                Pat::Ident(pat_ident) if get_param_type(&pat_type.ty).0 != "none" => {
+                    Some(pat_ident.ident.to_string())
+                }
+                _ => None,
+            },
+            FnArg::Receiver(_) => None,
+        })
+        .collect::<Vec<_>>();
+
+    let arg_names_code = if arg_names.is_empty() {
+        quote! {}
+    } else {
+        quote! { .with_arg_names([#(#arg_names),*]) }
+    };
+
     // If no schema is provided, generate it automatically from function arguments.
     let input_schema_code = if let Some(schema_json) = input_schema {
         if cfg!(not(feature = "legacy-spec")) {
@@ -135,11 +165,13 @@ pub(crate) fn expand(
                     && let Pat::Ident(pat_ident) = &*pat_type.pat
                 {
                     let arg_name = pat_ident.ident.to_string();
-                    let cat = get_arg_type(&pat_type.ty);
+                    let (cat, is_required) = get_param_type(&pat_type.ty);
                     if cat == "none" {
                         continue;
                     }
-                    let ty = &*pat_type.ty;
+                    // An `Option<T>` argument is described by its `T`, so the
+                    // subschema is probed past the `Option` first.
+                    let ty = get_option_inner(&pat_type.ty).unwrap_or(&pat_type.ty);
                     let prop_value = if cat == "object" {
                         // Structured args arrive wrapped (e.g. `Json<T>`); probe
                         // the inner type so a `JsonSchema`-deriving `T` yields a
@@ -151,7 +183,9 @@ pub(crate) fn expand(
                         quote! { neva::__macro_support::primitive_subschema(#json_type) }
                     };
                     prop_pairs.push(quote! { (#arg_name.to_string(), #prop_value) });
-                    required.push(arg_name);
+                    if is_required {
+                        required.push(arg_name);
+                    }
                 }
             }
             if prop_pairs.is_empty() {
@@ -173,12 +207,15 @@ pub(crate) fn expand(
                     && let Pat::Ident(pat_ident) = &*pat_type.pat
                 {
                     let arg_name = pat_ident.ident.to_string();
-                    let arg_type = get_arg_type(&pat_type.ty);
-                    if !arg_type.eq("none") {
-                        schema_entries.push(quote! {
-                            .with_required(#arg_name, #arg_type, #arg_type)
-                        });
+                    let (arg_type, is_required) = get_param_type(&pat_type.ty);
+                    if arg_type == "none" {
+                        continue;
                     }
+                    schema_entries.push(if is_required {
+                        quote! { .with_required(#arg_name, #arg_type, #arg_type) }
+                    } else {
+                        quote! { .with_prop(#arg_name, #arg_type, #arg_type) }
+                    });
                 }
             }
             if !schema_entries.is_empty() {
@@ -284,6 +321,7 @@ pub(crate) fn expand(
             app
                 #middleware_code
                 .map_tool(stringify!(#func_name), #func_name)
+                #arg_names_code
                 #title_code
                 #description_code
                 #input_schema_code

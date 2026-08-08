@@ -38,6 +38,8 @@ pub use content::{
     ToolUse,
 };
 pub use cursor::{Cursor, Page, Pagination};
+#[cfg(feature = "server")]
+pub use helpers::extract::{ArgNames, FromHandlerArgs};
 pub use helpers::{Json, Meta, PropertyType};
 pub use reference::Reference;
 pub use request::{Request, RequestId, RequestParamsMeta};

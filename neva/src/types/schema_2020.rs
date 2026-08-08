@@ -308,6 +308,9 @@ pub fn primitive_subschema(ty: &str) -> Value {
 /// property pairs and a list of required property names. Used by the `#[tool]`
 /// macro so generated code only ever names `neva::` paths. Uses the
 /// unconditional `From<Value>` (no `server` feature required).
+///
+/// A tool whose arguments are all optional gets no `required` key at all
+/// rather than an empty array, matching what the non-macro path publishes.
 #[cfg(not(feature = "legacy-spec"))]
 #[doc(hidden)]
 pub fn object_schema(properties: Vec<(String, Value)>, required: Vec<String>) -> InputSchema {
@@ -318,10 +321,12 @@ pub fn object_schema(properties: Vec<(String, Value)>, required: Vec<String>) ->
     let mut root = serde_json::Map::with_capacity(3);
     root.insert("type".to_string(), Value::String("object".to_string()));
     root.insert("properties".to_string(), Value::Object(props));
-    root.insert(
-        "required".to_string(),
-        Value::Array(required.into_iter().map(Value::String).collect()),
-    );
+    if !required.is_empty() {
+        root.insert(
+            "required".to_string(),
+            Value::Array(required.into_iter().map(Value::String).collect()),
+        );
+    }
     InputSchema::from(Value::Object(root))
 }
 

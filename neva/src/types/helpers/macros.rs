@@ -63,6 +63,22 @@ impl_type_category!(GetPromptRequestParams, PropertyType::None);
 impl_type_category!(Meta<T>, T, PropertyType::None);
 impl_type_category!(crate::Context, PropertyType::None);
 
+// An optional argument is the inner type's property, minus the obligation to
+// supply it. Implemented manually because the category is delegated rather
+// than fixed, and because `is_optional` is overridden.
+impl<T: TypeCategory> super::sealed::TypeCategorySealed for Option<T> {}
+impl<T: TypeCategory> TypeCategory for Option<T> {
+    #[inline]
+    fn category() -> PropertyType {
+        T::category()
+    }
+
+    #[inline]
+    fn is_optional() -> bool {
+        true
+    }
+}
+
 // DI extractor: injected from the request context, never a tool/prompt argument.
 // Implemented manually (not via `impl_type_category!`) because `Dc<T>` carries a
 // `T: Send + Sync` bound the macro form cannot express.

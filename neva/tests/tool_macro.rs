@@ -61,6 +61,27 @@ async fn search(q: String) -> String {
     q
 }
 
+// Two arguments of *different* types: the pair that used to fail outright when
+// a map iteration order handed them to the handler the wrong way round.
+#[neva::tool]
+async fn describe(name: String, age: i32) -> String {
+    format!("{name} is {age}")
+}
+
+// An optional argument: published as its inner type, kept out of `required`,
+// and `None` when the call leaves it out.
+#[neva::tool]
+async fn nickname(name: String, alias: Option<String>) -> String {
+    alias.unwrap_or(name)
+}
+
+// An optional structured argument still probes past both wrappers for a rich
+// subschema.
+#[neva::tool]
+async fn maybe_profile(profile: Option<Json<Profile>>) -> String {
+    profile.map(|p| p.0.name).unwrap_or_default()
+}
+
 // Struct return via `Json<T>` -> output schema derived from the return type.
 #[neva::tool]
 async fn make_greeting(name: String) -> Json<Greeting> {
@@ -164,6 +185,88 @@ async fn tool_macro_emits_json_schema_2020() {
     let greet = by_name("make_greeting");
     assert_eq!(greet["outputSchema"]["type"], serde_json::json!("object"));
     assert!(greet["outputSchema"]["properties"]["message"].is_object());
+
+    // 6. An optional argument is published like any other but is not required,
+    // and a structured one is still described past both wrappers.
+    let nickname = by_name("nickname");
+    assert_eq!(
+        nickname["inputSchema"]["properties"]["alias"]["type"],
+        serde_json::json!("string")
+    );
+    let req: Vec<String> =
+        serde_json::from_value(nickname["inputSchema"]["required"].clone()).unwrap();
+    assert_eq!(
+        req,
+        vec!["name".to_string()],
+        "`alias` must not be required"
+    );
+
+    let maybe = by_name("maybe_profile");
+    let profile_schema = &maybe["inputSchema"]["properties"]["profile"];
+    assert_eq!(profile_schema["type"], serde_json::json!("object"));
+    assert!(
+        profile_schema["properties"]["name"].is_object(),
+        "an Option<Json<T>> arg must still describe T: {profile_schema}"
+    );
+    assert!(
+        maybe["inputSchema"]["required"].is_null(),
+        "an all-optional tool requires nothing"
+    );
+
+    // 7. An optional argument the call leaves out arrives as `None`.
+    for (args, expected) in [
+        (serde_json::json!({ "name": "John" }), "John"),
+        (
+            serde_json::json!({ "name": "John", "alias": "Johnny" }),
+            "Johnny",
+        ),
+    ] {
+        let call_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": { "name": "nickname", "arguments": args, "_meta": meta() }
+        });
+        let resp = routed(client.post(&url), &call_body)
+            .json(&call_body)
+            .send()
+            .await
+            .expect("tools/call failed");
+        let body: serde_json::Value = resp.json().await.unwrap();
+
+        assert_eq!(
+            body.pointer("/result/content/0/text"),
+            Some(&serde_json::json!(expected)),
+            "unexpected response: {body}"
+        );
+    }
+
+    // 8. Arguments are read by name, so the order a peer happens to serialize
+    // them in cannot reach the handler. JSON object members are unordered and
+    // both spellings below are the same call.
+    for args in [
+        serde_json::json!({ "name": "John", "age": 30 }),
+        serde_json::json!({ "age": 30, "name": "John" }),
+    ] {
+        let call_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": { "name": "describe", "arguments": args, "_meta": meta() }
+        });
+        let resp = routed(client.post(&url), &call_body)
+            .json(&call_body)
+            .send()
+            .await
+            .expect("tools/call failed");
+        let body: serde_json::Value = resp.json().await.unwrap();
+
+        assert_eq!(
+            body.pointer("/result/content/0/text"),
+            Some(&serde_json::json!("John is 30")),
+            "unexpected response: {body}"
+        );
+    }
 
     handle.abort();
 }

@@ -141,6 +141,35 @@ pub(super) fn get_arg_type(t: &Type) -> &str {
     }
 }
 
+/// Describes a handler *parameter*: its schema category, and whether a call
+/// must supply it.
+///
+/// An `Option<T>` parameter is published as the `T` property and left out of
+/// `required`; an absent value resolves to `None` rather than failing the
+/// call. This is deliberately separate from [`get_arg_type`], which also reads
+/// *return* types -- there `Option<T>` keeps meaning "nothing to describe".
+#[inline]
+pub(super) fn get_param_type(t: &Type) -> (&str, bool) {
+    match get_option_inner(t) {
+        Some(inner) => (get_arg_type(inner), false),
+        None => (get_arg_type(t), true),
+    }
+}
+
+/// The `T` of an `Option<T>` parameter, if the type is one.
+#[inline]
+pub(super) fn get_option_inner(ty: &Type) -> Option<&Type> {
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.last()
+        && segment.ident == "Option"
+        && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+    {
+        return Some(inner);
+    }
+    None
+}
+
 #[inline]
 pub(super) fn get_inner_type_from_generic(ty: &Type) -> Option<&Type> {
     if let Type::Path(type_path) = ty

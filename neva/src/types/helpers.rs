@@ -136,10 +136,29 @@ mod sealed {
     pub(crate) trait TypeCategorySealed {}
 }
 
-/// A trait that helps to determine a category of an object type
+/// A trait that helps to determine a category of an object type.
+///
+/// [`PropertyType::None`] marks a type that is not a handler *argument* at
+/// all but is served from the request's metadata -- [`Meta`], `Context`, a
+/// DI-injected `Dc<T>`. Such a parameter takes no schema property and consumes
+/// no argument slot.
+///
+/// The trait is sealed: it is implemented for the types neva can extract, and
+/// cannot be implemented outside this crate.
 #[cfg(feature = "server")]
 pub(crate) trait TypeCategory: sealed::TypeCategorySealed {
+    /// Returns the schema category of `Self`.
     fn category() -> PropertyType;
+
+    /// Whether a call may leave this argument out.
+    ///
+    /// True for `Option<T>`, which is published as the `T` property but kept
+    /// out of the schema's `required` list; an absent value resolves to `None`
+    /// instead of failing the call.
+    #[inline]
+    fn is_optional() -> bool {
+        false
+    }
 }
 
 /// Wraps JSON-typed data

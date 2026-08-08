@@ -1075,7 +1075,7 @@ mod tests {
             meta: None,
         };
 
-        let result = prompt.call(req.into()).await.unwrap();
+        let result = prompt.call(req).await.unwrap();
 
         let msg = result.messages.first().unwrap();
 
@@ -1099,7 +1099,7 @@ mod tests {
             meta: None,
         };
 
-        let result = prompt.call(req.into()).await;
+        let result = prompt.call(req).await;
 
         assert!(result.is_err())
     }

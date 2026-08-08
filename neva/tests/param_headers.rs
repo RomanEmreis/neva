@@ -28,7 +28,8 @@ async fn mirrored_headers_must_describe_the_call() {
                 }
             })
             .into()
-        });
+        })
+        .with_arg_names(["region"]);
 
     let handle = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -112,6 +113,8 @@ async fn a_header_without_the_argument_it_mirrors_is_rejected() {
     let mut app =
         App::new().with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")));
 
+    // The handler takes no argument at all, so there is nothing to name: the
+    // annotated `region` property exists only to be claimed by a header.
     app.map_tool("query", || async move { "ok".to_string() })
         .with_input_schema(|_| {
             serde_json::json!({
@@ -185,7 +188,8 @@ async fn a_batched_call_of_an_annotated_tool_still_runs() {
                 }
             })
             .into()
-        });
+        })
+        .with_arg_names(["region"]);
 
     let handle = tokio::spawn(async move { app.run().await });
 

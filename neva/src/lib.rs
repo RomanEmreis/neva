@@ -249,12 +249,123 @@ pub mod json {
 }
 
 /// Internal re-exports used by `neva_macros`-generated code. Not public API.
-#[cfg(not(feature = "legacy-spec"))]
 #[doc(hidden)]
 pub mod __macro_support {
+    #[cfg(not(feature = "legacy-spec"))]
     pub use crate::types::schema_2020::{
         SchemaProbe, ViaFallback, ViaJsonSchema, object_schema, primitive_subschema,
     };
+
+    /// Whether a handler parameter type is a value-carrying argument rather
+    /// than a parameter served from the request's metadata.
+    ///
+    /// Used by [`crate::map_tool`] / [`crate::map_prompt`] to drop `Context`,
+    /// `Meta<_>` and `Dc<_>` parameters from the declared argument names, the
+    /// same way they are dropped from the generated schema.
+    ///
+    /// Blanket-implemented for every extractable type; there is nothing to
+    /// implement by hand.
+    #[cfg(feature = "server")]
+    pub trait IsArgument {
+        /// Returns `true` when `Self` occupies an argument slot.
+        fn is_argument() -> bool;
+    }
+
+    #[cfg(feature = "server")]
+    impl<T: crate::types::helpers::TypeCategory> IsArgument for T {
+        #[inline]
+        fn is_argument() -> bool {
+            T::category() != crate::types::PropertyType::None
+        }
+    }
+}
+
+/// Registers a tool from a closure, keeping the closure's parameter names.
+///
+/// [`App::map_tool`] takes a plain closure, and Rust does not preserve a
+/// closure's parameter names -- such a tool falls back to publishing and
+/// reading the positional `arg0`, `arg1`, ... arguments. This macro reads the
+/// names off the closure at expansion time and declares them via
+/// [`crate::types::Tool::with_arg_names`], so the tool advertises the names
+/// you wrote and extraction reads by them.
+///
+/// Parameters served from the request's metadata -- `Context`, `Meta<_>`, a
+/// DI-injected `Dc<T>` -- are skipped, exactly as they are skipped in the
+/// generated schema.
+///
+/// Expands to the [`App::map_tool`] call itself, so the returned
+/// `&mut Tool` can be configured further as usual.
+///
+/// # Example
+/// ```no_run
+/// use neva::{App, map_tool};
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// let mut app = App::new();
+///
+/// map_tool!(app, "greet", |name: String, age: i32| async move {
+///     format!("Hello, {name}! You are {age}.")
+/// })
+/// .with_description("Greets a person");
+///
+/// # app.run().await;
+/// # }
+/// ```
+#[cfg(feature = "server")]
+#[macro_export]
+macro_rules! map_tool {
+    ($app:expr, $name:expr, |$($arg:ident : $ty:ty),* $(,)?| $body:expr) => {
+        $app.map_tool($name, move |$($arg: $ty),*| $body)
+            .with_arg_names($crate::__arg_names!($($arg : $ty),*))
+    };
+}
+
+/// Registers a prompt from a closure, keeping the closure's parameter names.
+///
+/// The prompt counterpart of [`crate::map_tool`]: the names are declared via
+/// [`crate::types::prompt::Prompt::with_args`], which is both what
+/// `prompts/list` publishes and what extraction reads by.
+///
+/// # Example
+/// ```no_run
+/// use neva::{App, map_prompt, types::Role};
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// let mut app = App::new();
+///
+/// map_prompt!(app, "analyze", |lang: String, code: String| async move {
+///     (format!("Analyze this {lang} code: {code}"), Role::User)
+/// })
+/// .with_description("Analyzes a code snippet");
+///
+/// # app.run().await;
+/// # }
+/// ```
+#[cfg(feature = "server")]
+#[macro_export]
+macro_rules! map_prompt {
+    ($app:expr, $name:expr, |$($arg:ident : $ty:ty),* $(,)?| $body:expr) => {
+        $app.map_prompt($name, move |$($arg: $ty),*| $body)
+            .with_args($crate::__arg_names!($($arg : $ty),*))
+    };
+}
+
+/// Collects the names of the value-carrying parameters. Not public API.
+#[cfg(feature = "server")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __arg_names {
+    ($($arg:ident : $ty:ty),* $(,)?) => {{
+        let mut names: ::std::vec::Vec<&'static str> = ::std::vec::Vec::new();
+        $(
+            if <$ty as $crate::__macro_support::IsArgument>::is_argument() {
+                names.push(::core::stringify!($arg));
+            }
+        )*
+        names
+    }};
 }
 
 pub mod prelude {
