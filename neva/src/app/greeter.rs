@@ -110,9 +110,51 @@ impl<'a> Greeter<'a> {
     }
 }
 
+/// Renders the line that closes a greeted server's session.
+///
+/// Its counterpart is [`Greeter::render`], and it goes to the same place for
+/// the same reason: on the stdio transport **stdout is the protocol channel**,
+/// so anything written there is a JSON-RPC frame to the peer. A parting word
+/// belongs on stderr, where hosts collect a server's logs.
+///
+/// It is a line of its own at both ends. Ctrl+C echoes `^C` into the terminal
+/// with no newline either side of it, so without the leading one the farewell
+/// starts mid-line (`^Cneva: server stopped`), and without the trailing one a
+/// shell redrawing its prompt from a half-written line marks the gap -- zsh
+/// prints a reverse `%` -- which reads as though the server left something
+/// behind.
+pub(super) fn render_farewell(use_color: bool) -> String {
+    let (cyan, reset) = if use_color { (CYAN, RESET) } else { ("", "") };
+    format!("\n{cyan}neva{reset}: server stopped\n")
+}
+
+/// Writes the farewell to stderr; write errors are silently discarded.
+pub(super) fn print_farewell(use_color: bool) {
+    eprint!("{}", render_farewell(use_color));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The farewell stands on its own line. Ctrl+C echoes a bare `^C` into the
+    /// terminal, so a farewell without the leading newline starts mid-line and
+    /// one without the trailing newline leaves the shell redrawing its prompt
+    /// from a half-written line.
+    #[test]
+    fn farewell_is_a_line_of_its_own() {
+        for use_color in [true, false] {
+            let farewell = render_farewell(use_color);
+            assert!(farewell.starts_with('\n'), "got: {farewell:?}");
+            assert!(farewell.ends_with('\n'), "got: {farewell:?}");
+        }
+    }
+
+    #[test]
+    fn farewell_omits_ansi_when_use_color_false() {
+        assert!(!render_farewell(false).contains('\x1b'));
+        assert!(render_farewell(true).contains('\x1b'));
+    }
 
     fn make_greeter<'a>(
         server_name: &'a str,

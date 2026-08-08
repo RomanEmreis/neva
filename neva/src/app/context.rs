@@ -706,6 +706,14 @@ impl Context {
 
     /// Adds a new prompt and notifies clients
     pub async fn add_prompt(&mut self, prompt: Prompt) -> Result<(), Error> {
+        // A prompt registered up front gets this same check at startup. One
+        // added while the server runs has no startup left to fail, so it is
+        // refused here rather than published in a shape no peer could
+        // successfully use.
+        if let Some(conflict) = prompt.arg_name_conflict() {
+            return Err(Error::new(ErrorCode::InternalError, conflict));
+        }
+
         self.options
             .prompts
             .insert(prompt.name.clone(), prompt)
@@ -736,6 +744,12 @@ impl Context {
 
     /// Adds a new prompt and notifies clients
     pub async fn add_tool(&mut self, tool: Tool) -> Result<(), Error> {
+        // See `add_prompt`: a tool added after startup has no startup check
+        // left to fail, so a schema its handler cannot read is refused here.
+        if let Some(conflict) = tool.arg_name_conflict() {
+            return Err(Error::new(ErrorCode::InternalError, conflict));
+        }
+
         self.options.tools.insert(tool.name.clone(), tool).await?;
 
         if self.options.is_tools_list_changed_supported() {
@@ -792,7 +806,7 @@ impl Context {
             Some(prompt) => {
                 #[cfg(feature = "http-server")]
                 self.validate_claims(prompt.roles.as_deref(), prompt.permissions.as_deref())?;
-                prompt.call(params.with_context(self).into()).await
+                prompt.call(params.with_context(self)).await
             }
         }
     }
@@ -807,7 +821,7 @@ impl Context {
             Some(tool) => {
                 #[cfg(feature = "http-server")]
                 self.validate_claims(tool.roles.as_deref(), tool.permissions.as_deref())?;
-                tool.call(params.with_context(self).into()).await
+                tool.call(params.with_context(self)).await
             }
         }
     }
@@ -858,7 +872,7 @@ impl Context {
                         tokio::select! {
                             result = tool.call(params
                                 .with_task(&task_id)
-                                .with_context(ctx).into()) => {
+                                .with_context(ctx)) => {
                                 // The outcome is stored *before* the status
                                 // flips, so a `tasks/get` that observes a
                                 // terminal status always sees the matching
@@ -903,7 +917,7 @@ impl Context {
                         "Tool required task augmented call",
                     ))
                 } else {
-                    tool.call(params.with_context(self).into())
+                    tool.call(params.with_context(self))
                         .await
                         .map(Either::Right)
                 }
@@ -2222,5 +2236,82 @@ mod subscription_sink_tests {
             .expect("stdio always has somewhere to write");
 
         assert!(pump.is_some(), "stdio needs a pump task");
+    }
+}
+
+/// A tool or prompt registered up front is checked for argument conflicts at
+/// startup. One added while the server is running has no startup left to fail,
+/// so the same check has to run at insertion -- otherwise it is published in a
+/// shape no peer could successfully call.
+#[cfg(all(test, feature = "http-server"))]
+mod runtime_registration_tests {
+    use super::*;
+    use crate::types::{Prompt, Role, Tool};
+
+    fn ctx() -> Context {
+        Context {
+            session_id: None,
+            headers: HeaderMap::new(),
+            claims: None,
+            pending: RequestQueue::new(Duration::from_secs(5)),
+            sender: TransportProtoSender::None,
+            // Runtime state: the collections must accept insertions, which is
+            // the whole point of the paths under test.
+            options: McpOptions::default().into_runtime(),
+            timeout: Duration::from_secs(5),
+            #[cfg(not(feature = "legacy-spec"))]
+            exec: ExecMode::None,
+            #[cfg(feature = "di")]
+            scope: None,
+        }
+    }
+
+    fn name_schema() -> crate::types::ToolInputSchema {
+        const JSON: &str = r#"{"type":"object","properties":{"name":{"type":"string"}}}"#;
+        #[cfg(feature = "legacy-spec")]
+        {
+            crate::types::tool::ToolSchema::from_json_str(JSON)
+        }
+        #[cfg(not(feature = "legacy-spec"))]
+        {
+            crate::types::schema_2020::InputSchema::from_json_str(JSON).unwrap_or_default()
+        }
+    }
+
+    #[tokio::test]
+    async fn it_refuses_a_tool_whose_schema_its_handler_cannot_read() {
+        let mut tool = Tool::new("greet", |name: String| async move { name });
+        tool.with_input_schema(|_| name_schema());
+
+        let err = ctx().add_tool(tool).await.expect_err("must be refused");
+
+        assert!(
+            err.to_string().contains("publishes an inputSchema without"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn it_refuses_a_prompt_that_publishes_too_few_args() {
+        let mut prompt = Prompt::new("analyze", |topic: String, tone: String| async move {
+            (format!("{topic}{tone}"), Role::User)
+        });
+        prompt.with_args(["topic"]);
+
+        let err = ctx().add_prompt(prompt).await.expect_err("must be refused");
+
+        assert!(
+            err.to_string().contains("publishes 1 argument(s)"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn it_accepts_a_consistent_tool() {
+        let mut tool = Tool::new("greet", |name: String| async move { name });
+        tool.with_input_schema(|_| name_schema())
+            .with_arg_names(["name"]);
+
+        ctx().add_tool(tool).await.expect("must be accepted");
     }
 }

@@ -5,6 +5,80 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.5.2
+
+### Fixed
+* **Tool and prompt arguments are extracted by name, not by position.**
+  * A failure now names the argument: ``missing required argument `age` `` and
+    ``invalid value for argument `age`: ... `` instead of
+    `Invalid param provided`.
+  * An argument a peer omitted is offered to the handler as `null`, so an
+    absent optional argument no longer errors on arrival.
+  * `Meta<_>`, `Context` and `Dc<_>` parameters consume no argument slot, so
+    they can sit anywhere in the signature without shifting the rest. The
+    `#[tool]` / `#[prompt]` macros classify them from the *resolved* type, so a
+    parameter reaching the signature through a type alias
+    (`type Token = Meta<ProgressToken>`) is recognised too. The same goes for
+    an argument's published JSON type and whether it is required: a
+    `type MaybeAge = Option<i32>` parameter now publishes exactly what the
+    spelled-out type does.
+  * Whether an argument may be omitted is decided by its type, never by whether
+    a synthetic `null` happens to deserialize into it -- otherwise a required
+    `serde_json::Value` argument would silently arrive as `Null`.
+* **Tools registered from a closure publish one property per argument.** The
+  generated `inputSchema` keyed its properties by *type name*, so
+  `|a: i32, b: i32|` advertised a single `number` property and the second
+  argument had nowhere to travel in. Properties are now named per argument and
+  listed in `required`. Prompt arguments likewise no longer publish
+  `std::any::type_name` output.
+
+### Added
+* **`Option<T>` tool and prompt arguments.**
+  * New `ToolArg` (the return type of `ToolHandler::args`) carries the
+    published property together with whether a call must supply it.
+  * New `PromptArgument::named(name, required)`.
+  * A tool whose arguments are all optional now publishes no `required` key
+    rather than an empty array.
+* `Tool::with_arg_names([...])` declares the names of a handler's arguments.
+  Rust does not keep a closure's parameter names, so a tool registered from a
+  bare closure publishes and reads the positional `arg0`, `arg1`, ... names
+  until this is called; it renames the generated schema and the extraction
+  names together, so the two cannot drift.
+* `map_tool!` / `map_prompt!` read the names off the closure itself:
+  `map_tool!(app, "greet", |name: String, age: i32| async move { ... })`
+  registers the tool with `name` and `age` and skips metadata parameters.
+* `App::run` fails at startup when a tool or prompt and its handler disagree
+  about the arguments -- a tool whose schema was overridden without
+  `with_arg_names`, a miscounted `with_arg_names`, declared names the schema
+  does not offer as properties, a `Prompt::with_args` list that does not cover
+  every argument the handler takes, or the same name given to two arguments.
+  None of these could ever be called
+  successfully, and this reports them before serving instead of on a peer's
+  first request. A schema that composes -- `$ref`, `allOf`, `oneOf`, a
+  conditional branch -- may publish an argument the check cannot follow, so it
+  is left alone rather than failed on a guess. `Context::add_tool` and
+  `Context::add_prompt` run the same check and refuse the insertion, since a
+  primitive registered while the server runs has no startup left to fail.
+* `ArgNames` and `FromHandlerArgs` in `neva::types`.
+
+### Changed
+* **Breaking:** `App::map_tool` / `Tool::new` take
+  `Args: FromHandlerArgs<CallToolRequestParams>` and `App::map_prompt` /
+  `Prompt::new` take `Args: FromHandlerArgs<GetPromptRequestParams>`, replacing
+  the `TryFrom<...Params>` bounds. Handlers themselves are unaffected; a
+  hand-written `impl TryFrom<CallToolRequestParams> for MyArgs` needs porting.
+* **Breaking:** `HandlerParams::Tool` and `HandlerParams::Prompt` carry the
+  primitive's `ArgNames` alongside the params.
+* **Breaking:** `ToolHandler::args` returns `Vec<ToolArg>` instead of
+  `Option<HashMap<String, SchemaProperty>>` -- ordered, so the *n*-th entry is
+  the *n*-th argument slot, and carrying each argument's `required` flag.
+* **Breaking (wire):** a tool registered from a bare closure advertises
+  `arg0`, `arg1`, ... instead of the former type names (`number`, `string`).
+  Tools declared with `#[tool]` are unaffected -- they already published their
+  parameter names, and now read by them.
+* `Prompt::with_args` sets the extraction names along with the published
+  argument list, so the two are one decision. `#[prompt]` needs no change.
+
 ## 0.5.1
 
 ### Added

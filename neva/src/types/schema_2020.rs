@@ -135,7 +135,7 @@ impl InputSchema {
     /// ```
     #[inline]
     pub fn from_value(value: Value) -> Self {
-        Self(value)
+        Self(value).with_object_type()
     }
 
     /// Parses an [`InputSchema`] from a JSON string.
@@ -158,7 +158,7 @@ impl InputSchema {
     #[inline]
     pub fn from_json_str(json: &str) -> Result<Self, crate::error::Error> {
         let value: Value = serde_json::from_str(json)?;
-        Ok(Self(value))
+        Ok(Self(value).with_object_type())
     }
 
     /// Creates an [`InputSchema`] from a type that implements
@@ -194,16 +194,44 @@ impl InputSchema {
     /// tool without going through the `schema_for!` macro.
     #[inline]
     pub fn from_schemars(schema: schemars::Schema) -> Self {
-        Self(schema.to_value())
+        Self(schema.to_value()).with_object_type()
     }
 }
 
 impl From<Value> for InputSchema {
-    /// Wraps any [`serde_json::Value`] as an [`InputSchema`]. The value
-    /// is stored verbatim.
+    /// Wraps any [`serde_json::Value`] as an [`InputSchema`], supplying the
+    /// `"type": "object"` discriminator MCP requires when the document is an
+    /// object schema that omitted it. An explicit `type` is left as written,
+    /// and a boolean schema has no key to add.
     #[inline]
     fn from(value: Value) -> Self {
-        Self(value)
+        Self(value).with_object_type()
+    }
+}
+
+impl InputSchema {
+    /// Supplies the `"type": "object"` discriminator when the document is an
+    /// object schema that left it out.
+    ///
+    /// MCP requires a tool's `inputSchema` and `outputSchema` to be *object*
+    /// schemas, and a conforming client validates that: a hand-written schema
+    /// that lists `properties` but never says `"type": "object"` makes the
+    /// whole `tools/list` result fail validation, taking the tools that were
+    /// fine down with it. Rather than publish a document neva's own docs call
+    /// invalid, the discriminator every such schema meant to carry is filled
+    /// in.
+    ///
+    /// An explicit `type` is left alone, whatever it says -- this fills a gap,
+    /// it does not overrule the author -- and a boolean schema (`true` /
+    /// `false`) is not an object to add a key to.
+    #[inline]
+    fn with_object_type(mut self) -> Self {
+        if let Value::Object(schema) = &mut self.0
+            && !schema.contains_key("type")
+        {
+            schema.insert("type".to_string(), Value::String("object".to_string()));
+        }
+        self
     }
 }
 
@@ -213,7 +241,7 @@ impl From<schemars::Schema> for InputSchema {
     /// its underlying JSON [`Value`].
     #[inline]
     fn from(schema: schemars::Schema) -> Self {
-        Self(schema.to_value())
+        Self(schema.to_value()).with_object_type()
     }
 }
 
@@ -308,6 +336,9 @@ pub fn primitive_subschema(ty: &str) -> Value {
 /// property pairs and a list of required property names. Used by the `#[tool]`
 /// macro so generated code only ever names `neva::` paths. Uses the
 /// unconditional `From<Value>` (no `server` feature required).
+///
+/// A tool whose arguments are all optional gets no `required` key at all
+/// rather than an empty array, matching what the non-macro path publishes.
 #[cfg(not(feature = "legacy-spec"))]
 #[doc(hidden)]
 pub fn object_schema(properties: Vec<(String, Value)>, required: Vec<String>) -> InputSchema {
@@ -318,10 +349,12 @@ pub fn object_schema(properties: Vec<(String, Value)>, required: Vec<String>) ->
     let mut root = serde_json::Map::with_capacity(3);
     root.insert("type".to_string(), Value::String("object".to_string()));
     root.insert("properties".to_string(), Value::Object(props));
-    root.insert(
-        "required".to_string(),
-        Value::Array(required.into_iter().map(Value::String).collect()),
-    );
+    if !required.is_empty() {
+        root.insert(
+            "required".to_string(),
+            Value::Array(required.into_iter().map(Value::String).collect()),
+        );
+    }
     InputSchema::from(Value::Object(root))
 }
 
@@ -345,6 +378,48 @@ macro_rules! __tool_arg_subschema {
 
 #[cfg(test)]
 mod tests {
+    /// MCP requires a tool's `inputSchema`/`outputSchema` to be an *object*
+    /// schema, and a conforming client validates it: MCP Inspector rejects a
+    /// whole `tools/list` result over one schema that lists `properties` but
+    /// never says so. A hand-written schema that left the discriminator out
+    /// gets it supplied rather than published as-is.
+    #[test]
+    fn it_supplies_the_object_type_a_hand_written_schema_omitted() {
+        let schema = InputSchema::from(json!({
+            "properties": { "name": { "type": "string" } },
+            "required": ["name"]
+        }));
+
+        assert_eq!(schema.as_value()["type"], "object");
+        assert_eq!(schema.as_value()["required"][0], "name");
+    }
+
+    #[cfg(feature = "server")]
+    #[test]
+    fn it_supplies_the_object_type_when_parsed_from_a_string() {
+        let schema = InputSchema::from_json_str(r#"{"properties":{"q":{"type":"string"}}}"#)
+            .expect("valid JSON");
+
+        assert_eq!(schema.as_value()["type"], "object");
+    }
+
+    /// Filling a gap is not the same as overruling the author: an explicit
+    /// type stays exactly as written, whatever it says.
+    #[test]
+    fn it_leaves_an_explicit_type_alone() {
+        for declared in ["string", "array", "object"] {
+            let schema = InputSchema::from(json!({ "type": declared }));
+            assert_eq!(schema.as_value()["type"], declared);
+        }
+    }
+
+    /// A boolean schema is not an object, so there is no key to add.
+    #[test]
+    fn it_leaves_a_boolean_schema_alone() {
+        assert_eq!(InputSchema::from(json!(true)).as_value(), &json!(true));
+        assert_eq!(InputSchema::from(json!(false)).as_value(), &json!(false));
+    }
+
     use super::*;
     use serde_json::json;
 

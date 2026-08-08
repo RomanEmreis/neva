@@ -13,12 +13,12 @@ use crate::middleware::{MwContext, Next, make_fn::make_mw};
 use crate::shared;
 use crate::transport::{Receiver, Sender, Transport};
 use crate::types::{
-    CallToolRequestParams, CallToolResponse, CompleteResult, GetPromptRequestParams,
-    GetPromptResult, IntoResponse, ListPromptsRequestParams, ListPromptsResult,
-    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ListResourcesRequestParams,
-    ListResourcesResult, ListToolsRequestParams, ListToolsResult, Message, MessageBatch,
-    MessageEnvelope, Prompt, PromptHandler, ReadResourceRequestParams, ReadResourceResult, Request,
-    Resource, ResourceTemplate, Response, Tool, ToolHandler, Uri,
+    CallToolRequestParams, CallToolResponse, CompleteResult, FromHandlerArgs,
+    GetPromptRequestParams, GetPromptResult, IntoResponse, ListPromptsRequestParams,
+    ListPromptsResult, ListResourceTemplatesRequestParams, ListResourceTemplatesResult,
+    ListResourcesRequestParams, ListResourcesResult, ListToolsRequestParams, ListToolsResult,
+    Message, MessageBatch, MessageEnvelope, Prompt, PromptHandler, ReadResourceRequestParams,
+    ReadResourceResult, Request, Resource, ResourceTemplate, Response, Tool, ToolHandler, Uri,
     notification::{CancelledNotificationParams, Notification},
     resource::template::ResourceFunc,
 };
@@ -249,6 +249,10 @@ impl App {
         #[cfg(feature = "macros")]
         self.register_methods();
 
+        // Must follow register_methods() for the same reason the greeting does:
+        // macro-registered tools are not in the collection before it.
+        self.validate_arg_names();
+
         // ORDERING CONSTRAINT: must execute after register_methods() so macro-registered
         // tools/prompts are present; must execute before self.options.transport() consumes
         // `proto` and before ServerRuntime::new() transitions collections to Runtime state
@@ -309,6 +313,9 @@ impl App {
         self.options
             .add_middleware(make_mw(Self::message_middleware));
 
+        // Read before `self.options` moves into the runtime below.
+        let greeted = self.greeting;
+
         let mut transport = self.options.transport();
         let cancellation_token = transport.start();
         self.wait_for_shutdown_signal(cancellation_token.clone());
@@ -348,6 +355,12 @@ impl App {
                     }
                 }
             }
+        }
+
+        // Closes what the banner opened. Only for a greeted server: one that
+        // asked for no banner asked for a quiet terminal.
+        if greeted {
+            greeter::print_farewell(std::env::var_os("NO_COLOR").is_none());
         }
     }
 
@@ -580,8 +593,48 @@ impl App {
         self
     }
 
+    /// Fails startup when a registered tool or prompt and its handler disagree
+    /// about the arguments.
+    ///
+    /// Such a primitive cannot be called successfully by anyone, so it is a
+    /// registration mistake worth reporting before the server starts serving
+    /// rather than on a peer's first call. See [`Tool::arg_name_conflict`] and
+    /// [`Prompt::arg_name_conflict`].
+    fn validate_arg_names(&self) {
+        let conflict = self
+            .options
+            .tools
+            .as_ref()
+            .values()
+            .find_map(Tool::arg_name_conflict)
+            .or_else(|| {
+                self.options
+                    .prompts
+                    .as_ref()
+                    .values()
+                    .find_map(Prompt::arg_name_conflict)
+            });
+
+        if let Some(conflict) = conflict {
+            panic!("{conflict}");
+        }
+    }
+
     /// Maps an MCP tool call request to a specific function and returns a mutable reference to the
     /// [`Tool`] for further configuration
+    ///
+    /// # Argument names
+    ///
+    /// A call's `arguments` are read **by name**. Rust does not keep a
+    /// closure's parameter names, so a tool registered this way publishes and
+    /// reads the positional `arg0`, `arg1`, ... names. To give them the names
+    /// you wrote, use [`Tool::with_arg_names`], the [`crate::map_tool`] macro,
+    /// or the `#[tool]` attribute -- each declares the names and renames the
+    /// published schema together, so the two cannot disagree.
+    ///
+    /// Overriding the schema with [`Tool::with_input_schema`] does *not* by
+    /// itself change what the handler reads; a tool left in that state fails
+    /// [`App::run`] at startup rather than on a peer's first call.
     ///
     /// # Example
     /// ```no_run
@@ -593,7 +646,8 @@ impl App {
     ///
     /// app.map_tool("hello", |name: String| async move {
     ///     format!("Hello, {name}")
-    /// });
+    /// })
+    /// .with_arg_names(["name"]);
     ///
     /// # app.run().await;
     /// # }
@@ -602,7 +656,7 @@ impl App {
     where
         F: ToolHandler<Args, Output = R>,
         R: Into<CallToolResponse> + Send + 'static,
-        Args: TryFrom<CallToolRequestParams, Error = Error> + Send + Sync + 'static,
+        Args: FromHandlerArgs<CallToolRequestParams> + Send + Sync + 'static,
     {
         self.options.add_tool(Tool::new(name, handler))
     }
@@ -654,6 +708,14 @@ impl App {
 
     /// Maps an MCP get a prompt request to a specific function
     ///
+    /// # Argument names
+    ///
+    /// A request's `arguments` are read **by name**, and Rust does not keep a
+    /// closure's parameter names -- a prompt registered this way publishes and
+    /// reads the positional `arg0`, `arg1`, ... names until
+    /// [`Prompt::with_args`] gives them yours. [`crate::map_prompt`] and the
+    /// `#[prompt]` attribute do that for you.
+    ///
     /// # Example
     /// ```no_run
     /// use neva::{App, types::Role};
@@ -664,7 +726,8 @@ impl App {
     ///
     /// app.map_prompt("analyze-code", |lang: String| async move {
     ///     (format!("Language: {lang}"), Role::User)
-    /// });
+    /// })
+    /// .with_args(["lang"]);
     ///
     /// # app.run().await;
     /// # }
@@ -674,7 +737,7 @@ impl App {
         F: PromptHandler<Args, Output = R>,
         R: TryInto<GetPromptResult> + Send + 'static,
         R::Error: Into<Error>,
-        Args: TryFrom<GetPromptRequestParams, Error = Error> + Send + Sync + 'static,
+        Args: FromHandlerArgs<GetPromptRequestParams> + Send + Sync + 'static,
     {
         self.options.add_prompt(Prompt::new(name, handler))
     }
@@ -1958,6 +2021,434 @@ mod tests {
     fn it_enables_greeting_with_with_greeting() {
         let app = App::new().with_greeting();
         assert!(app.greeting);
+    }
+
+    /// The property names of a registered tool's `inputSchema`, sorted.
+    fn schema_props(app: &App, tool: &str) -> Vec<String> {
+        let tool = app.options.tools.as_ref().get(tool).expect("tool");
+        #[cfg(feature = "legacy-spec")]
+        let props = tool.input_schema.properties.as_ref().unwrap();
+        #[cfg(not(feature = "legacy-spec"))]
+        let props = tool.input_schema.as_value()["properties"]
+            .as_object()
+            .unwrap();
+
+        let mut names = props.keys().cloned().collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn map_tool_macro_keeps_the_closures_parameter_names() {
+        let mut app = App::new();
+        crate::map_tool!(app, "greet", |name: String, age: i32| async move {
+            format!("{name} is {age}")
+        });
+
+        assert_eq!(schema_props(&app, "greet"), ["age", "name"]);
+
+        let names = &app.options.tools.as_ref().get("greet").unwrap().arg_names;
+        assert!(names.is_declared());
+        assert_eq!(names.get(0), "name");
+        assert_eq!(names.get(1), "age");
+    }
+
+    #[test]
+    fn map_tool_macro_skips_metadata_parameters() {
+        use crate::types::{Meta, ProgressToken};
+
+        let mut app = App::new();
+        crate::map_tool!(
+            app,
+            "greet",
+            |token: Meta<ProgressToken>, name: String| async move {
+                let _ = token;
+                name
+            }
+        );
+
+        // `token` is served from `_meta`: it is neither published nor named,
+        // so `name` is still the first argument slot.
+        assert_eq!(schema_props(&app, "greet"), ["name"]);
+        assert_eq!(
+            app.options
+                .tools
+                .as_ref()
+                .get("greet")
+                .unwrap()
+                .arg_names
+                .get(0),
+            "name"
+        );
+    }
+
+    #[test]
+    fn map_tool_macro_names_an_optional_argument() {
+        let mut app = App::new();
+        crate::map_tool!(app, "greet", |name: String, age: Option<i32>| async move {
+            format!("{name} {age:?}")
+        });
+
+        // An `Option<T>` parameter is an argument: it is named, published and
+        // occupies a slot -- it just need not be supplied.
+        assert_eq!(schema_props(&app, "greet"), ["age", "name"]);
+
+        let names = &app.options.tools.as_ref().get("greet").unwrap().arg_names;
+        assert_eq!(names.arity(), 2);
+        assert_eq!(names.get(1), "age");
+    }
+
+    #[tokio::test]
+    async fn map_prompt_macro_keeps_names_and_optionality() {
+        use crate::types::Role;
+
+        let mut app = App::new();
+        crate::map_prompt!(
+            app,
+            "analyze",
+            |ctx: crate::Context, lang: String, tone: Option<String>| async move {
+                let _ = ctx;
+                (format!("{lang} {tone:?}"), Role::User)
+            }
+        );
+
+        let prompt = app.options.prompts.as_ref().get("analyze").expect("prompt");
+        let args = prompt.args.as_ref().unwrap();
+
+        // `ctx` is served from the request, so it is neither published nor
+        // named; `tone` is published as an argument peers may leave out.
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0].name, "lang");
+        assert_eq!(args[0].required, Some(true));
+        assert_eq!(args[1].name, "tone");
+        assert_eq!(args[1].required, Some(false));
+        assert_eq!(prompt.arg_names.get(0), "lang");
+        assert_eq!(prompt.arg_names.get(1), "tone");
+    }
+
+    #[test]
+    fn a_bare_closure_publishes_the_names_it_reads() {
+        let mut app = App::new();
+        app.map_tool("greet", |name: String, age: i32| async move {
+            format!("{name} is {age}")
+        });
+
+        let tool = app.options.tools.as_ref().get("greet").unwrap();
+
+        assert!(!tool.arg_names.is_declared());
+        assert_eq!(tool.arg_names.arity(), 2);
+        assert_eq!(schema_props(&app, "greet"), ["arg0", "arg1"]);
+    }
+
+    /// A hand-written schema with a single required `name` string property,
+    /// spelled for whichever schema model the build uses.
+    fn name_schema() -> crate::types::ToolInputSchema {
+        const JSON: &str = r#"{"type":"object","properties":{"name":{"type":"string"}}}"#;
+        #[cfg(feature = "legacy-spec")]
+        {
+            crate::types::tool::ToolSchema::from_json_str(JSON)
+        }
+        #[cfg(not(feature = "legacy-spec"))]
+        {
+            crate::types::schema_2020::InputSchema::from_json_str(JSON).unwrap_or_default()
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "publishes an inputSchema without the argument `arg0`")]
+    fn startup_rejects_a_schema_the_handler_cannot_read() {
+        let mut app = App::new();
+        app.map_tool("greet", |name: String| async move { name })
+            .with_input_schema(|_| name_schema());
+
+        app.validate_arg_names();
+    }
+
+    #[test]
+    #[should_panic(expected = "declares 1 argument name(s) but its handler takes 2")]
+    fn startup_rejects_a_miscounted_declaration() {
+        let mut app = App::new();
+        app.map_tool("greet", |name: String, age: i32| async move {
+            format!("{name} is {age}")
+        })
+        .with_arg_names(["name"]);
+
+        app.validate_arg_names();
+    }
+
+    /// Zero is a count like any other: a name handed to a handler that reads
+    /// none is the same miscount as too few names for one that reads several.
+    #[test]
+    #[should_panic(expected = "declares 1 argument name(s) but its handler takes 0")]
+    fn startup_rejects_a_declaration_on_a_zero_arity_handler() {
+        let mut app = App::new();
+        app.map_tool("ping", || async { "pong" })
+            .with_arg_names(["value"]);
+
+        app.validate_arg_names();
+    }
+
+    /// The counterpart: naming nothing for a handler that reads nothing is a
+    /// declaration that agrees with its handler, and is left alone.
+    #[test]
+    fn startup_accepts_an_empty_declaration_on_a_zero_arity_handler() {
+        let mut app = App::new();
+        app.map_tool("ping", || async { "pong" })
+            .with_arg_names(Vec::<String>::new());
+
+        app.validate_arg_names();
+    }
+
+    #[test]
+    #[should_panic(expected = "declares the argument `q` but publishes an inputSchema without it")]
+    fn startup_rejects_names_the_schema_does_not_offer() {
+        let mut app = App::new();
+        app.map_tool("search", |q: String| async move { q })
+            .with_input_schema(|_| {
+                const JSON: &str = r#"{"type":"object","properties":{"query":{"type":"string"}}}"#;
+                #[cfg(feature = "legacy-spec")]
+                {
+                    crate::types::tool::ToolSchema::from_json_str(JSON)
+                }
+                #[cfg(not(feature = "legacy-spec"))]
+                {
+                    crate::types::schema_2020::InputSchema::from_json_str(JSON).unwrap_or_default()
+                }
+            })
+            .with_arg_names(["q"]);
+
+        app.validate_arg_names();
+    }
+
+    /// A schema may name an argument by pattern rather than list it, and the
+    /// top-level map is then not the whole story either.
+    #[test]
+    #[cfg(not(feature = "legacy-spec"))]
+    fn startup_accepts_a_schema_with_pattern_properties() {
+        let mut app = App::new();
+        app.map_tool("search", |q: String, page: i32| async move {
+            format!("{q}{page}")
+        })
+        .with_input_schema(|_| {
+            crate::types::schema_2020::InputSchema::from_json_str(
+                r#"{
+                    "type": "object",
+                    "properties": { "page": { "type": "number" } },
+                    "patternProperties": { "^q$": { "type": "string" } },
+                    "required": ["page", "q"]
+                }"#,
+            )
+            .unwrap_or_default()
+        })
+        .with_arg_names(["q", "page"]);
+
+        app.validate_arg_names();
+    }
+
+    /// Permitting further names is not the same as naming one. A schema left
+    /// open by `additionalProperties` still tells no peer to send `q`, so the
+    /// tool is as uncallable as with a closed schema and is still reported.
+    #[test]
+    #[should_panic(expected = "declares the argument `q` but publishes an inputSchema without it")]
+    #[cfg(not(feature = "legacy-spec"))]
+    fn startup_checks_a_schema_left_open_to_further_properties() {
+        let mut app = App::new();
+        app.map_tool("search", |q: String| async move { q })
+            .with_input_schema(|_| {
+                crate::types::schema_2020::InputSchema::from_json_str(
+                    r#"{"type":"object","properties":{},"additionalProperties":{"type":"string"}}"#,
+                )
+                .unwrap_or_default()
+            })
+            .with_arg_names(["q"]);
+
+        app.validate_arg_names();
+    }
+
+    /// `propertyNames` constrains what names may appear; it declares none. It
+    /// is no reason to stop checking, least of all next to an
+    /// `additionalProperties: false` that closes the schema outright.
+    #[test]
+    #[should_panic(expected = "declares the argument `q` but publishes an inputSchema without it")]
+    #[cfg(not(feature = "legacy-spec"))]
+    fn startup_checks_a_schema_constraining_property_names() {
+        let mut app = App::new();
+        app.map_tool("search", |q: String| async move { q })
+            .with_input_schema(|_| {
+                crate::types::schema_2020::InputSchema::from_json_str(
+                    r#"{
+                        "type": "object",
+                        "properties": { "query": { "type": "string" } },
+                        "propertyNames": { "pattern": "^[a-z]+$" },
+                        "additionalProperties": false
+                    }"#,
+                )
+                .unwrap_or_default()
+            })
+            .with_arg_names(["q"]);
+
+        app.validate_arg_names();
+    }
+
+    /// `not` composes the other way round: it says what an instance must fail.
+    /// A name under it is one no peer may send, so it cannot be the one that
+    /// makes the top-level map incomplete, and the check still applies.
+    #[test]
+    #[should_panic(expected = "declares the argument `q` but publishes an inputSchema without it")]
+    #[cfg(not(feature = "legacy-spec"))]
+    fn startup_checks_a_schema_whose_only_composition_is_not() {
+        let mut app = App::new();
+        app.map_tool("search", |q: String| async move { q })
+            .with_input_schema(|_| {
+                crate::types::schema_2020::InputSchema::from_json_str(
+                    r#"{
+                        "type": "object",
+                        "properties": { "query": { "type": "string" } },
+                        "not": { "required": ["forbidden"] },
+                        "additionalProperties": false
+                    }"#,
+                )
+                .unwrap_or_default()
+            })
+            .with_arg_names(["q"]);
+
+        app.validate_arg_names();
+    }
+
+    /// `additionalProperties: false` closes the schema; the map is exhaustive
+    /// and the check applies as plainly as it does without the keyword.
+    #[test]
+    #[should_panic(expected = "declares the argument `q` but publishes an inputSchema without it")]
+    #[cfg(not(feature = "legacy-spec"))]
+    fn startup_still_checks_a_closed_schema() {
+        let mut app = App::new();
+        app.map_tool("search", |q: String| async move { q })
+            .with_input_schema(|_| {
+                crate::types::schema_2020::InputSchema::from_json_str(
+                    r#"{"type":"object","properties":{"query":{"type":"string"}},"additionalProperties":false}"#,
+                )
+                .unwrap_or_default()
+            })
+            .with_arg_names(["q"]);
+
+        app.validate_arg_names();
+    }
+
+    /// A schema that describes its arguments through `$ref` or a composition
+    /// keyword has no top-level `properties` to check against, and is left
+    /// alone rather than failed on a guess.
+    #[test]
+    fn startup_accepts_a_schema_without_top_level_properties() {
+        let mut app = App::new();
+        app.map_tool("search", |q: String| async move { q })
+            .with_input_schema(|_| {
+                const JSON: &str = r##"{"$ref": "#/$defs/Args"}"##;
+                #[cfg(feature = "legacy-spec")]
+                {
+                    crate::types::tool::ToolSchema::from_json_str(JSON)
+                }
+                #[cfg(not(feature = "legacy-spec"))]
+                {
+                    crate::types::schema_2020::InputSchema::from_json_str(JSON).unwrap_or_default()
+                }
+            })
+            .with_arg_names(["q"]);
+
+        app.validate_arg_names();
+    }
+
+    /// A schema may describe some arguments in its top-level `properties` and
+    /// the rest through composition. The map alone is then not the whole
+    /// story, and reading it as if it were would fail a well-formed tool.
+    #[test]
+    #[cfg(not(feature = "legacy-spec"))]
+    fn startup_accepts_a_schema_with_composed_properties() {
+        let mut app = App::new();
+        app.map_tool("search", |q: String, page: i32| async move {
+            format!("{q}{page}")
+        })
+        .with_input_schema(|_| {
+            crate::types::schema_2020::InputSchema::from_json_str(
+                r#"{
+                    "type": "object",
+                    "properties": { "q": { "type": "string" } },
+                    "allOf": [
+                        { "properties": { "page": { "type": "number" } } }
+                    ]
+                }"#,
+            )
+            .unwrap_or_default()
+        })
+        .with_arg_names(["q", "page"]);
+
+        app.validate_arg_names();
+    }
+
+    #[test]
+    #[should_panic(expected = "prompt `analyze` publishes 1 argument(s) but its handler takes 2")]
+    fn startup_rejects_a_prompt_that_publishes_too_few_args() {
+        use crate::types::Role;
+
+        let mut app = App::new();
+        app.map_prompt("analyze", |topic: String, tone: String| async move {
+            (format!("{topic}{tone}"), Role::User)
+        })
+        .with_args(["topic"]);
+
+        app.validate_arg_names();
+    }
+
+    #[test]
+    #[should_panic(expected = "prompt `analyze` publishes the argument `topic` twice")]
+    fn startup_rejects_a_prompt_with_duplicate_arg_names() {
+        use crate::types::Role;
+
+        let mut app = App::new();
+        app.map_prompt("analyze", |topic: String, tone: String| async move {
+            (format!("{topic}{tone}"), Role::User)
+        })
+        .with_args(["topic", "topic"]);
+
+        app.validate_arg_names();
+    }
+
+    #[test]
+    #[should_panic(expected = "tool `greet` declares the argument name `name` twice")]
+    fn startup_rejects_a_tool_with_duplicate_arg_names() {
+        let mut app = App::new();
+        app.map_tool("greet", |first: String, last: String| async move {
+            format!("{first}{last}")
+        })
+        .with_arg_names(["name", "name"]);
+
+        app.validate_arg_names();
+    }
+
+    #[test]
+    fn startup_accepts_a_prompt_that_publishes_every_arg() {
+        use crate::types::Role;
+
+        let mut app = App::new();
+        app.map_prompt("analyze", |topic: String, tone: String| async move {
+            (format!("{topic}{tone}"), Role::User)
+        })
+        .with_args(["topic", "tone"]);
+
+        let prompt = app.options.prompts.as_ref().get("analyze").unwrap();
+        assert_eq!(prompt.arg_names.arity(), 2);
+        assert_eq!(prompt.arg_names.get(1), "tone");
+
+        app.validate_arg_names();
+    }
+
+    #[test]
+    fn startup_accepts_a_declared_tool() {
+        let mut app = App::new();
+        app.map_tool("greet", |name: String| async move { name })
+            .with_input_schema(|_| name_schema())
+            .with_arg_names(["name"]);
+
+        app.validate_arg_names();
     }
 
     #[cfg(not(feature = "legacy-spec"))]

@@ -141,6 +141,57 @@ pub(super) fn get_arg_type(t: &Type) -> &str {
     }
 }
 
+/// The `ident: Type` pairs of a handler's parameters, in declaration order.
+///
+/// Handed to `neva::__arg_names!` / `neva::__prompt_args!`, which decide which
+/// of them are arguments from the resolved type -- see the call sites for why
+/// that decision cannot be made here.
+pub(super) fn param_idents_and_types(function: &ItemFn) -> Vec<(syn::Ident, syn::Type)> {
+    function
+        .sig
+        .inputs
+        .iter()
+        .filter_map(|arg| match arg {
+            syn::FnArg::Typed(pat_type) => match &*pat_type.pat {
+                syn::Pat::Ident(pat_ident) => {
+                    Some((pat_ident.ident.clone(), (*pat_type.ty).clone()))
+                }
+                _ => None,
+            },
+            syn::FnArg::Receiver(_) => None,
+        })
+        .collect()
+}
+
+/// Describes a handler *parameter*: its schema category, and whether a call
+/// must supply it.
+///
+/// An `Option<T>` parameter is published as the `T` property and left out of
+/// `required`; an absent value resolves to `None` rather than failing the
+/// call. This is deliberately separate from [`get_arg_type`], which also reads
+/// *return* types -- there `Option<T>` keeps meaning "nothing to describe".
+#[inline]
+pub(super) fn get_param_type(t: &Type) -> (&str, bool) {
+    match get_option_inner(t) {
+        Some(inner) => (get_arg_type(inner), false),
+        None => (get_arg_type(t), true),
+    }
+}
+
+/// The `T` of an `Option<T>` parameter, if the type is one.
+#[inline]
+pub(super) fn get_option_inner(ty: &Type) -> Option<&Type> {
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.last()
+        && segment.ident == "Option"
+        && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+    {
+        return Some(inner);
+    }
+    None
+}
+
 #[inline]
 pub(super) fn get_inner_type_from_generic(ty: &Type) -> Option<&Type> {
     if let Type::Path(type_path) = ty

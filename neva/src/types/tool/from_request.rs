@@ -1,146 +1,205 @@
 use super::CallToolRequestParams;
-use crate::error::Error;
-use crate::types::helpers::extract::{RequestArgument, extract_arg};
+use crate::types::helpers::extract::HandlerArgs;
+use crate::types::request::RequestParamsMeta;
+use serde_json::Value;
+use std::collections::HashMap;
 
-impl TryFrom<CallToolRequestParams> for () {
-    type Error = Error;
-
+impl HandlerArgs for CallToolRequestParams {
     #[inline]
-    fn try_from(_: CallToolRequestParams) -> Result<Self, Self::Error> {
-        Ok(())
+    fn into_parts(self) -> (Option<HashMap<String, Value>>, Option<RequestParamsMeta>) {
+        (self.args, self.meta)
     }
 }
-
-macro_rules! impl_from_call_tool_params {
-    ($($T: ident),*) => {
-        impl<$($T: RequestArgument<Error = Error>),+> TryFrom<CallToolRequestParams> for ($($T,)+) {
-            type Error = Error;
-
-            #[inline]
-            fn try_from(params: CallToolRequestParams) -> Result<Self, Self::Error> {
-                let args = params.args.unwrap_or_default();
-                let mut iter = args.iter();
-                let tuple = (
-                    $(
-                        extract_arg::<$T>(&params.meta, &mut iter)?,
-                    )*
-                );
-                Ok(tuple)
-            }
-        }
-    };
-}
-
-impl_from_call_tool_params! { T1 }
-impl_from_call_tool_params! { T1, T2 }
-impl_from_call_tool_params! { T1, T2, T3 }
-impl_from_call_tool_params! { T1, T2, T3, T4 }
-impl_from_call_tool_params! { T1, T2, T3, T4, T5 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Meta, ProgressToken, request::RequestParamsMeta};
-    use serde_json::{Value, json};
-    use std::collections::HashMap;
+    use crate::types::{ArgNames, FromHandlerArgs, Meta, ProgressToken};
+    use serde_json::json;
 
-    #[test]
-    fn it_extracts_args() {
-        let params = CallToolRequestParams {
-            args: Some(HashMap::from([("arg".into(), json!({ "test": 1 }))])),
-            meta: None,
+    fn params(args: Option<HashMap<String, Value>>) -> CallToolRequestParams {
+        CallToolRequestParams {
             name: "tool".into(),
+            args,
+            meta: None,
             #[cfg(feature = "tasks")]
             task: None,
-        };
+        }
+    }
 
-        let arg: (Value,) = params.try_into().unwrap();
+    fn meta(meta: RequestParamsMeta) -> CallToolRequestParams {
+        CallToolRequestParams {
+            name: "tool".into(),
+            args: None,
+            meta: Some(meta),
+            #[cfg(feature = "tasks")]
+            task: None,
+        }
+    }
+
+    #[test]
+    fn it_extracts_a_single_arg() {
+        let params = params(Some(HashMap::from([("arg0".into(), json!({ "test": 1 }))])));
+
+        let arg: (Value,) = FromHandlerArgs::from_args(params, &ArgNames::default()).unwrap();
 
         assert_eq!(arg.0, json!({ "test": 1 }));
     }
 
     #[test]
-    #[allow(clippy::useless_conversion)]
-    fn it_extracts_params() {
-        let params = CallToolRequestParams {
-            args: Some(HashMap::from([("arg".into(), json!(22))])),
-            meta: None,
-            name: "tool".into(),
-            #[cfg(feature = "tasks")]
-            task: None,
-        };
+    fn it_extracts_args_by_declared_name() {
+        let params = params(Some(HashMap::from([
+            ("age".into(), json!(30)),
+            ("name".into(), json!("John")),
+        ])));
 
-        let arg: CallToolRequestParams = params.try_into().unwrap();
+        let (name, age): (String, i32) =
+            FromHandlerArgs::from_args(params, &ArgNames::new(["name", "age"])).unwrap();
 
-        assert_eq!(arg.name, "tool");
-        assert_eq!(arg.args, Some(HashMap::from([("arg".into(), json!(22))])));
+        assert_eq!(name, "John");
+        assert_eq!(age, 30);
+    }
+
+    #[test]
+    fn it_extracts_same_typed_args_without_swapping_them() {
+        // The regression this whole path exists for: two arguments of the same
+        // type are told apart by name, never by their order in the map.
+        let params = params(Some(HashMap::from([
+            ("last".into(), json!("Doe")),
+            ("first".into(), json!("John")),
+        ])));
+
+        let (first, last): (String, String) =
+            FromHandlerArgs::from_args(params, &ArgNames::new(["first", "last"])).unwrap();
+
+        assert_eq!(first, "John");
+        assert_eq!(last, "Doe");
+    }
+
+    #[test]
+    fn it_extracts_positional_args_when_no_names_declared() {
+        let params = params(Some(HashMap::from([
+            ("arg1".into(), json!("John")),
+            ("arg0".into(), json!(30)),
+        ])));
+
+        let (age, name): (i32, String) =
+            FromHandlerArgs::from_args(params, &ArgNames::default()).unwrap();
+
+        assert_eq!(age, 30);
+        assert_eq!(name, "John");
+    }
+
+    #[test]
+    fn it_resolves_an_absent_optional_arg_to_none() {
+        let params = params(Some(HashMap::from([("name".into(), json!("John"))])));
+
+        let (name, age): (String, Option<i32>) =
+            FromHandlerArgs::from_args(params, &ArgNames::new(["name", "age"])).unwrap();
+
+        assert_eq!(name, "John");
+        assert_eq!(age, None);
+    }
+
+    #[test]
+    fn it_reports_a_missing_arg_by_name() {
+        let params = params(Some(HashMap::from([("name".into(), json!("John"))])));
+
+        let err = <(String, i32)>::from_args(params, &ArgNames::new(["name", "age"])).unwrap_err();
+
+        assert_eq!(err.code, crate::error::ErrorCode::InvalidParams);
+        assert!(
+            err.to_string().contains("missing required argument `age`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn it_reports_a_missing_required_arg_that_would_accept_null() {
+        // `serde_json::Value` deserializes from `null` quite happily, so
+        // optionality cannot be inferred from a synthetic null failing: the
+        // argument is required and its absence has to be reported as such.
+        let params = params(Some(HashMap::new()));
+
+        let err = <(Value,)>::from_args(params, &ArgNames::new(["payload"])).unwrap_err();
+
+        assert_eq!(err.code, crate::error::ErrorCode::InvalidParams);
+        assert!(
+            err.to_string()
+                .contains("missing required argument `payload`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn it_reads_an_explicit_null_for_a_null_accepting_required_arg() {
+        // Sent explicitly, `null` is a value the argument accepts -- only its
+        // *absence* is the error.
+        let params = params(Some(HashMap::from([("payload".into(), Value::Null)])));
+
+        let (payload,): (Value,) =
+            FromHandlerArgs::from_args(params, &ArgNames::new(["payload"])).unwrap();
+
+        assert_eq!(payload, Value::Null);
+    }
+
+    #[test]
+    fn it_reports_a_mistyped_arg_by_name() {
+        let params = params(Some(HashMap::from([("age".into(), json!("thirty"))])));
+
+        let err = <(i32,)>::from_args(params, &ArgNames::new(["age"])).unwrap_err();
+
+        assert_eq!(err.code, crate::error::ErrorCode::InvalidParams);
+        assert!(
+            err.to_string().contains("invalid value for argument `age`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn it_extracts_no_args() {
+        let extracted: () = FromHandlerArgs::from_args(params(None), &ArgNames::default()).unwrap();
+
+        assert_eq!(extracted, ());
     }
 
     #[test]
     fn it_extracts_meta() {
-        let params = CallToolRequestParams {
-            name: "tool".into(),
-            meta: Some(RequestParamsMeta {
-                progress_token: None,
-                traceparent: None,
-                baggage: None,
-                tracestate: None,
-                client_info: None,
-                #[cfg(not(feature = "legacy-spec"))]
-                input_responses: None,
-                #[cfg(not(feature = "legacy-spec"))]
-                request_state: None,
-                #[cfg(not(feature = "legacy-spec"))]
-                protocol_version: None,
-                #[cfg(not(feature = "legacy-spec"))]
-                client_capabilities: None,
-                #[cfg(not(feature = "legacy-spec"))]
-                log_level: None,
-                context: None,
-                #[cfg(feature = "tasks")]
-                task: None,
-            }),
-            args: None,
-            #[cfg(feature = "tasks")]
-            task: None,
-        };
+        let params = meta(RequestParamsMeta::default());
 
-        let arg: (Meta<RequestParamsMeta>,) = params.try_into().unwrap();
+        let arg: (Meta<RequestParamsMeta>,) =
+            FromHandlerArgs::from_args(params, &ArgNames::default()).unwrap();
 
         assert_eq!(arg.0.progress_token, None);
     }
 
     #[test]
     fn it_extracts_progress_token() {
-        let params = CallToolRequestParams {
-            name: "tool".into(),
-            meta: Some(RequestParamsMeta {
-                progress_token: Some(ProgressToken::Number(5)),
-                traceparent: None,
-                baggage: None,
-                tracestate: None,
-                client_info: None,
-                #[cfg(not(feature = "legacy-spec"))]
-                input_responses: None,
-                #[cfg(not(feature = "legacy-spec"))]
-                request_state: None,
-                #[cfg(not(feature = "legacy-spec"))]
-                protocol_version: None,
-                #[cfg(not(feature = "legacy-spec"))]
-                client_capabilities: None,
-                #[cfg(not(feature = "legacy-spec"))]
-                log_level: None,
-                context: None,
-                #[cfg(feature = "tasks")]
-                task: None,
-            }),
-            args: None,
-            #[cfg(feature = "tasks")]
-            task: None,
-        };
+        let params = meta(RequestParamsMeta {
+            progress_token: Some(ProgressToken::Number(5)),
+            ..Default::default()
+        });
 
-        let arg: (Meta<ProgressToken>,) = params.try_into().unwrap();
+        let arg: (Meta<ProgressToken>,) =
+            FromHandlerArgs::from_args(params, &ArgNames::default()).unwrap();
 
         assert_eq!(arg.0.0, ProgressToken::Number(5));
+    }
+
+    #[test]
+    fn it_does_not_let_a_meta_arg_consume_an_argument_slot() {
+        // `Meta<_>` comes from `_meta`, so the `String` after it still reads
+        // the *first* declared argument name.
+        let mut params = params(Some(HashMap::from([("name".into(), json!("John"))])));
+        params.meta = Some(RequestParamsMeta {
+            progress_token: Some(ProgressToken::Number(5)),
+            ..Default::default()
+        });
+
+        let (token, name): (Meta<ProgressToken>, String) =
+            FromHandlerArgs::from_args(params, &ArgNames::new(["name"])).unwrap();
+
+        assert_eq!(token.0, ProgressToken::Number(5));
+        assert_eq!(name, "John");
     }
 }

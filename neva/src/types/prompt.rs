@@ -7,9 +7,9 @@ use crate::error::{Error, ErrorCode};
 use crate::shared;
 #[cfg(feature = "server")]
 use crate::shared::BoxFuture;
-#[cfg(feature = "server")]
-use crate::types::FromRequest;
 use crate::types::request::RequestParamsMeta;
+#[cfg(feature = "server")]
+use crate::types::{ArgNames, FromHandlerArgs, FromRequest};
 use crate::types::{Cursor, Icon};
 #[cfg(feature = "server")]
 use crate::types::{IntoResponse, Page, PropertyType, Request, RequestId, Response};
@@ -100,6 +100,15 @@ pub struct Prompt {
     #[serde(skip)]
     #[cfg(feature = "http-server")]
     pub(crate) permissions: Option<Vec<String>>,
+
+    /// The names the handler's arguments are read from `arguments` by.
+    ///
+    /// Server-side only, and always kept in step with [`Self::args`] -- the
+    /// argument list a peer sees is the one extraction reads by. See
+    /// [`Prompt::with_args`].
+    #[serde(skip)]
+    #[cfg(feature = "server")]
+    pub(crate) arg_names: ArgNames,
 }
 
 /// Describes an argument that a prompt can accept.
@@ -317,7 +326,11 @@ impl<T: Into<String>> From<(T, T, bool)> for PromptArgument {
 /// Describes a generic get prompt handler
 #[cfg(feature = "server")]
 pub trait PromptHandler<Args>: GenericHandler<Args> {
-    /// Returns a prompt arguments schema
+    /// Returns the handler's value-carrying arguments, in declaration order.
+    ///
+    /// Parameters extracted from request metadata ([`crate::types::Meta`],
+    /// [`Context`], DI) are not arguments and do not appear here, so the
+    /// position in this list is the slot [`ArgNames`] indexes.
     #[inline]
     fn args() -> Option<Vec<PromptArgument>> {
         None
@@ -330,7 +343,7 @@ where
     F: PromptHandler<Args, Output = R>,
     R: TryInto<GetPromptResult>,
     R::Error: Into<Error>,
-    Args: TryFrom<GetPromptRequestParams, Error = Error>,
+    Args: FromHandlerArgs<GetPromptRequestParams>,
 {
     func: F,
     _marker: std::marker::PhantomData<Args>,
@@ -342,7 +355,7 @@ where
     F: PromptHandler<Args, Output = R>,
     R: TryInto<GetPromptResult>,
     R::Error: Into<Error>,
-    Args: TryFrom<GetPromptRequestParams, Error = Error>,
+    Args: FromHandlerArgs<GetPromptRequestParams>,
 {
     /// Creates a new [`PromptFunc`] wrapped into [`Arc`]
     pub(crate) fn new(func: F) -> Arc<Self> {
@@ -360,15 +373,15 @@ where
     F: PromptHandler<Args, Output = R>,
     R: TryInto<GetPromptResult>,
     R::Error: Into<Error>,
-    Args: TryFrom<GetPromptRequestParams, Error = Error> + Send + Sync,
+    Args: FromHandlerArgs<GetPromptRequestParams> + Send + Sync,
 {
     #[inline]
     fn call(&self, params: HandlerParams) -> BoxFuture<'_, Result<GetPromptResult, Error>> {
-        let HandlerParams::Prompt(params) = params else {
+        let HandlerParams::Prompt(params, names) = params else {
             unreachable!()
         };
         Box::pin(async move {
-            let args = Args::try_from(params)?;
+            let args = Args::from_args(params, &names)?;
             self.func.call(args).await.try_into().map_err(Into::into)
         })
     }
@@ -421,7 +434,7 @@ impl Prompt {
         F: PromptHandler<Args, Output = R>,
         R: TryInto<GetPromptResult> + Send + 'static,
         R::Error: Into<Error>,
-        Args: TryFrom<GetPromptRequestParams, Error = Error> + Send + Sync + 'static,
+        Args: FromHandlerArgs<GetPromptRequestParams> + Send + Sync + 'static,
     {
         let handler = PromptFunc::new(handler);
         let args = F::args();
@@ -430,6 +443,7 @@ impl Prompt {
             title: None,
             descr: None,
             meta: None,
+            arg_names: args.as_deref().map(arg_names).unwrap_or_default(),
             args,
             handler: Some(handler),
             #[cfg(feature = "http-server")]
@@ -453,13 +467,84 @@ impl Prompt {
     }
 
     /// Sets arguments for the [`Prompt`]
+    ///
+    /// The list is both what a peer sees in `prompts/list` and what the
+    /// handler's arguments are extracted by: the *n*-th argument here names
+    /// the value the handler's *n*-th value-carrying parameter reads. Setting
+    /// it therefore cannot leave the published arguments and the handler
+    /// disagreeing.
+    ///
+    /// Parameters served from request metadata -- [`crate::types::Meta`],
+    /// [`Context`], a DI-injected `Dc<T>` -- are not arguments and are not
+    /// listed here. An `Option<T>` parameter is: list it with
+    /// [`PromptArgument::optional`] or [`PromptArgument::named`] so peers know
+    /// they may leave it out.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::{App, types::Role};
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let mut app = App::new();
+    ///
+    /// app.map_prompt("analyze", |lang: String, code: String| async move {
+    ///     (format!("Analyze this {lang} code: {code}"), Role::User)
+    /// })
+    /// .with_args(["lang", "code"]);
+    ///
+    /// # app.run().await;
+    /// # }
+    /// ```
     pub fn with_args<T, A>(&mut self, args: T) -> &mut Self
     where
         T: IntoIterator<Item = A>,
         A: Into<PromptArgument>,
     {
-        self.args = Some(args.into_iter().map(Into::into).collect());
+        let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
+        // `declare` keeps the handler's own arity rather than adopting the
+        // length of this list, so a list that does not cover every argument
+        // stays detectable instead of silently leaving the trailing parameters
+        // reading unpublished `argN` keys.
+        self.arg_names = self
+            .arg_names
+            .declare(args.iter().map(|arg| arg.name.as_str()));
+
+        self.args = Some(args);
         self
+    }
+
+    /// Describes how the prompt's published argument list and its handler
+    /// disagree, if they do.
+    ///
+    /// The list is what peers are told to send *and* what extraction reads by,
+    /// so one that does not cover every argument the handler takes leaves the
+    /// trailing parameters reading keys no peer was ever asked for. Worth
+    /// catching at startup rather than on a peer's first request.
+    pub(crate) fn arg_name_conflict(&self) -> Option<String> {
+        if !self.arg_names.is_declared() {
+            return None;
+        }
+
+        let arity = self.arg_names.arity();
+        let declared = self.arg_names.len();
+        if declared != arity {
+            return Some(format!(
+                "prompt `{}` publishes {declared} argument(s) but its handler takes {arity}. \
+                 List every argument the handler reads, metadata parameters (`Context`, \
+                 `Meta<_>`, `Dc<_>`) excluded.",
+                self.name,
+            ));
+        }
+
+        self.arg_names.duplicate().map(|duplicate| {
+            format!(
+                "prompt `{}` publishes the argument `{duplicate}` twice. Arguments are read \
+                 from a request by name, so two parameters sharing one name would both be \
+                 handed the same value.",
+                self.name,
+            )
+        })
     }
 
     /// Sets the [`Prompt`] icons
@@ -492,15 +577,29 @@ impl Prompt {
 
     /// Get prompt result
     #[inline]
-    pub(crate) async fn call(&self, params: HandlerParams) -> Result<GetPromptResult, Error> {
+    pub(crate) async fn call(
+        &self,
+        params: GetPromptRequestParams,
+    ) -> Result<GetPromptResult, Error> {
         match self.handler {
-            Some(ref handler) => handler.call(params).await,
+            Some(ref handler) => {
+                handler
+                    .call(HandlerParams::Prompt(params, self.arg_names.clone()))
+                    .await
+            }
             None => Err(Error::new(
                 ErrorCode::InternalError,
                 "Prompt handler not specified",
             )),
         }
     }
+}
+
+/// The extraction names of a prompt's declared arguments, in order.
+#[cfg(feature = "server")]
+#[inline]
+fn arg_names(args: &[PromptArgument]) -> ArgNames {
+    ArgNames::new(args.iter().map(|arg| arg.name.as_str()))
 }
 
 /// Prompt arguments helper
@@ -519,12 +618,35 @@ impl PromptArguments {
 
 #[cfg(feature = "server")]
 impl PromptArgument {
-    /// Creates a new [`PromptArgument`]
-    pub(crate) fn new<T>() -> Self {
+    /// Creates the [`PromptArgument`] for the `slot`-th argument of a handler
+    /// whose parameter names are not known -- a bare closure.
+    ///
+    /// The positional name is what the prompt publishes *and* what extraction
+    /// reads by; [`Prompt::with_args`] replaces both together.
+    pub(crate) fn positional(slot: usize, required: bool) -> Self {
+        Self::named(
+            crate::types::helpers::extract::positional_name(slot),
+            required,
+        )
+    }
+
+    /// Creates a [`PromptArgument`] with no description.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use neva::types::prompt::PromptArgument;
+    ///
+    /// let arg = PromptArgument::named("tone", false);
+    ///
+    /// assert_eq!(arg.name, "tone");
+    /// assert_eq!(arg.required, Some(false));
+    /// ```
+    pub fn named<T: Into<String>>(name: T, required: bool) -> Self {
         Self {
-            name: std::any::type_name::<T>().into(),
+            name: name.into(),
             descr: None,
-            required: Some(true),
+            required: Some(required),
         }
     }
 
@@ -557,15 +679,20 @@ macro_rules! impl_generic_prompt_handler ({ $($param:ident)* } => {
         #[inline]
         #[allow(unused_mut)]
         fn args() -> Option<Vec<PromptArgument>> {
-            let mut args = Vec::new();
+            let mut args: Vec<PromptArgument> = Vec::new();
             $(
             {
+                // Metadata-served parameters are not arguments: they are
+                // neither published nor do they consume an argument slot.
                 if $param::category() != PropertyType::None {
-                    args.push(PromptArgument::new::<$param>());
+                    args.push(PromptArgument::positional(
+                        args.len(),
+                        !$param::is_optional(),
+                    ));
                 }
             }
             )*
-            if args.len() == 0 {
+            if args.is_empty() {
                 None
             } else {
                 Some(args)
