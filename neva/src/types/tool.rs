@@ -882,6 +882,48 @@ fn build_input_schema_from_args(
     }
 }
 
+/// Whether the schema can accept property names its top-level `properties`
+/// map does not list.
+///
+/// The startup check compares the handler's argument names against that map,
+/// which is only sound while the map is the whole story. Two families of
+/// keyword make it not:
+///
+/// * composition -- `$ref` and friends pull in properties defined elsewhere;
+/// * property matching -- `patternProperties` names properties by regex,
+///   `propertyNames` constrains names without listing any, and
+///   `additionalProperties` / `unevaluatedProperties` admit whatever is left
+///   over unless they are `false`, which is the one spelling that *closes* the
+///   schema and leaves the map exhaustive.
+///
+/// Deciding either properly means evaluating the schema, which is far more
+/// than a startup sanity check should carry -- so a schema that uses them is
+/// left alone rather than failed on a guess.
+#[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+fn admits_properties_elsewhere(schema: &serde_json::Map<String, Value>) -> bool {
+    const COMPOSES: [&str; 9] = [
+        "$ref",
+        "allOf",
+        "anyOf",
+        "oneOf",
+        "not",
+        "if",
+        "then",
+        "else",
+        "dependentSchemas",
+    ];
+    /// Name properties without listing them, at any value.
+    const MATCHES_NAMES: [&str; 2] = ["patternProperties", "propertyNames"];
+    /// Admit further properties unless set to `false`.
+    const OPEN_UNLESS_FALSE: [&str; 2] = ["additionalProperties", "unevaluatedProperties"];
+
+    COMPOSES.iter().any(|kw| schema.contains_key(*kw))
+        || MATCHES_NAMES.iter().any(|kw| schema.contains_key(*kw))
+        || OPEN_UNLESS_FALSE
+            .iter()
+            .any(|kw| schema.get(*kw).is_some_and(|v| v != &Value::Bool(false)))
+}
+
 /// Renames the generated properties of `schema` from the names the arguments
 /// are currently read by to the names they are about to be read by.
 ///
@@ -1210,23 +1252,8 @@ impl Tool {
 
         #[cfg(not(feature = "legacy-spec"))]
         let props = {
-            /// Keywords that can contribute properties from outside the
-            /// top-level map. Their presence means the map is only part of
-            /// what the schema publishes.
-            const COMPOSES: [&str; 9] = [
-                "$ref",
-                "allOf",
-                "anyOf",
-                "oneOf",
-                "not",
-                "if",
-                "then",
-                "else",
-                "dependentSchemas",
-            ];
-
             let schema = self.input_schema.as_value().as_object()?;
-            if COMPOSES.iter().any(|kw| schema.contains_key(*kw)) {
+            if admits_properties_elsewhere(schema) {
                 return None;
             }
             schema.get("properties").and_then(Value::as_object)?

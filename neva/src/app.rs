@@ -313,6 +313,9 @@ impl App {
         self.options
             .add_middleware(make_mw(Self::message_middleware));
 
+        // Read before `self.options` moves into the runtime below.
+        let greeted = self.greeting;
+
         let mut transport = self.options.transport();
         let cancellation_token = transport.start();
         self.wait_for_shutdown_signal(cancellation_token.clone());
@@ -352,6 +355,12 @@ impl App {
                     }
                 }
             }
+        }
+
+        // Closes what the banner opened. Only for a greeted server: one that
+        // asked for no banner asked for a quiet terminal.
+        if greeted {
+            greeter::print_farewell(std::env::var_os("NO_COLOR").is_none());
         }
     }
 
@@ -2182,6 +2191,67 @@ mod tests {
                 {
                     crate::types::schema_2020::InputSchema::from_json_str(JSON).unwrap_or_default()
                 }
+            })
+            .with_arg_names(["q"]);
+
+        app.validate_arg_names();
+    }
+
+    /// A schema may name an argument by pattern rather than list it, and the
+    /// top-level map is then not the whole story either.
+    #[test]
+    #[cfg(not(feature = "legacy-spec"))]
+    fn startup_accepts_a_schema_with_pattern_properties() {
+        let mut app = App::new();
+        app.map_tool("search", |q: String, page: i32| async move {
+            format!("{q}{page}")
+        })
+        .with_input_schema(|_| {
+            crate::types::schema_2020::InputSchema::from_json_str(
+                r#"{
+                    "type": "object",
+                    "properties": { "page": { "type": "number" } },
+                    "patternProperties": { "^q$": { "type": "string" } },
+                    "required": ["page", "q"]
+                }"#,
+            )
+            .unwrap_or_default()
+        })
+        .with_arg_names(["q", "page"]);
+
+        app.validate_arg_names();
+    }
+
+    /// `additionalProperties` left open admits names the map never listed.
+    #[test]
+    #[cfg(not(feature = "legacy-spec"))]
+    fn startup_accepts_a_schema_left_open_to_further_properties() {
+        let mut app = App::new();
+        app.map_tool("search", |q: String| async move { q })
+            .with_input_schema(|_| {
+                crate::types::schema_2020::InputSchema::from_json_str(
+                    r#"{"type":"object","properties":{},"additionalProperties":{"type":"string"}}"#,
+                )
+                .unwrap_or_default()
+            })
+            .with_arg_names(["q"]);
+
+        app.validate_arg_names();
+    }
+
+    /// `additionalProperties: false` is the spelling that *closes* the schema,
+    /// so the map really is exhaustive and the check still applies.
+    #[test]
+    #[should_panic(expected = "declares the argument `q` but publishes an inputSchema without it")]
+    #[cfg(not(feature = "legacy-spec"))]
+    fn startup_still_checks_a_closed_schema() {
+        let mut app = App::new();
+        app.map_tool("search", |q: String| async move { q })
+            .with_input_schema(|_| {
+                crate::types::schema_2020::InputSchema::from_json_str(
+                    r#"{"type":"object","properties":{"query":{"type":"string"}},"additionalProperties":false}"#,
+                )
+                .unwrap_or_default()
             })
             .with_arg_names(["q"]);
 
