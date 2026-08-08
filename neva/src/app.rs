@@ -2267,6 +2267,31 @@ mod tests {
         app.validate_arg_names();
     }
 
+    /// `not` composes the other way round: it says what an instance must fail.
+    /// A name under it is one no peer may send, so it cannot be the one that
+    /// makes the top-level map incomplete, and the check still applies.
+    #[test]
+    #[should_panic(expected = "declares the argument `q` but publishes an inputSchema without it")]
+    #[cfg(not(feature = "legacy-spec"))]
+    fn startup_checks_a_schema_whose_only_composition_is_not() {
+        let mut app = App::new();
+        app.map_tool("search", |q: String| async move { q })
+            .with_input_schema(|_| {
+                crate::types::schema_2020::InputSchema::from_json_str(
+                    r#"{
+                        "type": "object",
+                        "properties": { "query": { "type": "string" } },
+                        "not": { "required": ["forbidden"] },
+                        "additionalProperties": false
+                    }"#,
+                )
+                .unwrap_or_default()
+            })
+            .with_arg_names(["q"]);
+
+        app.validate_arg_names();
+    }
+
     /// `additionalProperties: false` closes the schema; the map is exhaustive
     /// and the check applies as plainly as it does without the keyword.
     #[test]

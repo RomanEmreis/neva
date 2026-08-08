@@ -902,14 +902,18 @@ fn build_input_schema_from_args(
 /// Following either properly means evaluating the schema, which is far more
 /// than a startup sanity check should carry, so a schema that uses them is
 /// left alone rather than failed on a guess.
+///
+/// `not` is the one composition keyword missing from that list, because it
+/// composes in the opposite direction: a subschema under `not` describes what
+/// an instance must *fail*, so a name appearing there is one a peer is being
+/// told to avoid, never one it could be sent.
 #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
 fn advertises_properties_elsewhere(schema: &serde_json::Map<String, Value>) -> bool {
-    const ADVERTISES: [&str; 10] = [
+    const ADVERTISES: [&str; 9] = [
         "$ref",
         "allOf",
         "anyOf",
         "oneOf",
-        "not",
         "if",
         "then",
         "else",
