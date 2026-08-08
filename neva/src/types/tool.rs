@@ -141,6 +141,17 @@ pub struct Tool {
     #[serde(skip)]
     #[cfg(feature = "server")]
     pub(crate) arg_names: ArgNames,
+
+    /// Whether [`Self::input_schema`] came from the caller rather than from
+    /// the handler's signature.
+    ///
+    /// [`Tool::with_arg_names`] rewrites the property names of a schema it
+    /// generated itself, and must not touch one it did not write: every key
+    /// there was chosen deliberately, including any that happens to look
+    /// positional.
+    #[serde(skip)]
+    #[cfg(feature = "server")]
+    custom_schema: bool,
 }
 
 /// Execution-related properties for a tool.
@@ -1014,6 +1025,7 @@ impl Tool {
             annotations: None,
             handler: Some(handler),
             arg_names,
+            custom_schema: false,
             icons: None,
             #[cfg(feature = "http-server")]
             roles: None,
@@ -1053,6 +1065,7 @@ impl Tool {
         F: FnOnce(crate::types::ToolInputSchema) -> crate::types::ToolInputSchema,
     {
         self.input_schema = config(Default::default());
+        self.custom_schema = true;
         self
     }
 
@@ -1103,7 +1116,13 @@ impl Tool {
         I: Into<String>,
     {
         let declared = self.arg_names.declare(names);
-        rename_args(&mut self.input_schema, &self.arg_names, &declared);
+        // Only a schema this crate generated is rewritten. A hand-written one
+        // is the caller's text, and every key in it was chosen on purpose --
+        // renaming a property that merely looks positional would silently
+        // overwrite whatever they named it after.
+        if !self.custom_schema {
+            rename_args(&mut self.input_schema, &self.arg_names, &declared);
+        }
         self.arg_names = declared;
         self
     }
@@ -1710,6 +1729,52 @@ mod tests {
         .with_arg_names(["a", "b"]);
 
         assert_eq!(schema_props(&tool), ["a", "b"]);
+    }
+
+    /// A hand-written schema is left alone even where it uses a name that
+    /// looks like one this crate generates. `arg0` there is the caller's own
+    /// property, not a leftover to rewrite, and renaming it would drop the
+    /// definition they gave the argument it collides with.
+    #[test]
+    fn it_leaves_a_positional_looking_property_of_a_hand_written_schema_alone() {
+        let mut tool = Tool::new("sum", |a: i32, b: i32| async move { a + b });
+        tool.with_input_schema(|_| {
+            const JSON: &str = r#"{
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "age": { "type": "number" },
+                    "arg0": { "type": "boolean" }
+                }
+            }"#;
+            #[cfg(feature = "legacy-spec")]
+            {
+                ToolSchema::from_json_str(JSON)
+            }
+            #[cfg(not(feature = "legacy-spec"))]
+            {
+                crate::types::schema_2020::InputSchema::from_json_str(JSON).unwrap_or_default()
+            }
+        })
+        .with_arg_names(["name", "age"]);
+
+        assert_eq!(schema_props(&tool), ["age", "arg0", "name"]);
+
+        // The caller's own definition of `name` must survive: renaming `arg0`
+        // onto it would leave the boolean behind.
+        #[cfg(feature = "legacy-spec")]
+        {
+            let props = tool.input_schema.properties.as_ref().unwrap();
+            assert_eq!(props["name"].r#type, PropertyType::String);
+            assert_eq!(props["arg0"].r#type, PropertyType::Bool);
+        }
+        #[cfg(not(feature = "legacy-spec"))]
+        {
+            let props = &tool.input_schema.as_value()["properties"];
+            assert_eq!(props["name"]["type"], "string");
+            assert_eq!(props["arg0"]["type"], "boolean");
+        }
+        assert!(tool.arg_name_conflict().is_none());
     }
 
     #[test]
