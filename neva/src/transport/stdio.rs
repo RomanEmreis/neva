@@ -5,13 +5,19 @@ use crate::transport::{Receiver as TransportReceiver, Sender as TransportSender,
 use crate::types::Message;
 use futures_util::TryFutureExt;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter},
+    io::{AsyncWrite, AsyncWriteExt, BufWriter},
     sync::mpsc::{self, Receiver, Sender},
 };
+
+// The async reader serves a child process's piped stdout, which only a client
+// has. A server reads its own stdin, and does that on a thread of its own --
+// see `StdIoReceiver::start_blocking`.
+#[cfg(feature = "client")]
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "server")]
-use tokio::io::{Stdin, Stdout};
+use tokio::io::Stdout;
 
 #[cfg(feature = "client")]
 use self::options::StdIoOptions;
@@ -218,6 +224,39 @@ fn parse_line(line: &str) -> Line {
     }
 }
 
+/// What a receive loop does with the line it just read.
+///
+/// The two loops below read over different I/O -- a client awaits a child's
+/// piped stdout, a server blocks on its own stdin -- but what a line *means*
+/// is the same either way, so it is decided once here and each loop only
+/// carries it out with the sends its own flavour has.
+enum Step {
+    /// Nothing to forward; read the next line.
+    Skip,
+    /// Hand to the dispatch layer.
+    Forward(Message),
+    /// Answer the peer directly through the transport's sender.
+    Answer(Message),
+    /// Report the read failure, then stop.
+    Fail(Error),
+    /// Input is finished.
+    Stop,
+}
+
+/// Classifies one read: how it went, and what the line it produced was.
+#[inline]
+fn next_step(read: std::io::Result<usize>, line: &str) -> Step {
+    match read {
+        Ok(0) => Step::Stop, // EOF
+        Ok(_) => match parse_line(line) {
+            Line::Drop => Step::Skip,
+            Line::Message(msg) => Step::Forward(msg),
+            Line::Reply(resp) => Step::Answer(resp),
+        },
+        Err(err) => Step::Fail(err.into()),
+    }
+}
+
 impl StdIoReceiver {
     /// Creates a new stdio transport receiver
     pub(crate) fn new() -> Self {
@@ -225,11 +264,16 @@ impl StdIoReceiver {
         Self { tx, rx }
     }
 
-    /// Starts a new thread that reads from stdin asynchronously.
+    /// Starts a task that reads `reader` asynchronously.
+    ///
+    /// Serves a client's view of a child process's piped stdout: a real async
+    /// pipe, so a pending read is a task the runtime can simply drop, and
+    /// cancellation lands on the next line boundary or sooner.
     ///
     /// `replies` is the transport's own sender: an unreadable inbound
     /// request is answered with a JSON-RPC parse error from here, since
     /// it never reaches the dispatch layer that would normally reply.
+    #[cfg(feature = "client")]
     pub(crate) fn start<T: AsyncRead + Unpin + Send + 'static>(
         &self,
         mut reader: BufReader<T>,
@@ -241,39 +285,77 @@ impl StdIoReceiver {
             let mut line = String::new();
             loop {
                 line.clear();
-                tokio::select! {
+                let read = tokio::select! {
                     biased;
                     _ = token.cancelled() => break,
-                    read_line = reader.read_line(&mut line) => {
-                        match read_line {
-                            Ok(0) => break, // EOF
-                            Ok(_) => match parse_line(&line) {
-                                Line::Drop => continue,
-                                Line::Message(msg) => {
-                                    if let Err(_e) = tx.send(Ok(msg)).await {
-                                        #[cfg(feature = "tracing")]
-                                        tracing::error!(logger = "neva", "Failed to send request: {:?}", _e);
-                                        break;
-                                    }
-                                }
-                                Line::Reply(resp) => {
-                                    if let Err(_e) = replies.send(resp).await {
-                                        #[cfg(feature = "tracing")]
-                                        tracing::error!(logger = "neva", "Failed to reply with a parse error: {:?}", _e);
-                                        break;
-                                    }
-                                }
-                            }
-                            Err(err) => {
-                                let err = Err(err.into());
-                                if let Err(_e) = tx.send(err).await {
-                                    #[cfg(feature = "tracing")]
-                                    tracing::error!(logger = "neva", "Failed to send error request: {:?}", _e);
-                                }
-                                break;
-                            }
-                        };
+                    read = reader.read_line(&mut line) => read,
+                };
+                let sent = match next_step(read, &line) {
+                    Step::Skip => continue,
+                    Step::Stop => break,
+                    Step::Forward(msg) => tx.send(Ok(msg)).await.is_ok(),
+                    Step::Answer(resp) => replies.send(resp).await.is_ok(),
+                    Step::Fail(err) => {
+                        let _ = tx.send(Err(err)).await;
+                        break;
                     }
+                };
+                if !sent {
+                    break;
+                }
+            }
+        });
+    }
+
+    /// Starts a dedicated OS thread that reads `reader` with blocking I/O.
+    ///
+    /// Used for the server's own `stdin`, which -- unlike a child process's
+    /// piped stdout -- has no async form. [`tokio::io::stdin`] emulates one by
+    /// parking each read on the runtime's *blocking pool*, and a read parked
+    /// there when the shutdown signal arrives is never interrupted: the peer
+    /// simply is not writing. Dropping the runtime waits for that pool, so a
+    /// server that shut down cleanly would still hang the process until the
+    /// peer happened to send another line. Ctrl+C looked like it did nothing.
+    ///
+    /// A thread of our own is not the runtime's to wait for, so returning from
+    /// `main` ends the process while this thread is still parked in `read`.
+    /// Cancellation is still observed between lines, for a host that keeps
+    /// running after the server stops.
+    ///
+    /// End of input leaves the dispatch loop waiting, exactly as it did
+    /// before: the receiver still holds a sender of its own, so the channel
+    /// never closes. That is a separate shortcoming of the stdio shutdown
+    /// path -- ending it properly means draining the handlers still in flight
+    /// so their answers are not thrown away -- and is deliberately not
+    /// conflated with the Ctrl+C fix here.
+    #[cfg(feature = "server")]
+    pub(crate) fn start_blocking<T: std::io::BufRead + Send + 'static>(
+        &self,
+        mut reader: T,
+        replies: Sender<Message>,
+        token: CancellationToken,
+    ) {
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if token.is_cancelled() {
+                    break;
+                }
+                let read = reader.read_line(&mut line);
+                let sent = match next_step(read, &line) {
+                    Step::Skip => continue,
+                    Step::Stop => break,
+                    Step::Forward(msg) => tx.blocking_send(Ok(msg)).is_ok(),
+                    Step::Answer(resp) => replies.blocking_send(resp).is_ok(),
+                    Step::Fail(err) => {
+                        let _ = tx.blocking_send(Err(err));
+                        break;
+                    }
+                };
+                if !sent {
+                    break;
                 }
             }
         });
@@ -362,10 +444,16 @@ impl StdIoServer {
         }
     }
 
-    /// Initializes and Returns references to `stdin` and `stdout`
-    pub(crate) fn init() -> (BufReader<Stdin>, BufWriter<Stdout>) {
+    /// Initializes and Returns handles to `stdin` and `stdout`.
+    ///
+    /// `stdin` is the std one, read on a thread of our own: see
+    /// [`StdIoReceiver::start_blocking`] for why tokio's cannot be used here.
+    /// `stdout` stays async -- a write parks on the blocking pool only for as
+    /// long as the write takes, so it is never the thing left outstanding at
+    /// shutdown.
+    pub(crate) fn init() -> (std::io::BufReader<std::io::Stdin>, BufWriter<Stdout>) {
         (
-            BufReader::new(tokio::io::stdin()),
+            std::io::BufReader::new(std::io::stdin()),
             BufWriter::new(tokio::io::stdout()),
         )
     }
@@ -425,7 +513,7 @@ impl Transport for StdIoServer {
         let (reader, writer) = StdIoServer::init();
 
         self.receiver
-            .start(reader, self.sender.tx.clone(), token.clone());
+            .start_blocking(reader, self.sender.tx.clone(), token.clone());
         self.sender.start(writer, token.clone());
 
         #[cfg(feature = "tracing")]
@@ -463,6 +551,10 @@ mod parse_line_tests {
     /// The regression the fix is really about: the bad line must not end
     /// the stream -- the pending request completes *and* the following
     /// lines keep arriving.
+    // Drives the async reader, which serves a child process's piped stdout and
+    // so is compiled only for a client. `blocking_reader_tests` covers the same
+    // routing on the server's own reader; both go through `next_step`.
+    #[cfg(feature = "client")]
     #[tokio::test]
     async fn a_bad_line_neither_ends_the_stream_nor_is_swallowed() {
         const INPUT: &[u8] = concat!(
@@ -495,6 +587,7 @@ mod parse_line_tests {
     /// End-to-end through the reader task: a malformed inbound request is
     /// written back out the transport's sender, and never surfaces to the
     /// receive loop that would have swallowed it.
+    #[cfg(feature = "client")]
     #[tokio::test]
     async fn a_malformed_request_is_written_back_to_the_peer() {
         const INPUT: &[u8] = concat!(
@@ -675,5 +768,84 @@ mod tests {
             .unwrap();
 
         assert!(output.stdout.is_empty(), "Process still running");
+    }
+}
+
+/// The server's stdin is read on a thread of neva's own rather than through
+/// [`tokio::io::stdin`], so that a read still parked when the peer goes quiet
+/// cannot hold the process open. These pin the behaviour that depends on it.
+#[cfg(all(test, feature = "server"))]
+mod blocking_reader_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// The reader forwards what it parses, on a thread the runtime does not
+    /// own -- the whole point being that shutdown never waits for it.
+    #[tokio::test]
+    async fn it_forwards_lines_read_from_a_blocking_source() {
+        let mut receiver = StdIoReceiver::new();
+        let (replies, _replies_rx) = mpsc::channel(8);
+        let input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n".to_vec();
+
+        receiver.start_blocking(
+            std::io::BufReader::new(std::io::Cursor::new(input)),
+            replies,
+            CancellationToken::new(),
+        );
+
+        let msg = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+            .await
+            .expect("the reader must forward the line")
+            .expect("a readable message");
+
+        let Message::Request(req) = msg else {
+            panic!("expected a request");
+        };
+        assert_eq!(req.method, "tools/list");
+    }
+
+    /// An unreadable request is answered rather than dropped or pushed into
+    /// the receive loop -- the same routing the async reader does.
+    #[tokio::test]
+    async fn it_answers_an_unreadable_request_out_of_band() {
+        let receiver = StdIoReceiver::new();
+        let (replies, mut replies_rx) = mpsc::channel(8);
+        let input = b"{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":}\n".to_vec();
+
+        receiver.start_blocking(
+            std::io::BufReader::new(std::io::Cursor::new(input)),
+            replies,
+            CancellationToken::new(),
+        );
+
+        let reply = tokio::time::timeout(Duration::from_secs(5), replies_rx.recv())
+            .await
+            .expect("a parse error must be answered")
+            .expect("a reply");
+
+        assert!(matches!(reply, Message::Response(_)));
+    }
+
+    /// Cancellation is observed between lines, so a host that keeps running
+    /// after the server stops is not left with a thread reading into a
+    /// channel nobody drains.
+    #[tokio::test]
+    async fn it_stops_reading_once_cancelled() {
+        let mut receiver = StdIoReceiver::new();
+        let (replies, _replies_rx) = mpsc::channel(8);
+        let token = CancellationToken::new();
+        token.cancel();
+
+        receiver.start_blocking(
+            std::io::BufReader::new(std::io::Cursor::new(
+                b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n".to_vec(),
+            )),
+            replies,
+            token,
+        );
+
+        // Nothing is forwarded: the loop checks the token before its first read.
+        let got = tokio::time::timeout(Duration::from_millis(300), receiver.recv()).await;
+        assert!(got.is_err(), "a cancelled reader must forward nothing");
     }
 }
