@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## 0.5.2
 
 ### Fixed
+* **Per-request `clientCapabilities` are read in the shape the spec defines.**
+  `io.modelcontextprotocol/clientCapabilities` holds a `ClientCapabilities`
+  object, in which each capability is itself an *optional object* whose presence
+  is the declaration (`{"elicitation": {"form": {}}, "roots": {}}`). neva read
+  the members as booleans, so every request from a spec-conformant client --
+  MCP Inspector among them -- failed to parse its `_meta` and came back as
+  `-32602 invalid type: map, expected a boolean`, making `tools/call`,
+  `resources/read` and `prompts/get` unusable. Both shapes are now accepted on
+  the way in (the boolean for older neva clients), and neva's own client writes
+  the object shape.
 * **Tool and prompt arguments are extracted by name, not by position.**
   * A failure now names the argument: ``missing required argument `age` `` and
     ``invalid value for argument `age`: ... `` instead of

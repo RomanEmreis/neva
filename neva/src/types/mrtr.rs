@@ -221,23 +221,110 @@ impl InputRequest {
 /// The server gates each input-request kind on the matching flag: asking for an
 /// input the client never declared is a server bug, and is reported as such
 /// rather than stalling the round-trip.
+///
+/// # Wire shape
+///
+/// This is the `io.modelcontextprotocol/clientCapabilities` value of a request's
+/// `_meta`, which the spec types as `ClientCapabilities`: each capability is an
+/// **optional object** whose mere presence declares support (`elicitation` and
+/// `sampling` may carry sub-capabilities, `roots` is empty). The flags here are
+/// therefore serialized as empty objects and deserialized from any object; a
+/// bare boolean is also accepted on the way in, since earlier neva clients wrote
+/// one.
+///
+/// # Examples
+/// ```
+/// use neva::types::mrtr::ClientMrtrCapabilities;
+///
+/// // Spec shape: presence of the object is the declaration.
+/// let caps: ClientMrtrCapabilities = serde_json::from_value(serde_json::json!({
+///     "elicitation": { "form": {} },
+///     "roots": {}
+/// }))?;
+/// assert!(caps.elicitation);
+/// assert!(caps.roots);
+/// assert!(!caps.sampling);
+///
+/// assert_eq!(
+///     serde_json::to_value(caps)?,
+///     serde_json::json!({ "elicitation": {}, "roots": {} })
+/// );
+/// # Ok::<(), serde_json::Error>(())
+/// ```
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct ClientMrtrCapabilities {
     /// Whether the client can fulfil `elicitation/create` input requests.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        deserialize_with = "de_declared",
+        serialize_with = "ser_declared",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
     pub elicitation: bool,
 
     /// Whether the client can fulfil `sampling/createMessage` input requests.
     ///
     /// A **deprecated** request kind -- see [`InputRequest::Sampling`].
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        deserialize_with = "de_declared",
+        serialize_with = "ser_declared",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
     pub sampling: bool,
 
     /// Whether the client can fulfil `roots/list` input requests.
     ///
     /// A **deprecated** request kind -- see [`InputRequest::Roots`].
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        deserialize_with = "de_declared",
+        serialize_with = "ser_declared",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
     pub roots: bool,
+}
+
+/// How a single capability may be spelled inside
+/// `io.modelcontextprotocol/clientCapabilities`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Declaration {
+    /// The spec shape: an object, possibly carrying sub-capabilities. Present
+    /// means supported, whatever it contains.
+    Object(AnyObject),
+    /// What neva's own client wrote before it followed the spec shape.
+    Flag(bool),
+}
+
+/// Any JSON object, whatever it holds -- the spec declares a capability by the
+/// presence of its object, not by anything inside it. Sub-capabilities are
+/// accepted and ignored (serde skips unknown fields of a fieldless struct).
+#[derive(Deserialize)]
+struct AnyObject {}
+
+/// Reads a capability that the spec spells as an optional object, tolerating the
+/// boolean older neva clients sent.
+fn de_declared<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Option::<Declaration>::deserialize(deserializer)? {
+        Some(Declaration::Object(_)) => true,
+        Some(Declaration::Flag(flag)) => flag,
+        None => false,
+    })
+}
+
+/// Writes a declared capability in the spec shape: an empty object. Only ever
+/// called for a `true` flag -- a `false` one is skipped, which is how the spec
+/// spells "not supported".
+fn ser_declared<S>(_declared: &bool, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeMap;
+    serializer.serialize_map(Some(0))?.end()
 }
 
 #[cfg(feature = "server")]
@@ -304,6 +391,77 @@ impl IntoResponse for InputRequiredResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_capabilities_read_the_spec_object_shape() {
+        // What a spec-conformant client (e.g. MCP Inspector) puts in `_meta`:
+        // every capability is an object, sub-capabilities and all.
+        let caps: ClientMrtrCapabilities = serde_json::from_value(serde_json::json!({
+            "elicitation": { "form": {}, "url": {} },
+            "sampling": { "context": {}, "tools": {} },
+            "roots": {}
+        }))
+        .expect("object-shaped capabilities must parse");
+
+        assert!(caps.elicitation);
+        assert!(caps.sampling);
+        assert!(caps.roots);
+    }
+
+    #[test]
+    fn client_capabilities_read_the_legacy_boolean_shape() {
+        let caps: ClientMrtrCapabilities = serde_json::from_value(serde_json::json!({
+            "elicitation": true,
+            "sampling": false
+        }))
+        .expect("boolean-shaped capabilities must still parse");
+
+        assert!(caps.elicitation);
+        assert!(!caps.sampling);
+        assert!(!caps.roots);
+    }
+
+    #[test]
+    fn absent_and_null_client_capabilities_declare_nothing() {
+        let empty: ClientMrtrCapabilities =
+            serde_json::from_value(serde_json::json!({})).expect("empty object must parse");
+        assert!(!empty.elicitation && !empty.sampling && !empty.roots);
+
+        let nulls: ClientMrtrCapabilities =
+            serde_json::from_value(serde_json::json!({ "elicitation": null, "roots": null }))
+                .expect("null capabilities must parse");
+        assert!(!nulls.elicitation && !nulls.roots);
+    }
+
+    #[test]
+    fn client_capabilities_write_the_spec_object_shape() {
+        let caps = ClientMrtrCapabilities {
+            elicitation: true,
+            sampling: false,
+            roots: true,
+        };
+
+        assert_eq!(
+            serde_json::to_value(caps).expect("serialize"),
+            serde_json::json!({ "elicitation": {}, "roots": {} })
+        );
+    }
+
+    #[test]
+    fn client_capabilities_roundtrip() {
+        let caps = ClientMrtrCapabilities {
+            elicitation: true,
+            sampling: true,
+            roots: false,
+        };
+        let back: ClientMrtrCapabilities =
+            serde_json::from_value(serde_json::to_value(caps).expect("serialize"))
+                .expect("deserialize");
+
+        assert!(back.elicitation);
+        assert!(back.sampling);
+        assert!(!back.roots);
+    }
 
     #[test]
     fn input_required_result_roundtrips_with_tag_and_envelope() {

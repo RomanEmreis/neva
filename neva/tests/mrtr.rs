@@ -45,11 +45,14 @@ async fn tool_elicits_then_completes_over_two_rounds() {
         .expect("test client");
     let url = format!("http://{addr}/mcp");
 
-    // Round 1: tools/call -> input_required.
+    // Round 1: tools/call -> input_required. Capabilities are spelled the way
+    // the spec does -- an object per capability, presence being the
+    // declaration -- which is what a conformant client (MCP Inspector) sends.
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "greet", "arguments": {},
-            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": { "elicitation": { "form": {} } } } }
     });
     let r1: serde_json::Value = routed(client.post(&url), &call)
         .json(&call)
@@ -81,7 +84,7 @@ async fn tool_elicits_then_completes_over_two_rounds() {
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": { "name": "greet", "arguments": {},
             "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-                "io.modelcontextprotocol/clientCapabilities": { "elicitation": true },
+                "io.modelcontextprotocol/clientCapabilities": { "elicitation": { "form": {} } },
                 "requestState": state,
                 "inputResponses": { key: { "action": "accept", "content": { "name": "octocat" } } }
             } }
@@ -836,6 +839,13 @@ async fn eliciting_without_declared_capability_is_rejected() {
     assert!(
         msg.contains("did not declare support"),
         "elicitation without declared capability must be rejected: {r1}"
+    );
+    // What the client is told to declare comes back in the spec's shape: the
+    // capability is an object, not a boolean.
+    assert_eq!(
+        r1.pointer("/error/data/requiredCapabilities"),
+        Some(&serde_json::json!({ "elicitation": {} })),
+        "requiredCapabilities must name the missing capability: {r1}"
     );
 
     handle.abort();

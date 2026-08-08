@@ -2313,10 +2313,11 @@ mod tests {
         };
         let meta = &req.params.as_ref().expect("params present")["_meta"];
         // Without this injection a batched eliciting tools/call is rejected as
-        // if the client did not support elicitation.
+        // if the client did not support elicitation. The spec spells a declared
+        // capability as an object, not a boolean.
         assert_eq!(
             meta["io.modelcontextprotocol/clientCapabilities"]["elicitation"],
-            json!(true)
+            json!({})
         );
         assert!(meta["io.modelcontextprotocol/clientInfo"].is_object());
         assert_eq!(
