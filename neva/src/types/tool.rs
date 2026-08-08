@@ -1136,10 +1136,13 @@ impl Tool {
         // the schema has to ask peers for those very keys, or a call built
         // faithfully from the schema still misses every argument.
         //
-        // Only checked against a schema that lists its properties at the top
-        // level: one assembled from `$ref` or a composition keyword describes
-        // its arguments somewhere this cannot follow, and guessing there would
-        // fail a tool that is perfectly well-formed.
+        // Only checked against a schema that describes every argument in one
+        // top-level `properties` map. A schema that composes -- `$ref`,
+        // `allOf`, `oneOf`, a conditional branch -- may well publish an
+        // argument somewhere this cannot follow, and a heuristic that guessed
+        // there would fail tools that are perfectly well-formed. Resolving
+        // composition properly means a full JSON Schema evaluator, which is
+        // far more than a startup sanity check should carry.
         let properties = self.schema_properties()?;
         let missing = (0..arity)
             .map(|slot| self.arg_names.get(slot))
@@ -1167,17 +1170,39 @@ impl Tool {
     }
 
     /// A predicate over the property names the input schema publishes, or
-    /// `None` when the schema does not list properties at the top level.
+    /// `None` when the schema does not describe all of them in one top-level
+    /// `properties` map.
     #[inline]
     fn schema_properties(&self) -> Option<impl Fn(&str) -> bool + '_> {
+        // The legacy schema is a closed struct of `type`/`properties`/
+        // `required` -- it cannot compose, so its map is always the whole
+        // story.
         #[cfg(feature = "legacy-spec")]
         let props = self.input_schema.properties.as_ref()?;
+
         #[cfg(not(feature = "legacy-spec"))]
-        let props = self
-            .input_schema
-            .as_value()
-            .get("properties")
-            .and_then(Value::as_object)?;
+        let props = {
+            /// Keywords that can contribute properties from outside the
+            /// top-level map. Their presence means the map is only part of
+            /// what the schema publishes.
+            const COMPOSES: [&str; 9] = [
+                "$ref",
+                "allOf",
+                "anyOf",
+                "oneOf",
+                "not",
+                "if",
+                "then",
+                "else",
+                "dependentSchemas",
+            ];
+
+            let schema = self.input_schema.as_value().as_object()?;
+            if COMPOSES.iter().any(|kw| schema.contains_key(*kw)) {
+                return None;
+            }
+            schema.get("properties").and_then(Value::as_object)?
+        };
 
         Some(move |name: &str| props.contains_key(name))
     }

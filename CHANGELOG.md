@@ -18,7 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     they can sit anywhere in the signature without shifting the rest. The
     `#[tool]` / `#[prompt]` macros classify them from the *resolved* type, so a
     parameter reaching the signature through a type alias
-    (`type Token = Meta<ProgressToken>`) is recognised too.
+    (`type Token = Meta<ProgressToken>`) is recognised too. The same goes for
+    an argument's published JSON type and whether it is required: a
+    `type MaybeAge = Option<i32>` parameter now publishes exactly what the
+    spelled-out type does.
   * Whether an argument may be omitted is decided by its type, never by whether
     a synthetic `null` happens to deserialize into it -- otherwise a required
     `serde_json::Value` argument would silently arrive as `Null`.
@@ -44,13 +47,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * `map_tool!` / `map_prompt!` read the names off the closure itself:
   `map_tool!(app, "greet", |name: String, age: i32| async move { ... })`
   registers the tool with `name` and `age` and skips metadata parameters.
-* `App::run` fails at startup when a tool's published `inputSchema` and its
-  handler disagree about the arguments -- an overridden schema without
-  `with_arg_names`, a miscounted declaration, or declared names the schema does
-  not offer as properties. Such a tool could never be called successfully, and
-  this reports it before serving instead of on a peer's first call. A schema
-  that has no top-level `properties` (assembled from `$ref` or a composition
-  keyword) is left alone rather than failed on a guess.
+* `App::run` fails at startup when a tool or prompt and its handler disagree
+  about the arguments -- a tool whose schema was overridden without
+  `with_arg_names`, a miscounted `with_arg_names`, declared names the schema
+  does not offer as properties, or a `Prompt::with_args` list that does not
+  cover every argument the handler takes. None of these could ever be called
+  successfully, and this reports them before serving instead of on a peer's
+  first request. A schema that composes -- `$ref`, `allOf`, `oneOf`, a
+  conditional branch -- may publish an argument the check cannot follow, so it
+  is left alone rather than failed on a guess.
 * `ArgNames` and `FromHandlerArgs` in `neva::types`.
 
 ### Changed

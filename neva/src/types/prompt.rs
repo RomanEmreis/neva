@@ -502,9 +502,37 @@ impl Prompt {
         A: Into<PromptArgument>,
     {
         let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
-        self.arg_names = arg_names(&args);
+        // `declare` keeps the handler's own arity rather than adopting the
+        // length of this list, so a list that does not cover every argument
+        // stays detectable instead of silently leaving the trailing parameters
+        // reading unpublished `argN` keys.
+        self.arg_names = self
+            .arg_names
+            .declare(args.iter().map(|arg| arg.name.as_str()));
+
         self.args = Some(args);
         self
+    }
+
+    /// Describes how the prompt's published argument list and its handler
+    /// disagree, if they do.
+    ///
+    /// The list is what peers are told to send *and* what extraction reads by,
+    /// so one that does not cover every argument the handler takes leaves the
+    /// trailing parameters reading keys no peer was ever asked for. Worth
+    /// catching at startup rather than on a peer's first request.
+    pub(crate) fn arg_name_conflict(&self) -> Option<String> {
+        let arity = self.arg_names.arity();
+        let declared = self.arg_names.len();
+
+        (self.arg_names.is_declared() && declared != arity).then(|| {
+            format!(
+                "prompt `{}` publishes {declared} argument(s) but its handler takes {arity}. \
+                 List every argument the handler reads, metadata parameters (`Context`, \
+                 `Meta<_>`, `Dc<_>`) excluded.",
+                self.name,
+            )
+        })
     }
 
     /// Sets the [`Prompt`] icons

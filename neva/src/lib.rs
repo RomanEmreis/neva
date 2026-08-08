@@ -273,6 +273,13 @@ pub mod __macro_support {
         /// Returns `true` when a call must supply the argument -- that is,
         /// when `Self` is not an `Option<T>`.
         fn is_required() -> bool;
+
+        /// The JSON type the argument is published as: `"string"`,
+        /// `"number"`, `"boolean"`, `"array"`, `"object"` or `"none"`.
+        ///
+        /// `"object"` is the signal that the property needs a `JsonSchema`
+        /// probe rather than an inline primitive subschema.
+        fn category() -> &'static str;
     }
 
     #[cfg(feature = "server")]
@@ -285,6 +292,19 @@ pub mod __macro_support {
         #[inline]
         fn is_required() -> bool {
             !T::is_optional()
+        }
+
+        #[inline]
+        fn category() -> &'static str {
+            use crate::types::PropertyType;
+            match T::category() {
+                PropertyType::String => "string",
+                PropertyType::Number => "number",
+                PropertyType::Bool => "boolean",
+                PropertyType::Array => "array",
+                PropertyType::Object => "object",
+                PropertyType::None => "none",
+            }
         }
     }
 }

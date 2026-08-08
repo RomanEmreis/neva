@@ -88,11 +88,25 @@ async fn maybe_profile(profile: Option<Json<Profile>>) -> String {
 // a `token` argument its handler never reads, and `App::run` refuses to start
 // on the disagreement.
 type Progress = neva::types::Meta<neva::types::ProgressToken>;
+type Postcode = String;
+type MaybeFloor = Option<i32>;
 
 #[neva::tool]
-async fn aliased(token: Progress, city: String) -> String {
+async fn aliased(token: Progress, city: Postcode, floor: MaybeFloor) -> String {
     let _ = token;
-    city
+    format!("{city} {floor:?}")
+}
+
+// The same signature spelled out, to pin that an alias changes nothing about
+// what gets published.
+#[neva::tool]
+async fn spelled(
+    token: neva::types::Meta<neva::types::ProgressToken>,
+    city: String,
+    floor: Option<i32>,
+) -> String {
+    let _ = token;
+    format!("{city} {floor:?}")
 }
 
 // Struct return via `Json<T>` -> output schema derived from the return type.
@@ -226,17 +240,29 @@ async fn tool_macro_emits_json_schema_2020() {
         "an all-optional tool requires nothing"
     );
 
-    // 7. An aliased metadata parameter is neither published nor named.
+    // 7. A type alias is transparent: an aliased `Meta<_>` is neither
+    // published nor named, an aliased `Option<T>` is published as its `T` and
+    // is not required, and an aliased primitive keeps its primitive type. All
+    // of it has to be settled by trait resolution -- the macro cannot see
+    // through an alias -- so the two tools must publish the same schema.
     let aliased = by_name("aliased");
     let props = aliased["inputSchema"]["properties"].as_object().unwrap();
     assert_eq!(
         props.keys().collect::<Vec<_>>(),
-        vec!["city"],
+        vec!["city", "floor"],
         "an aliased `Meta<_>` must not be published: {aliased}"
     );
+    assert_eq!(props["city"]["type"], serde_json::json!("string"));
+    assert_eq!(props["floor"]["type"], serde_json::json!("number"));
     let req: Vec<String> =
         serde_json::from_value(aliased["inputSchema"]["required"].clone()).unwrap();
     assert_eq!(req, vec!["city".to_string()]);
+
+    assert_eq!(
+        aliased["inputSchema"],
+        by_name("spelled")["inputSchema"],
+        "an alias must publish exactly what the spelled-out type does"
+    );
 
     // 8. An optional argument the call leaves out arrives as `None`.
     for (args, expected) in [

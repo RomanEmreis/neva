@@ -155,33 +155,35 @@ pub(crate) fn expand(
                     && let Pat::Ident(pat_ident) = &*pat_type.pat
                 {
                     let arg_name = pat_ident.ident.to_string();
-                    let cat = get_param_type(&pat_type.ty).0;
-                    if cat == "none" {
+                    if get_param_type(&pat_type.ty).0 == "none" {
                         continue;
                     }
                     // An `Option<T>` argument is described by its `T`, so the
-                    // subschema is probed past the `Option` first.
+                    // subschema is probed past the `Option` first. Structured
+                    // args arrive wrapped (e.g. `Json<T>`); probe the inner
+                    // type so a `JsonSchema`-deriving `T` yields a rich
+                    // schema. Bare `Value` (no inner) probes itself.
                     let ty = get_option_inner(&pat_type.ty).unwrap_or(&pat_type.ty);
-                    let prop_value = if cat == "object" {
-                        // Structured args arrive wrapped (e.g. `Json<T>`); probe
-                        // the inner type so a `JsonSchema`-deriving `T` yields a
-                        // rich schema. Bare `Value` (no inner) probes itself.
-                        let probe_ty = get_inner_type_from_generic(ty).unwrap_or(ty);
-                        quote! { neva::__tool_arg_subschema!(#probe_ty) }
-                    } else {
-                        let json_type = if cat == "slice" { "array" } else { cat };
-                        quote! { neva::__macro_support::primitive_subschema(#json_type) }
-                    };
-                    // Whether the parameter is an argument at all, and whether
-                    // it is required, are settled from the resolved type for
-                    // the same reason the names are: a type alias hides both
-                    // `Meta<_>` and `Option<_>` from a syntactic test, and a
-                    // schema that disagrees with `ToolHandler::args` describes
-                    // a call the handler will not read.
+                    let probe_ty = get_inner_type_from_generic(ty).unwrap_or(ty);
+                    // Everything the schema says about the parameter -- whether
+                    // it is an argument, whether it is required, and which JSON
+                    // type it publishes -- is settled from the resolved type
+                    // for the same reason the names are: a type alias hides
+                    // `Meta<_>`, `Option<_>` and the underlying primitive alike
+                    // from a syntactic test, and a schema that disagrees with
+                    // `ToolHandler::args` describes a call the handler will not
+                    // read. The probe stays syntactic because no trait can name
+                    // the `T` inside an aliased `Json<T>`.
                     let param_ty = &*pat_type.ty;
                     entries.push(quote! {
                         if <#param_ty as neva::__macro_support::IsArgument>::is_argument() {
-                            props.push((#arg_name.to_string(), #prop_value));
+                            let category = <#param_ty as neva::__macro_support::IsArgument>::category();
+                            let subschema = if category == "object" {
+                                neva::__tool_arg_subschema!(#probe_ty)
+                            } else {
+                                neva::__macro_support::primitive_subschema(category)
+                            };
+                            props.push((#arg_name.to_string(), subschema));
                             if <#param_ty as neva::__macro_support::IsArgument>::is_required() {
                                 required.push(#arg_name.to_string());
                             }
@@ -208,20 +210,21 @@ pub(crate) fn expand(
                     && let Pat::Ident(pat_ident) = &*pat_type.pat
                 {
                     let arg_name = pat_ident.ident.to_string();
-                    let arg_type = get_param_type(&pat_type.ty).0;
-                    if arg_type == "none" {
+                    if get_param_type(&pat_type.ty).0 == "none" {
                         continue;
                     }
-                    // See the 2026-07-28 branch: which parameters are arguments,
-                    // and which of them are required, come from the resolved
-                    // type so the schema cannot disagree with the handler.
+                    // See the 2026-07-28 branch: whether the parameter is an
+                    // argument, whether it is required and which JSON type it
+                    // publishes all come from the resolved type, so the schema
+                    // cannot disagree with the handler.
                     let param_ty = &*pat_type.ty;
                     schema_entries.push(quote! {
                         let schema = if <#param_ty as neva::__macro_support::IsArgument>::is_argument() {
+                            let category = <#param_ty as neva::__macro_support::IsArgument>::category();
                             if <#param_ty as neva::__macro_support::IsArgument>::is_required() {
-                                schema.with_required(#arg_name, #arg_type, #arg_type)
+                                schema.with_required(#arg_name, category, category)
                             } else {
-                                schema.with_prop(#arg_name, #arg_type, #arg_type)
+                                schema.with_prop(#arg_name, category, category)
                             }
                         } else {
                             schema

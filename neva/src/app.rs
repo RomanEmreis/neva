@@ -251,7 +251,7 @@ impl App {
 
         // Must follow register_methods() for the same reason the greeting does:
         // macro-registered tools are not in the collection before it.
-        self.validate_tool_arg_names();
+        self.validate_arg_names();
 
         // ORDERING CONSTRAINT: must execute after register_methods() so macro-registered
         // tools/prompts are present; must execute before self.options.transport() consumes
@@ -584,20 +584,29 @@ impl App {
         self
     }
 
-    /// Fails startup when a registered tool's published schema and its handler
-    /// disagree about the arguments.
+    /// Fails startup when a registered tool or prompt and its handler disagree
+    /// about the arguments.
     ///
-    /// Such a tool cannot be called successfully by anyone, so it is a
+    /// Such a primitive cannot be called successfully by anyone, so it is a
     /// registration mistake worth reporting before the server starts serving
-    /// rather than on a peer's first call. See [`Tool::arg_name_conflict`].
-    fn validate_tool_arg_names(&self) {
-        if let Some(conflict) = self
+    /// rather than on a peer's first call. See [`Tool::arg_name_conflict`] and
+    /// [`Prompt::arg_name_conflict`].
+    fn validate_arg_names(&self) {
+        let conflict = self
             .options
             .tools
             .as_ref()
             .values()
             .find_map(Tool::arg_name_conflict)
-        {
+            .or_else(|| {
+                self.options
+                    .prompts
+                    .as_ref()
+                    .values()
+                    .find_map(Prompt::arg_name_conflict)
+            });
+
+        if let Some(conflict) = conflict {
             panic!("{conflict}");
         }
     }
@@ -2143,7 +2152,7 @@ mod tests {
         app.map_tool("greet", |name: String| async move { name })
             .with_input_schema(|_| name_schema());
 
-        app.validate_tool_arg_names();
+        app.validate_arg_names();
     }
 
     #[test]
@@ -2155,7 +2164,7 @@ mod tests {
         })
         .with_arg_names(["name"]);
 
-        app.validate_tool_arg_names();
+        app.validate_arg_names();
     }
 
     #[test]
@@ -2176,7 +2185,7 @@ mod tests {
             })
             .with_arg_names(["q"]);
 
-        app.validate_tool_arg_names();
+        app.validate_arg_names();
     }
 
     /// A schema that describes its arguments through `$ref` or a composition
@@ -2199,7 +2208,65 @@ mod tests {
             })
             .with_arg_names(["q"]);
 
-        app.validate_tool_arg_names();
+        app.validate_arg_names();
+    }
+
+    /// A schema may describe some arguments in its top-level `properties` and
+    /// the rest through composition. The map alone is then not the whole
+    /// story, and reading it as if it were would fail a well-formed tool.
+    #[test]
+    #[cfg(not(feature = "legacy-spec"))]
+    fn startup_accepts_a_schema_with_composed_properties() {
+        let mut app = App::new();
+        app.map_tool("search", |q: String, page: i32| async move {
+            format!("{q}{page}")
+        })
+        .with_input_schema(|_| {
+            crate::types::schema_2020::InputSchema::from_json_str(
+                r#"{
+                    "type": "object",
+                    "properties": { "q": { "type": "string" } },
+                    "allOf": [
+                        { "properties": { "page": { "type": "number" } } }
+                    ]
+                }"#,
+            )
+            .unwrap_or_default()
+        })
+        .with_arg_names(["q", "page"]);
+
+        app.validate_arg_names();
+    }
+
+    #[test]
+    #[should_panic(expected = "prompt `analyze` publishes 1 argument(s) but its handler takes 2")]
+    fn startup_rejects_a_prompt_that_publishes_too_few_args() {
+        use crate::types::Role;
+
+        let mut app = App::new();
+        app.map_prompt("analyze", |topic: String, tone: String| async move {
+            (format!("{topic}{tone}"), Role::User)
+        })
+        .with_args(["topic"]);
+
+        app.validate_arg_names();
+    }
+
+    #[test]
+    fn startup_accepts_a_prompt_that_publishes_every_arg() {
+        use crate::types::Role;
+
+        let mut app = App::new();
+        app.map_prompt("analyze", |topic: String, tone: String| async move {
+            (format!("{topic}{tone}"), Role::User)
+        })
+        .with_args(["topic", "tone"]);
+
+        let prompt = app.options.prompts.as_ref().get("analyze").unwrap();
+        assert_eq!(prompt.arg_names.arity(), 2);
+        assert_eq!(prompt.arg_names.get(1), "tone");
+
+        app.validate_arg_names();
     }
 
     #[test]
@@ -2209,7 +2276,7 @@ mod tests {
             .with_input_schema(|_| name_schema())
             .with_arg_names(["name"]);
 
-        app.validate_tool_arg_names();
+        app.validate_arg_names();
     }
 
     #[cfg(not(feature = "legacy-spec"))]
