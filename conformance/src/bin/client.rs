@@ -11,7 +11,9 @@
 //!     --command "$(pwd)/target/debug/conformance-client" --suite core
 //! ```
 
+use neva::auth::oauth::{AuthorizationHandler, CallbackParams, OAuthClientConfig};
 use neva::prelude::*;
+use neva::shared::BoxFuture;
 use std::time::Duration;
 
 /// Splits the URL the suite hands us into the `host:port` and path halves the
@@ -100,6 +102,107 @@ fn dictated_calls() -> Vec<DictatedCall> {
     serde_json::from_value(context()["toolCalls"].clone()).unwrap_or_default()
 }
 
+/// Where the mock issuer is told to send the authorization response.
+///
+/// Nothing listens there: [`RedirectReader`] reads the redirect off the
+/// response instead of following it, so this only has to be a URL the issuer
+/// will accept and register.
+const CALLBACK_URI: &str = "http://127.0.0.1:8919/callback";
+
+/// Client credentials the scenario issued out of band, in its context.
+///
+/// A scenario that hands these over is testing a *pre-registered* client:
+/// registering dynamically instead would be answering a different question.
+struct PreRegistered {
+    client_id: Option<String>,
+    client_secret: Option<String>,
+}
+
+impl PreRegistered {
+    fn from_context() -> Self {
+        let ctx = context();
+        let field = |name: &str| ctx[name].as_str().map(str::to_owned);
+        Self {
+            client_id: field("client_id"),
+            client_secret: field("client_secret"),
+        }
+    }
+
+    fn apply(&self, mut oauth: OAuthClientConfig) -> OAuthClientConfig {
+        if let Some(id) = &self.client_id {
+            oauth = oauth.with_client_id(id.clone());
+        }
+        if let Some(secret) = &self.client_secret {
+            oauth = oauth.with_client_secret(secret.clone());
+        }
+        oauth
+    }
+}
+
+/// The authorization step, without a user or a browser.
+///
+/// The mock issuer approves on sight: its `GET /authorize` answers `302` with
+/// the code already on the redirect URI. So the flow is completed by making
+/// that request without following the redirect and reading the query off
+/// `Location` -- the same parameters a browser would have delivered to a
+/// listener, minus the listener.
+struct RedirectReader {
+    redirect_uri: String,
+}
+
+impl RedirectReader {
+    fn new(redirect_uri: impl Into<String>) -> Self {
+        Self {
+            redirect_uri: redirect_uri.into(),
+        }
+    }
+}
+
+impl AuthorizationHandler for RedirectReader {
+    fn redirect_uri(&self) -> BoxFuture<'_, Result<String, Error>> {
+        Box::pin(async move { Ok(self.redirect_uri.clone()) })
+    }
+
+    fn authorize(&self, authorization_url: String) -> BoxFuture<'_, Result<CallbackParams, Error>> {
+        Box::pin(async move {
+            let http = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .build()
+                .map_err(|err| Error::new(ErrorCode::InternalError, err.to_string()))?;
+
+            let resp = http
+                .get(&authorization_url)
+                .send()
+                .await
+                .map_err(|err| Error::new(ErrorCode::InternalError, err.to_string()))?;
+
+            let location = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::InternalError,
+                        format!(
+                            "the authorization endpoint answered {} without a redirect",
+                            resp.status()
+                        ),
+                    )
+                })?;
+
+            let query = location.split_once('?').map(|(_, q)| q).ok_or_else(|| {
+                Error::new(
+                    ErrorCode::InternalError,
+                    "the authorization redirect carried no query",
+                )
+            })?;
+
+            CallbackParams::from_query(query)
+        })
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt()
@@ -119,11 +222,24 @@ async fn main() -> Result<(), Error> {
     tracing::debug!(context = %context(), "scenario context");
 
     let (addr, endpoint) = split_url(&url)?;
+    let credentials = PreRegistered::from_context();
     let mut client = Client::new().with_options(|opt| {
         opt.with_name("neva-conformance-client")
             .with_version(env!("CARGO_PKG_VERSION"))
             .with_timeout(Duration::from_secs(20))
-            .with_http(|http| http.bind(&addr).with_endpoint(&endpoint))
+            .with_http(|http| {
+                http.bind(&addr)
+                    .with_endpoint(&endpoint)
+                    .with_oauth(|oauth| {
+                        // Inert until something answers `401`, which only the
+                        // authorization scenarios do. `require_https(false)`
+                        // because every mock issuer here is on loopback http.
+                        let oauth = oauth
+                            .require_https(false)
+                            .with_handler(RedirectReader::new(CALLBACK_URI));
+                        credentials.apply(oauth)
+                    })
+            })
     });
 
     // Registering the handler is also what declares the capability, and MRTR
@@ -226,6 +342,22 @@ async fn run(client: &mut Client, scenario: &str) -> Result<(), Error> {
             {
                 Ok(result) => tracing::info!(?result, "resumed and completed"),
                 Err(err) => tracing::warn!(%err, "reconnection tool failed"),
+            }
+        }
+        // Step-up: this scenario grants `tools/list` on one scope and
+        // `tools/call` on another, so the call is what makes the server ask for
+        // more. Listing first is what puts a token in hand for the escalation
+        // to widen rather than replace.
+        "auth/scope-step-up" => {
+            let tools = client.list_tools(None).await?;
+            let name = tools
+                .tools
+                .first()
+                .map(|t| t.name.to_string())
+                .unwrap_or_else(|| "test-tool".to_string());
+            match client.call_tool(&*name, None::<[(&str, &str); 0]>).await {
+                Ok(result) => tracing::info!(%name, ?result, "call succeeded after step-up"),
+                Err(err) => tracing::warn!(%name, %err, "call failed"),
             }
         }
         // The suite's own fixture server exposes `add_numbers`; list first so

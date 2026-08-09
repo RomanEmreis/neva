@@ -20,9 +20,14 @@ neva = { path = "../neva", features = [
     "http-server-volga",
     "client-macros",
     "http-client",
+    "client-oauth",
     "tracing",
     "tasks",
 ] }
+# The authorization scenarios have no user and no browser: their mock issuer
+# redirects straight back from `GET /authorize`, so the fixture reads the
+# redirect itself instead of opening one.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["full"] }

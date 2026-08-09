@@ -41,24 +41,19 @@ client:
   # resumed with a `GET` carrying `Last-Event-ID`, after the pause the server
   # asked for with `retry:`.
 
-  # -- OAuth client flows (#86) -------------------------------------------
-  - auth/metadata-default
-  - auth/metadata-var1
-  - auth/metadata-var2
-  - auth/metadata-var3
+  # The authorization-code flow is green here too -- the OAuth client is shared
+  # between the profiles. What remains needs a credential that flow does not
+  # have; see the 2026-07-28 baseline for the same block, spelled out.
+
+  # -- Client id metadata documents (#86) --------------------------------
   - auth/basic-cimd
-  - auth/scope-from-www-authenticate
-  - auth/scope-from-scopes-supported
-  - auth/scope-omitted-when-undefined
-  - auth/scope-step-up
-  - auth/scope-retry-limit
-  - auth/token-endpoint-auth-basic
-  - auth/token-endpoint-auth-post
-  - auth/token-endpoint-auth-none
-  - auth/pre-registration
+
+  # -- Grant types beyond authorization_code (#86) -----------------------
   - auth/client-credentials-jwt
   - auth/client-credentials-basic
   - auth/enterprise-managed-authorization
+  - auth/wif-jwt-bearer
+
+  # -- DPoP (#86) --------------------------------------------------------
   - auth/dpop
   - auth/dpop-nonce
-  - auth/wif-jwt-bearer

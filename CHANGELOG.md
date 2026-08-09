@@ -35,6 +35,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   now has something to branch on before it asks rather than only a refusal
   after.
 
+* **Protected Resource Metadata is looked for at the origin too.** A `401` that
+  names no `resource_metadata` sent the client to RFC 9728's path-based location
+  and nowhere else, so a server serving one document at
+  `/.well-known/oauth-protected-resource` -- the common shape for a host with a
+  single MCP endpoint -- was never discovered. A miss now falls back to the
+  origin, and the document there is checked against the origin rather than the
+  endpoint: describing the whole origin is what puts it at the root.
+* **The `scope` a `WWW-Authenticate` challenge names is what gets requested.**
+  The client asked for the resource's whole `scopes_supported` regardless, which
+  is both broader than the call needed and, when the challenge named something
+  the resource never advertised, missing the one scope that would have worked.
+  Order is now: scopes configured on the client, then the challenge, then
+  `scopes_supported`, then none at all.
+* **A `403 insufficient_scope` re-authorizes.** Only a `401` did, so a server
+  that granted `tools/list` and challenged `tools/call` for more left the client
+  refused with a perfectly valid token. Re-authorization asks for the union of
+  what was granted before and what the challenge demands (SEP-2350), so a
+  step-up widens the grant instead of trading one scope for another. A `403`
+  *without* an `insufficient_scope` challenge is untouched -- that one is about
+  the caller, not the token, and re-authorizing would only ask the user to
+  approve something that will be refused again.
+* **An advertised RFC 9207 `iss` is enforced.** The check read
+  `authorization_response_iss_parameter_supported` out of the metadata
+  document's *unmodelled* fields, where it never appears -- it has a typed field
+  -- so the flag always read false and an authorization response that omitted
+  `iss` was accepted from a server that had promised to send one. That is the
+  mix-up attack the parameter exists to catch.
 * **A dropped response stream is resumed (legacy profile).** A `POST` whose
   reply is an SSE stream used to fail its request the moment the stream ended
   without a response. On the session-bound transport that stream is resumable:

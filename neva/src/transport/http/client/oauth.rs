@@ -512,6 +512,13 @@ pub(crate) struct OAuthSession {
     /// Serializes authorization flows (concurrent 401s run one flow) and
     /// caches the client + metadata for non-interactive refresh.
     flow: Mutex<Option<FlowState>>,
+    /// Scopes the last completed flow asked for.
+    ///
+    /// A re-authorization asks for these *plus* whatever the new challenge
+    /// demands (SEP-2350): a token minted for the challenged scope alone would
+    /// lose access the session already had, and the next call for the old scope
+    /// would challenge straight back.
+    requested_scopes: RwLock<Vec<String>>,
 }
 
 impl std::fmt::Debug for OAuthSession {
@@ -537,7 +544,23 @@ impl OAuthSession {
             resource,
             token: RwLock::new(token),
             flow: Mutex::new(None),
+            requested_scopes: RwLock::new(Vec::new()),
         })
+    }
+
+    /// Scopes the last completed flow asked for.
+    fn requested_scopes(&self) -> Vec<String> {
+        self.requested_scopes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set_requested_scopes(&self, scopes: Vec<String>) {
+        *self
+            .requested_scopes
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = scopes;
     }
 
     /// The current bearer token, if any.
@@ -616,8 +639,25 @@ impl OAuthSession {
     ) -> Result<Arc<str>, Error> {
         let mut flight = self.flow.lock().await;
 
+        let challenge = www_authenticate.and_then(|header| BearerChallenge::parse(header).ok());
+        // Scopes the challenge demands that this session has never asked for.
+        // A refresh cannot widen a grant, so their presence is what separates
+        // "this token expired" from "this token is not enough" -- the second
+        // needs the user back, however fresh the token is.
+        let demanded = challenge
+            .as_ref()
+            .and_then(|challenge| challenge.scope())
+            .map(split_scopes)
+            .unwrap_or_default();
+
+        let step_up = {
+            let held = self.requested_scopes();
+            demanded.iter().any(|scope| !held.contains(scope))
+        };
+
         // Someone else completed the flow while this caller waited.
-        if let Some(current) = self.bearer()
+        if !step_up
+            && let Some(current) = self.bearer()
             && used != Some(&*current)
         {
             return Ok(current);
@@ -626,26 +666,29 @@ impl OAuthSession {
         // Refresh before interrupting the user: a stored refresh token
         // renews the session silently. A token identical to the rejected
         // one is no help though (revoked server-side) -- interactive then.
-        if let Some(token) = self.maintain(&mut flight).await
+        if !step_up
+            && let Some(token) = self.maintain(&mut flight).await
             && used != Some(&*token)
         {
             return Ok(token);
         }
 
-        let metadata_url = www_authenticate
-            .and_then(|header| BearerChallenge::parse(header).ok())
+        let stated = challenge
+            .as_ref()
             .and_then(|challenge| challenge.resource_metadata().map(str::to_owned));
-        let metadata_url = match metadata_url {
-            Some(url) => url,
-            None => protected_resource_metadata_url(&self.resource)
-                .map_err(|err| Error::new(ErrorCode::InternalError, err.to_string()))?,
-        };
 
         let discovery = DiscoveryClient::with_config(self.config.client_config());
-        let resource_metadata = discovery
-            .fetch_resource_metadata_from_url(&metadata_url, Some(&self.resource))
-            .await
-            .map_err(flow_error)?;
+        let resource_metadata = match stated {
+            // The challenge named the document: that is the answer, and a
+            // failure there is the failure -- guessing elsewhere would be
+            // discovering a document the server did not point at.
+            Some(url) => discovery
+                .fetch_resource_metadata_from_url(&url, Some(&self.resource))
+                .await
+                .map_err(flow_error)?,
+            None => self.discover_resource_metadata(&discovery).await?,
+        };
+
         let server_metadata = discovery
             .discover_authorization_server(&resource_metadata)
             .await
@@ -654,14 +697,27 @@ impl OAuthSession {
         let redirect_uri = self.config.handler.redirect_uri().await?;
         let client = self.build_client(&server_metadata, &redirect_uri).await?;
 
-        let scopes = self
-            .config
-            .scopes
-            .clone()
-            .unwrap_or_else(|| resource_metadata.scopes_supported.clone());
+        // What to ask for, most specific first. A configured set is the
+        // caller's decision and overrides everything. Otherwise the challenge
+        // names what this very request needed, which is narrower and more
+        // current than the resource's advertised set; `scopes_supported` is the
+        // fallback, and an empty one means asking for no `scope` at all.
+        let mut scopes = match &self.config.scopes {
+            Some(configured) => configured.clone(),
+            None if !demanded.is_empty() => demanded.clone(),
+            None => resource_metadata.scopes_supported.clone(),
+        };
+        // SEP-2350: carry everything earlier rounds asked for, so a step-up
+        // widens the grant instead of trading one scope for another.
+        for held in self.requested_scopes() {
+            if !scopes.contains(&held) {
+                scopes.push(held);
+            }
+        }
+
         let request = client
             .authorization_request(&server_metadata)
-            .with_scopes(scopes)
+            .with_scopes(scopes.clone())
             .with_resource(self.resource.clone())
             .build()
             .map_err(flow_error)?;
@@ -689,9 +745,72 @@ impl OAuthSession {
             metadata: server_metadata,
         });
 
+        self.set_requested_scopes(scopes);
+
         let token: Arc<str> = tokens.access_token.into();
         self.set_token(token.clone());
         Ok(token)
+    }
+
+    /// Finds the Protected Resource Metadata for a server that issued a `401`
+    /// without saying where it lives.
+    ///
+    /// RFC 9728 puts the document under the resource's own path
+    /// (`/.well-known/oauth-protected-resource/mcp` for a server at `/mcp`), so
+    /// that is asked first. A server that hosts one MCP endpoint often serves it
+    /// at the root instead, which is a location the path-based derivation never
+    /// reaches -- so a miss falls back there rather than failing the flow over a
+    /// document that exists.
+    async fn discover_resource_metadata(
+        &self,
+        discovery: &DiscoveryClient,
+    ) -> Result<volga_oauth_client::ProtectedResourceMetadata, Error> {
+        let path_based = protected_resource_metadata_url(&self.resource)
+            .map_err(|err| Error::new(ErrorCode::InternalError, err.to_string()))?;
+
+        let first = discovery
+            .fetch_resource_metadata_from_url(&path_based, Some(&self.resource))
+            .await;
+
+        let Err(err) = first else {
+            return first.map_err(flow_error);
+        };
+
+        let Some(origin) = origin_of(&self.resource) else {
+            return Err(flow_error(err));
+        };
+
+        let root = format!("{origin}{WELL_KNOWN_PROTECTED_RESOURCE}");
+        if root == path_based {
+            return Err(flow_error(err));
+        }
+
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            logger = "neva",
+            "no resource metadata at {path_based}; trying {root}"
+        );
+
+        // Checked against the origin, not against the endpoint. A document at
+        // the root describes the whole origin as the protected resource -- that
+        // is what puts it there rather than under the endpoint's path -- so
+        // demanding it name the endpoint would reject every document this
+        // fallback exists to find. The binding it does keep is the one that
+        // matters: the document has to name the origin it was served from.
+        discovery
+            .fetch_resource_metadata_from_url(&root, Some(&origin))
+            .await
+            // Both attempts are named: reporting only one of them leaves the
+            // reader guessing which location was the problem.
+            .map_err(|root_err| {
+                Error::new(
+                    ErrorCode::InternalError,
+                    format!(
+                        "OAuth flow failed: no usable resource metadata \
+                         at {path_based} ({err}) or {root} ({root_err})"
+                    ),
+                )
+            })
     }
 
     /// Builds the [`OAuthClient`] -- from the configured `client_id` or
@@ -781,11 +900,11 @@ fn validate_issuer(
     params: &CallbackParams,
     metadata: &AuthorizationServerMetadata,
 ) -> Result<(), Error> {
-    let supported = metadata
-        .additional_fields
-        .get("authorization_response_iss_parameter_supported")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+    // A modelled field, so it never appears in `additional_fields` -- reading it
+    // there made `supported` permanently false, and a server that advertised the
+    // parameter and then omitted it from the redirect went unchallenged, which
+    // is exactly the mix-up the parameter exists to catch.
+    let supported = metadata.authorization_response_iss_parameter_supported;
 
     match (&params.iss, supported) {
         (Some(iss), _) if *iss != metadata.issuer => Err(Error::new(
@@ -809,6 +928,28 @@ fn flow_error(err: ClientError) -> Error {
         ErrorCode::InternalError,
         format!("OAuth flow failed: {err}"),
     )
+}
+
+/// Splits an OAuth `scope` value into its space-delimited scope tokens.
+fn split_scopes(scope: &str) -> Vec<String> {
+    scope
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>()
+}
+
+/// RFC 9728's well-known path for Protected Resource Metadata.
+const WELL_KNOWN_PROTECTED_RESOURCE: &str = "/.well-known/oauth-protected-resource";
+
+/// The `scheme://authority` a resource identifier belongs to.
+///
+/// Returns `None` when `resource` is not a URL with an authority -- there is no
+/// origin to hang a well-known path off then.
+fn origin_of(resource: &str) -> Option<String> {
+    let (scheme, rest) = resource.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+
+    (!authority.is_empty()).then(|| format!("{scheme}://{authority}"))
 }
 
 #[cfg(test)]
@@ -883,6 +1024,30 @@ mod tests {
     }
 
     #[test]
+    fn the_root_metadata_location_is_derived_from_the_origin() {
+        assert_eq!(
+            origin_of("https://api.example.com/mcp").as_deref(),
+            Some("https://api.example.com")
+        );
+        assert_eq!(
+            origin_of("http://127.0.0.1:8001/deep/path?x=1").as_deref(),
+            Some("http://127.0.0.1:8001")
+        );
+        // Nothing to hang a well-known path off.
+        assert!(origin_of("not-a-url").is_none());
+        assert!(origin_of("https://").is_none());
+    }
+
+    #[test]
+    fn scopes_split_on_whitespace() {
+        assert_eq!(
+            split_scopes("mcp:basic  mcp:write\tmcp:read"),
+            ["mcp:basic", "mcp:write", "mcp:read"]
+        );
+        assert!(split_scopes("   ").is_empty());
+    }
+
+    #[test]
     fn web_registration_stays_a_web_client() {
         let metadata = registration_metadata("https://my.app/oauth/callback");
         assert!(metadata.application_type.is_none());
@@ -890,13 +1055,32 @@ mod tests {
         assert!(json.get("application_type").is_none());
     }
 
+    /// The flag is a *modelled* field, so it must be set through the builder:
+    /// stashing it in `additional_fields` is what let these tests pass while the
+    /// real document -- where serde puts it on the field -- read as unsupported.
     fn as_metadata(supported: Option<bool>) -> AuthorizationServerMetadata {
         let mut metadata = AuthorizationServerMetadata::new("https://auth.example.com");
         if let Some(supported) = supported {
-            metadata = metadata
-                .with_additional_field("authorization_response_iss_parameter_supported", supported);
+            metadata = metadata.with_authorization_response_iss_parameter(supported);
         }
         metadata
+    }
+
+    /// The document a server actually sends, parsed the way the client parses
+    /// it: the flag has to survive the round trip onto the modelled field.
+    #[test]
+    fn an_advertised_iss_parameter_survives_deserialization() {
+        let doc = serde_json::json!({
+            "issuer": "https://auth.example.com",
+            "response_types_supported": ["code"],
+            "authorization_response_iss_parameter_supported": true,
+        });
+        let metadata: AuthorizationServerMetadata = serde_json::from_value(doc).unwrap();
+        assert!(metadata.authorization_response_iss_parameter_supported);
+        assert!(
+            validate_issuer(&callback(None), &metadata).is_err(),
+            "a server that advertised `iss` and then omitted it must be refused"
+        );
     }
 
     fn callback(iss: Option<&str>) -> CallbackParams {
@@ -1013,6 +1197,7 @@ mod tests {
             resource: "http://127.0.0.1:3000/mcp".into(),
             token: RwLock::new(Some("stale-token".into())),
             flow: Mutex::new(flow),
+            requested_scopes: RwLock::new(Vec::new()),
         }
     }
 

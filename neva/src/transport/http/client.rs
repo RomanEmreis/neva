@@ -388,9 +388,19 @@ async fn exchange(
     // flow (single-flight across concurrent requests) and one retry with
     // the fresh token. On flow failure the original 401 falls through to
     // the regular response path.
+    //
+    // A `403` counts when its challenge says `insufficient_scope`: the token is
+    // valid and simply does not cover this call, which is the one 403 a fresh
+    // authorization can fix. Any other 403 is a decision about the caller, not
+    // about the token, and re-authorizing would only ask the user to approve
+    // something that will be refused again.
     #[cfg(feature = "client-oauth")]
     let resp = match (&auth, resp.status()) {
-        (ClientAuth::OAuth(oauth), reqwest::StatusCode::UNAUTHORIZED) => {
+        (ClientAuth::OAuth(oauth), status)
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || (status == reqwest::StatusCode::FORBIDDEN
+                    && insufficient_scope(resp.headers())) =>
+        {
             let challenge = resp
                 .headers()
                 .get(reqwest::header::WWW_AUTHENTICATE)
@@ -942,6 +952,19 @@ where
         }
     }
     answered
+}
+
+/// Whether a `403` is the authorization server's `insufficient_scope`, and so
+/// something a wider grant would fix.
+///
+/// RFC 6750 puts the code in the `WWW-Authenticate` challenge; a `403` without
+/// one is the resource server refusing the caller, not the token.
+#[cfg(feature = "client-oauth")]
+fn insufficient_scope(headers: &reqwest::header::HeaderMap) -> bool {
+    headers
+        .get(reqwest::header::WWW_AUTHENTICATE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|challenge| challenge.contains("insufficient_scope"))
 }
 
 /// Whether this session can resume a dropped stream.

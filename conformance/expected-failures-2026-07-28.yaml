@@ -34,34 +34,36 @@ server: []
   # `InputRequiredResult` says what for.
 
 client:
-  # -- OAuth client flows (#86) -------------------------------------------
-  # The client fixture connects unauthenticated; every scenario that drives a
-  # discovery/registration/token exchange needs an OAuth-capable client fixture
-  # first. Tracked with the credential-binding/CIMD work.
-  - auth/metadata-default
-  - auth/metadata-var1
-  - auth/metadata-var2
-  - auth/metadata-var3
+  # The authorization-code flow is green end to end: metadata discovery in all
+  # four layouts, dynamic registration, PKCE S256, scope selection (challenge
+  # first, then `scopes_supported`, omitted when neither), step-up with the
+  # SEP-2350 scope union, every token-endpoint auth method, pre-registered
+  # credentials, offline access, issuer migration and the RFC 9207 `iss` rules.
+  #
+  # What is left needs a credential the flow does not have.
+
+  # -- Client id metadata documents (#86) --------------------------------
+  # A server advertising `client_id_metadata_document_supported` expects a
+  # *URL* client id resolving to a hosted client metadata document. neva
+  # registers dynamically instead, which the scenario reports as a warning.
   - auth/basic-cimd
-  - auth/scope-from-www-authenticate
-  - auth/scope-from-scopes-supported
-  - auth/scope-omitted-when-undefined
-  - auth/scope-step-up
-  - auth/scope-retry-limit
-  - auth/token-endpoint-auth-basic
-  - auth/token-endpoint-auth-post
-  - auth/token-endpoint-auth-none
-  - auth/pre-registration
-  - auth/offline-access-scope
-  - auth/offline-access-not-supported
-  - auth/authorization-server-migration
-  - auth/iss-supported
-  - auth/iss-not-advertised
-  - auth/iss-supported-missing
-  - auth/iss-wrong-issuer
-  - auth/iss-unexpected
-  - auth/iss-normalized
-  - auth/metadata-issuer-mismatch
+
+  # -- Grant types beyond authorization_code (#86) -----------------------
+  # Each of these authenticates the *client* rather than a user, and needs a
+  # grant neva's OAuth client does not implement: `client_credentials` (with a
+  # signed JWT assertion or Basic), the enterprise token-exchange profile, and
+  # RFC 7523 JWT-bearer for workload identity.
+  - auth/client-credentials-jwt
+  - auth/client-credentials-basic
+  - auth/enterprise-managed-authorization
+  - auth/wif-jwt-bearer
+
+  # -- DPoP (#86) --------------------------------------------------------
+  # Sender-constrained tokens: every request carries a fresh signed proof bound
+  # to the key, method and URL, and the nonce variant adds a challenge-response
+  # round. neva issues bearer tokens only.
+  - auth/dpop
+  - auth/dpop-nonce
 
   # `sep-2322-client-request-state` is green: the retry echoes `requestState`
   # byte-exact on the params, takes a fresh JSON-RPC id, omits the state when
