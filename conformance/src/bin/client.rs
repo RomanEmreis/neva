@@ -212,6 +212,22 @@ async fn run(client: &mut Client, scenario: &str) -> Result<(), Error> {
                 }
             }
         }
+        // The scenario answers this call with an SSE stream, writes a priming
+        // frame carrying an event id and a `retry:`, then closes the stream
+        // without the response -- and finishes the answer on the stream the
+        // client is expected to resume. Nothing is asserted about the result
+        // here; the reconnection is the whole subject, so a call that ends in
+        // an error has still produced the traffic being judged.
+        "sse-retry" => {
+            client.list_tools(None).await?;
+            match client
+                .call_tool("test_reconnection", None::<[(&str, &str); 0]>)
+                .await
+            {
+                Ok(result) => tracing::info!(?result, "resumed and completed"),
+                Err(err) => tracing::warn!(%err, "reconnection tool failed"),
+            }
+        }
         // The suite's own fixture server exposes `add_numbers`; list first so
         // the recorded traffic carries both verbs, then call it.
         "tools_call"

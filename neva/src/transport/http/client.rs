@@ -479,7 +479,29 @@ async fn exchange(
         let stream = sse_stream::SseStream::from_bytes_stream(resp.bytes_stream());
         let ids = request_ids(&req);
 
-        let answered = drain_post_sse(stream, &resp_tx, &ids).await;
+        let mut answered = drain_post_sse(stream, &resp_tx, &ids, &session).await;
+
+        // A stream that ended before the response is not necessarily a failed
+        // request: on the session-bound transport the server may finish the
+        // answer on a resumed stream, which is what event ids and the `retry:`
+        // field are for. One attempt, and only when the server named an id to
+        // resume from -- without one there is nothing to ask it to replay, and
+        // more than one turns a server that keeps dropping the stream into a
+        // reconnect loop the caller cannot see.
+        if !answered
+            && resumable(&session)
+            && let Some(last_id) = session.last_event_id()
+        {
+            answered = resume_stream(
+                &client,
+                &session,
+                bearer.as_deref(),
+                &last_id,
+                &resp_tx,
+                &ids,
+            )
+            .await;
+        }
 
         // A truncated stream, an unparseable frame, or EOF before the final
         // response would otherwise leave the originating request sitting in the
@@ -868,11 +890,14 @@ async fn handle_sse_connection(
             }
         }
 
-        // Stream ended -- wait before reconnecting to avoid hammering the server
+        // Stream ended -- wait before reconnecting to avoid hammering the
+        // server. How long is the server's call when it has stated one with an
+        // SSE `retry:` field; the constant is only the answer for a server that
+        // never said.
         tokio::select! {
             biased;
             _ = token.cancelled() => return,
-            _ = tokio::time::sleep(SSE_RECONNECT_DELAY) => {}
+            _ = tokio::time::sleep(session.retry_delay(SSE_RECONNECT_DELAY)) => {}
         }
     }
 }
@@ -887,6 +912,7 @@ async fn drain_post_sse<S>(
     mut stream: S,
     resp_tx: &mpsc::Sender<Result<Message, Error>>,
     ids: &[crate::types::RequestId],
+    session: &McpSession,
 ) -> bool
 where
     S: futures_util::Stream<Item = Result<sse_stream::Sse, sse_stream::Error>> + Unpin,
@@ -894,12 +920,20 @@ where
     let mut answered = false;
     while let Some(event) = stream.next().await {
         match event {
-            Ok(sse) if is_message_event(&sse) => {
-                if forward_sse_message(sse, resp_tx, ids).await {
+            Ok(sse) => {
+                // Recorded before the frame is judged: a priming frame carries
+                // no message, and is exactly where a server states the id to
+                // resume from and how long to wait before doing so.
+                if let Some(retry) = sse.retry {
+                    session.set_retry(retry);
+                }
+                if let Some(id) = sse.id.clone() {
+                    session.set_last_event_id(id);
+                }
+                if is_message_event(&sse) && forward_sse_message(sse, resp_tx, ids).await {
                     answered = true;
                 }
             }
-            Ok(_) => {}
             Err(_err) => {
                 #[cfg(feature = "tracing")]
                 tracing::error!(logger = "neva", "SSE POST stream error: {}", _err);
@@ -908,6 +942,86 @@ where
         }
     }
     answered
+}
+
+/// Whether this session can resume a dropped stream.
+///
+/// Resumption is a session-bound-transport affair: MCP 2026-07-28 removed both
+/// the session and `Last-Event-ID`, so a 2026-07-28 peer has nothing to resume
+/// against and a dropped stream there is simply a failed request.
+fn resumable(
+    #[cfg_attr(feature = "legacy-spec", allow(unused_variables))] session: &McpSession,
+) -> bool {
+    #[cfg(not(feature = "legacy-spec"))]
+    {
+        session.is_legacy()
+    }
+    #[cfg(feature = "legacy-spec")]
+    {
+        true
+    }
+}
+
+/// Reopens a dropped response stream and drains it for the answer it owed.
+///
+/// The server said when to come back (`retry:`) and where to resume from
+/// (`id:`); both are honored, because reconnecting sooner hammers a server that
+/// asked for room and reconnecting without the id makes it replay from the
+/// start -- or from nothing.
+///
+/// Returns whether the terminal response arrived this time.
+async fn resume_stream(
+    client: &reqwest::Client,
+    session: &McpSession,
+    bearer: Option<&str>,
+    last_event_id: &str,
+    resp_tx: &mpsc::Sender<Result<Message, Error>>,
+    ids: &[crate::types::RequestId],
+) -> bool {
+    let token = session.cancellation_token();
+    tokio::select! {
+        biased;
+        _ = token.cancelled() => return false,
+        _ = tokio::time::sleep(session.retry_delay(SSE_RECONNECT_DELAY)) => {}
+    }
+
+    let mut req = client
+        .get(session.url())
+        .header(ACCEPT, "application/json, text/event-stream")
+        .header(CACHE_CONTROL, "no-cache")
+        .header(LAST_EVENT_ID, last_event_id);
+
+    if let Some(session_id) = session.session_id() {
+        req = req.header(MCP_SESSION_ID, session_id.to_string());
+    }
+    if let Some(bearer) = bearer {
+        req = req.bearer_auth(bearer);
+    }
+
+    let resp = match req.send().await {
+        Ok(resp) if resp.status().is_success() => resp,
+        Ok(_resp) => {
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                logger = "neva",
+                "SSE resumption refused with status: {}",
+                _resp.status()
+            );
+            return false;
+        }
+        Err(_err) => {
+            #[cfg(feature = "tracing")]
+            tracing::error!(logger = "neva", "Failed to resume SSE stream: {}", _err);
+            return false;
+        }
+    };
+
+    let stream = sse_stream::SseStream::from_bytes_stream(resp.bytes_stream());
+    tokio::select! {
+        biased;
+        _ = token.cancelled() => false,
+        answered = drain_post_sse(stream, resp_tx, ids, session) => answered,
+    }
 }
 
 /// Whether an SSE frame carries a JSON-RPC message.
@@ -929,6 +1043,9 @@ async fn handle_event(
     session: &Arc<McpSession>,
     resp_tx: &mpsc::Sender<Result<Message, Error>>,
 ) {
+    if let Some(retry) = event.retry {
+        session.set_retry(retry);
+    }
     let id = event.id.clone();
     let delivered = if is_message_event(&event) {
         handle_msg(event, resp_tx).await
@@ -1232,13 +1349,45 @@ mod tests {
             drain_post_sse(
                 futures_util::stream::iter(frames),
                 &tx,
-                &[crate::types::RequestId::Number(1)]
+                &[crate::types::RequestId::Number(1)],
+                &session,
             )
             .await,
             "the POST stream must count as answered"
         );
         assert!(matches!(rx.try_recv(), Ok(Ok(Message::Notification(_)))));
         assert!(matches!(rx.try_recv(), Ok(Ok(Message::Response(_)))));
+    }
+
+    /// A priming frame carries no message, and is exactly where a server states
+    /// where to resume from and how long to wait -- so both have to be taken off
+    /// a frame the message path skips.
+    #[tokio::test]
+    async fn a_priming_frame_still_states_where_to_resume_from() {
+        let session = make_session();
+        let (tx, mut rx) = mpsc::channel(2);
+
+        let mut priming = sse_stream::Sse::default().id("event-1");
+        priming.retry = Some(500);
+        let frames = vec![Ok(priming)];
+
+        assert!(
+            !drain_post_sse(
+                futures_util::stream::iter(frames),
+                &tx,
+                &[crate::types::RequestId::Number(1)],
+                &session,
+            )
+            .await,
+            "a priming frame answers nothing"
+        );
+        assert!(rx.try_recv().is_err(), "and delivers nothing");
+        assert_eq!(session.last_event_id(), Some("event-1".to_string()));
+        assert_eq!(
+            session.retry_delay(SSE_RECONNECT_DELAY),
+            Duration::from_millis(500),
+            "the server's retry field must replace the default delay"
+        );
     }
 
     /// Frames of some other event type are skipped without answering the
@@ -1256,7 +1405,8 @@ mod tests {
             !drain_post_sse(
                 futures_util::stream::iter(frames),
                 &tx,
-                &[crate::types::RequestId::Number(1)]
+                &[crate::types::RequestId::Number(1)],
+                &make_session(),
             )
             .await
         );

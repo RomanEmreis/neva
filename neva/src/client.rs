@@ -260,11 +260,24 @@ impl Client {
     /// }
     /// ```
     pub async fn disconnect(mut self) -> Result<(), Error> {
-        self.send_notification(crate::types::notification::commands::CANCELLED, None)
-            .await?;
-        if let Some(token) = self.cancellation_token {
+        // Closing the transport is the whole goodbye. This used to send a
+        // param-less `notifications/cancelled` first, which was wrong twice
+        // over: that notification cancels one named in-flight request and its
+        // `params.requestId` is required, so without params it fails the spec's
+        // own schema -- and no server has anything to act on either, neva's
+        // included, which drops it for want of a request id. Under
+        // MCP 2026-07-28 there is nothing to send in any case: the revision
+        // defines no client-to-server notification on Streamable HTTP, where
+        // closing the stream *is* the cancellation.
+        //
+        // It only reached the wire when the transport task picked it up before
+        // the cancellation below landed, which is why it read as a flake rather
+        // than a bug.
+        if let Some(token) = self.cancellation_token.take() {
             token.cancel();
         }
+        // Let the transport task observe the cancellation and drain before the
+        // runtime goes away under it.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         Ok(())
     }
@@ -290,8 +303,16 @@ impl Client {
         }
     }
 
-    /// Validates a server-reported protocol version against what this client
-    /// negotiated, cancelling the transport on mismatch.
+    /// Validates the protocol version the server answered the handshake with,
+    /// cancelling the transport when this client cannot speak it.
+    ///
+    /// The version the client offers is a proposal, not a demand: a server that
+    /// does not speak it answers with one it does, and the handshake succeeds if
+    /// the client speaks that. Only a version outside
+    /// [`PROTOCOL_VERSIONS`](crate::PROTOCOL_VERSIONS) ends the connection --
+    /// insisting on the offered version instead would refuse every server a
+    /// notch older than the client, which is the case the negotiation exists
+    /// for.
     fn validate_server_version(&mut self, server_ver: &str) -> Result<(), Error> {
         if !crate::PROTOCOL_VERSIONS.contains(&server_ver) {
             self.cancel_transport();
@@ -300,15 +321,13 @@ impl Client {
                 format!("Unsupported server protocol version: {server_ver}"),
             ));
         }
+        #[cfg(feature = "tracing")]
         if server_ver != self.expected_protocol_ver() {
-            self.cancel_transport();
-            return Err(Error::new(
-                ErrorCode::InvalidRequest,
-                format!(
-                    "Server protocol version mismatch: expected {}, got {server_ver}",
-                    self.expected_protocol_ver()
-                ),
-            ));
+            tracing::info!(
+                logger = "neva",
+                "Server answered with protocol version {server_ver}, not the offered {}",
+                self.expected_protocol_ver()
+            );
         }
         Ok(())
     }

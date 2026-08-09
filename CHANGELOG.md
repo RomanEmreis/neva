@@ -35,7 +35,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   now has something to branch on before it asks rather than only a refusal
   after.
 
+* **A dropped response stream is resumed (legacy profile).** A `POST` whose
+  reply is an SSE stream used to fail its request the moment the stream ended
+  without a response. On the session-bound transport that stream is resumable:
+  neva now reopens it once with a `GET` carrying `Last-Event-ID`, after the
+  pause the server asked for. One attempt, and only when the server named an id
+  to resume from -- without one there is nothing to replay, and repeating turns
+  a server that keeps dropping the stream into a reconnect loop the caller
+  cannot see. MCP 2026-07-28 removed both sessions and `Last-Event-ID`, so a
+  2026-07-28 peer is unaffected.
+* **The SSE `retry:` field sets the reconnection delay.** It was parsed and
+  ignored in favour of a fixed three seconds, so a server asking to be
+  reconnected sooner waited, and one asking for room got hammered.
+
 ### Changed
+* **A server may answer the handshake with a different protocol version.** The
+  version a client offers is a proposal: a server that does not speak it answers
+  with one it does, which is what the negotiation is for. neva's client treated
+  any difference as fatal and refused every server a notch older than itself.
+  Only a version outside `PROTOCOL_VERSIONS` now ends the connection.
+* **`Client::disconnect` sends nothing.** It used to send a param-less
+  `notifications/cancelled` first -- a notification that cancels one named
+  in-flight request, whose `params.requestId` is required, so without params it
+  fails the spec's own schema and no server has anything to act on (neva's drops
+  it for want of a request id). Closing the transport is the whole goodbye, and
+  under MCP 2026-07-28 the revision defines no client-to-server notification on
+  Streamable HTTP at all.
 * **An MRTR round carries every input the handler asked for.** The handler's
   `?` decides: unwinding at the first miss leaves one request in the round, as
   before, while holding the `?` until everything has been requested puts them

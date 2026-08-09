@@ -37,10 +37,9 @@ client:
   # `Content-Type`, and an argument-less call omits `arguments` rather than
   # sending `null`.
 
-  # -- SSE reconnection is reported but not exercised (TBD: no issue yet) --------------
-  # The scenario ends in warnings rather than failures: nothing in the fixture
-  # makes the stream drop, so the retry behavior is reported as untested.
-  - sse-retry
+  # `sse-retry` is green: a response stream that ends before the response is
+  # resumed with a `GET` carrying `Last-Event-ID`, after the pause the server
+  # asked for with `retry:`.
 
   # -- OAuth client flows (#86) -------------------------------------------
   - auth/metadata-default
