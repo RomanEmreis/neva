@@ -791,6 +791,18 @@ impl NumberSchema {
             "Expected number value",
         ))?;
 
+        // `integer` and `number` share this struct because their keywords are
+        // the same, but they are different JSON Schema types and the peer was
+        // told which one applies. Checking the fractional part rather than the
+        // JSON representation is deliberate: `1.0` is a valid integer under
+        // 2020-12, and a client that sends it is not in the wrong.
+        if self.r#type == PropertyType::Integer && num_value.fract() != 0.0 {
+            return Err(Error::new(
+                ErrorCode::InvalidParams,
+                format!("Expected integer value, got: {num_value}"),
+            ));
+        }
+
         if let Some(min) = self.min
             && num_value < min
         {
@@ -1036,6 +1048,42 @@ mod tests {
         assert!(schema.validate(&json!(20)).is_ok());
         assert!(schema.validate(&json!(9)).is_err());
         assert!(schema.validate(&json!(21)).is_err());
+    }
+
+    /// A field published as `"integer"` must be held to it: the peer was told
+    /// `1.5` is not a legal value there, and validating it as a plain number
+    /// would accept exactly what the declared schema rules out.
+    #[test]
+    fn an_integer_field_is_held_to_whole_values() {
+        let Schema::Number(schema) = Schema::integer() else {
+            panic!("Schema::integer must be backed by NumberSchema");
+        };
+
+        assert!(schema.validate(&json!(1)).is_ok());
+        assert!(schema.validate(&json!(-7)).is_ok());
+        // 2020-12 judges the value, not how it was written: a zero fractional
+        // part is an integer.
+        assert!(schema.validate(&json!(1.0)).is_ok());
+        assert!(schema.validate(&json!(1.5)).is_err());
+
+        // ...and `number` still accepts what `integer` refuses.
+        assert!(NumberSchema::default().validate(&json!(1.5)).is_ok());
+    }
+
+    /// The integer check runs before the bounds, but must not shadow them:
+    /// both refusals stay reachable.
+    #[test]
+    fn an_integer_field_still_carries_its_bounds() {
+        let schema = NumberSchema {
+            r#type: PropertyType::Integer,
+            min: Some(1.0),
+            max: Some(10.0),
+            ..Default::default()
+        };
+
+        assert!(schema.validate(&json!(5)).is_ok());
+        assert!(schema.validate(&json!(11)).is_err(), "above the maximum");
+        assert!(schema.validate(&json!(5.5)).is_err(), "not an integer");
     }
 
     #[test]

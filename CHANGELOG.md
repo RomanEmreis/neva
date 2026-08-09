@@ -110,6 +110,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   rather than as the client getting the protocol wrong.
 
 ### Fixed
+* **A resumed response stream is let go once it has answered.** The drain that
+  reads a resumed stream is the one written for a `POST` reply, which the server
+  closes after the response; the stream a resumption reopens is the session's
+  own long-lived `GET`, which does not. So the task went on reading it forever:
+  one leaked connection per truncated reply, each competing with the standalone
+  `GET` for the traffic that followed. The drain now stops as soon as nothing is
+  owed.
+  * It also tracks what is owed per request rather than as a single flag, so a
+    batched `POST` whose stream died midway resumes for -- and, failing that,
+    fails -- only the requests still unanswered, instead of counting the whole
+    batch answered on the first response to arrive.
+* **A resumption carries the token the exchange ended up authorized with.** When
+  a `401` sent the request through a fresh OAuth flow, the retry used the new
+  token but a later resumption `GET` still carried the rejected one, drawing
+  another `401` and losing the answer it went back for.
+* **A field declared `integer` is validated as one.** `Schema::integer()`
+  publishes `"type": "integer"` but shares its struct with `number`, and
+  validation only checked the bounds -- so an elicitation field the client was
+  told rejects `1.5` accepted it. The check judges the value rather than how it
+  was written: `1.0` is a valid integer under 2020-12.
+* **`requestState` / `inputResponses` of the wrong JSON type are refused.** Both
+  accessors answer `None` for a field that is present but malformed, which read
+  as *absent*: a wrongly-typed `requestState` turned a retry into a fresh call
+  whose answers looked like ones offered up front, and with the field malformed
+  in one of its two locations and well-formed in the other, the accessors would
+  quietly read the other one. Now `InvalidParams`, checked where the rest of the
+  request's shape is. An explicit `null` still reads as unstated -- that is how
+  JSON spells an absent optional.
 * **A notification goes on the session stream the moment it is emitted (legacy
   profile).** `notification::fmt::layer()` used to hand every event to a channel
   of its own, drained by a spawned task that forwarded it to the session's SSE

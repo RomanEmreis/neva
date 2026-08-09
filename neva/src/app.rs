@@ -1356,6 +1356,7 @@ impl App {
         if let Some(err) = req
             .required_meta_error()
             .or_else(|| req.unsupported_version_error())
+            .or_else(|| req.malformed_mrtr_error())
         {
             let mut resp = Response::error(req_id, err);
             if let Some(session_id) = session_id {

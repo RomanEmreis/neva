@@ -363,7 +363,11 @@ async fn exchange(
     auth: ClientAuth,
     #[cfg(not(feature = "legacy-spec"))] param_registry: crate::shared::param_headers::Registry,
 ) {
-    let bearer = auth.fresh_bearer().await;
+    // `mut` because a managed-OAuth retry replaces it: whatever token this
+    // exchange ends up authorized with is also the one a later resumption `GET`
+    // must carry, and the one held here was just rejected.
+    #[cfg_attr(not(feature = "client-oauth"), allow(unused_mut))]
+    let mut bearer = auth.fresh_bearer().await;
     let sent = build_post(
         &client,
         &session,
@@ -411,7 +415,7 @@ async fn exchange(
                 .await
             {
                 Ok(fresh) => {
-                    match build_post(
+                    let retried = build_post(
                         &client,
                         &session,
                         &req,
@@ -420,8 +424,13 @@ async fn exchange(
                         &param_registry,
                     )
                     .send()
-                    .await
-                    {
+                    .await;
+                    // From here on the exchange belongs to the fresh grant. A
+                    // resumption `GET` carrying the token that drew the 401
+                    // would draw another one and lose the answer it went back
+                    // for.
+                    bearer = Some(fresh);
+                    match retried {
                         Ok(retried) => retried,
                         Err(_err) => {
                             #[cfg(feature = "tracing")]
@@ -489,7 +498,7 @@ async fn exchange(
         let stream = sse_stream::SseStream::from_bytes_stream(resp.bytes_stream());
         let ids = request_ids(&req);
 
-        let mut answered = drain_post_sse(stream, &resp_tx, &ids, &session).await;
+        let mut owed = drain_post_sse(stream, &resp_tx, &ids, &session).await;
 
         // A stream that ended before the response is not necessarily a failed
         // request: on the session-bound transport the server may finish the
@@ -498,17 +507,21 @@ async fn exchange(
         // resume from -- without one there is nothing to ask it to replay, and
         // more than one turns a server that keeps dropping the stream into a
         // reconnect loop the caller cannot see.
-        if !answered
+        //
+        // The resumption asks for what is still owed rather than for everything
+        // the `POST` carried: a batch whose stream died midway has some of its
+        // answers already, and re-delivering those would resolve nothing.
+        if !owed.is_empty()
             && resumable(&session)
             && let Some(last_id) = session.last_event_id()
         {
-            answered = resume_stream(
+            owed = resume_stream(
                 &client,
                 &session,
                 bearer.as_deref(),
                 &last_id,
                 &resp_tx,
-                &ids,
+                &owed,
             )
             .await;
         }
@@ -519,10 +532,10 @@ async fn exchange(
         // the non-JSON-RPC reply path below. `InternalError` (not `ParseError`)
         // on purpose: the peer clearly speaks 2026-07-28, so this must not be mistaken
         // for dual-mode fallback evidence.
-        if !answered {
+        if !owed.is_empty() {
             #[cfg(feature = "tracing")]
             tracing::error!(logger = "neva", STREAM_ENDED_BEFORE_RESPONSE);
-            for id in ids {
+            for id in owed {
                 let resp = crate::types::Response::error(
                     id,
                     Error::new(ErrorCode::InternalError, STREAM_ENDED_BEFORE_RESPONSE),
@@ -915,20 +928,29 @@ async fn handle_sse_connection(
 /// Drains a request-scoped SSE `POST` reply, forwarding every JSON-RPC message
 /// it carries to the receive loop.
 ///
-/// Returns whether the terminal reply arrived, so the caller can fail the
-/// originating request when the stream ends without one. `ids` are the requests
-/// this `POST` carried -- a reply answers it only by answering one of them.
+/// `ids` are the requests still owed an answer; the returned list is whatever
+/// is *still* owed when the stream stops, so the caller can resume for exactly
+/// those and fail exactly those.
+///
+/// Reading stops as soon as nothing is owed. That matters on the resumption
+/// path: the stream replaying a truncated answer is the session's own `GET`,
+/// which is long-lived and does not close once it has replayed. Draining it to
+/// EOF would park this task on the session stream for the life of the client,
+/// one leaked connection per truncated reply, competing with the standalone
+/// `GET` for the traffic that follows.
 async fn drain_post_sse<S>(
     mut stream: S,
     resp_tx: &mpsc::Sender<Result<Message, Error>>,
     ids: &[crate::types::RequestId],
     session: &McpSession,
-) -> bool
+) -> Vec<crate::types::RequestId>
 where
     S: futures_util::Stream<Item = Result<sse_stream::Sse, sse_stream::Error>> + Unpin,
 {
-    let mut answered = false;
-    while let Some(event) = stream.next().await {
+    let mut owed = ids.to_vec();
+    while !owed.is_empty()
+        && let Some(event) = stream.next().await
+    {
         match event {
             Ok(sse) => {
                 // Recorded before the frame is judged: a priming frame carries
@@ -940,8 +962,8 @@ where
                 if let Some(id) = sse.id.clone() {
                     session.set_last_event_id(id);
                 }
-                if is_message_event(&sse) && forward_sse_message(sse, resp_tx, ids).await {
-                    answered = true;
+                if is_message_event(&sse) {
+                    forward_sse_message(sse, resp_tx, &mut owed).await;
                 }
             }
             Err(_err) => {
@@ -951,7 +973,7 @@ where
             }
         }
     }
-    answered
+    owed
 }
 
 /// Whether a `403` is the authorization server's `insufficient_scope`, and so
@@ -992,7 +1014,7 @@ fn resumable(
 /// asked for room and reconnecting without the id makes it replay from the
 /// start -- or from nothing.
 ///
-/// Returns whether the terminal response arrived this time.
+/// Returns what is still owed after this attempt.
 async fn resume_stream(
     client: &reqwest::Client,
     session: &McpSession,
@@ -1000,11 +1022,11 @@ async fn resume_stream(
     last_event_id: &str,
     resp_tx: &mpsc::Sender<Result<Message, Error>>,
     ids: &[crate::types::RequestId],
-) -> bool {
+) -> Vec<crate::types::RequestId> {
     let token = session.cancellation_token();
     tokio::select! {
         biased;
-        _ = token.cancelled() => return false,
+        _ = token.cancelled() => return ids.to_vec(),
         _ = tokio::time::sleep(session.retry_delay(SSE_RECONNECT_DELAY)) => {}
     }
 
@@ -1030,20 +1052,20 @@ async fn resume_stream(
                 "SSE resumption refused with status: {}",
                 _resp.status()
             );
-            return false;
+            return ids.to_vec();
         }
         Err(_err) => {
             #[cfg(feature = "tracing")]
             tracing::error!(logger = "neva", "Failed to resume SSE stream: {}", _err);
-            return false;
+            return ids.to_vec();
         }
     };
 
     let stream = sse_stream::SseStream::from_bytes_stream(resp.bytes_stream());
     tokio::select! {
         biased;
-        _ = token.cancelled() => false,
-        answered = drain_post_sse(stream, resp_tx, ids, session) => answered,
+        _ = token.cancelled() => ids.to_vec(),
+        owed = drain_post_sse(stream, resp_tx, ids, session) => owed,
     }
 }
 
@@ -1119,10 +1141,10 @@ async fn handle_msg(
 
 /// Forwards one frame of a request-scoped SSE `POST` reply to the receive loop.
 ///
-/// Returns `true` only for the *terminal* reply -- a response to one of `ids`,
-/// the requests this `POST` carried, whether standalone or inside a batch -- so
-/// the caller can tell an orderly stream end from a truncated one
-/// (notifications, and frames that fail to parse, return `false`).
+/// Strikes off `owed` every request this frame answers -- a response to one of
+/// them, whether standalone or inside a batch -- so the caller can tell an
+/// orderly stream end from a truncated one. Notifications, and frames that fail
+/// to parse or to reach the receive loop, strike off nothing.
 ///
 /// Both halves of that matter. A batch is not terminal by virtue of being a
 /// batch: a subscription stream may deliver its acknowledgment and its events
@@ -1131,13 +1153,16 @@ async fn handle_msg(
 /// mistake makes a stream that dies before the real response look orderly,
 /// leaving a listen slot -- which carries no TTL -- with nothing to fail it and
 /// `Subscription::closed` waiting on a result that is never coming.
+///
+/// A batch reply is struck off per response rather than wholesale: one frame
+/// may answer some of what a batched `POST` asked and leave the rest to come.
 async fn forward_sse_message(
     event: sse_stream::Sse,
     resp_tx: &mpsc::Sender<Result<Message, Error>>,
-    ids: &[crate::types::RequestId],
-) -> bool {
+    owed: &mut Vec<crate::types::RequestId>,
+) {
     let Some(data) = event.data else {
-        return false;
+        return;
     };
 
     let msg = match serde_json::from_str::<Message>(&data) {
@@ -1145,26 +1170,32 @@ async fn forward_sse_message(
         Err(_err) => {
             #[cfg(feature = "tracing")]
             tracing::error!(logger = "neva", "Failed to parse SSE POST event: {}", _err);
-            return false;
+            return;
         }
     };
 
-    let answers = |resp: &crate::types::Response| ids.contains(&resp.full_id());
-    let terminal = match &msg {
-        Message::Response(resp) => answers(resp),
-        Message::Batch(batch) => batch.iter().any(
-            |env| matches!(env, crate::types::MessageEnvelope::Response(resp) if answers(resp)),
-        ),
-        _ => false,
+    let answered: Vec<_> = match &msg {
+        Message::Response(resp) => vec![resp.full_id()],
+        Message::Batch(batch) => batch
+            .iter()
+            .filter_map(|env| match env {
+                crate::types::MessageEnvelope::Response(resp) => Some(resp.full_id()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
     };
 
+    // Struck off only once the message is on its way to the receive loop: a
+    // frame that never gets there has resolved nothing, and the caller must
+    // still fail the request rather than assume it was answered.
     if let Err(_err) = resp_tx.send(Ok(msg)).await {
         #[cfg(feature = "tracing")]
         tracing::error!(logger = "neva", "Failed to send response: {}", _err);
-        return false;
+        return;
     }
 
-    terminal
+    owed.retain(|id| !answered.contains(id));
 }
 
 #[inline]
@@ -1375,8 +1406,9 @@ mod tests {
                 &[crate::types::RequestId::Number(1)],
                 &session,
             )
-            .await,
-            "the POST stream must count as answered"
+            .await
+            .is_empty(),
+            "the POST stream must leave nothing owed"
         );
         assert!(matches!(rx.try_recv(), Ok(Ok(Message::Notification(_)))));
         assert!(matches!(rx.try_recv(), Ok(Ok(Message::Response(_)))));
@@ -1394,14 +1426,15 @@ mod tests {
         priming.retry = Some(500);
         let frames = vec![Ok(priming)];
 
-        assert!(
-            !drain_post_sse(
+        assert_eq!(
+            drain_post_sse(
                 futures_util::stream::iter(frames),
                 &tx,
                 &[crate::types::RequestId::Number(1)],
                 &session,
             )
             .await,
+            vec![crate::types::RequestId::Number(1)],
             "a priming frame answers nothing"
         );
         assert!(rx.try_recv().is_err(), "and delivers nothing");
@@ -1424,14 +1457,15 @@ mod tests {
                 .event("endpoint")
                 .data(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#)),
         ];
-        assert!(
-            !drain_post_sse(
+        assert_eq!(
+            drain_post_sse(
                 futures_util::stream::iter(frames),
                 &tx,
                 &[crate::types::RequestId::Number(1)],
                 &make_session(),
             )
-            .await
+            .await,
+            vec![crate::types::RequestId::Number(1)]
         );
         assert!(rx.try_recv().is_err(), "no frame should be delivered");
     }
@@ -1472,20 +1506,90 @@ mod tests {
         for (frame, terminal) in cases {
             let (tx, mut rx) = mpsc::channel(1);
             let event = sse_stream::Sse::default().data(frame);
-            assert_eq!(
-                forward_sse_message(event, &tx, &[crate::types::RequestId::Number(1)]).await,
-                terminal,
-                "wrong terminal flag for {frame}"
-            );
+            let mut owed = vec![crate::types::RequestId::Number(1)];
+            forward_sse_message(event, &tx, &mut owed).await;
+            assert_eq!(owed.is_empty(), terminal, "wrong terminal flag for {frame}");
             assert!(rx.try_recv().is_ok(), "{frame} should still be delivered");
         }
+    }
+
+    /// A batched `POST` is answered request by request: a frame that resolves
+    /// one of them leaves the others owed, and the caller must resume for --
+    /// and ultimately fail -- only those.
+    #[tokio::test]
+    async fn a_batch_is_struck_off_one_answer_at_a_time() {
+        let ids = [
+            crate::types::RequestId::Number(1),
+            crate::types::RequestId::Number(2),
+        ];
+        let (tx, _rx) = mpsc::channel(2);
+        let mut owed = ids.to_vec();
+
+        forward_sse_message(
+            sse_stream::Sse::default().data(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#),
+            &tx,
+            &mut owed,
+        )
+        .await;
+        assert_eq!(
+            owed,
+            vec![crate::types::RequestId::Number(2)],
+            "only the answered request may be struck off"
+        );
+
+        forward_sse_message(
+            sse_stream::Sse::default().data(r#"{"jsonrpc":"2.0","id":2,"result":{}}"#),
+            &tx,
+            &mut owed,
+        )
+        .await;
+        assert!(owed.is_empty(), "the batch is now fully answered");
+    }
+
+    /// The resumed stream is the session's own long-lived `GET`: it does not
+    /// close once it has replayed what was missed. Draining it to EOF would
+    /// park this task on the session stream for the life of the client, so the
+    /// drain has to stop the moment nothing is owed.
+    #[tokio::test]
+    async fn draining_stops_once_nothing_is_owed() {
+        let (tx, mut rx) = mpsc::channel(8);
+        // The response, then traffic that keeps coming -- as a live session
+        // stream does. `pending()` after them stands in for a stream that never
+        // ends: reaching it at all would hang this test.
+        let frames = futures_util::stream::iter(vec![
+            Ok(sse_stream::Sse::default().data(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#)),
+            Ok(sse_stream::Sse::default()
+                .data(r#"{"jsonrpc":"2.0","method":"notifications/message"}"#)),
+        ])
+        .chain(futures_util::stream::pending());
+
+        let owed = tokio::time::timeout(
+            Duration::from_secs(1),
+            drain_post_sse(
+                Box::pin(frames),
+                &tx,
+                &[crate::types::RequestId::Number(1)],
+                &make_session(),
+            ),
+        )
+        .await
+        .expect("the drain must return instead of holding the session stream open");
+
+        assert!(owed.is_empty());
+        assert!(matches!(rx.try_recv(), Ok(Ok(Message::Response(_)))));
+        assert!(
+            rx.try_recv().is_err(),
+            "nothing past the answer belongs to this exchange"
+        );
     }
 
     #[tokio::test]
     async fn forward_sse_message_reports_unparseable_frame_as_unanswered() {
         let (tx, mut rx) = mpsc::channel(1);
         let event = sse_stream::Sse::default().data("not json");
-        assert!(!forward_sse_message(event, &tx, &[crate::types::RequestId::Number(1)]).await);
+        let mut owed = vec![crate::types::RequestId::Number(1)];
+        forward_sse_message(event, &tx, &mut owed).await;
+        assert_eq!(owed, vec![crate::types::RequestId::Number(1)]);
         assert!(
             rx.try_recv().is_err(),
             "a malformed frame must not reach the receive loop"

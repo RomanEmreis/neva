@@ -385,6 +385,74 @@ impl Request {
         from_params.or_else(|| self.meta().and_then(|m| m.request_state))
     }
 
+    /// Why this request's MRTR fields are not acceptable, if they are not.
+    ///
+    /// [`Self::state`] and [`Self::input_responses`] both answer `None` for a
+    /// field that is present but of the wrong JSON type, because neither can
+    /// say anything else. Left at that, a `requestState` of the wrong type
+    /// would read as *no state at all*: the retry would take the absent-state
+    /// path, its `inputResponses` would be treated as answers offered up front
+    /// rather than as the continuation of a round, and the client would be told
+    /// nothing about why. Worse, with the field malformed in one of the two
+    /// locations and well-formed in the other, the accessors would quietly read
+    /// the other one.
+    ///
+    /// So the accessors keep their `Option`, and stating a recognized field
+    /// with the wrong type is rejected here instead -- a property of the
+    /// message, checked where [`Self::required_meta_error`] is.
+    ///
+    /// # Examples
+    /// ```
+    /// use neva::types::Request;
+    ///
+    /// let good = Request::new(None, "tools/call", Some(serde_json::json!({
+    ///     "name": "greet",
+    ///     "requestState": "v1.0.sealed"
+    /// })));
+    /// assert!(good.malformed_mrtr_error().is_none());
+    ///
+    /// let bad = Request::new(None, "tools/call", Some(serde_json::json!({
+    ///     "name": "greet",
+    ///     "requestState": 42
+    /// })));
+    /// assert!(bad.malformed_mrtr_error().is_some());
+    /// ```
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn malformed_mrtr_error(&self) -> Option<crate::error::Error> {
+        use crate::error::{Error, ErrorCode};
+
+        let params = self.params.as_ref()?;
+        let malformed = |key: &str, expected: &str| {
+            Some(Error::new(
+                ErrorCode::InvalidParams,
+                format!("`{key}` must be {expected}"),
+            ))
+        };
+
+        // Both locations the accessors read, in the same order and for the same
+        // reason: a 0.5.x peer states these in `_meta`, a current one on the
+        // params, and either may be the malformed one.
+        // An explicit `null` is how JSON spells an absent optional -- serde
+        // itself writes one for a `None` without `skip_serializing_if` -- so it
+        // is read as the field being unstated rather than as the wrong type.
+        let stated = |source: &serde_json::Value, key: &str| {
+            source.get(key).filter(|v| !v.is_null()).cloned()
+        };
+
+        // Both locations the accessors read, in the same order and for the same
+        // reason: a 0.5.x peer states these in `_meta`, a current one on the
+        // params, and either may be the malformed one.
+        for source in [Some(params), params.get("_meta")].into_iter().flatten() {
+            if stated(source, "requestState").is_some_and(|v| !v.is_string()) {
+                return malformed("requestState", "a string");
+            }
+            if stated(source, "inputResponses").is_some_and(|v| !v.is_object()) {
+                return malformed("inputResponses", "an object");
+            }
+        }
+        None
+    }
+
     /// Why the protocol version this request states is one this build cannot
     /// serve, if it is.
     ///
@@ -679,6 +747,65 @@ mod tests {
         let neither = Request::new(None, "tools/call", Some(json!({ "name": "greet" })));
         assert!(neither.state().is_none());
         assert!(neither.input_responses().is_none());
+    }
+
+    /// A recognized field stated with the wrong JSON type is malformed params,
+    /// not an absent field: read as absent, a bad `requestState` turns a retry
+    /// into a fresh call whose answers look like ones offered up front.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn a_mrtr_field_of_the_wrong_type_is_rejected() {
+        use serde_json::json;
+
+        let call = |params| Request::new(None, "tools/call", Some(params));
+
+        for params in [
+            json!({ "name": "greet", "requestState": 42 }),
+            json!({ "name": "greet", "requestState": { "sealed": true } }),
+            json!({ "name": "greet", "inputResponses": "who" }),
+            json!({ "name": "greet", "inputResponses": ["who"] }),
+            // The old location is read too, so it is checked too.
+            json!({ "name": "greet", "_meta": { "requestState": 42 } }),
+            json!({ "name": "greet", "_meta": { "inputResponses": 7 } }),
+            // Malformed where the accessors look first, well-formed where they
+            // look second: without this check the request would be served
+            // against a state it did not state here.
+            json!({
+                "name": "greet",
+                "requestState": 42,
+                "_meta": { "requestState": "from-meta" }
+            }),
+        ] {
+            assert!(
+                call(params.clone()).malformed_mrtr_error().is_some(),
+                "{params} must be rejected"
+            );
+        }
+
+        for params in [
+            json!({ "name": "greet" }),
+            json!({ "name": "greet", "requestState": "v1.0.sealed" }),
+            json!({
+                "name": "greet",
+                "requestState": "v1.0.sealed",
+                "inputResponses": { "who": { "action": "accept" } }
+            }),
+            // `null` is how serde writes an absent optional, and every peer
+            // that omits the field is entitled to spell it this way.
+            json!({ "name": "greet", "requestState": null }),
+        ] {
+            assert!(
+                call(params.clone()).malformed_mrtr_error().is_none(),
+                "{params} must be accepted"
+            );
+        }
+
+        assert!(
+            Request::new(None, "tools/list", None::<()>)
+                .malformed_mrtr_error()
+                .is_none(),
+            "a request without params states no MRTR fields at all"
+        );
     }
 
     /// Nothing this build sends may carry the old location, or a peer reading
