@@ -1,0 +1,114 @@
+# Known failures of the default (MCP 2026-07-28) build against
+# @modelcontextprotocol/conformance, pinned to CONFORMANCE_VERSION in
+# .github/workflows/conformance.yml.
+#
+# This is a strict baseline, not a mute button:
+#   - an unlisted failure fails the build (a regression)
+#   - a listed entry that starts passing fails the build (a stale entry)
+# So every line here is a debt with an owner, and removing one is how a fix is
+# proved. Each entry names the defect that retires it; the ones marked
+# `TBD: no issue yet` still need one filed.
+#
+# `server-stateless` is baselined per check rather than wholesale: the scenario
+# carries 30 checks and 23 of them pass, so excusing the scenario would stop
+# enforcing the ones that already hold.
+
+server:
+  # -- Method-not-found must be HTTP 404, not 200 (TBD: no issue yet) -------------------
+  # The JSON-RPC code is right (-32601); the HTTP status is not. The spec
+  # pins it so a client can tell "no such method" from "this is not an MCP
+  # endpoint" without parsing the body.
+  - server-stateless:sep-2575-http-server-method-not-found-404
+  - server-stateless:sep-2575-http-server-method-not-found-404-initialize
+  - server-stateless:sep-2575-http-server-method-not-found-404-ping
+  - server-stateless:sep-2575-http-server-method-not-found-404-logging-setlevel
+  - server-stateless:sep-2575-http-server-method-not-found-404-resources-subscribe
+  - server-stateless:sep-2575-http-server-method-not-found-404-resources-unsubscribe
+
+  # -- A header/body protocol-version disagreement is a HeaderMismatch (TBD: no issue yet)
+  # neva answers -32022 (UnsupportedProtocolVersion) because the header is
+  # checked against the supported set before it is compared to the body.
+  - server-stateless:sep-2575-http-server-header-mismatch-400
+
+  # -- resources/read errors omit `data.uri` (TBD: no issue yet) ------------------------
+  # A SHOULD: the -32602 for an unknown resource should name the URI that was
+  # not found in `error.data.uri`. neva sends `data: null`. Warnings count as
+  # scenario failures in a requirements run, so this needs an entry.
+  - sep-2164-resource-not-found:sep-2164-data-uri
+
+  # -- No Origin validation (TBD: no issue yet) ----------------------------------------
+  # "Servers MUST validate the Origin header on all incoming connections" and
+  # answer 403 when it is present and invalid.
+  - dns-rebinding-protection
+
+  # -- MRTR: `inputResponses` / `requestState` live in params (TBD: no issue yet) -------
+  # neva reads and writes them inside `_meta`; the schema puts them on
+  # `InputResponseRequestParams` next to `name`/`arguments`. Round 1 is
+  # correct on every one of these -- round 2 is what fails.
+  #
+  # -- MRTR: elicitation params carry an external `Form` tag (TBD: no issue yet) --------
+  # `ElicitRequestParams` serializes as `{"Form": {...}}` instead of the flat
+  # `{"message": ..., "requestedSchema": ...}`, so the wire-schema check fails
+  # alongside the round-2 checks above.
+  - input-required-result-basic-elicitation
+  - input-required-result-basic-sampling
+  - input-required-result-basic-list-roots
+  - input-required-result-request-state
+  - input-required-result-multiple-input-requests
+  - input-required-result-multi-round
+  - input-required-result-missing-input-response
+  - input-required-result-non-tool-request
+  - input-required-result-result-type
+  - input-required-result-tampered-state
+  - input-required-result-capability-check
+  - input-required-result-ignore-extra-params
+  - input-required-result-validate-input
+
+client:
+  # -- OAuth client flows (#86) -------------------------------------------
+  # The client fixture connects unauthenticated; every scenario that drives a
+  # discovery/registration/token exchange needs an OAuth-capable client fixture
+  # first. Tracked with the credential-binding/CIMD work.
+  - auth/metadata-default
+  - auth/metadata-var1
+  - auth/metadata-var2
+  - auth/metadata-var3
+  - auth/basic-cimd
+  - auth/scope-from-www-authenticate
+  - auth/scope-from-scopes-supported
+  - auth/scope-omitted-when-undefined
+  - auth/scope-step-up
+  - auth/scope-retry-limit
+  - auth/token-endpoint-auth-basic
+  - auth/token-endpoint-auth-post
+  - auth/token-endpoint-auth-none
+  - auth/pre-registration
+  - auth/offline-access-scope
+  - auth/offline-access-not-supported
+  - auth/authorization-server-migration
+  - auth/iss-supported
+  - auth/iss-not-advertised
+  - auth/iss-supported-missing
+  - auth/iss-wrong-issuer
+  - auth/iss-unexpected
+  - auth/iss-normalized
+  - auth/metadata-issuer-mismatch
+
+  # -- Client side of the MRTR params placement (TBD: no issue yet) ---------------------
+  - sep-2322-client-request-state
+
+  # -- `x-mcp-header` parameter mirroring (TBD: no issue yet) ---------------------------
+  # Clients MUST mirror tool parameters annotated with `x-mcp-header` into
+  # `Mcp-Param-*` headers. neva's client does not read the annotation.
+  - http-custom-headers
+  - http-invalid-tool-headers
+
+  # -- JSON Schema handling in the client (TBD: no issue yet) ---------------------------
+  # `$ref` must survive untouched and 2020-12 keywords must be preserved when
+  # a tool schema is round-tripped.
+  - json-schema-ref-no-deref
+  - json-schema-2020-12-preservation
+
+  # -- request-metadata emits a warning, not a failure --------------------
+  # Listed because the runner counts the scenario as failing on its warning.
+  - request-metadata

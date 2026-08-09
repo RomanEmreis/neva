@@ -1,0 +1,73 @@
+# Known failures of the `legacy-spec` build against the 2025-11-25 requirement
+# set of @modelcontextprotocol/conformance.
+#
+# Same strict semantics as the 2026-07-28 baseline: an unlisted failure and a
+# listed entry that starts passing both fail the build. This file is the only
+# automated statement of what the legacy profile still gets wrong -- nothing
+# else in CI exercises that wire.
+
+server:
+  # -- Elicitation params carry an external `Form` tag (TBD: no issue yet) --------------
+  # `ElicitRequestParams` serializes as `{"Form": {...}}`, so an
+  # `elicitation/create` request has neither `message` nor `requestedSchema`
+  # where the schema expects them. The client never recognizes the request,
+  # which is why all three elicitation scenarios fail rather than just the
+  # wire-schema check. Same root cause as the 2026-07-28 MRTR failures.
+  - tools-call-elicitation
+  - elicitation-sep1034-defaults
+  - elicitation-sep1330-enums
+
+  # -- Declared tool schemas are not preserved verbatim (TBD: no issue yet) -------------
+  # `$schema`, `$defs` and `additionalProperties` are stripped from a tool's
+  # `inputSchema` between declaration and `tools/list`. SEP-2106 requires the
+  # 2020-12 vocabulary to survive untouched.
+  - json-schema-2020-12
+
+  # -- No progress notifications on the legacy transport (TBD: no issue yet) ------------
+  # The same fixture reports progress correctly on the 2026-07-28 profile, so
+  # this is the legacy delivery path, not the tool.
+  - tools-call-with-progress
+
+  # -- A terminated session must answer 404 (TBD: no issue yet) -------------------------
+  # After DELETE, a request bearing the dead session id still gets 200.
+  - server-session-lifecycle
+
+  # -- No Origin validation (TBD: no issue yet) ----------------------------------------
+  # Shared with the 2026-07-28 profile: the check lives in the HTTP layer,
+  # which both profiles share.
+  - dns-rebinding-protection
+
+client:
+  # -- A 404/405 on the optional GET stream ends the connection (TBD: no issue yet) -----
+  # The legacy client opens the standalone SSE stream on connect and treats a
+  # non-200 as fatal ("Connection closed"), so every scenario whose server does
+  # not host that stream dies before the first request. The stream is optional
+  # in 2025-11-25; the client must fall back to POST-only. This one bug is why
+  # the list below is so long -- most of these never get to exercise what they
+  # are about.
+  - tools_call
+  - elicitation-sep1034-client-defaults
+  - sse-retry
+  - json-schema-2020-12-preservation
+
+  # -- OAuth client flows (#86) -------------------------------------------
+  - auth/metadata-default
+  - auth/metadata-var1
+  - auth/metadata-var2
+  - auth/metadata-var3
+  - auth/basic-cimd
+  - auth/scope-from-www-authenticate
+  - auth/scope-from-scopes-supported
+  - auth/scope-omitted-when-undefined
+  - auth/scope-step-up
+  - auth/scope-retry-limit
+  - auth/token-endpoint-auth-basic
+  - auth/token-endpoint-auth-post
+  - auth/token-endpoint-auth-none
+  - auth/pre-registration
+  - auth/client-credentials-jwt
+  - auth/client-credentials-basic
+  - auth/enterprise-managed-authorization
+  - auth/dpop
+  - auth/dpop-nonce
+  - auth/wif-jwt-bearer

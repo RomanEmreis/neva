@@ -1,0 +1,82 @@
+name: Conformance
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pinned deliberately: the suite grows between releases, and an unpinned
+  # `@latest` would turn someone else's new scenario into our red build. Bumping
+  # this is a reviewed change that comes with a baseline review.
+  CONFORMANCE_VERSION: 0.2.0-alpha.11
+
+jobs:
+  # One job per protocol generation. neva picks its generation at compile time,
+  # so unlike an SDK that negotiates at runtime we cannot cover both from one
+  # build -- and the legacy row is the only automated proof that the old wire
+  # still works after a refactor.
+  conformance:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: default
+            features: ""
+            requirements: "2026-07-28"
+            baseline: conformance/expected-failures-2026-07-28.yaml
+          - profile: legacy-spec
+            features: "--features legacy-spec"
+            requirements: "2025-11-25"
+            baseline: conformance/expected-failures-2025-11-25.yaml
+
+    name: ${{ matrix.profile }} (${{ matrix.requirements }})
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build the fixtures
+        run: cargo build -p neva-conformance ${{ matrix.features }}
+
+      - name: Start the fixture server
+        run: |
+          PORT=8001 ./target/debug/conformance-server &
+          echo $! > /tmp/conformance-server.pid
+          for _ in $(seq 1 60); do
+            if curl -s -o /dev/null http://127.0.0.1:8001/mcp; then
+              echo "server is up"
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "server did not come up within 30s" >&2
+          exit 1
+
+      # `--requirements` runs exactly what the revision required at release and
+      # scores only those; extension scenarios (Tasks, MCP Apps) still run and
+      # are reported, but cannot fail the job. The baseline covers the rest.
+      - name: Server mode
+        run: |
+          npx -y "@modelcontextprotocol/conformance@${CONFORMANCE_VERSION}" server \
+            --url http://127.0.0.1:8001/mcp \
+            --requirements ${{ matrix.requirements }} \
+            --expected-failures ${{ matrix.baseline }}
+
+      - name: Client mode
+        run: |
+          npx -y "@modelcontextprotocol/conformance@${CONFORMANCE_VERSION}" client \
+            --command "$(pwd)/target/debug/conformance-client" \
+            --requirements ${{ matrix.requirements }} \
+            --expected-failures ${{ matrix.baseline }}
+
+      - name: Stop the fixture server
+        if: always()
+        run: kill "$(cat /tmp/conformance-server.pid)" || true
