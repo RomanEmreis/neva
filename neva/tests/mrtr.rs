@@ -1661,6 +1661,247 @@ async fn sampling_without_declared_capability_is_rejected() {
     handle.abort();
 }
 
+/// A handler that needs three inputs spends one round on them, not three.
+///
+/// Each helper records its request and hands back the same "input required"
+/// signal, so it is the handler's `?` that decides: unwind at the first miss and
+/// the round carries one request; hold the `?` until everything has been asked
+/// for and they all travel together.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_round_carries_every_input_the_handler_asked_for() {
+    use neva::types::sampling::{CreateMessageRequestParams, SamplingMessage};
+
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("intake", |mut ctx: Context| async move {
+        let form: ElicitRequestParams = ElicitRequestParams::form("Your name?")
+            .with_required("name", "string")
+            .into();
+        let sampling = CreateMessageRequestParams::new()
+            .with_message(SamplingMessage::user().with("Greet them"))
+            .with_max_tokens(50);
+
+        let name = ctx.elicit("who", form).await;
+        #[allow(deprecated)]
+        let greeting = ctx.sample("greeting", sampling).await;
+        #[allow(deprecated)]
+        let roots = ctx.list_roots("dirs").await;
+
+        let (name, _greeting, roots) = (name?, greeting?, roots?);
+        let name = name
+            .content
+            .and_then(|c| c.get("name").and_then(|v| v.as_str().map(str::to_owned)))
+            .unwrap_or_else(|| "stranger".into());
+        Ok::<String, Error>(format!("{name} has {} roots", roots.roots.len()))
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
+    let url = format!("http://{addr}/mcp");
+    let caps = serde_json::json!({ "elicitation": {}, "sampling": {}, "roots": {} });
+
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "intake", "arguments": {},
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": caps } }
+    });
+    let r1: serde_json::Value = routed(client.post(&url), &call)
+        .json(&call)
+        .send()
+        .await
+        .expect("round 1 send")
+        .json()
+        .await
+        .expect("round 1 json");
+
+    let requests = r1["result"]["inputRequests"]
+        .as_object()
+        .unwrap_or_else(|| panic!("inputRequests object: {r1}"));
+    assert_eq!(requests.len(), 3, "all three must ride one round: {r1}");
+    let mut methods = requests
+        .values()
+        .filter_map(|r| r["method"].as_str())
+        .collect::<Vec<_>>();
+    methods.sort_unstable();
+    assert_eq!(
+        methods,
+        ["elicitation/create", "roots/list", "sampling/createMessage"],
+        "every kind must be named in the round: {r1}"
+    );
+
+    let state = r1["result"]["requestState"]
+        .as_str()
+        .unwrap_or_else(|| panic!("requestState present: {r1}"))
+        .to_string();
+
+    let retry = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": { "name": "intake", "arguments": {},
+            "requestState": state,
+            "inputResponses": {
+                "who": { "action": "accept", "content": { "name": "octocat" } },
+                "greeting": { "role": "assistant", "content": { "type": "text", "text": "hi" }, "model": "m" },
+                "dirs": { "roots": [{ "uri": "file:///work", "name": "work" }] }
+            },
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": caps } }
+    });
+    let r2: serde_json::Value = routed(client.post(&url), &retry)
+        .json(&retry)
+        .send()
+        .await
+        .expect("round 2 send")
+        .json()
+        .await
+        .expect("round 2 json");
+    assert_eq!(
+        r2.pointer("/result/content/0/text")
+            .and_then(|v| v.as_str()),
+        Some("octocat has 1 roots"),
+        "one retry answering all three must finish the call: {r2}"
+    );
+
+    handle.abort();
+}
+
+/// An answer of the wrong shape is the client getting the protocol wrong, and
+/// is answered as such.
+///
+/// It must not be re-requested -- asking again for a key the client already
+/// answered wrongly is how a chain loops -- and it must not arrive as an in-band
+/// tool error either, which on the wire is a *complete* result and reads as the
+/// call having run and failed.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_of_the_wrong_shape_is_a_protocol_error() {
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("greet", |mut ctx: Context| async move {
+        let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
+            .with_required("name", "string")
+            .into();
+        ctx.elicit("who", params).await?;
+        Ok::<String, Error>("done".into())
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
+    let url = format!("http://{addr}/mcp");
+
+    // A number where an elicitation result belongs.
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "greet", "arguments": {},
+            "inputResponses": { "who": 12345 },
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": { "elicitation": {} } } }
+    });
+    let r: serde_json::Value = routed(client.post(&url), &call)
+        .json(&call)
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+
+    assert_eq!(
+        r["error"]["code"], -32602,
+        "a malformed answer must be a JSON-RPC error, not a result: {r}"
+    );
+    assert!(
+        r["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("elicitation/create"),
+        "the error must name the kind the answer failed to be: {r}"
+    );
+
+    handle.abort();
+}
+
+/// A handler can read what the caller declared and ask only for that.
+///
+/// Without it the only feedback is the refusal, which ends the call -- so a tool
+/// that could have got its answer another way never gets the chance.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_handler_asks_only_for_what_the_caller_declared() {
+    use neva::types::sampling::{CreateMessageRequestParams, SamplingMessage};
+
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("ask", |mut ctx: Context| async move {
+        if ctx.client_capabilities().elicitation {
+            let form: ElicitRequestParams = ElicitRequestParams::form("Your name?")
+                .with_required("name", "string")
+                .into();
+            ctx.elicit("who", form).await?;
+            return Ok::<String, Error>("asked the user".into());
+        }
+        let sampling = CreateMessageRequestParams::new()
+            .with_message(SamplingMessage::user().with("Guess a name"))
+            .with_max_tokens(50);
+        #[allow(deprecated)]
+        ctx.sample("who", sampling).await?;
+        Ok::<String, Error>("asked the model".into())
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
+    let url = format!("http://{addr}/mcp");
+
+    // Sampling only: the handler must not reach for elicitation.
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "ask", "arguments": {},
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": { "sampling": {} } } }
+    });
+    let r1: serde_json::Value = routed(client.post(&url), &call)
+        .json(&call)
+        .send()
+        .await
+        .expect("round 1 send")
+        .json()
+        .await
+        .expect("round 1 json");
+
+    assert_eq!(
+        r1["result"]["inputRequests"]["who"]["method"],
+        serde_json::json!("sampling/createMessage"),
+        "the handler must ask the kind the caller declared: {r1}"
+    );
+
+    handle.abort();
+}
+
 fn pick_free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();

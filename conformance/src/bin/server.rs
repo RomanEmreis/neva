@@ -394,6 +394,12 @@ async fn test_input_required_result_request_state(mut ctx: Context) -> Result<St
     Ok(format!("{name} confirmed {ticket}"))
 }
 
+/// Three inputs, one round.
+///
+/// The `?`s are deliberately held until every input has been asked for. Each
+/// helper records its request and returns the same "input required" signal, so
+/// unwinding at the first one would put a single request in the round and cost
+/// three round-trips for what fits in one.
 #[cfg(not(feature = "legacy-spec"))]
 #[tool(descr = "Asks for several inputs at once")]
 async fn test_input_required_result_multiple_inputs(mut ctx: Context) -> Result<String, Error> {
@@ -404,12 +410,13 @@ async fn test_input_required_result_multiple_inputs(mut ctx: Context) -> Result<
         .with_message(SamplingMessage::user().with("Generate a greeting"))
         .with_max_tokens(50);
 
-    let name = elicited_name(ctx.elicit("user_name", form).await?);
+    let name = ctx.elicit("user_name", form).await;
     #[allow(deprecated)]
-    let greeting = ctx.sample("greeting", sampling).await?;
+    let greeting = ctx.sample("greeting", sampling).await;
     #[allow(deprecated)]
-    let roots = ctx.list_roots("client_roots").await?;
+    let roots = ctx.list_roots("client_roots").await;
 
+    let (name, greeting, roots) = (elicited_name(name?), greeting?, roots?);
     Ok(format!(
         "{name}: {:?} ({} roots)",
         greeting.content,
@@ -443,14 +450,34 @@ async fn test_input_required_result_tampered_state(mut ctx: Context) -> Result<S
     Ok(format!("State accepted for {name}"))
 }
 
+/// Asks for whatever the caller said it can answer, and nothing else.
+///
+/// Asking for an undeclared kind is refused outright, which ends the call --
+/// so a tool that can get its answer more than one way has to look at the
+/// declaration before it asks, not after it is refused.
 #[cfg(not(feature = "legacy-spec"))]
-#[tool(descr = "Elicits input, so a caller that declared no elicitation is refused")]
+#[tool(descr = "Asks only for the input kinds the caller declared")]
 async fn test_input_required_result_capabilities(mut ctx: Context) -> Result<String, Error> {
-    let params = ElicitRequestParams::form("Capability check")
-        .with_required("name", "string")
-        .into();
-    let name = elicited_name(ctx.elicit("capability_check", params).await?);
-    Ok(format!("Capability satisfied for {name}"))
+    let declared = ctx.client_capabilities();
+
+    if declared.elicitation {
+        let params = ElicitRequestParams::form("Capability check")
+            .with_required("name", "string")
+            .into();
+        let name = elicited_name(ctx.elicit("capability_check", params).await?);
+        return Ok(format!("Capability satisfied for {name}"));
+    }
+
+    if declared.sampling {
+        let params = CreateMessageRequestParams::new()
+            .with_message(SamplingMessage::user().with("What is your name?"))
+            .with_max_tokens(50);
+        #[allow(deprecated)]
+        let answer = ctx.sample("capability_check", params).await?;
+        return Ok(format!("Capability satisfied by {:?}", answer.content));
+    }
+
+    Ok("Caller can answer nothing; nothing was asked".to_string())
 }
 
 #[cfg(not(feature = "legacy-spec"))]

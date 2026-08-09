@@ -13,7 +13,9 @@
 # Prefer the latter whenever most of a scenario's checks pass -- excusing the
 # scenario would stop enforcing the ones that already hold.
 
-server:
+server: []
+  # Nothing left to excuse: every scored server scenario passes.
+  #
   # `server-stateless` (30 checks) and `sep-2164-resource-not-found` are fully
   # green: the method-not-found status, the header/body version precedence and
   # the `error.data.uri` on a missing resource were the first three findings of
@@ -23,36 +25,13 @@ server:
   # loopback names and refuses anything else with 403.
 
   # -- MRTR -----------------------------------------------------------------
-  # The round-trip itself is green: `inputResponses` / `requestState` now ride
-  # on the params where `InputResponseRequestParams` puts them, and the
-  # elicitation payload is no longer wrapped in a `{"Form": ...}` object. What
-  # is left are four distinct behaviors, one check each.
-
-  # A round asks for exactly one input (TBD: no issue yet).
-  # `ctx.elicit` / `ctx.sample` / `ctx.list_roots` each return the moment they
-  # are awaited, so a handler that needs three inputs spends three rounds on
-  # them. `InputRequiredResult.inputRequests` is a map precisely so a server
-  # can ask for all of them at once.
-  - input-required-result-multiple-input-requests:sep-2322-multiple-inputs-incomplete
-
-  # A handler cannot see what the client declared (TBD: no issue yet).
-  # The scenario expects the server to ask only for kinds the caller supports
-  # -- sampling but not elicitation, here. neva knows the declared set (it
-  # refuses an undeclared kind with `-32021`), but `Context` exposes no
-  # accessor, so a handler cannot branch on it and the refusal is all the
-  # caller gets.
-  - input-required-result-capability-check:sep-2322-respect-client-capabilities
-
-  # Two SHOULDs about being forgiving, both currently answered with an error.
-  # They surfaced only once the answers were read at all, which is why they are
-  # new here rather than resolved:
-  #   * answers echoed without a `requestState` are rejected instead of ignored;
-  #   * a missing answer is rejected instead of re-requested with a fresh
-  #     `InputRequiredResult`.
-  # Warnings count toward the exit code in a requirements run, so both need an
-  # entry.
-  - input-required-result-ignore-extra-params:sep-2322-ignore-unexpected-params
-  - input-required-result-missing-input-response:sep-2322-missing-response-rerequests
+  # Green end to end. `inputResponses` / `requestState` ride on the params where
+  # `InputResponseRequestParams` puts them; a round carries every input the
+  # handler asked for rather than one at a time; a handler can read the caller's
+  # declared capabilities off `Context` and ask only for those; and an answer
+  # that does not fit what the chain is waiting for is dropped rather than
+  # turned into an error, so the handler asks again and the fresh
+  # `InputRequiredResult` says what for.
 
 client:
   # -- OAuth client flows (#86) -------------------------------------------

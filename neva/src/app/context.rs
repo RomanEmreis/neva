@@ -88,12 +88,27 @@ pub(crate) struct MrtrCtx {
     /// arrangement [`Context::memo`] uses.
     pub(crate) answers: std::collections::HashMap<String, serde_json::Value>,
 
-    /// The newly-requested input (at most one per round), recorded on a
-    /// cache miss.
-    pub(crate) pending: std::sync::Mutex<Option<(String, crate::types::mrtr::InputRequest)>>,
+    /// The inputs newly requested this round, in the order they were asked for,
+    /// each recorded on a cache miss.
+    ///
+    /// A handler that unwinds on its first miss (the usual `ctx.elicit(..).await?`)
+    /// leaves one here and spends a round on it. One that holds its `?` until it
+    /// has asked for everything leaves several, and they travel in a single
+    /// `InputRequiredResult` -- one round-trip instead of one per input.
+    pub(crate) pending: std::sync::Mutex<Vec<(String, crate::types::mrtr::InputRequest)>>,
 
     /// Which input-request kinds the client declared support for this round.
     pub(crate) client_capabilities: crate::types::mrtr::ClientMrtrCapabilities,
+
+    /// Why an answer could not be read as the kind it answers, if one could not.
+    ///
+    /// Recorded rather than merely returned because the handler's `Err` does not
+    /// survive: tool and prompt wrappers fold it into an in-band error result,
+    /// which on the wire is a *complete* result and reads as the call having run
+    /// and failed. A malformed answer is the client getting the protocol wrong,
+    /// and the dispatch layer promotes this back to a JSON-RPC error so it says
+    /// so. Same reason [`Self::pending`] is recorded instead of inferred.
+    pub(crate) malformed_answer: std::sync::Mutex<Option<String>>,
 
     /// Cached `ctx.memo` values (seeded from `requestState`, grown on miss).
     pub(crate) memos: std::sync::Mutex<std::collections::HashMap<String, serde_json::Value>>,
@@ -113,6 +128,7 @@ impl std::fmt::Debug for MrtrCtx {
             .field("answers", &self.answers)
             .field("pending", &self.pending)
             .field("client_capabilities", &self.client_capabilities)
+            .field("malformed_answer", &self.malformed_answer)
             .field("memos", &self.memos)
             .field("effects", &self.effects)
             .finish_non_exhaustive()
@@ -136,17 +152,23 @@ impl MrtrCtx {
     ) -> Result<T, Error> {
         if let Some(answer) = self.answers.get(&key) {
             return serde_json::from_value(answer.clone()).map_err(|err| {
-                Error::new(
-                    ErrorCode::InvalidParams,
-                    format!(
-                        "the answer for `{key}` is not a valid {} result: {err}",
-                        request.method()
-                    ),
-                )
+                let reason = format!(
+                    "the answer for `{key}` is not a valid {} result: {err}",
+                    request.method()
+                );
+                if let Ok(mut malformed) = self.malformed_answer.lock() {
+                    malformed.get_or_insert_with(|| reason.clone());
+                }
+                Error::new(ErrorCode::InvalidParams, reason)
             });
         }
-        if let Ok(mut pending) = self.pending.lock() {
-            *pending = Some((key, request));
+        // Asking twice for one key in a round is a handler re-running its own
+        // request, not two questions: keep the first and let the round carry one
+        // entry per key, which is also all the map on the wire can express.
+        if let Ok(mut pending) = self.pending.lock()
+            && !pending.iter().any(|(pending_key, _)| *pending_key == key)
+        {
+            pending.push((key, request));
         }
         Err(Error::input_required())
     }
@@ -345,6 +367,10 @@ pub struct Context {
     #[cfg(not(feature = "legacy-spec"))]
     pub(crate) exec: ExecMode,
 
+    /// What the caller declared it can answer, read off this request's `_meta`.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(crate) client_capabilities: crate::types::mrtr::ClientMrtrCapabilities,
+
     /// Represents a DI scope
     #[cfg(feature = "di")]
     pub(crate) scope: Option<Container>,
@@ -416,6 +442,8 @@ impl ServerRuntime {
             timeout: self.options.request_timeout,
             #[cfg(not(feature = "legacy-spec"))]
             exec: ExecMode::None,
+            #[cfg(not(feature = "legacy-spec"))]
+            client_capabilities: Default::default(),
             #[cfg(feature = "di")]
             scope: None,
         }
@@ -439,6 +467,8 @@ impl ServerRuntime {
             timeout: self.options.request_timeout,
             #[cfg(not(feature = "legacy-spec"))]
             exec: ExecMode::None,
+            #[cfg(not(feature = "legacy-spec"))]
+            client_capabilities: Default::default(),
             #[cfg(feature = "di")]
             scope: None,
         }
@@ -1122,6 +1152,42 @@ impl Context {
                 "elicitation is not available for this request",
             )),
         }
+    }
+
+    /// What the caller declared it can answer, from this request's `_meta`
+    /// (MCP 2026-07-28).
+    ///
+    /// Capabilities are declared per request, so this is the caller of *this*
+    /// call and not of some earlier handshake. Ask only for kinds it names:
+    /// requesting one it did not declare is refused with
+    /// [`MissingRequiredClientCapability`](crate::error::ErrorCode::MissingRequiredClientCapability),
+    /// which ends the call rather than degrading it -- a handler that can do
+    /// without an input should look here first and skip asking.
+    ///
+    /// A caller that declared nothing reads as all-false, which is the same
+    /// answer as a caller that cannot answer anything: either way, do not ask.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(all(feature = "server-macros", not(feature = "legacy-spec")))] {
+    /// use neva::{Context, error::Error, types::elicitation::ElicitRequestParams, tool};
+    ///
+    /// #[tool]
+    /// async fn greet(mut ctx: Context) -> Result<String, Error> {
+    ///     if !ctx.client_capabilities().elicitation {
+    ///         return Ok("Hello, stranger!".to_string());
+    ///     }
+    ///     let params = ElicitRequestParams::form("Your name?")
+    ///         .with_required("name", "string")
+    ///         .into();
+    ///     let res = ctx.elicit("name", params).await?;
+    ///     Ok(format!("{:?}", res.content))
+    /// }
+    /// # }
+    /// ```
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn client_capabilities(&self) -> crate::types::mrtr::ClientMrtrCapabilities {
+        self.client_capabilities
     }
 
     /// Requests an LLM completion from the client (MRTR, MCP 2026-07-28).
@@ -2096,7 +2162,7 @@ mod mrtr_tests {
         // Miss: returns the sentinel and records pending.
         let miss = mrtr.resolve::<ElicitResult>("unknown".into(), elicitation());
         assert_eq!(miss.unwrap_err().code, ErrorCode::InputRequired);
-        assert!(mrtr.pending.lock().unwrap().is_some());
+        assert_eq!(mrtr.pending.lock().unwrap().len(), 1);
     }
 
     /// Every kind replays through the same slot -- only the result type differs.
@@ -2147,7 +2213,7 @@ mod mrtr_tests {
             "the error must name the kind that was asked for, got: {err}"
         );
         assert!(
-            mrtr.pending.lock().unwrap().is_none(),
+            mrtr.pending.lock().unwrap().is_empty(),
             "a mismatched answer must not re-request the input"
         );
     }
@@ -2194,6 +2260,7 @@ mod subscription_sink_tests {
             options: Arc::new(McpOptions::default()),
             timeout: Duration::from_secs(5),
             exec: ExecMode::None,
+            client_capabilities: Default::default(),
             #[cfg(feature = "di")]
             scope: None,
         }
@@ -2267,6 +2334,8 @@ mod runtime_registration_tests {
             timeout: Duration::from_secs(5),
             #[cfg(not(feature = "legacy-spec"))]
             exec: ExecMode::None,
+            #[cfg(not(feature = "legacy-spec"))]
+            client_capabilities: Default::default(),
             #[cfg(feature = "di")]
             scope: None,
         }

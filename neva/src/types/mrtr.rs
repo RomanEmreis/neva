@@ -366,13 +366,19 @@ pub enum InputRequiredTag {
 // deserializes it from the wire.
 #[cfg(feature = "server")]
 impl InputRequiredResult {
-    /// Builds an `InputRequiredResult` for a single input request of any kind.
-    pub(crate) fn single(key: String, request: InputRequest, state: String) -> Self {
-        let mut input_requests = HashMap::with_capacity(1);
-        input_requests.insert(key, request);
+    /// Builds an `InputRequiredResult` asking for `requests`, of any kinds.
+    ///
+    /// `inputRequests` is a map rather than a single request precisely so a
+    /// round can ask for everything it needs at once: a handler that needs a
+    /// name, a completion and the caller's roots costs one round-trip, not
+    /// three.
+    pub(crate) fn new(
+        requests: impl IntoIterator<Item = (String, InputRequest)>,
+        state: String,
+    ) -> Self {
         Self {
             result_type: InputRequiredTag::InputRequired,
-            input_requests: Some(input_requests),
+            input_requests: Some(requests.into_iter().collect()),
             request_state: Some(state),
         }
     }

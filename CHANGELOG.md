@@ -28,6 +28,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     `HttpServer::allow_any_origin()` turns it off for a deployment whose name
     is validated in front of the server.
 
+* **`Context::client_capabilities()`** reports what the caller declared it can
+  answer, read off this request's `_meta`. Requesting an input kind the caller
+  did not declare is refused with `MissingRequiredClientCapability`, which ends
+  the call -- so a handler that can do without an input, or get it another way,
+  now has something to branch on before it asks rather than only a refusal
+  after.
+
+### Changed
+* **An MRTR round carries every input the handler asked for.** The handler's
+  `?` decides: unwinding at the first miss leaves one request in the round, as
+  before, while holding the `?` until everything has been requested puts them
+  all in one `InputRequiredResult` -- which is why `inputRequests` is a map. A
+  handler needing a name, a completion and the caller's roots costs one
+  round-trip instead of three.
+* **An `inputResponses` entry that does not fit is dropped, not rejected.**
+  Answers arriving without a `requestState`, for a key the server did not ask
+  about, or for one already settled, each used to fail the whole call with
+  `-32602`. The spec has a server ignore what it does not recognize, and a
+  client that re-sends its whole answer set every round is not misbehaving. What
+  a dropped answer costs is a round: the handler asks again and the fresh
+  `InputRequiredResult` says what for. The property the rejections were
+  protecting is intact -- with a verified state, an answer for a key that state
+  does not name is still not honored, so a client cannot pre-seed an answer to
+  skip an elicitation the server intends to make. An answer that does not fit
+  the kind it answers stays an error, and is now reported as a JSON-RPC one:
+  previously the handler's `Err` was folded into an in-band tool error, which on
+  the wire is a *complete* result and reads as the call having run and failed
+  rather than as the client getting the protocol wrong.
+
 ### Fixed
 * **A notification goes on the session stream the moment it is emitted (legacy
   profile).** `notification::fmt::layer()` used to hand every event to a channel
