@@ -288,6 +288,14 @@ impl Client {
     /// [`crate::LATEST_PROTOCOL_VERSION`]: a `with_mcp_version` override only
     /// selects which legacy version the dual-mode fallback negotiates --
     /// it must never make `server/discover` reject a valid 2026-07-28 server.
+    ///
+    /// On the legacy profile the offered version is a proposal the server may
+    /// answer with another supported one, so nothing downstream reads it back:
+    /// the sole consumer there is the (tracing-gated) negotiation log.
+    #[cfg_attr(
+        all(feature = "legacy-spec", not(feature = "tracing")),
+        allow(dead_code)
+    )]
     fn expected_protocol_ver(&self) -> &'static str {
         #[cfg(not(feature = "legacy-spec"))]
         {
