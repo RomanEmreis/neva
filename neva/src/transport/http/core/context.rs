@@ -31,6 +31,9 @@ pub struct HttpContext {
     pub(crate) inbound_tx: mpsc::Sender<Result<Message, Error>>,
     pub(crate) sse_live_queue_capacity: usize,
     pub(crate) sse_log_queue_capacity: usize,
+    /// Which `Origin` / `Host` this server answers to -- the DNS-rebinding
+    /// gate every route runs before it does anything else.
+    pub(crate) origin_policy: super::origin::OriginPolicy,
     #[cfg(feature = "server-oauth")]
     pub(crate) oauth: Option<super::oauth::OAuthResource>,
 }

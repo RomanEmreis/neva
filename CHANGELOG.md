@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## 0.5.2
 
+### Added
+* **DNS-rebinding protection: the HTTP server validates `Origin` and `Host`.**
+  A server on loopback is reachable by any page the browser loads -- point
+  `evil.example.com` at `127.0.0.1` and the browser connects; the request is
+  genuinely local, and only the name it was addressed by gives it away. The
+  spec makes validating these headers a MUST for local servers, and neva did
+  not.
+  * Bound to loopback, a server now answers only to loopback names
+    (`localhost`, anything in `127.0.0.0/8`, `[::1]`) on any port, and refuses
+    anything else with `403 Forbidden` before the body is read. POST, GET and
+    DELETE are all gated.
+  * Bound to anything else, it accepts everything as before: behind a proxy the
+    `Host` is whatever that proxy forwards, so the legitimate names are not
+    knowable from here.
+  * A request carrying neither header is left alone -- there is no rebinding
+    without a name to rebind, and non-browser callers send neither.
+  * New `HttpServer::with_allowed_origins([...])` names additional hosts (and
+    turns the gate on for a non-loopback bind);
+    `HttpServer::allow_any_origin()` turns it off for a deployment whose name
+    is validated in front of the server.
+
 ### Fixed
 * **MRTR `inputResponses` / `requestState` travel on the params, not in
   `_meta`.** The spec puts both on `InputResponseRequestParams`, beside `name`
@@ -21,8 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     `_meta`): a request does not become a different request by being answered,
     and hashing the answers in would have made every `requestState` fail
     verification on the round it was minted for.
-  * New `Request::input_responses()` and `Request::request_state()` read
-    whichever location a peer used.
+  * New `Request::input_responses()` and `Request::state()` read whichever
+    location a peer used.
 * **Elicitation params are written as the spec's union, not as a tagged enum.**
   `ElicitRequestParams` derived its `Serialize`/`Deserialize`, so an
   `elicitation/create` carried `{"Form": {"message": ..., "requestedSchema":

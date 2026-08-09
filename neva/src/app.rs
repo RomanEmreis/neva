@@ -1452,7 +1452,7 @@ impl App {
         // cached, so a hit here is by construction a replay of one.
         #[cfg(not(feature = "legacy-spec"))]
         let state_tag: Option<String> = if mrtr_method {
-            req.request_state().and_then(|state| {
+            req.state().and_then(|state| {
                 let (_, tag) = state.rsplit_once('.')?;
                 let answers = req
                     .input_responses()
@@ -1859,7 +1859,7 @@ fn seed_mrtr_ctx(
     // Keys the server requested in the prior round, decoded from the verified
     // state. `None` means no valid state was supplied, so no input was solicited.
     let mut requested: Option<Vec<String>> = None;
-    if let Some(state) = req.request_state() {
+    if let Some(state) = req.state() {
         // Reject an oversized inbound state before decoding it. Base64 decoding
         // and AEAD decryption in `StateCodec::decode` both allocate/compute in
         // proportion to the blob size, so without this guard `with_max_state_bytes`

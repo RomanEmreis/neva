@@ -168,6 +168,17 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
     let mut headers = req.headers().clone();
     let id = get_or_create_mcp_session(&headers);
 
+    // DNS-rebinding gate, before anything else is read: a request addressed by
+    // a name this server does not answer to gets no further, and learns
+    // nothing about what is here. The spec pins the status to `403`.
+    if let Some(err) = ctx.origin_policy.rejection(&headers) {
+        return PostPrep::Reply(build_json_response(
+            http::StatusCode::FORBIDDEN,
+            id,
+            &Message::Response(Response::error(RequestId::Null, err)),
+        ));
+    }
+
     // Stateless 2026-07-28 transport requires every POST to carry the exact 2026-07-28
     // `MCP-Protocol-Version` header; reject before body dispatch otherwise.
     // `PROTOCOL_VERSIONS` still lists legacy versions (e.g. 2025-06-18) for
@@ -1080,6 +1091,15 @@ fn status_response(
 /// SSE session in the registry (and unregisters its log channel, when
 /// tracing is enabled) and replies 200 with the session id echoed back.
 pub async fn handle_delete(req: HttpRequest, ctx: &HttpContext) -> HttpResponse {
+    // Same gate as POST: terminating someone else's session is as much an
+    // effect as sending a request.
+    if ctx.origin_policy.rejection(req.headers()).is_some() {
+        return http::Response::builder()
+            .status(http::StatusCode::FORBIDDEN)
+            .body(Bytes::new())
+            .unwrap_or_default();
+    }
+
     let Some(id) = parse_session_id(req.headers()) else {
         return http::Response::builder()
             .status(http::StatusCode::BAD_REQUEST)
@@ -1196,6 +1216,17 @@ pub async fn handle_get_sse<E: HttpEngine>(
     req: HttpRequest,
     ctx: &HttpContext,
 ) -> StreamResponse<impl Stream<Item = E::SseEvent> + Send + 'static> {
+    // The stream is the most valuable thing here to hand to the wrong caller:
+    // it carries everything the server pushes for the whole session.
+    if ctx.origin_policy.rejection(req.headers()).is_some() {
+        return StreamResponse::Complete(
+            http::Response::builder()
+                .status(http::StatusCode::FORBIDDEN)
+                .body(Bytes::new())
+                .unwrap_or_default(),
+        );
+    }
+
     let Some(id) = parse_session_id(req.headers()) else {
         return StreamResponse::Complete(
             http::Response::builder()
@@ -1290,6 +1321,10 @@ mod tests {
             inbound_tx,
             sse_live_queue_capacity: 64,
             sse_log_queue_capacity: 64,
+            // These tests send no `Origin`/`Host`, so either policy would pass
+            // them; `Any` states that the gate is not what they are about.
+            // `origin_gate_rejects_a_rebound_name` sets its own.
+            origin_policy: crate::transport::http::core::origin::OriginPolicy::Any,
             #[cfg(feature = "server-oauth")]
             oauth: None,
         };
@@ -1498,6 +1533,35 @@ mod tests {
             body["error"]["data"]["supported"],
             serde_json::json!(["2026-07-28"])
         );
+    }
+
+    /// A request addressed by a name this server does not answer to is
+    /// refused with `403`, before its body is read -- that is what stops a page
+    /// on a rebound domain from driving a local server.
+    #[tokio::test]
+    async fn origin_gate_rejects_a_rebound_name() {
+        let (mut ctx, _rx) = make_ctx();
+        ctx.origin_policy = crate::transport::http::core::origin::OriginPolicy::Loopback;
+
+        let rebound = post_builder()
+            .header("host", "evil.example.com")
+            .header("origin", "http://evil.example.com")
+            .body(make_request_body("tools/list"))
+            .unwrap();
+        let resp = handle_post(rebound, &ctx).await;
+        assert_eq!(resp.status(), http::StatusCode::FORBIDDEN);
+
+        // The legitimate caller gets past the gate. The body is deliberately
+        // unparseable so the preamble answers it here: a well-formed request
+        // would be dispatched, and nothing in this test context is listening
+        // on the other end of `inbound_tx` to answer it.
+        let local = post_builder()
+            .header("host", "127.0.0.1:3000")
+            .header("origin", "http://127.0.0.1:3000")
+            .body(bytes::Bytes::from_static(b"{ not json"))
+            .unwrap();
+        let resp = handle_post(local, &ctx).await;
+        assert_ne!(resp.status(), http::StatusCode::FORBIDDEN);
     }
 
     /// A body version that disagrees with the header is a *header mismatch*,

@@ -19,10 +19,8 @@ server:
   # the `error.data.uri` on a missing resource were the first three findings of
   # this harness and are fixed.
 
-  # -- No Origin validation (TBD: no issue yet) ----------------------------------------
-  # "Servers MUST validate the Origin header on all incoming connections" and
-  # answer 403 when it is present and invalid.
-  - dns-rebinding-protection
+  # `dns-rebinding-protection` is green: a loopback server now answers only to
+  # loopback names and refuses anything else with 403.
 
   # -- MRTR -----------------------------------------------------------------
   # The round-trip itself is green: `inputResponses` / `requestState` now ride

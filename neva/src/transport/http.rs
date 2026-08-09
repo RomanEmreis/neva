@@ -191,6 +191,9 @@ where
     sse_log_queue_capacity: usize,
     sse_cleanup_interval: Duration,
     sse_session_ttl: Duration,
+    /// `None` means "derive from the bind address" -- see
+    /// [`Self::with_allowed_origins`].
+    origin_policy: Option<core::origin::OriginPolicy>,
     #[cfg(feature = "server-oauth")]
     oauth: Option<core::oauth::OAuthResourceOptions>,
     sender: HttpSender,
@@ -280,6 +283,7 @@ impl Default for HttpServer<server::DefaultClaims, server::VolgaEngine> {
             sse_log_queue_capacity: DEFAULT_SSE_LOG_QUEUE_CAPACITY,
             sse_cleanup_interval: DEFAULT_SSE_CLEANUP_INTERVAL,
             sse_session_ttl: DEFAULT_SSE_SESSION_TTL,
+            origin_policy: None,
             #[cfg(feature = "server-oauth")]
             oauth: None,
             receiver: HttpReceiver::new(),
@@ -430,6 +434,7 @@ where
             sse_log_queue_capacity: DEFAULT_SSE_LOG_QUEUE_CAPACITY,
             sse_cleanup_interval: DEFAULT_SSE_CLEANUP_INTERVAL,
             sse_session_ttl: DEFAULT_SSE_SESSION_TTL,
+            origin_policy: None,
             #[cfg(feature = "server-oauth")]
             oauth: None,
             receiver: HttpReceiver::new(),
@@ -458,6 +463,71 @@ where
         self
     }
 
+    /// Names the hosts this server answers to, in addition to the loopback
+    /// ones, and turns on `Origin` / `Host` checking if the bind address did
+    /// not already.
+    ///
+    /// # Why this exists
+    ///
+    /// A server on loopback is reachable by any page the browser loads: point
+    /// `evil.example.com` at `127.0.0.1` and the browser will connect. The
+    /// request is genuinely local; what gives the attack away is the name it
+    /// was addressed by. The spec therefore requires local servers to validate
+    /// these headers and answer `403 Forbidden` when they do not check out.
+    ///
+    /// # The default needs no call
+    ///
+    /// Bound to loopback, a server already accepts only loopback names --
+    /// `localhost`, anything in `127.0.0.0/8`, `[::1]` -- on any port. Bound to
+    /// anything else it accepts everything, because the names a deployment is
+    /// legitimately reached by are not knowable from here: behind a proxy the
+    /// `Host` is whatever that proxy forwards. This method is how such a
+    /// deployment states them.
+    ///
+    /// Entries are hostnames; a port in one is ignored, since the port a
+    /// request arrives on says nothing about who sent it. Matching is
+    /// case-insensitive. A request carrying neither header is not from a
+    /// browser and is left alone -- there is no rebinding without a name.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use neva::transport::http::HttpServer;
+    ///
+    /// let server = HttpServer::new("0.0.0.0:3000")
+    ///     .with_allowed_origins(["mcp.example.com", "app.example.com"]);
+    /// ```
+    pub fn with_allowed_origins<I, S>(mut self, hosts: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let hosts = hosts
+            .into_iter()
+            .map(|h| Box::from(h.as_ref()))
+            .collect::<Vec<Box<str>>>();
+        self.origin_policy = Some(core::origin::OriginPolicy::Allowlist(hosts.into()));
+        self
+    }
+
+    /// Answers to any `Origin` and `Host`, turning off the DNS-rebinding gate.
+    ///
+    /// Only meaningful on a loopback bind, where the gate is on by default.
+    /// Reach for this when something in front of the server already validates
+    /// the name -- not to quiet a rejection whose cause has not been read,
+    /// since that rejection is the protection working.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use neva::transport::http::HttpServer;
+    ///
+    /// // A tunnel terminates the browser-facing name and forwards here.
+    /// let server = HttpServer::new("127.0.0.1:3000").allow_any_origin();
+    /// ```
+    pub fn allow_any_origin(mut self) -> Self {
+        self.origin_policy = Some(core::origin::OriginPolicy::Any);
+        self
+    }
+
     /// Swap the HTTP engine. Engine-specific config (auth, TLS) does not
     /// carry over -- the new engine starts with its own defaults.
     pub fn with_engine<E2>(self, engine: E2) -> HttpServer<C, E2>
@@ -472,6 +542,9 @@ where
             sse_log_queue_capacity: self.sse_log_queue_capacity,
             sse_cleanup_interval: self.sse_cleanup_interval,
             sse_session_ttl: self.sse_session_ttl,
+            // Carried across the swap: the DNS-rebinding gate is a property of
+            // the deployment, not of which engine serves it.
+            origin_policy: self.origin_policy,
             #[cfg(feature = "server-oauth")]
             oauth: self.oauth,
             sender: self.sender,
@@ -630,6 +703,10 @@ where
             inbound_tx: self.receiver.tx.clone(),
             sse_live_queue_capacity: self.sse_live_queue_capacity,
             sse_log_queue_capacity: self.sse_log_queue_capacity,
+            origin_policy: self
+                .origin_policy
+                .clone()
+                .unwrap_or_else(|| core::origin::OriginPolicy::for_addr(&self.url.addr)),
             #[cfg(feature = "server-oauth")]
             oauth,
         };
@@ -661,6 +738,7 @@ impl HttpServer<server::DefaultClaims, VolgaEngine> {
             sse_log_queue_capacity: DEFAULT_SSE_LOG_QUEUE_CAPACITY,
             sse_cleanup_interval: DEFAULT_SSE_CLEANUP_INTERVAL,
             sse_session_ttl: DEFAULT_SSE_SESSION_TTL,
+            origin_policy: None,
             #[cfg(feature = "server-oauth")]
             oauth: None,
             receiver: HttpReceiver::new(),

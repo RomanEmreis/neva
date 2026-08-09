@@ -14,5 +14,6 @@ pub mod types;
 pub(crate) mod auth;
 pub(crate) mod cleanup;
 pub(crate) mod dispatch;
+pub(crate) mod origin;
 
 pub mod handlers;

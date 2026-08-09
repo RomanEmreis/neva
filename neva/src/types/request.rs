@@ -121,7 +121,7 @@ pub struct RequestParamsMeta {
     /// MRTR: the opaque `requestState` echoed back from `InputRequiredResult`.
     ///
     /// Read-only for the same reason as [`Self::input_responses`]; see
-    /// [`Request::request_state`].
+    /// [`Request::state`].
     #[cfg(not(feature = "legacy-spec"))]
     #[serde(rename = "requestState", default, skip_serializing)]
     pub(crate) request_state: Option<String>,
@@ -356,6 +356,10 @@ impl Request {
 
     /// The opaque MRTR `requestState` this request echoes back, if any.
     ///
+    /// Named for the receiver rather than the wire: `req.state()` says what
+    /// `req.request_state()` would, without the stutter. The field it reads is
+    /// `requestState`, in either of the two places below.
+    ///
     /// Same two locations, same order, and the same reason as
     /// [`Self::input_responses`].
     ///
@@ -367,10 +371,10 @@ impl Request {
     ///     "name": "greet",
     ///     "requestState": "v1.0.sealed"
     /// })));
-    /// assert_eq!(req.request_state().as_deref(), Some("v1.0.sealed"));
+    /// assert_eq!(req.state().as_deref(), Some("v1.0.sealed"));
     /// ```
     #[cfg(not(feature = "legacy-spec"))]
-    pub fn request_state(&self) -> Option<String> {
+    pub fn state(&self) -> Option<String> {
         let from_params = self
             .params
             .as_ref()
@@ -639,7 +643,7 @@ mod tests {
                 "inputResponses": { "who": { "action": "accept" } }
             })),
         );
-        assert_eq!(spec.request_state().as_deref(), Some("from-params"));
+        assert_eq!(spec.state().as_deref(), Some("from-params"));
         assert!(spec.input_responses().expect("answers").contains_key("who"));
 
         let legacy = Request::new(
@@ -653,7 +657,7 @@ mod tests {
                 }
             })),
         );
-        assert_eq!(legacy.request_state().as_deref(), Some("from-meta"));
+        assert_eq!(legacy.state().as_deref(), Some("from-meta"));
         assert!(
             legacy
                 .input_responses()
@@ -670,10 +674,10 @@ mod tests {
                 "_meta": { "requestState": "from-meta" }
             })),
         );
-        assert_eq!(both.request_state().as_deref(), Some("from-params"));
+        assert_eq!(both.state().as_deref(), Some("from-params"));
 
         let neither = Request::new(None, "tools/call", Some(json!({ "name": "greet" })));
-        assert!(neither.request_state().is_none());
+        assert!(neither.state().is_none());
         assert!(neither.input_responses().is_none());
     }
 

@@ -31,10 +31,8 @@ server:
   # After DELETE, a request bearing the dead session id still gets 200.
   - server-session-lifecycle
 
-  # -- No Origin validation (TBD: no issue yet) ----------------------------------------
-  # Shared with the 2026-07-28 profile: the check lives in the HTTP layer,
-  # which both profiles share.
-  - dns-rebinding-protection
+  # `dns-rebinding-protection` is green on this profile too -- the gate lives in
+  # the shared HTTP layer.
 
 client:
   # -- A 404/405 on the optional GET stream ends the connection (TBD: no issue yet) -----
