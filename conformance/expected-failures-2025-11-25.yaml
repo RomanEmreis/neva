@@ -27,15 +27,15 @@ server:
   # the shared HTTP layer.
 
 client:
-  # -- A 404/405 on the optional GET stream ends the connection (TBD: no issue yet) -----
-  # The legacy client opens the standalone SSE stream on connect and treats a
-  # non-200 as fatal ("Connection closed"), so every scenario whose server does
-  # not host that stream dies before the first request. The stream is optional
-  # in 2025-11-25; the client must fall back to POST-only. This one bug is why
-  # the list below is so long -- most of these never get to exercise what they
-  # are about.
-  - tools_call
-  - elicitation-sep1034-client-defaults
+  # `tools_call`, `elicitation-sep1034-client-defaults` and
+  # `json-schema-2020-12-preservation` are green: a server that hosts no
+  # standalone GET stream no longer ends the session, the POST carries one
+  # `Content-Type`, and an argument-less call omits `arguments` rather than
+  # sending `null`.
+
+  # -- SSE reconnection is reported but not exercised (TBD: no issue yet) --------------
+  # The scenario ends in warnings rather than failures: nothing in the fixture
+  # makes the stream drop, so the retry behavior is reported as untested.
   - sse-retry
 
   # -- OAuth client flows (#86) -------------------------------------------

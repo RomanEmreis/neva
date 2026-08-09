@@ -97,12 +97,10 @@ client:
   # `json-schema-2020-12-preservation` is green: a tool schema the client reads
   # comes back out with every keyword it arrived with.
 
-  # -- The client cannot reach this scenario's server (TBD: no issue yet) ---------------
-  # Its mock delegates `tools/list` to a bundled SDK transport that answers our
-  # POST with `415 Unsupported Media Type` before the `$ref` question is ever
-  # reached. Whatever that transport objects to in our request is a separate
-  # interop question from schema handling.
-  - json-schema-ref-no-deref
+  # `json-schema-ref-no-deref` is green too, once the POST stopped carrying two
+  # `Content-Type` headers -- a duplicate that read as
+  # `"application/json, application/json"` and drew a `415` from the SDK
+  # transport the scenario's mock delegates to.
 
   # -- request-metadata emits a warning, not a failure --------------------
   # Listed because the runner counts the scenario as failing on its warning.

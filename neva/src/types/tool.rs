@@ -243,7 +243,12 @@ pub struct CallToolRequestParams {
     pub name: String,
 
     /// Optional arguments to pass to the tool.
-    #[serde(rename = "arguments")]
+    ///
+    /// Omitted from the wire when absent rather than written as `null`: the
+    /// schema types this as an optional object, and `null` is not one -- a
+    /// strict peer rejects the call for the field it was not given rather than
+    /// for the arguments it was.
+    #[serde(rename = "arguments", default, skip_serializing_if = "Option::is_none")]
     pub args: Option<HashMap<String, Value>>,
 
     /// If specified, the caller is requesting task-augmented execution for this request.

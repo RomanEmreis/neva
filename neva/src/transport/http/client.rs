@@ -263,10 +263,14 @@ fn build_post(
     bearer: Option<&str>,
     #[cfg(not(feature = "legacy-spec"))] param_registry: &crate::shared::param_headers::Registry,
 ) -> RequestBuilder {
+    // `.json()` already sets `Content-Type: application/json`, and `.header()`
+    // *appends* rather than replaces -- setting it again put the header on the
+    // wire twice. A receiver that reads the header as a list then sees
+    // `"application/json, application/json"`, which matches no media type it
+    // knows, and answers `415 Unsupported Media Type`.
     let mut resp = client
         .post(session.url())
         .json(req)
-        .header(CONTENT_TYPE, "application/json")
         .header(ACCEPT, "application/json, text/event-stream");
 
     if let Some(session_id) = session.session_id() {
@@ -799,6 +803,29 @@ async fn handle_sse_connection(
             }
         }
 
+        // A server that hosts no standalone stream says so with `405 Method Not
+        // Allowed` -- the status the spec names for exactly this -- or with a
+        // `404`, which is what a POST-only endpoint answers a verb it does not
+        // route. Neither is a failure: the GET stream is optional, and a client
+        // that treats "there is no stream here" as a dead session refuses to
+        // talk to a conformant server that simply chose not to offer one.
+        //
+        // The init POST is waiting on `sse_ready`, so it is released rather
+        // than cancelled, and the session carries on over POST alone.
+        if matches!(
+            resp.status(),
+            reqwest::StatusCode::METHOD_NOT_ALLOWED | reqwest::StatusCode::NOT_FOUND
+        ) {
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                logger = "neva",
+                "server offers no standalone SSE stream ({}); continuing over POST only",
+                resp.status()
+            );
+            session.notify_sse_initialized();
+            return;
+        }
+
         if !resp.status().is_success() {
             #[cfg(feature = "tracing")]
             tracing::error!(
@@ -806,8 +833,10 @@ async fn handle_sse_connection(
                 "SSE request failed with status: {}",
                 resp.status()
             );
-            // Cancel the session so any in-flight init POST waiting on sse_ready()
-            // is unblocked instead of hanging forever.
+            // Any other non-2xx is about the session itself, not about the
+            // stream being on offer -- a 401 says the credentials the POSTs
+            // carry are wrong too. Cancel, so an in-flight init POST waiting on
+            // `sse_ready()` fails with that rather than hanging forever.
             session.cancellation_token().cancel();
             return;
         }

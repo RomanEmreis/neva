@@ -29,6 +29,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     is validated in front of the server.
 
 ### Fixed
+* **A server that hosts no standalone SSE stream no longer ends the session
+  (legacy profile).** The client opens the optional `GET` stream after the
+  `initialize` handshake and treated any non-2xx as fatal, cancelling the
+  session -- so a conformant server that simply chose not to offer one (the
+  spec has it answer `405 Method Not Allowed`) was reported as
+  `Connection closed` before the first request went out. `404` and `405` are
+  now read as "there is no stream here": the pending `initialize` is released
+  and the session carries on over POST alone. Any other non-2xx is still
+  fatal -- a `401` says the credentials the POSTs carry are wrong too.
+* **The POST no longer carries `Content-Type` twice.** It was set once by the
+  JSON body and once explicitly, and `.header()` appends: the header reached
+  the peer as `application/json, application/json`, which matches no media type
+  and drew `415 Unsupported Media Type` from strict receivers.
+* **A tool call with no arguments omits `arguments` instead of sending
+  `null`.** The schema types it as an optional object; `null` is not one, and a
+  peer that validates rejected the call over the field it was not given.
 * **A schema is published the way it was declared.** `Schema` and (on the
   legacy profile) `ToolSchema` modelled the keywords neva itself reads and
   dropped everything else, so a peer received a schema quietly different from

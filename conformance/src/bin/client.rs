@@ -32,6 +32,49 @@ fn split_url(url: &str) -> Result<(String, String), Error> {
     })
 }
 
+/// The answer a client's form would submit if the user accepted it untouched:
+/// every field at the `default` its schema declares.
+///
+/// A field without one gets a placeholder, so a form that declares no defaults
+/// is still answered rather than left empty.
+fn prefilled_answer(params: &ElicitRequestParams) -> serde_json::Value {
+    let Some(form) = params.as_form() else {
+        return serde_json::json!({});
+    };
+
+    let filled = form
+        .schema
+        .properties
+        .iter()
+        .map(|(name, schema)| {
+            let declared = serde_json::to_value(schema).unwrap_or_default();
+            let value = declared
+                .get("default")
+                .cloned()
+                .unwrap_or_else(|| placeholder_for(&declared));
+            (name.clone(), value)
+        })
+        .collect::<serde_json::Map<_, _>>();
+
+    serde_json::Value::Object(filled)
+}
+
+/// Something type-appropriate for a field whose schema declares no default.
+fn placeholder_for(schema: &serde_json::Value) -> serde_json::Value {
+    match schema.get("type").and_then(|t| t.as_str()) {
+        Some("integer") | Some("number") => serde_json::json!(1),
+        Some("boolean") => serde_json::json!(true),
+        Some("array") => serde_json::json!([]),
+        // A string, or an enum -- whose first allowed value is the only answer
+        // a fixture can give without guessing.
+        _ => schema
+            .get("enum")
+            .and_then(|e| e.as_array())
+            .and_then(|values| values.first().cloned())
+            .unwrap_or_else(|| serde_json::json!("conformance")),
+    }
+}
+
 /// Scenario-specific data the suite passes in `MCP_CONFORMANCE_CONTEXT`.
 fn context() -> serde_json::Value {
     std::env::var("MCP_CONFORMANCE_CONTEXT")
@@ -68,10 +111,12 @@ async fn main() -> Result<(), Error> {
 
     // Registering the handler is also what declares the capability, and MRTR
     // scenarios only get an input request if the client declared it can answer
-    // one. Accepting everything is the right answer for a fixture: the suite
-    // asserts on how the retry is formed, not on what was typed into it.
-    client.map_elicitation(|_params: ElicitRequestParams| async {
-        ElicitResult::accept().with_content(serde_json::json!({ "name": "conformance" }))
+    // one. The answer is built from the form's own schema: SEP-1034 has the
+    // client prefill each field's declared `default`, which is what a real UI
+    // shows the user, so a fixture that answers with something else would not
+    // be exercising the requirement.
+    client.map_elicitation(|params: ElicitRequestParams| async move {
+        ElicitResult::accept().with_content(prefilled_answer(&params))
     });
 
     client.connect().await?;
@@ -106,6 +151,18 @@ async fn run(client: &mut Client, scenario: &str) -> Result<(), Error> {
                 .call_tool("json_schema_echo", Some([("schema", observed)]))
                 .await?;
             tracing::info!(?result, "echoed the observed schema back");
+        }
+        // Calling this tool is what makes the server elicit; the handler
+        // registered above answers with the schema's declared defaults, which
+        // is the behavior under test.
+        "elicitation-sep1034-client-defaults" => {
+            let result = client
+                .call_tool(
+                    "test_client_elicitation_defaults",
+                    None::<[(&str, &str); 0]>,
+                )
+                .await?;
+            tracing::info!(?result, "elicitation tool returned");
         }
         // The suite's own fixture server exposes `add_numbers`; list first so
         // the recorded traffic carries both verbs, then call it.
