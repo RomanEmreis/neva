@@ -117,6 +117,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   appears to hang, while Chrome (which does not sniff a declared
   `text/event-stream`) works, making it look like a browser quirk. Non-browser
   consumers never sniff, so nothing else changes.
+* **A challenge naming a scope outside `with_scopes` fails instead of running a
+  doomed flow.** The configured set is a ceiling as well as a floor -- the flow
+  asks for exactly it -- so a `WWW-Authenticate` demanding anything else
+  described a grant the client could not obtain, and re-authorizing interrupted
+  the user for consent only to return without the one scope the call needed.
+  The retry was then refused identically. It now ends there, naming the scope,
+  because adding it to `with_scopes` is what resolves it. Widening past the
+  configured set is not the answer: it would override the caller's decision, and
+  an authorization server refuses a scope the client is not registered for.
 * **A step-up widens the grant a restored token already holds.** The scopes an
   earlier round asked for were remembered in memory only, so after a restart
   against a persistent `TokenStore` the first `insufficient_scope` challenge

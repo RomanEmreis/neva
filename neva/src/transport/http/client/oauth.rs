@@ -682,6 +682,35 @@ impl OAuthSession {
             demanded.iter().any(|scope| !held.contains(scope))
         };
 
+        // A configured set is the caller's decision about what this client may
+        // ever ask for, and the flow below honors it to the letter -- so a
+        // challenge naming something outside it describes a grant this client
+        // cannot obtain. Running the flow anyway is the worst of both: it
+        // interrupts the user for consent and still comes back without the one
+        // scope the call needed, so the retry is refused exactly as before.
+        // Widening past the configured set is no answer either -- it would
+        // override the decision, and an authorization server refuses a scope
+        // the client is not registered for. So this ends here, naming the
+        // scope, because adding it to `with_scopes` is the only thing that
+        // resolves it.
+        if step_up && let Some(configured) = &self.config.scopes {
+            let missing = demanded
+                .iter()
+                .filter(|scope| !configured.contains(scope))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                return Err(Error::new(
+                    ErrorCode::InvalidRequest,
+                    format!(
+                        "the server requires scope `{}`, which this client is not \
+                         configured to request; add it to `with_scopes`",
+                        missing.join(" ")
+                    ),
+                ));
+            }
+        }
+
         // Someone else completed the flow while this caller waited.
         if !step_up
             && let Some(current) = self.bearer()
@@ -725,10 +754,12 @@ impl OAuthSession {
         let client = self.build_client(&server_metadata, &redirect_uri).await?;
 
         // What to ask for, most specific first. A configured set is the
-        // caller's decision and overrides everything. Otherwise the challenge
-        // names what this very request needed, which is narrower and more
-        // current than the resource's advertised set; `scopes_supported` is the
-        // fallback, and an empty one means asking for no `scope` at all.
+        // caller's decision and overrides everything -- and by here it already
+        // covers whatever the challenge demanded, since a demand outside it
+        // ended this call above. Otherwise the challenge names what this very
+        // request needed, which is narrower and more current than the
+        // resource's advertised set; `scopes_supported` is the fallback, and an
+        // empty one means asking for no `scope` at all.
         let mut scopes = match &self.config.scopes {
             Some(configured) => configured.clone(),
             None if !demanded.is_empty() => demanded.clone(),
@@ -1370,6 +1401,52 @@ mod tests {
         assert_eq!(
             session.requested_scopes(),
             vec!["from-this-process".to_string()]
+        );
+    }
+
+    /// A configured scope set is a ceiling as well as a floor: the flow asks
+    /// for exactly it. So a challenge demanding something outside it describes
+    /// a grant this client cannot obtain, and running the flow would interrupt
+    /// the user for consent only to come back without the scope that was
+    /// missing -- the retry then fails identically.
+    #[tokio::test]
+    async fn a_demand_outside_the_configured_scopes_ends_the_call() {
+        // Plain HTTP, which discovery refuses before opening a socket, so this
+        // test touches no network whichever way the guard goes.
+        const RESOURCE: &str = "http://127.0.0.1:9/mcp";
+
+        let config = OAuthClientConfig::default().with_scopes(["read"]);
+        let session = OAuthSession::new(config, RESOURCE).unwrap();
+
+        let err = session
+            .authorize(
+                Some(r#"Bearer error="insufficient_scope", scope="admin""#),
+                None,
+            )
+            .await
+            .expect_err("a scope this client may not request cannot be obtained");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("admin") && msg.contains("with_scopes"),
+            "the error must name the scope and how to allow it, got: {msg}"
+        );
+
+        // A demand the configured set already covers is not this case: it is
+        // an ordinary re-authorization and proceeds to discovery, which is
+        // where this test leaves it.
+        let config = OAuthClientConfig::default().with_scopes(["read", "admin"]);
+        let session = OAuthSession::new(config, RESOURCE).unwrap();
+
+        let err = session
+            .authorize(
+                Some(r#"Bearer error="insufficient_scope", scope="admin""#),
+                None,
+            )
+            .await
+            .expect_err("the resource is unreachable, so the flow cannot finish");
+        assert!(
+            !err.to_string().contains("with_scopes"),
+            "a covered demand must not be refused up front, got: {err}"
         );
     }
 }
