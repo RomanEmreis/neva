@@ -1,5 +1,6 @@
 # Known failures of the `legacy-spec` build against the 2025-11-25 requirement
-# set of @modelcontextprotocol/conformance.
+# set of @modelcontextprotocol/conformance, at the version pinned in
+# `conformance/.conformance-version`.
 #
 # Same strict semantics as the 2026-07-28 baseline: an unlisted failure and a
 # listed entry that starts passing both fail the build. This file is the only

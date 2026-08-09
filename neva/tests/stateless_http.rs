@@ -108,20 +108,69 @@ async fn stateless_discover_and_call() {
         serde_json::json!(["2026-07-28"])
     );
 
-    // (d3) `ping` is gone in MCP 2026-07-28.
-    let ping = serde_json::json!({
-        "jsonrpc": "2.0", "id": 5, "method": "ping",
-        "params": { "_meta": meta() }
+    // (d3) `ping` is gone in MCP 2026-07-28, and a method this server does not
+    // implement answers `404` -- that status is what tells a caller "this
+    // endpoint speaks MCP and has no such method" apart from "this URL is not
+    // an MCP endpoint", without reading the body.
+    for method in ["ping", "initialize", "logging/setLevel", "no/such/method"] {
+        let gone = serde_json::json!({
+            "jsonrpc": "2.0", "id": 5, "method": method,
+            "params": { "_meta": meta() }
+        });
+        let resp = routed(client.post(&url), &gone)
+            .json(&gone)
+            .send()
+            .await
+            .expect("send failed");
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "`{method}` must answer 404"
+        );
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["error"]["code"], -32601, "`{method}`: {body}");
+        assert_eq!(body["id"], 5, "the id must survive: {body}");
+    }
+
+    // (d4) The header and the body must agree on the protocol version. They
+    // disagree here, which is a header mismatch rather than an unsupported
+    // version: picking a version off the supported list would not fix it.
+    let mismatched = serde_json::json!({
+        "jsonrpc": "2.0", "id": 6, "method": "tools/list",
+        "params": { "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "v999.0.0",
+            "io.modelcontextprotocol/clientCapabilities": {}
+        } }
     });
-    let body: serde_json::Value = routed(client.post(&url), &ping)
-        .json(&ping)
+    let resp = client
+        .post(&url)
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", "tools/list")
+        .json(&mismatched)
+        .send()
+        .await
+        .expect("send failed");
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], -32020, "got: {body}");
+
+    // (d5) A read of a resource that does not exist names the URI it could not
+    // find, so a caller with several reads in flight can tell which one this
+    // is about.
+    let missing = serde_json::json!({
+        "jsonrpc": "2.0", "id": 7, "method": "resources/read",
+        "params": { "uri": "res://nope", "_meta": meta() }
+    });
+    let body: serde_json::Value = routed(client.post(&url), &missing)
+        .json(&missing)
         .send()
         .await
         .expect("send failed")
         .json()
         .await
         .unwrap();
-    assert_eq!(body["error"]["code"], -32601, "ping must be gone: {body}");
+    assert_eq!(body["error"]["code"], -32602, "got: {body}");
+    assert_eq!(body["error"]["data"]["uri"], "res://nope", "got: {body}");
 
     // (e) GET and DELETE are not routed under the flag.
     let get = client.get(&url).send().await.expect("get failed");

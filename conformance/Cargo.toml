@@ -31,5 +31,6 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [features]
 # Build the fixtures against the pre-2026-07-28 wire profile. The suite is then
-# run with `--requirements 2025-11-25`; see conformance/README.md.
+# run with `--requirements 2025-11-25` at the version pinned in
+# `.conformance-version`; see conformance/README.md.
 legacy-spec = ["neva/legacy-spec"]

@@ -267,10 +267,15 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
     // waiting on ids too.
     #[cfg(not(feature = "legacy-spec"))]
     {
+        let header_version = headers
+            .get(crate::transport::http::MCP_PROTOCOL_VERSION)
+            .and_then(|v| v.to_str().ok());
         let invalid = match &msg {
-            Message::Request(r) => request_meta_error(r).is_some(),
+            Message::Request(r) => request_meta_error(r, header_version).is_some(),
             Message::Batch(batch) => batch.iter().any(|env| match env {
-                crate::types::MessageEnvelope::Request(r) => request_meta_error(r).is_some(),
+                crate::types::MessageEnvelope::Request(r) => {
+                    request_meta_error(r, header_version).is_some()
+                }
                 _ => false,
             }),
             _ => false,
@@ -278,7 +283,7 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
 
         if invalid {
             let reply = reject_post_each(&msg, |r| {
-                request_meta_error(r).unwrap_or_else(|| {
+                request_meta_error(r, header_version).unwrap_or_else(|| {
                     Error::new(
                         ErrorCode::InvalidRequest,
                         "Not processed: another request in this batch was rejected",
@@ -859,30 +864,60 @@ fn reject_post(msg: &Message, err: Error) -> Message {
 
 /// Why a request's `_meta` is unacceptable, if it is.
 ///
-/// Two rules, in order. MCP 2026-07-28 makes `protocolVersion` (a string) and
+/// Three rules, in order. MCP 2026-07-28 makes `protocolVersion` (a string) and
 /// `clientCapabilities` (an object) mandatory on every request -- capabilities
 /// are declared per request precisely so a stateless server never has to infer
 /// them from earlier traffic. A request that omits either, or states it with
 /// the wrong JSON type, is malformed params (`-32602`): a version that is not
 /// a string is not a version, and treating it as absent would let the next
-/// rule be skipped by sending a number. A version that *is* stated must be one
-/// this build serves, or it is `UnsupportedProtocolVersion` (`-32022`) naming
-/// what is on offer.
+/// rules be skipped by sending a number.
 ///
-/// Both rules belong to the message rather than to HTTP, so both live on
-/// [`crate::types::Request`] and are enforced again at the dispatch seam for
-/// the transports that have no preamble of their own. Catching them here is
-/// what earns them the `400` the spec mandates on this one; the caller
+/// A version that *is* stated must first **agree with the `MCP-Protocol-Version`
+/// header**, or it is `HeaderMismatch` (`-32020`). This outranks the third rule
+/// even though a disagreeing body version is, on this build, also unsupported:
+/// the two errors say different things to whoever has to fix them. `-32022`
+/// means "retry with a version from this list"; `-32020` means the header and
+/// the body disagree, which is a bug in the sender or in an intermediary that
+/// rewrote one of them -- and picking a version off the offered list would not
+/// fix it. Only then, with the two in agreement, must the version be one this
+/// build serves or it is `UnsupportedProtocolVersion` (`-32022`) naming what is
+/// on offer.
+///
+/// The first and last rules belong to the message rather than to HTTP, so both
+/// live on [`crate::types::Request`] and are enforced again at the dispatch seam
+/// for the transports that have no preamble of their own. The middle one is
+/// HTTP's alone -- no other transport mirrors the version into an envelope --
+/// which is why it is applied here rather than there. Catching them here is
+/// what earns them the `400` the spec mandates on this transport; the caller
 /// supplies the status.
-///
-/// The header carrying the version was checked before the body was read, and
-/// only this version passes that gate -- so a stated version that disagrees
-/// with the header is exactly one this build does not serve, and the second
-/// rule already covers it.
 #[cfg(not(feature = "legacy-spec"))]
-fn request_meta_error(req: &crate::types::Request) -> Option<Error> {
+fn request_meta_error(req: &crate::types::Request, header_version: Option<&str>) -> Option<Error> {
     req.required_meta_error()
+        .or_else(|| header_version_mismatch(req, header_version))
         .or_else(|| req.unsupported_version_error())
+}
+
+/// Why the version this request states disagrees with the one its
+/// `MCP-Protocol-Version` header carries, if it does.
+///
+/// A request that arrived without a readable header never gets here -- the
+/// preamble rejects that before the body is parsed -- so `None` for the header
+/// can only mean "not an HTTP request", and there is nothing to disagree with.
+#[cfg(not(feature = "legacy-spec"))]
+fn header_version_mismatch(
+    req: &crate::types::Request,
+    header_version: Option<&str>,
+) -> Option<Error> {
+    let stated = req.stated_protocol_version()?;
+    let header = header_version?;
+    (stated != header).then(|| {
+        Error::new(
+            ErrorCode::HeaderMismatch,
+            format!(
+                "Header mismatch: MCP-Protocol-Version header value {header:?} does not match body value {stated:?}"
+            ),
+        )
+    })
 }
 
 /// The body value `Mcp-Name` mirrors for `req`, if its method has one.
@@ -971,6 +1006,12 @@ fn routing_header_error(req: &crate::types::Request, headers: &HeaderMap) -> Opt
 /// raised during dispatch rather than in the transport preamble, so the status
 /// has to be recovered here from the reply.
 ///
+/// `MethodNotFound` is pinned to `404 Not Found` for a different reason: it is
+/// what lets a client tell "this endpoint speaks MCP and has no such method"
+/// from "this URL is not an MCP endpoint at all" without parsing the body --
+/// the same `404` a pre-2026 HTTP+SSE server returns for the modern endpoint.
+/// The JSON-RPC error body is what distinguishes the two.
+///
 /// A batch keeps `200 OK` even when some of its items carry such an error: one
 /// status covers every item, and the per-item codes are in the body.
 #[cfg(not(feature = "legacy-spec"))]
@@ -980,6 +1021,7 @@ fn dispatched_status(msg: &Message) -> http::StatusCode {
             ErrorCode::HeaderMismatch
             | ErrorCode::MissingRequiredClientCapability
             | ErrorCode::UnsupportedProtocolVersion => http::StatusCode::BAD_REQUEST,
+            ErrorCode::MethodNotFound => http::StatusCode::NOT_FOUND,
             _ => http::StatusCode::OK,
         },
         _ => http::StatusCode::OK,
@@ -1425,12 +1467,13 @@ mod tests {
         assert_eq!(body["error"]["code"], -32022);
     }
 
-    /// The body states the version the request is made under, and a version
-    /// this build does not serve is refused there too -- putting it past the
-    /// header gate does not make it servable.
+    /// A version this build does not serve is refused whether it is stated in
+    /// the header or in the body -- here they agree on it, which is the case
+    /// `-32022` is actually for, and the caller is told what is on offer so it
+    /// can retry rather than guess.
     #[cfg(not(feature = "legacy-spec"))]
     #[tokio::test]
-    async fn rejects_a_body_version_this_build_does_not_serve() {
+    async fn rejects_a_version_this_build_does_not_serve() {
         let (ctx, _rx) = make_ctx();
         let body = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "tools/list",
@@ -1439,19 +1482,91 @@ mod tests {
                 "io.modelcontextprotocol/clientCapabilities": {}
             } }
         });
-        let req = post_builder()
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(crate::transport::http::MCP_PROTOCOL_VERSION, "2025-06-18")
+            .header(crate::transport::http::MCP_METHOD, "tools/list")
             .body(bytes::Bytes::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
         let resp = handle_post(req, &ctx).await;
         assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
         let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
         assert_eq!(body["error"]["code"], -32022);
-        // Told what is on offer, so it can retry rather than guess.
         assert_eq!(body["error"]["data"]["requested"], "2025-06-18");
         assert_eq!(
             body["error"]["data"]["supported"],
             serde_json::json!(["2026-07-28"])
         );
+    }
+
+    /// A body version that disagrees with the header is a *header mismatch*,
+    /// not an unsupported version. On this build every disagreeing version is
+    /// also one we do not serve, so the two rules would both fire -- and the
+    /// one that fires decides what the sender is told to do: `-32022` says
+    /// "retry with a version from this list", which would not fix a header and
+    /// body that disagree.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[tokio::test]
+    async fn rejects_a_body_version_disagreeing_with_the_header() {
+        let (ctx, _rx) = make_ctx();
+        let body = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+            "params": { "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "v999.0.0",
+                "io.modelcontextprotocol/clientCapabilities": {}
+            } }
+        });
+        // `post_builder` sets the header to the version this build serves, so
+        // the header is good and only the body disagrees.
+        let req = post_builder()
+            .body(bytes::Bytes::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = handle_post(req, &ctx).await;
+
+        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+        assert_eq!(body["error"]["code"], -32020);
+        assert_eq!(body["id"], 1);
+    }
+
+    /// A method this build does not implement answers `404`, not `200`: that
+    /// is what lets a caller tell "no such method here" from "not an MCP
+    /// endpoint" without reading the body. The other status-bearing codes keep
+    /// their `400`, and an ordinary application error still rides on `200`.
+    ///
+    /// `dispatched_status` is exercised directly because `handle_post` only
+    /// reaches it after a real dispatch, and the test context here has nothing
+    /// on the other end of `inbound_tx` to do the dispatching. The end-to-end
+    /// path is covered in `tests/stateless_http.rs`.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn method_not_found_is_a_404() {
+        let status = |code: ErrorCode| {
+            dispatched_status(&Message::Response(Response::error(
+                RequestId::Number(1),
+                Error::from(code),
+            )))
+        };
+
+        assert_eq!(
+            status(ErrorCode::MethodNotFound),
+            http::StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            status(ErrorCode::HeaderMismatch),
+            http::StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status(ErrorCode::UnsupportedProtocolVersion),
+            http::StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status(ErrorCode::MissingRequiredClientCapability),
+            http::StatusCode::BAD_REQUEST
+        );
+        // An error from the handler is not an error about the request.
+        assert_eq!(status(ErrorCode::InternalError), http::StatusCode::OK);
     }
 
     /// `protocolVersion` and `clientCapabilities` are required on every
@@ -1679,9 +1794,13 @@ mod tests {
 
     /// A batch must not be a way around the version gate a standalone request
     /// faces: the offending item is caught while the array is still unopened.
+    ///
+    /// The item states a version the header does not, so what it earns is a
+    /// header mismatch -- see `rejects_a_body_version_disagreeing_with_the_header`
+    /// for why that outranks "unsupported version".
     #[cfg(not(feature = "legacy-spec"))]
     #[tokio::test]
-    async fn rejects_a_batched_body_version_this_build_does_not_serve() {
+    async fn rejects_a_batched_body_version_disagreeing_with_the_header() {
         let (ctx, _rx) = make_ctx();
         let body = serde_json::json!([
             { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": meta() } },
@@ -1704,7 +1823,7 @@ mod tests {
 
         // The offender hears what is wrong with it...
         assert_eq!(items[1]["id"], 2);
-        assert_eq!(items[1]["error"]["code"], -32022);
+        assert_eq!(items[1]["error"]["code"], -32020);
         // ...and the item that rode in with it hears that the POST carrying it
         // was not processed, rather than nothing at all.
         assert_eq!(items[0]["id"], 1);

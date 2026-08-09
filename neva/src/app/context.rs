@@ -792,7 +792,13 @@ impl Context {
                     .call(params.with_args(args).with_context(self).into())
                     .await
             }
-            _ => Err(Error::from(ErrorCode::RESOURCE_NOT_FOUND)),
+            // The spec's SHOULD: name the URI that was not found in
+            // `error.data.uri`. A caller that fanned several reads onto one
+            // connection otherwise cannot tell which of them this refers to
+            // without matching on the request id, and an intermediary logging
+            // the error has nothing to log.
+            _ => Err(Error::from(ErrorCode::RESOURCE_NOT_FOUND)
+                .with_data(serde_json::json!({ "uri": params.uri.to_string() }))),
         }
     }
 

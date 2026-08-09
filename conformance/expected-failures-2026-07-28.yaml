@@ -1,6 +1,6 @@
 # Known failures of the default (MCP 2026-07-28) build against
-# @modelcontextprotocol/conformance, pinned to CONFORMANCE_VERSION in
-# .github/workflows/conformance.yml.
+# @modelcontextprotocol/conformance at the version pinned in
+# `conformance/.conformance-version`.
 #
 # This is a strict baseline, not a mute button:
 #   - an unlisted failure fails the build (a regression)
@@ -9,32 +9,15 @@
 # proved. Each entry names the defect that retires it; the ones marked
 # `TBD: no issue yet` still need one filed.
 #
-# `server-stateless` is baselined per check rather than wholesale: the scenario
-# carries 30 checks and 23 of them pass, so excusing the scenario would stop
-# enforcing the ones that already hold.
+# Entries may name a whole scenario or a single check (`scenario:check-id`).
+# Prefer the latter whenever most of a scenario's checks pass -- excusing the
+# scenario would stop enforcing the ones that already hold.
 
 server:
-  # -- Method-not-found must be HTTP 404, not 200 (TBD: no issue yet) -------------------
-  # The JSON-RPC code is right (-32601); the HTTP status is not. The spec
-  # pins it so a client can tell "no such method" from "this is not an MCP
-  # endpoint" without parsing the body.
-  - server-stateless:sep-2575-http-server-method-not-found-404
-  - server-stateless:sep-2575-http-server-method-not-found-404-initialize
-  - server-stateless:sep-2575-http-server-method-not-found-404-ping
-  - server-stateless:sep-2575-http-server-method-not-found-404-logging-setlevel
-  - server-stateless:sep-2575-http-server-method-not-found-404-resources-subscribe
-  - server-stateless:sep-2575-http-server-method-not-found-404-resources-unsubscribe
-
-  # -- A header/body protocol-version disagreement is a HeaderMismatch (TBD: no issue yet)
-  # neva answers -32022 (UnsupportedProtocolVersion) because the header is
-  # checked against the supported set before it is compared to the body.
-  - server-stateless:sep-2575-http-server-header-mismatch-400
-
-  # -- resources/read errors omit `data.uri` (TBD: no issue yet) ------------------------
-  # A SHOULD: the -32602 for an unknown resource should name the URI that was
-  # not found in `error.data.uri`. neva sends `data: null`. Warnings count as
-  # scenario failures in a requirements run, so this needs an entry.
-  - sep-2164-resource-not-found:sep-2164-data-uri
+  # `server-stateless` (30 checks) and `sep-2164-resource-not-found` are fully
+  # green: the method-not-found status, the header/body version precedence and
+  # the `error.data.uri` on a missing resource were the first three findings of
+  # this harness and are fixed.
 
   # -- No Origin validation (TBD: no issue yet) ----------------------------------------
   # "Servers MUST validate the Origin header on all incoming connections" and

@@ -8,10 +8,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # Pinned deliberately: the suite grows between releases, and an unpinned
-  # `@latest` would turn someone else's new scenario into our red build. Bumping
-  # this is a reviewed change that comes with a baseline review.
-  CONFORMANCE_VERSION: 0.2.0-alpha.11
 
 jobs:
   # One job per protocol generation. neva picks its generation at compile time,
@@ -42,6 +38,15 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      # Pinned deliberately, and pinned in exactly one place: the suite grows
+      # between releases, so an unpinned `@latest` would turn somebody else's
+      # new scenario into our red build -- and `latest` is still on the 0.1.x
+      # line, which predates both `--requirements` and MCP 2026-07-28. The
+      # README tells contributors to read the same file, so a bump cannot leave
+      # local runs and CI on different suites.
+      - name: Read the pinned suite version
+        run: echo "CONFORMANCE_VERSION=$(cat conformance/.conformance-version)" >> "$GITHUB_ENV"
 
       - name: Build the fixtures
         run: cargo build -p neva-conformance ${{ matrix.features }}

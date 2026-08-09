@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## 0.5.2
 
 ### Fixed
+* **An unimplemented method answers `404 Not Found` over HTTP.** The JSON-RPC
+  code was already `-32601`, but the status was `200`. The spec pins the `404`
+  so a caller can tell "this endpoint speaks MCP and has no such method" from
+  "this URL is not an MCP endpoint" without parsing the body -- the JSON-RPC
+  error body is what distinguishes the two. Found by the conformance suite.
+* **A protocol version stated in the body that disagrees with the
+  `MCP-Protocol-Version` header is a `HeaderMismatch` (`-32020`).** It was
+  reported as `UnsupportedProtocolVersion` (`-32022`), because the body version
+  was checked against the supported set before it was compared to the header.
+  The two say different things to whoever has to fix them: `-32022` means
+  "retry with a version from this list", which does not fix a header and a body
+  that disagree.
+* **`resources/read` for an unknown URI names it in `error.data.uri`.** A
+  spec SHOULD; the error carried `data: null`, so a caller with several reads in
+  flight could not tell which one it was about without matching on the request
+  id.
 * **Per-request `clientCapabilities` are read in the shape the spec defines.**
   `io.modelcontextprotocol/clientCapabilities` holds a `ClientCapabilities`
   object, in which each capability is itself an *optional object* whose presence

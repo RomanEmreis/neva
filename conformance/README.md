@@ -19,8 +19,11 @@ line, which predates both MCP 2026-07-28 and the `--requirements` flag -- a bare
 `alpha` line only. Use the same version CI does:
 
 ```bash
-export CONFORMANCE_VERSION=0.2.0-alpha.11   # keep in sync with .github/workflows/conformance.yml
+export CONFORMANCE_VERSION=$(cat conformance/.conformance-version)
 ```
+
+That file is the single pin -- CI reads the same one, so a local run and the
+workflow can never drift onto different suites.
 
 Then, from the repository root:
 
@@ -126,7 +129,8 @@ require an extension.
 
 ## Bumping the suite
 
-`CONFORMANCE_VERSION` in `.github/workflows/conformance.yml` is pinned on
-purpose: the suite grows between releases, and an unpinned `@latest` turns
-somebody else's new scenario into our red build. Bump it deliberately, re-run
-all four commands above, and update the baselines in the same commit.
+`conformance/.conformance-version` is the one place the suite version is pinned;
+CI reads it and so does the export above. It is pinned on purpose: the suite
+grows between releases, and an unpinned `@latest` turns somebody else's new
+scenario into our red build. Bump the file deliberately, re-run all four
+commands above, and update the baselines in the same commit.
