@@ -108,13 +108,22 @@ pub struct RequestParamsMeta {
     pub(crate) client_info: Option<super::Implementation>,
 
     /// MRTR: the client's results for a prior `InputRequiredResult`.
+    ///
+    /// **Read-only, and only for peers older than 0.5.3.** The spec puts this
+    /// on the params (`InputResponseRequestParams`), which is where neva now
+    /// writes it and where [`Request::input_responses`] looks first; the field
+    /// survives here so a request from a 0.5.x neva client is still understood.
+    /// It is never serialized, so nothing this build sends can carry it.
     #[cfg(not(feature = "legacy-spec"))]
-    #[serde(rename = "inputResponses", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "inputResponses", default, skip_serializing)]
     pub(crate) input_responses: Option<crate::types::mrtr::InputResponses>,
 
     /// MRTR: the opaque `requestState` echoed back from `InputRequiredResult`.
+    ///
+    /// Read-only for the same reason as [`Self::input_responses`]; see
+    /// [`Request::request_state`].
     #[cfg(not(feature = "legacy-spec"))]
-    #[serde(rename = "requestState", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "requestState", default, skip_serializing)]
     pub(crate) request_state: Option<String>,
 
     /// Request-scoped logging level (MCP 2026-07-28).
@@ -313,6 +322,63 @@ impl Request {
             .get("_meta")?
             .get("io.modelcontextprotocol/protocolVersion")?
             .as_str()
+    }
+
+    /// The MRTR answers this request carries, if any.
+    ///
+    /// The spec puts `inputResponses` on the params themselves
+    /// (`InputResponseRequestParams`), next to `name` / `arguments` -- not in
+    /// `_meta`. neva wrote them into `_meta` up to 0.5.2, so a request is read
+    /// from the spec location first and from the old one only as a fallback:
+    /// that keeps a 0.5.x client talking to a newer server, and costs one
+    /// lookup on a request that has neither.
+    ///
+    /// # Examples
+    /// ```
+    /// use neva::types::Request;
+    ///
+    /// let req = Request::new(None, "tools/call", Some(serde_json::json!({
+    ///     "name": "greet",
+    ///     "inputResponses": { "who": { "action": "accept" } }
+    /// })));
+    /// assert!(req.input_responses().is_some());
+    /// ```
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn input_responses(&self) -> Option<crate::types::mrtr::InputResponses> {
+        let from_params = self
+            .params
+            .as_ref()
+            .and_then(|p| p.get("inputResponses"))
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+        from_params.or_else(|| self.meta().and_then(|m| m.input_responses))
+    }
+
+    /// The opaque MRTR `requestState` this request echoes back, if any.
+    ///
+    /// Same two locations, same order, and the same reason as
+    /// [`Self::input_responses`].
+    ///
+    /// # Examples
+    /// ```
+    /// use neva::types::Request;
+    ///
+    /// let req = Request::new(None, "tools/call", Some(serde_json::json!({
+    ///     "name": "greet",
+    ///     "requestState": "v1.0.sealed"
+    /// })));
+    /// assert_eq!(req.request_state().as_deref(), Some("v1.0.sealed"));
+    /// ```
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn request_state(&self) -> Option<String> {
+        let from_params = self
+            .params
+            .as_ref()
+            .and_then(|p| p.get("requestState"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+
+        from_params.or_else(|| self.meta().and_then(|m| m.request_state))
     }
 
     /// Why the protocol version this request states is one this build cannot
@@ -555,6 +621,80 @@ mod tests {
         assert!(got.request_state.is_none());
         // pre-existing params keys are untouched.
         assert_eq!(req.params.expect("params present")["x"], json!(1));
+    }
+
+    /// The MRTR re-run fields are params. `_meta` is read only as a fallback,
+    /// for a 0.5.x neva client, and the params win when both are present.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn mrtr_fields_are_read_from_params_first() {
+        use serde_json::json;
+
+        let spec = Request::new(
+            None,
+            "tools/call",
+            Some(json!({
+                "name": "greet",
+                "requestState": "from-params",
+                "inputResponses": { "who": { "action": "accept" } }
+            })),
+        );
+        assert_eq!(spec.request_state().as_deref(), Some("from-params"));
+        assert!(spec.input_responses().expect("answers").contains_key("who"));
+
+        let legacy = Request::new(
+            None,
+            "tools/call",
+            Some(json!({
+                "name": "greet",
+                "_meta": {
+                    "requestState": "from-meta",
+                    "inputResponses": { "who": { "action": "accept" } }
+                }
+            })),
+        );
+        assert_eq!(legacy.request_state().as_deref(), Some("from-meta"));
+        assert!(
+            legacy
+                .input_responses()
+                .expect("answers")
+                .contains_key("who")
+        );
+
+        let both = Request::new(
+            None,
+            "tools/call",
+            Some(json!({
+                "name": "greet",
+                "requestState": "from-params",
+                "_meta": { "requestState": "from-meta" }
+            })),
+        );
+        assert_eq!(both.request_state().as_deref(), Some("from-params"));
+
+        let neither = Request::new(None, "tools/call", Some(json!({ "name": "greet" })));
+        assert!(neither.request_state().is_none());
+        assert!(neither.input_responses().is_none());
+    }
+
+    /// Nothing this build sends may carry the old location, or a peer reading
+    /// the spec one would see an answered retry as a fresh call.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn mrtr_meta_fields_are_never_written() {
+        let meta = RequestParamsMeta {
+            request_state: Some("sealed".into()),
+            input_responses: Some(
+                [("who".to_string(), serde_json::json!({ "action": "accept" }))]
+                    .into_iter()
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_value(&meta).expect("serialize");
+        assert!(json.get("requestState").is_none(), "got: {json}");
+        assert!(json.get("inputResponses").is_none(), "got: {json}");
     }
 
     #[cfg(all(feature = "client", not(feature = "legacy-spec")))]

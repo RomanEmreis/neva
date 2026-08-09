@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## 0.5.2
 
 ### Fixed
+* **MRTR `inputResponses` / `requestState` travel on the params, not in
+  `_meta`.** The spec puts both on `InputResponseRequestParams`, beside `name`
+  and `arguments`; neva read and wrote them inside `_meta`, so its client and
+  server agreed with each other and with no one else -- against any other
+  implementation the retry looked like a fresh call and the round-trip never
+  completed.
+  * A request is read from the spec location first and from `_meta` only as a
+    fallback, so a 0.5.x neva client keeps working against a newer server.
+    Nothing this build sends carries the old location.
+  * The MRTR request binding ignores both fields (as it already ignored
+    `_meta`): a request does not become a different request by being answered,
+    and hashing the answers in would have made every `requestState` fail
+    verification on the round it was minted for.
+  * New `Request::input_responses()` and `Request::request_state()` read
+    whichever location a peer used.
 * **Elicitation params are written as the spec's union, not as a tagged enum.**
   `ElicitRequestParams` derived its `Serialize`/`Deserialize`, so an
   `elicitation/create` carried `{"Form": {"message": ..., "requestedSchema":

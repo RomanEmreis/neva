@@ -1333,8 +1333,9 @@ impl App {
         let session_id = req.session_id;
         let full_id = req.full_id();
 
-        // MRTR pre-capture: method + salient params (params minus `_meta`),
-        // needed after `req`/`context` are moved into `handler.call`.
+        // MRTR pre-capture: method + salient params (the params that identify
+        // this request, see `salient_params`), needed after `req`/`context` are
+        // moved into `handler.call`.
         #[cfg(not(feature = "legacy-spec"))]
         let mrtr_method = shared::is_mrtr_method(&req.method);
         #[cfg(not(feature = "legacy-spec"))]
@@ -1343,7 +1344,7 @@ impl App {
         let salient_params = req
             .params
             .as_ref()
-            .map(strip_meta)
+            .map(salient_params)
             .unwrap_or(serde_json::Value::Null);
 
         // What MCP 2026-07-28 requires of every request's `_meta`: the
@@ -1451,13 +1452,10 @@ impl App {
         // cached, so a hit here is by construction a replay of one.
         #[cfg(not(feature = "legacy-spec"))]
         let state_tag: Option<String> = if mrtr_method {
-            req.meta().and_then(|m| {
-                let tag = m
-                    .request_state
-                    .as_deref()
-                    .and_then(|blob| blob.rsplit_once('.').map(|(_, tag)| tag))?;
-                let answers = m
-                    .input_responses
+            req.request_state().and_then(|state| {
+                let (_, tag) = state.rsplit_once('.')?;
+                let answers = req
+                    .input_responses()
                     .as_ref()
                     .map(crate::types::mrtr::state::input_responses_digest)
                     .unwrap_or_default();
@@ -1714,14 +1712,22 @@ fn create_tracing_span(
     }
 }
 
-/// Returns a clone of `params` with the `_meta` key removed, so the MRTR
-/// request-binding digest is stable across round-trips.
+/// Returns a clone of `params` with everything that differs between MRTR
+/// rounds removed, so the request-binding digest is stable across round-trips.
+///
+/// That is `_meta`, plus the two fields the retry adds -- `inputResponses` and
+/// `requestState`. Leaving those in would make round 2 hash differently from
+/// round 1 and every state would be rejected as "not matching this request":
+/// the binding is about *which* request this is, and a request does not become
+/// a different one by being answered.
 #[cfg(not(feature = "legacy-spec"))]
-fn strip_meta(params: &serde_json::Value) -> serde_json::Value {
+fn salient_params(params: &serde_json::Value) -> serde_json::Value {
     match params {
         serde_json::Value::Object(map) => {
             let mut cloned = map.clone();
             cloned.remove("_meta");
+            cloned.remove("inputResponses");
+            cloned.remove("requestState");
             serde_json::Value::Object(cloned)
         }
         other => other.clone(),
@@ -1853,7 +1859,7 @@ fn seed_mrtr_ctx(
     // Keys the server requested in the prior round, decoded from the verified
     // state. `None` means no valid state was supplied, so no input was solicited.
     let mut requested: Option<Vec<String>> = None;
-    if let Some(state) = meta.as_ref().and_then(|m| m.request_state.clone()) {
+    if let Some(state) = req.request_state() {
         // Reject an oversized inbound state before decoding it. Base64 decoding
         // and AEAD decryption in `StateCodec::decode` both allocate/compute in
         // proportion to the blob size, so without this guard `with_max_state_bytes`
@@ -1892,7 +1898,7 @@ fn seed_mrtr_ctx(
         effects = payload.effects;
         requested = Some(payload.requested);
     }
-    if let Some(responses) = meta.and_then(|m| m.input_responses) {
+    if let Some(responses) = req.input_responses() {
         // `inputResponses` are answers to inputs the server requested in a
         // prior round; that request set lives in the encrypted `requestState`.
         // Without a verified state there is nothing to bind them to, so accept

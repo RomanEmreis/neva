@@ -79,14 +79,16 @@ async fn tool_elicits_then_completes_over_two_rounds() {
         .expect("one input request")
         .clone();
 
-    // Round 2: retry with a new id + inputResponses + echoed state.
+    // Round 2: retry with a new id + inputResponses + echoed state. Both ride
+    // on the params, next to `name` and `arguments`, which is where the spec's
+    // `InputResponseRequestParams` puts them -- not in `_meta`.
     let retry = serde_json::json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": { "name": "greet", "arguments": {},
+            "requestState": state,
+            "inputResponses": { key: { "action": "accept", "content": { "name": "octocat" } } },
             "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-                "io.modelcontextprotocol/clientCapabilities": { "elicitation": { "form": {} } },
-                "requestState": state,
-                "inputResponses": { key: { "action": "accept", "content": { "name": "octocat" } } }
+                "io.modelcontextprotocol/clientCapabilities": { "elicitation": { "form": {} } }
             } }
     });
     let r2: serde_json::Value = routed(client.post(&url), &retry)
@@ -109,6 +111,93 @@ async fn tool_elicits_then_completes_over_two_rounds() {
         r2["result"]["resultType"],
         serde_json::json!("complete"),
         "round 2 must be tagged complete: {r2}"
+    );
+
+    handle.abort();
+}
+
+/// neva wrote `inputResponses` / `requestState` into `_meta` up to 0.5.2. A
+/// client on that version must keep working against a newer server, so the old
+/// location is still read -- after the spec one, and only if it is empty.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_stating_its_answers_in_meta_is_still_understood() {
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("greet", |mut ctx: Context| async move {
+        let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
+            .with_required("name", "string")
+            .into();
+        let res = ctx.elicit("name", params).await?;
+        let name = res
+            .content
+            .and_then(|c| c.get("name").and_then(|v| v.as_str().map(str::to_owned)))
+            .unwrap_or_else(|| "stranger".into());
+        Ok::<String, Error>(format!("hello {name}"))
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
+    let url = format!("http://{addr}/mcp");
+
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "greet", "arguments": {},
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
+    });
+    let r1: serde_json::Value = routed(client.post(&url), &call)
+        .json(&call)
+        .send()
+        .await
+        .expect("round 1 send")
+        .json()
+        .await
+        .expect("round 1 json");
+    let state = r1["result"]["requestState"]
+        .as_str()
+        .expect("requestState present")
+        .to_string();
+    let key = r1["result"]["inputRequests"]
+        .as_object()
+        .expect("inputRequests object")
+        .keys()
+        .next()
+        .expect("one input request")
+        .clone();
+
+    // The 0.5.2 shape: both fields inside `_meta`.
+    let retry = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": { "name": "greet", "arguments": {},
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": { "elicitation": true },
+                "requestState": state,
+                "inputResponses": { key: { "action": "accept", "content": { "name": "octocat" } } }
+            } }
+    });
+    let r2: serde_json::Value = routed(client.post(&url), &retry)
+        .json(&retry)
+        .send()
+        .await
+        .expect("round 2 send")
+        .json()
+        .await
+        .expect("round 2 json");
+
+    assert_eq!(
+        r2.pointer("/result/content/0/text")
+            .and_then(|v| v.as_str()),
+        Some("hello octocat"),
+        "a 0.5.2-shaped retry must still complete: {r2}"
     );
 
     handle.abort();

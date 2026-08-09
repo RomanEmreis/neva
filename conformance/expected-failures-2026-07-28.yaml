@@ -24,27 +24,37 @@ server:
   # answer 403 when it is present and invalid.
   - dns-rebinding-protection
 
-  # -- MRTR: `inputResponses` / `requestState` live in params (TBD: no issue yet) -------
-  # neva reads and writes them inside `_meta`; the schema puts them on
-  # `InputResponseRequestParams` next to `name`/`arguments`, so neva's client
-  # and server agree with each other and with nobody else. Round 1 is correct
-  # on every one of these -- round 2, the retry carrying the answers, is what
-  # fails, which is why each of these is one failing check out of two or three.
-  #
-  # The elicitation params these carry are no longer wrapped in a `{"Form": ...}`
-  # object; that fix is what took four scenarios off this list.
-  - input-required-result-basic-elicitation
-  - input-required-result-basic-sampling
-  - input-required-result-basic-list-roots
-  - input-required-result-request-state
-  - input-required-result-multiple-input-requests
-  - input-required-result-multi-round
-  - input-required-result-non-tool-request
-  - input-required-result-tampered-state
-  - input-required-result-capability-check
-  # Same cause, reported as a warning (a SHOULD) rather than a failure -- which
-  # the runner still counts, so it needs an entry of its own.
+  # -- MRTR -----------------------------------------------------------------
+  # The round-trip itself is green: `inputResponses` / `requestState` now ride
+  # on the params where `InputResponseRequestParams` puts them, and the
+  # elicitation payload is no longer wrapped in a `{"Form": ...}` object. What
+  # is left are four distinct behaviors, one check each.
+
+  # A round asks for exactly one input (TBD: no issue yet).
+  # `ctx.elicit` / `ctx.sample` / `ctx.list_roots` each return the moment they
+  # are awaited, so a handler that needs three inputs spends three rounds on
+  # them. `InputRequiredResult.inputRequests` is a map precisely so a server
+  # can ask for all of them at once.
+  - input-required-result-multiple-input-requests:sep-2322-multiple-inputs-incomplete
+
+  # A handler cannot see what the client declared (TBD: no issue yet).
+  # The scenario expects the server to ask only for kinds the caller supports
+  # -- sampling but not elicitation, here. neva knows the declared set (it
+  # refuses an undeclared kind with `-32021`), but `Context` exposes no
+  # accessor, so a handler cannot branch on it and the refusal is all the
+  # caller gets.
+  - input-required-result-capability-check:sep-2322-respect-client-capabilities
+
+  # Two SHOULDs about being forgiving, both currently answered with an error.
+  # They surfaced only once the answers were read at all, which is why they are
+  # new here rather than resolved:
+  #   * answers echoed without a `requestState` are rejected instead of ignored;
+  #   * a missing answer is rejected instead of re-requested with a fresh
+  #     `InputRequiredResult`.
+  # Warnings count toward the exit code in a requirements run, so both need an
+  # entry.
   - input-required-result-ignore-extra-params:sep-2322-ignore-unexpected-params
+  - input-required-result-missing-input-response:sep-2322-missing-response-rerequests
 
 client:
   # -- OAuth client flows (#86) -------------------------------------------
@@ -76,8 +86,9 @@ client:
   - auth/iss-normalized
   - auth/metadata-issuer-mismatch
 
-  # -- Client side of the MRTR params placement (TBD: no issue yet) ---------------------
-  - sep-2322-client-request-state
+  # `sep-2322-client-request-state` is green: the retry echoes `requestState`
+  # byte-exact on the params, takes a fresh JSON-RPC id, omits the state when
+  # the server sent none, and leaks neither field into an unrelated call.
 
   # -- `x-mcp-header` parameter mirroring (TBD: no issue yet) ---------------------------
   # Clients MUST mirror tool parameters annotated with `x-mcp-header` into

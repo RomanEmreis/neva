@@ -66,6 +66,14 @@ async fn main() -> Result<(), Error> {
             .with_http(|http| http.bind(&addr).with_endpoint(&endpoint))
     });
 
+    // Registering the handler is also what declares the capability, and MRTR
+    // scenarios only get an input request if the client declared it can answer
+    // one. Accepting everything is the right answer for a fixture: the suite
+    // asserts on how the retry is formed, not on what was typed into it.
+    client.map_elicitation(|_params: ElicitRequestParams| async {
+        ElicitResult::accept().with_content(serde_json::json!({ "name": "conformance" }))
+    });
+
     client.connect().await?;
     let result = run(&mut client, &scenario).await;
     client.disconnect().await?;
@@ -91,6 +99,26 @@ async fn run(client: &mut Client, scenario: &str) -> Result<(), Error> {
                 )
                 .await?;
             tracing::info!(?result, "add_numbers returned");
+        }
+        // The MRTR scenario's mock server checks how a retry is formed: that
+        // `requestState` comes back byte-exact, that it is absent when the
+        // server sent none, that the retry carries a fresh JSON-RPC id, and
+        // that an unrelated call in between carries neither field. Each tool
+        // drives one of those, so all four are called -- and the errors are
+        // logged rather than propagated, because a tool that answers with a
+        // JSON-RPC error has still produced the traffic being judged.
+        "sep-2322-client-request-state" => {
+            for tool in [
+                "test_mrtr_echo_state",
+                "test_mrtr_no_state",
+                "test_mrtr_unrelated",
+                "test_mrtr_no_result_type",
+            ] {
+                match client.call_tool(tool, None::<[(&str, &str); 0]>).await {
+                    Ok(result) => tracing::info!(%tool, ?result, "tool returned"),
+                    Err(err) => tracing::warn!(%tool, %err, "tool failed"),
+                }
+            }
         }
         // Everything else: exercise the read-only surface so the scenario has
         // traffic to inspect without guessing at fixture names.

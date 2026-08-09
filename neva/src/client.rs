@@ -1581,14 +1581,6 @@ impl Client {
             roots: self.options.roots_capability().is_some(),
         });
 
-        if input_responses.is_some() {
-            meta.input_responses = input_responses;
-        }
-
-        if request_state.is_some() {
-            meta.request_state = request_state;
-        }
-
         if let Some(provider) = self.options.trace_context_provider.as_ref()
             && let Some(tc) = provider()
         {
@@ -1603,6 +1595,28 @@ impl Client {
         }
 
         req.set_meta(meta);
+
+        // The MRTR re-run fields are *params*, not metadata: the spec puts
+        // `inputResponses` and `requestState` on `InputResponseRequestParams`,
+        // next to `name` / `arguments`. They are written after `set_meta` so
+        // neither can clobber the other -- both edit the same params object.
+        if input_responses.is_some() || request_state.is_some() {
+            let mut params = match req.params.take() {
+                Some(serde_json::Value::Object(map)) => map,
+                // A retry of a request that carried no params at all still has
+                // somewhere to put the answers.
+                _ => serde_json::Map::new(),
+            };
+            if let Some(responses) = input_responses
+                && let Ok(value) = serde_json::to_value(responses)
+            {
+                params.insert("inputResponses".into(), value);
+            }
+            if let Some(state) = request_state {
+                params.insert("requestState".into(), serde_json::Value::String(state));
+            }
+            req.params = Some(serde_json::Value::Object(params));
+        }
     }
 
     /// Applies the initial per-request 2026-07-28 client metadata (`clientInfo` /
@@ -2330,6 +2344,38 @@ mod tests {
             panic!("second item must be a notification");
         };
         assert!(notif.params.is_none());
+    }
+
+    /// An MRTR retry states its answers where the spec puts them: on the
+    /// params, beside `name` and `arguments`. They used to go into `_meta`,
+    /// where no other implementation looks for them.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn a_retry_states_its_answers_in_the_params() {
+        use serde_json::json;
+
+        let client = Client::new();
+        let mut req = Request::new(
+            Some(RequestId::Number(2)),
+            "tools/call",
+            Some(json!({ "name": "greet", "arguments": {} })),
+        );
+
+        let answers: crate::types::mrtr::InputResponses =
+            [("who".to_string(), json!({ "action": "accept" }))]
+                .into_iter()
+                .collect();
+        client.apply_client_meta(&mut req, Some(answers), Some("v1.0.sealed".into()));
+
+        let params = req.params.as_ref().expect("params present");
+        assert_eq!(params["requestState"], json!("v1.0.sealed"));
+        assert_eq!(params["inputResponses"]["who"]["action"], json!("accept"));
+        // The params it is a retry *of* are untouched...
+        assert_eq!(params["name"], json!("greet"));
+        // ...and `_meta` keeps the envelope without duplicating the answers.
+        assert!(params["_meta"]["io.modelcontextprotocol/clientInfo"].is_object());
+        assert!(params["_meta"].get("inputResponses").is_none());
+        assert!(params["_meta"].get("requestState").is_none());
     }
 
     /// A configured trace-context provider is invoked during 2026-07-28 metadata
