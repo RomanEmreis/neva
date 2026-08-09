@@ -300,6 +300,7 @@ pub mod __macro_support {
             match T::category() {
                 PropertyType::String => "string",
                 PropertyType::Number => "number",
+                PropertyType::Integer => "integer",
                 PropertyType::Bool => "boolean",
                 PropertyType::Array => "array",
                 PropertyType::Object => "object",

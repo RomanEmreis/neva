@@ -939,6 +939,7 @@ mod tests {
                 min_length: Some(2),
                 max_length: Some(50),
                 format: None,
+                extra: Default::default(),
             }),
         );
         schema.properties.insert(
@@ -949,6 +950,7 @@ mod tests {
                 descr: None,
                 min: Some(0.0),
                 max: Some(120.0),
+                extra: Default::default(),
             }),
         );
         schema.properties.insert(
@@ -1289,6 +1291,7 @@ mod tests {
                     "pending".to_string(),
                 ],
                 default: None,
+                extra: Default::default(),
             }),
         );
         schema.required = Some(vec!["status".to_string()]);
@@ -1315,6 +1318,7 @@ mod tests {
                 descr: None,
                 r#enum: vec!["active".to_string(), "inactive".to_string()],
                 default: None,
+                extra: Default::default(),
             }),
         );
         schema.required = Some(vec!["status".to_string()]);
@@ -1348,6 +1352,7 @@ mod tests {
                 descr: None,
                 r#enum: vec!["active".to_string(), "inactive".to_string()],
                 default: None,
+                extra: Default::default(),
             }),
         );
         schema.required = Some(vec!["status".to_string()]);
@@ -1378,6 +1383,7 @@ mod tests {
                 min_length: None,
                 max_length: None,
                 format: Some(StringFormat::Email),
+                extra: Default::default(),
             }),
         );
         schema.required = Some(vec!["email".to_string()]);
@@ -1405,6 +1411,7 @@ mod tests {
                 min_length: None,
                 max_length: None,
                 format: Some(StringFormat::Email),
+                extra: Default::default(),
             }),
         );
         schema.required = Some(vec!["email".to_string()]);
@@ -1435,6 +1442,7 @@ mod tests {
                 min_length: None,
                 max_length: None,
                 format: Some(StringFormat::Uri),
+                extra: Default::default(),
             }),
         );
 
@@ -1470,6 +1478,7 @@ mod tests {
                 min_length: None,
                 max_length: None,
                 format: Some(StringFormat::Uri),
+                extra: Default::default(),
             }),
         );
 
@@ -1499,6 +1508,7 @@ mod tests {
                 min_length: None,
                 max_length: None,
                 format: Some(StringFormat::Date),
+                extra: Default::default(),
             }),
         );
 
@@ -1525,6 +1535,7 @@ mod tests {
                 min_length: None,
                 max_length: None,
                 format: Some(StringFormat::Date),
+                extra: Default::default(),
             }),
         );
 
@@ -1567,6 +1578,7 @@ mod tests {
                 min_length: None,
                 max_length: None,
                 format: Some(StringFormat::DateTime),
+                extra: Default::default(),
             }),
         );
 
@@ -1593,6 +1605,7 @@ mod tests {
                 min_length: None,
                 max_length: None,
                 format: Some(StringFormat::DateTime),
+                extra: Default::default(),
             }),
         );
 
@@ -1622,6 +1635,7 @@ mod tests {
                 min_length: None,
                 max_length: None,
                 format: None,
+                extra: Default::default(),
             }),
         );
 
@@ -1745,6 +1759,7 @@ mod tests {
                 descr: None,
                 r#enum: vec![],
                 default: None,
+                extra: Default::default(),
             }),
         );
 

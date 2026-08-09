@@ -75,8 +75,17 @@ pub enum PropertyType {
     String,
 
     /// Number type
-    #[serde(rename = "number", alias = "integer")]
+    #[serde(rename = "number")]
     Number,
+
+    /// Integer type.
+    ///
+    /// Distinct from [`Self::Number`] because JSON Schema treats them as
+    /// different types: `integer` rejects `1.5` where `number` accepts it.
+    /// They used to share a variant, so a declared `"integer"` came back out as
+    /// `"number"` and the peer was told a wider type than the server meant.
+    #[serde(rename = "integer")]
+    Integer,
 
     /// Boolean type
     #[serde(rename = "boolean")]
@@ -100,7 +109,8 @@ impl From<&str> for PropertyType {
         match s {
             "array" => PropertyType::Array,
             "string" => PropertyType::String,
-            "number" | "integer" => PropertyType::Number,
+            "number" => PropertyType::Number,
+            "integer" => PropertyType::Integer,
             "bool" | "boolean" => PropertyType::Bool,
             "object" => PropertyType::Object,
             "none" => PropertyType::None,
@@ -123,6 +133,7 @@ impl Display for PropertyType {
             PropertyType::Array => write!(f, "array"),
             PropertyType::String => write!(f, "string"),
             PropertyType::Number => write!(f, "number"),
+            PropertyType::Integer => write!(f, "integer"),
             PropertyType::Bool => write!(f, "boolean"),
             PropertyType::Object => write!(f, "object"),
             PropertyType::None => write!(f, "none"),

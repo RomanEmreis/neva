@@ -281,6 +281,17 @@ pub struct ToolSchema {
     /// The required properties of the schema
     #[serde(skip_serializing_if = "Option::is_none")]
     pub required: Option<Vec<String>>,
+
+    /// Every keyword this type does not model, kept verbatim.
+    ///
+    /// `type` / `properties` / `required` are what neva itself reads; a schema
+    /// is a whole document, and `$schema`, `$defs`, `$ref`, `additionalProperties`,
+    /// `allOf` and the `if`/`then`/`else` triple are all meaningful to the peer
+    /// that receives it. Dropping them would publish a schema quietly wider
+    /// than the one the tool declared -- SEP-2106 requires the vocabulary to
+    /// survive untouched -- so everything else round-trips through here.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// Represents schema property description
@@ -433,6 +444,7 @@ impl Default for ToolSchema {
             r#type: PropertyType::Object,
             properties: Some(HashMap::new()),
             required: None,
+            extra: Default::default(),
         }
     }
 }
@@ -483,6 +495,7 @@ impl ToolSchema {
             r#type: PropertyType::Object,
             properties: props,
             required,
+            extra: Default::default(),
         }
     }
 

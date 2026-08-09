@@ -83,12 +83,35 @@ async fn main() -> Result<(), Error> {
 /// Drives the exchange the named scenario asserts on.
 async fn run(client: &mut Client, scenario: &str) -> Result<(), Error> {
     match scenario {
+        // The harness cannot see what a client kept of a schema, so it asks for
+        // it back: list the tools, then hand the observed `inputSchema` to the
+        // echo tool verbatim. What arrives is what survived the round trip.
+        "json-schema-2020-12-preservation" => {
+            let tools = client.list_tools(None).await?;
+            let observed = tools
+                .tools
+                .iter()
+                .find(|t| t.name == "json_schema_2020_12_tool")
+                .map(|t| serde_json::to_value(&t.input_schema))
+                .transpose()
+                .map_err(Error::from)?
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::InvalidParams,
+                        "the mock server did not advertise json_schema_2020_12_tool",
+                    )
+                })?;
+
+            let result = client
+                .call_tool("json_schema_echo", Some([("schema", observed)]))
+                .await?;
+            tracing::info!(?result, "echoed the observed schema back");
+        }
         // The suite's own fixture server exposes `add_numbers`; list first so
         // the recorded traffic carries both verbs, then call it.
         "tools_call"
         | "request-metadata"
         | "http-standard-headers"
-        | "json-schema-2020-12-preservation"
         | "json-schema-ref-no-deref" => {
             let tools = client.list_tools(None).await?;
             tracing::info!(count = tools.tools.len(), "tools listed");

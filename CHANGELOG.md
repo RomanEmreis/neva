@@ -29,6 +29,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     is validated in front of the server.
 
 ### Fixed
+* **A schema is published the way it was declared.** `Schema` and (on the
+  legacy profile) `ToolSchema` modelled the keywords neva itself reads and
+  dropped everything else, so a peer received a schema quietly different from
+  the one the server wrote -- wider, in the cases that matter.
+  * Both now carry an `extra` catch-all, flattened on the wire, that keeps every
+    unmodelled keyword verbatim: `default` (SEP-1034), `pattern`, `examples`,
+    and on a tool's `inputSchema` the `$schema`, `$defs`, `$ref`,
+    `additionalProperties`, `allOf`/`anyOf` and `if`/`then`/`else` that SEP-2106
+    requires to survive untouched.
+  * **Breaking:** `PropertyType` gains an `Integer` variant, and `"integer"` no
+    longer deserializes into `Number`. The two are different types in JSON
+    Schema -- `integer` rejects `1.5` -- and sharing a variant meant a declared
+    `"integer"` was published as `"number"`. A match on `PropertyType` needs the
+    new arm; `Schema::integer()` builds one.
+  * **Breaking:** the schema structs in `neva::types::schema` gain the `extra`
+    field, so a struct literal that names every field needs it (or
+    `..Default::default()`).
 * **MRTR `inputResponses` / `requestState` travel on the params, not in
   `_meta`.** The spec puts both on `InputResponseRequestParams`, beside `name`
   and `arguments`; neva read and wrote them inside `_meta`, so its client and

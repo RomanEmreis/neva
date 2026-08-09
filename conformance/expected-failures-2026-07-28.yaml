@@ -94,11 +94,15 @@ client:
   - http-custom-headers
   - http-invalid-tool-headers
 
-  # -- JSON Schema handling in the client (TBD: no issue yet) ---------------------------
-  # `$ref` must survive untouched and 2020-12 keywords must be preserved when
-  # a tool schema is round-tripped.
+  # `json-schema-2020-12-preservation` is green: a tool schema the client reads
+  # comes back out with every keyword it arrived with.
+
+  # -- The client cannot reach this scenario's server (TBD: no issue yet) ---------------
+  # Its mock delegates `tools/list` to a bundled SDK transport that answers our
+  # POST with `415 Unsupported Media Type` before the `$ref` question is ever
+  # reached. Whatever that transport objects to in our request is a separate
+  # interop question from schema handling.
   - json-schema-ref-no-deref
-  - json-schema-2020-12-preservation
 
   # -- request-metadata emits a warning, not a failure --------------------
   # Listed because the runner counts the scenario as failing on its warning.
