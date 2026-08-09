@@ -1697,9 +1697,19 @@ mod routing_hints_tests {
         assert_eq!(encode_header_value(" lead"), "=?base64?IGxlYWQ=?=");
         assert_eq!(encode_header_value("trail "), "=?base64?dHJhaWwg?=");
         assert_eq!(encode_header_value("a\nb"), "=?base64?YQpi?=");
-        // A tab is a control character wherever it sits, including mid-value
-        // where it would otherwise pass RFC 9110's field-value set.
-        assert_eq!(encode_header_value("a\tb"), "=?base64?YQli?=");
+        // Horizontal tab is in the safe set the spec states, so an interior one
+        // is sent as it came -- RFC 9110's `field-content` admits HTAB between
+        // field-vchars. Only at an edge does it need encoding, and then by the
+        // leading/trailing whitespace rule.
+        //
+        // The conformance suite's own predicate encodes any byte below 0x20,
+        // interior tab included, but its `x-mcp-header` scenario only ever
+        // sends a *leading* tab -- which both readings encode. Nothing on the
+        // wire distinguishes them; this assertion is what keeps the library on
+        // the spec's side of a difference no scenario exercises.
+        assert_eq!(encode_header_value("a\tb"), "a\tb");
+        assert_eq!(encode_header_value("\tindented"), "=?base64?CWluZGVudGVk?=");
+        assert_eq!(encode_header_value("trailing\t"), "=?base64?dHJhaWxpbmcJ?=");
         // A plain value that looks like the sentinel must be encoded too, or a
         // server would decode something the client never encoded.
         assert_eq!(

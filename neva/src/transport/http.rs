@@ -77,24 +77,30 @@ pub(crate) const B64_SUFFIX: &str = "?=";
 /// Encodes `raw` for use as an HTTP header value, per the spec's value-encoding
 /// rules.
 ///
-/// A value travels as it was written when it is visible ASCII and space, with
-/// no leading or trailing whitespace. Anything else -- and any plain value that
-/// would otherwise be mistaken for the sentinel -- travels Base64-encoded.
+/// A value travels as it was written when it is visible ASCII, space or
+/// horizontal tab, with no leading or trailing whitespace. Anything else -- and
+/// any plain value that would otherwise be mistaken for the sentinel -- travels
+/// Base64-encoded.
 ///
-/// Horizontal tab is encoded rather than sent as it came. The spec quotes RFC
-/// 9110's field-value set, which admits HTAB, and then names control characters
-/// as a reason to encode -- and HTAB is one. The two readings only differ for a
-/// tab in the middle of a value, and encoding is the safe way to differ:
-/// decoding the sentinel is mandatory for every peer, whereas a bare tab is
-/// exactly the byte an intermediary is entitled to fold into a space.
+/// The safe set is the one the spec states, quoting RFC 9110: visible ASCII
+/// (0x21-0x7E), space (0x20) and horizontal tab (0x09). HTAB is in it, so an
+/// interior tab is sent as it came; RFC 9110's `field-content` admits `HTAB`
+/// between field-vchars, and nothing there lets a recipient rewrite it. The
+/// spec's list of reasons to encode -- non-ASCII, control characters,
+/// leading/trailing whitespace -- is introduced with "e.g." and describes the
+/// ways a value falls outside that set, so it does not withdraw the tab it just
+/// admitted. An *edge* tab is still encoded, by the leading/trailing whitespace
+/// rule rather than by the safe set.
 #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
 pub(crate) fn encode_header_value(raw: &str) -> String {
     use base64::{Engine, engine::general_purpose::STANDARD};
 
     let safe = !raw.is_empty()
-        && raw.bytes().all(|b| (0x20..=0x7E).contains(&b))
-        && !raw.starts_with(' ')
-        && !raw.ends_with(' ');
+        && raw
+            .bytes()
+            .all(|b| b == b'\t' || (0x20..=0x7E).contains(&b))
+        && !raw.starts_with([' ', '\t'])
+        && !raw.ends_with([' ', '\t']);
     let sentinel_lookalike = raw.starts_with(B64_PREFIX) && raw.ends_with(B64_SUFFIX);
 
     if safe && !sentinel_lookalike {

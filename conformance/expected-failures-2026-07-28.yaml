@@ -74,6 +74,20 @@ client:
   # unannotated ones stay off the wire, and a tool whose annotations break the
   # constraints is dropped from `tools/list` without taking its well-formed
   # neighbours with it.
+  #
+  # Two things this green does NOT prove, both upstream-known:
+  #   - The scenario serves `tools/list` with `ttlMs: 0` and then requires
+  #     `Mcp-Param-*` derived from that same schema. SEP-2549 makes `ttlMs: 0`
+  #     immediately stale and SEP-2243 says to omit the headers for a stale
+  #     schema, so a client that implemented the cache TTL would *fail* here
+  #     (conformance#354). neva's annotation registry has no TTL, which is why
+  #     it passes -- a gap the suite currently rewards rather than catches.
+  #   - The suite's own encoding predicate Base64s any byte below 0x20,
+  #     interior horizontal tab included, which the spec's safe set admits
+  #     (it quotes RFC 9110: VCHAR, SP and HTAB). The scenario only ever sends
+  #     a *leading* tab, which both readings encode, so nothing here
+  #     distinguishes them. The library follows the spec; the unit test in
+  #     `transport/http/client.rs` is what holds that line.
 
   # `json-schema-2020-12-preservation` is green: a tool schema the client reads
   # comes back out with every keyword it arrived with.

@@ -170,12 +170,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   server's capabilities came back as
   `missing field \`subscribe\`` -- and since capabilities arrive with the
   handshake, the connection failed outright rather than degrading.
-* **A mirrored header value carrying a horizontal tab is Base64-encoded.** The
-  spec quotes RFC 9110's field-value set, which admits HTAB, and then names
-  control characters as a reason to encode; HTAB is one. The readings differ
-  only for a tab in the middle of a value, and encoding is the safe way to
-  differ -- decoding the sentinel is mandatory for every peer, whereas a bare
-  tab is exactly the byte an intermediary may fold into a space.
 * **A server that hosts no standalone SSE stream no longer ends the session
   (legacy profile).** The client opens the optional `GET` stream after the
   `initialize` handshake and treated any non-2xx as fatal, cancelling the
