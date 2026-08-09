@@ -89,16 +89,25 @@ async fn test_tool_with_logging() -> &'static str {
     "Logging complete"
 }
 
+/// The scenario spells this tool out: report `0/100`, wait ~50ms, `50/100`,
+/// wait ~50ms, `100/100`. The waits are not decoration. On the legacy transport
+/// the reports travel on the session's SSE `GET` stream while the result travels
+/// on the call's own `POST` response -- two connections, so nothing orders them
+/// but the work between the reports. A tool that reports three times and returns
+/// without ever awaiting never yields, and its result overtakes every report it
+/// just made; the client, which stops looking once the result is in hand, sees
+/// none of them.
 #[tool(descr = "Reports progress while running")]
 async fn test_tool_with_progress(token: Meta<ProgressToken>) -> &'static str {
-    for step in 1..=3 {
+    for value in [0, 50, 100] {
         tracing::info!(
             target: "progress",
             token = %token,
-            value = step * 33,
+            value = value,
             total = 100,
             message = "working"
         );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     "Progress complete"
 }

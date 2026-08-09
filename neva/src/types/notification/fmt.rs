@@ -5,10 +5,9 @@ use crate::shared::MessageRegistry;
 use crate::types::Message;
 #[cfg(not(feature = "legacy-spec"))]
 use crate::types::notification::LoggingLevel;
-use crate::types::notification::{Notification, formatter::build_notification};
+use crate::types::notification::formatter::build_notification;
 use once_cell::sync::Lazy;
 use std::io::{self, Write};
-use tokio::sync::mpsc::{Sender, channel};
 use tracing::{
     field::Field,
     span::Attributes,
@@ -53,31 +52,7 @@ pub(crate) static LOG_REGISTRY: Lazy<MessageRegistry> = Lazy::new(MessageRegistr
 ///     .init();
 /// ```
 pub fn layer() -> MpscLayer {
-    let (tx, mut rx) = channel::<Notification>(100);
-    tokio::spawn(async move {
-        while let Some(notification) = rx.recv().await {
-            let _ = LOG_REGISTRY.send(notification.into());
-        }
-    });
-    MpscLayer {
-        sender: NotificationSender::new(tx),
-    }
-}
-
-/// Keeps a [`Sender`]
-#[derive(Debug)]
-struct NotificationSender {
-    sender: Sender<Notification>,
-}
-
-impl NotificationSender {
-    fn new(sender: Sender<Notification>) -> Self {
-        Self { sender }
-    }
-
-    fn send_notification(&self, notification: Notification) {
-        let _ = self.sender.try_send(notification);
-    }
+    MpscLayer
 }
 
 /// Represents a custom tracing layer that delivers messages to MCP Client
@@ -91,10 +66,8 @@ impl NotificationSender {
 ///     .with(notification::fmt::layer())
 ///     .init();
 /// ```
-#[derive(Debug)]
-pub struct MpscLayer {
-    sender: NotificationSender,
-}
+#[derive(Debug, Default)]
+pub struct MpscLayer;
 
 impl<S> Layer<S> for MpscLayer
 where
@@ -152,7 +125,14 @@ where
                 return;
             }
 
-            self.sender.send_notification(notification);
+            // Legacy: the session-scoped SSE `GET` stream. Queued here and now,
+            // synchronously, so a notification a handler emits is on the
+            // stream's channel before the handler returns -- routing it through
+            // a channel of its own once cost a scheduler hop, and a handler that
+            // never awaits (it reports progress and returns) would not yield
+            // until it was done, letting its own response overtake the progress
+            // it had already reported.
+            let _ = LOG_REGISTRY.send(notification.into());
         } else {
             let mut stderr = io::stderr();
             let json = serde_json::to_string(&notification).unwrap();
@@ -265,6 +245,85 @@ impl Visit for SpanVisitor {
                 self.session_id = Some(session_id);
             }
         }
+    }
+}
+
+// The legacy emission path: a session-scoped SSE `GET` stream fed through
+// `LOG_REGISTRY`, with no per-request sink to route to.
+#[cfg(all(test, feature = "legacy-spec"))]
+mod legacy_tests {
+    use tracing_subscriber::prelude::*;
+
+    /// Emits inside a `request` span carrying `session_id` and returns whatever
+    /// the session's channel holds by the time the emitting code is done --
+    /// nothing is awaited in between on purpose.
+    fn emit_and_drain(session_id: uuid::Uuid, emit: impl FnOnce()) -> Vec<serde_json::Value> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        super::LOG_REGISTRY.register(session_id, 1, tx);
+
+        let subscriber = tracing_subscriber::registry().with(super::MpscLayer);
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("request", mcp_session_id = session_id.to_string());
+            let _entered = span.enter();
+            emit();
+        });
+
+        super::LOG_REGISTRY.unregister(&session_id);
+
+        let mut got = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            got.push(serde_json::to_value(&msg).unwrap());
+        }
+        got
+    }
+
+    #[test]
+    fn a_progress_report_is_on_the_stream_before_the_emitter_returns() {
+        // The reports and the call's result travel on two different connections
+        // here, so nothing orders them but the emitting task yielding. Queueing
+        // synchronously is what keeps a report that was made *during* the call
+        // from arriving after the call's own result -- by which time the client
+        // has stopped looking.
+        let got = emit_and_drain(uuid::Uuid::new_v4(), || {
+            for value in [0, 50, 100] {
+                tracing::info!(target: "progress", token = "tok-1", value = value, total = 100);
+            }
+        });
+
+        let progress = got
+            .iter()
+            .filter(|m| m["method"] == "notifications/progress")
+            .collect::<Vec<_>>();
+        assert_eq!(progress.len(), 3, "got: {got:?}");
+        assert_eq!(progress[0]["params"]["progressToken"], "tok-1");
+        assert_eq!(progress[0]["params"]["progress"], 0.0);
+        assert_eq!(progress[2]["params"]["progress"], 100.0);
+        assert_eq!(progress[2]["params"]["total"], 100.0);
+    }
+
+    #[test]
+    fn a_log_message_travels_the_same_way() {
+        let got = emit_and_drain(uuid::Uuid::new_v4(), || {
+            tracing::warn!(logger = "tool", "something happened");
+        });
+
+        assert_eq!(got.len(), 1, "got: {got:?}");
+        assert_eq!(got[0]["method"], "notifications/message");
+        assert_eq!(got[0]["params"]["level"], "warning");
+        assert_eq!(got[0]["params"]["data"]["message"], "something happened");
+    }
+
+    #[test]
+    fn an_event_for_an_unknown_session_is_dropped_rather_than_kept() {
+        // No stream to put it on. The registry says so, and nothing queues up
+        // waiting for a session that may never open one.
+        let subscriber = tracing_subscriber::registry().with(super::MpscLayer);
+        tracing::subscriber::with_default(subscriber, || {
+            let span =
+                tracing::info_span!("request", mcp_session_id = uuid::Uuid::new_v4().to_string());
+            let _entered = span.enter();
+            tracing::warn!(logger = "tool", "nobody is listening");
+        });
     }
 }
 
@@ -414,15 +473,15 @@ mod tests {
     /// child span that carries no MCP fields of its own.
     #[tokio::test]
     async fn routes_events_from_nested_spans_to_the_request_sink() {
-        use crate::types::notification::Notification;
-
         let session_id = uuid::Uuid::new_v4();
         let mut sink_rx = super::super::sink::register(session_id, 8, false).await;
 
-        let (fallback_tx, mut fallback_rx) = tokio::sync::mpsc::channel::<Notification>(8);
-        let subscriber = tracing_subscriber::registry().with(super::MpscLayer {
-            sender: super::NotificationSender::new(fallback_tx),
-        });
+        // The legacy session-SSE registry, standing by under the same id: if the
+        // 2026-07-28 path ever fell through, this is where the event would land.
+        let (fallback_tx, mut fallback_rx) = tokio::sync::mpsc::channel(8);
+        super::LOG_REGISTRY.register(session_id, 1, fallback_tx);
+
+        let subscriber = tracing_subscriber::registry().with(super::MpscLayer);
 
         tracing::subscriber::with_default(subscriber, || {
             let request = tracing::info_span!(
@@ -437,6 +496,7 @@ mod tests {
         });
 
         super::super::sink::unregister(&session_id);
+        super::LOG_REGISTRY.unregister(&session_id);
 
         let msg = sink_rx
             .try_recv()

@@ -7,17 +7,21 @@
 # automated statement of what the legacy profile still gets wrong -- nothing
 # else in CI exercises that wire.
 
-server:
+server: []
+  # Nothing left to excuse: the legacy server profile is green end to end.
+  #
   # `tools-call-elicitation` and `elicitation-sep1330-enums` are green: the
   # `{"Form": {...}}` wrapper around elicitation params is gone.
 
   # `elicitation-sep1034-defaults` and `json-schema-2020-12` are green: schemas
   # keep the keywords they were declared with, and `integer` stays `integer`.
 
-  # -- No progress notifications on the legacy transport (TBD: no issue yet) ------------
-  # The same fixture reports progress correctly on the 2026-07-28 profile, so
-  # this is the legacy delivery path, not the tool.
-  - tools-call-with-progress
+  # `tools-call-with-progress` is green. The delivery path was fine; the fixture
+  # was not. It reported three times and returned without ever awaiting, and on
+  # this transport the reports ride the session's SSE `GET` while the result
+  # rides the call's own `POST` -- two connections, so only the work between the
+  # reports orders them. The tool now waits between reports, as the scenario
+  # spells out.
 
   # `server-session-lifecycle` is green: a session id the server no longer
   # holds is answered `404` on POST, GET and DELETE alike, so a client learns

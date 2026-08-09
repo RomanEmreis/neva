@@ -29,6 +29,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     is validated in front of the server.
 
 ### Fixed
+* **A notification goes on the session stream the moment it is emitted (legacy
+  profile).** `notification::fmt::layer()` used to hand every event to a channel
+  of its own, drained by a spawned task that forwarded it to the session's SSE
+  stream. Two consequences, both removed by writing to the session registry
+  straight from the event: a handler that reports progress and returns without
+  ever awaiting never yielded, so its own response could overtake the progress
+  it had just reported; and the channel was a single 100-slot queue shared by
+  every session, dropping events on a burst in one of them. `layer()` also no
+  longer spawns, so it can be built before the runtime is running.
 * **A terminated session answers `404` (legacy profile).** `DELETE` removed the
   session from the registry, but nothing consulted that registry afterwards: a
   request bearing the dead id was served as if the session were live, and a
