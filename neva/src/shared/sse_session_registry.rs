@@ -230,14 +230,14 @@ impl SseSessionRegistry {
     /// replay. If an entry already exists (live connection or prior pre-registration),
     /// this is a no-op -- the existing buffer and sequence counter are preserved.
     ///
-    /// Has no effect when `capacity == 0` (buffering disabled).
+    /// The entry is created even with buffering disabled (`capacity == 0`): it is
+    /// also what makes the session *known*, and a server that buffers nothing
+    /// still has to tell a live session from a terminated one. Buffering stays
+    /// governed by the per-session capacity this copies.
     // Stateless 2026-07-28 transport skips pre-registration (no SSE GET); the method
     // stays compiled for the legacy build.
     #[cfg_attr(not(feature = "legacy-spec"), allow(dead_code))]
     pub(crate) fn pre_register(&self, id: Uuid) {
-        if self.capacity == 0 {
-            return;
-        }
         self.sessions.entry(id).or_insert_with(|| SseSession {
             sender: Self::disconnected_sender(),
             buffer: Mutex::new(VecDeque::new()),
@@ -246,6 +246,27 @@ impl SseSessionRegistry {
             capacity: self.capacity,
             generation: 0,
         });
+    }
+
+    /// Reports whether `id` names a session this server still holds, counting
+    /// the visit as activity.
+    ///
+    /// The refresh is what keeps a session that only ever POSTs alive: its
+    /// sender is the disconnected placeholder [`pre_register`] left, so without
+    /// a touch on each request [`evict_stale`] would reap it mid-conversation
+    /// and the next request would be answered as a terminated session.
+    #[cfg_attr(not(feature = "legacy-spec"), allow(dead_code))]
+    pub(crate) fn is_live(&self, id: &Uuid) -> bool {
+        match self.sessions.get(id) {
+            Some(session) => {
+                *session
+                    .last_activity
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Instant::now();
+                true
+            }
+            None => false,
+        }
     }
 
     /// Removes disconnected sessions whose last activity is older than `ttl`.

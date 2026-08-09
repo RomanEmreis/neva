@@ -29,6 +29,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     is validated in front of the server.
 
 ### Fixed
+* **A terminated session answers `404` (legacy profile).** `DELETE` removed the
+  session from the registry, but nothing consulted that registry afterwards: a
+  request bearing the dead id was served as if the session were live, and a
+  `GET` on it re-created the session outright -- handing the caller the stream
+  that carries everything the server pushes for it. The spec has a server
+  answer `404` to any request naming a session it no longer holds, which is
+  what tells the client to open a new one with a fresh `initialize`.
+  * `POST`, `GET` and `DELETE` are all gated. The `404` on a POST carries a
+    JSON-RPC error addressed to the request's own id, so the caller sees it
+    rather than waiting out its timeout.
+  * Only an id the client actually stated is judged. A request without the
+    header is handed a freshly minted session, as before, and `initialize` is
+    exempt -- it is the one message that may name a session the server has
+    never held.
+  * Every request bearing a live id now counts as activity, so an idle-session
+    sweep no longer reaps a session whose client only ever POSTs.
 * **A `resources` capability that omits `subscribe` no longer fails to parse.**
   Every member of a capability object is optional, and a server that supports
   neither subscriptions nor list-change notifications advertises

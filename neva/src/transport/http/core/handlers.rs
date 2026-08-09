@@ -399,13 +399,40 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
     }
 
     // Pre-register on the initialize handshake so the server can emit
-    // events between the init POST response and the SSE GET. Stateless 2026-07-28
-    // transport has no SSE GET, so this is skipped under the flag.
+    // events between the init POST response and the SSE GET, and so the session
+    // is one this server knows from here on. Stateless 2026-07-28 transport has
+    // neither an SSE GET nor sessions, so this is skipped under the flag.
     #[cfg(feature = "legacy-spec")]
-    if let Message::Request(ref r) = msg
-        && r.method == crate::commands::INIT
-    {
+    let is_init = matches!(msg, Message::Request(ref r) if r.method == crate::commands::INIT);
+    #[cfg(feature = "legacy-spec")]
+    if is_init {
         ctx.sse_registry.pre_register(id);
+    }
+
+    // A session id this server does not hold is a terminated (or expired) one,
+    // and the spec answers it with `404` so the client knows to open a new
+    // session with a fresh `initialize` rather than retry into a void. Only an
+    // id the client actually stated is judged: a request without the header is
+    // handed a newly minted session, as it always was.
+    //
+    // `initialize` is exempt on purpose. It is the one message that may name a
+    // session the server has never heard of -- the id was just minted above --
+    // and answering the handshake with "start a new session" would be a loop.
+    #[cfg(feature = "legacy-spec")]
+    if !is_init && headers.contains_key(MCP_SESSION_ID) && !ctx.sse_registry.is_live(&id) {
+        return PostPrep::Reply(
+            http::Response::builder()
+                .status(http::StatusCode::NOT_FOUND)
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(Bytes::from(
+                    serde_json::to_vec(&reject_post(
+                        &msg,
+                        Error::new(ErrorCode::InvalidRequest, "Session not found"),
+                    ))
+                    .unwrap_or_default(),
+                ))
+                .unwrap_or_default(),
+        );
     }
 
     // Notification fast-path: 202 Accepted, no oneshot.
@@ -824,7 +851,6 @@ fn get_or_create_mcp_session(
 ///
 /// `None` when the body carried no request at all -- a notification is never
 /// answered, rejection included.
-#[cfg(not(feature = "legacy-spec"))]
 fn reject_post_each(
     msg: &Message,
     verdict: impl Fn(&crate::types::Request) -> Error,
@@ -858,7 +884,6 @@ fn reject_post_each(
 ///
 /// Falls back to an unaddressed reply when there is no request to address:
 /// the POST is still answered, since the status is what carries the rejection.
-#[cfg(not(feature = "legacy-spec"))]
 fn reject_post(msg: &Message, err: Error) -> Message {
     // `Error` is not `Clone` -- its cause is a boxed `dyn StdError` -- and a
     // batch needs one reply per request, all saying the same thing.
@@ -1107,6 +1132,17 @@ pub async fn handle_delete(req: HttpRequest, ctx: &HttpContext) -> HttpResponse 
             .unwrap_or_default();
     };
 
+    // Terminating a session that is already gone is the same "no such session"
+    // the next POST would get, and answering `200` would tell a client that
+    // retried the DELETE it had just ended a live session.
+    #[cfg(feature = "legacy-spec")]
+    if !ctx.sse_registry.is_live(&id) {
+        return http::Response::builder()
+            .status(http::StatusCode::NOT_FOUND)
+            .body(Bytes::new())
+            .unwrap_or_default();
+    }
+
     #[cfg(feature = "tracing")]
     crate::types::notification::fmt::LOG_REGISTRY.unregister(&id);
     ctx.sse_registry.terminate(&id);
@@ -1235,6 +1271,19 @@ pub async fn handle_get_sse<E: HttpEngine>(
                 .unwrap_or_default(),
         );
     };
+
+    // `register` below creates the session when it finds none, which on a
+    // terminated id would resurrect what a DELETE just ended -- and hand the
+    // caller the stream carrying everything the server pushes for it.
+    #[cfg(feature = "legacy-spec")]
+    if !ctx.sse_registry.is_live(&id) {
+        return StreamResponse::Complete(
+            http::Response::builder()
+                .status(http::StatusCode::NOT_FOUND)
+                .body(Bytes::new())
+                .unwrap_or_default(),
+        );
+    }
 
     let (msg_tx, msg_rx) =
         tokio::sync::mpsc::channel::<(u64, Arc<Message>)>(ctx.sse_live_queue_capacity);
@@ -1997,6 +2046,9 @@ mod tests {
     async fn delete_with_session_id_echoes_it_back() {
         let (ctx, _rx) = make_ctx();
         let id = uuid::Uuid::new_v4();
+        // Ending a session the server holds -- the handshake would have put it
+        // there. An id it never issued is a different answer, below.
+        ctx.sse_registry.pre_register(id);
         let req = http::Request::builder()
             .method("DELETE")
             .uri("/mcp")
@@ -2010,6 +2062,109 @@ mod tests {
                 .get(MCP_SESSION_ID)
                 .and_then(|v| v.to_str().ok()),
             Some(id.to_string().as_str())
+        );
+    }
+
+    #[cfg(feature = "legacy-spec")]
+    #[tokio::test]
+    async fn a_terminated_session_is_gone_for_every_verb() {
+        // The whole point of terminating a session is that nothing reaches it
+        // afterwards, so all three verbs have to agree. A GET is the one that
+        // would otherwise recreate it -- opening the stream registers the id.
+        let (ctx, _rx) = make_ctx();
+        let id = uuid::Uuid::new_v4();
+        ctx.sse_registry.pre_register(id);
+        ctx.sse_registry.terminate(&id);
+
+        let post = post_builder()
+            .header(MCP_SESSION_ID, id.to_string())
+            .body(make_request_body("tools/list"))
+            .unwrap();
+        assert_eq!(
+            handle_post(post, &ctx).await.status(),
+            http::StatusCode::NOT_FOUND
+        );
+
+        let delete = http::Request::builder()
+            .method("DELETE")
+            .uri("/mcp")
+            .header(MCP_SESSION_ID, id.to_string())
+            .body(Bytes::new())
+            .unwrap();
+        assert_eq!(
+            handle_delete(delete, &ctx).await.status(),
+            http::StatusCode::NOT_FOUND
+        );
+
+        let get = http::Request::builder()
+            .method("GET")
+            .uri("/mcp")
+            .header(MCP_SESSION_ID, id.to_string())
+            .body(Bytes::new())
+            .unwrap();
+        match handle_get_sse::<TestEngine>(get, &ctx).await {
+            StreamResponse::Complete(r) => assert_eq!(r.status(), http::StatusCode::NOT_FOUND),
+            StreamResponse::Stream { .. } => panic!("a terminated session opened a stream"),
+        }
+    }
+
+    #[cfg(feature = "legacy-spec")]
+    #[tokio::test]
+    async fn a_404_on_a_dead_session_is_addressed_to_the_caller() {
+        // A JSON-RPC error reaches its caller by id; one carrying `null` matches
+        // no pending request, and the client would sit on the call until it
+        // timed out instead of learning to re-initialize.
+        let (ctx, _rx) = make_ctx();
+        let req = post_builder()
+            .header(MCP_SESSION_ID, uuid::Uuid::new_v4().to_string())
+            .body(make_request_body("tools/list"))
+            .unwrap();
+
+        let resp = handle_post(req, &ctx).await;
+        assert_eq!(resp.status(), http::StatusCode::NOT_FOUND);
+
+        let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+        assert_eq!(body["id"], 1);
+        assert_eq!(body["error"]["code"], i32::from(ErrorCode::InvalidRequest));
+    }
+
+    #[cfg(feature = "legacy-spec")]
+    #[tokio::test]
+    async fn an_initialize_naming_an_unknown_session_still_opens_one() {
+        // The handshake is the one message allowed to name a session the server
+        // has never held: answering it with "start a new session" is the advice
+        // it is already following.
+        let (ctx, _rx) = make_ctx();
+        let id = uuid::Uuid::new_v4();
+        let req = post_builder()
+            .header(MCP_SESSION_ID, id.to_string())
+            .body(make_request_body(crate::commands::INIT))
+            .unwrap();
+
+        let ctx = Arc::new(ctx);
+        let ctx_clone = ctx.clone();
+        let _h = tokio::spawn(async move { handle_post(req, &ctx_clone).await });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(
+            ctx.sse_registry.is_live(&id),
+            "the handshake did not open the session it named"
+        );
+    }
+
+    #[cfg(feature = "legacy-spec")]
+    #[tokio::test]
+    async fn a_post_without_a_session_header_is_not_judged_against_one() {
+        // Nothing was stated, so there is nothing to have gone stale: the
+        // request gets a freshly minted session, exactly as before.
+        let (ctx, _rx) = make_ctx();
+        let req = post_builder()
+            .body(make_notification_body("notifications/initialized"))
+            .unwrap();
+
+        assert_eq!(
+            handle_post(req, &ctx).await.status(),
+            http::StatusCode::ACCEPTED
         );
     }
 

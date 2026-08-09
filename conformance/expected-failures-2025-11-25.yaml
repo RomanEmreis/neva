@@ -19,9 +19,9 @@ server:
   # this is the legacy delivery path, not the tool.
   - tools-call-with-progress
 
-  # -- A terminated session must answer 404 (TBD: no issue yet) -------------------------
-  # After DELETE, a request bearing the dead session id still gets 200.
-  - server-session-lifecycle
+  # `server-session-lifecycle` is green: a session id the server no longer
+  # holds is answered `404` on POST, GET and DELETE alike, so a client learns
+  # to open a new one instead of retrying into a session that ended.
 
   # `dns-rebinding-protection` is green on this profile too -- the gate lives in
   # the shared HTTP layer.
