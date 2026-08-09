@@ -77,20 +77,24 @@ pub(crate) const B64_SUFFIX: &str = "?=";
 /// Encodes `raw` for use as an HTTP header value, per the spec's value-encoding
 /// rules.
 ///
-/// RFC 9110 limits field values to visible ASCII, space and horizontal tab,
-/// with no leading or trailing whitespace. Anything outside that -- and any
-/// plain value that would otherwise be mistaken for the sentinel -- travels
-/// Base64-encoded instead.
+/// A value travels as it was written when it is visible ASCII and space, with
+/// no leading or trailing whitespace. Anything else -- and any plain value that
+/// would otherwise be mistaken for the sentinel -- travels Base64-encoded.
+///
+/// Horizontal tab is encoded rather than sent as it came. The spec quotes RFC
+/// 9110's field-value set, which admits HTAB, and then names control characters
+/// as a reason to encode -- and HTAB is one. The two readings only differ for a
+/// tab in the middle of a value, and encoding is the safe way to differ:
+/// decoding the sentinel is mandatory for every peer, whereas a bare tab is
+/// exactly the byte an intermediary is entitled to fold into a space.
 #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
 pub(crate) fn encode_header_value(raw: &str) -> String {
     use base64::{Engine, engine::general_purpose::STANDARD};
 
     let safe = !raw.is_empty()
-        && raw
-            .bytes()
-            .all(|b| b == b'\t' || (0x20..=0x7E).contains(&b))
-        && !raw.starts_with([' ', '\t'])
-        && !raw.ends_with([' ', '\t']);
+        && raw.bytes().all(|b| (0x20..=0x7E).contains(&b))
+        && !raw.starts_with(' ')
+        && !raw.ends_with(' ');
     let sentinel_lookalike = raw.starts_with(B64_PREFIX) && raw.ends_with(B64_SUFFIX);
 
     if safe && !sentinel_lookalike {

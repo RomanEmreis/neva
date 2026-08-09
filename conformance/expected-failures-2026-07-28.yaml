@@ -88,11 +88,11 @@ client:
   # byte-exact on the params, takes a fresh JSON-RPC id, omits the state when
   # the server sent none, and leaks neither field into an unrelated call.
 
-  # -- `x-mcp-header` parameter mirroring (TBD: no issue yet) ---------------------------
-  # Clients MUST mirror tool parameters annotated with `x-mcp-header` into
-  # `Mcp-Param-*` headers. neva's client does not read the annotation.
-  - http-custom-headers
-  - http-invalid-tool-headers
+  # `http-custom-headers` and `http-invalid-tool-headers` are green: annotated
+  # arguments reach `Mcp-Param-*` with the sentinel encoding the spec asks for,
+  # unannotated ones stay off the wire, and a tool whose annotations break the
+  # constraints is dropped from `tools/list` without taking its well-formed
+  # neighbours with it.
 
   # `json-schema-2020-12-preservation` is green: a tool schema the client reads
   # comes back out with every keyword it arrived with.

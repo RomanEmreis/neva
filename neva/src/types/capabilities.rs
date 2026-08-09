@@ -251,6 +251,7 @@ pub struct ResourcesCapability {
     pub list_changed: bool,
 
     /// Indicates whether this server supports subscribing to resource updates.
+    #[serde(default)]
     pub subscribe: bool,
 }
 
@@ -619,5 +620,32 @@ impl ClientTaskRequestsCapability {
             create: Some(SamplingCreateMessageTaskCapability {}),
         });
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_resources_capability_states_only_what_it_supports() {
+        // Every member of a capability object is optional: a server that
+        // supports neither subscriptions nor list-change notifications
+        // advertises `"resources": {}`, and one that supports only the latter
+        // says so alone. Requiring a member turns a conformant peer's
+        // capabilities into a parse error and drops the connection.
+        let empty: ResourcesCapability = serde_json::from_str("{}").unwrap();
+        assert!(!empty.subscribe);
+        assert!(!empty.list_changed);
+
+        let listing: ResourcesCapability =
+            serde_json::from_str(r#"{"listChanged": true}"#).unwrap();
+        assert!(!listing.subscribe);
+        assert!(listing.list_changed);
+
+        let subscribing: ResourcesCapability =
+            serde_json::from_str(r#"{"subscribe": true}"#).unwrap();
+        assert!(subscribing.subscribe);
+        assert!(!subscribing.list_changed);
     }
 }

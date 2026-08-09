@@ -83,6 +83,23 @@ fn context() -> serde_json::Value {
         .unwrap_or(serde_json::Value::Null)
 }
 
+/// One call the scenario dictates, name and arguments both.
+///
+/// A scenario that judges what a call puts on the wire cannot let the fixture
+/// invent the arguments, so it hands them over in the context and expects them
+/// back verbatim.
+#[derive(serde::Deserialize)]
+struct DictatedCall {
+    name: String,
+    #[serde(default)]
+    arguments: serde_json::Value,
+}
+
+/// The calls named in `context.toolCalls`, or none if the scenario named any.
+fn dictated_calls() -> Vec<DictatedCall> {
+    serde_json::from_value(context()["toolCalls"].clone()).unwrap_or_default()
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt()
@@ -163,6 +180,37 @@ async fn run(client: &mut Client, scenario: &str) -> Result<(), Error> {
                 )
                 .await?;
             tracing::info!(?result, "elicitation tool returned");
+        }
+        // `x-mcp-header` mirroring is judged on the headers a call carries, so
+        // the scenario dictates both the tool and its arguments. Listing first
+        // is what teaches the client the annotations -- the registry it mirrors
+        // from is filled by `tools/list`, so a call issued before one would
+        // rightly carry no `Mcp-Param-*` header at all.
+        "http-custom-headers" => {
+            client.list_tools(None).await?;
+            for call in dictated_calls() {
+                let result = client.call_tool(&*call.name, call.arguments).await?;
+                tracing::info!(tool = %call.name, ?result, "dictated call returned");
+            }
+        }
+        // The scenario serves one well-formed tool among ten with malformed
+        // annotations and watches which ones get called. Calling everything
+        // that survived `tools/list` states both halves at once: the valid tool
+        // is still reachable, and no invalid one is.
+        "http-invalid-tool-headers" => {
+            let tools = client.list_tools(None).await?;
+            let names = tools
+                .tools
+                .iter()
+                .map(|t| t.name.to_string())
+                .collect::<Vec<_>>();
+            tracing::info!(?names, "tools that survived listing");
+            for name in names {
+                match client.call_tool(&*name, None::<[(&str, &str); 0]>).await {
+                    Ok(result) => tracing::info!(%name, ?result, "tool returned"),
+                    Err(err) => tracing::warn!(%name, %err, "tool failed"),
+                }
+            }
         }
         // The suite's own fixture server exposes `add_numbers`; list first so
         // the recorded traffic carries both verbs, then call it.

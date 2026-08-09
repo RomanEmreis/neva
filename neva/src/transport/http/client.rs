@@ -1420,6 +1420,9 @@ mod routing_hints_tests {
         assert_eq!(encode_header_value(" lead"), "=?base64?IGxlYWQ=?=");
         assert_eq!(encode_header_value("trail "), "=?base64?dHJhaWwg?=");
         assert_eq!(encode_header_value("a\nb"), "=?base64?YQpi?=");
+        // A tab is a control character wherever it sits, including mid-value
+        // where it would otherwise pass RFC 9110's field-value set.
+        assert_eq!(encode_header_value("a\tb"), "=?base64?YQli?=");
         // A plain value that looks like the sentinel must be encoded too, or a
         // server would decode something the client never encoded.
         assert_eq!(
