@@ -8,20 +8,18 @@
 # else in CI exercises that wire.
 
 server:
-  # -- Elicitation params carry an external `Form` tag (TBD: no issue yet) --------------
-  # `ElicitRequestParams` serializes as `{"Form": {...}}`, so an
-  # `elicitation/create` request has neither `message` nor `requestedSchema`
-  # where the schema expects them. The client never recognizes the request,
-  # which is why all three elicitation scenarios fail rather than just the
-  # wire-schema check. Same root cause as the 2026-07-28 MRTR failures.
-  - tools-call-elicitation
-  - elicitation-sep1034-defaults
-  - elicitation-sep1330-enums
+  # `tools-call-elicitation` and `elicitation-sep1330-enums` are green: the
+  # `{"Form": {...}}` wrapper around elicitation params is gone.
 
-  # -- Declared tool schemas are not preserved verbatim (TBD: no issue yet) -------------
-  # `$schema`, `$defs` and `additionalProperties` are stripped from a tool's
-  # `inputSchema` between declaration and `tools/list`. SEP-2106 requires the
-  # 2020-12 vocabulary to survive untouched.
+  # -- Schemas are re-typed rather than carried (TBD: no issue yet) --------------------
+  # Two faces of one gap: `Schema` is a closed enum of the keywords neva knows,
+  # so anything outside it is dropped on the way through.
+  #   * a property's `default` (SEP-1034) has nowhere to live, and an
+  #     `"integer"` property comes back out as `"number"`;
+  #   * `$schema`, `$defs` and `additionalProperties` are stripped from a
+  #     tool's `inputSchema` between declaration and `tools/list`, though
+  #     SEP-2106 requires the 2020-12 vocabulary to survive untouched.
+  - elicitation-sep1034-defaults
   - json-schema-2020-12
 
   # -- No progress notifications on the legacy transport (TBD: no issue yet) ------------

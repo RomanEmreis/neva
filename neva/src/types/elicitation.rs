@@ -33,14 +33,58 @@ pub mod commands {
 
 /// Represents a message issued from the server to elicit additional information from the user via the client.
 ///
+/// # Wire shape
+///
+/// The spec types this as a bare union -- `ElicitRequestFormParams |
+/// ElicitRequestURLParams` -- so the chosen variant's fields sit directly in
+/// `params`, with no wrapper naming it. `mode` is the discriminator: `"url"`
+/// selects the URL variant, and absent or `"form"` selects the form one. Both
+/// halves of that are hand-written below, because a derived enum would wrap
+/// the payload in a `{"Form": ...}` object no peer knows how to read.
+///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ElicitRequestParams {
     /// Elicitation request parameters for a form
     Form(ElicitRequestFormParams),
 
     /// Elicitation request parameters for a URL
     Url(ElicitRequestUrlParams),
+}
+
+impl Serialize for ElicitRequestParams {
+    /// Writes the chosen variant's fields flat, which is what the union means.
+    #[inline]
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Form(params) => params.serialize(serializer),
+            Self::Url(params) => params.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ElicitRequestParams {
+    /// Reads the union by its `mode` discriminator rather than by trying each
+    /// variant in turn: a payload that names its mode and then fails to parse
+    /// deserves that variant's error, not "data did not match any variant".
+    ///
+    /// `mode` is optional on the form variant -- omitting it *is* how a form is
+    /// spelled -- so anything that is not `"url"` is read as a form.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as DeError;
+
+        let value = Value::deserialize(deserializer)?;
+        let is_url = value.get("mode").and_then(Value::as_str) == Some("url");
+        if is_url {
+            serde_json::from_value(value)
+                .map(Self::Url)
+                .map_err(D::Error::custom)
+        } else {
+            serde_json::from_value(value)
+                .map(Self::Form)
+                .map_err(D::Error::custom)
+        }
+    }
 }
 
 /// Represents the parameters for a request to elicit non-sensitive information from the user
@@ -52,7 +96,12 @@ pub struct ElicitRequestFormParams {
     /// The message to present to the user.
     pub message: String,
 
-    /// The elicitation mode
+    /// The elicitation mode.
+    ///
+    /// Optional here, and omitted rather than written as `null` when unset:
+    /// the spec spells this variant's mode `"form"` or leaves it out, and
+    /// `null` is neither.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<ElicitationMode>,
 
     /// The requested schema.
@@ -795,6 +844,88 @@ mod tests {
         name: String,
         age: u32,
         active: bool,
+    }
+
+    /// The union is spelled by its fields, not by a wrapper naming the variant:
+    /// a peer reads `params.message`, and a `{"Form": {...}}` object hides it
+    /// from every conforming implementation.
+    #[test]
+    fn form_params_serialize_flat() {
+        let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
+            .with_required("name", "string")
+            .into();
+
+        let json = serde_json::to_value(&params).expect("serialize");
+        assert_eq!(json["message"], "Your name?");
+        assert_eq!(json["requestedSchema"]["type"], "object");
+        assert!(json.get("Form").is_none(), "got: {json}");
+        // `mode` is optional on a form, and `null` is not one of its values.
+        assert!(json.get("mode").is_none(), "got: {json}");
+    }
+
+    /// The URL variant carries its mode, and that is what selects it on the
+    /// way back in.
+    #[test]
+    fn url_params_serialize_flat_and_keep_their_mode() {
+        let params: ElicitRequestParams =
+            ElicitRequestParams::url("https://example.com/pay", "Confirm the payment").into();
+
+        let json = serde_json::to_value(&params).expect("serialize");
+        assert_eq!(json["mode"], "url");
+        assert_eq!(json["url"], "https://example.com/pay");
+        assert_eq!(json["message"], "Confirm the payment");
+        assert!(json.get("Url").is_none(), "got: {json}");
+    }
+
+    /// `mode` is the discriminator: absent or `"form"` reads as a form, `"url"`
+    /// as a URL request.
+    #[test]
+    fn mode_selects_the_variant_on_the_way_in() {
+        let form: ElicitRequestParams = serde_json::from_value(serde_json::json!({
+            "message": "Your name?",
+            "requestedSchema": { "type": "object", "properties": {} }
+        }))
+        .expect("a form omitting its mode must parse");
+        assert!(matches!(form, ElicitRequestParams::Form(_)));
+
+        let stated: ElicitRequestParams = serde_json::from_value(serde_json::json!({
+            "mode": "form",
+            "message": "Your name?",
+            "requestedSchema": { "type": "object", "properties": {} }
+        }))
+        .expect("a form stating its mode must parse");
+        assert!(matches!(stated, ElicitRequestParams::Form(_)));
+
+        let url_json = serde_json::json!({
+            "mode": "url",
+            "message": "Confirm the payment",
+            "url": "https://example.com/pay",
+            "elicitationId": "e-1"
+        });
+        let url: ElicitRequestParams =
+            serde_json::from_value(url_json).expect("a url request must parse");
+        assert!(matches!(url, ElicitRequestParams::Url(_)));
+    }
+
+    /// A payload that names its mode and is then malformed hears about the
+    /// missing field, not about failing to match any variant.
+    #[test]
+    fn a_malformed_variant_reports_its_own_error() {
+        let err = serde_json::from_value::<ElicitRequestParams>(serde_json::json!({
+            "mode": "url",
+            "message": "Confirm the payment"
+        }))
+        .expect_err("a url request without a url must not parse");
+
+        // Which field is named first differs by profile -- the legacy URL
+        // variant also requires `elicitationId` -- so what matters is that the
+        // error is the URL variant's own, and not the "data did not match any
+        // variant" an untagged union would produce.
+        let err = err.to_string();
+        assert!(
+            err.contains("missing field"),
+            "error should name a missing field, got: {err}"
+        );
     }
 
     fn create_test_schema() -> RequestSchema {

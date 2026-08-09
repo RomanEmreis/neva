@@ -284,11 +284,11 @@ async fn test_elicitation_sep1034_defaults(mut ctx: Context) -> Result<String, E
 async fn test_elicitation_sep1330_enums(mut ctx: Context) -> Result<String, Error> {
     let params = ElicitRequestParams::form("Pick your options")
         .with_required(
-            "untitled_single",
+            "untitledSingle",
             &json!({ "type": "string", "enum": ["option1", "option2", "option3"] }),
         )
         .with_required(
-            "titled_single",
+            "titledSingle",
             &json!({
                 "type": "string",
                 "oneOf": [
@@ -299,7 +299,7 @@ async fn test_elicitation_sep1330_enums(mut ctx: Context) -> Result<String, Erro
             }),
         )
         .with_required(
-            "legacy_titled",
+            "legacyEnum",
             &json!({
                 "type": "string",
                 "enum": ["opt1", "opt2", "opt3"],
@@ -307,14 +307,14 @@ async fn test_elicitation_sep1330_enums(mut ctx: Context) -> Result<String, Erro
             }),
         )
         .with_required(
-            "untitled_multi",
+            "untitledMulti",
             &json!({
                 "type": "array",
                 "items": { "type": "string", "enum": ["option1", "option2", "option3"] }
             }),
         )
         .with_required(
-            "titled_multi",
+            "titledMulti",
             &json!({
                 "type": "array",
                 "items": {

@@ -465,16 +465,18 @@ mod tests {
 
     #[test]
     fn input_required_result_roundtrips_with_tag_and_envelope() {
+        // The elicitation params sit flat in `params`, the way the spec's
+        // `ElicitRequestFormParams | ElicitRequestURLParams` union spells them
+        // -- no variant name wraps them, and a form omits `mode` entirely.
         let json = r#"{
             "resultType": "input_required",
             "inputRequests": {
                 "ask_name": {
                     "method": "elicitation/create",
-                    "params": { "Form": {
+                    "params": {
                         "message": "Your name?",
-                        "mode": null,
                         "requestedSchema": { "type": "object", "properties": {}, "required": null }
-                    }}
+                    }
                 }
             },
             "requestState": "abc.def"
@@ -494,6 +496,11 @@ mod tests {
             back["inputRequests"]["ask_name"]["method"],
             serde_json::json!("elicitation/create")
         );
+        // Round-tripped flat, and with no `mode: null` invented on the way out.
+        let params = &back["inputRequests"]["ask_name"]["params"];
+        assert_eq!(params["message"], serde_json::json!("Your name?"));
+        assert!(params.get("Form").is_none(), "got: {params}");
+        assert!(params.get("mode").is_none(), "got: {params}");
     }
 
     /// The union must keep the flat `{ method, params }` envelope for every

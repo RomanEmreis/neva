@@ -26,26 +26,25 @@ server:
 
   # -- MRTR: `inputResponses` / `requestState` live in params (TBD: no issue yet) -------
   # neva reads and writes them inside `_meta`; the schema puts them on
-  # `InputResponseRequestParams` next to `name`/`arguments`. Round 1 is
-  # correct on every one of these -- round 2 is what fails.
+  # `InputResponseRequestParams` next to `name`/`arguments`, so neva's client
+  # and server agree with each other and with nobody else. Round 1 is correct
+  # on every one of these -- round 2, the retry carrying the answers, is what
+  # fails, which is why each of these is one failing check out of two or three.
   #
-  # -- MRTR: elicitation params carry an external `Form` tag (TBD: no issue yet) --------
-  # `ElicitRequestParams` serializes as `{"Form": {...}}` instead of the flat
-  # `{"message": ..., "requestedSchema": ...}`, so the wire-schema check fails
-  # alongside the round-2 checks above.
+  # The elicitation params these carry are no longer wrapped in a `{"Form": ...}`
+  # object; that fix is what took four scenarios off this list.
   - input-required-result-basic-elicitation
   - input-required-result-basic-sampling
   - input-required-result-basic-list-roots
   - input-required-result-request-state
   - input-required-result-multiple-input-requests
   - input-required-result-multi-round
-  - input-required-result-missing-input-response
   - input-required-result-non-tool-request
-  - input-required-result-result-type
   - input-required-result-tampered-state
   - input-required-result-capability-check
-  - input-required-result-ignore-extra-params
-  - input-required-result-validate-input
+  # Same cause, reported as a warning (a SHOULD) rather than a failure -- which
+  # the runner still counts, so it needs an entry of its own.
+  - input-required-result-ignore-extra-params:sep-2322-ignore-unexpected-params
 
 client:
   # -- OAuth client flows (#86) -------------------------------------------

@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## 0.5.2
 
 ### Fixed
+* **Elicitation params are written as the spec's union, not as a tagged enum.**
+  `ElicitRequestParams` derived its `Serialize`/`Deserialize`, so an
+  `elicitation/create` carried `{"Form": {"message": ..., "requestedSchema":
+  ...}}`. The spec types the params as a bare union -- `ElicitRequestFormParams
+  | ElicitRequestURLParams` -- whose fields sit directly in `params`, so no
+  conforming client found `message` or `requestedSchema` where it looks for
+  them and elicitation did not work with any peer but neva. The variant is now
+  chosen by the `mode` discriminator on the way in (absent or `"form"` for a
+  form, `"url"` for a URL request) and written flat on the way out; a form no
+  longer emits `"mode": null`, which is not one of the values the spec allows.
+  Affects both protocol profiles.
 * **An unimplemented method answers `404 Not Found` over HTTP.** The JSON-RPC
   code was already `-32601`, but the status was `200`. The spec pins the `404`
   so a caller can tell "this endpoint speaks MCP and has no such method" from
