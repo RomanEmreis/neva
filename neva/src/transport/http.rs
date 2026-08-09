@@ -139,6 +139,21 @@ pub(crate) fn decode_header_value(value: &str) -> Option<String> {
 #[cfg(not(feature = "legacy-spec"))]
 pub(crate) const MCP_PROTOCOL_VERSION: &str = "MCP-Protocol-Version";
 
+/// `X-Content-Type-Options: nosniff`, sent on every SSE response.
+///
+/// A browser client reading the stream with `fetch()` is the case this exists
+/// for: without the header Firefox buffers the body to sniff its type, and an
+/// SSE stream that stays open never reaches the size that ends the sniff -- so
+/// no event is delivered and the connection simply appears to hang. Chrome does
+/// not sniff a declared `text/event-stream`, which is what makes the failure
+/// look like a browser quirk rather than a missing header.
+///
+/// Non-browser consumers (neva's own client, an SDK proxy) never sniff, so this
+/// costs them nothing. It is also the ordinary hardening answer for any
+/// endpoint whose content type must be taken at its word.
+#[cfg(feature = "http-server-volga")]
+pub(crate) const CONTENT_TYPE_OPTIONS: (&str, &str) = ("X-Content-Type-Options", "nosniff");
+
 const DEFAULT_ADDR: &str = "127.0.0.1:3000";
 const DEFAULT_MCP_ENDPOINT: &str = "/mcp";
 

@@ -110,6 +110,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   rather than as the client getting the protocol wrong.
 
 ### Fixed
+* **SSE responses carry `X-Content-Type-Options: nosniff`.** A browser reading
+  the stream with `fetch()` is the case this closes: without the header Firefox
+  buffers the body to sniff its type, and a stream that stays open never reaches
+  the size that ends the sniff -- so no event arrives and the request simply
+  appears to hang, while Chrome (which does not sniff a declared
+  `text/event-stream`) works, making it look like a browser quirk. Non-browser
+  consumers never sniff, so nothing else changes.
+* **A step-up widens the grant a restored token already holds.** The scopes an
+  earlier round asked for were remembered in memory only, so after a restart
+  against a persistent `TokenStore` the first `insufficient_scope` challenge
+  built its re-authorization from the demanded scopes alone and traded away
+  everything the stored token carried -- the next call for one of those was
+  challenged in turn, and the two ping-ponged. The stored token's own granted
+  `scope` now stands in, and the configured scopes cover a server that omitted
+  it (RFC 6749 section 5.1).
 * **A resumed response stream is let go once it has answered.** The drain that
   reads a resumed stream is the one written for a `POST` reply, which the server
   closes after the response; the stream a resumption reopens is the session's

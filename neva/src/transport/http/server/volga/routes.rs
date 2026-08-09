@@ -38,7 +38,7 @@ pub(crate) async fn post(manager: Dc<HttpContext>, req: HttpRequest) -> HttpResu
     match outcome {
         StreamResponse::Stream { stream, .. } => {
             let stream = futures_util::StreamExt::map(stream, Ok::<SseMessage, VolgaError>);
-            sse!(stream)
+            sse!(stream; [crate::transport::http::CONTENT_TYPE_OPTIONS])
         }
         StreamResponse::Complete(resp) => VolgaEngine::adapt_response(resp),
     }
@@ -74,9 +74,15 @@ pub(crate) async fn get(manager: Dc<HttpContext>, req: HttpRequest) -> HttpResul
                 .map(str::to_owned);
             let stream = futures_util::StreamExt::map(stream, Ok::<SseMessage, VolgaError>);
             if let Some(id) = session_id {
-                sse!(stream; [(handlers::MCP_SESSION_ID, id)])
+                sse!(
+                    stream;
+                    [
+                        (handlers::MCP_SESSION_ID, id),
+                        crate::transport::http::CONTENT_TYPE_OPTIONS,
+                    ]
+                )
             } else {
-                sse!(stream)
+                sse!(stream; [crate::transport::http::CONTENT_TYPE_OPTIONS])
             }
         }
         StreamResponse::Complete(resp) => VolgaEngine::adapt_response(resp),

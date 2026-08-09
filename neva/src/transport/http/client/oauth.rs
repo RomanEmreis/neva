@@ -548,12 +548,39 @@ impl OAuthSession {
         })
     }
 
-    /// Scopes the last completed flow asked for.
+    /// Scopes this session is known to hold, most authoritative source first.
+    ///
+    /// The in-memory set records what the last flow *in this process* asked
+    /// for, so it is empty after a restart -- and a persistent
+    /// [`TokenStore`] hands back a token whose grant the process never saw. Left
+    /// at that, the first `insufficient_scope` challenge after a restart would
+    /// build its step-up from the demanded scopes alone and trade away
+    /// everything the restored token already carried, which is the opposite of
+    /// what SEP-2350 asks for. So a stored token's own `scope` -- what RFC 6749
+    /// has the authorization server report as *granted* -- stands in for it.
+    ///
+    /// A server may omit `scope` when it granted exactly what was asked
+    /// (RFC 6749 section 5.1), leaving nothing recorded. Configured scopes
+    /// answer that case: they are what every flow of this session requests, so
+    /// they are held by construction.
     fn requested_scopes(&self) -> Vec<String> {
-        self.requested_scopes
+        let asked = self
+            .requested_scopes
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+            .clone();
+        if !asked.is_empty() {
+            return asked;
+        }
+
+        self.config
+            .store
+            .get(&self.resource)
+            .and_then(|tokens| tokens.scope)
+            .map(|granted| split_scopes(&granted))
+            .filter(|granted| !granted.is_empty())
+            .or_else(|| self.config.scopes.clone())
+            .unwrap_or_default()
     }
 
     fn set_requested_scopes(&self, scopes: Vec<String>) {
@@ -1281,5 +1308,68 @@ mod tests {
         let config = OAuthClientConfig::default().with_token_store(store);
         let session = OAuthSession::new(config, "http://127.0.0.1:3000/mcp").unwrap();
         assert_eq!(session.bearer().as_deref(), Some("stored-token"));
+    }
+
+    /// A token restored from a persistent store carries a grant this process
+    /// never asked for. Unless it counts as held, the first
+    /// `insufficient_scope` challenge after a restart builds its step-up from
+    /// the demanded scopes alone and trades away everything the restored token
+    /// had -- so the next call for one of those is challenged in turn, and the
+    /// two ping-pong.
+    #[test]
+    fn a_restored_grant_is_what_a_step_up_widens() {
+        let stored = |scope: Option<&str>| {
+            let store = InMemoryTokenStore::new();
+            store.put(
+                "http://127.0.0.1:3000/mcp",
+                &TokenSet {
+                    access_token: "stored-token".into(),
+                    token_type: "Bearer".into(),
+                    refresh_token: None,
+                    scope: scope.map(str::to_owned),
+                    id_token: None,
+                    expires_at: None,
+                },
+            );
+            store
+        };
+
+        // The granted scope on the stored token is the record of the grant.
+        let config = OAuthClientConfig::default().with_token_store(stored(Some("read write")));
+        let session = OAuthSession::new(config, "http://127.0.0.1:3000/mcp").unwrap();
+        assert_eq!(
+            session.requested_scopes(),
+            vec!["read".to_string(), "write".to_string()],
+            "a restored grant must be held, or a step-up replaces it"
+        );
+
+        // A server that granted exactly what was asked may omit `scope`
+        // (RFC 6749 5.1). Configured scopes are what every flow of this session
+        // requests, so they stand in.
+        let config = OAuthClientConfig::default()
+            .with_token_store(stored(None))
+            .with_scopes(["read", "write"]);
+        let session = OAuthSession::new(config, "http://127.0.0.1:3000/mcp").unwrap();
+        assert_eq!(
+            session.requested_scopes(),
+            vec!["read".to_string(), "write".to_string()]
+        );
+
+        // Nothing stored and nothing configured: there is no grant to widen,
+        // and any demanded scope is genuinely new.
+        let config = OAuthClientConfig::default().with_token_store(stored(None));
+        let session = OAuthSession::new(config, "http://127.0.0.1:3000/mcp").unwrap();
+        assert!(session.requested_scopes().is_empty());
+
+        // What this process actually asked for still wins over both.
+        let config = OAuthClientConfig::default()
+            .with_token_store(stored(Some("read")))
+            .with_scopes(["configured"]);
+        let session = OAuthSession::new(config, "http://127.0.0.1:3000/mcp").unwrap();
+        session.set_requested_scopes(vec!["from-this-process".to_string()]);
+        assert_eq!(
+            session.requested_scopes(),
+            vec!["from-this-process".to_string()]
+        );
     }
 }
