@@ -503,7 +503,10 @@ async fn exchange(
         let stream = sse_stream::SseStream::from_bytes_stream(resp.bytes_stream());
         let ids = request_ids(&req);
 
-        let mut owed = drain_post_sse(stream, &resp_tx, &ids, &session).await;
+        let Drained {
+            mut owed,
+            last_event_id,
+        } = drain_post_sse(stream, &resp_tx, &ids, &session).await;
 
         // A stream that ended before the response is not necessarily a failed
         // request: on the session-bound transport the server may finish the
@@ -513,12 +516,16 @@ async fn exchange(
         // more than one turns a server that keeps dropping the stream into a
         // reconnect loop the caller cannot see.
         //
+        // The id is the one *this* stream stated. The session's other stream
+        // has its own position, and resuming from that one would ask the server
+        // to replay from somewhere this request never was.
+        //
         // The resumption asks for what is still owed rather than for everything
         // the `POST` carried: a batch whose stream died midway has some of its
         // answers already, and re-delivering those would resolve nothing.
         if !owed.is_empty()
             && resumable(&session)
-            && let Some(last_id) = session.last_event_id()
+            && let Some(last_id) = last_event_id
         {
             owed = resume_stream(
                 &client,
@@ -947,7 +954,7 @@ async fn handle_sse_connection(
 /// Drains a request-scoped SSE `POST` reply, forwarding every JSON-RPC message
 /// it carries to the receive loop.
 ///
-/// `ids` are the requests still owed an answer; the returned list is whatever
+/// `ids` are the requests still owed an answer; [`Drained::owed`] is whatever
 /// is *still* owed when the stream stops, so the caller can resume for exactly
 /// those and fail exactly those.
 ///
@@ -957,16 +964,25 @@ async fn handle_sse_connection(
 /// EOF would park this task on the session stream for the life of the client,
 /// one leaked connection per truncated reply, competing with the standalone
 /// `GET` for the traffic that follows.
+///
+/// The event id is reported back rather than written to the session. A legacy
+/// session runs two streams at once -- the standalone `GET` and this
+/// request-scoped `POST` -- and each has its own position. Sharing one cursor
+/// lets a `GET` frame arriving between the truncation and the resumption send
+/// this `POST` back to a place it never reached, replaying past its own
+/// terminal response, and lets a `POST` frame do the same to the `GET`'s
+/// reconnect.
 async fn drain_post_sse<S>(
     mut stream: S,
     resp_tx: &mpsc::Sender<Result<Message, Error>>,
     ids: &[crate::types::RequestId],
     session: &McpSession,
-) -> Vec<crate::types::RequestId>
+) -> Drained
 where
     S: futures_util::Stream<Item = Result<sse_stream::Sse, sse_stream::Error>> + Unpin,
 {
     let mut owed = ids.to_vec();
+    let mut last_event_id = None;
     while !owed.is_empty()
         && let Some(event) = stream.next().await
     {
@@ -975,11 +991,14 @@ where
                 // Recorded before the frame is judged: a priming frame carries
                 // no message, and is exactly where a server states the id to
                 // resume from and how long to wait before doing so.
+                //
+                // `retry:` *is* the session's: it is the server saying how long
+                // any reconnection should wait, not a position in a stream.
                 if let Some(retry) = sse.retry {
                     session.set_retry(retry);
                 }
                 if let Some(id) = sse.id.clone() {
-                    session.set_last_event_id(id);
+                    last_event_id = Some(id);
                 }
                 if is_message_event(&sse) {
                     forward_sse_message(sse, resp_tx, &mut owed).await;
@@ -992,7 +1011,20 @@ where
             }
         }
     }
-    owed
+    Drained {
+        owed,
+        last_event_id,
+    }
+}
+
+/// What one pass over a request-scoped SSE stream left behind.
+#[derive(Debug)]
+struct Drained {
+    /// Requests this `POST` carried that are still unanswered.
+    owed: Vec<crate::types::RequestId>,
+    /// The last `id:` this stream stated -- where a resumption of *this*
+    /// stream picks up, which is not where the session's other stream is.
+    last_event_id: Option<String>,
 }
 
 /// Whether a `403` is the authorization server's `insufficient_scope`, and so
@@ -1096,7 +1128,7 @@ async fn resume_stream(
     tokio::select! {
         biased;
         _ = token.cancelled() => ids.to_vec(),
-        owed = drain_post_sse(stream, resp_tx, ids, session) => owed,
+        drained = drain_post_sse(stream, resp_tx, ids, session) => drained.owed,
     }
 }
 
@@ -1476,6 +1508,7 @@ mod tests {
                 &session,
             )
             .await
+            .owed
             .is_empty(),
             "the POST stream must leave nothing owed"
         );
@@ -1486,28 +1519,45 @@ mod tests {
     /// A priming frame carries no message, and is exactly where a server states
     /// where to resume from and how long to wait -- so both have to be taken off
     /// a frame the message path skips.
+    ///
+    /// Where they go differs. `retry:` is the session's: it says how long any
+    /// reconnection waits. The `id:` belongs to this stream alone -- a legacy
+    /// session also runs the standalone `GET`, with its own position, and one
+    /// shared cursor would send each stream back to where the other had got to.
     #[tokio::test]
     async fn a_priming_frame_still_states_where_to_resume_from() {
         let session = make_session();
+        session.set_last_event_id("get-stream-7".to_string());
         let (tx, mut rx) = mpsc::channel(2);
 
         let mut priming = sse_stream::Sse::default().id("event-1");
         priming.retry = Some(500);
         let frames = vec![Ok(priming)];
 
+        let drained = drain_post_sse(
+            futures_util::stream::iter(frames),
+            &tx,
+            &[crate::types::RequestId::Number(1)],
+            &session,
+        )
+        .await;
+
         assert_eq!(
-            drain_post_sse(
-                futures_util::stream::iter(frames),
-                &tx,
-                &[crate::types::RequestId::Number(1)],
-                &session,
-            )
-            .await,
+            drained.owed,
             vec![crate::types::RequestId::Number(1)],
             "a priming frame answers nothing"
         );
         assert!(rx.try_recv().is_err(), "and delivers nothing");
-        assert_eq!(session.last_event_id(), Some("event-1".to_string()));
+        assert_eq!(
+            drained.last_event_id,
+            Some("event-1".to_string()),
+            "this stream resumes from where this stream got to"
+        );
+        assert_eq!(
+            session.last_event_id(),
+            Some("get-stream-7".to_string()),
+            "and leaves the standalone GET's own position alone"
+        );
         assert_eq!(
             session.retry_delay(SSE_RECONNECT_DELAY),
             Duration::from_millis(500),
@@ -1533,7 +1583,8 @@ mod tests {
                 &[crate::types::RequestId::Number(1)],
                 &make_session(),
             )
-            .await,
+            .await
+            .owed,
             vec![crate::types::RequestId::Number(1)]
         );
         assert!(rx.try_recv().is_err(), "no frame should be delivered");
@@ -1644,7 +1695,7 @@ mod tests {
         .await
         .expect("the drain must return instead of holding the session stream open");
 
-        assert!(owed.is_empty());
+        assert!(owed.owed.is_empty());
         assert!(matches!(rx.try_recv(), Ok(Ok(Message::Response(_)))));
         assert!(
             rx.try_recv().is_err(),

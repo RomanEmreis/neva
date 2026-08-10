@@ -1062,6 +1062,7 @@ impl Client {
         // truthful one: it says the headers were wrong, and they still are.
         let name = params.name.clone();
         let mut cursor = None;
+        let mut refreshed = false;
         // A server that keeps handing out cursors would otherwise walk this
         // recovery forever, and nothing above it can see that happening.
         for _ in 0..MAX_REFRESH_PAGES {
@@ -1069,12 +1070,23 @@ impl Client {
                 return Ok(resp);
             };
             if page.tools.iter().any(|tool| *tool.name == *name) {
+                refreshed = true;
                 break;
             }
             match page.next_cursor {
                 Some(next) => cursor = Some(next),
                 None => break,
             }
+        }
+
+        // The traversal ran out -- the listing no longer carries this tool, or
+        // it is paged further out than the cap reaches. Either way there is
+        // nothing to retry *with*: the refresh started over and cleared the
+        // registration, so a second attempt would go out exactly as bare as the
+        // first and answer a different question. The original `HeaderMismatch`
+        // is the useful answer and it stands.
+        if !refreshed {
+            return Ok(resp);
         }
 
         let id = self.generate_id()?;

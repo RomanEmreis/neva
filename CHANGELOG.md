@@ -159,6 +159,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     registry. A traversal that restarts clears what the previous one recorded,
     so a tool the server pages later would otherwise be left with no
     annotations and the retry would omit the very headers it was sent back for.
+    A traversal that ends without finding it retries nothing: there would be
+    nothing to retry *with*, and a second bare attempt would only replace the
+    refusal that explained the failure.
+* **A resumed `POST` stream picks up where that stream left off.** The event id
+  was recorded on the session, which a legacy connection shares with the
+  standalone `GET` stream -- so a `GET` frame arriving between a truncation and
+  its resumption sent the `POST` back to a position it had never reached,
+  replaying past its own terminal response, and a `POST` frame did the same to
+  the `GET`'s reconnect. Each stream now carries its own cursor; `retry:`, which
+  says how long *any* reconnection waits, stays on the session.
 * **A `404` on the standalone SSE `GET` can mean the session is gone (legacy
   profile).** Every `404` there was read as "this server offers no stream",
   which released the handshake and left the client running on a session id
