@@ -690,10 +690,30 @@ impl OAuthSession {
             )
         });
 
-        let step_up = insufficient || {
-            let held = self.requested_scopes();
-            demanded.iter().any(|scope| !held.contains(scope))
-        };
+        // Read after the lock, so a flow that finished while this caller queued
+        // behind it is already accounted for.
+        let held = self.requested_scopes();
+        let uncovered = demanded.iter().any(|scope| !held.contains(scope));
+
+        // Someone else may have completed a widening flow while this caller
+        // waited on the lock, and its token is right here. Taking it is the
+        // whole point of the single-flight lock: two callers refused for the
+        // same missing scope must not walk the user through consent twice.
+        //
+        // Trustworthy only because both halves are checked: the grant on record
+        // now covers what the challenge demanded, *and* the token is not the
+        // one that was just refused. When the challenge named no scope there is
+        // nothing to check coverage against, so a token that has since changed
+        // is the only evidence there is -- and it is the same evidence the
+        // non-step-up path already acts on.
+        if !uncovered
+            && let Some(current) = self.bearer()
+            && used != Some(&*current)
+        {
+            return Ok(current);
+        }
+
+        let step_up = insufficient || uncovered;
 
         // A configured set is the caller's decision about what this client may
         // ever ask for, and the flow below honors it to the letter -- so a
@@ -722,14 +742,6 @@ impl OAuthSession {
                     ),
                 ));
             }
-        }
-
-        // Someone else completed the flow while this caller waited.
-        if !step_up
-            && let Some(current) = self.bearer()
-            && used != Some(&*current)
-        {
-            return Ok(current);
         }
 
         // Refresh before interrupting the user: a stored refresh token
@@ -1592,6 +1604,51 @@ mod tests {
         assert_eq!(
             session.requested_scopes(),
             vec!["from-this-process".to_string()]
+        );
+    }
+
+    /// Two callers refused for the same missing scope must not walk the user
+    /// through consent twice.
+    ///
+    /// The loser of the single-flight lock arrives after the winner has
+    /// recorded the widened grant and stored its token. Forcing the step-up on
+    /// the error code alone would send it straight past that and into a second
+    /// interactive flow, for a scope it now already holds.
+    #[tokio::test]
+    async fn the_loser_of_a_step_up_takes_the_winners_token() {
+        let store = InMemoryTokenStore::new();
+        store.put(
+            "http://127.0.0.1:9/mcp",
+            &TokenSet {
+                access_token: "widened-token".into(),
+                token_type: "Bearer".into(),
+                refresh_token: None,
+                // What the winner was granted, which covers the challenge.
+                scope: Some("admin".into()),
+                id_token: None,
+                expires_at: None,
+            },
+        );
+
+        let config = OAuthClientConfig::default()
+            .require_https(false)
+            .with_token_store(store);
+        let session = OAuthSession::new(config, "http://127.0.0.1:9/mcp").unwrap();
+
+        // Nothing listens on port 9, so a run that reaches discovery fails on
+        // connect rather than hanging -- the shortcut is what keeps it away
+        // from the network at all.
+        let token = session
+            .authorize(
+                Some(r#"Bearer error="insufficient_scope", scope="admin""#),
+                Some("the-refused-token"),
+            )
+            .await
+            .expect("the grant on record already covers the challenge");
+
+        assert_eq!(
+            &*token, "widened-token",
+            "the loser must reuse what the winner obtained"
         );
     }
 

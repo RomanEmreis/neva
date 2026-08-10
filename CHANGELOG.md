@@ -140,6 +140,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   was treated as the error. That sent the caller through an interactive flow,
   replacing a perfectly valid token, to retry a request re-authorization was
   never going to fix. The challenge is parsed now, and only `error` counts.
+* **A full notification queue no longer logs itself to death (legacy
+  profile).** Reporting a full or closed session channel goes through
+  `tracing::warn!`, and that event comes straight back into the layer, under
+  the same span, aimed at the same still-full channel -- so a burst of log
+  messages recursed until the stack ran out. `tracing-core`'s own re-entrancy
+  guard does not cover it: `dispatcher::get_default` checks it only when a
+  *scoped* dispatcher is installed and takes a fast path to the global one
+  otherwise, which is how a subscriber set up with `.init()` runs.
+* **A step-up that lost the race reuses what the winner obtained.** Forcing the
+  interactive path on the `insufficient_scope` code alone skipped the
+  single-flight shortcut, so the second of two callers refused for the same
+  missing scope walked the user through consent again for a grant it already
+  held by then. The shortcut is now checked on what the challenge demanded
+  rather than on how the step-up was decided.
 * **An elicitation `mode` that is present has to be a string.** The
   discriminator is optional by *absence* -- omitting it is how a form is
   spelled -- but a `mode` of `null` (or a number, or an object) was read as "no

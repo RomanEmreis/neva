@@ -69,6 +69,46 @@ pub fn layer() -> MpscLayer {
 #[derive(Debug, Default)]
 pub struct MpscLayer;
 
+thread_local! {
+    /// Whether this thread is already inside [`MpscLayer::on_event`].
+    static DELIVERING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Held for the duration of one delivery; refuses to be taken twice on a
+/// thread.
+///
+/// Delivering a notification can itself log: a session channel that is full or
+/// closed says so with `tracing::warn!`, and that event arrives straight back
+/// in this layer, under the same span, to be delivered down the same channel.
+/// A full channel is still full, so the two would call each other until the
+/// stack ran out -- a burst of log messages taking the process down with it.
+/// The outermost delivery wins; whatever the delivery itself emits is dropped,
+/// which is the right answer anyway: it is a diagnostic *about* this channel
+/// and has no business being queued on it.
+///
+/// `tracing-core` has a guard of its own (`can_enter`), and it is not enough
+/// here: `dispatcher::get_default` checks it only when a *scoped* dispatcher is
+/// installed, and returns through a fast path straight to the global dispatcher
+/// when `SCOPED_COUNT` is zero. A subscriber installed with `.init()` -- the
+/// ordinary way, and the one [`layer`]'s own example shows -- is global, so the
+/// fast path is what runs and nothing upstream breaks the cycle. It also means
+/// a test using `with_default` cannot reproduce the recursion: that path *is*
+/// guarded.
+struct DeliveryGuard;
+
+impl DeliveryGuard {
+    /// `None` when a delivery is already in progress on this thread.
+    fn enter() -> Option<Self> {
+        (!DELIVERING.replace(true)).then_some(Self)
+    }
+}
+
+impl Drop for DeliveryGuard {
+    fn drop(&mut self) {
+        DELIVERING.set(false);
+    }
+}
+
 impl<S> Layer<S> for MpscLayer
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
@@ -80,6 +120,11 @@ where
 
     #[inline]
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
+        // See [`DeliveryGuard`]: what a delivery logs must not be delivered.
+        let Some(_delivery) = DeliveryGuard::enter() else {
+            return;
+        };
+
         let notification = build_notification(event);
         if let Some(span) = ctx.event_span(event) {
             let mut notification = notification;
@@ -254,6 +299,27 @@ impl Visit for SpanVisitor {
 mod legacy_tests {
     use tracing_subscriber::prelude::*;
 
+    /// The whole of the recursion defence: a second delivery on the same thread
+    /// is refused, and the refusal lifts once the first one is done.
+    ///
+    /// What re-enters in production is a `tracing::warn!` raised *by* the
+    /// delivery -- a full or closed channel reporting itself -- arriving back
+    /// in `on_event` under the same span and aimed at the same channel.
+    #[test]
+    fn a_delivery_refuses_to_nest() {
+        let outer = super::DeliveryGuard::enter().expect("the first delivery proceeds");
+        assert!(
+            super::DeliveryGuard::enter().is_none(),
+            "what a delivery logs must not be delivered"
+        );
+        drop(outer);
+
+        assert!(
+            super::DeliveryGuard::enter().is_some(),
+            "and the next event is delivered as usual"
+        );
+    }
+
     /// Emits inside a `request` span carrying `session_id` and returns whatever
     /// the session's channel holds by the time the emitting code is done --
     /// nothing is awaited in between on purpose.
@@ -275,6 +341,45 @@ mod legacy_tests {
             got.push(serde_json::to_value(&msg).unwrap());
         }
         got
+    }
+
+    /// The overflow of a full queue is dropped rather than queued.
+    ///
+    /// Note what this does *not* cover. The reason a full queue is dangerous is
+    /// that saying so goes through `tracing::warn!`, which comes back here
+    /// aimed at the same full channel -- and `DeliveryGuard` is what stops
+    /// that. This test cannot exercise it: a test subscriber has to be scoped
+    /// (`with_default`), and `tracing-core`'s own `can_enter` already guards
+    /// the scoped path. The recursion is reachable only under a *global*
+    /// subscriber, which a shared test binary cannot install. `DeliveryGuard`'s
+    /// own test covers the mechanism instead.
+    #[test]
+    fn a_full_queue_drops_its_overflow() {
+        let session_id = uuid::Uuid::new_v4();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        super::LOG_REGISTRY.register(session_id, 1, tx);
+
+        let subscriber = tracing_subscriber::registry().with(super::MpscLayer);
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("request", mcp_session_id = session_id.to_string());
+            let _entered = span.enter();
+            // One fills the channel; the rest each find it full, and each full
+            // send warns.
+            for i in 0..64 {
+                tracing::info!(logger = "neva", "message {i}");
+            }
+        });
+
+        super::LOG_REGISTRY.unregister(&session_id);
+
+        let mut delivered = 0;
+        while rx.try_recv().is_ok() {
+            delivered += 1;
+        }
+        assert_eq!(
+            delivered, 1,
+            "the queue holds one, and the overflow is dropped rather than queued"
+        );
     }
 
     #[test]
