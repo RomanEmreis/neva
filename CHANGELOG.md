@@ -148,6 +148,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   guard does not cover it: `dispatcher::get_default` checks it only when a
   *scoped* dispatcher is installed and takes a fast path to the global one
   otherwise, which is how a subscriber set up with `.init()` runs.
+* **A stored refresh token survives a restart.** A durable `TokenStore` outlives
+  the process; the flow state that knows how to use it does not -- so after a
+  restart there was no client and no metadata to refresh *with*, and a
+  perfectly good refresh token went unused while the user was walked through
+  consent again. The refresh is now retried once both have been rebuilt, on the
+  way to the interactive flow rather than instead of it. Only with a configured
+  `client_id`: without one the client registers afresh, and a refresh token
+  belongs to the client it was issued to.
+* **A `403` on the standalone SSE `GET` re-authorizes like one on a `POST`
+  (legacy profile).** Only a `401` triggered the flow there, so a server that
+  guards its session stream with a scope its `POST`s do not need was unusable:
+  the client never asked for that scope and the stream died with the session.
+  The `POST` path already treated a `403` carrying an `insufficient_scope`
+  challenge as a step-up; the `GET` path now does the same.
 * **A step-up that lost the race reuses what the winner obtained.** Forcing the
   interactive path on the `insufficient_scope` code alone skipped the
   single-flight shortcut, so the second of two callers refused for the same

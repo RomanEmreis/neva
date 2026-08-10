@@ -633,6 +633,16 @@ impl OAuthSession {
     /// authorization is required or no flow has completed yet.
     async fn maintain(&self, state: &mut Option<FlowState>) -> Option<Arc<str>> {
         let FlowState { client, metadata } = state.as_ref()?;
+        self.refresh_with(client, metadata).await
+    }
+
+    /// [`Self::maintain`] for a client and metadata held directly rather than
+    /// cached -- what the reconstruct-after-restart path has in hand.
+    async fn refresh_with(
+        &self,
+        client: &OAuthClient,
+        metadata: &AuthorizationServerMetadata,
+    ) -> Option<Arc<str>> {
         match client.token(&self.resource, metadata).await {
             Ok(Some(tokens)) => {
                 let token: Arc<str> = tokens.access_token.into();
@@ -777,6 +787,30 @@ impl OAuthSession {
 
         let redirect_uri = self.config.handler.redirect_uri().await?;
         let client = self.build_client(&server_metadata, &redirect_uri).await?;
+
+        // A durable [`TokenStore`] outlives the process; the flow state that
+        // knows how to use it does not. So after a restart the refresh attempt
+        // above found nothing to refresh *with* -- no client, no metadata --
+        // and a stored refresh token, still perfectly good, went unused while
+        // the user was walked through consent again. Both halves have just been
+        // rebuilt, so ask once more before that.
+        //
+        // Only with a configured `client_id`. Without one `build_client`
+        // registers a *new* client (RFC 7591), and a refresh token belongs to
+        // the client it was issued to -- offering it under a new identity asks
+        // the authorization server to refuse.
+        if !step_up
+            && self.config.client_id.is_some()
+            && let Some(token) = self.refresh_with(&client, &server_metadata).await
+            && used != Some(&*token)
+        {
+            // Keep what made it work, so the next refresh is the cheap path.
+            *flight = Some(FlowState {
+                client,
+                metadata: server_metadata,
+            });
+            return Ok(token);
+        }
 
         // What to ask for, most specific first. A configured set is the
         // caller's decision and overrides everything -- and by here it already
@@ -1604,6 +1638,99 @@ mod tests {
         assert_eq!(
             session.requested_scopes(),
             vec!["from-this-process".to_string()]
+        );
+    }
+
+    /// A whole authorization server on one socket: the resource document, its
+    /// own metadata, and a token endpoint that answers a refresh.
+    async fn spawn_authorization_server() -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let read = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+                let root = format!("http://{addr}");
+
+                let body = if request.contains("/.well-known/oauth-protected-resource") {
+                    format!(r#"{{"resource":"{root}/mcp","authorization_servers":["{root}"]}}"#)
+                } else if request.contains("/.well-known/") {
+                    format!(
+                        r#"{{"issuer":"{root}","token_endpoint":"{root}/token",
+                             "authorization_endpoint":"{root}/authorize",
+                             "response_types_supported":["code"]}}"#
+                    )
+                } else {
+                    r#"{"access_token":"refreshed-after-restart","token_type":"Bearer","expires_in":3600}"#.to_string()
+                };
+
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+        addr
+    }
+
+    /// A handler that supplies a redirect URI but refuses to interact, so a
+    /// flow that should never have reached the user says so instead of opening
+    /// a browser and waiting five minutes.
+    struct NoInteraction;
+
+    impl AuthorizationHandler for NoInteraction {
+        fn redirect_uri(&self) -> BoxFuture<'_, Result<String, Error>> {
+            Box::pin(async { Ok("http://127.0.0.1:8919/callback".to_string()) })
+        }
+
+        fn authorize(&self, _url: String) -> BoxFuture<'_, Result<CallbackParams, Error>> {
+            Box::pin(async {
+                Err(Error::new(
+                    ErrorCode::InvalidRequest,
+                    "the stored refresh token should have been used instead",
+                ))
+            })
+        }
+    }
+
+    /// A durable token store outlives the process; the flow state that knows
+    /// how to use it does not. After a restart the refresh token in that store
+    /// is still good, and spending it is the difference between a silent
+    /// renewal and walking the user through consent again.
+    #[tokio::test]
+    async fn a_stored_refresh_token_survives_a_restart() {
+        let addr = spawn_authorization_server().await;
+        let resource = format!("http://{addr}/mcp");
+
+        let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+        store.put(&resource, &stale_tokens());
+
+        // A fresh process: a store with a usable refresh token, and no flow
+        // state at all.
+        let config = OAuthClientConfig {
+            store: store.clone(),
+            ..OAuthClientConfig::default()
+                .require_https(false)
+                .with_client_id("cid")
+                .with_handler(NoInteraction)
+        };
+        let session = OAuthSession::new(config, &resource).unwrap();
+        assert!(
+            session.flow.lock().await.is_none(),
+            "a restart starts with nothing cached"
+        );
+
+        let token = session
+            .authorize(None, Some("the-expired-token"))
+            .await
+            .expect("the stored refresh token is what answers this");
+
+        assert_eq!(&*token, "refreshed-after-restart");
+        assert!(
+            session.flow.lock().await.is_some(),
+            "and what made it work is kept, so the next refresh is the cheap path"
         );
     }
 

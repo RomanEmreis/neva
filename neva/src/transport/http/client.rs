@@ -834,8 +834,17 @@ async fn handle_sse_connection(
 
         // A 401 under a managed OAuth session re-runs the authorization
         // flow once and retries the subscription with the fresh token.
+        //
+        // So does a `403` whose challenge says `insufficient_scope`, on the
+        // same reasoning the `POST` path uses: the token is valid and simply
+        // does not cover this, which is the one `403` a wider grant fixes. A
+        // server that guards its session stream with a scope its `POST`s do not
+        // need would otherwise be unusable -- the client would never ask for
+        // that scope, and the stream would die with the session.
         #[cfg(feature = "client-oauth")]
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+        if (resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            || (resp.status() == reqwest::StatusCode::FORBIDDEN
+                && insufficient_scope(resp.headers())))
             && !reauthorized
             && let ClientAuth::OAuth(oauth) = &auth
         {
