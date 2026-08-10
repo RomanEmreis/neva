@@ -140,6 +140,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   was treated as the error. That sent the caller through an interactive flow,
   replacing a perfectly valid token, to retry a request re-authorization was
   never going to fix. The challenge is parsed now, and only `error` counts.
+* **The Bearer challenge is found wherever the server put it.** Only the first
+  `WWW-Authenticate` value was read, so a server that lists `Basic` first and
+  `Bearer` on a second line -- both legal -- was answered as if it had offered
+  no challenge at all: no `resource_metadata` pointer, no `scope`, and no
+  step-up. Several challenges *inside* one value were already handled.
+* **The RFC 8707 resource indicator is the one the accepted metadata
+  declares.** The authorization request always named the endpoint URL, even
+  when the Protected Resource Metadata had been found at the origin and
+  declares the origin. An authorization server that enforces its own advertised
+  identifier would refuse that request, or issue a token audienced to something
+  the resource never claimed.
 * **An `insufficient_scope` challenge is a step-up even when it names no
   scope.** The `scope` attribute is optional in RFC 6750, and the decision was
   read only off the scopes the challenge named -- so a server that said the

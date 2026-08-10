@@ -410,11 +410,7 @@ async fn exchange(
                 || (status == reqwest::StatusCode::FORBIDDEN
                     && insufficient_scope(resp.headers())) =>
         {
-            let challenge = resp
-                .headers()
-                .get(reqwest::header::WWW_AUTHENTICATE)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned);
+            let challenge = bearer_challenge(resp.headers());
             match oauth
                 .authorize(challenge.as_deref(), bearer.as_deref())
                 .await
@@ -843,11 +839,7 @@ async fn handle_sse_connection(
             && !reauthorized
             && let ClientAuth::OAuth(oauth) = &auth
         {
-            let challenge = resp
-                .headers()
-                .get(reqwest::header::WWW_AUTHENTICATE)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned);
+            let challenge = bearer_challenge(resp.headers());
             match oauth
                 .authorize(challenge.as_deref(), bearer.as_deref())
                 .await
@@ -1043,13 +1035,30 @@ struct Drained {
 fn insufficient_scope(headers: &reqwest::header::HeaderMap) -> bool {
     use volga_oauth_client::{BearerChallenge, OAuthErrorCode};
 
-    headers
-        .get(reqwest::header::WWW_AUTHENTICATE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|challenge| BearerChallenge::parse(challenge).ok())
+    bearer_challenge(headers)
+        .and_then(|challenge| BearerChallenge::parse(&challenge).ok())
         .is_some_and(|challenge| {
             matches!(challenge.error(), Some(OAuthErrorCode::InsufficientScope))
         })
+}
+
+/// The `WWW-Authenticate` value carrying the Bearer challenge, if any.
+///
+/// `WWW-Authenticate` may be sent more than once, and a server is free to list
+/// `Basic` first -- so reading only the first value would miss the Bearer
+/// challenge behind it and answer a `401`/`403` as if none had been offered.
+/// Several challenges *within* one value are already handled downstream:
+/// `BearerChallenge::parse` walks the list and skips the other schemes.
+#[cfg(feature = "client-oauth")]
+fn bearer_challenge(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    use volga_oauth_client::BearerChallenge;
+
+    headers
+        .get_all(reqwest::header::WWW_AUTHENTICATE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find(|value| BearerChallenge::parse(value).is_ok())
+        .map(str::to_owned)
 }
 
 /// Whether this session can resume a dropped stream.
@@ -1333,6 +1342,31 @@ mod tests {
 
         // And no challenge at all.
         assert!(!insufficient_scope(&reqwest::header::HeaderMap::new()));
+
+        // `WWW-Authenticate` may be sent more than once, and the Bearer
+        // challenge need not come first. Reading only the first value would
+        // answer as if none had been offered.
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.append(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"Basic realm="legacy""#.parse().expect("a header value"),
+        );
+        headers.append(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"Bearer error="insufficient_scope", scope="admin""#
+                .parse()
+                .expect("a header value"),
+        );
+        assert!(
+            insufficient_scope(&headers),
+            "the Bearer challenge counts wherever in the list it sits"
+        );
+
+        // Several challenges inside *one* value are the parser's job, and it
+        // does them -- so this must not regress into scanning only the first.
+        assert!(challenged(
+            r#"Basic realm="legacy", Bearer error="insufficient_scope""#
+        ));
     }
 
     fn make_session() -> Arc<McpSession> {

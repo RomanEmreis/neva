@@ -786,10 +786,18 @@ impl OAuthSession {
             }
         }
 
+        // The RFC 8707 resource indicator is the identifier the *accepted*
+        // metadata declares, not the endpoint this client happens to talk to.
+        // They are the same thing whenever the document was found under the
+        // endpoint's own path -- that is what validating it checks -- but a
+        // document served at the origin describes the origin, and asking for a
+        // token audienced to the endpoint would either be refused by an
+        // authorization server that enforces its own advertised identifier, or
+        // grant a token for an audience the resource never claimed.
         let request = client
             .authorization_request(&server_metadata)
             .with_scopes(scopes.clone())
-            .with_resource(self.resource.clone())
+            .with_resource(resource_metadata.resource.clone())
             .build()
             .map_err(flow_error)?;
 
@@ -1297,6 +1305,35 @@ mod tests {
         addr
     }
 
+    /// A server with one MCP endpoint that keeps its metadata at the root:
+    /// `404` under the endpoint's path, and a document describing the origin at
+    /// `/.well-known/oauth-protected-resource`.
+    async fn spawn_root_document() -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let read = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+                let root = format!("http://{addr}");
+                let resp = if request.contains("/.well-known/oauth-protected-resource/mcp") {
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .to_string()
+                } else {
+                    let body =
+                        format!(r#"{{"resource":"{root}","authorization_servers":["{root}"]}}"#);
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+        addr
+    }
+
     /// The origin fallback exists for a server that keeps its one document at
     /// the root, which the path-based derivation never reaches. It must not
     /// exist for a path-based document that *answered* and was refused: falling
@@ -1332,6 +1369,26 @@ mod tests {
         assert!(
             !msg.contains("no usable resource metadata"),
             "the origin must not have been tried at all: {msg}"
+        );
+
+        // A genuine miss falls through to the origin, and what comes back is
+        // the origin's own document -- `resource` included. That value is what
+        // rides the authorization request as the RFC 8707 indicator, so an
+        // authorization server enforcing its metadata's identifier sees the
+        // resource that actually claimed the grant.
+        let root_only = spawn_root_document().await;
+        let config = OAuthClientConfig::default().require_https(false);
+        let session = OAuthSession::new(config, &format!("http://{root_only}/mcp")).unwrap();
+        let discovery = DiscoveryClient::with_config(session.config.client_config());
+
+        let found = session
+            .discover_resource_metadata(&discovery)
+            .await
+            .expect("the origin document answers");
+        assert_eq!(
+            found.resource,
+            format!("http://{root_only}"),
+            "the accepted document describes the origin, and says so"
         );
 
         // A genuine miss still falls through to the origin, and says so by
