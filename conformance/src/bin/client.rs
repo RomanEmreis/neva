@@ -203,7 +203,20 @@ impl AuthorizationHandler for RedirectReader {
     }
 }
 
-#[tokio::main]
+/// Two workers, not one per core.
+///
+/// The suite starts every client scenario at once -- two dozen of these
+/// processes plus two dozen mock servers -- so a runtime sized to the machine
+/// leaves a small CI runner with far more runnable threads than cores. That
+/// costs `sse-retry` in particular: it measures the wall-clock gap between a
+/// stream closing and the reconnect, against the 500ms the server asked for
+/// with a 200ms late tolerance, and a timer that fires on a starved thread
+/// spends that tolerance on scheduling. This fixture opens one connection and
+/// makes a handful of calls; it has no use for a work-stealing pool.
+///
+/// `multi_thread` rather than `current_thread` because `Client::connect` uses
+/// `block_in_place`, which the current-thread runtime refuses.
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
