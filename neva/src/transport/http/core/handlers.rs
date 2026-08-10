@@ -420,19 +420,26 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
     // and answering the handshake with "start a new session" would be a loop.
     #[cfg(feature = "legacy-spec")]
     if !is_init && headers.contains_key(MCP_SESSION_ID) && !ctx.sse_registry.is_live(&id) {
-        return PostPrep::Reply(
-            http::Response::builder()
-                .status(http::StatusCode::NOT_FOUND)
-                .header(http::header::CONTENT_TYPE, "application/json")
-                .body(Bytes::from(
-                    serde_json::to_vec(&reject_post(
-                        &msg,
-                        Error::new(ErrorCode::InvalidRequest, "Session not found"),
-                    ))
-                    .unwrap_or_default(),
-                ))
-                .unwrap_or_default(),
-        );
+        // A notification is never answered, rejection included: it carries no
+        // id, so a JSON-RPC reply to it addresses nothing and matches nothing
+        // on the other side. `reject_post_each` says so by answering `None`
+        // here (and for a batch that is notifications throughout), and the
+        // `404` alone carries the refusal -- which is all the caller needs to
+        // learn that its session is gone.
+        let reply = reject_post_each(&msg, |_| {
+            Error::new(ErrorCode::InvalidRequest, "Session not found")
+        });
+
+        let mut builder = http::Response::builder().status(http::StatusCode::NOT_FOUND);
+        let body = match reply {
+            Some(reply) => {
+                builder = builder.header(http::header::CONTENT_TYPE, "application/json");
+                Bytes::from(serde_json::to_vec(&reply).unwrap_or_default())
+            }
+            None => Bytes::new(),
+        };
+
+        return PostPrep::Reply(builder.body(body).unwrap_or_default());
     }
 
     // Notification fast-path: 202 Accepted, no oneshot.
@@ -882,8 +889,14 @@ fn reject_post_each(
 /// header that was wrong for every request underneath it -- where the verdict
 /// on each request is the same one.
 ///
-/// Falls back to an unaddressed reply when there is no request to address:
-/// the POST is still answered, since the status is what carries the rejection.
+/// Falls back to an unaddressed reply when there is no request to address.
+///
+/// That fallback is for the header gates below, where the 2026-07-28 revision
+/// leaves a notification POST's requirements undefined and the diagnostic is
+/// worth more than the empty body. Where the protocol *does* speak -- the
+/// legacy stale-session `404` -- the caller uses [`reject_post_each`] directly
+/// and sends nothing, because a notification is never answered.
+#[cfg(not(feature = "legacy-spec"))]
 fn reject_post(msg: &Message, err: Error) -> Message {
     // `Error` is not `Clone` -- its cause is a boxed `dyn StdError` -- and a
     // batch needs one reply per request, all saying the same thing.
@@ -2126,6 +2139,68 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
         assert_eq!(body["id"], 1);
         assert_eq!(body["error"]["code"], i32::from(ErrorCode::InvalidRequest));
+    }
+
+    /// The `404` still applies to a notification -- the session really is gone
+    /// -- but a notification carries no id, so a JSON-RPC reply to it addresses
+    /// nothing and matches nothing on the other side. The status is the whole
+    /// answer.
+    #[cfg(feature = "legacy-spec")]
+    #[tokio::test]
+    async fn a_dead_session_answers_a_notification_with_status_alone() {
+        let dead = uuid::Uuid::new_v4().to_string();
+
+        let notification = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": { "requestId": 1 }
+        });
+        let batch = serde_json::json!([notification, notification]);
+
+        for body in [notification.clone(), batch] {
+            let (ctx, _rx) = make_ctx();
+            let req = post_builder()
+                .header(MCP_SESSION_ID, &dead)
+                .body(Bytes::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap();
+
+            let resp = handle_post(req, &ctx).await;
+            assert_eq!(resp.status(), http::StatusCode::NOT_FOUND);
+            assert!(
+                resp.body().is_empty(),
+                "a notification must not be answered, rejection included; got {}",
+                String::from_utf8_lossy(resp.body())
+            );
+            assert!(
+                !resp.headers().contains_key(http::header::CONTENT_TYPE),
+                "an empty body claims no content type"
+            );
+        }
+    }
+
+    /// A batch that mixes the two is answered for its requests only: they have
+    /// slots waiting, and the notifications alongside them still get nothing.
+    #[cfg(feature = "legacy-spec")]
+    #[tokio::test]
+    async fn a_dead_session_answers_only_the_requests_in_a_mixed_batch() {
+        let (ctx, _rx) = make_ctx();
+        let body = serde_json::json!([
+            { "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": 9 } },
+            { "jsonrpc": "2.0", "method": "tools/list", "id": 7 }
+        ]);
+
+        let req = post_builder()
+            .header(MCP_SESSION_ID, uuid::Uuid::new_v4().to_string())
+            .body(Bytes::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let resp = handle_post(req, &ctx).await;
+        assert_eq!(resp.status(), http::StatusCode::NOT_FOUND);
+
+        let replies: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+        let replies = replies.as_array().expect("a batch is answered by a batch");
+        assert_eq!(replies.len(), 1, "only the request is answered");
+        assert_eq!(replies[0]["id"], 7);
     }
 
     #[cfg(feature = "legacy-spec")]

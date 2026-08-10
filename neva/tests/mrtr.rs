@@ -209,6 +209,7 @@ static FETCHES: AtomicUsize = AtomicUsize::new(0);
 static CHARGES: AtomicUsize = AtomicUsize::new(0);
 static RECEIPTS: AtomicUsize = AtomicUsize::new(0);
 static LOST_RESPONSE_COMMITS: AtomicUsize = AtomicUsize::new(0);
+static IGNORED_ANSWER_COMMITS: AtomicUsize = AtomicUsize::new(0);
 static CONCURRENT_FINAL_COMMITS: AtomicUsize = AtomicUsize::new(0);
 
 #[tokio::test(flavor = "multi_thread")]
@@ -332,6 +333,138 @@ async fn final_round_replay_is_idempotent_after_a_lost_response() {
         LOST_RESPONSE_COMMITS.load(Ordering::SeqCst),
         1,
         "on_commit must not fire again on a lost-response retry"
+    );
+
+    handle.abort();
+}
+
+/// An answer the server ignores must not buy a fresh run of the final round.
+///
+/// The idempotency key folds in a digest of the round's answers, so that one
+/// minted state echoed with two *different* answers cannot serve the first
+/// answer's result for the second. But the server drops an answer that is
+/// unsolicited or already settled -- so a replay can add a junk key, change
+/// nothing the handler sees, and still present a different raw
+/// `inputResponses`. Keyed on the raw map that is a different key, the cache
+/// misses, and the final handler runs again with its `on_commit` effects: an
+/// idempotency guard that anyone can step around by appending a byte.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ignored_answer_does_not_buy_a_second_run_of_the_final_round() {
+    IGNORED_ANSWER_COMMITS.store(0, Ordering::SeqCst);
+
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("greet", |mut ctx: Context| async move {
+        let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
+            .with_required("name", "string")
+            .into();
+        let res = ctx.elicit("name", params).await?;
+        let name = res
+            .content
+            .and_then(|c| c.get("name").and_then(|v| v.as_str().map(str::to_owned)))
+            .unwrap_or_else(|| "stranger".into());
+        ctx.on_commit(async move {
+            IGNORED_ANSWER_COMMITS.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        Ok::<String, Error>(format!("hello {name}"))
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
+    let url = format!("http://{addr}/mcp");
+
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "greet", "arguments": {},
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
+    });
+    let r1: serde_json::Value = routed(client.post(&url), &call)
+        .json(&call)
+        .send()
+        .await
+        .expect("round 1 send")
+        .json()
+        .await
+        .expect("round 1 json");
+    let state = r1["result"]["requestState"]
+        .as_str()
+        .expect("requestState present")
+        .to_string();
+    let key = r1["result"]["inputRequests"]
+        .as_object()
+        .expect("inputRequests object")
+        .keys()
+        .next()
+        .expect("one input request")
+        .clone();
+
+    let answer = serde_json::json!({ "action": "accept", "content": { "name": "octocat" } });
+    let final_round = |id: i32, responses: serde_json::Value| {
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": { "name": "greet", "arguments": {},
+                "requestState": state,
+                "inputResponses": responses,
+                "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
+        })
+    };
+
+    let first = final_round(2, serde_json::json!({ key.clone(): answer }));
+    let r2: serde_json::Value = routed(client.post(&url), &first)
+        .json(&first)
+        .send()
+        .await
+        .expect("final send")
+        .json()
+        .await
+        .expect("final json");
+    assert_eq!(
+        r2.pointer("/result/content/0/text")
+            .and_then(|v| v.as_str()),
+        Some("hello octocat"),
+        "final round must complete: {r2}"
+    );
+    assert_eq!(IGNORED_ANSWER_COMMITS.load(Ordering::SeqCst), 1);
+
+    // The same state and the same accepted answer, plus a key the server never
+    // asked for. The handler sees exactly what it saw the first time.
+    let padded = final_round(
+        3,
+        serde_json::json!({
+            key: answer,
+            "never-requested": { "action": "accept", "content": { "name": "impostor" } }
+        }),
+    );
+    let r3: serde_json::Value = routed(client.post(&url), &padded)
+        .json(&padded)
+        .send()
+        .await
+        .expect("padded send")
+        .json()
+        .await
+        .expect("padded json");
+
+    assert_eq!(
+        r3.pointer("/result/content/0/text")
+            .and_then(|v| v.as_str()),
+        Some("hello octocat"),
+        "the padded replay must be served from the cache: {r3}"
+    );
+    assert_eq!(
+        IGNORED_ANSWER_COMMITS.load(Ordering::SeqCst),
+        1,
+        "an answer the server ignores must not re-run the final round"
     );
 
     handle.abort();

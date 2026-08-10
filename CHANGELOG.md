@@ -117,6 +117,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   appears to hang, while Chrome (which does not sniff a declared
   `text/event-stream`) works, making it look like a browser quirk. Non-browser
   consumers never sniff, so nothing else changes.
+* **An ignored MRTR answer no longer buys a second run of the final round.**
+  The idempotency key folded in a digest of the raw `inputResponses` off the
+  wire, but the server *drops* an answer that is unsolicited or already settled
+  -- so a replay could append a key nobody asked for, leave the handler's input
+  identical, and still present a different key. The cache missed, and the final
+  handler ran again with its `on_commit` effects: a guard anyone could step
+  around by adding a byte. The digest is taken over the answers the round
+  actually resolved to, which makes the key a function of the work the cache
+  exists to deduplicate.
+* **A stale session answers a notification with the status alone (legacy
+  profile).** The `404` for a terminated or expired `Mcp-Session-Id` fabricated
+  a JSON-RPC error with a `null` id when the body carried no request. A
+  notification has no id and is never answered, rejection included -- such a
+  reply addresses nothing and matches nothing on the other side. The body is
+  now empty for a notification (and for a batch that is notifications
+  throughout); a batch that mixes the two is still answered for its requests.
 * **`insufficient_scope` is read off the challenge's `error` parameter.** The
   `403` re-authorization gate searched the whole `WWW-Authenticate` value for
   the string, so a challenge that merely *mentioned* it -- an

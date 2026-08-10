@@ -1454,23 +1454,34 @@ impl App {
         // incoming state's sealed segment (the ciphertext+tag after the last
         // `.` -- `rsplit_once` keeps grabbing it regardless of the leading
         // `v1.kid.` header segments -- unique per minted state thanks to the
-        // random AEAD nonce) *plus* a
-        // digest of this round's `inputResponses`. The answers digest matters
-        // because the *same* minted state can be echoed with *different*
-        // answers -- a client (or attacker) replaying one round-1 blob with two
-        // different `inputResponses` would otherwise hit the first answer's
-        // cached result for the second. Folding in the answers' digest keeps
-        // those apart, while a genuine lost-response retry -- same state *and*
-        // same answers -- still hits. Only committed *final* rounds are ever
-        // cached, so a hit here is by construction a replay of one.
+        // random AEAD nonce) *plus* a digest of the answers this round actually
+        // resolved to. The answers digest matters because the *same* minted
+        // state can be echoed with *different* answers -- a client (or
+        // attacker) replaying one round-1 blob with two different
+        // `inputResponses` would otherwise hit the first answer's cached result
+        // for the second. Folding in the answers' digest keeps those apart,
+        // while a genuine lost-response retry -- same state *and* same answers
+        // -- still hits. Only committed *final* rounds are ever cached, so a
+        // hit here is by construction a replay of one.
+        //
+        // The digest is taken over the *seeded* answers rather than the raw
+        // `inputResponses` off the wire, and the difference is the whole
+        // protection. `seed_mrtr_ctx` drops an answer that is unsolicited or
+        // already settled, so two requests can carry different `inputResponses`
+        // and still resolve to identical input for the handler. Keying on the
+        // raw map would give those two different keys: a replay that merely
+        // adds a junk key, or re-answers a key the state already sealed, would
+        // miss the cache and run the final handler -- and its `on_commit`
+        // effects -- a second time. Keying on what the handler will actually
+        // see makes the key a function of the work, which is what the cache is
+        // there to deduplicate.
         #[cfg(not(feature = "legacy-spec"))]
         let state_tag: Option<String> = if mrtr_method {
             req.state().and_then(|state| {
                 let (_, tag) = state.rsplit_once('.')?;
-                let answers = req
-                    .input_responses()
+                let answers = mrtr_arc
                     .as_ref()
-                    .map(crate::types::mrtr::state::input_responses_digest)
+                    .map(|arc| crate::types::mrtr::state::input_responses_digest(&arc.answers))
                     .unwrap_or_default();
                 Some(format!("{tag}.{answers}"))
             })
