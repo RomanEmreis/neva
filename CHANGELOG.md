@@ -156,6 +156,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   way to the interactive flow rather than instead of it. Only with a configured
   `client_id`: without one the client registers afresh, and a refresh token
   belongs to the client it was issued to.
+* **Renewing a token no longer forgets what it was granted.** An authorization
+  server may leave `scope` out of a refresh response when the grant has not
+  changed (RFC 6749 section 5.1), and the renewed token set replaces the stored
+  one -- so a silent renewal erased the only record of what the token covered.
+  The next `insufficient_scope` challenge then had nothing to widen and asked
+  for the demanded scope alone, trading the grant away instead of adding to it,
+  which is what SEP-2350 exists to prevent. The known scope now rides along,
+  exactly as the refresh token itself already does.
 * **A `403` on the standalone SSE `GET` re-authorizes like one on a `POST`
   (legacy profile).** Only a `401` triggered the flow there, so a server that
   guards its session stream with a scope its `POST`s do not need was unusable:

@@ -643,8 +643,28 @@ impl OAuthSession {
         client: &OAuthClient,
         metadata: &AuthorizationServerMetadata,
     ) -> Option<Arc<str>> {
+        // What the grant was known to cover going in. A refresh response may
+        // leave `scope` out when the grant is unchanged (RFC 6749 section 5.1),
+        // and the renewed set *replaces* the stored one -- so a renewal would
+        // otherwise erase the only record of what the token carries. The next
+        // `insufficient_scope` challenge would then widen from nothing and
+        // trade the grant away, which is the very thing SEP-2350 forbids. The
+        // refresh token itself is carried over for the same reason one step
+        // down, inside `OAuthClient::token`.
+        let carried = self
+            .config
+            .store
+            .get(&self.resource)
+            .and_then(|tokens| tokens.scope);
+
         match client.token(&self.resource, metadata).await {
-            Ok(Some(tokens)) => {
+            Ok(Some(mut tokens)) => {
+                if tokens.scope.is_none()
+                    && let Some(scope) = carried
+                {
+                    tokens.scope = Some(scope);
+                    self.config.store.put(&self.resource, &tokens);
+                }
                 let token: Arc<str> = tokens.access_token.into();
                 self.set_token(token.clone());
                 Some(token)
@@ -1509,6 +1529,53 @@ mod tests {
         assert_eq!(stored.refresh_token.as_deref(), Some("refresh-1"));
         // The flow state survives for the next refresh.
         assert!(session.flow.lock().await.is_some());
+    }
+
+    /// A refresh response may leave `scope` out when the grant is unchanged
+    /// (RFC 6749 section 5.1), and the renewed set replaces the stored one. So
+    /// unless the known grant rides along, simply renewing a token forgets what
+    /// it covers -- and the next step-up then widens from nothing, replacing
+    /// the grant instead of adding to it.
+    #[tokio::test]
+    async fn a_renewal_keeps_the_grant_it_did_not_restate() {
+        let addr = spawn_token_endpoint(
+            r#"{"access_token":"fresh-token","token_type":"Bearer","expires_in":3600}"#,
+        )
+        .await;
+
+        let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+        let mut restored = stale_tokens();
+        restored.scope = Some("read".into());
+        store.put("http://127.0.0.1:3000/mcp", &restored);
+
+        let flow = FlowState {
+            client: OAuthClient::new("cid")
+                .with_config(ClientConfig::new().require_https(false))
+                .with_token_store(store.clone()),
+            metadata: AuthorizationServerMetadata::new("http://issuer.local")
+                .with_token_endpoint(format!("http://{addr}/token")),
+        };
+        // Nothing recorded in memory: the state a restart leaves behind, where
+        // the store is the only thing that knows what was granted.
+        let session = session_with(store.clone(), Some(flow));
+
+        assert_eq!(
+            session.refreshed_bearer().await.as_deref(),
+            Some("fresh-token")
+        );
+        assert_eq!(
+            store
+                .get("http://127.0.0.1:3000/mcp")
+                .and_then(|tokens| tokens.scope)
+                .as_deref(),
+            Some("read"),
+            "a renewal that restated nothing must not erase the granted scope"
+        );
+        assert_eq!(
+            session.requested_scopes(),
+            vec!["read".to_string()],
+            "and a step-up must still have that grant to widen"
+        );
     }
 
     #[tokio::test]
