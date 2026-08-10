@@ -2044,6 +2044,58 @@ fn pick_free_port() -> u16 {
 
 /// Attaches the routing headers MCP 2026-07-28 requires on every request, the
 /// way a conforming client derives them: from the body it is about to send.
+/// `requestState` and `inputResponses` are protocol fields on the methods MRTR
+/// runs on -- `tools/call`, `prompts/get`, `resources/read` -- and nowhere
+/// else. A custom method registered with `map_handler` owns its own params, so
+/// a numeric `requestState` there is a perfectly good argument and judging it
+/// by the MRTR shapes would refuse a request this server was written to serve.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_custom_method_owns_its_own_params() {
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new().with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_handler("custom/echo", || async move { "served" });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
+    let url = format!("http://{addr}/mcp");
+
+    // Both names, both of a shape MRTR would refuse.
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "custom/echo",
+        "params": {
+            "requestState": 42,
+            "inputResponses": ["not", "an", "object"],
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }
+        }
+    });
+
+    let resp: serde_json::Value = routed(client.post(&url), &call)
+        .json(&call)
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+
+    assert!(
+        resp.get("error").is_none(),
+        "a custom method's own params must reach its handler: {resp}"
+    );
+
+    handle.abort();
+}
+
 fn routed(req: reqwest::RequestBuilder, body: &serde_json::Value) -> reqwest::RequestBuilder {
     let method = body["method"].as_str().unwrap_or_default();
     let req = req

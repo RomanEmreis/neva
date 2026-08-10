@@ -140,6 +140,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   was treated as the error. That sent the caller through an interactive flow,
   replacing a perfectly valid token, to retry a request re-authorization was
   never going to fix. The challenge is parsed now, and only `error` counts.
+* **A tool property keeps the keywords it was declared with (legacy profile).**
+  `ToolSchema` kept every keyword it did not model, but the property schemas
+  under it were read as just `type` + `description`, so a property's `enum`,
+  `format`, `$ref`, `minimum` and the rest were dropped on the way out -- the
+  server published a property wider than the one it declared, and a client
+  validating against it would accept values the tool refuses. A property that
+  states no `type` no longer acquires one either: `{"$ref": ...}` came back out
+  as `{"type": "object", ...}`, a constraint nobody wrote.
+* **The MRTR field check applies to MRTR methods only.** `requestState` and
+  `inputResponses` are protocol fields on `tools/call`, `prompts/get` and
+  `resources/read`; on a method registered with `App::map_handler` they are the
+  handler's own params, and a numeric `requestState` there is a perfectly good
+  argument. Judging every request by the MRTR shapes refused requests the
+  server was written to serve.
 * **`x-mcp-header` registrations expire with the listing that carried them.**
   Each tool's annotations were kept indefinitely, so a client went on mirroring
   arguments into `Mcp-Param-*` from a schema the server may have withdrawn --

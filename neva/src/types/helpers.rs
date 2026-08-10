@@ -103,6 +103,26 @@ impl Default for PropertyType {
     }
 }
 
+impl PropertyType {
+    /// The reading for a declaration that states no `type` at all.
+    ///
+    /// Distinct from the [`Default`] (`object`), which is the right answer for
+    /// a *schema* -- the root of an `inputSchema` is an object whether or not
+    /// it says so. A single property is not: `{"$ref": ...}` and
+    /// `{"enum": [..]}` state no type on purpose, and inventing one for them
+    /// publishes a constraint the author did not write.
+    #[inline]
+    pub(crate) fn unstated() -> Self {
+        Self::None
+    }
+
+    /// Whether this is [`Self::unstated`], and so must not be serialized.
+    #[inline]
+    pub(crate) fn is_unstated(&self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
 impl From<&str> for PropertyType {
     #[inline]
     fn from(s: &str) -> Self {

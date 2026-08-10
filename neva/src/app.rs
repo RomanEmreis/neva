@@ -1352,11 +1352,18 @@ impl App {
         // The HTTP preamble rejects both earlier so it can attach the `400` the
         // spec asks for; this seam is what every other transport gets, since
         // the requirements are on the message and not on how it travelled.
+        //
+        // The MRTR field check rides along, but only for the methods MRTR runs
+        // on. `requestState` and `inputResponses` are protocol fields *there*;
+        // on a custom `map_handler` method they are just params, and a handler
+        // is entitled to a numeric `requestState` of its own. Judging those by
+        // the MRTR shapes would refuse a request this server was written to
+        // serve.
         #[cfg(not(feature = "legacy-spec"))]
         if let Some(err) = req
             .required_meta_error()
             .or_else(|| req.unsupported_version_error())
-            .or_else(|| req.malformed_mrtr_error())
+            .or_else(|| mrtr_method.then(|| req.malformed_mrtr_error()).flatten())
         {
             let mut resp = Response::error(req_id, err);
             if let Some(session_id) = session_id {
