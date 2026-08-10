@@ -677,7 +677,20 @@ impl OAuthSession {
             .map(split_scopes)
             .unwrap_or_default();
 
-        let step_up = {
+        // `insufficient_scope` is itself the statement that this grant is too
+        // narrow, and RFC 6750 leaves the `scope` attribute optional -- so a
+        // server may say it without naming what it wants. Reading only the
+        // named scopes would call that "not a step-up", take the refresh path,
+        // and spend the exchange's one retry on a token that is short by
+        // exactly as much as before.
+        let insufficient = challenge.as_ref().is_some_and(|challenge| {
+            matches!(
+                challenge.error(),
+                Some(volga_oauth_client::OAuthErrorCode::InsufficientScope)
+            )
+        });
+
+        let step_up = insufficient || {
             let held = self.requested_scopes();
             demanded.iter().any(|scope| !held.contains(scope))
         };

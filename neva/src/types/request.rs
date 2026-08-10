@@ -429,24 +429,22 @@ impl Request {
             ))
         };
 
-        // Both locations the accessors read, in the same order and for the same
-        // reason: a 0.5.x peer states these in `_meta`, a current one on the
-        // params, and either may be the malformed one.
-        // An explicit `null` is how JSON spells an absent optional -- serde
-        // itself writes one for a `None` without `skip_serializing_if` -- so it
-        // is read as the field being unstated rather than as the wrong type.
-        let stated = |source: &serde_json::Value, key: &str| {
-            source.get(key).filter(|v| !v.is_null()).cloned()
-        };
-
+        // `null` counts as stating the field, and stating it wrong. The spec
+        // types these as `string` and `object` and makes them optional by
+        // *absence* -- an omitted property, not a null one -- so `null` is a
+        // value of the wrong type like any other. Excusing it would leave the
+        // hole this check exists to close: a retry meaning to continue a chain
+        // would read as starting fresh, and its answers be taken as offered up
+        // front.
+        //
         // Both locations the accessors read, in the same order and for the same
         // reason: a 0.5.x peer states these in `_meta`, a current one on the
         // params, and either may be the malformed one.
         for source in [Some(params), params.get("_meta")].into_iter().flatten() {
-            if stated(source, "requestState").is_some_and(|v| !v.is_string()) {
+            if source.get("requestState").is_some_and(|v| !v.is_string()) {
                 return malformed("requestState", "a string");
             }
-            if stated(source, "inputResponses").is_some_and(|v| !v.is_object()) {
+            if source.get("inputResponses").is_some_and(|v| !v.is_object()) {
                 return malformed("inputResponses", "an object");
             }
         }
@@ -775,6 +773,12 @@ mod tests {
                 "requestState": 42,
                 "_meta": { "requestState": "from-meta" }
             }),
+            // `null` states the field, and states it wrong: the spec makes
+            // these optional by absence, so a peer with nothing to say leaves
+            // them out. Excusing `null` would read a retry as a fresh call and
+            // take its answers as offered up front.
+            json!({ "name": "greet", "requestState": null }),
+            json!({ "name": "greet", "inputResponses": null }),
         ] {
             assert!(
                 call(params.clone()).malformed_mrtr_error().is_some(),
@@ -790,9 +794,6 @@ mod tests {
                 "requestState": "v1.0.sealed",
                 "inputResponses": { "who": { "action": "accept" } }
             }),
-            // `null` is how serde writes an absent optional, and every peer
-            // that omits the field is entitled to spell it this way.
-            json!({ "name": "greet", "requestState": null }),
         ] {
             assert!(
                 call(params.clone()).malformed_mrtr_error().is_none(),

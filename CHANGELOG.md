@@ -140,6 +140,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   was treated as the error. That sent the caller through an interactive flow,
   replacing a perfectly valid token, to retry a request re-authorization was
   never going to fix. The challenge is parsed now, and only `error` counts.
+* **An `insufficient_scope` challenge is a step-up even when it names no
+  scope.** The `scope` attribute is optional in RFC 6750, and the decision was
+  read only off the scopes the challenge named -- so a server that said the
+  grant was too narrow without saying what it wanted was treated as an ordinary
+  expiry. The client then refreshed, and spent the exchange's one retry on a
+  token short by exactly as much as before. The error code alone now forces the
+  interactive path.
+* **An SSE `retry: 0` means reconnect immediately.** Zero was dropped as if
+  nothing had been asked for, so a server wanting instant recovery got the
+  three-second default (or whatever it had asked for earlier) after every
+  disconnect. Zero is a delay like any other; "nothing was stated" is now a
+  state of its own rather than sharing zero's encoding.
 * **A tool property keeps the keywords it was declared with (legacy profile).**
   `ToolSchema` kept every keyword it did not model, but the property schemas
   under it were read as just `type` + `description`, so a property's `enum`,
@@ -251,8 +263,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   whose answers looked like ones offered up front, and with the field malformed
   in one of its two locations and well-formed in the other, the accessors would
   quietly read the other one. Now `InvalidParams`, checked where the rest of the
-  request's shape is. An explicit `null` still reads as unstated -- that is how
-  JSON spells an absent optional.
+  request's shape is, and only for the methods MRTR runs on. An explicit `null`
+  counts as stating the field wrongly: the spec types these as `string` and
+  `object` and makes them optional by *absence*, so a peer with nothing to say
+  omits them rather than nulling them.
 * **A notification goes on the session stream the moment it is emitted (legacy
   profile).** `notification::fmt::layer()` used to hand every event to a channel
   of its own, drained by a spawned task that forwarded it to the session's SSE
