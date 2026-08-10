@@ -70,11 +70,22 @@ impl<'de> Deserialize<'de> for ElicitRequestParams {
     ///
     /// `mode` is optional on the form variant -- omitting it *is* how a form is
     /// spelled -- so anything that is not `"url"` is read as a form.
+    ///
+    /// Optional by *absence*, though. A `mode` that is present has to be a
+    /// string: the union spells this discriminator `"form"` or `"url"` and
+    /// admits leaving it out, and `null` is none of the three. Reading a
+    /// stated-but-unusable `mode` as "no mode" would hand a handler a malformed
+    /// request dressed as a well-formed form.
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::Error as DeError;
 
         let value = Value::deserialize(deserializer)?;
-        let is_url = value.get("mode").and_then(Value::as_str) == Some("url");
+        let stated = value.get("mode");
+        if stated.is_some_and(|mode| !mode.is_string()) {
+            return Err(D::Error::custom("`mode` must be a string"));
+        }
+
+        let is_url = stated.and_then(Value::as_str) == Some("url");
         if is_url {
             serde_json::from_value(value)
                 .map(Self::Url)
@@ -905,6 +916,44 @@ mod tests {
         let url: ElicitRequestParams =
             serde_json::from_value(url_json).expect("a url request must parse");
         assert!(matches!(url, ElicitRequestParams::Url(_)));
+    }
+
+    /// The discriminator is optional by *absence*. A `mode` that is present but
+    /// not a string is none of the three things the union admits, and reading
+    /// it as "no mode" would hand a handler a malformed request dressed as a
+    /// well-formed form.
+    #[test]
+    fn a_stated_mode_has_to_be_a_string() {
+        let form_body = |mode: serde_json::Value| {
+            serde_json::json!({
+                "mode": mode,
+                "message": "Your name?",
+                "requestedSchema": { "type": "object", "properties": {} }
+            })
+        };
+
+        for mode in [
+            serde_json::json!(null),
+            serde_json::json!(0),
+            serde_json::json!(true),
+            serde_json::json!({ "form": true }),
+            serde_json::json!(["form"]),
+        ] {
+            let err = serde_json::from_value::<ElicitRequestParams>(form_body(mode.clone()))
+                .expect_err("a non-string mode is not a mode");
+            assert!(
+                err.to_string().contains("`mode` must be a string"),
+                "wrong error for mode {mode}: {err}"
+            );
+        }
+
+        // A string the union does not define still reaches the variant, which
+        // reports it as the unknown value it is.
+        assert!(
+            serde_json::from_value::<ElicitRequestParams>(form_body(serde_json::json!("bogus")))
+                .is_err(),
+            "an undefined mode must not pass as a form"
+        );
     }
 
     /// A payload that names its mode and is then malformed hears about the

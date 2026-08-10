@@ -140,6 +140,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   was treated as the error. That sent the caller through an interactive flow,
   replacing a perfectly valid token, to retry a request re-authorization was
   never going to fix. The challenge is parsed now, and only `error` counts.
+* **An elicitation `mode` that is present has to be a string.** The
+  discriminator is optional by *absence* -- omitting it is how a form is
+  spelled -- but a `mode` of `null` (or a number, or an object) was read as "no
+  mode" and the payload delivered to the handler as a well-formed form. The
+  union spells it `"form"` or `"url"` or leaves it out, and none of those is
+  `null`.
 * **The Bearer challenge is found wherever the server put it.** Only the first
   `WWW-Authenticate` value was read, so a server that lists `Basic` first and
   `Bearer` on a second line -- both legal -- was answered as if it had offered
