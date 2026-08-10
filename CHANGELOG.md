@@ -153,7 +153,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     client then re-lists and retries once. The listing fetched for that retry
     is good for it regardless of its own TTL -- otherwise the remedy could
     never work against the `ttlMs: 0` that an absent `ttlMs` also means, and an
-    annotated tool would be uncallable.
+    annotated tool would be uncallable. That exception is scoped to the tool
+    that was refused: every other tool on the page is an ordinary registration.
+  * The refresh follows `nextCursor` until the refused tool is back in the
+    registry. A traversal that restarts clears what the previous one recorded,
+    so a tool the server pages later would otherwise be left with no
+    annotations and the retry would omit the very headers it was sent back for.
+* **A `404` on the standalone SSE `GET` can mean the session is gone (legacy
+  profile).** Every `404` there was read as "this server offers no stream",
+  which released the handshake and left the client running on a session id
+  every later POST would be refused for -- and the same revision gives `404` on
+  this verb the meaning "the session named here is one I no longer hold", which
+  neva's own server now answers. When it arrives is what tells the two apart:
+  before the stream has ever opened it is the endpoint not routing `GET` (which
+  is how servers answer an unhandled verb, the spec's `405` notwithstanding),
+  and after a stream that worked the route plainly exists, so the `404` is
+  about the session and the connection ends instead of carrying on dead.
 * **What the authorization server *granted* is what the session records.** The
   scopes a completed flow *asked for* were remembered instead, so a server that
   granted a subset -- and said so in the token response's `scope`, as RFC 6749

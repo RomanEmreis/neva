@@ -305,6 +305,86 @@ async fn an_annotated_tool_survives_a_listing_that_is_stale_on_arrival() {
     handle.abort();
 }
 
+/// The refusal recovery has to reach the tool it was sent back for, wherever
+/// the server pages it.
+///
+/// A refreshed traversal starts over, clearing what the previous one
+/// registered, so stopping at the first page would leave a later-paged tool
+/// with no annotations at all -- and the retry would omit exactly the headers
+/// it was refused for. The server pages at ten, so the annotated tool is named
+/// to sort onto the second page.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_refusal_recovery_pages_until_it_finds_the_tool() {
+    use neva::client::Client;
+
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app =
+        App::new().with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")));
+
+    for i in 0..10 {
+        app.map_tool(
+            format!("a{i:02}_filler"),
+            || async move { "ok".to_string() },
+        );
+    }
+
+    app.map_tool("z_query", |region: String| async move { region })
+        .with_input_schema(|_| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "region": { "type": "string", "x-mcp-header": "Region" }
+                }
+            })
+            .into()
+        })
+        .with_arg_names(["region"]);
+
+    let handle = tokio::spawn(async move { app.run().await });
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match tokio::net::TcpStream::connect(&addr).await {
+            Ok(_) => break,
+            Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await
+            }
+            Err(err) => panic!("server never became reachable: {err}"),
+        }
+    }
+
+    let mut client = Client::new().with_options(|opt| {
+        opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
+            .with_timeout(std::time::Duration::from_secs(5))
+    });
+    client.connect().await.expect("connect");
+
+    // Only the first page, which is exactly what leaves the annotated tool
+    // unregistered.
+    let page = client.list_tools(None).await.expect("tools/list");
+    assert!(
+        page.next_cursor.is_some() && !page.tools.iter().any(|t| &*t.name == "z_query"),
+        "this test needs the annotated tool to sit past the first page"
+    );
+
+    let result = client
+        .call_tool("z_query", [("region", "us-west1")])
+        .await
+        .expect("the recovery must page far enough to refresh the refused tool");
+
+    assert_eq!(
+        serde_json::to_value(&result)
+            .ok()
+            .as_ref()
+            .and_then(|v| v.pointer("/content/0/text").and_then(|v| v.as_str())),
+        Some("us-west1"),
+        "got: {result:?}"
+    );
+
+    handle.abort();
+}
+
 fn pick_free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();

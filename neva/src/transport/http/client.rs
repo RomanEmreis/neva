@@ -797,6 +797,9 @@ async fn handle_sse_connection(
     // accepted and the session must fail rather than loop.
     #[cfg(feature = "client-oauth")]
     let mut reauthorized = false;
+    // Whether this session has ever had the standalone stream open. It is what
+    // tells the two meanings of a `404` on this verb apart; see below.
+    let mut streamed = false;
     loop {
         let bearer = auth.fresh_bearer().await;
         let mut req = client
@@ -854,18 +857,27 @@ async fn handle_sse_connection(
         }
 
         // A server that hosts no standalone stream says so with `405 Method Not
-        // Allowed` -- the status the spec names for exactly this -- or with a
-        // `404`, which is what a POST-only endpoint answers a verb it does not
-        // route. Neither is a failure: the GET stream is optional, and a client
-        // that treats "there is no stream here" as a dead session refuses to
-        // talk to a conformant server that simply chose not to offer one.
+        // Allowed`, the status the spec names for exactly this. That is not a
+        // failure: the GET stream is optional, and a client that reads "there
+        // is no stream here" as a dead session refuses to talk to a conformant
+        // server that simply chose not to offer one.
         //
         // The init POST is waiting on `sse_ready`, so it is released rather
         // than cancelled, and the session carries on over POST alone.
-        if matches!(
-            resp.status(),
-            reqwest::StatusCode::METHOD_NOT_ALLOWED | reqwest::StatusCode::NOT_FOUND
-        ) {
+        //
+        // `404` carries both meanings on this verb, and *when* it arrives is
+        // what separates them. Before the stream has ever opened it is the
+        // endpoint not routing `GET` at all -- servers answer a verb they do
+        // not handle that way, the spec's `405` notwithstanding -- and the
+        // handshake that just completed says the session is live. After a
+        // stream that worked, the route plainly exists, so a `404` is the
+        // session the request named being one the server no longer holds. That
+        // one must not be swallowed: releasing the wait would leave the client
+        // running on a session id every later POST is going to be refused for,
+        // so it falls through to the cancellation below.
+        if resp.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED
+            || (resp.status() == reqwest::StatusCode::NOT_FOUND && !streamed)
+        {
             #[cfg(feature = "tracing")]
             tracing::debug!(
                 logger = "neva",
@@ -901,6 +913,8 @@ async fn handle_sse_connection(
             .map_ok(|event| handle_event(event, &session, &resp_tx))
             .map_err(handle_error);
 
+        // The route exists, so from here a `404` can only be about the session.
+        streamed = true;
         session.notify_sse_initialized();
 
         loop {

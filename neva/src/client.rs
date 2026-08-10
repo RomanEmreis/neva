@@ -40,6 +40,15 @@ use crate::types::{
     GetTaskPayloadRequestParams, ListTasksRequestParams, ListTasksResult, Task, TaskPayload,
 };
 
+/// How many `tools/list` pages the `HeaderMismatch` recovery will walk looking
+/// for the tool it was sent back for.
+///
+/// The traversal ends on its own at a page without a `nextCursor`; this is the
+/// bound for a server that never stops handing them out, which would otherwise
+/// keep a single failed call walking forever with nothing above it able to see.
+#[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+const MAX_REFRESH_PAGES: usize = 64;
+
 pub mod batch;
 mod handler;
 mod notification_handler;
@@ -560,19 +569,22 @@ impl Client {
         self.list_tools_inner(
             cursor,
             #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
-            false,
+            None,
         )
         .await
     }
 
-    /// [`Self::list_tools`], plus whether this listing was fetched to satisfy a
-    /// call the server refused for missing `Mcp-Param-*` headers -- which makes
-    /// it usable for that one retry regardless of its TTL. See
-    /// [`Self::retry_after_header_mismatch`].
+    /// [`Self::list_tools`], plus the name of the tool this listing was fetched
+    /// to retry -- whose registration becomes usable once regardless of its
+    /// TTL. Only that one: every other tool on the page is an ordinary
+    /// registration, and handing it the same exception would let a later call
+    /// mirror from a listing it never refreshed.
+    ///
+    /// See [`Self::retry_after_header_mismatch`].
     async fn list_tools_inner(
         &mut self,
         cursor: Option<Cursor>,
-        #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))] grace: bool,
+        #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))] grace: Option<&str>,
     ) -> Result<ListToolsResult, Error> {
         // A cursor-less call starts the listing over, so it replaces what the
         // previous traversal registered rather than merging into it.
@@ -605,7 +617,7 @@ impl Client {
         let Ok(mut result) = serde_json::from_value::<ListToolsResult>(ok.result.clone()) else {
             return;
         };
-        self.register_param_headers(&mut result, true, false);
+        self.register_param_headers(&mut result, true, None);
         if let Ok(value) = serde_json::to_value(&result) {
             ok.result = value;
         }
@@ -632,7 +644,12 @@ impl Client {
     /// from the listing is not all that hiding it does -- see
     /// [`Self::blocked_tool_error`].
     #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
-    fn register_param_headers(&mut self, result: &mut ListToolsResult, fresh: bool, grace: bool) {
+    fn register_param_headers(
+        &mut self,
+        result: &mut ListToolsResult,
+        fresh: bool,
+        grace: Option<&str>,
+    ) {
         use crate::shared::param_headers;
 
         if fresh {
@@ -657,7 +674,11 @@ impl Client {
                     if !headers.is_empty() {
                         self.options.param_headers.insert(
                             tool.name.to_string(),
-                            param_headers::Registration::new(headers, ttl_ms, grace),
+                            param_headers::Registration::new(
+                                headers,
+                                ttl_ms,
+                                grace == Some(&*tool.name),
+                            ),
                         );
                     }
                     true
@@ -1006,6 +1027,11 @@ impl Client {
     /// Exactly one retry, and only for `-32020`. A server that answers the
     /// fresh attempt the same way is saying something the listing cannot fix,
     /// and repeating would turn that into a loop the caller cannot see.
+    ///
+    /// The refresh follows `nextCursor` until the refused tool is back in the
+    /// registry: a traversal that restarts clears what the previous one
+    /// registered, so a tool the server pages later would otherwise be left
+    /// without the annotations the retry needs.
     #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
     async fn retry_after_header_mismatch(
         &mut self,
@@ -1019,8 +1045,11 @@ impl Client {
             return Ok(resp);
         }
 
-        // A listing this client cannot obtain leaves the original answer as the
-        // truthful one: it says the headers were wrong, and they still are.
+        // Refresh until the tool that was refused has actually been re-listed.
+        // Stopping at the first page would leave a tool the server pages later
+        // with no registration at all -- the traversal starts over, so the old
+        // one is cleared -- and the retry would omit exactly the headers it was
+        // sent back for.
         //
         // Fetched with grace: this listing is the server's current answer, and
         // the retry below is what it was fetched for. Judging it by its own TTL
@@ -1028,8 +1057,24 @@ impl Client {
         // an absent `ttlMs` also means -- the re-fetch would be stale on
         // arrival, the retry would omit the headers again, and the call could
         // never succeed.
-        if self.list_tools_inner(None, true).await.is_err() {
-            return Ok(resp);
+        //
+        // A listing this client cannot obtain leaves the original answer as the
+        // truthful one: it says the headers were wrong, and they still are.
+        let name = params.name.clone();
+        let mut cursor = None;
+        // A server that keeps handing out cursors would otherwise walk this
+        // recovery forever, and nothing above it can see that happening.
+        for _ in 0..MAX_REFRESH_PAGES {
+            let Ok(page) = self.list_tools_inner(cursor, Some(&name)).await else {
+                return Ok(resp);
+            };
+            if page.tools.iter().any(|tool| *tool.name == *name) {
+                break;
+            }
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
         }
 
         let id = self.generate_id()?;
@@ -3167,13 +3212,13 @@ mod param_header_registry_tests {
         let mut client = Client::new();
 
         let mut first = listing(serde_json::json!([annotated("search")]));
-        client.register_param_headers(&mut first, true, false);
+        client.register_param_headers(&mut first, true, None);
         assert!(client.options.param_headers.contains_key("search"));
 
         // The tool is gone from the refreshed listing -- a later direct
         // `call_tool("search", ..)` must not keep mirroring its argument.
         let mut second = listing(serde_json::json!([plain("other")]));
-        client.register_param_headers(&mut second, true, false);
+        client.register_param_headers(&mut second, true, None);
         assert!(client.options.param_headers.is_empty());
     }
 
@@ -3187,7 +3232,7 @@ mod param_header_registry_tests {
         let mut client = Client::new();
 
         let mut immediate = listing(serde_json::json!([annotated("search")]));
-        client.register_param_headers(&mut immediate, true, false);
+        client.register_param_headers(&mut immediate, true, None);
         {
             let entry = client
                 .options
@@ -3206,7 +3251,7 @@ mod param_header_registry_tests {
         }
 
         let mut with_room = listing_with_ttl(serde_json::json!([annotated("search")]), 60_000);
-        client.register_param_headers(&mut with_room, true, false);
+        client.register_param_headers(&mut with_room, true, None);
         let entry = client
             .options
             .param_headers
@@ -3232,7 +3277,7 @@ mod param_header_registry_tests {
         let mut client = Client::new();
 
         let mut refetched = listing(serde_json::json!([annotated("search")]));
-        client.register_param_headers(&mut refetched, true, true);
+        client.register_param_headers(&mut refetched, true, Some("search"));
 
         let entry = client
             .options
@@ -3250,15 +3295,52 @@ mod param_header_registry_tests {
         );
     }
 
+    /// The grace belongs to the call that earned it. A refresh triggered by one
+    /// tool re-registers every tool on the page, and handing them all the same
+    /// exception would let the next call to a *different* tool mirror from a
+    /// listing that was stale on arrival and that nothing refreshed on its
+    /// behalf.
+    #[test]
+    fn the_retry_grace_does_not_spill_onto_other_tools() {
+        let mut client = Client::new();
+
+        let mut refetched = listing(serde_json::json!([
+            annotated("search"),
+            annotated("translate")
+        ]));
+        client.register_param_headers(&mut refetched, true, Some("search"));
+
+        assert!(
+            client
+                .options
+                .param_headers
+                .get("search")
+                .expect("registered")
+                .usable()
+                .is_some(),
+            "the refused tool carries its retry"
+        );
+        assert!(
+            client
+                .options
+                .param_headers
+                .get("translate")
+                .expect("registered")
+                .usable()
+                .is_none(),
+            "a tool that was merely on the same page mirrors nothing"
+        );
+    }
+
     #[test]
     fn a_dropped_annotation_is_forgotten_on_the_same_tool() {
         let mut client = Client::new();
 
         let mut first = listing(serde_json::json!([annotated("search")]));
-        client.register_param_headers(&mut first, true, false);
+        client.register_param_headers(&mut first, true, None);
 
         let mut second = listing(serde_json::json!([plain("search")]));
-        client.register_param_headers(&mut second, true, false);
+        client.register_param_headers(&mut second, true, None);
         assert!(client.options.param_headers.is_empty());
     }
 
@@ -3326,11 +3408,11 @@ mod param_header_registry_tests {
         let mut client = Client::new();
 
         let mut page1 = listing(serde_json::json!([annotated("search")]));
-        client.register_param_headers(&mut page1, true, false);
+        client.register_param_headers(&mut page1, true, None);
 
         // A tool absent from page two was not withdrawn, only listed earlier.
         let mut page2 = listing(serde_json::json!([annotated("lookup")]));
-        client.register_param_headers(&mut page2, false, false);
+        client.register_param_headers(&mut page2, false, None);
 
         assert!(client.options.param_headers.contains_key("search"));
         assert!(client.options.param_headers.contains_key("lookup"));
@@ -3341,7 +3423,7 @@ mod param_header_registry_tests {
         let mut client = Client::new();
 
         let mut first = listing(serde_json::json!([annotated("search")]));
-        client.register_param_headers(&mut first, true, false);
+        client.register_param_headers(&mut first, true, None);
 
         // Same tool, now annotated somewhere the client cannot reach.
         let mut second = listing(serde_json::json!([{
@@ -3353,7 +3435,7 @@ mod param_header_registry_tests {
                 }
             }
         }]));
-        client.register_param_headers(&mut second, true, false);
+        client.register_param_headers(&mut second, true, None);
 
         assert!(second.tools.is_empty(), "a malformed tool is not callable");
         assert!(client.options.param_headers.is_empty());
@@ -3384,7 +3466,7 @@ mod param_header_registry_tests {
                 }
             }
         ]));
-        client.register_param_headers(&mut listed, true, false);
+        client.register_param_headers(&mut listed, true, None);
 
         let err = client
             .blocked_tool_error(&call("broken"))
@@ -3416,16 +3498,16 @@ mod param_header_registry_tests {
                 "properties": { "p": { "type": "array", "items": { "x-mcp-header": "P" } } }
             }
         }]));
-        client.register_param_headers(&mut first, true, false);
+        client.register_param_headers(&mut first, true, None);
         assert!(client.blocked_tool_error(&call("broken")).is_some());
 
         let mut fixed = listing(serde_json::json!([annotated("broken")]));
-        client.register_param_headers(&mut fixed, true, false);
+        client.register_param_headers(&mut fixed, true, None);
         assert!(client.blocked_tool_error(&call("broken")).is_none());
 
-        client.register_param_headers(&mut first, true, false);
+        client.register_param_headers(&mut first, true, None);
         let mut gone = listing(serde_json::json!([plain("other")]));
-        client.register_param_headers(&mut gone, true, false);
+        client.register_param_headers(&mut gone, true, None);
         assert!(client.blocked_tool_error(&call("broken")).is_none());
     }
 }
