@@ -138,8 +138,13 @@ fn param_headers(
     let Some(entry) = registry.get(name) else {
         return Vec::new();
     };
+    // Nothing is mirrored from a listing that has gone stale: the schema that
+    // declared these annotations may no longer be the server's.
+    let Some(headers) = entry.usable() else {
+        return Vec::new();
+    };
     let args = params.get("arguments").cloned().unwrap_or_default();
-    crate::shared::param_headers::extract(entry.value(), &args)
+    crate::shared::param_headers::extract(headers, &args)
 }
 
 pub(super) async fn connect(rt: ClientRuntimeContext, token: CancellationToken) {

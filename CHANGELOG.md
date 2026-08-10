@@ -140,6 +140,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   was treated as the error. That sent the caller through an interactive flow,
   replacing a perfectly valid token, to retry a request re-authorization was
   never going to fix. The challenge is parsed now, and only `error` counts.
+* **`x-mcp-header` registrations expire with the listing that carried them.**
+  Each tool's annotations were kept indefinitely, so a client went on mirroring
+  arguments into `Mcp-Param-*` from a schema the server may have withdrawn --
+  putting an argument in a header nobody asked for, and letting an intermediary
+  route on an annotation that no longer exists. SEP-2243 has a client omit those
+  headers while its cached schema is stale, and SEP-2549 supplies the clock: a
+  listing is usable for its `ttlMs`, `0` means immediately stale, and an absent
+  `ttlMs` reads as `0`.
+  * The other half of the rule comes with it: a server that *requires* the
+    headers answers the omission with `HeaderMismatch` (`-32020`), and the
+    client then re-lists and retries once. The listing fetched for that retry
+    is good for it regardless of its own TTL -- otherwise the remedy could
+    never work against the `ttlMs: 0` that an absent `ttlMs` also means, and an
+    annotated tool would be uncallable.
+* **What the authorization server *granted* is what the session records.** The
+  scopes a completed flow *asked for* were remembered instead, so a server that
+  granted a subset -- and said so in the token response's `scope`, as RFC 6749
+  section 5.1 requires when it differs -- left the client believing it held a
+  scope it had been refused. The next challenge naming that scope then read as
+  "this token expired" rather than "this grant is too narrow", and the client
+  refreshed into the same refusal instead of widening. The request is now only
+  the fallback, for a response that omits `scope` because it matched.
+* **Only a `404` opens the Protected Resource Metadata origin fallback.** Any
+  failure at the path-based location sent the client to the origin document,
+  including a malformed body, a `resource` that named something else, a
+  rejected plain-HTTP URL, and transport or TLS failures. Those are the
+  path-based document *answering*, and its answer is authoritative: falling
+  past it could discard a validation failure and authorize against metadata
+  for a different resource than the one just refused.
 * **A challenge naming a scope outside `with_scopes` fails instead of running a
   doomed flow.** The configured set is a ceiling as well as a floor -- the flow
   asks for exactly it -- so a `WWW-Authenticate` demanding anything else

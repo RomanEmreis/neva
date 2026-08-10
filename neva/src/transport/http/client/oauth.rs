@@ -550,8 +550,8 @@ impl OAuthSession {
 
     /// Scopes this session is known to hold, most authoritative source first.
     ///
-    /// The in-memory set records what the last flow *in this process* asked
-    /// for, so it is empty after a restart -- and a persistent
+    /// The in-memory set records what the last flow *in this process* was
+    /// granted, so it is empty after a restart -- and a persistent
     /// [`TokenStore`] hands back a token whose grant the process never saw. Left
     /// at that, the first `insufficient_scope` challenge after a restart would
     /// build its step-up from the demanded scopes alone and trade away
@@ -803,7 +803,21 @@ impl OAuthSession {
             metadata: server_metadata,
         });
 
-        self.set_requested_scopes(scopes);
+        // What the server *granted*, which is not always what was asked for.
+        // RFC 6749 section 5.1 has the token response state `scope` whenever it
+        // differs from the request and omit it when it matches, so the response
+        // is the authority and the request is only the fallback. Recording the
+        // request would count a scope that was asked for and refused as held --
+        // and then the challenge that names it reads as "this token expired"
+        // rather than "this grant is too narrow", so the client refreshes into
+        // the same refusal instead of widening.
+        let granted = tokens
+            .scope
+            .as_deref()
+            .map(split_scopes)
+            .filter(|granted| !granted.is_empty())
+            .unwrap_or(scopes);
+        self.set_requested_scopes(granted);
 
         let token: Arc<str> = tokens.access_token.into();
         self.set_token(token.clone());
@@ -817,8 +831,14 @@ impl OAuthSession {
     /// (`/.well-known/oauth-protected-resource/mcp` for a server at `/mcp`), so
     /// that is asked first. A server that hosts one MCP endpoint often serves it
     /// at the root instead, which is a location the path-based derivation never
-    /// reaches -- so a miss falls back there rather than failing the flow over a
-    /// document that exists.
+    /// reaches -- so a `404` falls back there rather than failing the flow over
+    /// a document that exists.
+    ///
+    /// Strictly a `404`, and not "the first attempt did not work out". Any
+    /// other failure means the path-based location answered, and what it said
+    /// stands: falling back past a malformed body or a mismatched `resource`
+    /// would trade an authoritative refusal for a document describing something
+    /// else.
     async fn discover_resource_metadata(
         &self,
         discovery: &DiscoveryClient,
@@ -833,6 +853,18 @@ impl OAuthSession {
         let Err(err) = first else {
             return first.map_err(flow_error);
         };
+
+        // Only "there is no document here" opens the fallback. Every other
+        // failure is the path-based document *answering*, and its answer is the
+        // authoritative one: a body that does not parse, a `resource` that
+        // names something else, a rejected plain-HTTP URL, a TLS or connection
+        // failure. Treating those as absence would let a document that failed
+        // validation be replaced by one from the origin, which is how a client
+        // ends up authorizing against metadata for a different resource than
+        // the one it just refused.
+        if !matches!(err, ClientError::Http(status) if status.as_u16() == 404) {
+            return Err(flow_error(err));
+        }
 
         let Some(origin) = origin_of(&self.resource) else {
             return Err(flow_error(err));
@@ -1234,6 +1266,80 @@ mod tests {
         addr
     }
 
+    /// A one-shot HTTP server answering every request with `status` and `body`.
+    async fn spawn_static(status: &'static str, body: &'static str) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+        addr
+    }
+
+    /// The origin fallback exists for a server that keeps its one document at
+    /// the root, which the path-based derivation never reaches. It must not
+    /// exist for a path-based document that *answered* and was refused: falling
+    /// back past a mismatched `resource` would authorize against metadata for a
+    /// different resource than the one just rejected.
+    #[tokio::test]
+    async fn only_a_missing_document_opens_the_origin_fallback() {
+        // Every path answers with a document naming a *different* resource, so
+        // the path-based attempt fails validation rather than 404ing. The root
+        // would "succeed" if the fallback were reached, since it is checked
+        // against the origin -- which is exactly the confusion to avoid.
+        let addr = spawn_static(
+            "200 OK",
+            r#"{"resource":"http://127.0.0.1:1","authorization_servers":["http://127.0.0.1:1"]}"#,
+        )
+        .await;
+
+        let config = OAuthClientConfig::default().require_https(false);
+        let session = OAuthSession::new(config, &format!("http://{addr}/mcp")).unwrap();
+        let discovery = DiscoveryClient::with_config(session.config.client_config());
+
+        let err = session
+            .discover_resource_metadata(&discovery)
+            .await
+            .expect_err("a document that names another resource is not usable");
+        // The path-based document's own verdict, verbatim -- not the combined
+        // "at X or Y" message, which only the fallback path can produce.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("resource mismatch"),
+            "the refusal must be the one the path-based document earned: {msg}"
+        );
+        assert!(
+            !msg.contains("no usable resource metadata"),
+            "the origin must not have been tried at all: {msg}"
+        );
+
+        // A genuine miss still falls through to the origin, and says so by
+        // naming both locations when that fails too.
+        let missing = spawn_static("404 Not Found", "{}").await;
+        let config = OAuthClientConfig::default().require_https(false);
+        let session = OAuthSession::new(config, &format!("http://{missing}/mcp")).unwrap();
+        let discovery = DiscoveryClient::with_config(session.config.client_config());
+
+        let err = session
+            .discover_resource_metadata(&discovery)
+            .await
+            .expect_err("nothing is served at either location");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("/.well-known/oauth-protected-resource/mcp")
+                && msg.contains("/.well-known/oauth-protected-resource ("),
+            "a 404 must try the origin and report both: {msg}"
+        );
+    }
+
     fn stale_tokens() -> TokenSet {
         TokenSet {
             access_token: "stale-token".into(),
@@ -1391,6 +1497,21 @@ mod tests {
         let config = OAuthClientConfig::default().with_token_store(stored(None));
         let session = OAuthSession::new(config, "http://127.0.0.1:3000/mcp").unwrap();
         assert!(session.requested_scopes().is_empty());
+
+        // A grant narrower than the request is what the store records, and it
+        // is what `requested_scopes` must report: counting a refused scope as
+        // held would read the next challenge for it as an expired token rather
+        // than a narrow grant, and the client would refresh into the same
+        // refusal instead of widening.
+        let config = OAuthClientConfig::default()
+            .with_token_store(stored(Some("read")))
+            .with_scopes(["read", "write"]);
+        let session = OAuthSession::new(config, "http://127.0.0.1:3000/mcp").unwrap();
+        assert_eq!(
+            session.requested_scopes(),
+            vec!["read".to_string()],
+            "the granted scope outranks the configured request"
+        );
 
         // What this process actually asked for still wins over both.
         let config = OAuthClientConfig::default()

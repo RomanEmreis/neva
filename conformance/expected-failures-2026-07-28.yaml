@@ -69,25 +69,36 @@ client:
   # byte-exact on the params, takes a fresh JSON-RPC id, omits the state when
   # the server sent none, and leaks neither field into an unrelated call.
 
-  # `http-custom-headers` and `http-invalid-tool-headers` are green: annotated
-  # arguments reach `Mcp-Param-*` with the sentinel encoding the spec asks for,
-  # unannotated ones stay off the wire, and a tool whose annotations break the
+  # -- The stale-schema rule, conformance#354 ----------------------------
+  # Not a gap on our side: the scenario cannot be passed by a client that
+  # implements SEP-2243's stale-schema rule, and neva now does.
+  #
+  # It serves `tools/list` with `ttlMs: 0` -- which SEP-2549 defines as
+  # immediately stale, and which is also what an absent `ttlMs` means -- and
+  # then requires `Mcp-Param-*` derived from that same listing. SEP-2243 says
+  # a client SHOULD omit those headers while its cached schema is stale, and
+  # recover by re-listing when the server answers `HeaderMismatch`. This
+  # scenario's `handleToolsCall` returns success whatever the headers say, so
+  # the rejection never comes, the recovery never fires, and the positive
+  # checks fail.
+  #
+  # Retiring this entry means the scenario stopped requiring headers from a
+  # listing it declared stale -- not that neva started sending them again.
+  # The end-to-end loop is covered instead by
+  # `neva/tests/param_headers.rs::an_annotated_tool_survives_a_listing_that_is_stale_on_arrival`,
+  # against a real server that does reject.
+  - http-custom-headers
+
+  # `http-invalid-tool-headers` is green: a tool whose annotations break the
   # constraints is dropped from `tools/list` without taking its well-formed
   # neighbours with it.
   #
-  # Two things this green does NOT prove, both upstream-known:
-  #   - The scenario serves `tools/list` with `ttlMs: 0` and then requires
-  #     `Mcp-Param-*` derived from that same schema. SEP-2549 makes `ttlMs: 0`
-  #     immediately stale and SEP-2243 says to omit the headers for a stale
-  #     schema, so a client that implemented the cache TTL would *fail* here
-  #     (conformance#354). neva's annotation registry has no TTL, which is why
-  #     it passes -- a gap the suite currently rewards rather than catches.
-  #   - The suite's own encoding predicate Base64s any byte below 0x20,
-  #     interior horizontal tab included, which the spec's safe set admits
-  #     (it quotes RFC 9110: VCHAR, SP and HTAB). The scenario only ever sends
-  #     a *leading* tab, which both readings encode, so nothing here
-  #     distinguishes them. The library follows the spec; the unit test in
-  #     `transport/http/client.rs` is what holds that line.
+  # One thing that green does NOT prove: the suite's encoding predicate
+  # Base64s any byte below 0x20, interior horizontal tab included, which the
+  # spec's safe set admits (it quotes RFC 9110: VCHAR, SP and HTAB). The
+  # scenario only ever sends a *leading* tab, which both readings encode, so
+  # nothing here distinguishes them. The library follows the spec; the unit
+  # test in `transport/http/client.rs` is what holds that line.
 
   # `json-schema-2020-12-preservation` is green: a tool schema the client reads
   # comes back out with every keyword it arrived with.

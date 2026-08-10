@@ -20,7 +20,74 @@ use std::sync::Arc;
 /// the transport task sees what the client registered. Client-side only -- a
 /// server reads the annotations straight off the tool it already owns.
 #[cfg(feature = "http-client")]
-pub(crate) type Registry = Arc<dashmap::DashMap<String, Vec<ParamHeader>>>;
+pub(crate) type Registry = Arc<dashmap::DashMap<String, Registration>>;
+
+/// What one tool's listing said, and how long that remains true.
+///
+/// SEP-2243 has a client omit `Mcp-Param-*` when it has no `inputSchema` for a
+/// tool *or its cached one is stale*, and SEP-2549 supplies the clock: a
+/// listing's `ttlMs` says how long it may be used, `0` means immediately stale,
+/// and an absent `ttlMs` reads as `0`. Without the expiry the client would keep
+/// mirroring from a schema the server has since withdrawn -- putting an
+/// argument in a header nobody asked for, and letting an intermediary route on
+/// an annotation that no longer exists.
+#[cfg(feature = "http-client")]
+#[derive(Debug, Clone)]
+pub(crate) struct Registration {
+    headers: Vec<ParamHeader>,
+    /// `None` when the stated TTL is too far out to represent, which is as
+    /// good as never expiring.
+    expires_at: Option<std::time::Instant>,
+    /// One mirroring allowed regardless of the TTL.
+    ///
+    /// SEP-2243's remedy for a refused call is to fetch the current
+    /// `inputSchema` and "retry the original request **with the appropriate
+    /// headers**" -- so a listing fetched *because* a call was refused is good
+    /// for that call. Without this the remedy could never work against a server
+    /// that states `ttlMs: 0` (the value an absent `ttlMs` also means): the
+    /// re-fetched listing would be stale on arrival too, the retry would omit
+    /// the headers again, and the call could never succeed.
+    grace: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(feature = "http-client")]
+impl Registration {
+    /// Records `headers` as usable for `ttl_ms` from now.
+    ///
+    /// `grace` marks a listing fetched to satisfy a call the server refused for
+    /// missing headers; see the field.
+    pub(crate) fn new(headers: Vec<ParamHeader>, ttl_ms: u64, grace: bool) -> Self {
+        Self {
+            headers,
+            // `ttl_ms == 0` lands exactly on `now`, which `usable` reads as
+            // already past -- immediately stale, as the spec says.
+            expires_at: std::time::Instant::now()
+                .checked_add(std::time::Duration::from_millis(ttl_ms)),
+            grace: Arc::new(std::sync::atomic::AtomicBool::new(grace)),
+        }
+    }
+
+    /// The annotations, or `None` once the listing they came from is stale and
+    /// its one grace mirroring is spent.
+    pub(crate) fn usable(&self) -> Option<&[ParamHeader]> {
+        let fresh = match self.expires_at {
+            Some(at) => std::time::Instant::now() < at,
+            None => true,
+        };
+        if fresh || self.grace.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            Some(&self.headers)
+        } else {
+            None
+        }
+    }
+
+    /// The annotations regardless of age -- for callers asking what was
+    /// declared rather than what may be sent.
+    #[cfg(test)]
+    pub(crate) fn declared(&self) -> &[ParamHeader] {
+        &self.headers
+    }
+}
 
 /// The annotation keyword inside a property schema.
 const KEYWORD: &str = "x-mcp-header";
