@@ -8,505 +8,191 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## 0.5.2
 
 ### Added
-* **DNS-rebinding protection: the HTTP server validates `Origin` and `Host`.**
-  A server on loopback is reachable by any page the browser loads -- point
-  `evil.example.com` at `127.0.0.1` and the browser connects; the request is
-  genuinely local, and only the name it was addressed by gives it away. The
-  spec makes validating these headers a MUST for local servers, and neva did
-  not.
-  * Bound to loopback, a server now answers only to loopback names
-    (`localhost`, anything in `127.0.0.0/8`, `[::1]`) on any port, and refuses
-    anything else with `403 Forbidden` before the body is read. POST, GET and
-    DELETE are all gated.
-  * Bound to anything else, it accepts everything as before: behind a proxy the
-    `Host` is whatever that proxy forwards, so the legitimate names are not
-    knowable from here.
-  * A request carrying neither header is left alone -- there is no rebinding
-    without a name to rebind, and non-browser callers send neither.
-  * New `HttpServer::with_allowed_origins([...])` names additional hosts (and
-    turns the gate on for a non-loopback bind);
-    `HttpServer::allow_any_origin()` turns it off for a deployment whose name
-    is validated in front of the server.
-
-* **`Context::client_capabilities()`** reports what the caller declared it can
-  answer, read off this request's `_meta`. Requesting an input kind the caller
-  did not declare is refused with `MissingRequiredClientCapability`, which ends
-  the call -- so a handler that can do without an input, or get it another way,
-  now has something to branch on before it asks rather than only a refusal
-  after.
-
-* **Protected Resource Metadata is looked for at the origin too.** A `401` that
-  names no `resource_metadata` sent the client to RFC 9728's path-based location
-  and nowhere else, so a server serving one document at
-  `/.well-known/oauth-protected-resource` -- the common shape for a host with a
-  single MCP endpoint -- was never discovered. A miss now falls back to the
-  origin, and the document there is checked against the origin rather than the
-  endpoint: describing the whole origin is what puts it at the root.
-* **The `scope` a `WWW-Authenticate` challenge names is what gets requested.**
-  The client asked for the resource's whole `scopes_supported` regardless, which
-  is both broader than the call needed and, when the challenge named something
-  the resource never advertised, missing the one scope that would have worked.
-  Order is now: scopes configured on the client, then the challenge, then
-  `scopes_supported`, then none at all.
-* **A `403 insufficient_scope` re-authorizes.** Only a `401` did, so a server
-  that granted `tools/list` and challenged `tools/call` for more left the client
-  refused with a perfectly valid token. Re-authorization asks for the union of
-  what was granted before and what the challenge demands (SEP-2350), so a
-  step-up widens the grant instead of trading one scope for another. A `403`
-  *without* an `insufficient_scope` challenge is untouched -- that one is about
-  the caller, not the token, and re-authorizing would only ask the user to
-  approve something that will be refused again.
-* **An advertised RFC 9207 `iss` is enforced.** The check read
-  `authorization_response_iss_parameter_supported` out of the metadata
-  document's *unmodelled* fields, where it never appears -- it has a typed field
-  -- so the flag always read false and an authorization response that omitted
-  `iss` was accepted from a server that had promised to send one. That is the
-  mix-up attack the parameter exists to catch.
-* **A dropped response stream is resumed (legacy profile).** A `POST` whose
-  reply is an SSE stream used to fail its request the moment the stream ended
-  without a response. On the session-bound transport that stream is resumable:
-  neva now reopens it once with a `GET` carrying `Last-Event-ID`, after the
-  pause the server asked for. One attempt, and only when the server named an id
-  to resume from -- without one there is nothing to replay, and repeating turns
-  a server that keeps dropping the stream into a reconnect loop the caller
-  cannot see. MCP 2026-07-28 removed both sessions and `Last-Event-ID`, so a
-  2026-07-28 peer is unaffected.
-* **The SSE `retry:` field sets the reconnection delay.** It was parsed and
-  ignored in favour of a fixed three seconds, so a server asking to be
-  reconnected sooner waited, and one asking for room got hammered.
-
-### Changed
-* **A server may answer the handshake with a different protocol version.** The
-  version a client offers is a proposal: a server that does not speak it answers
-  with one it does, which is what the negotiation is for. neva's client treated
-  any difference as fatal and refused every server a notch older than itself.
-  Only a version outside `PROTOCOL_VERSIONS` now ends the connection.
-* **`Client::disconnect` sends nothing.** It used to send a param-less
-  `notifications/cancelled` first -- a notification that cancels one named
-  in-flight request, whose `params.requestId` is required, so without params it
-  fails the spec's own schema and no server has anything to act on (neva's drops
-  it for want of a request id). Closing the transport is the whole goodbye, and
-  under MCP 2026-07-28 the revision defines no client-to-server notification on
-  Streamable HTTP at all.
-* **An MRTR round carries every input the handler asked for.** The handler's
-  `?` decides: unwinding at the first miss leaves one request in the round, as
-  before, while holding the `?` until everything has been requested puts them
-  all in one `InputRequiredResult` -- which is why `inputRequests` is a map. A
-  handler needing a name, a completion and the caller's roots costs one
-  round-trip instead of three.
-* **An `inputResponses` entry that does not fit is dropped, not rejected.**
-  Answers arriving without a `requestState`, for a key the server did not ask
-  about, or for one already settled, each used to fail the whole call with
-  `-32602`. The spec has a server ignore what it does not recognize, and a
-  client that re-sends its whole answer set every round is not misbehaving. What
-  a dropped answer costs is a round: the handler asks again and the fresh
-  `InputRequiredResult` says what for. The property the rejections were
-  protecting is intact -- with a verified state, an answer for a key that state
-  does not name is still not honored, so a client cannot pre-seed an answer to
-  skip an elicitation the server intends to make. An answer that does not fit
-  the kind it answers stays an error, and is now reported as a JSON-RPC one:
-  previously the handler's `Err` was folded into an in-band tool error, which on
-  the wire is a *complete* result and reads as the call having run and failed
-  rather than as the client getting the protocol wrong.
-
-### Fixed
-* **SSE responses carry `X-Content-Type-Options: nosniff`.** A browser reading
-  the stream with `fetch()` is the case this closes: without the header Firefox
-  buffers the body to sniff its type, and a stream that stays open never reaches
-  the size that ends the sniff -- so no event arrives and the request simply
-  appears to hang, while Chrome (which does not sniff a declared
-  `text/event-stream`) works, making it look like a browser quirk. Non-browser
-  consumers never sniff, so nothing else changes.
-* **An ignored MRTR answer no longer buys a second run of the final round.**
-  The idempotency key folded in a digest of the raw `inputResponses` off the
-  wire, but the server *drops* an answer that is unsolicited or already settled
-  -- so a replay could append a key nobody asked for, leave the handler's input
-  identical, and still present a different key. The cache missed, and the final
-  handler ran again with its `on_commit` effects: a guard anyone could step
-  around by adding a byte. The digest is taken over the answers the round
-  actually resolved to, which makes the key a function of the work the cache
-  exists to deduplicate.
-* **A stale session answers a notification with the status alone (legacy
-  profile).** The `404` for a terminated or expired `Mcp-Session-Id` fabricated
-  a JSON-RPC error with a `null` id when the body carried no request. A
-  notification has no id and is never answered, rejection included -- such a
-  reply addresses nothing and matches nothing on the other side. The body is
-  now empty for a notification (and for a batch that is notifications
-  throughout); a batch that mixes the two is still answered for its requests.
-* **`insufficient_scope` is read off the challenge's `error` parameter.** The
-  `403` re-authorization gate searched the whole `WWW-Authenticate` value for
-  the string, so a challenge that merely *mentioned* it -- an
-  `error_description` explaining the code, or a scope whose name contains it --
-  was treated as the error. That sent the caller through an interactive flow,
-  replacing a perfectly valid token, to retry a request re-authorization was
-  never going to fix. The challenge is parsed now, and only `error` counts.
-* **A full notification queue no longer logs itself to death (legacy
-  profile).** Reporting a full or closed session channel goes through
-  `tracing::warn!`, and that event comes straight back into the layer, under
-  the same span, aimed at the same still-full channel -- so a burst of log
-  messages recursed until the stack ran out. `tracing-core`'s own re-entrancy
-  guard does not cover it: `dispatcher::get_default` checks it only when a
-  *scoped* dispatcher is installed and takes a fast path to the global one
-  otherwise, which is how a subscriber set up with `.init()` runs.
-* **A stored refresh token survives a restart.** A durable `TokenStore` outlives
-  the process; the flow state that knows how to use it does not -- so after a
-  restart there was no client and no metadata to refresh *with*, and a
-  perfectly good refresh token went unused while the user was walked through
-  consent again. The refresh is now retried once both have been rebuilt, on the
-  way to the interactive flow rather than instead of it. Only with a configured
-  `client_id`: without one the client registers afresh, and a refresh token
-  belongs to the client it was issued to.
-* **Renewing a token no longer forgets what it was granted.** An authorization
-  server may leave `scope` out of a refresh response when the grant has not
-  changed (RFC 6749 section 5.1), and the renewed token set replaces the stored
-  one -- so a silent renewal erased the only record of what the token covered.
-  The next `insufficient_scope` challenge then had nothing to widen and asked
-  for the demanded scope alone, trading the grant away instead of adding to it,
-  which is what SEP-2350 exists to prevent. The known scope now rides along,
-  exactly as the refresh token itself already does.
-* **A `403` on the standalone SSE `GET` re-authorizes like one on a `POST`
-  (legacy profile).** Only a `401` triggered the flow there, so a server that
-  guards its session stream with a scope its `POST`s do not need was unusable:
-  the client never asked for that scope and the stream died with the session.
-  The `POST` path already treated a `403` carrying an `insufficient_scope`
-  challenge as a step-up; the `GET` path now does the same.
-* **A step-up that lost the race reuses what the winner obtained.** Forcing the
-  interactive path on the `insufficient_scope` code alone skipped the
-  single-flight shortcut, so the second of two callers refused for the same
-  missing scope walked the user through consent again for a grant it already
-  held by then. The shortcut is now checked on what the challenge demanded
-  rather than on how the step-up was decided.
-* **An elicitation `mode` that is present has to be a string.** The
-  discriminator is optional by *absence* -- omitting it is how a form is
-  spelled -- but a `mode` of `null` (or a number, or an object) was read as "no
-  mode" and the payload delivered to the handler as a well-formed form. The
-  union spells it `"form"` or `"url"` or leaves it out, and none of those is
-  `null`.
-* **The Bearer challenge is found wherever the server put it.** Only the first
-  `WWW-Authenticate` value was read, so a server that lists `Basic` first and
-  `Bearer` on a second line -- both legal -- was answered as if it had offered
-  no challenge at all: no `resource_metadata` pointer, no `scope`, and no
-  step-up. Several challenges *inside* one value were already handled.
-* **The RFC 8707 resource indicator is the one the accepted metadata
-  declares.** The authorization request always named the endpoint URL, even
-  when the Protected Resource Metadata had been found at the origin and
-  declares the origin. An authorization server that enforces its own advertised
-  identifier would refuse that request, or issue a token audienced to something
-  the resource never claimed.
-* **An `insufficient_scope` challenge is a step-up even when it names no
-  scope.** The `scope` attribute is optional in RFC 6750, and the decision was
-  read only off the scopes the challenge named -- so a server that said the
-  grant was too narrow without saying what it wanted was treated as an ordinary
-  expiry. The client then refreshed, and spent the exchange's one retry on a
-  token short by exactly as much as before. The error code alone now forces the
-  interactive path.
-* **An SSE `retry: 0` means reconnect immediately.** Zero was dropped as if
-  nothing had been asked for, so a server wanting instant recovery got the
-  three-second default (or whatever it had asked for earlier) after every
-  disconnect. Zero is a delay like any other; "nothing was stated" is now a
-  state of its own rather than sharing zero's encoding.
-* **A tool property keeps the keywords it was declared with (legacy profile).**
-  `ToolSchema` kept every keyword it did not model, but the property schemas
-  under it were read as just `type` + `description`, so a property's `enum`,
-  `format`, `$ref`, `minimum` and the rest were dropped on the way out -- the
-  server published a property wider than the one it declared, and a client
-  validating against it would accept values the tool refuses. A property that
-  states no `type` no longer acquires one either: `{"$ref": ...}` came back out
-  as `{"type": "object", ...}`, a constraint nobody wrote.
-* **The MRTR field check applies to MRTR methods only.** `requestState` and
-  `inputResponses` are protocol fields on `tools/call`, `prompts/get` and
-  `resources/read`; on a method registered with `App::map_handler` they are the
-  handler's own params, and a numeric `requestState` there is a perfectly good
-  argument. Judging every request by the MRTR shapes refused requests the
-  server was written to serve.
-* **`x-mcp-header` registrations expire with the listing that carried them.**
-  Each tool's annotations were kept indefinitely, so a client went on mirroring
-  arguments into `Mcp-Param-*` from a schema the server may have withdrawn --
-  putting an argument in a header nobody asked for, and letting an intermediary
-  route on an annotation that no longer exists. SEP-2243 has a client omit those
-  headers while its cached schema is stale, and SEP-2549 supplies the clock: a
-  listing is usable for its `ttlMs`, `0` means immediately stale, and an absent
-  `ttlMs` reads as `0`.
-  * The other half of the rule comes with it: a server that *requires* the
-    headers answers the omission with `HeaderMismatch` (`-32020`), and the
-    client then re-lists and retries once. The listing fetched for that retry
-    is good for it regardless of its own TTL -- otherwise the remedy could
-    never work against the `ttlMs: 0` that an absent `ttlMs` also means, and an
-    annotated tool would be uncallable. That exception is scoped to the tool
-    that was refused: every other tool on the page is an ordinary registration.
-  * The refresh follows `nextCursor` until the refused tool is back in the
-    registry. A traversal that restarts clears what the previous one recorded,
-    so a tool the server pages later would otherwise be left with no
-    annotations and the retry would omit the very headers it was sent back for.
-    A traversal that ends without finding it retries nothing: there would be
-    nothing to retry *with*, and a second bare attempt would only replace the
-    refusal that explained the failure.
-* **A resumed `POST` stream picks up where that stream left off.** The event id
-  was recorded on the session, which a legacy connection shares with the
-  standalone `GET` stream -- so a `GET` frame arriving between a truncation and
-  its resumption sent the `POST` back to a position it had never reached,
-  replaying past its own terminal response, and a `POST` frame did the same to
-  the `GET`'s reconnect. Each stream now carries its own cursor; `retry:`, which
-  says how long *any* reconnection waits, stays on the session.
-* **A `404` on the standalone SSE `GET` can mean the session is gone (legacy
-  profile).** Every `404` there was read as "this server offers no stream",
-  which released the handshake and left the client running on a session id
-  every later POST would be refused for -- and the same revision gives `404` on
-  this verb the meaning "the session named here is one I no longer hold", which
-  neva's own server now answers. When it arrives is what tells the two apart:
-  before the stream has ever opened it is the endpoint not routing `GET` (which
-  is how servers answer an unhandled verb, the spec's `405` notwithstanding),
-  and after a stream that worked the route plainly exists, so the `404` is
-  about the session and the connection ends instead of carrying on dead.
-* **What the authorization server *granted* is what the session records.** The
-  scopes a completed flow *asked for* were remembered instead, so a server that
-  granted a subset -- and said so in the token response's `scope`, as RFC 6749
-  section 5.1 requires when it differs -- left the client believing it held a
-  scope it had been refused. The next challenge naming that scope then read as
-  "this token expired" rather than "this grant is too narrow", and the client
-  refreshed into the same refusal instead of widening. The request is now only
-  the fallback, for a response that omits `scope` because it matched.
-* **Only a `404` opens the Protected Resource Metadata origin fallback.** Any
-  failure at the path-based location sent the client to the origin document,
-  including a malformed body, a `resource` that named something else, a
-  rejected plain-HTTP URL, and transport or TLS failures. Those are the
-  path-based document *answering*, and its answer is authoritative: falling
-  past it could discard a validation failure and authorize against metadata
-  for a different resource than the one just refused.
-* **A challenge naming a scope outside `with_scopes` fails instead of running a
-  doomed flow.** The configured set is a ceiling as well as a floor -- the flow
-  asks for exactly it -- so a `WWW-Authenticate` demanding anything else
-  described a grant the client could not obtain, and re-authorizing interrupted
-  the user for consent only to return without the one scope the call needed.
-  The retry was then refused identically. It now ends there, naming the scope,
-  because adding it to `with_scopes` is what resolves it. Widening past the
-  configured set is not the answer: it would override the caller's decision, and
-  an authorization server refuses a scope the client is not registered for.
-* **A step-up widens the grant a restored token already holds.** The scopes an
-  earlier round asked for were remembered in memory only, so after a restart
-  against a persistent `TokenStore` the first `insufficient_scope` challenge
-  built its re-authorization from the demanded scopes alone and traded away
-  everything the stored token carried -- the next call for one of those was
-  challenged in turn, and the two ping-ponged. The stored token's own granted
-  `scope` now stands in, and the configured scopes cover a server that omitted
-  it (RFC 6749 section 5.1).
-* **A resumed response stream is let go once it has answered.** The drain that
-  reads a resumed stream is the one written for a `POST` reply, which the server
-  closes after the response; the stream a resumption reopens is the session's
-  own long-lived `GET`, which does not. So the task went on reading it forever:
-  one leaked connection per truncated reply, each competing with the standalone
-  `GET` for the traffic that followed. The drain now stops as soon as nothing is
-  owed.
-  * It also tracks what is owed per request rather than as a single flag, so a
-    batched `POST` whose stream died midway resumes for -- and, failing that,
-    fails -- only the requests still unanswered, instead of counting the whole
-    batch answered on the first response to arrive.
-* **A resumption carries the token the exchange ended up authorized with.** When
-  a `401` sent the request through a fresh OAuth flow, the retry used the new
-  token but a later resumption `GET` still carried the rejected one, drawing
-  another `401` and losing the answer it went back for.
-* **A field declared `integer` is validated as one.** `Schema::integer()`
-  publishes `"type": "integer"` but shares its struct with `number`, and
-  validation only checked the bounds -- so an elicitation field the client was
-  told rejects `1.5` accepted it. The check judges the value rather than how it
-  was written: `1.0` is a valid integer under 2020-12.
-* **`requestState` / `inputResponses` of the wrong JSON type are refused.** Both
-  accessors answer `None` for a field that is present but malformed, which read
-  as *absent*: a wrongly-typed `requestState` turned a retry into a fresh call
-  whose answers looked like ones offered up front, and with the field malformed
-  in one of its two locations and well-formed in the other, the accessors would
-  quietly read the other one. Now `InvalidParams`, checked where the rest of the
-  request's shape is, and only for the methods MRTR runs on. An explicit `null`
-  counts as stating the field wrongly: the spec types these as `string` and
-  `object` and makes them optional by *absence*, so a peer with nothing to say
-  omits them rather than nulling them.
-* **A notification goes on the session stream the moment it is emitted (legacy
-  profile).** `notification::fmt::layer()` used to hand every event to a channel
-  of its own, drained by a spawned task that forwarded it to the session's SSE
-  stream. Two consequences, both removed by writing to the session registry
-  straight from the event: a handler that reports progress and returns without
-  ever awaiting never yielded, so its own response could overtake the progress
-  it had just reported; and the channel was a single 100-slot queue shared by
-  every session, dropping events on a burst in one of them. `layer()` also no
-  longer spawns, so it can be built before the runtime is running.
-* **A terminated session answers `404` (legacy profile).** `DELETE` removed the
-  session from the registry, but nothing consulted that registry afterwards: a
-  request bearing the dead id was served as if the session were live, and a
-  `GET` on it re-created the session outright -- handing the caller the stream
-  that carries everything the server pushes for it. The spec has a server
-  answer `404` to any request naming a session it no longer holds, which is
-  what tells the client to open a new one with a fresh `initialize`.
-  * `POST`, `GET` and `DELETE` are all gated. The `404` on a POST carries a
-    JSON-RPC error addressed to the request's own id, so the caller sees it
-    rather than waiting out its timeout.
-  * Only an id the client actually stated is judged. A request without the
-    header is handed a freshly minted session, as before, and `initialize` is
-    exempt -- it is the one message that may name a session the server has
-    never held.
-  * Every request bearing a live id now counts as activity, so an idle-session
-    sweep no longer reaps a session whose client only ever POSTs.
-* **A `resources` capability that omits `subscribe` no longer fails to parse.**
-  Every member of a capability object is optional, and a server that supports
-  neither subscriptions nor list-change notifications advertises
-  `"resources": {}`. `subscribe` was the one member without a default, so such a
-  server's capabilities came back as
-  `missing field \`subscribe\`` -- and since capabilities arrive with the
-  handshake, the connection failed outright rather than degrading.
-* **A server that hosts no standalone SSE stream no longer ends the session
-  (legacy profile).** The client opens the optional `GET` stream after the
-  `initialize` handshake and treated any non-2xx as fatal, cancelling the
-  session -- so a conformant server that simply chose not to offer one (the
-  spec has it answer `405 Method Not Allowed`) was reported as
-  `Connection closed` before the first request went out. `404` and `405` are
-  now read as "there is no stream here": the pending `initialize` is released
-  and the session carries on over POST alone. Any other non-2xx is still
-  fatal -- a `401` says the credentials the POSTs carry are wrong too.
-* **The POST no longer carries `Content-Type` twice.** It was set once by the
-  JSON body and once explicitly, and `.header()` appends: the header reached
-  the peer as `application/json, application/json`, which matches no media type
-  and drew `415 Unsupported Media Type` from strict receivers.
-* **A tool call with no arguments omits `arguments` instead of sending
-  `null`.** The schema types it as an optional object; `null` is not one, and a
-  peer that validates rejected the call over the field it was not given.
-* **A schema is published the way it was declared.** `Schema` and (on the
-  legacy profile) `ToolSchema` modelled the keywords neva itself reads and
-  dropped everything else, so a peer received a schema quietly different from
-  the one the server wrote -- wider, in the cases that matter.
-  * Both now carry an `extra` catch-all, flattened on the wire, that keeps every
-    unmodelled keyword verbatim: `default` (SEP-1034), `pattern`, `examples`,
-    and on a tool's `inputSchema` the `$schema`, `$defs`, `$ref`,
-    `additionalProperties`, `allOf`/`anyOf` and `if`/`then`/`else` that SEP-2106
-    requires to survive untouched.
-  * **Breaking:** `PropertyType` gains an `Integer` variant, and `"integer"` no
-    longer deserializes into `Number`. The two are different types in JSON
-    Schema -- `integer` rejects `1.5` -- and sharing a variant meant a declared
-    `"integer"` was published as `"number"`. A match on `PropertyType` needs the
-    new arm; `Schema::integer()` builds one.
-  * **Breaking:** the schema structs in `neva::types::schema` gain the `extra`
-    field, so a struct literal that names every field needs it (or
-    `..Default::default()`).
-* **MRTR `inputResponses` / `requestState` travel on the params, not in
-  `_meta`.** The spec puts both on `InputResponseRequestParams`, beside `name`
-  and `arguments`; neva read and wrote them inside `_meta`, so its client and
-  server agreed with each other and with no one else -- against any other
-  implementation the retry looked like a fresh call and the round-trip never
-  completed.
-  * A request is read from the spec location first and from `_meta` only as a
-    fallback, so a 0.5.x neva client keeps working against a newer server.
-    Nothing this build sends carries the old location.
-  * The MRTR request binding ignores both fields (as it already ignored
-    `_meta`): a request does not become a different request by being answered,
-    and hashing the answers in would have made every `requestState` fail
-    verification on the round it was minted for.
-  * New `Request::input_responses()` and `Request::state()` read whichever
-    location a peer used.
-* **Elicitation params are written as the spec's union, not as a tagged enum.**
-  `ElicitRequestParams` derived its `Serialize`/`Deserialize`, so an
-  `elicitation/create` carried `{"Form": {"message": ..., "requestedSchema":
-  ...}}`. The spec types the params as a bare union -- `ElicitRequestFormParams
-  | ElicitRequestURLParams` -- whose fields sit directly in `params`, so no
-  conforming client found `message` or `requestedSchema` where it looks for
-  them and elicitation did not work with any peer but neva. The variant is now
-  chosen by the `mode` discriminator on the way in (absent or `"form"` for a
-  form, `"url"` for a URL request) and written flat on the way out; a form no
-  longer emits `"mode": null`, which is not one of the values the spec allows.
-  Affects both protocol profiles.
-* **An unimplemented method answers `404 Not Found` over HTTP.** The JSON-RPC
-  code was already `-32601`, but the status was `200`. The spec pins the `404`
-  so a caller can tell "this endpoint speaks MCP and has no such method" from
-  "this URL is not an MCP endpoint" without parsing the body -- the JSON-RPC
-  error body is what distinguishes the two. Found by the conformance suite.
-* **A protocol version stated in the body that disagrees with the
-  `MCP-Protocol-Version` header is a `HeaderMismatch` (`-32020`).** It was
-  reported as `UnsupportedProtocolVersion` (`-32022`), because the body version
-  was checked against the supported set before it was compared to the header.
-  The two say different things to whoever has to fix them: `-32022` means
-  "retry with a version from this list", which does not fix a header and a body
-  that disagree.
-* **`resources/read` for an unknown URI names it in `error.data.uri`.** A
-  spec SHOULD; the error carried `data: null`, so a caller with several reads in
-  flight could not tell which one it was about without matching on the request
-  id.
-* **Per-request `clientCapabilities` are read in the shape the spec defines.**
-  `io.modelcontextprotocol/clientCapabilities` holds a `ClientCapabilities`
-  object, in which each capability is itself an *optional object* whose presence
-  is the declaration (`{"elicitation": {"form": {}}, "roots": {}}`). neva read
-  the members as booleans, so every request from a spec-conformant client --
-  MCP Inspector among them -- failed to parse its `_meta` and came back as
-  `-32602 invalid type: map, expected a boolean`, making `tools/call`,
-  `resources/read` and `prompts/get` unusable. Both shapes are now accepted on
-  the way in (the boolean for older neva clients), and neva's own client writes
-  the object shape.
-* **Tool and prompt arguments are extracted by name, not by position.**
-  * A failure now names the argument: ``missing required argument `age` `` and
-    ``invalid value for argument `age`: ... `` instead of
-    `Invalid param provided`.
-  * An argument a peer omitted is offered to the handler as `null`, so an
-    absent optional argument no longer errors on arrival.
-  * `Meta<_>`, `Context` and `Dc<_>` parameters consume no argument slot, so
-    they can sit anywhere in the signature without shifting the rest. The
-    `#[tool]` / `#[prompt]` macros classify them from the *resolved* type, so a
-    parameter reaching the signature through a type alias
-    (`type Token = Meta<ProgressToken>`) is recognised too. The same goes for
-    an argument's published JSON type and whether it is required: a
-    `type MaybeAge = Option<i32>` parameter now publishes exactly what the
-    spelled-out type does.
-  * Whether an argument may be omitted is decided by its type, never by whether
-    a synthetic `null` happens to deserialize into it -- otherwise a required
-    `serde_json::Value` argument would silently arrive as `Null`.
-* **Tools registered from a closure publish one property per argument.** The
-  generated `inputSchema` keyed its properties by *type name*, so
-  `|a: i32, b: i32|` advertised a single `number` property and the second
-  argument had nowhere to travel in. Properties are now named per argument and
-  listed in `required`. Prompt arguments likewise no longer publish
-  `std::any::type_name` output.
-
-### Added
-* **`Option<T>` tool and prompt arguments.**
-  * New `ToolArg` (the return type of `ToolHandler::args`) carries the
-    published property together with whether a call must supply it.
-  * New `PromptArgument::named(name, required)`.
-  * A tool whose arguments are all optional now publishes no `required` key
-    rather than an empty array.
-* `Tool::with_arg_names([...])` declares the names of a handler's arguments.
-  Rust does not keep a closure's parameter names, so a tool registered from a
-  bare closure publishes and reads the positional `arg0`, `arg1`, ... names
-  until this is called; it renames the generated schema and the extraction
-  names together, so the two cannot drift.
-* `map_tool!` / `map_prompt!` read the names off the closure itself:
-  `map_tool!(app, "greet", |name: String, age: i32| async move { ... })`
-  registers the tool with `name` and `age` and skips metadata parameters.
-* `App::run` fails at startup when a tool or prompt and its handler disagree
-  about the arguments -- a tool whose schema was overridden without
-  `with_arg_names`, a miscounted `with_arg_names`, declared names the schema
-  does not offer as properties, a `Prompt::with_args` list that does not cover
-  every argument the handler takes, or the same name given to two arguments.
-  None of these could ever be called
-  successfully, and this reports them before serving instead of on a peer's
-  first request. A schema that composes -- `$ref`, `allOf`, `oneOf`, a
-  conditional branch -- may publish an argument the check cannot follow, so it
-  is left alone rather than failed on a guess. `Context::add_tool` and
-  `Context::add_prompt` run the same check and refuse the insertion, since a
-  primitive registered while the server runs has no startup left to fail.
+* **DNS-rebinding protection.** The HTTP server validates `Origin` and `Host`:
+  on a loopback bind it refuses non-loopback names with `403` before reading the
+  body. `HttpServer::with_allowed_origins([...])` names more hosts;
+  `allow_any_origin()` turns the gate off.
+* **`Context::client_capabilities()`** reports what the caller declared in this
+  request's `_meta`, so a handler can branch before asking for an input kind it
+  would be refused for (`MissingRequiredClientCapability`).
+* **`Option<T>` tool and prompt arguments**, via `ToolArg` (returned by
+  `ToolHandler::args`) and `PromptArgument::named(name, required)`. A tool whose
+  arguments are all optional publishes no `required` key.
+* **`Tool::with_arg_names([...])`** names a bare closure's arguments, renaming
+  the published schema and the extraction names together; `map_tool!` /
+  `map_prompt!` read those names off the closure itself.
+* **`App::run` fails at startup** when a tool or prompt and its handler disagree
+  about arguments. `Context::add_tool` / `add_prompt` run the same check.
 * `ArgNames` and `FromHandlerArgs` in `neva::types`.
+* **A dropped `POST` response stream is resumed once**, with a `GET` carrying
+  `Last-Event-ID` after the pause the server asked for. Legacy profile only, and
+  only when the server named an id to resume from.
+* **The SSE `retry:` field sets the reconnection delay**, instead of a fixed
+  three seconds.
+* **Protected Resource Metadata is looked for at the origin too** when the
+  RFC 9728 path-based location misses; the document found there is validated
+  against the origin rather than the endpoint.
+* **The `scope` a `WWW-Authenticate` challenge names is what gets requested.**
+  Order: configured scopes, the challenge, `scopes_supported`, none at all.
+* **A `403 insufficient_scope` re-authorizes**, asking for the union of the
+  existing grant and what the challenge demands (SEP-2350). A `403` without that
+  challenge is untouched.
+* **An advertised RFC 9207 `iss` is enforced** -- the flag was read out of the
+  metadata document's unmodelled fields and so always came out false.
 
 ### Changed
-* **Breaking:** `App::map_tool` / `Tool::new` take
+* **A server may answer the handshake with a different protocol version.** Only
+  a version outside `PROTOCOL_VERSIONS` now ends the connection.
+* **`Client::disconnect` sends nothing.** The param-less
+  `notifications/cancelled` it used to send fails the spec's own schema.
+* **An MRTR round carries every input the handler asked for**, in one
+  `InputRequiredResult`, when the handler holds its `?` until it has asked for
+  everything.
+* **An `inputResponses` entry that does not fit is dropped, not rejected.**
+  Unsolicited, stale or state-less answers cost a round instead of failing the
+  call with `-32602`. An answer of the wrong kind is still an error, now a
+  JSON-RPC one rather than an in-band tool error.
+* `Prompt::with_args` also sets the extraction names, so the two cannot drift.
+
+### Changed (breaking)
+* `App::map_tool` / `Tool::new` take
   `Args: FromHandlerArgs<CallToolRequestParams>` and `App::map_prompt` /
   `Prompt::new` take `Args: FromHandlerArgs<GetPromptRequestParams>`, replacing
-  the `TryFrom<...Params>` bounds. Handlers themselves are unaffected; a
-  hand-written `impl TryFrom<CallToolRequestParams> for MyArgs` needs porting.
-* **Breaking:** `HandlerParams::Tool` and `HandlerParams::Prompt` carry the
-  primitive's `ArgNames` alongside the params.
-* **Breaking:** `ToolHandler::args` returns `Vec<ToolArg>` instead of
+  the `TryFrom<...>` bounds. Handlers are unaffected; a hand-written
+  `impl TryFrom` needs porting.
+* `ToolHandler::args` returns `Vec<ToolArg>` instead of
   `Option<HashMap<String, SchemaProperty>>` -- ordered, so the *n*-th entry is
-  the *n*-th argument slot, and carrying each argument's `required` flag.
-* **Breaking (wire):** a tool registered from a bare closure advertises
-  `arg0`, `arg1`, ... instead of the former type names (`number`, `string`).
-  Tools declared with `#[tool]` are unaffected -- they already published their
-  parameter names, and now read by them.
-* `Prompt::with_args` sets the extraction names along with the published
-  argument list, so the two are one decision. `#[prompt]` needs no change.
+  the *n*-th argument slot.
+* `HandlerParams::Tool` and `HandlerParams::Prompt` carry the primitive's
+  `ArgNames` alongside the params.
+* `PropertyType` gains an `Integer` variant and `"integer"` no longer
+  deserializes into `Number`; a match needs the new arm.
+* The schema structs in `neva::types::schema` gain an `extra` field, so an
+  exhaustive struct literal needs it (or `..Default::default()`).
+* **Wire:** a tool registered from a bare closure advertises `arg0`, `arg1`, ...
+  instead of the former type names. `#[tool]` tools are unaffected.
+
+### Fixed
+
+#### Authorization
+* **`insufficient_scope` is read off the challenge's `error` parameter**, not by
+  searching the whole `WWW-Authenticate` value for the string.
+* **A challenge that names no `scope` is still a step-up** -- the attribute is
+  optional in RFC 6750.
+* **The Bearer challenge is found in any `WWW-Authenticate` value**, not only
+  the first.
+* **A `403` on the standalone SSE `GET` re-authorizes** like one on a `POST`
+  (legacy profile).
+* **A step-up that lost the race reuses the winner's token** instead of walking
+  the user through consent for a grant it already holds.
+* **A stored refresh token survives a restart.** The refresh is retried once the
+  client and metadata have been rebuilt, on the way to the interactive flow --
+  and only with a configured `client_id`, since a refresh token belongs to the
+  client it was issued to.
+* **Renewing a token keeps the scope it was granted**, which a refresh response
+  may omit when the grant is unchanged (RFC 6749 5.1); otherwise the next
+  step-up had nothing to widen.
+* **The session records what was *granted*, not what was asked for**, so a
+  granted subset no longer reads as a token that merely expired.
+* **A step-up widens the grant a restored token holds**, taken from the stored
+  token's own `scope` when memory is empty after a restart.
+* **A challenge naming a scope outside `with_scopes` fails, naming it**, rather
+  than running a flow that cannot obtain it.
+* **Only a `404` opens the Protected Resource Metadata origin fallback** -- a
+  malformed body or a mismatched `resource` is the path-based document
+  answering, and its answer is authoritative.
+* **The RFC 8707 resource indicator is the one the accepted metadata declares**,
+  not the endpoint URL.
+* **A resumption carries the token the exchange ended up authorized with**, not
+  the one a `401` had already rejected.
+
+#### HTTP transport and sessions
+* **SSE responses carry `X-Content-Type-Options: nosniff`.** Without it Firefox
+  buffers the stream to sniff its type and a `fetch()` reader sees nothing.
+* **Each stream carries its own `Last-Event-ID` cursor.** It lived on the
+  session, so the `POST` and standalone `GET` streams sent each other back to
+  positions they had never reached. `retry:` stays on the session.
+* **A resumed response stream is released once it has answered**, instead of
+  being read forever -- one leaked connection per truncated reply. What is owed
+  is tracked per request, so a batch resumes only what is still unanswered.
+* **An SSE `retry: 0` means reconnect immediately**; zero was dropped as if
+  nothing had been stated.
+* **A server offering no standalone SSE stream no longer ends the session**
+  (legacy profile): `404` and `405` release the pending `initialize` and the
+  session carries on over POST alone.
+* **A `404` after a stream that worked means the session is gone** and ends the
+  connection, instead of carrying on dead (legacy profile).
+* **A terminated session answers `404` on `POST`, `GET` and `DELETE`** (legacy
+  profile), the POST body carrying a JSON-RPC error addressed to the request's
+  own id. `initialize` is exempt, and any request on a live id counts as
+  activity against the idle sweep.
+* **A stale session answers a notification with the status alone**, not a
+  `null`-id JSON-RPC error that matches nothing on the other side.
+* **A notification reaches the session stream the moment it is emitted** (legacy
+  profile), so a handler's response can no longer overtake the progress it just
+  reported. Per-session delivery replaces one shared 100-slot queue, and
+  `layer()` no longer spawns, so it can be built before the runtime runs.
+* **A full notification queue no longer logs itself to death** (legacy profile)
+  -- the warning fed straight back into the layer until the stack ran out.
+* **The POST no longer carries `Content-Type` twice**, which drew `415` from
+  strict receivers.
+
+#### MRTR and parameter headers
+* **`inputResponses` / `requestState` travel on the params, not in `_meta`**,
+  where the spec puts them -- against any other implementation the retry looked
+  like a fresh call. `_meta` is still read as a fallback;
+  `Request::input_responses()` and `Request::state()` read either.
+* **The idempotency digest covers the answers a round resolved to**, not the raw
+  `inputResponses`. An unasked key could otherwise miss the cache and re-run the
+  final handler's `on_commit` effects.
+* **The MRTR field check applies to MRTR methods only**; on a method registered
+  with `App::map_handler` those names are the handler's own params.
+* **A `requestState` / `inputResponses` of the wrong JSON type is
+  `InvalidParams`**, not silently absent. An explicit `null` counts as stating
+  the field wrongly -- the spec makes both optional by *absence*.
+* **`x-mcp-header` registrations expire with the listing that carried them**
+  (SEP-2243 with SEP-2549's clock): a listing is usable for its `ttlMs`, and an
+  absent `ttlMs` reads as `0`. A `HeaderMismatch` (`-32020`) then has the client
+  re-list, following `nextCursor` until it finds the tool, and retry once; that
+  listing is good for that retry regardless of TTL, scoped to the refused tool.
+
+#### Schemas and arguments
+* **A schema is published the way it was declared.** `Schema` and (legacy
+  profile) `ToolSchema` keep every unmodelled keyword verbatim in a flattened
+  `extra`: `default` (SEP-1034), `pattern`, `examples`, and the `$schema`,
+  `$defs`, `$ref`, `additionalProperties`, `allOf`/`anyOf` and `if`/`then`/`else`
+  that SEP-2106 requires to survive untouched.
+* **A tool property keeps its own keywords too** (legacy profile): `enum`,
+  `format`, `$ref` and `minimum` were dropped, and a property stating no `type`
+  no longer acquires `"object"`.
+* **A field declared `integer` rejects `1.5`.** The check judges the value, not
+  how it was written, so `1.0` still passes.
+* **Tool and prompt arguments are extracted by name, not by position.** Failures
+  name the argument, an omitted argument arrives as `null` instead of erroring,
+  and `Meta<_>` / `Context` / `Dc<_>` consume no argument slot wherever they sit
+  -- classified from the *resolved* type, so type aliases are recognised.
+* **Tools registered from a closure publish one property per argument**, instead
+  of keying them by type name and collapsing `|a: i32, b: i32|` into one.
+* **A tool call with no arguments omits `arguments`** rather than sending `null`,
+  which a validating peer rejects.
+
+#### Wire and protocol
+* **Per-request `clientCapabilities` are read as the spec's optional objects**,
+  not booleans. Every request from a conformant client -- MCP Inspector among
+  them -- failed with `-32602 invalid type: map, expected a boolean`. Both
+  shapes are accepted on the way in.
+* **Elicitation params are written as the spec's union**, not a tagged enum:
+  `{"Form": {...}}` hid `message` and `requestedSchema` from every peer but
+  neva. Affects both protocol profiles.
+* **An elicitation `mode` that is present has to be a string**; `null` was read
+  as "no mode" and delivered as a well-formed form.
+* **A `resources` capability that omits `subscribe` parses**, instead of failing
+  the handshake it arrives with.
+* **An unimplemented method answers `404` over HTTP**, not `200` with `-32601`.
+* **A body protocol version disagreeing with the `MCP-Protocol-Version` header
+  is a `HeaderMismatch` (`-32020`)**, not `UnsupportedProtocolVersion` -- "retry
+  with a version from this list" does not fix a header and a body that disagree.
+* **`resources/read` names the unknown URI in `error.data.uri`** (a spec SHOULD).
 
 ## 0.5.1
 
