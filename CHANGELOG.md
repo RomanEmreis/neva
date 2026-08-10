@@ -117,6 +117,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   appears to hang, while Chrome (which does not sniff a declared
   `text/event-stream`) works, making it look like a browser quirk. Non-browser
   consumers never sniff, so nothing else changes.
+* **`insufficient_scope` is read off the challenge's `error` parameter.** The
+  `403` re-authorization gate searched the whole `WWW-Authenticate` value for
+  the string, so a challenge that merely *mentioned* it -- an
+  `error_description` explaining the code, or a scope whose name contains it --
+  was treated as the error. That sent the caller through an interactive flow,
+  replacing a perfectly valid token, to retry a request re-authorization was
+  never going to fix. The challenge is parsed now, and only `error` counts.
 * **A challenge naming a scope outside `with_scopes` fails instead of running a
   doomed flow.** The configured set is a ceiling as well as a floor -- the flow
   asks for exactly it -- so a `WWW-Authenticate` demanding anything else

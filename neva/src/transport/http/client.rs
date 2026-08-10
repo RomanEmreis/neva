@@ -981,12 +981,24 @@ where
 ///
 /// RFC 6750 puts the code in the `WWW-Authenticate` challenge; a `403` without
 /// one is the resource server refusing the caller, not the token.
+///
+/// The challenge is parsed rather than searched. `insufficient_scope` is a
+/// value of the `error` parameter, and the same bytes appear in places that
+/// mean the opposite of it: an `error_description` explaining the code, or a
+/// scope name that merely contains it. Reading those as the error would send a
+/// caller through an interactive flow -- replacing a perfectly good token -- to
+/// retry a request that re-authorization was never going to fix.
 #[cfg(feature = "client-oauth")]
 fn insufficient_scope(headers: &reqwest::header::HeaderMap) -> bool {
+    use volga_oauth_client::{BearerChallenge, OAuthErrorCode};
+
     headers
         .get(reqwest::header::WWW_AUTHENTICATE)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|challenge| challenge.contains("insufficient_scope"))
+        .and_then(|challenge| BearerChallenge::parse(challenge).ok())
+        .is_some_and(|challenge| {
+            matches!(challenge.error(), Some(OAuthErrorCode::InsufficientScope))
+        })
 }
 
 /// Whether this session can resume a dropped stream.
@@ -1233,6 +1245,44 @@ impl From<reqwest::Error> for Error {
 mod tests {
     use super::*;
     use crate::transport::http::ServiceUrl;
+
+    /// `insufficient_scope` is a value of the challenge's `error` parameter,
+    /// and the same bytes turn up where they mean the opposite: describing the
+    /// code in prose, or inside a scope name. Mistaking those for the error
+    /// sends the caller through an interactive flow -- discarding a valid token
+    /// -- to retry a request re-authorization cannot fix.
+    #[test]
+    #[cfg(feature = "client-oauth")]
+    fn only_the_challenge_error_parameter_says_the_scope_is_short() {
+        let challenged = |value: &str| {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::WWW_AUTHENTICATE,
+                value.parse().expect("a header value"),
+            );
+            insufficient_scope(&headers)
+        };
+
+        assert!(challenged(r#"Bearer error="insufficient_scope""#));
+        assert!(challenged(
+            r#"Bearer realm="mcp", error="insufficient_scope", scope="admin""#
+        ));
+
+        // The words, but as prose about a different error.
+        assert!(!challenged(
+            r#"Bearer error="invalid_token", error_description="missing insufficient_scope claim""#
+        ));
+        // The words, but as part of a scope name.
+        assert!(!challenged(
+            r#"Bearer error="invalid_token", scope="insufficient_scope_admin""#
+        ));
+        // No error parameter at all: a resource server refusing the caller.
+        assert!(!challenged(r#"Bearer realm="mcp""#));
+        assert!(!challenged("Basic realm=\"mcp\""));
+
+        // And no challenge at all.
+        assert!(!insufficient_scope(&reqwest::header::HeaderMap::new()));
+    }
 
     fn make_session() -> Arc<McpSession> {
         Arc::new(McpSession::new(
