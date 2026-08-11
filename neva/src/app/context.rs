@@ -1538,8 +1538,14 @@ impl Context {
     /// `Optional` one. Called outside an elicitable dispatch, it is a no-op.
     ///
     /// # Durability
-    /// "Exactly once" means once per successfully-completed flow, not globally
-    /// idempotent -- a client that abandons and restarts the flow runs it again.
+    /// "Exactly once" means once per completed flow, not globally idempotent --
+    /// a client that abandons and restarts the flow runs it again.
+    ///
+    /// A round that failed partway through its commits counts as completed for
+    /// this purpose: its error is cached against that state exactly as a
+    /// success would be, so retrying the same round replays the error rather
+    /// than running the effects that already applied. Recovering from such a
+    /// failure means starting a fresh flow, which re-runs everything.
     ///
     /// # Example
     /// ```no_run

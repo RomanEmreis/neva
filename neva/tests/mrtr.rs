@@ -12,7 +12,7 @@
 use neva::{
     App, Context,
     client::Client,
-    error::Error,
+    error::{Error, ErrorCode},
     types::elicitation::{ElicitRequestParams, ElicitResult},
 };
 
@@ -211,6 +211,7 @@ static RECEIPTS: AtomicUsize = AtomicUsize::new(0);
 static LOST_RESPONSE_COMMITS: AtomicUsize = AtomicUsize::new(0);
 static IGNORED_ANSWER_COMMITS: AtomicUsize = AtomicUsize::new(0);
 static CONCURRENT_FINAL_COMMITS: AtomicUsize = AtomicUsize::new(0);
+static PARTIAL_COMMIT_CHARGES: AtomicUsize = AtomicUsize::new(0);
 
 #[tokio::test(flavor = "multi_thread")]
 async fn final_round_replay_is_idempotent_after_a_lost_response() {
@@ -465,6 +466,138 @@ async fn an_ignored_answer_does_not_buy_a_second_run_of_the_final_round() {
         IGNORED_ANSWER_COMMITS.load(Ordering::SeqCst),
         1,
         "an answer the server ignores must not re-run the final round"
+    );
+
+    handle.abort();
+}
+
+/// A final round that fails partway through its commits must not be repeatable.
+///
+/// Commits run in registration order and the first `Err` becomes the response
+/// error -- but by then the earlier ones have already applied their effects.
+/// Caching only successful rounds would leave that state open: a client whose
+/// error response went missing re-sends the identical request, misses the
+/// cache, and the handler plus every commit before the failing one runs a
+/// second time. Charged twice, to be told the same thing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_round_that_failed_midway_through_its_commits_is_not_repeatable() {
+    PARTIAL_COMMIT_CHARGES.store(0, Ordering::SeqCst);
+
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("checkout", |mut ctx: Context| async move {
+        let params: ElicitRequestParams = ElicitRequestParams::form("Confirm?")
+            .with_required("card", "string")
+            .into();
+        ctx.elicit("card", params).await?;
+        // The money moves first and the receipt fails after it -- the ordering
+        // that makes a re-run cost something real.
+        ctx.on_commit(async move {
+            PARTIAL_COMMIT_CHARGES.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        ctx.on_commit(async move {
+            Err::<(), Error>(Error::new(ErrorCode::InternalError, "receipt service down"))
+        });
+        Ok::<String, Error>("charged".into())
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
+    let url = format!("http://{addr}/mcp");
+
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "checkout", "arguments": {},
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
+    });
+    let r1: serde_json::Value = routed(client.post(&url), &call)
+        .json(&call)
+        .send()
+        .await
+        .expect("round 1 send")
+        .json()
+        .await
+        .expect("round 1 json");
+    let state = r1["result"]["requestState"]
+        .as_str()
+        .expect("requestState present")
+        .to_string();
+    let key = r1["result"]["inputRequests"]
+        .as_object()
+        .expect("inputRequests object")
+        .keys()
+        .next()
+        .expect("one input request")
+        .clone();
+
+    let answer = serde_json::json!({ "action": "accept", "content": { "card": "4242" } });
+    let final_round = |id: i32| {
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": { "name": "checkout", "arguments": {},
+                "requestState": state,
+                "inputResponses": { key.clone(): answer },
+                "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
+        })
+    };
+
+    let first = final_round(2);
+    let r2: serde_json::Value = routed(client.post(&url), &first)
+        .json(&first)
+        .send()
+        .await
+        .expect("final send")
+        .json()
+        .await
+        .expect("final json");
+    assert!(
+        r2["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("receipt service down")),
+        "the failing commit must be the response error: {r2}"
+    );
+    assert_eq!(
+        PARTIAL_COMMIT_CHARGES.load(Ordering::SeqCst),
+        1,
+        "the commit before the failure applied once"
+    );
+
+    // The client never saw that answer and asks again, byte for byte.
+    let again = final_round(3);
+    let r3: serde_json::Value = routed(client.post(&url), &again)
+        .json(&again)
+        .send()
+        .await
+        .expect("retry send")
+        .json()
+        .await
+        .expect("retry json");
+    assert!(
+        r3["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("receipt service down")),
+        "the retry must replay the cached failure: {r3}"
+    );
+    assert_eq!(
+        r3["id"],
+        serde_json::json!(3),
+        "the cached response adopts the retry id"
+    );
+    assert_eq!(
+        PARTIAL_COMMIT_CHARGES.load(Ordering::SeqCst),
+        1,
+        "a retry of a failed round must not charge again"
     );
 
     handle.abort();

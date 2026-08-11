@@ -1590,15 +1590,29 @@ impl App {
                             break;
                         }
                     }
+                    // Cache this round's answer either way (below, once the id
+                    // is final), so a lost-response retry is served from it
+                    // rather than run again.
+                    //
+                    // Failure has to be cached too, and that is the whole point
+                    // rather than an afterthought: by here the commits have
+                    // *started*. An earlier one may have already applied its
+                    // effect, and the one that returned `Err` may have applied
+                    // part of its own. Leaving the round uncached would send an
+                    // identical retry back through the handler and re-run those
+                    // effects -- charging twice to report the same failure,
+                    // which is exactly what `on_commit` exists to prevent.
+                    //
+                    // The cost is that the state carries its failure: a retry
+                    // of this round replays the error instead of getting
+                    // another attempt. That is the safe direction. Recovering
+                    // means starting a fresh flow, whose new state re-runs
+                    // everything deliberately -- the case `on_commit`'s docs
+                    // already call out as outside its guarantee.
+                    cache_final = true;
                     match commit_err {
                         Some(e) => Err(e),
-                        None => {
-                            // Final round committed successfully: cache its
-                            // response (below, once the id is final) so a
-                            // lost-response retry is served idempotently.
-                            cache_final = true;
-                            resp
-                        }
+                        None => resp,
                     }
                 } else {
                     resp
