@@ -1073,21 +1073,20 @@ fn insufficient_scope(headers: &reqwest::header::HeaderMap) -> bool {
 /// The `WWW-Authenticate` value carrying the Bearer challenge that applies, if
 /// any.
 ///
-/// `WWW-Authenticate` may be sent more than once, and a server is free to list
-/// `Basic` first -- so reading only the first value would miss the Bearer
-/// challenge behind it and answer a `401`/`403` as if none had been offered.
-/// Several challenges *within* one value are already handled downstream:
-/// `BearerChallenge::parse` walks the list and skips the other schemes.
+/// `WWW-Authenticate` may be sent more than once, and one value may carry
+/// several challenges -- including several *Bearer* ones, which RFC 9110 allows
+/// and a server distinguishing realms produces. Both are walked:
+/// [`bearer_challenges`] takes one value apart, and this takes them all.
 ///
-/// Among several *Bearer* challenges the one naming `insufficient_scope` wins,
-/// wherever it sits. It is the only error a client can answer with anything
-/// beyond authenticating again, and answering it takes what that challenge
-/// carries -- the `scope` the request was short of. Handing the flow whichever
-/// parsed first, a `Bearer error="invalid_token"` say, would have it re-authorize
-/// for exactly the grant it already held and spend the exchange's one retry
-/// being refused identically. Where no challenge names the code the first is as
-/// good as any: a `resource_metadata` pointer is the server's own and does not
-/// depend on which error accompanies it.
+/// Among them the one naming `insufficient_scope` wins, wherever it sits. It is
+/// the only error a client can answer with anything beyond authenticating again,
+/// and answering it takes what that challenge carries -- the `scope` the request
+/// was short of. Handing the flow whichever came first, a
+/// `Bearer error="invalid_token"` say, would have it re-authorize for exactly the
+/// grant it already held and spend the exchange's one retry being refused
+/// identically. Where none names the code the first is as good as any: a
+/// `resource_metadata` pointer is the server's own and does not depend on which
+/// error accompanies it.
 #[cfg(feature = "client-oauth")]
 fn bearer_challenge(headers: &reqwest::header::HeaderMap) -> Option<String> {
     use volga_oauth_client::{BearerChallenge, OAuthErrorCode};
@@ -1098,15 +1097,89 @@ fn bearer_challenge(headers: &reqwest::header::HeaderMap) -> Option<String> {
         .iter()
         .filter_map(|value| value.to_str().ok())
     {
-        let Ok(challenge) = BearerChallenge::parse(value) else {
-            continue;
-        };
-        if matches!(challenge.error(), Some(OAuthErrorCode::InsufficientScope)) {
-            return Some(value.to_owned());
+        for challenge in bearer_challenges(value) {
+            let Ok(parsed) = BearerChallenge::parse(&challenge) else {
+                continue;
+            };
+            if matches!(parsed.error(), Some(OAuthErrorCode::InsufficientScope)) {
+                return Some(challenge);
+            }
+            first.get_or_insert(challenge);
         }
-        first.get_or_insert_with(|| value.to_owned());
     }
     first
+}
+
+/// The Bearer challenges inside one `WWW-Authenticate` value, each rendered on
+/// its own.
+///
+/// `BearerChallenge::parse` returns the *first* Bearer challenge in a value and
+/// stops where the next scheme begins, which is the right contract for reading
+/// one challenge and the wrong one for finding the applicable challenge among
+/// several. Iterating header values does not help: RFC 9110 section 11.6.1 lets a
+/// server put the whole list in one value, so
+/// `Bearer error="invalid_token", Bearer error="insufficient_scope", scope="admin"`
+/// is a single value whose second challenge is the one that matters.
+///
+/// Splitting is by challenge boundary, not by comma: a list element begins a new
+/// challenge when its first token is not `name=value` (RFC 9110 section 11.1),
+/// and commas inside a quoted string separate nothing. Parameters are left to
+/// `BearerChallenge::parse`, which each rendered challenge is handed whole.
+#[cfg(feature = "client-oauth")]
+fn bearer_challenges(value: &str) -> Vec<String> {
+    let mut groups: Vec<Vec<&str>> = Vec::new();
+    for element in list_elements(value) {
+        // No `=`, or whitespace ahead of it: a scheme, so a new challenge.
+        // `error="x"` has neither and belongs to the challenge it follows.
+        let starts_challenge = match element.find('=') {
+            None => true,
+            Some(eq) => element[..eq].contains(char::is_whitespace),
+        };
+        if starts_challenge {
+            groups.push(vec![element]);
+        } else if let Some(group) = groups.last_mut() {
+            group.push(element);
+        }
+    }
+
+    groups
+        .into_iter()
+        .filter(|group| {
+            group[0]
+                .split_ascii_whitespace()
+                .next()
+                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("Bearer"))
+        })
+        .map(|group| group.join(", "))
+        .collect()
+}
+
+/// Splits a header value on the commas that separate list elements -- the ones
+/// outside a quoted string, since a quoted `scope="a,b"` carries its own.
+#[cfg(feature = "client-oauth")]
+fn list_elements(value: &str) -> Vec<&str> {
+    let mut elements = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (i, byte) in value.bytes().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match byte {
+            b'\\' if quoted => escaped = true,
+            b'"' => quoted = !quoted,
+            b',' if !quoted => {
+                elements.push(value[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    elements.push(value[start..].trim());
+    elements.retain(|element| !element.is_empty());
+    elements
 }
 
 /// Whether this session can resume a dropped stream.
@@ -1469,6 +1542,55 @@ mod tests {
             )
         );
         assert!(!insufficient_scope(&plain));
+
+        // The same list, in *one* value. RFC 9110 lets a server send it that
+        // way, and the dependency's parser stops at the second scheme -- so
+        // walking header values alone would never reach the challenge that
+        // matters.
+        assert!(challenged(
+            r#"Bearer realm="legacy", error="invalid_token", Bearer realm="mcp", error="insufficient_scope", scope="admin""#
+        ));
+        let mut combined = reqwest::header::HeaderMap::new();
+        combined.insert(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"Bearer realm="legacy", error="invalid_token", Bearer realm="mcp", error="insufficient_scope", scope="admin""#
+                .parse()
+                .expect("a header value"),
+        );
+        assert_eq!(
+            bearer_challenge(&combined).as_deref(),
+            Some(r#"Bearer realm="mcp", error="insufficient_scope", scope="admin""#),
+            "the applicable challenge is handed over on its own"
+        );
+    }
+
+    /// A comma inside a quoted string separates nothing, and a parameter is not
+    /// a scheme however much it looks like one at a glance.
+    #[test]
+    #[cfg(feature = "client-oauth")]
+    fn a_header_value_is_split_on_challenge_boundaries() {
+        assert_eq!(
+            bearer_challenges(r#"Bearer scope="a,b", error="insufficient_scope""#),
+            vec![r#"Bearer scope="a,b", error="insufficient_scope""#],
+            "a quoted comma is part of the value, not a list separator"
+        );
+        assert_eq!(
+            bearer_challenges(r#"Basic realm="legacy", Bearer realm="mcp""#),
+            vec![r#"Bearer realm="mcp""#],
+            "the other scheme's parameters stay with it"
+        );
+        assert_eq!(
+            bearer_challenges(r#"Bearer, Bearer error="insufficient_scope""#),
+            vec![r#"Bearer"#, r#"Bearer error="insufficient_scope""#],
+            "a bare challenge is still a challenge"
+        );
+        assert!(bearer_challenges(r#"Basic realm="legacy""#).is_empty());
+        // A quoted escape must not end the string early and turn the rest of
+        // the value into challenges of its own.
+        assert_eq!(
+            bearer_challenges(r#"Bearer error_description="say \" then, stop""#),
+            vec![r#"Bearer error_description="say \" then, stop""#]
+        );
     }
 
     fn make_session() -> Arc<McpSession> {

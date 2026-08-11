@@ -80,13 +80,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   searching the whole `WWW-Authenticate` value for the string.
 * **A challenge that names no `scope` is still a step-up** -- the attribute is
   optional in RFC 6750.
-* **The Bearer challenge is found in any `WWW-Authenticate` value**, not only
-  the first -- and among several, the one naming `insufficient_scope` is the one
-  acted on. A `Bearer error="invalid_token"` ahead of it would otherwise answer
-  for both: no step-up, or a step-up asking for the grant it already held,
-  because the `scope` it was short of lives on the challenge that named the
-  code. Detection and the challenge handed to the flow are now the same
-  selection, so they cannot disagree.
+* **The applicable Bearer challenge is found wherever the server put it** --
+  behind another scheme, in a second `WWW-Authenticate` value, or later in the
+  same one, which RFC 9110 allows and the parser's "first Bearer wins" contract
+  stops at. Among several, the one naming `insufficient_scope` is acted on: a
+  `Bearer error="invalid_token"` ahead of it would otherwise answer for both,
+  giving either no step-up or one asking for the grant already held, since the
+  `scope` the request was short of lives on the challenge that named the code.
+  Detection and the challenge handed to the flow are the same selection, so they
+  cannot disagree.
 * **A `403` on the standalone SSE `GET` re-authorizes** like one on a `POST`
   (legacy profile).
 * **A step-up that lost the race reuses the winner's token** instead of walking
@@ -95,9 +97,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   client and metadata have been rebuilt, on the way to the interactive flow --
   and only with a configured `client_id`, since a refresh token belongs to the
   client it was issued to.
-* **Renewing a token keeps the scope it was granted**, which a refresh response
-  may omit when the grant is unchanged (RFC 6749 5.1); otherwise the next
-  step-up had nothing to widen.
+* **A renewal leaves the session holding what the renewed token holds.** A
+  refresh response may omit `scope` when the grant is unchanged (RFC 6749 5.1),
+  and the renewed set replaces the stored one -- so the grant was carried over
+  rather than erased, and the next step-up had something to widen. A response
+  that *narrows* the grant now updates the in-memory record too: it outranks the
+  store, so a remembered wider grant would have a challenge read as already
+  covered and hand the caller back a token that lacks the scope.
 * **The session records what was *granted*, not what was asked for**, so a
   granted subset no longer reads as a token that merely expired.
 * **A step-up widens the grant a restored token holds**, taken from the stored

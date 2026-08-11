@@ -659,11 +659,28 @@ impl OAuthSession {
 
         match client.token(&self.resource, metadata).await {
             Ok(Some(mut tokens)) => {
+                // What the renewed token covers: what the response said it
+                // granted, or -- when it said nothing -- the grant it did not
+                // restate.
+                let granted = tokens.scope.clone().or(carried);
                 if tokens.scope.is_none()
-                    && let Some(scope) = carried
+                    && let Some(scope) = granted.clone()
                 {
                     tokens.scope = Some(scope);
                     self.config.store.put(&self.resource, &tokens);
+                }
+                // And the in-memory record moves with it. A refresh may
+                // *narrow* the grant, and this process's memory of the earlier,
+                // wider one outranks the store -- so a challenge demanding
+                // something the renewed token no longer carries would read as
+                // already covered, take the single-flight shortcut, and hand
+                // back that same token to be refused again on the request's one
+                // retry.
+                if let Some(scope) = granted.as_deref() {
+                    let scopes = split_scopes(scope);
+                    if !scopes.is_empty() {
+                        self.set_requested_scopes(scopes);
+                    }
                 }
                 let token: Arc<str> = tokens.access_token.into();
                 self.set_token(token.clone());
@@ -1616,6 +1633,55 @@ mod tests {
             session.requested_scopes(),
             vec!["read".to_string()],
             "and a step-up must still have that grant to widen"
+        );
+    }
+
+    /// The other direction: a refresh that *narrows* the grant.
+    ///
+    /// The in-memory set outranks the store, so a wider grant remembered from
+    /// an earlier round in this process would outlive the token that carried
+    /// it. A challenge demanding a scope the renewed token no longer has would
+    /// then read as already covered, take the single-flight shortcut, and hand
+    /// the caller that same token to be refused again on its one retry.
+    #[tokio::test]
+    async fn a_narrowing_renewal_is_what_the_session_remembers() {
+        let addr = spawn_token_endpoint(
+            r#"{"access_token":"fresh-token","token_type":"Bearer","expires_in":3600,"scope":"read"}"#,
+        )
+        .await;
+
+        let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+        let mut restored = stale_tokens();
+        restored.scope = Some("read write".into());
+        store.put("http://127.0.0.1:3000/mcp", &restored);
+
+        let flow = FlowState {
+            client: OAuthClient::new("cid")
+                .with_config(ClientConfig::new().require_https(false))
+                .with_token_store(store.clone()),
+            metadata: AuthorizationServerMetadata::new("http://issuer.local")
+                .with_token_endpoint(format!("http://{addr}/token")),
+        };
+        let session = session_with(store.clone(), Some(flow));
+        // What an earlier round in this process was granted.
+        session.set_requested_scopes(vec!["read".to_string(), "write".to_string()]);
+
+        assert_eq!(
+            session.refreshed_bearer().await.as_deref(),
+            Some("fresh-token")
+        );
+        assert_eq!(
+            store
+                .get("http://127.0.0.1:3000/mcp")
+                .and_then(|tokens| tokens.scope)
+                .as_deref(),
+            Some("read"),
+            "the response stated the grant, so nothing is carried over it"
+        );
+        assert_eq!(
+            session.requested_scopes(),
+            vec!["read".to_string()],
+            "and the session holds what the token holds, not what it used to"
         );
     }
 
