@@ -1476,6 +1476,47 @@ mod tests {
         );
     }
 
+    /// RFC 9728 section 3.3 states two validation rules, and which applies
+    /// depends on how the document was found. One reached by inserting the
+    /// well-known suffix is checked against the identifier the suffix was
+    /// inserted into, so a document at the origin legitimately names the
+    /// origin. One reached through the challenge's `resource_metadata` pointer
+    /// is checked against something else entirely: "the resource value returned
+    /// MUST be identical to the URL that the client used to make the request to
+    /// the resource server", and if they differ the document "MUST NOT be
+    /// used". Section 7.3 says why -- it is what stops a server from pointing at
+    /// a document that claims to speak for a resource it is not.
+    ///
+    /// So the same origin-wide document is usable when discovered and unusable
+    /// when pointed at. That asymmetry is the rule, not an oversight, and this
+    /// pins it: relaxing the pointed-at case to accept the origin would trade an
+    /// impersonation check for the convenience of a server that is misusing the
+    /// pointer.
+    #[tokio::test]
+    async fn a_challenge_pointer_is_held_to_the_url_the_client_called() {
+        // The very document `only_a_missing_document_opens_the_origin_fallback`
+        // accepts through discovery: it names the origin, and the endpoint this
+        // client calls sits at `/mcp` under it.
+        let addr = spawn_root_document().await;
+        let config = OAuthClientConfig::default()
+            .require_https(false)
+            .with_handler(NoInteraction);
+        let session = OAuthSession::new(config, &format!("http://{addr}/mcp")).unwrap();
+        let challenge = format!(
+            r#"Bearer resource_metadata="http://{addr}/.well-known/oauth-protected-resource""#
+        );
+
+        let err = session
+            .authorize(Some(&challenge), None)
+            .await
+            .expect_err("a pointed-at document naming something other than the called URL");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("resource mismatch"),
+            "the refusal must be the validation one, reached before any flow: {msg}"
+        );
+    }
+
     fn stale_tokens() -> TokenSet {
         TokenSet {
             access_token: "stale-token".into(),
