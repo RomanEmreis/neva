@@ -111,7 +111,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   store, so a remembered wider grant would have a challenge read as already
   covered and hand the caller back a token that lacks the scope.
 * **The session records what was *granted*, not what was asked for**, so a
-  granted subset no longer reads as a token that merely expired.
+  granted subset no longer reads as a token that merely expired. When the
+  response omits `scope` -- the server's way of saying "exactly what you asked
+  for" -- the inferred grant is written into the stored token too, not just held
+  in memory, so it is still there after a restart.
 * **A step-up widens the grant a restored token holds**, taken from the stored
   token's own `scope` when memory is empty after a restart.
 * **A challenge naming a scope outside `with_scopes` fails, naming it**, rather

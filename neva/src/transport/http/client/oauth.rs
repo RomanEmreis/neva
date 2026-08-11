@@ -899,14 +899,6 @@ impl OAuthSession {
             .await
             .map_err(flow_error)?;
 
-        self.config.store.put(&self.resource, &tokens);
-        // Keep the client + metadata so future refreshes stay
-        // non-interactive.
-        *flight = Some(FlowState {
-            client,
-            metadata: server_metadata,
-        });
-
         // What the server *granted*, which is not always what was asked for.
         // RFC 6749 section 5.1 has the token response state `scope` whenever it
         // differs from the request and omit it when it matches, so the response
@@ -915,12 +907,31 @@ impl OAuthSession {
         // and then the challenge that names it reads as "this token expired"
         // rather than "this grant is too narrow", so the client refreshes into
         // the same refusal instead of widening.
+        let mut tokens = tokens;
         let granted = tokens
             .scope
             .as_deref()
             .map(split_scopes)
             .filter(|granted| !granted.is_empty())
             .unwrap_or(scopes);
+
+        // A grant inferred from the request goes into the stored set too, not
+        // just into memory. The store is what outlives the process, and the
+        // omission that produced this inference -- "granted exactly what you
+        // asked for" -- is the common case, so leaving it unwritten would have
+        // the next run start out believing it holds nothing and let the first
+        // step-up replace the grant instead of widening it.
+        if tokens.scope.is_none() && !granted.is_empty() {
+            tokens.scope = Some(granted.join(" "));
+        }
+
+        self.config.store.put(&self.resource, &tokens);
+        // Keep the client + metadata so future refreshes stay
+        // non-interactive.
+        *flight = Some(FlowState {
+            client,
+            metadata: server_metadata,
+        });
         self.set_requested_scopes(granted);
 
         let token: Arc<str> = tokens.access_token.into();
@@ -1847,6 +1858,136 @@ mod tests {
             }
         });
         addr
+    }
+
+    /// An authorization server that also registers clients and answers the
+    /// token endpoint *without* a `scope` -- RFC 6749 section 5.1's "you were
+    /// granted exactly what you asked for", which is the case that leaves the
+    /// grant to be inferred.
+    async fn spawn_registering_authorization_server() -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let read = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+                let root = format!("http://{addr}");
+
+                let body = if request.contains("/.well-known/oauth-protected-resource") {
+                    format!(r#"{{"resource":"{root}/mcp","authorization_servers":["{root}"]}}"#)
+                } else if request.contains("/.well-known/") {
+                    format!(
+                        r#"{{"issuer":"{root}","token_endpoint":"{root}/token",
+                             "authorization_endpoint":"{root}/authorize",
+                             "registration_endpoint":"{root}/register",
+                             "response_types_supported":["code"]}}"#
+                    )
+                } else if request.contains("/register") {
+                    r#"{"client_id":"registered-client"}"#.to_string()
+                } else {
+                    r#"{"access_token":"granted-token","token_type":"Bearer","expires_in":3600}"#
+                        .to_string()
+                };
+
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+        addr
+    }
+
+    /// Completes the flow without a browser by reading the `state` back off the
+    /// authorization URL -- which is what the redirect would have carried.
+    struct EchoesState;
+
+    impl AuthorizationHandler for EchoesState {
+        fn redirect_uri(&self) -> BoxFuture<'_, Result<String, Error>> {
+            Box::pin(async { Ok("http://127.0.0.1:8919/callback".to_string()) })
+        }
+
+        fn authorize(&self, url: String) -> BoxFuture<'_, Result<CallbackParams, Error>> {
+            Box::pin(async move {
+                let state = url
+                    .split(['?', '&'])
+                    .find_map(|param| param.strip_prefix("state="))
+                    .ok_or_else(|| {
+                        Error::new(
+                            ErrorCode::InvalidRequest,
+                            "the authorization URL carried no `state`",
+                        )
+                    })?
+                    .to_owned();
+                Ok(CallbackParams {
+                    code: "the-code".into(),
+                    state,
+                    iss: None,
+                })
+            })
+        }
+    }
+
+    /// A grant the token response did not restate is inferred from the request
+    /// -- and has to be written down where a restart can find it.
+    ///
+    /// Omitting `scope` is how a server says "exactly what you asked for", so
+    /// this is the ordinary case rather than an edge one. Recorded in memory
+    /// alone it dies with the process, and the next run's first
+    /// `insufficient_scope` challenge widens from nothing: the step-up asks for
+    /// the demanded scope by itself and trades away everything the token
+    /// already carried.
+    #[tokio::test]
+    async fn an_inferred_grant_is_stored_where_a_restart_can_find_it() {
+        let addr = spawn_registering_authorization_server().await;
+        let resource = format!("http://{addr}/mcp");
+
+        let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+        let config = OAuthClientConfig {
+            store: store.clone(),
+            ..OAuthClientConfig::default()
+        }
+        .require_https(false)
+        .with_handler(EchoesState);
+        // No configured scopes: the challenge is what the flow asks for, and
+        // the store is then the only place that grant can be kept.
+        let session = OAuthSession::new(config, &resource).unwrap();
+
+        let token = session
+            .authorize(
+                Some(r#"Bearer error="insufficient_scope", scope="admin""#),
+                None,
+            )
+            .await
+            .expect("the flow completes");
+        assert_eq!(&*token, "granted-token");
+
+        assert_eq!(
+            store
+                .get(&resource)
+                .and_then(|tokens| tokens.scope)
+                .as_deref(),
+            Some("admin"),
+            "a grant the response left implicit must still be written down"
+        );
+
+        // What the next process sees: a fresh session over the same store, with
+        // nothing in memory.
+        let restarted = OAuthSession::new(
+            OAuthClientConfig {
+                store,
+                ..OAuthClientConfig::default()
+            },
+            &resource,
+        )
+        .unwrap();
+        assert_eq!(
+            restarted.requested_scopes(),
+            vec!["admin".to_string()],
+            "and be there for the next step-up to widen"
+        );
     }
 
     /// A handler that supplies a redirect URI but refuses to interact, so a
