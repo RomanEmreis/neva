@@ -81,9 +81,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * **A challenge that names no `scope` is still a step-up** -- the attribute is
   optional in RFC 6750.
 * **The Bearer challenge is found in any `WWW-Authenticate` value**, not only
-  the first. `insufficient_scope` goes further and asks every Bearer challenge:
-  the applicable one need not lead, and a `Bearer error="invalid_token"` ahead
-  of it would otherwise answer for both and skip the step-up.
+  the first -- and among several, the one naming `insufficient_scope` is the one
+  acted on. A `Bearer error="invalid_token"` ahead of it would otherwise answer
+  for both: no step-up, or a step-up asking for the grant it already held,
+  because the `scope` it was short of lives on the challenge that named the
+  code. Detection and the challenge handed to the flow are now the same
+  selection, so they cannot disagree.
 * **A `403` on the standalone SSE `GET` re-authorizes** like one on a `POST`
   (legacy profile).
 * **A step-up that lost the race reuses the winner's token** instead of walking

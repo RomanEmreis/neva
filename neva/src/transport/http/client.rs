@@ -1056,44 +1056,57 @@ struct Drained {
 /// caller through an interactive flow -- replacing a perfectly good token -- to
 /// retry a request that re-authorization was never going to fix.
 ///
-/// Every Bearer challenge is asked, not just the first one that parses. A
-/// server may send several, and the one carrying this code need not lead: a
-/// `Bearer error="invalid_token"` ahead of a `Bearer
-/// error="insufficient_scope"` would otherwise answer for both and skip the
-/// step-up the second one asked for. This is the one question where the
-/// applicable challenge is the one that names the code, rather than whichever
-/// came first -- which is what [`bearer_challenge`] finds, and the right answer
-/// there, since a `resource_metadata` pointer is the server's own and does not
-/// depend on which error accompanies it.
+/// The question is asked of [`bearer_challenge`], which is also what the flow
+/// is handed -- so what decides a step-up and what is acted on cannot be two
+/// different challenges.
 #[cfg(feature = "client-oauth")]
 fn insufficient_scope(headers: &reqwest::header::HeaderMap) -> bool {
     use volga_oauth_client::{BearerChallenge, OAuthErrorCode};
 
-    headers
-        .get_all(reqwest::header::WWW_AUTHENTICATE)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .filter_map(|value| BearerChallenge::parse(value).ok())
-        .any(|challenge| matches!(challenge.error(), Some(OAuthErrorCode::InsufficientScope)))
+    bearer_challenge(headers)
+        .and_then(|challenge| BearerChallenge::parse(&challenge).ok())
+        .is_some_and(|challenge| {
+            matches!(challenge.error(), Some(OAuthErrorCode::InsufficientScope))
+        })
 }
 
-/// The `WWW-Authenticate` value carrying the Bearer challenge, if any.
+/// The `WWW-Authenticate` value carrying the Bearer challenge that applies, if
+/// any.
 ///
 /// `WWW-Authenticate` may be sent more than once, and a server is free to list
 /// `Basic` first -- so reading only the first value would miss the Bearer
 /// challenge behind it and answer a `401`/`403` as if none had been offered.
 /// Several challenges *within* one value are already handled downstream:
 /// `BearerChallenge::parse` walks the list and skips the other schemes.
+///
+/// Among several *Bearer* challenges the one naming `insufficient_scope` wins,
+/// wherever it sits. It is the only error a client can answer with anything
+/// beyond authenticating again, and answering it takes what that challenge
+/// carries -- the `scope` the request was short of. Handing the flow whichever
+/// parsed first, a `Bearer error="invalid_token"` say, would have it re-authorize
+/// for exactly the grant it already held and spend the exchange's one retry
+/// being refused identically. Where no challenge names the code the first is as
+/// good as any: a `resource_metadata` pointer is the server's own and does not
+/// depend on which error accompanies it.
 #[cfg(feature = "client-oauth")]
 fn bearer_challenge(headers: &reqwest::header::HeaderMap) -> Option<String> {
-    use volga_oauth_client::BearerChallenge;
+    use volga_oauth_client::{BearerChallenge, OAuthErrorCode};
 
-    headers
+    let mut first = None;
+    for value in headers
         .get_all(reqwest::header::WWW_AUTHENTICATE)
         .iter()
         .filter_map(|value| value.to_str().ok())
-        .find(|value| BearerChallenge::parse(value).is_ok())
-        .map(str::to_owned)
+    {
+        let Ok(challenge) = BearerChallenge::parse(value) else {
+            continue;
+        };
+        if matches!(challenge.error(), Some(OAuthErrorCode::InsufficientScope)) {
+            return Some(value.to_owned());
+        }
+        first.get_or_insert_with(|| value.to_owned());
+    }
+    first
 }
 
 /// Whether this session can resume a dropped stream.
@@ -1427,6 +1440,35 @@ mod tests {
             insufficient_scope(&headers),
             "the challenge that names the code is the one that answers"
         );
+        // And it is the one handed to the flow, or the step-up would go asking
+        // for the grant it already had: the scope it was short of lives on that
+        // challenge and nowhere else.
+        assert_eq!(
+            bearer_challenge(&headers).as_deref(),
+            Some(r#"Bearer realm="mcp", error="insufficient_scope", scope="admin""#),
+            "the flow must be given the challenge that says what is missing"
+        );
+
+        // With no such challenge, the first that parses is as good as any --
+        // and a Bearer behind a Basic is still found.
+        let mut plain = reqwest::header::HeaderMap::new();
+        plain.append(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"Basic realm="legacy""#.parse().expect("a header value"),
+        );
+        plain.append(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"Bearer resource_metadata="https://rs.example/.well-known/oauth-protected-resource""#
+                .parse()
+                .expect("a header value"),
+        );
+        assert_eq!(
+            bearer_challenge(&plain).as_deref(),
+            Some(
+                r#"Bearer resource_metadata="https://rs.example/.well-known/oauth-protected-resource""#
+            )
+        );
+        assert!(!insufficient_scope(&plain));
     }
 
     fn make_session() -> Arc<McpSession> {
