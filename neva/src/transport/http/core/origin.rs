@@ -28,11 +28,17 @@ pub(crate) enum OriginPolicy {
     #[default]
     Loopback,
 
-    /// Accept the listed hosts, plus the loopback ones.
+    /// Accept the listed origins, plus the loopback ones.
     ///
-    /// Entries are matched against the hostname only; a port in an entry is
-    /// ignored, since the port a request arrives on says nothing about who sent
-    /// it.
+    /// An entry that states a scheme (`https://app.example.com`) is an origin
+    /// and is matched as one: scheme, host and port all have to agree, with a
+    /// missing port meaning the scheme's default. An entry that states none
+    /// (`app.example.com`) is a host, and matches that host on any scheme and
+    /// any port -- narrowed to one port if the entry names one.
+    ///
+    /// `Host` is matched by hostname either way. It says where the request
+    /// landed rather than who sent it, it carries no scheme, and behind a proxy
+    /// its port is the proxy's business.
     Allowlist(Arc<[Box<str>]>),
 
     /// Accept anything.
@@ -75,17 +81,14 @@ impl OriginPolicy {
             ))
         };
 
-        if let Some(origin) = header(headers, "origin") {
-            // `null` is the opaque origin a sandboxed frame or a `file://` page
-            // sends. It names nothing, so it can never be on the list.
-            let host = origin_host(origin).unwrap_or("null");
-            if !self.allows(host) {
-                return refuse("Origin", origin);
-            }
+        if let Some(origin) = header(headers, "origin")
+            && !self.allows_origin(origin)
+        {
+            return refuse("Origin", origin);
         }
 
         if let Some(value) = header(headers, "host")
-            && !self.allows(host_of(value))
+            && !self.allows_host(host_of(value))
         {
             return refuse("Host", value);
         }
@@ -93,8 +96,45 @@ impl OriginPolicy {
         None
     }
 
-    /// Whether `host` (a hostname, no port) is one this policy accepts.
-    fn allows(&self, host: &str) -> bool {
+    /// Whether `origin` -- a whole `scheme://host[:port]` -- is one this policy
+    /// answers to.
+    ///
+    /// Judged as an origin rather than as the hostname inside it, because that
+    /// is what it is: `https://app.example.com` and `http://app.example.com:8080`
+    /// are two security origins that happen to share a name, and a page on the
+    /// second is not the application the first one is. Reducing both to
+    /// `app.example.com` would let whatever else that host serves -- a staging
+    /// build, a user-content app, anything on a spare port -- issue
+    /// state-changing requests here.
+    fn allows_origin(&self, origin: &str) -> bool {
+        if matches!(self, Self::Any) {
+            return true;
+        }
+
+        // `null` is the opaque origin a sandboxed frame or a `file://` page
+        // sends, and anything else unparseable names nothing either. Neither can
+        // be on a list of origins.
+        let Some((scheme, host, port)) = split_origin(origin) else {
+            return false;
+        };
+
+        // A loopback origin is a page the user is genuinely running locally, on
+        // whatever port it chose. Rebinding is about names that resolve *back*
+        // to this machine from outside, which this is not.
+        if is_loopback_host(host) {
+            return true;
+        }
+
+        match self {
+            Self::Any | Self::Loopback => false,
+            Self::Allowlist(allowed) => allowed
+                .iter()
+                .any(|entry| entry_allows_origin(entry, scheme, host, port)),
+        }
+    }
+
+    /// Whether `host` (a hostname, no port) is one this policy answers to.
+    fn allows_host(&self, host: &str) -> bool {
         match self {
             Self::Any => true,
             Self::Loopback => is_loopback_host(host),
@@ -108,15 +148,66 @@ impl OriginPolicy {
     }
 }
 
+/// Whether an allowlist entry covers the origin `scheme://host[:port]`.
+///
+/// An entry naming a scheme is an origin and has to agree on all three parts.
+/// An entry naming none is a host, and the caller has said nothing about scheme
+/// or port -- so neither is held against the request, beyond a port the entry
+/// does state.
+fn entry_allows_origin(entry: &str, scheme: &str, host: &str, port: Option<&str>) -> bool {
+    match entry.split_once("://") {
+        Some((entry_scheme, rest)) => {
+            entry_scheme.eq_ignore_ascii_case(scheme)
+                && host_of(rest).eq_ignore_ascii_case(host)
+                && stated_port(entry_scheme, port_of(rest)) == stated_port(scheme, port)
+        }
+        None => {
+            host_of(entry).eq_ignore_ascii_case(host)
+                && port_of(entry).is_none_or(|entry_port| Some(entry_port) == port)
+        }
+    }
+}
+
+/// The port an origin is really on: the one it states, or its scheme's default.
+///
+/// `https://x` and `https://x:443` are the same origin, and a list that spelled
+/// one must not miss the other.
+fn stated_port<'a>(scheme: &str, port: Option<&'a str>) -> Option<&'a str> {
+    port.or(match scheme.to_ascii_lowercase().as_str() {
+        "http" => Some("80"),
+        "https" => Some("443"),
+        _ => None,
+    })
+}
+
 /// The header value as a string, if it is present and readable.
 fn header<'h>(headers: &'h HeaderMap, name: &str) -> Option<&'h str> {
     headers.get(name).and_then(|v| v.to_str().ok())
 }
 
-/// The host part of `scheme://host[:port]`.
-fn origin_host(origin: &str) -> Option<&str> {
-    let rest = origin.split_once("://")?.1;
-    Some(host_of(rest))
+/// `scheme://host[:port]` taken apart, or `None` when it is not one -- `null`
+/// among them.
+fn split_origin(origin: &str) -> Option<(&str, &str, Option<&str>)> {
+    let (scheme, rest) = origin.trim().split_once("://")?;
+    if scheme.is_empty() || rest.is_empty() {
+        return None;
+    }
+    Some((scheme, host_of(rest), port_of(rest)))
+}
+
+/// The port in `host[:port]`, if it states one. An IPv6 literal's own colons do
+/// not count; only what follows its closing bracket.
+fn port_of(value: &str) -> Option<&str> {
+    let value = value.trim();
+    let rest = match value.find(']') {
+        Some(end) => &value[end + 1..],
+        // Unbracketed and multi-colon: an IPv6 literal, all host and no port.
+        None if value.matches(':').count() > 1 => return None,
+        None => value,
+    };
+    rest.split_once(':')
+        .map(|(_, port)| port)
+        .filter(|port| !port.is_empty())
 }
 
 /// Strips the port from `host[:port]`, keeping a bracketed IPv6 literal whole.
@@ -261,6 +352,83 @@ mod tests {
                 .rejection(&headers(&[("origin", "https://evil.example.com")]))
                 .is_some()
         );
+    }
+
+    /// An entry that names a scheme is an origin, and only that origin gets in.
+    ///
+    /// A hostname is not an origin: `https://app.example.com` and
+    /// `http://app.example.com:8080` are two security principals sharing a name,
+    /// and whatever else that host serves -- staging, user content, a spare port
+    /// -- must not inherit the trust the application was given.
+    #[test]
+    fn a_listed_origin_is_matched_whole() {
+        let policy = OriginPolicy::Allowlist(Arc::from([Box::from("https://app.example.com")]));
+
+        let allows = |origin: &str| policy.rejection(&headers(&[("origin", origin)])).is_none();
+
+        assert!(allows("https://app.example.com"));
+        // The default port is the same origin spelled out.
+        assert!(allows("https://app.example.com:443"));
+
+        assert!(!allows("http://app.example.com"), "another scheme");
+        assert!(!allows("http://app.example.com:8080"), "another port");
+        assert!(!allows("https://app.example.com:8443"), "another port");
+        assert!(!allows("https://other.example.com"), "another host");
+    }
+
+    /// An entry that names no scheme is a host, and says nothing about scheme or
+    /// port -- so neither is held against the request. It is the shape the
+    /// documented example used, and it keeps meaning what it meant.
+    #[test]
+    fn a_listed_host_covers_the_schemes_it_did_not_name() {
+        let policy = OriginPolicy::Allowlist(Arc::from([Box::from("app.example.com")]));
+        for origin in [
+            "https://app.example.com",
+            "http://app.example.com",
+            "http://app.example.com:8080",
+        ] {
+            assert!(
+                policy.rejection(&headers(&[("origin", origin)])).is_none(),
+                "`{origin}` must be accepted"
+            );
+        }
+
+        // Stating a port narrows it to that port, still on any scheme.
+        let pinned = OriginPolicy::Allowlist(Arc::from([Box::from("app.example.com:8443")]));
+        assert!(
+            pinned
+                .rejection(&headers(&[("origin", "https://app.example.com:8443")]))
+                .is_none()
+        );
+        assert!(
+            pinned
+                .rejection(&headers(&[("origin", "https://app.example.com")]))
+                .is_some()
+        );
+        // `Host` is matched by name either way: it says where the request
+        // landed, not who sent it, and behind a proxy its port is the proxy's.
+        assert!(
+            pinned
+                .rejection(&headers(&[("host", "app.example.com:443")]))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_origin_is_taken_apart_at_the_right_colons() {
+        assert_eq!(
+            split_origin("https://app.example.com:8443"),
+            Some(("https", "app.example.com", Some("8443")))
+        );
+        assert_eq!(
+            split_origin("http://[::1]:3000"),
+            Some(("http", "[::1]", Some("3000")))
+        );
+        assert_eq!(split_origin("http://[::1]"), Some(("http", "[::1]", None)));
+        // The opaque origin, and other things that are not origins.
+        assert_eq!(split_origin("null"), None);
+        assert_eq!(split_origin("app.example.com"), None);
+        assert_eq!(split_origin("https://"), None);
     }
 
     #[test]

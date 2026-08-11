@@ -10,8 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 * **DNS-rebinding protection.** The HTTP server validates `Origin` and `Host`:
   on a loopback bind it refuses non-loopback names with `403` before reading the
-  body. `HttpServer::with_allowed_origins([...])` names more hosts;
-  `allow_any_origin()` turns the gate off.
+  body. `HttpServer::with_allowed_origins([...])` names more; `allow_any_origin()`
+  turns the gate off. An entry naming a scheme (`https://app.example.com`) is an
+  origin and is matched as one -- scheme, host and port, a missing port meaning
+  the scheme's default -- so trusting an application does not also trust whatever
+  else its host serves on another port. A bare host stays a host: it says nothing
+  about scheme or port and holds neither against the request. `Host` is matched
+  by name either way, since it says where the request landed rather than who sent
+  it.
 * **`Context::client_capabilities()`** reports what the caller declared in this
   request's `_meta`, so a handler can branch before asking for an input kind it
   would be refused for (`MissingRequiredClientCapability`). Elicitation is

@@ -509,17 +509,31 @@ where
     /// `Host` is whatever that proxy forwards. This method is how such a
     /// deployment states them.
     ///
-    /// Entries are hostnames; a port in one is ignored, since the port a
-    /// request arrives on says nothing about who sent it. Matching is
-    /// case-insensitive. A request carrying neither header is not from a
-    /// browser and is left alone -- there is no rebinding without a name.
+    /// # What an entry means
+    ///
+    /// Write the whole origin -- `https://app.example.com` -- and the `Origin`
+    /// has to match all of it: scheme, host and port, with a missing port
+    /// meaning the scheme's default. That is what an origin is, and it is the
+    /// form to prefer: a bare host trusts everything served under that name,
+    /// including whatever sits on another port.
+    ///
+    /// A bare host -- `app.example.com` -- says nothing about scheme or port and
+    /// so holds neither against the request, narrowed to one port if the entry
+    /// names one (`app.example.com:8443`).
+    ///
+    /// `Host` is matched by hostname against every entry either way: it says
+    /// where the request landed rather than who sent it, carries no scheme, and
+    /// behind a proxy its port is the proxy's business. Matching is
+    /// case-insensitive throughout, loopback is always accepted, and a request
+    /// carrying neither header is not from a browser and is left alone -- there
+    /// is no rebinding without a name.
     ///
     /// # Example
     /// ```rust,ignore
     /// use neva::transport::http::HttpServer;
     ///
     /// let server = HttpServer::new("0.0.0.0:3000")
-    ///     .with_allowed_origins(["mcp.example.com", "app.example.com"]);
+    ///     .with_allowed_origins(["https://mcp.example.com", "https://app.example.com"]);
     /// ```
     pub fn with_allowed_origins<I, S>(mut self, hosts: I) -> Self
     where
