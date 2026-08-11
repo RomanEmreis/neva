@@ -182,7 +182,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (SEP-2243 with SEP-2549's clock): a listing is usable for its `ttlMs`, and an
   absent `ttlMs` reads as `0`. A `HeaderMismatch` (`-32020`) then has the client
   re-list, following `nextCursor` until it finds the tool, and retry once; that
-  listing is good for that retry regardless of TTL, scoped to the refused tool.
+  listing is good for that retry regardless of TTL, scoped to the refused tool
+  and spent on the first call either way -- it covers the retry it was fetched
+  for, never a later call the TTL has since disowned.
 
 #### Schemas and arguments
 * **A schema is published the way it was declared.** `Schema` and (legacy

@@ -69,16 +69,21 @@ impl Registration {
 
     /// The annotations, or `None` once the listing they came from is stale and
     /// its one grace mirroring is spent.
+    ///
+    /// The grace is spent on the first use whether or not it was needed. It
+    /// exists for one call -- the retry the listing was fetched for -- and a
+    /// listing with a TTL long enough to cover that retry has already served its
+    /// purpose without it. Letting it sit unspent until the TTL runs out would
+    /// hand one later call a mirroring from a schema that is by then stale,
+    /// which is the whole thing the expiry is for.
     pub(crate) fn usable(&self) -> Option<&[ParamHeader]> {
         let fresh = match self.expires_at {
             Some(at) => std::time::Instant::now() < at,
             None => true,
         };
-        if fresh || self.grace.swap(false, std::sync::atomic::Ordering::AcqRel) {
-            Some(&self.headers)
-        } else {
-            None
-        }
+        // Not `fresh ||`: that short-circuits, and the point is to consume.
+        let graced = self.grace.swap(false, std::sync::atomic::Ordering::AcqRel);
+        (fresh || graced).then_some(self.headers.as_slice())
     }
 
     /// The annotations regardless of age -- for callers asking what was
@@ -526,6 +531,38 @@ mod tests {
                 got[0].1
             );
         }
+    }
+
+    /// The grace covers the retry its listing was fetched for, and nothing
+    /// after it.
+    ///
+    /// A listing whose TTL outlives that retry never needs the grace -- so if
+    /// the grace only went when it was called on, it would sit there until the
+    /// TTL ran out and then buy one mirroring from a schema that is stale by
+    /// definition. The client would put an argument in a header the server may
+    /// have stopped asking for, and an intermediary would route on it.
+    #[cfg(feature = "http-client")]
+    #[test]
+    fn a_grace_is_spent_by_the_call_it_was_fetched_for() {
+        let headers = vec![ParamHeader {
+            path: vec!["region".into()],
+            header: "Region".into(),
+        }];
+
+        // Fresh on arrival: the retry is served by the TTL, not the grace.
+        let registration = Registration::new(headers.clone(), 100, true);
+        assert!(registration.usable().is_some(), "the retry mirrors");
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(
+            registration.usable().is_none(),
+            "and the grace did not survive the listing that carried it"
+        );
+
+        // `ttlMs: 0` -- stale on arrival, which is the case the grace exists
+        // for: one mirroring, and only one.
+        let registration = Registration::new(headers, 0, true);
+        assert!(registration.usable().is_some(), "the retry still mirrors");
+        assert!(registration.usable().is_none(), "once");
     }
 
     #[test]
