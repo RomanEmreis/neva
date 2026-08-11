@@ -368,11 +368,10 @@ async fn exchange(
     auth: ClientAuth,
     #[cfg(not(feature = "legacy-spec"))] param_registry: crate::shared::param_headers::Registry,
 ) {
-    // `mut` because a managed-OAuth retry replaces it: whatever token this
-    // exchange ends up authorized with is also the one a later resumption `GET`
-    // must carry, and the one held here was just rejected.
-    #[cfg_attr(not(feature = "client-oauth"), allow(unused_mut))]
-    let mut bearer = auth.fresh_bearer().await;
+    // Only this exchange's own requests use it. A resumption `GET` asks `auth`
+    // again when its turn comes, so a flow completing in between -- here or
+    // anywhere else -- reaches it without being threaded through.
+    let bearer = auth.fresh_bearer().await;
     let sent = build_post(
         &client,
         &session,
@@ -426,11 +425,6 @@ async fn exchange(
                     )
                     .send()
                     .await;
-                    // From here on the exchange belongs to the fresh grant. A
-                    // resumption `GET` carrying the token that drew the 401
-                    // would draw another one and lose the answer it went back
-                    // for.
-                    bearer = Some(fresh);
                     match retried {
                         Ok(retried) => retried,
                         Err(_err) => {
@@ -526,16 +520,7 @@ async fn exchange(
             && resumable(&session)
             && let Some(last_id) = last_event_id
         {
-            owed = resume_stream(
-                &client,
-                &session,
-                bearer.as_deref(),
-                &last_id,
-                retry,
-                &resp_tx,
-                &owed,
-            )
-            .await;
+            owed = resume_stream(&client, &session, &auth, &last_id, retry, &resp_tx, &owed).await;
         }
 
         // A truncated stream, an unparseable frame, or EOF before the final
@@ -1218,7 +1203,7 @@ fn resumable(
 async fn resume_stream(
     client: &reqwest::Client,
     session: &McpSession,
-    bearer: Option<&str>,
+    auth: &ClientAuth,
     last_event_id: &str,
     retry: Option<u64>,
     resp_tx: &mpsc::Sender<Result<Message, Error>>,
@@ -1232,35 +1217,74 @@ async fn resume_stream(
         _ = tokio::time::sleep(delay) => {}
     }
 
-    let mut req = client
-        .get(session.url())
-        .header(ACCEPT, "application/json, text/event-stream")
-        .header(CACHE_CONTROL, "no-cache")
-        .header(LAST_EVENT_ID, last_event_id);
+    // Asked for here rather than carried from the `POST`, because the wait in
+    // between is the server's to choose and may outlast the token that request
+    // went out with. A managed session renews one that is about to expire
+    // without troubling anybody.
+    #[cfg_attr(not(feature = "client-oauth"), allow(unused_mut))]
+    let mut bearer = auth.fresh_bearer().await;
+    #[cfg(feature = "client-oauth")]
+    let mut reauthorized = false;
 
-    if let Some(session_id) = session.session_id() {
-        req = req.header(MCP_SESSION_ID, session_id.to_string());
-    }
-    if let Some(bearer) = bearer {
-        req = req.bearer_auth(bearer);
-    }
+    // Without the OAuth retry there is nothing to come back for, and the loop
+    // is one pass by construction.
+    #[cfg_attr(not(feature = "client-oauth"), allow(clippy::never_loop))]
+    let resp = loop {
+        let mut req = client
+            .get(session.url())
+            .header(ACCEPT, "application/json, text/event-stream")
+            .header(CACHE_CONTROL, "no-cache")
+            .header(LAST_EVENT_ID, last_event_id);
 
-    let resp = match req.send().await {
-        Ok(resp) if resp.status().is_success() => resp,
-        Ok(_resp) => {
-            #[cfg(feature = "tracing")]
-            tracing::debug!(
-                logger = "neva",
-                "SSE resumption refused with status: {}",
-                _resp.status()
-            );
-            return ids.to_vec();
+        if let Some(session_id) = session.session_id() {
+            req = req.header(MCP_SESSION_ID, session_id.to_string());
         }
-        Err(_err) => {
-            #[cfg(feature = "tracing")]
-            tracing::error!(logger = "neva", "Failed to resume SSE stream: {}", _err);
-            return ids.to_vec();
+        if let Some(bearer) = bearer.as_deref() {
+            req = req.bearer_auth(bearer);
         }
+
+        let resp = match req.send().await {
+            Ok(resp) => resp,
+            Err(_err) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(logger = "neva", "Failed to resume SSE stream: {}", _err);
+                return ids.to_vec();
+            }
+        };
+        if resp.status().is_success() {
+            break resp;
+        }
+
+        // The same authorization retry the `POST` and the standalone `GET` get,
+        // for the same reason and once only. Treating a `401` here as final
+        // throws away the answer this reconnection went back for -- the request
+        // fails with an `InternalError` over a credential the client could have
+        // renewed.
+        #[cfg(feature = "client-oauth")]
+        if !reauthorized
+            && (resp.status() == reqwest::StatusCode::UNAUTHORIZED
+                || (resp.status() == reqwest::StatusCode::FORBIDDEN
+                    && insufficient_scope(resp.headers())))
+            && let ClientAuth::OAuth(oauth) = auth
+        {
+            let challenge = bearer_challenge(resp.headers());
+            if let Ok(fresh) = oauth
+                .authorize(challenge.as_deref(), bearer.as_deref())
+                .await
+            {
+                bearer = Some(fresh);
+                reauthorized = true;
+                continue;
+            }
+        }
+
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            logger = "neva",
+            "SSE resumption refused with status: {}",
+            resp.status()
+        );
+        return ids.to_vec();
     };
 
     let stream = sse_stream::SseStream::from_bytes_stream(resp.bytes_stream());
@@ -1629,6 +1653,149 @@ mod tests {
             #[cfg(not(feature = "legacy-spec"))]
             Default::default(),
         ))
+    }
+
+    /// A resumption refused for a credential must not cost the answer.
+    ///
+    /// The wait before reconnecting is the server's to name, and it can outlast
+    /// the token the original `POST` went out with. The `POST` and the
+    /// standalone `GET` both re-authorize once on a `401`; this path treating it
+    /// as final loses the terminal response the reconnection went back for, and
+    /// the request fails with an `InternalError` over a credential the client
+    /// could simply have renewed.
+    #[cfg(feature = "client-oauth")]
+    #[tokio::test]
+    async fn a_resumption_refused_for_its_token_authorizes_and_tries_again() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // One socket playing both parts: the MCP endpoint that refuses the
+        // resumption until it carries the granted token, and the authorization
+        // server that issues it.
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let read = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+                let root = format!("http://{addr}");
+
+                let resp = if request.starts_with("GET /mcp") {
+                    if request.contains("Bearer granted-token") {
+                        let body = "id: 2\nevent: message\ndata: \
+                             {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n";
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                    } else {
+                        format!(
+                            "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer resource_metadata=\"{root}/.well-known/oauth-protected-resource/mcp\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        )
+                    }
+                } else {
+                    let body = if request.contains("/.well-known/oauth-protected-resource") {
+                        format!(r#"{{"resource":"{root}/mcp","authorization_servers":["{root}"]}}"#)
+                    } else if request.contains("/.well-known/") {
+                        format!(
+                            r#"{{"issuer":"{root}","token_endpoint":"{root}/token",
+                                 "authorization_endpoint":"{root}/authorize",
+                                 "registration_endpoint":"{root}/register",
+                                 "response_types_supported":["code"]}}"#
+                        )
+                    } else if request.contains("/register") {
+                        r#"{"client_id":"registered-client"}"#.to_string()
+                    } else {
+                        r#"{"access_token":"granted-token","token_type":"Bearer","expires_in":3600}"#
+                            .to_string()
+                    };
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let url = format!("http://{addr}/mcp");
+        // `From<&str>` takes `addr[/endpoint]`, without a scheme; the endpoint
+        // defaults to `/mcp`, which is where this mock listens.
+        let session = Arc::new(McpSession::new(
+            ServiceUrl::from(addr.to_string().as_str()),
+            CancellationToken::new(),
+            #[cfg(not(feature = "legacy-spec"))]
+            Default::default(),
+        ));
+        let config = oauth::OAuthClientConfig::default()
+            .require_https(false)
+            .with_handler(EchoesState);
+        let auth = ClientAuth::OAuth(Arc::new(
+            oauth::OAuthSession::new(config, &url).expect("a session"),
+        ));
+
+        let (tx, mut rx) = mpsc::channel(2);
+        let owed = resume_stream(
+            &create_client(
+                #[cfg(feature = "client-tls")]
+                None,
+            )
+            .expect("a client"),
+            &session,
+            &auth,
+            "1",
+            Some(0),
+            &tx,
+            &[crate::types::RequestId::Number(1)],
+        )
+        .await;
+
+        assert!(
+            owed.is_empty(),
+            "the resumption must recover the answer rather than give up on a 401"
+        );
+        assert!(matches!(rx.try_recv(), Ok(Ok(Message::Response(_)))));
+    }
+
+    /// Completes the flow without a browser by reading the `state` back off the
+    /// authorization URL -- which is what the redirect would have carried.
+    #[cfg(feature = "client-oauth")]
+    struct EchoesState;
+
+    #[cfg(feature = "client-oauth")]
+    impl crate::auth::oauth::AuthorizationHandler for EchoesState {
+        fn redirect_uri(
+            &self,
+        ) -> futures_util::future::BoxFuture<'_, Result<String, crate::error::Error>> {
+            Box::pin(async { Ok("http://127.0.0.1:8919/callback".to_string()) })
+        }
+
+        fn authorize(
+            &self,
+            url: String,
+        ) -> futures_util::future::BoxFuture<
+            '_,
+            Result<crate::auth::oauth::CallbackParams, crate::error::Error>,
+        > {
+            Box::pin(async move {
+                let state = url
+                    .split(['?', '&'])
+                    .find_map(|param| param.strip_prefix("state="))
+                    .ok_or_else(|| {
+                        Error::new(
+                            ErrorCode::InvalidRequest,
+                            "the authorization URL carried no `state`",
+                        )
+                    })?
+                    .to_owned();
+                Ok(crate::auth::oauth::CallbackParams {
+                    code: "the-code".into(),
+                    state,
+                    iss: None,
+                })
+            })
+        }
     }
 
     // A minimal valid JSON-RPC notification that Message will accept

@@ -124,8 +124,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   answering, and its answer is authoritative.
 * **The RFC 8707 resource indicator is the one the accepted metadata declares**,
   not the endpoint URL.
-* **A resumption carries the token the exchange ended up authorized with**, not
-  the one a `401` had already rejected.
+* **A resumption asks for a token when its turn comes**, rather than carrying
+  the one the original `POST` was sent with. The wait before reconnecting is the
+  server's to name and can outlast that token, so it is renewed if it is about
+  to expire -- and a `401` (or a `403` saying the scope is short) re-authorizes
+  once and tries again, as the `POST` and the standalone `GET` already did.
+  Treating it as final threw away the answer the reconnection went back for.
 
 #### HTTP transport and sessions
 * **SSE responses carry `X-Content-Type-Options: nosniff`.** Without it Firefox
