@@ -460,10 +460,16 @@ async fn test_input_required_result_tampered_state(mut ctx: Context) -> Result<S
 async fn test_input_required_result_capabilities(mut ctx: Context) -> Result<String, Error> {
     let declared = ctx.client_capabilities();
 
-    if declared.elicitation {
-        let params = ElicitRequestParams::form("Capability check")
-            .with_required("name", "string")
-            .into();
+    // Down to the mode: a caller that named only `url` has not said it can fill
+    // in a form, and asking it to anyway is the refusal this tool exists to
+    // avoid.
+    let params: ElicitRequestParams = ElicitRequestParams::form("Capability check")
+        .with_required("name", "string")
+        .into();
+    if declared
+        .elicitation
+        .is_some_and(|modes| modes.allows(&params))
+    {
         let name = elicited_name(ctx.elicit("capability_check", params).await?);
         return Ok(format!("Capability satisfied for {name}"));
     }

@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `allow_any_origin()` turns the gate off.
 * **`Context::client_capabilities()`** reports what the caller declared in this
   request's `_meta`, so a handler can branch before asking for an input kind it
-  would be refused for (`MissingRequiredClientCapability`).
+  would be refused for (`MissingRequiredClientCapability`). Elicitation is
+  reported down to the mode, via the new `ElicitationModes`.
 * **`Option<T>` tool and prompt arguments**, via `ToolArg` (returned by
   `ToolHandler::args`) and `PromptArgument::named(name, required)`. A tool whose
   arguments are all optional publishes no `required` key.
@@ -80,7 +81,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * **A challenge that names no `scope` is still a step-up** -- the attribute is
   optional in RFC 6750.
 * **The Bearer challenge is found in any `WWW-Authenticate` value**, not only
-  the first.
+  the first. `insufficient_scope` goes further and asks every Bearer challenge:
+  the applicable one need not lead, and a `Bearer error="invalid_token"` ahead
+  of it would otherwise answer for both and skip the step-up.
 * **A `403` on the standalone SSE `GET` re-authorizes** like one on a `POST`
   (legacy profile).
 * **A step-up that lost the race reuses the winner's token** instead of walking
@@ -109,9 +112,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 #### HTTP transport and sessions
 * **SSE responses carry `X-Content-Type-Options: nosniff`.** Without it Firefox
   buffers the stream to sniff its type and a `fetch()` reader sees nothing.
-* **Each stream carries its own `Last-Event-ID` cursor.** It lived on the
-  session, so the `POST` and standalone `GET` streams sent each other back to
-  positions they had never reached. `retry:` stays on the session.
+* **Each stream carries its own `Last-Event-ID` cursor and its own `retry:`
+  delay.** Both lived on the session, so the `POST` and standalone `GET` streams
+  sent each other back to positions they had never reached, and whichever frame
+  landed last set the other's reconnection time -- a `retry: 0` on a `POST` reply
+  had a dropped `GET` reconnect instantly, and a patient `GET` held up a `POST`
+  resumption. A reconnection time belongs to the connection it was stated on.
 * **A resumed response stream is released once it has answered**, instead of
   being read forever -- one leaked connection per truncated reply. What is owed
   is tracked per request, so a batch resumes only what is still unanswered.
@@ -150,6 +156,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * **A `requestState` / `inputResponses` of the wrong JSON type is
   `InvalidParams`**, not silently absent. An explicit `null` counts as stating
   the field wrongly -- the spec makes both optional by *absence*.
+* **A declared elicitation mode is honored.** `elicitation` was flattened to one
+  flag, so a client declaring `{"form": {}}` was also considered able to answer a
+  `url` request -- which it had said nothing about, and the round stalled waiting
+  for an answer that could not come. Named modes are now a list of what the
+  client can do, and `MissingRequiredClientCapability` names the mode rather than
+  just the capability. An `elicitation` that names no mode rules none out, which
+  is what a bare `{}` (or the boolean older neva clients wrote) has always meant.
 * **`x-mcp-header` registrations expire with the listing that carried them**
   (SEP-2243 with SEP-2549's clock): a listing is usable for its `ttlMs`, and an
   absent `ttlMs` reads as `0`. A `HeaderMismatch` (`-32020`) then has the client

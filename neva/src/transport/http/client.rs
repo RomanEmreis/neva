@@ -502,7 +502,8 @@ async fn exchange(
         let Drained {
             mut owed,
             last_event_id,
-        } = drain_post_sse(stream, &resp_tx, &ids, &session).await;
+            retry,
+        } = drain_post_sse(stream, &resp_tx, &ids).await;
 
         // A stream that ended before the response is not necessarily a failed
         // request: on the session-bound transport the server may finish the
@@ -512,9 +513,11 @@ async fn exchange(
         // more than one turns a server that keeps dropping the stream into a
         // reconnect loop the caller cannot see.
         //
-        // The id is the one *this* stream stated. The session's other stream
-        // has its own position, and resuming from that one would ask the server
-        // to replay from somewhere this request never was.
+        // Both the id and the delay are the ones *this* stream stated. The
+        // session's other stream has its own position and its own idea of how
+        // long to wait; borrowing either would ask the server to replay from
+        // somewhere this request never was, or to be reconnected on a schedule
+        // it never asked this stream for.
         //
         // The resumption asks for what is still owed rather than for everything
         // the `POST` carried: a batch whose stream died midway has some of its
@@ -528,6 +531,7 @@ async fn exchange(
                 &session,
                 bearer.as_deref(),
                 &last_id,
+                retry,
                 &resp_tx,
                 &owed,
             )
@@ -966,24 +970,24 @@ async fn handle_sse_connection(
 /// one leaked connection per truncated reply, competing with the standalone
 /// `GET` for the traffic that follows.
 ///
-/// The event id is reported back rather than written to the session. A legacy
-/// session runs two streams at once -- the standalone `GET` and this
-/// request-scoped `POST` -- and each has its own position. Sharing one cursor
-/// lets a `GET` frame arriving between the truncation and the resumption send
-/// this `POST` back to a place it never reached, replaying past its own
-/// terminal response, and lets a `POST` frame do the same to the `GET`'s
-/// reconnect.
+/// The event id and the `retry:` delay are reported back rather than written to
+/// the session. A legacy session runs two streams at once -- the standalone
+/// `GET` and this request-scoped `POST` -- and each has its own position and its
+/// own reconnection time. Sharing either lets a `GET` frame arriving between the
+/// truncation and the resumption send this `POST` back to a place it never
+/// reached, or reconnect it on a schedule the server named for the other stream;
+/// and lets a `POST` frame do the same to the `GET`.
 async fn drain_post_sse<S>(
     mut stream: S,
     resp_tx: &mpsc::Sender<Result<Message, Error>>,
     ids: &[crate::types::RequestId],
-    session: &McpSession,
 ) -> Drained
 where
     S: futures_util::Stream<Item = Result<sse_stream::Sse, sse_stream::Error>> + Unpin,
 {
     let mut owed = ids.to_vec();
     let mut last_event_id = None;
+    let mut retry = None;
     while !owed.is_empty()
         && let Some(event) = stream.next().await
     {
@@ -993,10 +997,17 @@ where
                 // no message, and is exactly where a server states the id to
                 // resume from and how long to wait before doing so.
                 //
-                // `retry:` *is* the session's: it is the server saying how long
-                // any reconnection should wait, not a position in a stream.
-                if let Some(retry) = sse.retry {
-                    session.set_retry(retry);
+                // Both stay with this stream. A reconnection time belongs to
+                // the connection that was told it -- that is what the SSE
+                // standard makes it -- and a legacy session runs two streams
+                // whose lifetimes have nothing to do with each other: the
+                // long-lived `GET` and this request-scoped reply. Writing this
+                // one to the session would let whichever frame arrived last set
+                // the other stream's delay, so a `retry: 0` here would have a
+                // dropped `GET` reconnect instantly, and a patient `GET` would
+                // hold up this resumption.
+                if let Some(ms) = sse.retry {
+                    retry = Some(ms);
                 }
                 if let Some(id) = sse.id.clone() {
                     last_event_id = Some(id);
@@ -1015,6 +1026,7 @@ where
     Drained {
         owed,
         last_event_id,
+        retry,
     }
 }
 
@@ -1026,6 +1038,9 @@ struct Drained {
     /// The last `id:` this stream stated -- where a resumption of *this*
     /// stream picks up, which is not where the session's other stream is.
     last_event_id: Option<String>,
+    /// The `retry:` this stream stated, in milliseconds, if it stated one --
+    /// how long before reopening *this* stream, and nobody else's.
+    retry: Option<u64>,
 }
 
 /// Whether a `403` is the authorization server's `insufficient_scope`, and so
@@ -1040,15 +1055,26 @@ struct Drained {
 /// scope name that merely contains it. Reading those as the error would send a
 /// caller through an interactive flow -- replacing a perfectly good token -- to
 /// retry a request that re-authorization was never going to fix.
+///
+/// Every Bearer challenge is asked, not just the first one that parses. A
+/// server may send several, and the one carrying this code need not lead: a
+/// `Bearer error="invalid_token"` ahead of a `Bearer
+/// error="insufficient_scope"` would otherwise answer for both and skip the
+/// step-up the second one asked for. This is the one question where the
+/// applicable challenge is the one that names the code, rather than whichever
+/// came first -- which is what [`bearer_challenge`] finds, and the right answer
+/// there, since a `resource_metadata` pointer is the server's own and does not
+/// depend on which error accompanies it.
 #[cfg(feature = "client-oauth")]
 fn insufficient_scope(headers: &reqwest::header::HeaderMap) -> bool {
     use volga_oauth_client::{BearerChallenge, OAuthErrorCode};
 
-    bearer_challenge(headers)
-        .and_then(|challenge| BearerChallenge::parse(&challenge).ok())
-        .is_some_and(|challenge| {
-            matches!(challenge.error(), Some(OAuthErrorCode::InsufficientScope))
-        })
+    headers
+        .get_all(reqwest::header::WWW_AUTHENTICATE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .filter_map(|value| BearerChallenge::parse(value).ok())
+        .any(|challenge| matches!(challenge.error(), Some(OAuthErrorCode::InsufficientScope)))
 }
 
 /// The `WWW-Authenticate` value carrying the Bearer challenge, if any.
@@ -1093,7 +1119,9 @@ fn resumable(
 /// The server said when to come back (`retry:`) and where to resume from
 /// (`id:`); both are honored, because reconnecting sooner hammers a server that
 /// asked for room and reconnecting without the id makes it replay from the
-/// start -- or from nothing.
+/// start -- or from nothing. Both are what the dropped stream itself stated:
+/// `retry` is `None` when it stated nothing, and the constant answers for it
+/// rather than the standalone `GET`'s opinion of when to come back.
 ///
 /// Returns what is still owed after this attempt.
 async fn resume_stream(
@@ -1101,14 +1129,16 @@ async fn resume_stream(
     session: &McpSession,
     bearer: Option<&str>,
     last_event_id: &str,
+    retry: Option<u64>,
     resp_tx: &mpsc::Sender<Result<Message, Error>>,
     ids: &[crate::types::RequestId],
 ) -> Vec<crate::types::RequestId> {
+    let delay = retry.map_or(SSE_RECONNECT_DELAY, std::time::Duration::from_millis);
     let token = session.cancellation_token();
     tokio::select! {
         biased;
         _ = token.cancelled() => return ids.to_vec(),
-        _ = tokio::time::sleep(session.retry_delay(SSE_RECONNECT_DELAY)) => {}
+        _ = tokio::time::sleep(delay) => {}
     }
 
     let mut req = client
@@ -1146,7 +1176,7 @@ async fn resume_stream(
     tokio::select! {
         biased;
         _ = token.cancelled() => ids.to_vec(),
-        drained = drain_post_sse(stream, resp_tx, ids, session) => drained.owed,
+        drained = drain_post_sse(stream, resp_tx, ids) => drained.owed,
     }
 }
 
@@ -1376,6 +1406,27 @@ mod tests {
         assert!(challenged(
             r#"Basic realm="legacy", Bearer error="insufficient_scope""#
         ));
+
+        // Two *Bearer* challenges, the applicable one second. Stopping at the
+        // first that parses answers "not a step-up" on a response that asked
+        // for one, and the token gets refreshed into the same refusal.
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.append(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"Bearer realm="legacy", error="invalid_token""#
+                .parse()
+                .expect("a header value"),
+        );
+        headers.append(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"Bearer realm="mcp", error="insufficient_scope", scope="admin""#
+                .parse()
+                .expect("a header value"),
+        );
+        assert!(
+            insufficient_scope(&headers),
+            "the challenge that names the code is the one that answers"
+        );
     }
 
     fn make_session() -> Arc<McpSession> {
@@ -1548,7 +1599,6 @@ mod tests {
                 futures_util::stream::iter(frames),
                 &tx,
                 &[crate::types::RequestId::Number(1)],
-                &session,
             )
             .await
             .owed
@@ -1563,14 +1613,16 @@ mod tests {
     /// where to resume from and how long to wait -- so both have to be taken off
     /// a frame the message path skips.
     ///
-    /// Where they go differs. `retry:` is the session's: it says how long any
-    /// reconnection waits. The `id:` belongs to this stream alone -- a legacy
-    /// session also runs the standalone `GET`, with its own position, and one
-    /// shared cursor would send each stream back to where the other had got to.
+    /// Both belong to this stream alone -- a legacy session also runs the
+    /// standalone `GET`, with its own position and its own reconnection time,
+    /// and either one shared would have each stream reconnect on the other's
+    /// terms: from a place it never reached, or after a delay named for
+    /// somebody else.
     #[tokio::test]
     async fn a_priming_frame_still_states_where_to_resume_from() {
         let session = make_session();
         session.set_last_event_id("get-stream-7".to_string());
+        session.set_retry(9_000);
         let (tx, mut rx) = mpsc::channel(2);
 
         let mut priming = sse_stream::Sse::default().id("event-1");
@@ -1581,7 +1633,6 @@ mod tests {
             futures_util::stream::iter(frames),
             &tx,
             &[crate::types::RequestId::Number(1)],
-            &session,
         )
         .await;
 
@@ -1597,14 +1648,19 @@ mod tests {
             "this stream resumes from where this stream got to"
         );
         assert_eq!(
+            drained.retry,
+            Some(500),
+            "and after the delay this stream was given"
+        );
+        assert_eq!(
             session.last_event_id(),
             Some("get-stream-7".to_string()),
-            "and leaves the standalone GET's own position alone"
+            "leaving the standalone GET's own position alone"
         );
         assert_eq!(
             session.retry_delay(SSE_RECONNECT_DELAY),
-            Duration::from_millis(500),
-            "the server's retry field must replace the default delay"
+            Duration::from_millis(9_000),
+            "and its own reconnection delay with it"
         );
     }
 
@@ -1624,7 +1680,6 @@ mod tests {
                 futures_util::stream::iter(frames),
                 &tx,
                 &[crate::types::RequestId::Number(1)],
-                &make_session(),
             )
             .await
             .owed,
@@ -1728,12 +1783,7 @@ mod tests {
 
         let owed = tokio::time::timeout(
             Duration::from_secs(1),
-            drain_post_sse(
-                Box::pin(frames),
-                &tx,
-                &[crate::types::RequestId::Number(1)],
-                &make_session(),
-            ),
+            drain_post_sse(Box::pin(frames), &tx, &[crate::types::RequestId::Number(1)]),
         )
         .await
         .expect("the drain must return instead of holding the session stream open");

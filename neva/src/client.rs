@@ -1742,7 +1742,16 @@ impl Client {
         // `ListRootsResult` is a valid answer, so a client that opted in must
         // not be gated out of being asked.
         meta.client_capabilities = Some(crate::types::mrtr::ClientMrtrCapabilities {
-            elicitation: self.options.elicitation_handler.is_some(),
+            // Declared without naming modes, which is the honest answer: the
+            // handler is handed the whole `ElicitRequestParams` union, so what
+            // it does with a `url` request is the caller's business and not
+            // something this client can promise on its behalf. An unstated set
+            // rules nothing out, which is exactly that.
+            elicitation: self
+                .options
+                .elicitation_handler
+                .is_some()
+                .then(crate::types::mrtr::ElicitationModes::default),
             sampling: self.options.sampling_handler.is_some(),
             roots: self.options.roots_capability().is_some(),
         });

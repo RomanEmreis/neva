@@ -1164,8 +1164,11 @@ impl Context {
     /// which ends the call rather than degrading it -- a handler that can do
     /// without an input should look here first and skip asking.
     ///
-    /// A caller that declared nothing reads as all-false, which is the same
-    /// answer as a caller that cannot answer anything: either way, do not ask.
+    /// A caller that declared nothing reads as declaring nothing, which is the
+    /// same answer as a caller that cannot answer anything: either way, do not
+    /// ask. Elicitation reads down to the mode -- see
+    /// [`ElicitationModes`](crate::types::mrtr::ElicitationModes), whose
+    /// `allows` answers "can this caller be sent *these* params".
     ///
     /// # Example
     /// ```no_run
@@ -1174,7 +1177,7 @@ impl Context {
     ///
     /// #[tool]
     /// async fn greet(mut ctx: Context) -> Result<String, Error> {
-    ///     if !ctx.client_capabilities().elicitation {
+    ///     if ctx.client_capabilities().elicitation.is_none() {
     ///         return Ok("Hello, stranger!".to_string());
     ///     }
     ///     let params = ElicitRequestParams::form("Your name?")
@@ -2139,7 +2142,7 @@ mod mrtr_tests {
             answers,
             pending: Default::default(),
             client_capabilities: crate::types::mrtr::ClientMrtrCapabilities {
-                elicitation: true,
+                elicitation: Some(Default::default()),
                 sampling: true,
                 roots: true,
             },

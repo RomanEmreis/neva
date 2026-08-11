@@ -1195,11 +1195,13 @@ async fn eliciting_without_declared_capability_is_rejected() {
         msg.contains("did not declare support"),
         "elicitation without declared capability must be rejected: {r1}"
     );
-    // What the client is told to declare comes back in the spec's shape: the
-    // capability is an object, not a boolean.
+    // What the client is told to declare comes back in the spec's shape -- the
+    // capability is an object, not a boolean -- and names the mode. A client
+    // refused for a `url` request it cannot answer learns to declare `url`,
+    // which "elicitation" on its own would not have told it.
     assert_eq!(
         r1.pointer("/error/data/requiredCapabilities"),
-        Some(&serde_json::json!({ "elicitation": {} })),
+        Some(&serde_json::json!({ "elicitation": { "form": {} } })),
         "requiredCapabilities must name the missing capability: {r1}"
     );
 
@@ -2119,7 +2121,7 @@ async fn a_handler_asks_only_for_what_the_caller_declared() {
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
     app.map_tool("ask", |mut ctx: Context| async move {
-        if ctx.client_capabilities().elicitation {
+        if ctx.client_capabilities().elicitation.is_some() {
             let form: ElicitRequestParams = ElicitRequestParams::form("Your name?")
                 .with_required("name", "string")
                 .into();
