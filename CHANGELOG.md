@@ -75,7 +75,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * `PropertyType` gains an `Integer` variant and `"integer"` no longer
   deserializes into `Number`; a match needs the new arm.
 * The schema structs in `neva::types::schema` gain an `extra` field, so an
-  exhaustive struct literal needs it (or `..Default::default()`).
+  exhaustive struct literal needs it (or `..Default::default()`). `EnumItems`,
+  `EnumOptions` and `EnumOption` are among them, and `EnumOption` gives up its
+  `Eq` impl in the process -- an arbitrary JSON value is not `Eq`. `PartialEq`
+  stays.
 * **Wire:** a tool registered from a bare closure advertises `arg0`, `arg1`, ...
   instead of the former type names. `#[tool]` tools are unaffected.
 
@@ -198,7 +201,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   profile) `ToolSchema` keep every unmodelled keyword verbatim in a flattened
   `extra`: `default` (SEP-1034), `pattern`, `examples`, and the `$schema`,
   `$defs`, `$ref`, `additionalProperties`, `allOf`/`anyOf` and `if`/`then`/`else`
-  that SEP-2106 requires to survive untouched.
+  that SEP-2106 requires to survive untouched. Below the root too: an enum
+  form's `items`, and each `anyOf` option under it, keep theirs the same way.
 * **A tool property keeps its own keywords too** (legacy profile): `enum`,
   `format`, `$ref` and `minimum` were dropped, and a property stating no `type`
   no longer acquires `"object"`.

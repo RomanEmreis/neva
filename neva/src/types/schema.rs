@@ -381,6 +381,13 @@ pub struct EnumItems {
     /// The list of allowed string values for the enum.
     #[serde(rename = "enum")]
     pub r#enum: Vec<String>,
+
+    /// Every keyword this type does not model, kept verbatim -- see
+    /// [`Schema`]'s own `extra`. A schema nests, so the round trip has to hold
+    /// below the root as well: a `pattern` beside an `enum` is the server's
+    /// constraint wherever it sits.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// Schema for array items with enum options and display labels.
@@ -391,12 +398,19 @@ pub struct EnumOptions {
     /// Array of enum options with values and display labels.
     #[serde(rename = "anyOf")]
     pub any_of: Vec<EnumOption>,
+
+    /// Every keyword this type does not model, kept verbatim -- see
+    /// [`Schema`]'s own `extra`. A schema nests, so the round trip has to hold
+    /// below the root as well: a `pattern` beside an `enum` is the server's
+    /// constraint wherever it sits.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// Represents an enumeration option with a display title.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EnumOption {
     /// The enum value.
     #[serde(rename = "const")]
@@ -404,6 +418,13 @@ pub struct EnumOption {
 
     /// Display label for this option.
     pub title: String,
+
+    /// Every keyword this type does not model, kept verbatim -- see
+    /// [`Schema`]'s own `extra`. A schema nests, so the round trip has to hold
+    /// below the root as well: a `pattern` beside an `enum` is the server's
+    /// constraint wherever it sits.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 impl<'de> Deserialize<'de> for Schema {
@@ -614,6 +635,7 @@ impl Default for EnumItems {
         Self {
             r#type: PropertyType::String,
             r#enum: Vec::new(),
+            extra: Default::default(),
         }
     }
 }
@@ -621,7 +643,10 @@ impl Default for EnumItems {
 impl Default for EnumOptions {
     #[inline]
     fn default() -> Self {
-        Self { any_of: Vec::new() }
+        Self {
+            any_of: Vec::new(),
+            extra: Default::default(),
+        }
     }
 }
 
@@ -920,6 +945,7 @@ impl EnumOptions {
     pub fn new(options: impl IntoIterator<Item = EnumOption>) -> Self {
         Self {
             any_of: options.into_iter().collect(),
+            extra: Default::default(),
         }
     }
 }
@@ -931,6 +957,7 @@ impl EnumOption {
         Self {
             value: value.into(),
             title: title.into(),
+            extra: Default::default(),
         }
     }
 }
@@ -945,6 +972,7 @@ impl EnumItems {
         Self {
             r#type: PropertyType::String,
             r#enum: items.into_iter().map(|s| s.into()).collect(),
+            extra: Default::default(),
         }
     }
 }
@@ -1441,6 +1469,44 @@ mod tests {
             declared,
             "every declared keyword must survive"
         );
+    }
+
+    /// A schema nests, so the round trip has to hold below the root.
+    ///
+    /// The enum forms put a schema inside `items` (and another inside each
+    /// `anyOf` option), and a keyword sitting there is the peer's constraint
+    /// just as much as one at the top. Keeping only the root's would publish an
+    /// array of anything-shaped strings where the server declared a pattern.
+    #[test]
+    fn unmodelled_keywords_survive_inside_the_enum_forms() {
+        for declared in [
+            json!({
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": ["x"],
+                    "pattern": "^x",
+                    "$comment": "inside items"
+                }
+            }),
+            json!({
+                "type": "array",
+                "items": {
+                    "anyOf": [
+                        { "const": "x", "title": "Ex", "description": "the x one" }
+                    ],
+                    "$comment": "inside anyOf"
+                }
+            }),
+        ] {
+            let schema: Schema = serde_json::from_value(declared.clone())
+                .unwrap_or_else(|e| panic!("{declared} must parse: {e}"));
+            assert_eq!(
+                serde_json::to_value(&schema).expect("serializes"),
+                declared,
+                "a keyword below the root must survive too"
+            );
+        }
     }
 
     /// `default` is the one SEP-1034 is about, and it is dropped by a type that
