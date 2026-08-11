@@ -1129,12 +1129,17 @@ fn bearer_challenge(headers: &reqwest::header::HeaderMap) -> Option<String> {
 fn bearer_challenges(value: &str) -> Vec<String> {
     let mut groups: Vec<Vec<&str>> = Vec::new();
     for element in list_elements(value) {
-        // No `=`, or whitespace ahead of it: a scheme, so a new challenge.
-        // `error="x"` has neither and belongs to the challenge it follows.
-        let starts_challenge = match element.find('=') {
-            None => true,
-            Some(eq) => element[..eq].contains(char::is_whitespace),
-        };
+        // A parameter is `token BWS "=" BWS value` (RFC 9110 section 11.2), so
+        // what tells it from a scheme is whether an `=` follows the first token
+        // -- not whether whitespace precedes the `=`, which that grammar allows.
+        // Reading `scope = "admin"` as a scheme would break the challenge in two
+        // and leave the step-up asking for nothing.
+        let rest = element.trim_start();
+        let token_end = rest
+            .find(|c: char| c.is_whitespace() || c == '=')
+            .unwrap_or(rest.len());
+
+        let starts_challenge = !rest[token_end..].trim_start().starts_with('=');
         if starts_challenge {
             groups.push(vec![element]);
         } else if let Some(group) = groups.last_mut() {
@@ -1439,14 +1444,16 @@ mod tests {
     #[test]
     #[cfg(feature = "client-oauth")]
     fn only_the_challenge_error_parameter_says_the_scope_is_short() {
-        let challenged = |value: &str| {
+        let headers_of = |value: &str| {
             let mut headers = reqwest::header::HeaderMap::new();
             headers.insert(
                 reqwest::header::WWW_AUTHENTICATE,
                 value.parse().expect("a header value"),
             );
-            insufficient_scope(&headers)
+            headers
         };
+
+        let challenged = |value: &str| insufficient_scope(&headers_of(value));
 
         assert!(challenged(r#"Bearer error="insufficient_scope""#));
         assert!(challenged(
@@ -1562,6 +1569,19 @@ mod tests {
             Some(r#"Bearer realm="mcp", error="insufficient_scope", scope="admin""#),
             "the applicable challenge is handed over on its own"
         );
+
+        // The demanded scope has to survive the split, or the step-up asks for
+        // nothing and the retry is refused identically. Spaced around the `=`,
+        // which RFC 9110 allows and the challenge parser accepts.
+        let spaced = r#"Bearer error = "insufficient_scope", scope = "admin""#;
+        assert!(challenged(spaced));
+        let parsed = volga_oauth_client::BearerChallenge::parse(
+            bearer_challenge(&headers_of(spaced))
+                .as_deref()
+                .expect("a challenge"),
+        )
+        .expect("it parses");
+        assert_eq!(parsed.scope(), Some("admin"));
     }
 
     /// A comma inside a quoted string separates nothing, and a parameter is not
@@ -1585,6 +1605,15 @@ mod tests {
             "a bare challenge is still a challenge"
         );
         assert!(bearer_challenges(r#"Basic realm="legacy""#).is_empty());
+        // `token BWS "=" BWS value` is a parameter, not a scheme -- splitting
+        // there would leave the challenge without the scope it demanded.
+        assert_eq!(
+            bearer_challenges(r#"Bearer error="insufficient_scope", scope = "admin""#),
+            vec![r#"Bearer error="insufficient_scope", scope = "admin""#]
+        );
+        // A token68 payload has whitespace after its scheme and an `=` of its
+        // own, and is still a challenge of another scheme.
+        assert!(bearer_challenges("Basic dXNlcjpwYXNz==").is_empty());
         // A quoted escape must not end the string early and turn the rest of
         // the value into challenges of its own.
         assert_eq!(

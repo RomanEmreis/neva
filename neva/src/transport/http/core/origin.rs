@@ -142,10 +142,19 @@ impl OriginPolicy {
                 is_loopback_host(host)
                     || allowed
                         .iter()
-                        .any(|entry| host_of(entry).eq_ignore_ascii_case(host))
+                        .any(|entry| entry_host(entry).eq_ignore_ascii_case(host))
             }
         }
     }
+}
+
+/// The host an allowlist entry names, in whichever form it was written.
+///
+/// The scheme has to come off first: `host_of` cuts at the first colon, so a
+/// full origin would answer `https` -- a name no `Host` ever carries, which
+/// would refuse every request made from the very origin that was allowed.
+fn entry_host(entry: &str) -> &str {
+    host_of(entry.split_once("://").map_or(entry, |(_, rest)| rest))
 }
 
 /// Whether an allowlist entry covers the origin `scheme://host[:port]`.
@@ -364,7 +373,14 @@ mod tests {
     fn a_listed_origin_is_matched_whole() {
         let policy = OriginPolicy::Allowlist(Arc::from([Box::from("https://app.example.com")]));
 
-        let allows = |origin: &str| policy.rejection(&headers(&[("origin", origin)])).is_none();
+        // Both headers, because that is what a browser sends -- and a `Host`
+        // never carries a scheme. Checking the `Origin` alone would miss an
+        // entry that clears one gate and is refused at the other.
+        let allows = |origin: &str| {
+            policy
+                .rejection(&headers(&[("origin", origin), ("host", "app.example.com")]))
+                .is_none()
+        };
 
         assert!(allows("https://app.example.com"));
         // The default port is the same origin spelled out.
