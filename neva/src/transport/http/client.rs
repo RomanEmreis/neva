@@ -259,6 +259,29 @@ async fn handle_connection(
     }
 }
 
+/// The `Mcp-Param-*` headers a request mirrors -- read once per exchange.
+///
+/// Once, because reading can *spend* something. A listing fetched to recover
+/// from a `HeaderMismatch` is good for exactly one call, and an exchange builds
+/// its `POST` more than once whenever a managed-OAuth `401` sends it back
+/// through authorization. Reading again there would find the grace gone and the
+/// listing stale, so the retry -- the very call the recovery was for -- would go
+/// out without the headers the server refused it for, and be refused again.
+#[cfg(not(feature = "legacy-spec"))]
+fn mirrored_param_headers(
+    session: &McpSession,
+    req: &Message,
+    registry: &crate::shared::param_headers::Registry,
+) -> Vec<(String, String)> {
+    // A legacy peer never negotiated these, so asking would spend a grace on a
+    // request that is not going to carry them.
+    if session.is_legacy() {
+        return Vec::new();
+    }
+
+    param_headers(req, registry)
+}
+
 /// Builds the JSON-RPC POST with all transport headers and the current
 /// bearer credential attached.
 fn build_post(
@@ -266,7 +289,7 @@ fn build_post(
     session: &McpSession,
     req: &Message,
     bearer: Option<&str>,
-    #[cfg(not(feature = "legacy-spec"))] param_registry: &crate::shared::param_headers::Registry,
+    #[cfg(not(feature = "legacy-spec"))] mirrored: &[(String, String)],
 ) -> RequestBuilder {
     // `.json()` already sets `Content-Type: application/json`, and `.header()`
     // *appends* rather than replaces -- setting it again put the header on the
@@ -296,9 +319,14 @@ fn build_post(
                 resp = resp.header(crate::transport::http::MCP_NAME, n);
             }
         }
-        for (name, value) in param_headers(req, param_registry) {
-            resp = resp.header(name, crate::transport::http::encode_header_value(&value));
+
+        for (name, value) in mirrored {
+            resp = resp.header(
+                name.as_str(),
+                crate::transport::http::encode_header_value(value),
+            );
         }
+
         resp = resp.header(
             crate::transport::http::MCP_PROTOCOL_VERSION,
             crate::LATEST_PROTOCOL_VERSION,
@@ -372,13 +400,16 @@ async fn exchange(
     // again when its turn comes, so a flow completing in between -- here or
     // anywhere else -- reaches it without being threaded through.
     let bearer = auth.fresh_bearer().await;
+    // Once for the whole exchange -- see `mirrored_param_headers`.
+    #[cfg(not(feature = "legacy-spec"))]
+    let mirrored = mirrored_param_headers(&session, &req, &param_registry);
     let sent = build_post(
         &client,
         &session,
         &req,
         bearer.as_deref(),
         #[cfg(not(feature = "legacy-spec"))]
-        &param_registry,
+        &mirrored,
     )
     .send()
     .await;
@@ -421,7 +452,7 @@ async fn exchange(
                         &req,
                         Some(&fresh),
                         #[cfg(not(feature = "legacy-spec"))]
-                        &param_registry,
+                        &mirrored,
                     )
                     .send()
                     .await;
@@ -1653,6 +1684,75 @@ mod tests {
             #[cfg(not(feature = "legacy-spec"))]
             Default::default(),
         ))
+    }
+
+    /// An exchange that builds its `POST` twice must send the same
+    /// `Mcp-Param-*` headers both times.
+    ///
+    /// The second build is the managed-OAuth retry, and the headers may be
+    /// mirrored on a grace: one call's worth, granted because the server refused
+    /// the first attempt for missing them. Reading the registry again there
+    /// finds the grace spent and the listing stale, so the retry would go out
+    /// bare -- and be refused for exactly what the recovery had just fixed.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn a_retried_post_mirrors_what_the_first_one_did() {
+        use crate::shared::param_headers::{ParamHeader, Registration};
+
+        let session = make_session();
+        let registry: crate::shared::param_headers::Registry = Default::default();
+        // `ttlMs: 0` -- stale on arrival, which is what an absent `ttlMs` means
+        // too, so the grace is the only thing that lets this call mirror at all.
+        registry.insert(
+            "route".to_string(),
+            Registration::new(
+                vec![ParamHeader {
+                    path: vec!["region".into()],
+                    header: "Region".into(),
+                }],
+                0,
+                true,
+            ),
+        );
+
+        let req = Message::Request(crate::types::Request::new(
+            Some(crate::types::RequestId::Number(1)),
+            crate::types::tool::commands::CALL,
+            Some(serde_json::json!({
+                "name": "route",
+                "arguments": { "region": "us-west1" }
+            })),
+        ));
+
+        let mirrored = mirrored_param_headers(&session, &req, &registry);
+        assert_eq!(
+            mirrored,
+            vec![("Mcp-Param-Region".to_string(), "us-west1".to_string())],
+            "the grace covers this call"
+        );
+        assert!(
+            mirrored_param_headers(&session, &req, &registry).is_empty(),
+            "and reading is what spends it -- hence reading once"
+        );
+
+        let client = create_client(
+            #[cfg(feature = "client-tls")]
+            None,
+        )
+        .expect("a client");
+        for attempt in ["first", "retry"] {
+            let built = build_post(&client, &session, &req, None, &mirrored)
+                .build()
+                .expect("a request");
+            assert_eq!(
+                built
+                    .headers()
+                    .get("Mcp-Param-Region")
+                    .and_then(|v| v.to_str().ok()),
+                Some("us-west1"),
+                "the {attempt} attempt must carry the mirrored header"
+            );
+        }
     }
 
     /// A resumption refused for a credential must not cost the answer.

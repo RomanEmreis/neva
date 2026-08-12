@@ -194,7 +194,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   re-list, following `nextCursor` until it finds the tool, and retry once; that
   listing is good for that retry regardless of TTL, scoped to the refused tool
   and spent on the first call either way -- it covers the retry it was fetched
-  for, never a later call the TTL has since disowned.
+  for, never a later call the TTL has since disowned. "One call" is the whole
+  exchange, not one HTTP attempt: the mirrored headers are read once and reused,
+  so a managed-OAuth `401` that sends the request back through authorization
+  does not lose them on the way.
 
 #### Schemas and arguments
 * **A schema is published the way it was declared.** `Schema` and (legacy
