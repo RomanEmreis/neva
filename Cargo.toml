@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["neva", "neva_macros", "examples/*"]
+members = ["neva", "neva_macros", "conformance", "examples/*"]
 default-members = ["neva", "neva_macros"]
 exclude = [
     "examples/batch",

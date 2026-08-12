@@ -1333,8 +1333,9 @@ impl App {
         let session_id = req.session_id;
         let full_id = req.full_id();
 
-        // MRTR pre-capture: method + salient params (params minus `_meta`),
-        // needed after `req`/`context` are moved into `handler.call`.
+        // MRTR pre-capture: method + salient params (the params that identify
+        // this request, see `salient_params`), needed after `req`/`context` are
+        // moved into `handler.call`.
         #[cfg(not(feature = "legacy-spec"))]
         let mrtr_method = shared::is_mrtr_method(&req.method);
         #[cfg(not(feature = "legacy-spec"))]
@@ -1343,7 +1344,7 @@ impl App {
         let salient_params = req
             .params
             .as_ref()
-            .map(strip_meta)
+            .map(salient_params)
             .unwrap_or(serde_json::Value::Null);
 
         // What MCP 2026-07-28 requires of every request's `_meta`: the
@@ -1351,10 +1352,18 @@ impl App {
         // The HTTP preamble rejects both earlier so it can attach the `400` the
         // spec asks for; this seam is what every other transport gets, since
         // the requirements are on the message and not on how it travelled.
+        //
+        // The MRTR field check rides along, but only for the methods MRTR runs
+        // on. `requestState` and `inputResponses` are protocol fields *there*;
+        // on a custom `map_handler` method they are just params, and a handler
+        // is entitled to a numeric `requestState` of its own. Judging those by
+        // the MRTR shapes would refuse a request this server was written to
+        // serve.
         #[cfg(not(feature = "legacy-spec"))]
         if let Some(err) = req
             .required_meta_error()
             .or_else(|| req.unsupported_version_error())
+            .or_else(|| mrtr_method.then(|| req.malformed_mrtr_error()).flatten())
         {
             let mut resp = Response::error(req_id, err);
             if let Some(session_id) = session_id {
@@ -1402,6 +1411,18 @@ impl App {
         // round's `inputResponses`, and attach the replay state to the context.
         #[cfg(not(feature = "legacy-spec"))]
         let mut context = context;
+        // Declared per request, so it belongs on every dispatch and not just the
+        // MRTR ones: a task-augmented call asks the same caller for the same
+        // kinds of input, and a handler that skips asking when the caller cannot
+        // answer needs to know that on any substrate.
+        #[cfg(not(feature = "legacy-spec"))]
+        {
+            context.client_capabilities = req
+                .meta()
+                .as_ref()
+                .and_then(|m| m.client_capabilities)
+                .unwrap_or_default();
+        }
         #[cfg(not(feature = "legacy-spec"))]
         let (mrtr_arc, mrtr_principal) = if mrtr_method {
             #[cfg(feature = "http-server")]
@@ -1440,26 +1461,34 @@ impl App {
         // incoming state's sealed segment (the ciphertext+tag after the last
         // `.` -- `rsplit_once` keeps grabbing it regardless of the leading
         // `v1.kid.` header segments -- unique per minted state thanks to the
-        // random AEAD nonce) *plus* a
-        // digest of this round's `inputResponses`. The answers digest matters
-        // because the *same* minted state can be echoed with *different*
-        // answers -- a client (or attacker) replaying one round-1 blob with two
-        // different `inputResponses` would otherwise hit the first answer's
-        // cached result for the second. Folding in the answers' digest keeps
-        // those apart, while a genuine lost-response retry -- same state *and*
-        // same answers -- still hits. Only committed *final* rounds are ever
-        // cached, so a hit here is by construction a replay of one.
+        // random AEAD nonce) *plus* a digest of the answers this round actually
+        // resolved to. The answers digest matters because the *same* minted
+        // state can be echoed with *different* answers -- a client (or
+        // attacker) replaying one round-1 blob with two different
+        // `inputResponses` would otherwise hit the first answer's cached result
+        // for the second. Folding in the answers' digest keeps those apart,
+        // while a genuine lost-response retry -- same state *and* same answers
+        // -- still hits. Only committed *final* rounds are ever cached, so a
+        // hit here is by construction a replay of one.
+        //
+        // The digest is taken over the *seeded* answers rather than the raw
+        // `inputResponses` off the wire, and the difference is the whole
+        // protection. `seed_mrtr_ctx` drops an answer that is unsolicited or
+        // already settled, so two requests can carry different `inputResponses`
+        // and still resolve to identical input for the handler. Keying on the
+        // raw map would give those two different keys: a replay that merely
+        // adds a junk key, or re-answers a key the state already sealed, would
+        // miss the cache and run the final handler -- and its `on_commit`
+        // effects -- a second time. Keying on what the handler will actually
+        // see makes the key a function of the work, which is what the cache is
+        // there to deduplicate.
         #[cfg(not(feature = "legacy-spec"))]
         let state_tag: Option<String> = if mrtr_method {
-            req.meta().and_then(|m| {
-                let tag = m
-                    .request_state
-                    .as_deref()
-                    .and_then(|blob| blob.rsplit_once('.').map(|(_, tag)| tag))?;
-                let answers = m
-                    .input_responses
+            req.state().and_then(|state| {
+                let (_, tag) = state.rsplit_once('.')?;
+                let answers = mrtr_arc
                     .as_ref()
-                    .map(crate::types::mrtr::state::input_responses_digest)
+                    .map(|arc| crate::types::mrtr::state::input_responses_digest(&arc.answers))
                     .unwrap_or_default();
                 Some(format!("{tag}.{answers}"))
             })
@@ -1524,8 +1553,20 @@ impl App {
         #[cfg(not(feature = "legacy-spec"))]
         let resp = match (mrtr_method, mrtr_arc) {
             (true, Some(arc)) => {
-                let has_pending = arc.pending.lock().map(|p| p.is_some()).unwrap_or(false);
-                if has_pending {
+                // An answer that does not fit the kind it answers outranks
+                // everything else this round, re-requesting included: asking
+                // again for a key the client already answered wrongly is how a
+                // chain loops forever. It is the client's protocol mistake, so
+                // it is answered as one and not as a call that ran and failed.
+                let malformed = arc
+                    .malformed_answer
+                    .lock()
+                    .map(|mut m| m.take())
+                    .unwrap_or_default();
+                let has_pending = arc.pending.lock().map(|p| !p.is_empty()).unwrap_or(false);
+                if let Some(reason) = malformed {
+                    Err(Error::new(ErrorCode::InvalidParams, reason))
+                } else if has_pending {
                     build_input_required(
                         &arc,
                         &req_method,
@@ -1549,15 +1590,29 @@ impl App {
                             break;
                         }
                     }
+                    // Cache this round's answer either way (below, once the id
+                    // is final), so a lost-response retry is served from it
+                    // rather than run again.
+                    //
+                    // Failure has to be cached too, and that is the whole point
+                    // rather than an afterthought: by here the commits have
+                    // *started*. An earlier one may have already applied its
+                    // effect, and the one that returned `Err` may have applied
+                    // part of its own. Leaving the round uncached would send an
+                    // identical retry back through the handler and re-run those
+                    // effects -- charging twice to report the same failure,
+                    // which is exactly what `on_commit` exists to prevent.
+                    //
+                    // The cost is that the state carries its failure: a retry
+                    // of this round replays the error instead of getting
+                    // another attempt. That is the safe direction. Recovering
+                    // means starting a fresh flow, whose new state re-runs
+                    // everything deliberately -- the case `on_commit`'s docs
+                    // already call out as outside its guarantee.
+                    cache_final = true;
                     match commit_err {
                         Some(e) => Err(e),
-                        None => {
-                            // Final round committed successfully: cache its
-                            // response (below, once the id is final) so a
-                            // lost-response retry is served idempotently.
-                            cache_final = true;
-                            resp
-                        }
+                        None => resp,
                     }
                 } else {
                     resp
@@ -1714,14 +1769,22 @@ fn create_tracing_span(
     }
 }
 
-/// Returns a clone of `params` with the `_meta` key removed, so the MRTR
-/// request-binding digest is stable across round-trips.
+/// Returns a clone of `params` with everything that differs between MRTR
+/// rounds removed, so the request-binding digest is stable across round-trips.
+///
+/// That is `_meta`, plus the two fields the retry adds -- `inputResponses` and
+/// `requestState`. Leaving those in would make round 2 hash differently from
+/// round 1 and every state would be rejected as "not matching this request":
+/// the binding is about *which* request this is, and a request does not become
+/// a different one by being answered.
 #[cfg(not(feature = "legacy-spec"))]
-fn strip_meta(params: &serde_json::Value) -> serde_json::Value {
+fn salient_params(params: &serde_json::Value) -> serde_json::Value {
     match params {
         serde_json::Value::Object(map) => {
             let mut cloned = map.clone();
             cloned.remove("_meta");
+            cloned.remove("inputResponses");
+            cloned.remove("requestState");
             serde_json::Value::Object(cloned)
         }
         other => other.clone(),
@@ -1853,7 +1916,7 @@ fn seed_mrtr_ctx(
     // Keys the server requested in the prior round, decoded from the verified
     // state. `None` means no valid state was supplied, so no input was solicited.
     let mut requested: Option<Vec<String>> = None;
-    if let Some(state) = meta.as_ref().and_then(|m| m.request_state.clone()) {
+    if let Some(state) = req.state() {
         // Reject an oversized inbound state before decoding it. Base64 decoding
         // and AEAD decryption in `StateCodec::decode` both allocate/compute in
         // proportion to the blob size, so without this guard `with_max_state_bytes`
@@ -1892,32 +1955,30 @@ fn seed_mrtr_ctx(
         effects = payload.effects;
         requested = Some(payload.requested);
     }
-    if let Some(responses) = meta.and_then(|m| m.input_responses) {
-        // `inputResponses` are answers to inputs the server requested in a
-        // prior round; that request set lives in the encrypted `requestState`.
-        // Without a verified state there is nothing to bind them to, so accept
-        // only solicited, non-duplicate keys -- otherwise a client could
-        // pre-seed answers for a later `ctx.elicit` key (skipping the intended
-        // `InputRequiredResult`) or overwrite an already-resolved answer.
-        let Some(requested) = requested.as_ref() else {
-            return Err(Error::new(
-                ErrorCode::InvalidParams,
-                "inputResponses supplied without a requestState",
-            ));
-        };
-
+    if let Some(responses) = req.input_responses() {
+        // An answer is taken when it fits what this chain is waiting for, and
+        // dropped otherwise. Nothing here is an error: the spec has a server
+        // ignore information it does not recognize, and a client that re-sends
+        // its whole answer set every round -- a perfectly ordinary client -- is
+        // not misbehaving. What a dropped answer costs the client is a round: the
+        // handler asks again, and the fresh `InputRequiredResult` says what for.
         for (key, value) in responses {
+            // An answer already sealed into the state is settled. A later one
+            // for the same key is not an update; honoring it would let a replay
+            // of one round's state carry a different answer than the round that
+            // produced it.
             if answers.contains_key(&key) {
-                return Err(Error::new(
-                    ErrorCode::InvalidParams,
-                    "inputResponses re-answers an already-resolved input",
-                ));
+                continue;
             }
-            if !requested.contains(&key) {
-                return Err(Error::new(
-                    ErrorCode::InvalidParams,
-                    "inputResponses contains a key the server did not request",
-                ));
+            // With a verified state we know exactly what was asked, so anything
+            // else is unsolicited -- including an answer pre-seeded for a key
+            // the handler has not reached yet, which would skip the elicitation
+            // the server intended to make. Without a state there is nothing to
+            // check against and no round in flight to subvert, so an answer
+            // offered up front is simply available to the handler that asks for
+            // it.
+            if requested.as_ref().is_some_and(|r| !r.contains(&key)) {
+                continue;
             }
             answers.insert(key, value);
         }
@@ -1927,6 +1988,7 @@ fn seed_mrtr_ctx(
         answers,
         pending: Default::default(),
         client_capabilities,
+        malformed_answer: Default::default(),
         memos: std::sync::Mutex::new(memos),
         effects: std::sync::Mutex::new(effects),
         commits: Default::default(),
@@ -1946,17 +2008,27 @@ fn build_input_required(
     use crate::types::mrtr::InputRequiredResult;
     use crate::types::mrtr::state::{StateCodec, StatePayload, now_secs, request_binding};
 
-    let (key, request) = arc
+    let pending = arc
         .pending
         .lock()
-        .ok()
-        .and_then(|mut p| p.take())
-        .ok_or_else(|| Error::new(ErrorCode::InternalError, "missing pending MRTR input"))?;
+        .map(|mut p| std::mem::take(&mut *p))
+        .unwrap_or_default();
+    if pending.is_empty() {
+        return Err(Error::new(
+            ErrorCode::InternalError,
+            "missing pending MRTR input",
+        ));
+    }
 
     // Each kind is gated on its own flag: a client that fulfils elicitation
     // need not fulfil the deprecated sampling/roots kinds, and asking for one
-    // it never declared would otherwise stall the round-trip.
-    if !arc.client_capabilities.allows(&request) {
+    // it never declared would otherwise stall the round-trip. One unsupported
+    // kind fails the round even when the others are fine -- a partial round
+    // would silently drop an input the handler is going to ask for again.
+    if let Some((_, request)) = pending
+        .iter()
+        .find(|(_, request)| !arc.client_capabilities.allows(request))
+    {
         return Err(Error::new(
             ErrorCode::MissingRequiredClientCapability,
             format!(
@@ -1965,7 +2037,7 @@ fn build_input_required(
             ),
         )
         .with_data(serde_json::json!({
-            "requiredCapabilities": arc.client_capabilities.requiring(&request),
+            "requiredCapabilities": arc.client_capabilities.requiring(request),
         })));
     }
 
@@ -1974,9 +2046,9 @@ fn build_input_required(
 
     let payload = StatePayload {
         answers: arc.answers.clone(),
-        // Bind the key we are requesting into the signed state so the next
-        // round can verify the client only answers what we actually asked for.
-        requested: vec![key.clone()],
+        // Bind the keys we are requesting into the signed state so the next
+        // round can tell an answer it asked for from one it did not.
+        requested: pending.iter().map(|(key, _)| key.clone()).collect(),
         memos,
         effects,
         exp: now_secs() + options.request_state_ttl_secs(),
@@ -1992,7 +2064,7 @@ fn build_input_required(
         ));
     }
 
-    Ok(InputRequiredResult::single(key, request, state))
+    Ok(InputRequiredResult::new(pending, state))
 }
 
 /// Returns `true` only when `resp` is a genuine success that should trigger the
@@ -2601,18 +2673,25 @@ mod tests {
             assert!(format!("{err}").contains("principal mismatch"), "{err}");
         }
 
+        /// An accepted elicitation answer tagged so two answers for one key can
+        /// be told apart.
+        fn answer(tag: &str) -> serde_json::Value {
+            serde_json::json!({ "action": "accept", "content": { "tag": tag } })
+        }
+
+        /// The tag [`answer`] put on the answer stored under `key`.
+        fn tag_of(ctx: &crate::app::context::MrtrCtx, key: &str) -> Option<String> {
+            ctx.answers.get(key)?["content"]["tag"]
+                .as_str()
+                .map(str::to_owned)
+        }
+
         /// Builds the `_meta` JSON with the given request state (if any) and
-        /// `inputResponses` map of key -> accepted [`ElicitResult`].
-        fn request_with_responses(state: Option<&str>, response_keys: &[&str]) -> Request {
-            use crate::types::elicitation::ElicitResult;
-            let responses: serde_json::Map<String, serde_json::Value> = response_keys
+        /// `inputResponses` map of key -> tagged answer.
+        fn request_with_answers(state: Option<&str>, responses: &[(&str, &str)]) -> Request {
+            let responses: serde_json::Map<String, serde_json::Value> = responses
                 .iter()
-                .map(|k| {
-                    (
-                        (*k).to_owned(),
-                        serde_json::to_value(ElicitResult::accept()).expect("serialize result"),
-                    )
-                })
+                .map(|(key, tag)| ((*key).to_owned(), answer(tag)))
                 .collect();
             let mut meta = serde_json::json!({
                 "io.modelcontextprotocol/clientCapabilities": { "elicitation": true },
@@ -2626,16 +2705,10 @@ mod tests {
             Request::new(Some(RequestId::Number(1)), METHOD, Some(params))
         }
 
-        fn state_with(answers: &[&str], requested: &[&str]) -> String {
-            use crate::types::elicitation::ElicitResult;
+        fn state_with(answers: &[(&str, &str)], requested: &[&str]) -> String {
             let answers = answers
                 .iter()
-                .filter_map(|k| {
-                    Some((
-                        (*k).to_owned(),
-                        serde_json::to_value(ElicitResult::accept()).ok()?,
-                    ))
-                })
+                .map(|(key, tag)| ((*key).to_owned(), answer(tag)))
                 .collect();
             let payload = StatePayload {
                 answers,
@@ -2650,46 +2723,55 @@ mod tests {
         }
 
         #[test]
-        fn input_responses_without_request_state_are_rejected() {
-            // No validated state: nothing solicited these answers.
-            let req = request_with_responses(None, &["ask_name"]);
-            let err = super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), None)
-                .expect_err("unbound inputResponses must be rejected");
-            assert_eq!(err.code, ErrorCode::InvalidParams);
-            assert!(format!("{err}").contains("without a requestState"), "{err}");
+        fn answers_offered_without_a_request_state_are_available_to_the_handler() {
+            // Nothing is in flight, so there is no round to subvert: an answer
+            // offered up front is simply there when the handler asks for that
+            // key. Erroring instead would break a client that knows what the
+            // tool will ask and answers in one shot.
+            let req = request_with_answers(None, &[("ask_name", "offered")]);
+            let ctx = super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), None)
+                .expect("unsolicited answers must not fail the call");
+            assert_eq!(tag_of(&ctx, "ask_name").as_deref(), Some("offered"));
         }
 
         #[test]
-        fn unsolicited_input_response_key_is_rejected() {
-            // State requested `ask_name`; client answers an unrelated key.
+        fn an_unsolicited_key_is_dropped_once_a_state_says_what_was_asked() {
+            // State requested `ask_name`; the client answers that plus a key
+            // nobody asked about. The extra one is ignored rather than fatal --
+            // a server SHOULD ignore what it does not recognize -- and, more to
+            // the point, is not left lying around to satisfy a later
+            // `ctx.elicit("ask_age", ..)` the server has not made yet.
             let state = state_with(&[], &["ask_name"]);
-            let req = request_with_responses(Some(&state), &["ask_age"]);
-            let err = super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), None)
-                .expect_err("unsolicited key must be rejected");
-            assert_eq!(err.code, ErrorCode::InvalidParams);
-            assert!(format!("{err}").contains("did not request"), "{err}");
+            let req = request_with_answers(
+                Some(&state),
+                &[("ask_name", "solicited"), ("ask_age", "unsolicited")],
+            );
+            let ctx = super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), None)
+                .expect("an unsolicited key must not fail the call");
+            assert_eq!(tag_of(&ctx, "ask_name").as_deref(), Some("solicited"));
+            assert!(!ctx.answers.contains_key("ask_age"));
         }
 
         #[test]
-        fn re_answering_a_resolved_input_is_rejected() {
-            // `ask_name` already resolved in the signed answers log; the client
-            // tries to overwrite it (even though it is also in `requested`).
-            let state = state_with(&["ask_name"], &["ask_name"]);
-            let req = request_with_responses(Some(&state), &["ask_name"]);
-            let err = super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), None)
-                .expect_err("re-answering must be rejected");
-            assert_eq!(err.code, ErrorCode::InvalidParams);
-            assert!(format!("{err}").contains("already-resolved"), "{err}");
+        fn a_settled_answer_is_not_overwritten_by_a_later_one() {
+            // `ask_name` is already sealed into the signed answers log. A second
+            // answer for it is dropped: taking it would let one round's state be
+            // replayed carrying a different answer than the round that made it.
+            let state = state_with(&[("ask_name", "settled")], &["ask_name"]);
+            let req = request_with_answers(Some(&state), &[("ask_name", "overwrite")]);
+            let ctx = super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), None)
+                .expect("a repeated answer must not fail the call");
+            assert_eq!(tag_of(&ctx, "ask_name").as_deref(), Some("settled"));
         }
 
         #[test]
         fn solicited_input_response_is_accepted() {
             // The happy path: client answers exactly the requested key.
             let state = state_with(&[], &["ask_name"]);
-            let req = request_with_responses(Some(&state), &["ask_name"]);
+            let req = request_with_answers(Some(&state), &[("ask_name", "answered")]);
             let ctx = super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), None)
                 .expect("solicited response must be accepted");
-            assert!(ctx.answers.contains_key("ask_name"));
+            assert_eq!(tag_of(&ctx, "ask_name").as_deref(), Some("answered"));
         }
     }
 

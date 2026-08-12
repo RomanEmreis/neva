@@ -1,0 +1,113 @@
+# Known failures of the default (MCP 2026-07-28) build against
+# @modelcontextprotocol/conformance at the version pinned in
+# `conformance/.conformance-version`.
+#
+# This is a strict baseline, not a mute button:
+#   - an unlisted failure fails the build (a regression)
+#   - a listed entry that starts passing fails the build (a stale entry)
+# So every line here is a debt with an owner, and removing one is how a fix is
+# proved. Each entry names the defect that retires it; the ones marked
+# `TBD: no issue yet` still need one filed.
+#
+# Entries may name a whole scenario or a single check (`scenario:check-id`).
+# Prefer the latter whenever most of a scenario's checks pass -- excusing the
+# scenario would stop enforcing the ones that already hold.
+
+server: []
+  # Nothing left to excuse: every scored server scenario passes.
+  #
+  # `server-stateless` (30 checks) and `sep-2164-resource-not-found` are fully
+  # green: the method-not-found status, the header/body version precedence and
+  # the `error.data.uri` on a missing resource were the first three findings of
+  # this harness and are fixed.
+
+  # `dns-rebinding-protection` is green: a loopback server now answers only to
+  # loopback names and refuses anything else with 403.
+
+  # -- MRTR -----------------------------------------------------------------
+  # Green end to end. `inputResponses` / `requestState` ride on the params where
+  # `InputResponseRequestParams` puts them; a round carries every input the
+  # handler asked for rather than one at a time; a handler can read the caller's
+  # declared capabilities off `Context` and ask only for those; and an answer
+  # that does not fit what the chain is waiting for is dropped rather than
+  # turned into an error, so the handler asks again and the fresh
+  # `InputRequiredResult` says what for.
+
+client:
+  # The authorization-code flow is green end to end: metadata discovery in all
+  # four layouts, dynamic registration, PKCE S256, scope selection (challenge
+  # first, then `scopes_supported`, omitted when neither), step-up with the
+  # SEP-2350 scope union, every token-endpoint auth method, pre-registered
+  # credentials, offline access, issuer migration and the RFC 9207 `iss` rules.
+  #
+  # What is left needs a credential the flow does not have.
+
+  # -- Client id metadata documents (#86) --------------------------------
+  # A server advertising `client_id_metadata_document_supported` expects a
+  # *URL* client id resolving to a hosted client metadata document. neva
+  # registers dynamically instead, which the scenario reports as a warning.
+  - auth/basic-cimd
+
+  # -- Grant types beyond authorization_code (#86) -----------------------
+  # Each of these authenticates the *client* rather than a user, and needs a
+  # grant neva's OAuth client does not implement: `client_credentials` (with a
+  # signed JWT assertion or Basic), the enterprise token-exchange profile, and
+  # RFC 7523 JWT-bearer for workload identity.
+  - auth/client-credentials-jwt
+  - auth/client-credentials-basic
+  - auth/enterprise-managed-authorization
+  - auth/wif-jwt-bearer
+
+  # -- DPoP (#86) --------------------------------------------------------
+  # Sender-constrained tokens: every request carries a fresh signed proof bound
+  # to the key, method and URL, and the nonce variant adds a challenge-response
+  # round. neva issues bearer tokens only.
+  - auth/dpop
+  - auth/dpop-nonce
+
+  # `sep-2322-client-request-state` is green: the retry echoes `requestState`
+  # byte-exact on the params, takes a fresh JSON-RPC id, omits the state when
+  # the server sent none, and leaks neither field into an unrelated call.
+
+  # -- The stale-schema rule, conformance#354 ----------------------------
+  # Not a gap on our side: the scenario cannot be passed by a client that
+  # implements SEP-2243's stale-schema rule, and neva now does.
+  #
+  # It serves `tools/list` with `ttlMs: 0` -- which SEP-2549 defines as
+  # immediately stale, and which is also what an absent `ttlMs` means -- and
+  # then requires `Mcp-Param-*` derived from that same listing. SEP-2243 says
+  # a client SHOULD omit those headers while its cached schema is stale, and
+  # recover by re-listing when the server answers `HeaderMismatch`. This
+  # scenario's `handleToolsCall` returns success whatever the headers say, so
+  # the rejection never comes, the recovery never fires, and the positive
+  # checks fail.
+  #
+  # Retiring this entry means the scenario stopped requiring headers from a
+  # listing it declared stale -- not that neva started sending them again.
+  # The end-to-end loop is covered instead by
+  # `neva/tests/param_headers.rs::an_annotated_tool_survives_a_listing_that_is_stale_on_arrival`,
+  # against a real server that does reject.
+  - http-custom-headers
+
+  # `http-invalid-tool-headers` is green: a tool whose annotations break the
+  # constraints is dropped from `tools/list` without taking its well-formed
+  # neighbours with it.
+  #
+  # One thing that green does NOT prove: the suite's encoding predicate
+  # Base64s any byte below 0x20, interior horizontal tab included, which the
+  # spec's safe set admits (it quotes RFC 9110: VCHAR, SP and HTAB). The
+  # scenario only ever sends a *leading* tab, which both readings encode, so
+  # nothing here distinguishes them. The library follows the spec; the unit
+  # test in `transport/http/client.rs` is what holds that line.
+
+  # `json-schema-2020-12-preservation` is green: a tool schema the client reads
+  # comes back out with every keyword it arrived with.
+
+  # `json-schema-ref-no-deref` is green too, once the POST stopped carrying two
+  # `Content-Type` headers -- a duplicate that read as
+  # `"application/json, application/json"` and drew a `415` from the SDK
+  # transport the scenario's mock delegates to.
+
+  # -- request-metadata emits a warning, not a failure --------------------
+  # Listed because the runner counts the scenario as failing on its warning.
+  - request-metadata

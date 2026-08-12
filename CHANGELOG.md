@@ -7,77 +7,215 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## 0.5.2
 
-### Fixed
-* **Tool and prompt arguments are extracted by name, not by position.**
-  * A failure now names the argument: ``missing required argument `age` `` and
-    ``invalid value for argument `age`: ... `` instead of
-    `Invalid param provided`.
-  * An argument a peer omitted is offered to the handler as `null`, so an
-    absent optional argument no longer errors on arrival.
-  * `Meta<_>`, `Context` and `Dc<_>` parameters consume no argument slot, so
-    they can sit anywhere in the signature without shifting the rest. The
-    `#[tool]` / `#[prompt]` macros classify them from the *resolved* type, so a
-    parameter reaching the signature through a type alias
-    (`type Token = Meta<ProgressToken>`) is recognised too. The same goes for
-    an argument's published JSON type and whether it is required: a
-    `type MaybeAge = Option<i32>` parameter now publishes exactly what the
-    spelled-out type does.
-  * Whether an argument may be omitted is decided by its type, never by whether
-    a synthetic `null` happens to deserialize into it -- otherwise a required
-    `serde_json::Value` argument would silently arrive as `Null`.
-* **Tools registered from a closure publish one property per argument.** The
-  generated `inputSchema` keyed its properties by *type name*, so
-  `|a: i32, b: i32|` advertised a single `number` property and the second
-  argument had nowhere to travel in. Properties are now named per argument and
-  listed in `required`. Prompt arguments likewise no longer publish
-  `std::any::type_name` output.
-
 ### Added
-* **`Option<T>` tool and prompt arguments.**
-  * New `ToolArg` (the return type of `ToolHandler::args`) carries the
-    published property together with whether a call must supply it.
-  * New `PromptArgument::named(name, required)`.
-  * A tool whose arguments are all optional now publishes no `required` key
-    rather than an empty array.
-* `Tool::with_arg_names([...])` declares the names of a handler's arguments.
-  Rust does not keep a closure's parameter names, so a tool registered from a
-  bare closure publishes and reads the positional `arg0`, `arg1`, ... names
-  until this is called; it renames the generated schema and the extraction
-  names together, so the two cannot drift.
-* `map_tool!` / `map_prompt!` read the names off the closure itself:
-  `map_tool!(app, "greet", |name: String, age: i32| async move { ... })`
-  registers the tool with `name` and `age` and skips metadata parameters.
-* `App::run` fails at startup when a tool or prompt and its handler disagree
-  about the arguments -- a tool whose schema was overridden without
-  `with_arg_names`, a miscounted `with_arg_names`, declared names the schema
-  does not offer as properties, a `Prompt::with_args` list that does not cover
-  every argument the handler takes, or the same name given to two arguments.
-  None of these could ever be called
-  successfully, and this reports them before serving instead of on a peer's
-  first request. A schema that composes -- `$ref`, `allOf`, `oneOf`, a
-  conditional branch -- may publish an argument the check cannot follow, so it
-  is left alone rather than failed on a guess. `Context::add_tool` and
-  `Context::add_prompt` run the same check and refuse the insertion, since a
-  primitive registered while the server runs has no startup left to fail.
+* **DNS-rebinding protection.** The HTTP server validates `Origin` and `Host`:
+  on a loopback bind it refuses non-loopback names with `403` before reading the
+  body. `HttpServer::with_allowed_origins([...])` names more;
+  `allow_any_origin()` turns the gate off. An entry naming a scheme
+  (`https://app.example.com`) is an origin and matched as one, so trusting an
+  application does not trust what else its host serves; a bare host holds
+  neither scheme nor port against the request. `Host` is matched by name either
+  way.
+* **`Context::client_capabilities()`** reports what the caller declared in this
+  request's `_meta`, so a handler can branch before asking for an input kind it
+  would be refused for (`MissingRequiredClientCapability`). Elicitation is
+  reported down to the mode, via the new `ElicitationModes`.
+* **`Option<T>` tool and prompt arguments**, via `ToolArg` (returned by
+  `ToolHandler::args`) and `PromptArgument::named(name, required)`. A tool whose
+  arguments are all optional publishes no `required` key.
+* **`Tool::with_arg_names([...])`** names a bare closure's arguments, renaming
+  the published schema and the extraction names together; `map_tool!` /
+  `map_prompt!` read those names off the closure itself.
+* **`App::run` fails at startup** when a tool or prompt and its handler disagree
+  about arguments. `Context::add_tool` / `add_prompt` run the same check.
 * `ArgNames` and `FromHandlerArgs` in `neva::types`.
+* **A dropped `POST` response stream is resumed once**, with a `GET` carrying
+  `Last-Event-ID` after the pause the server asked for. Legacy profile only, and
+  only when the server named an id to resume from.
+* **The SSE `retry:` field sets the reconnection delay**, instead of a fixed
+  three seconds.
+* **Protected Resource Metadata is looked for at the origin too** when the
+  RFC 9728 path-based location misses; the document found there is validated
+  against the origin rather than the endpoint.
+* **The `scope` a `WWW-Authenticate` challenge names is what gets requested.**
+  Order: configured scopes, the challenge, `scopes_supported`, none at all.
+* **A `403 insufficient_scope` re-authorizes**, asking for the union of the
+  existing grant and what the challenge demands (SEP-2350). A `403` without that
+  challenge is untouched.
+* **An advertised RFC 9207 `iss` is enforced** -- the flag was read out of the
+  metadata document's unmodelled fields and so always came out false.
 
 ### Changed
-* **Breaking:** `App::map_tool` / `Tool::new` take
+* **A server may answer the handshake with a different protocol version.** Only
+  a version outside `PROTOCOL_VERSIONS` now ends the connection.
+* **`Client::disconnect` sends nothing.** The param-less
+  `notifications/cancelled` it used to send fails the spec's own schema.
+* **An MRTR round carries every input the handler asked for**, in one
+  `InputRequiredResult`, when the handler holds its `?` until it has asked for
+  everything.
+* **An `inputResponses` entry that does not fit is dropped, not rejected.**
+  Unsolicited, stale or state-less answers cost a round instead of failing the
+  call with `-32602`. An answer of the wrong kind is still an error, now a
+  JSON-RPC one rather than an in-band tool error.
+* `Prompt::with_args` also sets the extraction names, so the two cannot drift.
+
+### Changed (breaking)
+* `App::map_tool` / `Tool::new` take
   `Args: FromHandlerArgs<CallToolRequestParams>` and `App::map_prompt` /
   `Prompt::new` take `Args: FromHandlerArgs<GetPromptRequestParams>`, replacing
-  the `TryFrom<...Params>` bounds. Handlers themselves are unaffected; a
-  hand-written `impl TryFrom<CallToolRequestParams> for MyArgs` needs porting.
-* **Breaking:** `HandlerParams::Tool` and `HandlerParams::Prompt` carry the
-  primitive's `ArgNames` alongside the params.
-* **Breaking:** `ToolHandler::args` returns `Vec<ToolArg>` instead of
+  the `TryFrom<...>` bounds. Handlers are unaffected; a hand-written
+  `impl TryFrom` needs porting.
+* `ToolHandler::args` returns `Vec<ToolArg>` instead of
   `Option<HashMap<String, SchemaProperty>>` -- ordered, so the *n*-th entry is
-  the *n*-th argument slot, and carrying each argument's `required` flag.
-* **Breaking (wire):** a tool registered from a bare closure advertises
-  `arg0`, `arg1`, ... instead of the former type names (`number`, `string`).
-  Tools declared with `#[tool]` are unaffected -- they already published their
-  parameter names, and now read by them.
-* `Prompt::with_args` sets the extraction names along with the published
-  argument list, so the two are one decision. `#[prompt]` needs no change.
+  the *n*-th argument slot.
+* `HandlerParams::Tool` and `HandlerParams::Prompt` carry the primitive's
+  `ArgNames` alongside the params.
+* `PropertyType` gains an `Integer` variant and `"integer"` no longer
+  deserializes into `Number`; a match needs the new arm.
+* The schema structs in `neva::types::schema` gain an `extra` field, so an
+  exhaustive struct literal needs it (or `..Default::default()`). `EnumOption`
+  gives up `Eq` with it -- an arbitrary JSON value is not `Eq`; `PartialEq`
+  stays.
+* **Wire:** a tool registered from a bare closure advertises `arg0`, `arg1`, ...
+  instead of the former type names. `#[tool]` tools are unaffected.
+
+### Fixed
+
+#### Authorization
+* **`insufficient_scope` is read off the challenge's `error` parameter**, not by
+  searching the whole `WWW-Authenticate` value for the string.
+* **A challenge that names no `scope` is still a step-up** -- the attribute is
+  optional in RFC 6750.
+* **The applicable Bearer challenge is found wherever the server put it** --
+  behind another scheme, in a second `WWW-Authenticate` value, or later in the
+  same one, all of which RFC 9110 allows. Among several the one naming
+  `insufficient_scope` is acted on: it carries the `scope` the request was short
+  of, and reading any other leaves the step-up asking for the grant it had.
+* **A `403` on the standalone SSE `GET` re-authorizes** like one on a `POST`
+  (legacy profile).
+* **A step-up that lost the race reuses the winner's token**, but only when the
+  grant on record covers what was demanded. A challenge that named no scope
+  gives nothing to check that against, and a changed token proves nothing -- a
+  refresh rotates one without widening it -- so that case runs the flow.
+* **A stored refresh token survives a restart**: the refresh is retried once the
+  client and metadata have been rebuilt, on the way to the interactive flow.
+  Only with a configured `client_id` -- a refresh token belongs to the client it
+  was issued to.
+* **What the session believes it was granted follows the token.** It records
+  what the response *granted*, not what was asked for, so a granted subset no
+  longer reads as a token that merely expired; one that omits `scope` (RFC 6749
+  5.1) has the grant carried over, one that narrows it updates the record. All
+  of it reaches the token store, so a step-up after a restart widens the stored
+  grant rather than replacing it.
+* **A challenge naming a scope outside `with_scopes` fails, naming it**, rather
+  than running a flow that cannot obtain it.
+* **Only a `404` opens the Protected Resource Metadata origin fallback** -- a
+  malformed body or a mismatched `resource` is the path-based document
+  answering, and its answer is authoritative.
+* **The RFC 8707 resource indicator is the one the accepted metadata declares**,
+  not the endpoint URL.
+* **A resumption asks for a token when its turn comes**, not carrying the one
+  the original `POST` used: the server names the wait, and it can outlast that
+  token. A `401` there re-authorizes once and tries again, as the `POST` and the
+  standalone `GET` already did, instead of losing the answer.
+
+#### HTTP transport and sessions
+* **SSE responses carry `X-Content-Type-Options: nosniff`.** Without it Firefox
+  buffers the stream to sniff its type and a `fetch()` reader sees nothing.
+* **Each stream carries its own `Last-Event-ID` cursor and `retry:` delay.**
+  Both lived on the session, so the `POST` and standalone `GET` streams sent
+  each other back to positions they had never reached, and whichever frame
+  landed last set the other's reconnection time.
+* **A resumed response stream is released once it has answered**, instead of
+  being read forever -- one leaked connection per truncated reply. What is owed
+  is tracked per request, so a batch resumes only what is still unanswered.
+* **An SSE `retry: 0` means reconnect immediately**; zero was dropped as if
+  nothing had been stated.
+* **A server offering no standalone SSE stream no longer ends the session**
+  (legacy profile): `404` and `405` release the pending `initialize` and the
+  session carries on over POST alone.
+* **A `404` after a stream that worked means the session is gone** and ends the
+  connection, instead of carrying on dead (legacy profile).
+* **A terminated session answers `404` on `POST`, `GET` and `DELETE`** (legacy
+  profile), the POST body carrying a JSON-RPC error addressed to the request's
+  own id. `initialize` is exempt; a live id counts as activity against the
+  idle sweep.
+* **A stale session answers a notification with the status alone**, not a
+  `null`-id JSON-RPC error that matches nothing on the other side.
+* **A notification reaches the session stream the moment it is emitted** (legacy
+  profile), so a handler's response can no longer overtake the progress it just
+  reported. Per-session delivery replaces one shared 100-slot queue, and
+  `layer()` no longer spawns.
+* **A full notification queue no longer logs itself to death** (legacy profile)
+  -- the warning fed straight back into the layer until the stack ran out.
+* **The POST no longer carries `Content-Type` twice**, which drew `415` from
+  strict receivers.
+
+#### MRTR and parameter headers
+* **`inputResponses` / `requestState` travel on the params, not in `_meta`**,
+  where the spec puts them -- against any other implementation the retry looked
+  like a fresh call. `_meta` is still read as a fallback;
+  `Request::input_responses()` and `Request::state()` read either.
+* **The idempotency digest covers the answers a round resolved to**, not the raw
+  `inputResponses`. An unasked key could otherwise miss the cache and re-run the
+  final handler's `on_commit` effects.
+* **The MRTR field check applies to MRTR methods only**; on a method registered
+  with `App::map_handler` those names are the handler's own params.
+* **A `requestState` / `inputResponses` of the wrong JSON type is
+  `InvalidParams`**, not silently absent. An explicit `null` counts as stating
+  the field wrongly -- the spec makes both optional by *absence*.
+* **A declared elicitation mode is honored.** `elicitation` was one flag, so a
+  client declaring `{"form": {}}` was sent `url` requests it had said nothing
+  about and the round stalled. Named modes are a list of what the client can do,
+  and `MissingRequiredClientCapability` names the mode; naming none rules none
+  out, which is what a bare `{}` has always meant.
+* **`x-mcp-header` registrations expire with the listing that carried them**
+  (SEP-2243 with SEP-2549's clock): usable for the listing's `ttlMs`, and an
+  absent `ttlMs` reads as `0`. A `HeaderMismatch` (`-32020`) then has the client
+  re-list and retry once; that listing is good for the retry whatever its TTL,
+  for the refused tool and that one exchange only. The re-listing runs to the
+  end -- a restarted traversal clears what the last one recorded, so a page it
+  never reaches loses its annotations and its record of the dropped tools.
+
+#### Schemas and arguments
+* **A schema is published the way it was declared.** `Schema` and (legacy
+  profile) `ToolSchema` keep every unmodelled keyword verbatim in a flattened
+  `extra`: `default` (SEP-1034), `pattern`, `examples`, and the `$schema`,
+  `$defs`, `$ref`, `additionalProperties`, `allOf`/`anyOf` and
+  `if`/`then`/`else` that SEP-2106 requires to survive untouched -- below the
+  root as well, in an enum form's `items` and each `anyOf` option under it.
+* **A tool property keeps its own keywords too** (legacy profile): `enum`,
+  `format`, `$ref` and `minimum` were dropped, and a property stating no `type`
+  no longer acquires `"object"`.
+* **A field declared `integer` rejects `1.5`.** The check judges the value, not
+  how it was written, so `1.0` still passes.
+* **Tool and prompt arguments are extracted by name, not by position.** Failures
+  name the argument, an omitted argument arrives as `null` instead of erroring,
+  and `Meta<_>` / `Context` / `Dc<_>` consume no argument slot wherever they sit
+  -- classified from the *resolved* type, so type aliases are recognised.
+* **Tools registered from a closure publish one property per argument**, instead
+  of keying them by type name and collapsing `|a: i32, b: i32|` into one.
+* **A tool call with no arguments omits `arguments`** rather than sending
+  `null`, which a validating peer rejects.
+
+#### Wire and protocol
+* **Per-request `clientCapabilities` are read as the spec's optional objects**,
+  not booleans. Every request from a conformant client -- MCP Inspector among
+  them -- failed with `-32602 invalid type: map, expected a boolean`. Both
+  shapes are accepted on the way in.
+* **Elicitation params are written as the spec's union**, not a tagged enum:
+  `{"Form": {...}}` hid `message` and `requestedSchema` from every peer but
+  neva. Affects both protocol profiles.
+* **An elicitation `mode` that is present has to be a string**; `null` was read
+  as "no mode" and delivered as a well-formed form.
+* **A `resources` capability that omits `subscribe` parses**, instead of failing
+  the handshake it arrives with.
+* **An unimplemented method answers `404` over HTTP**, not `200` with `-32601`.
+* **A body protocol version disagreeing with the `MCP-Protocol-Version` header
+  is a `HeaderMismatch` (`-32020`)**, not `UnsupportedProtocolVersion` -- "retry
+  with a version from this list" does not fix a header and a body that disagree.
+* **`resources/read` names the unknown URI in `error.data.uri`** (a spec
+  SHOULD).
 
 ## 0.5.1
 

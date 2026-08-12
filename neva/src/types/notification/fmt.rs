@@ -5,10 +5,9 @@ use crate::shared::MessageRegistry;
 use crate::types::Message;
 #[cfg(not(feature = "legacy-spec"))]
 use crate::types::notification::LoggingLevel;
-use crate::types::notification::{Notification, formatter::build_notification};
+use crate::types::notification::formatter::build_notification;
 use once_cell::sync::Lazy;
 use std::io::{self, Write};
-use tokio::sync::mpsc::{Sender, channel};
 use tracing::{
     field::Field,
     span::Attributes,
@@ -53,31 +52,7 @@ pub(crate) static LOG_REGISTRY: Lazy<MessageRegistry> = Lazy::new(MessageRegistr
 ///     .init();
 /// ```
 pub fn layer() -> MpscLayer {
-    let (tx, mut rx) = channel::<Notification>(100);
-    tokio::spawn(async move {
-        while let Some(notification) = rx.recv().await {
-            let _ = LOG_REGISTRY.send(notification.into());
-        }
-    });
-    MpscLayer {
-        sender: NotificationSender::new(tx),
-    }
-}
-
-/// Keeps a [`Sender`]
-#[derive(Debug)]
-struct NotificationSender {
-    sender: Sender<Notification>,
-}
-
-impl NotificationSender {
-    fn new(sender: Sender<Notification>) -> Self {
-        Self { sender }
-    }
-
-    fn send_notification(&self, notification: Notification) {
-        let _ = self.sender.try_send(notification);
-    }
+    MpscLayer
 }
 
 /// Represents a custom tracing layer that delivers messages to MCP Client
@@ -91,9 +66,47 @@ impl NotificationSender {
 ///     .with(notification::fmt::layer())
 ///     .init();
 /// ```
-#[derive(Debug)]
-pub struct MpscLayer {
-    sender: NotificationSender,
+#[derive(Debug, Default)]
+pub struct MpscLayer;
+
+thread_local! {
+    /// Whether this thread is already inside [`MpscLayer::on_event`].
+    static DELIVERING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Held for the duration of one delivery; refuses to be taken twice on a
+/// thread.
+///
+/// Delivering a notification can itself log: a session channel that is full or
+/// closed says so with `tracing::warn!`, and that event arrives straight back
+/// in this layer, under the same span, to be delivered down the same channel.
+/// A full channel is still full, so the two would call each other until the
+/// stack ran out -- a burst of log messages taking the process down with it.
+/// The outermost delivery wins; whatever the delivery itself emits is dropped,
+/// which is the right answer anyway: it is a diagnostic *about* this channel
+/// and has no business being queued on it.
+///
+/// `tracing-core` has a guard of its own (`can_enter`), and it is not enough
+/// here: `dispatcher::get_default` checks it only when a *scoped* dispatcher is
+/// installed, and returns through a fast path straight to the global dispatcher
+/// when `SCOPED_COUNT` is zero. A subscriber installed with `.init()` -- the
+/// ordinary way, and the one [`layer`]'s own example shows -- is global, so the
+/// fast path is what runs and nothing upstream breaks the cycle. It also means
+/// a test using `with_default` cannot reproduce the recursion: that path *is*
+/// guarded.
+struct DeliveryGuard;
+
+impl DeliveryGuard {
+    /// `None` when a delivery is already in progress on this thread.
+    fn enter() -> Option<Self> {
+        (!DELIVERING.replace(true)).then_some(Self)
+    }
+}
+
+impl Drop for DeliveryGuard {
+    fn drop(&mut self) {
+        DELIVERING.set(false);
+    }
 }
 
 impl<S> Layer<S> for MpscLayer
@@ -107,6 +120,11 @@ where
 
     #[inline]
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
+        // See [`DeliveryGuard`]: what a delivery logs must not be delivered.
+        let Some(_delivery) = DeliveryGuard::enter() else {
+            return;
+        };
+
         let notification = build_notification(event);
         if let Some(span) = ctx.event_span(event) {
             let mut notification = notification;
@@ -152,7 +170,14 @@ where
                 return;
             }
 
-            self.sender.send_notification(notification);
+            // Legacy: the session-scoped SSE `GET` stream. Queued here and now,
+            // synchronously, so a notification a handler emits is on the
+            // stream's channel before the handler returns -- routing it through
+            // a channel of its own once cost a scheduler hop, and a handler that
+            // never awaits (it reports progress and returns) would not yield
+            // until it was done, letting its own response overtake the progress
+            // it had already reported.
+            let _ = LOG_REGISTRY.send(notification.into());
         } else {
             let mut stderr = io::stderr();
             let json = serde_json::to_string(&notification).unwrap();
@@ -265,6 +290,145 @@ impl Visit for SpanVisitor {
                 self.session_id = Some(session_id);
             }
         }
+    }
+}
+
+// The legacy emission path: a session-scoped SSE `GET` stream fed through
+// `LOG_REGISTRY`, with no per-request sink to route to.
+#[cfg(all(test, feature = "legacy-spec"))]
+mod legacy_tests {
+    use tracing_subscriber::prelude::*;
+
+    /// The whole of the recursion defence: a second delivery on the same thread
+    /// is refused, and the refusal lifts once the first one is done.
+    ///
+    /// What re-enters in production is a `tracing::warn!` raised *by* the
+    /// delivery -- a full or closed channel reporting itself -- arriving back
+    /// in `on_event` under the same span and aimed at the same channel.
+    #[test]
+    fn a_delivery_refuses_to_nest() {
+        let outer = super::DeliveryGuard::enter().expect("the first delivery proceeds");
+        assert!(
+            super::DeliveryGuard::enter().is_none(),
+            "what a delivery logs must not be delivered"
+        );
+        drop(outer);
+
+        assert!(
+            super::DeliveryGuard::enter().is_some(),
+            "and the next event is delivered as usual"
+        );
+    }
+
+    /// Emits inside a `request` span carrying `session_id` and returns whatever
+    /// the session's channel holds by the time the emitting code is done --
+    /// nothing is awaited in between on purpose.
+    fn emit_and_drain(session_id: uuid::Uuid, emit: impl FnOnce()) -> Vec<serde_json::Value> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        super::LOG_REGISTRY.register(session_id, 1, tx);
+
+        let subscriber = tracing_subscriber::registry().with(super::MpscLayer);
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("request", mcp_session_id = session_id.to_string());
+            let _entered = span.enter();
+            emit();
+        });
+
+        super::LOG_REGISTRY.unregister(&session_id);
+
+        let mut got = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            got.push(serde_json::to_value(&msg).unwrap());
+        }
+        got
+    }
+
+    /// The overflow of a full queue is dropped rather than queued.
+    ///
+    /// Note what this does *not* cover. The reason a full queue is dangerous is
+    /// that saying so goes through `tracing::warn!`, which comes back here
+    /// aimed at the same full channel -- and `DeliveryGuard` is what stops
+    /// that. This test cannot exercise it: a test subscriber has to be scoped
+    /// (`with_default`), and `tracing-core`'s own `can_enter` already guards
+    /// the scoped path. The recursion is reachable only under a *global*
+    /// subscriber, which a shared test binary cannot install. `DeliveryGuard`'s
+    /// own test covers the mechanism instead.
+    #[test]
+    fn a_full_queue_drops_its_overflow() {
+        let session_id = uuid::Uuid::new_v4();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        super::LOG_REGISTRY.register(session_id, 1, tx);
+
+        let subscriber = tracing_subscriber::registry().with(super::MpscLayer);
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("request", mcp_session_id = session_id.to_string());
+            let _entered = span.enter();
+            // One fills the channel; the rest each find it full, and each full
+            // send warns.
+            for i in 0..64 {
+                tracing::info!(logger = "neva", "message {i}");
+            }
+        });
+
+        super::LOG_REGISTRY.unregister(&session_id);
+
+        let mut delivered = 0;
+        while rx.try_recv().is_ok() {
+            delivered += 1;
+        }
+        assert_eq!(
+            delivered, 1,
+            "the queue holds one, and the overflow is dropped rather than queued"
+        );
+    }
+
+    #[test]
+    fn a_progress_report_is_on_the_stream_before_the_emitter_returns() {
+        // The reports and the call's result travel on two different connections
+        // here, so nothing orders them but the emitting task yielding. Queueing
+        // synchronously is what keeps a report that was made *during* the call
+        // from arriving after the call's own result -- by which time the client
+        // has stopped looking.
+        let got = emit_and_drain(uuid::Uuid::new_v4(), || {
+            for value in [0, 50, 100] {
+                tracing::info!(target: "progress", token = "tok-1", value = value, total = 100);
+            }
+        });
+
+        let progress = got
+            .iter()
+            .filter(|m| m["method"] == "notifications/progress")
+            .collect::<Vec<_>>();
+        assert_eq!(progress.len(), 3, "got: {got:?}");
+        assert_eq!(progress[0]["params"]["progressToken"], "tok-1");
+        assert_eq!(progress[0]["params"]["progress"], 0.0);
+        assert_eq!(progress[2]["params"]["progress"], 100.0);
+        assert_eq!(progress[2]["params"]["total"], 100.0);
+    }
+
+    #[test]
+    fn a_log_message_travels_the_same_way() {
+        let got = emit_and_drain(uuid::Uuid::new_v4(), || {
+            tracing::warn!(logger = "tool", "something happened");
+        });
+
+        assert_eq!(got.len(), 1, "got: {got:?}");
+        assert_eq!(got[0]["method"], "notifications/message");
+        assert_eq!(got[0]["params"]["level"], "warning");
+        assert_eq!(got[0]["params"]["data"]["message"], "something happened");
+    }
+
+    #[test]
+    fn an_event_for_an_unknown_session_is_dropped_rather_than_kept() {
+        // No stream to put it on. The registry says so, and nothing queues up
+        // waiting for a session that may never open one.
+        let subscriber = tracing_subscriber::registry().with(super::MpscLayer);
+        tracing::subscriber::with_default(subscriber, || {
+            let span =
+                tracing::info_span!("request", mcp_session_id = uuid::Uuid::new_v4().to_string());
+            let _entered = span.enter();
+            tracing::warn!(logger = "tool", "nobody is listening");
+        });
     }
 }
 
@@ -414,15 +578,15 @@ mod tests {
     /// child span that carries no MCP fields of its own.
     #[tokio::test]
     async fn routes_events_from_nested_spans_to_the_request_sink() {
-        use crate::types::notification::Notification;
-
         let session_id = uuid::Uuid::new_v4();
         let mut sink_rx = super::super::sink::register(session_id, 8, false).await;
 
-        let (fallback_tx, mut fallback_rx) = tokio::sync::mpsc::channel::<Notification>(8);
-        let subscriber = tracing_subscriber::registry().with(super::MpscLayer {
-            sender: super::NotificationSender::new(fallback_tx),
-        });
+        // The legacy session-SSE registry, standing by under the same id: if the
+        // 2026-07-28 path ever fell through, this is where the event would land.
+        let (fallback_tx, mut fallback_rx) = tokio::sync::mpsc::channel(8);
+        super::LOG_REGISTRY.register(session_id, 1, fallback_tx);
+
+        let subscriber = tracing_subscriber::registry().with(super::MpscLayer);
 
         tracing::subscriber::with_default(subscriber, || {
             let request = tracing::info_span!(
@@ -437,6 +601,7 @@ mod tests {
         });
 
         super::super::sink::unregister(&session_id);
+        super::LOG_REGISTRY.unregister(&session_id);
 
         let msg = sink_rx
             .try_recv()

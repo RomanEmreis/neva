@@ -512,6 +512,13 @@ pub(crate) struct OAuthSession {
     /// Serializes authorization flows (concurrent 401s run one flow) and
     /// caches the client + metadata for non-interactive refresh.
     flow: Mutex<Option<FlowState>>,
+    /// Scopes the last completed flow asked for.
+    ///
+    /// A re-authorization asks for these *plus* whatever the new challenge
+    /// demands (SEP-2350): a token minted for the challenged scope alone would
+    /// lose access the session already had, and the next call for the old scope
+    /// would challenge straight back.
+    requested_scopes: RwLock<Vec<String>>,
 }
 
 impl std::fmt::Debug for OAuthSession {
@@ -537,7 +544,50 @@ impl OAuthSession {
             resource,
             token: RwLock::new(token),
             flow: Mutex::new(None),
+            requested_scopes: RwLock::new(Vec::new()),
         })
+    }
+
+    /// Scopes this session is known to hold, most authoritative source first.
+    ///
+    /// The in-memory set records what the last flow *in this process* was
+    /// granted, so it is empty after a restart -- and a persistent
+    /// [`TokenStore`] hands back a token whose grant the process never saw. Left
+    /// at that, the first `insufficient_scope` challenge after a restart would
+    /// build its step-up from the demanded scopes alone and trade away
+    /// everything the restored token already carried, which is the opposite of
+    /// what SEP-2350 asks for. So a stored token's own `scope` -- what RFC 6749
+    /// has the authorization server report as *granted* -- stands in for it.
+    ///
+    /// A server may omit `scope` when it granted exactly what was asked
+    /// (RFC 6749 section 5.1), leaving nothing recorded. Configured scopes
+    /// answer that case: they are what every flow of this session requests, so
+    /// they are held by construction.
+    fn requested_scopes(&self) -> Vec<String> {
+        let asked = self
+            .requested_scopes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if !asked.is_empty() {
+            return asked;
+        }
+
+        self.config
+            .store
+            .get(&self.resource)
+            .and_then(|tokens| tokens.scope)
+            .map(|granted| split_scopes(&granted))
+            .filter(|granted| !granted.is_empty())
+            .or_else(|| self.config.scopes.clone())
+            .unwrap_or_default()
+    }
+
+    fn set_requested_scopes(&self, scopes: Vec<String>) {
+        *self
+            .requested_scopes
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = scopes;
     }
 
     /// The current bearer token, if any.
@@ -583,8 +633,55 @@ impl OAuthSession {
     /// authorization is required or no flow has completed yet.
     async fn maintain(&self, state: &mut Option<FlowState>) -> Option<Arc<str>> {
         let FlowState { client, metadata } = state.as_ref()?;
+        self.refresh_with(client, metadata).await
+    }
+
+    /// [`Self::maintain`] for a client and metadata held directly rather than
+    /// cached -- what the reconstruct-after-restart path has in hand.
+    async fn refresh_with(
+        &self,
+        client: &OAuthClient,
+        metadata: &AuthorizationServerMetadata,
+    ) -> Option<Arc<str>> {
+        // What the grant was known to cover going in. A refresh response may
+        // leave `scope` out when the grant is unchanged (RFC 6749 section 5.1),
+        // and the renewed set *replaces* the stored one -- so a renewal would
+        // otherwise erase the only record of what the token carries. The next
+        // `insufficient_scope` challenge would then widen from nothing and
+        // trade the grant away, which is the very thing SEP-2350 forbids. The
+        // refresh token itself is carried over for the same reason one step
+        // down, inside `OAuthClient::token`.
+        let carried = self
+            .config
+            .store
+            .get(&self.resource)
+            .and_then(|tokens| tokens.scope);
+
         match client.token(&self.resource, metadata).await {
-            Ok(Some(tokens)) => {
+            Ok(Some(mut tokens)) => {
+                // What the renewed token covers: what the response said it
+                // granted, or -- when it said nothing -- the grant it did not
+                // restate.
+                let granted = tokens.scope.clone().or(carried);
+                if tokens.scope.is_none()
+                    && let Some(scope) = granted.clone()
+                {
+                    tokens.scope = Some(scope);
+                    self.config.store.put(&self.resource, &tokens);
+                }
+                // And the in-memory record moves with it. A refresh may
+                // *narrow* the grant, and this process's memory of the earlier,
+                // wider one outranks the store -- so a challenge demanding
+                // something the renewed token no longer carries would read as
+                // already covered, take the single-flight shortcut, and hand
+                // back that same token to be refused again on the request's one
+                // retry.
+                if let Some(scope) = granted.as_deref() {
+                    let scopes = split_scopes(scope);
+                    if !scopes.is_empty() {
+                        self.set_requested_scopes(scopes);
+                    }
+                }
                 let token: Arc<str> = tokens.access_token.into();
                 self.set_token(token.clone());
                 Some(token)
@@ -616,36 +713,117 @@ impl OAuthSession {
     ) -> Result<Arc<str>, Error> {
         let mut flight = self.flow.lock().await;
 
-        // Someone else completed the flow while this caller waited.
-        if let Some(current) = self.bearer()
+        let challenge = www_authenticate.and_then(|header| BearerChallenge::parse(header).ok());
+        // Scopes the challenge demands that this session has never asked for.
+        // A refresh cannot widen a grant, so their presence is what separates
+        // "this token expired" from "this token is not enough" -- the second
+        // needs the user back, however fresh the token is.
+        let demanded = challenge
+            .as_ref()
+            .and_then(|challenge| challenge.scope())
+            .map(split_scopes)
+            .unwrap_or_default();
+
+        // `insufficient_scope` is itself the statement that this grant is too
+        // narrow, and RFC 6750 leaves the `scope` attribute optional -- so a
+        // server may say it without naming what it wants. Reading only the
+        // named scopes would call that "not a step-up", take the refresh path,
+        // and spend the exchange's one retry on a token that is short by
+        // exactly as much as before.
+        let insufficient = challenge.as_ref().is_some_and(|challenge| {
+            matches!(
+                challenge.error(),
+                Some(volga_oauth_client::OAuthErrorCode::InsufficientScope)
+            )
+        });
+
+        // Read after the lock, so a flow that finished while this caller queued
+        // behind it is already accounted for.
+        let held = self.requested_scopes();
+        let uncovered = demanded.iter().any(|scope| !held.contains(scope));
+
+        let step_up = insufficient || uncovered;
+
+        // A step-up that named no scope leaves nothing to check coverage
+        // against, and a token that merely changed proves nothing: a refresh
+        // rotates the access token without touching what it covers, and any
+        // other request in this process may have run one while this caller
+        // queued. Taking it would be the refresh path under another name --
+        // exactly what reading `insufficient_scope` was meant to stop -- and the
+        // exchange's one retry would go out just as short as before.
+        let unverifiable = step_up && demanded.is_empty();
+
+        // Someone else may have completed a widening flow while this caller
+        // waited on the lock, and its token is right here. Taking it is the
+        // whole point of the single-flight lock: two callers refused for the
+        // same missing scope must not walk the user through consent twice.
+        //
+        // Trustworthy only because both halves are checked: the grant on record
+        // now covers what the challenge demanded, *and* the token is not the one
+        // that was just refused.
+        if !uncovered
+            && !unverifiable
+            && let Some(current) = self.bearer()
             && used != Some(&*current)
         {
             return Ok(current);
         }
 
+        // A configured set is the caller's decision about what this client may
+        // ever ask for, and the flow below honors it to the letter -- so a
+        // challenge naming something outside it describes a grant this client
+        // cannot obtain. Running the flow anyway is the worst of both: it
+        // interrupts the user for consent and still comes back without the one
+        // scope the call needed, so the retry is refused exactly as before.
+        // Widening past the configured set is no answer either -- it would
+        // override the decision, and an authorization server refuses a scope
+        // the client is not registered for. So this ends here, naming the
+        // scope, because adding it to `with_scopes` is the only thing that
+        // resolves it.
+        if step_up && let Some(configured) = &self.config.scopes {
+            let missing = demanded
+                .iter()
+                .filter(|scope| !configured.contains(scope))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                return Err(Error::new(
+                    ErrorCode::InvalidRequest,
+                    format!(
+                        "the server requires scope `{}`, which this client is not \
+                         configured to request; add it to `with_scopes`",
+                        missing.join(" ")
+                    ),
+                ));
+            }
+        }
+
         // Refresh before interrupting the user: a stored refresh token
         // renews the session silently. A token identical to the rejected
         // one is no help though (revoked server-side) -- interactive then.
-        if let Some(token) = self.maintain(&mut flight).await
+        if !step_up
+            && let Some(token) = self.maintain(&mut flight).await
             && used != Some(&*token)
         {
             return Ok(token);
         }
 
-        let metadata_url = www_authenticate
-            .and_then(|header| BearerChallenge::parse(header).ok())
+        let stated = challenge
+            .as_ref()
             .and_then(|challenge| challenge.resource_metadata().map(str::to_owned));
-        let metadata_url = match metadata_url {
-            Some(url) => url,
-            None => protected_resource_metadata_url(&self.resource)
-                .map_err(|err| Error::new(ErrorCode::InternalError, err.to_string()))?,
-        };
 
         let discovery = DiscoveryClient::with_config(self.config.client_config());
-        let resource_metadata = discovery
-            .fetch_resource_metadata_from_url(&metadata_url, Some(&self.resource))
-            .await
-            .map_err(flow_error)?;
+        let resource_metadata = match stated {
+            // The challenge named the document: that is the answer, and a
+            // failure there is the failure -- guessing elsewhere would be
+            // discovering a document the server did not point at.
+            Some(url) => discovery
+                .fetch_resource_metadata_from_url(&url, Some(&self.resource))
+                .await
+                .map_err(flow_error)?,
+            None => self.discover_resource_metadata(&discovery).await?,
+        };
+
         let server_metadata = discovery
             .discover_authorization_server(&resource_metadata)
             .await
@@ -654,15 +832,62 @@ impl OAuthSession {
         let redirect_uri = self.config.handler.redirect_uri().await?;
         let client = self.build_client(&server_metadata, &redirect_uri).await?;
 
-        let scopes = self
-            .config
-            .scopes
-            .clone()
-            .unwrap_or_else(|| resource_metadata.scopes_supported.clone());
+        // A durable [`TokenStore`] outlives the process; the flow state that
+        // knows how to use it does not. So after a restart the refresh attempt
+        // above found nothing to refresh *with* -- no client, no metadata --
+        // and a stored refresh token, still perfectly good, went unused while
+        // the user was walked through consent again. Both halves have just been
+        // rebuilt, so ask once more before that.
+        //
+        // Only with a configured `client_id`. Without one `build_client`
+        // registers a *new* client (RFC 7591), and a refresh token belongs to
+        // the client it was issued to -- offering it under a new identity asks
+        // the authorization server to refuse.
+        if !step_up
+            && self.config.client_id.is_some()
+            && let Some(token) = self.refresh_with(&client, &server_metadata).await
+            && used != Some(&*token)
+        {
+            // Keep what made it work, so the next refresh is the cheap path.
+            *flight = Some(FlowState {
+                client,
+                metadata: server_metadata,
+            });
+            return Ok(token);
+        }
+
+        // What to ask for, most specific first. A configured set is the
+        // caller's decision and overrides everything -- and by here it already
+        // covers whatever the challenge demanded, since a demand outside it
+        // ended this call above. Otherwise the challenge names what this very
+        // request needed, which is narrower and more current than the
+        // resource's advertised set; `scopes_supported` is the fallback, and an
+        // empty one means asking for no `scope` at all.
+        let mut scopes = match &self.config.scopes {
+            Some(configured) => configured.clone(),
+            None if !demanded.is_empty() => demanded.clone(),
+            None => resource_metadata.scopes_supported.clone(),
+        };
+        // SEP-2350: carry everything earlier rounds asked for, so a step-up
+        // widens the grant instead of trading one scope for another.
+        for held in self.requested_scopes() {
+            if !scopes.contains(&held) {
+                scopes.push(held);
+            }
+        }
+
+        // The RFC 8707 resource indicator is the identifier the *accepted*
+        // metadata declares, not the endpoint this client happens to talk to.
+        // They are the same thing whenever the document was found under the
+        // endpoint's own path -- that is what validating it checks -- but a
+        // document served at the origin describes the origin, and asking for a
+        // token audienced to the endpoint would either be refused by an
+        // authorization server that enforces its own advertised identifier, or
+        // grant a token for an audience the resource never claimed.
         let request = client
             .authorization_request(&server_metadata)
-            .with_scopes(scopes)
-            .with_resource(self.resource.clone())
+            .with_scopes(scopes.clone())
+            .with_resource(resource_metadata.resource.clone())
             .build()
             .map_err(flow_error)?;
 
@@ -681,6 +906,32 @@ impl OAuthSession {
             .await
             .map_err(flow_error)?;
 
+        // What the server *granted*, which is not always what was asked for.
+        // RFC 6749 section 5.1 has the token response state `scope` whenever it
+        // differs from the request and omit it when it matches, so the response
+        // is the authority and the request is only the fallback. Recording the
+        // request would count a scope that was asked for and refused as held --
+        // and then the challenge that names it reads as "this token expired"
+        // rather than "this grant is too narrow", so the client refreshes into
+        // the same refusal instead of widening.
+        let mut tokens = tokens;
+        let granted = tokens
+            .scope
+            .as_deref()
+            .map(split_scopes)
+            .filter(|granted| !granted.is_empty())
+            .unwrap_or(scopes);
+
+        // A grant inferred from the request goes into the stored set too, not
+        // just into memory. The store is what outlives the process, and the
+        // omission that produced this inference -- "granted exactly what you
+        // asked for" -- is the common case, so leaving it unwritten would have
+        // the next run start out believing it holds nothing and let the first
+        // step-up replace the grant instead of widening it.
+        if tokens.scope.is_none() && !granted.is_empty() {
+            tokens.scope = Some(granted.join(" "));
+        }
+
         self.config.store.put(&self.resource, &tokens);
         // Keep the client + metadata so future refreshes stay
         // non-interactive.
@@ -688,10 +939,90 @@ impl OAuthSession {
             client,
             metadata: server_metadata,
         });
+        self.set_requested_scopes(granted);
 
         let token: Arc<str> = tokens.access_token.into();
         self.set_token(token.clone());
         Ok(token)
+    }
+
+    /// Finds the Protected Resource Metadata for a server that issued a `401`
+    /// without saying where it lives.
+    ///
+    /// RFC 9728 puts the document under the resource's own path
+    /// (`/.well-known/oauth-protected-resource/mcp` for a server at `/mcp`), so
+    /// that is asked first. A server that hosts one MCP endpoint often serves it
+    /// at the root instead, which is a location the path-based derivation never
+    /// reaches -- so a `404` falls back there rather than failing the flow over
+    /// a document that exists.
+    ///
+    /// Strictly a `404`, and not "the first attempt did not work out". Any
+    /// other failure means the path-based location answered, and what it said
+    /// stands: falling back past a malformed body or a mismatched `resource`
+    /// would trade an authoritative refusal for a document describing something
+    /// else.
+    async fn discover_resource_metadata(
+        &self,
+        discovery: &DiscoveryClient,
+    ) -> Result<volga_oauth_client::ProtectedResourceMetadata, Error> {
+        let path_based = protected_resource_metadata_url(&self.resource)
+            .map_err(|err| Error::new(ErrorCode::InternalError, err.to_string()))?;
+
+        let first = discovery
+            .fetch_resource_metadata_from_url(&path_based, Some(&self.resource))
+            .await;
+
+        let Err(err) = first else {
+            return first.map_err(flow_error);
+        };
+
+        // Only "there is no document here" opens the fallback. Every other
+        // failure is the path-based document *answering*, and its answer is the
+        // authoritative one: a body that does not parse, a `resource` that
+        // names something else, a rejected plain-HTTP URL, a TLS or connection
+        // failure. Treating those as absence would let a document that failed
+        // validation be replaced by one from the origin, which is how a client
+        // ends up authorizing against metadata for a different resource than
+        // the one it just refused.
+        if !matches!(err, ClientError::Http(status) if status.as_u16() == 404) {
+            return Err(flow_error(err));
+        }
+
+        let Some(origin) = origin_of(&self.resource) else {
+            return Err(flow_error(err));
+        };
+
+        let root = format!("{origin}{WELL_KNOWN_PROTECTED_RESOURCE}");
+        if root == path_based {
+            return Err(flow_error(err));
+        }
+
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            logger = "neva",
+            "no resource metadata at {path_based}; trying {root}"
+        );
+
+        // Checked against the origin, not against the endpoint. A document at
+        // the root describes the whole origin as the protected resource -- that
+        // is what puts it there rather than under the endpoint's path -- so
+        // demanding it name the endpoint would reject every document this
+        // fallback exists to find. The binding it does keep is the one that
+        // matters: the document has to name the origin it was served from.
+        discovery
+            .fetch_resource_metadata_from_url(&root, Some(&origin))
+            .await
+            // Both attempts are named: reporting only one of them leaves the
+            // reader guessing which location was the problem.
+            .map_err(|root_err| {
+                Error::new(
+                    ErrorCode::InternalError,
+                    format!(
+                        "OAuth flow failed: no usable resource metadata \
+                         at {path_based} ({err}) or {root} ({root_err})"
+                    ),
+                )
+            })
     }
 
     /// Builds the [`OAuthClient`] -- from the configured `client_id` or
@@ -781,11 +1112,11 @@ fn validate_issuer(
     params: &CallbackParams,
     metadata: &AuthorizationServerMetadata,
 ) -> Result<(), Error> {
-    let supported = metadata
-        .additional_fields
-        .get("authorization_response_iss_parameter_supported")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+    // A modelled field, so it never appears in `additional_fields` -- reading it
+    // there made `supported` permanently false, and a server that advertised the
+    // parameter and then omitted it from the redirect went unchallenged, which
+    // is exactly the mix-up the parameter exists to catch.
+    let supported = metadata.authorization_response_iss_parameter_supported;
 
     match (&params.iss, supported) {
         (Some(iss), _) if *iss != metadata.issuer => Err(Error::new(
@@ -809,6 +1140,28 @@ fn flow_error(err: ClientError) -> Error {
         ErrorCode::InternalError,
         format!("OAuth flow failed: {err}"),
     )
+}
+
+/// Splits an OAuth `scope` value into its space-delimited scope tokens.
+fn split_scopes(scope: &str) -> Vec<String> {
+    scope
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>()
+}
+
+/// RFC 9728's well-known path for Protected Resource Metadata.
+const WELL_KNOWN_PROTECTED_RESOURCE: &str = "/.well-known/oauth-protected-resource";
+
+/// The `scheme://authority` a resource identifier belongs to.
+///
+/// Returns `None` when `resource` is not a URL with an authority -- there is no
+/// origin to hang a well-known path off then.
+fn origin_of(resource: &str) -> Option<String> {
+    let (scheme, rest) = resource.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+
+    (!authority.is_empty()).then(|| format!("{scheme}://{authority}"))
 }
 
 #[cfg(test)]
@@ -883,6 +1236,30 @@ mod tests {
     }
 
     #[test]
+    fn the_root_metadata_location_is_derived_from_the_origin() {
+        assert_eq!(
+            origin_of("https://api.example.com/mcp").as_deref(),
+            Some("https://api.example.com")
+        );
+        assert_eq!(
+            origin_of("http://127.0.0.1:8001/deep/path?x=1").as_deref(),
+            Some("http://127.0.0.1:8001")
+        );
+        // Nothing to hang a well-known path off.
+        assert!(origin_of("not-a-url").is_none());
+        assert!(origin_of("https://").is_none());
+    }
+
+    #[test]
+    fn scopes_split_on_whitespace() {
+        assert_eq!(
+            split_scopes("mcp:basic  mcp:write\tmcp:read"),
+            ["mcp:basic", "mcp:write", "mcp:read"]
+        );
+        assert!(split_scopes("   ").is_empty());
+    }
+
+    #[test]
     fn web_registration_stays_a_web_client() {
         let metadata = registration_metadata("https://my.app/oauth/callback");
         assert!(metadata.application_type.is_none());
@@ -890,13 +1267,32 @@ mod tests {
         assert!(json.get("application_type").is_none());
     }
 
+    /// The flag is a *modelled* field, so it must be set through the builder:
+    /// stashing it in `additional_fields` is what let these tests pass while the
+    /// real document -- where serde puts it on the field -- read as unsupported.
     fn as_metadata(supported: Option<bool>) -> AuthorizationServerMetadata {
         let mut metadata = AuthorizationServerMetadata::new("https://auth.example.com");
         if let Some(supported) = supported {
-            metadata = metadata
-                .with_additional_field("authorization_response_iss_parameter_supported", supported);
+            metadata = metadata.with_authorization_response_iss_parameter(supported);
         }
         metadata
+    }
+
+    /// The document a server actually sends, parsed the way the client parses
+    /// it: the flag has to survive the round trip onto the modelled field.
+    #[test]
+    fn an_advertised_iss_parameter_survives_deserialization() {
+        let doc = serde_json::json!({
+            "issuer": "https://auth.example.com",
+            "response_types_supported": ["code"],
+            "authorization_response_iss_parameter_supported": true,
+        });
+        let metadata: AuthorizationServerMetadata = serde_json::from_value(doc).unwrap();
+        assert!(metadata.authorization_response_iss_parameter_supported);
+        assert!(
+            validate_issuer(&callback(None), &metadata).is_err(),
+            "a server that advertised `iss` and then omitted it must be refused"
+        );
     }
 
     fn callback(iss: Option<&str>) -> CallbackParams {
@@ -992,6 +1388,170 @@ mod tests {
         addr
     }
 
+    /// A one-shot HTTP server answering every request with `status` and `body`.
+    async fn spawn_static(status: &'static str, body: &'static str) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+        addr
+    }
+
+    /// A server with one MCP endpoint that keeps its metadata at the root:
+    /// `404` under the endpoint's path, and a document describing the origin at
+    /// `/.well-known/oauth-protected-resource`.
+    async fn spawn_root_document() -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let read = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+                let root = format!("http://{addr}");
+                let resp = if request.contains("/.well-known/oauth-protected-resource/mcp") {
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .to_string()
+                } else {
+                    let body =
+                        format!(r#"{{"resource":"{root}","authorization_servers":["{root}"]}}"#);
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+        addr
+    }
+
+    /// The origin fallback exists for a server that keeps its one document at
+    /// the root, which the path-based derivation never reaches. It must not
+    /// exist for a path-based document that *answered* and was refused: falling
+    /// back past a mismatched `resource` would authorize against metadata for a
+    /// different resource than the one just rejected.
+    #[tokio::test]
+    async fn only_a_missing_document_opens_the_origin_fallback() {
+        // Every path answers with a document naming a *different* resource, so
+        // the path-based attempt fails validation rather than 404ing. The root
+        // would "succeed" if the fallback were reached, since it is checked
+        // against the origin -- which is exactly the confusion to avoid.
+        let addr = spawn_static(
+            "200 OK",
+            r#"{"resource":"http://127.0.0.1:1","authorization_servers":["http://127.0.0.1:1"]}"#,
+        )
+        .await;
+
+        let config = OAuthClientConfig::default().require_https(false);
+        let session = OAuthSession::new(config, &format!("http://{addr}/mcp")).unwrap();
+        let discovery = DiscoveryClient::with_config(session.config.client_config());
+
+        let err = session
+            .discover_resource_metadata(&discovery)
+            .await
+            .expect_err("a document that names another resource is not usable");
+        // The path-based document's own verdict, verbatim -- not the combined
+        // "at X or Y" message, which only the fallback path can produce.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("resource mismatch"),
+            "the refusal must be the one the path-based document earned: {msg}"
+        );
+        assert!(
+            !msg.contains("no usable resource metadata"),
+            "the origin must not have been tried at all: {msg}"
+        );
+
+        // A genuine miss falls through to the origin, and what comes back is
+        // the origin's own document -- `resource` included. That value is what
+        // rides the authorization request as the RFC 8707 indicator, so an
+        // authorization server enforcing its metadata's identifier sees the
+        // resource that actually claimed the grant.
+        let root_only = spawn_root_document().await;
+        let config = OAuthClientConfig::default().require_https(false);
+        let session = OAuthSession::new(config, &format!("http://{root_only}/mcp")).unwrap();
+        let discovery = DiscoveryClient::with_config(session.config.client_config());
+
+        let found = session
+            .discover_resource_metadata(&discovery)
+            .await
+            .expect("the origin document answers");
+        assert_eq!(
+            found.resource,
+            format!("http://{root_only}"),
+            "the accepted document describes the origin, and says so"
+        );
+
+        // A genuine miss still falls through to the origin, and says so by
+        // naming both locations when that fails too.
+        let missing = spawn_static("404 Not Found", "{}").await;
+        let config = OAuthClientConfig::default().require_https(false);
+        let session = OAuthSession::new(config, &format!("http://{missing}/mcp")).unwrap();
+        let discovery = DiscoveryClient::with_config(session.config.client_config());
+
+        let err = session
+            .discover_resource_metadata(&discovery)
+            .await
+            .expect_err("nothing is served at either location");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("/.well-known/oauth-protected-resource/mcp")
+                && msg.contains("/.well-known/oauth-protected-resource ("),
+            "a 404 must try the origin and report both: {msg}"
+        );
+    }
+
+    /// RFC 9728 section 3.3 states two validation rules, and which applies
+    /// depends on how the document was found. One reached by inserting the
+    /// well-known suffix is checked against the identifier the suffix was
+    /// inserted into, so a document at the origin legitimately names the
+    /// origin. One reached through the challenge's `resource_metadata` pointer
+    /// is checked against something else entirely: "the resource value returned
+    /// MUST be identical to the URL that the client used to make the request to
+    /// the resource server", and if they differ the document "MUST NOT be
+    /// used". Section 7.3 says why -- it is what stops a server from pointing at
+    /// a document that claims to speak for a resource it is not.
+    ///
+    /// So the same origin-wide document is usable when discovered and unusable
+    /// when pointed at. That asymmetry is the rule, not an oversight, and this
+    /// pins it: relaxing the pointed-at case to accept the origin would trade an
+    /// impersonation check for the convenience of a server that is misusing the
+    /// pointer.
+    #[tokio::test]
+    async fn a_challenge_pointer_is_held_to_the_url_the_client_called() {
+        // The very document `only_a_missing_document_opens_the_origin_fallback`
+        // accepts through discovery: it names the origin, and the endpoint this
+        // client calls sits at `/mcp` under it.
+        let addr = spawn_root_document().await;
+        let config = OAuthClientConfig::default()
+            .require_https(false)
+            .with_handler(NoInteraction);
+        let session = OAuthSession::new(config, &format!("http://{addr}/mcp")).unwrap();
+        let challenge = format!(
+            r#"Bearer resource_metadata="http://{addr}/.well-known/oauth-protected-resource""#
+        );
+
+        let err = session
+            .authorize(Some(&challenge), None)
+            .await
+            .expect_err("a pointed-at document naming something other than the called URL");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("resource mismatch"),
+            "the refusal must be the validation one, reached before any flow: {msg}"
+        );
+    }
+
     fn stale_tokens() -> TokenSet {
         TokenSet {
             access_token: "stale-token".into(),
@@ -1013,6 +1573,7 @@ mod tests {
             resource: "http://127.0.0.1:3000/mcp".into(),
             token: RwLock::new(Some("stale-token".into())),
             flow: Mutex::new(flow),
+            requested_scopes: RwLock::new(Vec::new()),
         }
     }
 
@@ -1044,6 +1605,102 @@ mod tests {
         assert_eq!(stored.refresh_token.as_deref(), Some("refresh-1"));
         // The flow state survives for the next refresh.
         assert!(session.flow.lock().await.is_some());
+    }
+
+    /// A refresh response may leave `scope` out when the grant is unchanged
+    /// (RFC 6749 section 5.1), and the renewed set replaces the stored one. So
+    /// unless the known grant rides along, simply renewing a token forgets what
+    /// it covers -- and the next step-up then widens from nothing, replacing
+    /// the grant instead of adding to it.
+    #[tokio::test]
+    async fn a_renewal_keeps_the_grant_it_did_not_restate() {
+        let addr = spawn_token_endpoint(
+            r#"{"access_token":"fresh-token","token_type":"Bearer","expires_in":3600}"#,
+        )
+        .await;
+
+        let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+        let mut restored = stale_tokens();
+        restored.scope = Some("read".into());
+        store.put("http://127.0.0.1:3000/mcp", &restored);
+
+        let flow = FlowState {
+            client: OAuthClient::new("cid")
+                .with_config(ClientConfig::new().require_https(false))
+                .with_token_store(store.clone()),
+            metadata: AuthorizationServerMetadata::new("http://issuer.local")
+                .with_token_endpoint(format!("http://{addr}/token")),
+        };
+        // Nothing recorded in memory: the state a restart leaves behind, where
+        // the store is the only thing that knows what was granted.
+        let session = session_with(store.clone(), Some(flow));
+
+        assert_eq!(
+            session.refreshed_bearer().await.as_deref(),
+            Some("fresh-token")
+        );
+        assert_eq!(
+            store
+                .get("http://127.0.0.1:3000/mcp")
+                .and_then(|tokens| tokens.scope)
+                .as_deref(),
+            Some("read"),
+            "a renewal that restated nothing must not erase the granted scope"
+        );
+        assert_eq!(
+            session.requested_scopes(),
+            vec!["read".to_string()],
+            "and a step-up must still have that grant to widen"
+        );
+    }
+
+    /// The other direction: a refresh that *narrows* the grant.
+    ///
+    /// The in-memory set outranks the store, so a wider grant remembered from
+    /// an earlier round in this process would outlive the token that carried
+    /// it. A challenge demanding a scope the renewed token no longer has would
+    /// then read as already covered, take the single-flight shortcut, and hand
+    /// the caller that same token to be refused again on its one retry.
+    #[tokio::test]
+    async fn a_narrowing_renewal_is_what_the_session_remembers() {
+        let addr = spawn_token_endpoint(
+            r#"{"access_token":"fresh-token","token_type":"Bearer","expires_in":3600,"scope":"read"}"#,
+        )
+        .await;
+
+        let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+        let mut restored = stale_tokens();
+        restored.scope = Some("read write".into());
+        store.put("http://127.0.0.1:3000/mcp", &restored);
+
+        let flow = FlowState {
+            client: OAuthClient::new("cid")
+                .with_config(ClientConfig::new().require_https(false))
+                .with_token_store(store.clone()),
+            metadata: AuthorizationServerMetadata::new("http://issuer.local")
+                .with_token_endpoint(format!("http://{addr}/token")),
+        };
+        let session = session_with(store.clone(), Some(flow));
+        // What an earlier round in this process was granted.
+        session.set_requested_scopes(vec!["read".to_string(), "write".to_string()]);
+
+        assert_eq!(
+            session.refreshed_bearer().await.as_deref(),
+            Some("fresh-token")
+        );
+        assert_eq!(
+            store
+                .get("http://127.0.0.1:3000/mcp")
+                .and_then(|tokens| tokens.scope)
+                .as_deref(),
+            Some("read"),
+            "the response stated the grant, so nothing is carried over it"
+        );
+        assert_eq!(
+            session.requested_scopes(),
+            vec!["read".to_string()],
+            "and the session holds what the token holds, not what it used to"
+        );
     }
 
     #[tokio::test]
@@ -1096,5 +1753,473 @@ mod tests {
         let config = OAuthClientConfig::default().with_token_store(store);
         let session = OAuthSession::new(config, "http://127.0.0.1:3000/mcp").unwrap();
         assert_eq!(session.bearer().as_deref(), Some("stored-token"));
+    }
+
+    /// A token restored from a persistent store carries a grant this process
+    /// never asked for. Unless it counts as held, the first
+    /// `insufficient_scope` challenge after a restart builds its step-up from
+    /// the demanded scopes alone and trades away everything the restored token
+    /// had -- so the next call for one of those is challenged in turn, and the
+    /// two ping-pong.
+    #[test]
+    fn a_restored_grant_is_what_a_step_up_widens() {
+        let stored = |scope: Option<&str>| {
+            let store = InMemoryTokenStore::new();
+            store.put(
+                "http://127.0.0.1:3000/mcp",
+                &TokenSet {
+                    access_token: "stored-token".into(),
+                    token_type: "Bearer".into(),
+                    refresh_token: None,
+                    scope: scope.map(str::to_owned),
+                    id_token: None,
+                    expires_at: None,
+                },
+            );
+            store
+        };
+
+        // The granted scope on the stored token is the record of the grant.
+        let config = OAuthClientConfig::default().with_token_store(stored(Some("read write")));
+        let session = OAuthSession::new(config, "http://127.0.0.1:3000/mcp").unwrap();
+        assert_eq!(
+            session.requested_scopes(),
+            vec!["read".to_string(), "write".to_string()],
+            "a restored grant must be held, or a step-up replaces it"
+        );
+
+        // A server that granted exactly what was asked may omit `scope`
+        // (RFC 6749 5.1). Configured scopes are what every flow of this session
+        // requests, so they stand in.
+        let config = OAuthClientConfig::default()
+            .with_token_store(stored(None))
+            .with_scopes(["read", "write"]);
+        let session = OAuthSession::new(config, "http://127.0.0.1:3000/mcp").unwrap();
+        assert_eq!(
+            session.requested_scopes(),
+            vec!["read".to_string(), "write".to_string()]
+        );
+
+        // Nothing stored and nothing configured: there is no grant to widen,
+        // and any demanded scope is genuinely new.
+        let config = OAuthClientConfig::default().with_token_store(stored(None));
+        let session = OAuthSession::new(config, "http://127.0.0.1:3000/mcp").unwrap();
+        assert!(session.requested_scopes().is_empty());
+
+        // A grant narrower than the request is what the store records, and it
+        // is what `requested_scopes` must report: counting a refused scope as
+        // held would read the next challenge for it as an expired token rather
+        // than a narrow grant, and the client would refresh into the same
+        // refusal instead of widening.
+        let config = OAuthClientConfig::default()
+            .with_token_store(stored(Some("read")))
+            .with_scopes(["read", "write"]);
+        let session = OAuthSession::new(config, "http://127.0.0.1:3000/mcp").unwrap();
+        assert_eq!(
+            session.requested_scopes(),
+            vec!["read".to_string()],
+            "the granted scope outranks the configured request"
+        );
+
+        // What this process actually asked for still wins over both.
+        let config = OAuthClientConfig::default()
+            .with_token_store(stored(Some("read")))
+            .with_scopes(["configured"]);
+        let session = OAuthSession::new(config, "http://127.0.0.1:3000/mcp").unwrap();
+        session.set_requested_scopes(vec!["from-this-process".to_string()]);
+        assert_eq!(
+            session.requested_scopes(),
+            vec!["from-this-process".to_string()]
+        );
+    }
+
+    /// A whole authorization server on one socket: the resource document, its
+    /// own metadata, and a token endpoint that answers a refresh.
+    async fn spawn_authorization_server() -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let read = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+                let root = format!("http://{addr}");
+
+                let body = if request.contains("/.well-known/oauth-protected-resource") {
+                    format!(r#"{{"resource":"{root}/mcp","authorization_servers":["{root}"]}}"#)
+                } else if request.contains("/.well-known/") {
+                    format!(
+                        r#"{{"issuer":"{root}","token_endpoint":"{root}/token",
+                             "authorization_endpoint":"{root}/authorize",
+                             "response_types_supported":["code"]}}"#
+                    )
+                } else {
+                    r#"{"access_token":"refreshed-after-restart","token_type":"Bearer","expires_in":3600}"#.to_string()
+                };
+
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+        addr
+    }
+
+    /// An authorization server that also registers clients and answers the
+    /// token endpoint *without* a `scope` -- RFC 6749 section 5.1's "you were
+    /// granted exactly what you asked for", which is the case that leaves the
+    /// grant to be inferred.
+    async fn spawn_registering_authorization_server() -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let read = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+                let root = format!("http://{addr}");
+
+                let body = if request.contains("/.well-known/oauth-protected-resource") {
+                    format!(r#"{{"resource":"{root}/mcp","authorization_servers":["{root}"]}}"#)
+                } else if request.contains("/.well-known/") {
+                    format!(
+                        r#"{{"issuer":"{root}","token_endpoint":"{root}/token",
+                             "authorization_endpoint":"{root}/authorize",
+                             "registration_endpoint":"{root}/register",
+                             "response_types_supported":["code"]}}"#
+                    )
+                } else if request.contains("/register") {
+                    r#"{"client_id":"registered-client"}"#.to_string()
+                } else {
+                    r#"{"access_token":"granted-token","token_type":"Bearer","expires_in":3600}"#
+                        .to_string()
+                };
+
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+        addr
+    }
+
+    /// Completes the flow without a browser by reading the `state` back off the
+    /// authorization URL -- which is what the redirect would have carried.
+    struct EchoesState;
+
+    impl AuthorizationHandler for EchoesState {
+        fn redirect_uri(&self) -> BoxFuture<'_, Result<String, Error>> {
+            Box::pin(async { Ok("http://127.0.0.1:8919/callback".to_string()) })
+        }
+
+        fn authorize(&self, url: String) -> BoxFuture<'_, Result<CallbackParams, Error>> {
+            Box::pin(async move {
+                let state = url
+                    .split(['?', '&'])
+                    .find_map(|param| param.strip_prefix("state="))
+                    .ok_or_else(|| {
+                        Error::new(
+                            ErrorCode::InvalidRequest,
+                            "the authorization URL carried no `state`",
+                        )
+                    })?
+                    .to_owned();
+                Ok(CallbackParams {
+                    code: "the-code".into(),
+                    state,
+                    iss: None,
+                })
+            })
+        }
+    }
+
+    /// A grant the token response did not restate is inferred from the request
+    /// -- and has to be written down where a restart can find it.
+    ///
+    /// Omitting `scope` is how a server says "exactly what you asked for", so
+    /// this is the ordinary case rather than an edge one. Recorded in memory
+    /// alone it dies with the process, and the next run's first
+    /// `insufficient_scope` challenge widens from nothing: the step-up asks for
+    /// the demanded scope by itself and trades away everything the token
+    /// already carried.
+    #[tokio::test]
+    async fn an_inferred_grant_is_stored_where_a_restart_can_find_it() {
+        let addr = spawn_registering_authorization_server().await;
+        let resource = format!("http://{addr}/mcp");
+
+        let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+        let config = OAuthClientConfig {
+            store: store.clone(),
+            ..OAuthClientConfig::default()
+        }
+        .require_https(false)
+        .with_handler(EchoesState);
+        // No configured scopes: the challenge is what the flow asks for, and
+        // the store is then the only place that grant can be kept.
+        let session = OAuthSession::new(config, &resource).unwrap();
+
+        let token = session
+            .authorize(
+                Some(r#"Bearer error="insufficient_scope", scope="admin""#),
+                None,
+            )
+            .await
+            .expect("the flow completes");
+        assert_eq!(&*token, "granted-token");
+
+        assert_eq!(
+            store
+                .get(&resource)
+                .and_then(|tokens| tokens.scope)
+                .as_deref(),
+            Some("admin"),
+            "a grant the response left implicit must still be written down"
+        );
+
+        // What the next process sees: a fresh session over the same store, with
+        // nothing in memory.
+        let restarted = OAuthSession::new(
+            OAuthClientConfig {
+                store,
+                ..OAuthClientConfig::default()
+            },
+            &resource,
+        )
+        .unwrap();
+        assert_eq!(
+            restarted.requested_scopes(),
+            vec!["admin".to_string()],
+            "and be there for the next step-up to widen"
+        );
+    }
+
+    /// A handler that supplies a redirect URI but refuses to interact, so a
+    /// flow that should never have reached the user says so instead of opening
+    /// a browser and waiting five minutes.
+    struct NoInteraction;
+
+    impl AuthorizationHandler for NoInteraction {
+        fn redirect_uri(&self) -> BoxFuture<'_, Result<String, Error>> {
+            Box::pin(async { Ok("http://127.0.0.1:8919/callback".to_string()) })
+        }
+
+        fn authorize(&self, _url: String) -> BoxFuture<'_, Result<CallbackParams, Error>> {
+            Box::pin(async {
+                Err(Error::new(
+                    ErrorCode::InvalidRequest,
+                    "the stored refresh token should have been used instead",
+                ))
+            })
+        }
+    }
+
+    /// A durable token store outlives the process; the flow state that knows
+    /// how to use it does not. After a restart the refresh token in that store
+    /// is still good, and spending it is the difference between a silent
+    /// renewal and walking the user through consent again.
+    #[tokio::test]
+    async fn a_stored_refresh_token_survives_a_restart() {
+        let addr = spawn_authorization_server().await;
+        let resource = format!("http://{addr}/mcp");
+
+        let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+        store.put(&resource, &stale_tokens());
+
+        // A fresh process: a store with a usable refresh token, and no flow
+        // state at all.
+        let config = OAuthClientConfig {
+            store: store.clone(),
+            ..OAuthClientConfig::default()
+                .require_https(false)
+                .with_client_id("cid")
+                .with_handler(NoInteraction)
+        };
+        let session = OAuthSession::new(config, &resource).unwrap();
+        assert!(
+            session.flow.lock().await.is_none(),
+            "a restart starts with nothing cached"
+        );
+
+        let token = session
+            .authorize(None, Some("the-expired-token"))
+            .await
+            .expect("the stored refresh token is what answers this");
+
+        assert_eq!(&*token, "refreshed-after-restart");
+        assert!(
+            session.flow.lock().await.is_some(),
+            "and what made it work is kept, so the next refresh is the cheap path"
+        );
+    }
+
+    /// Two callers refused for the same missing scope must not walk the user
+    /// through consent twice.
+    ///
+    /// The loser of the single-flight lock arrives after the winner has
+    /// recorded the widened grant and stored its token. Forcing the step-up on
+    /// the error code alone would send it straight past that and into a second
+    /// interactive flow, for a scope it now already holds.
+    #[tokio::test]
+    async fn the_loser_of_a_step_up_takes_the_winners_token() {
+        let store = InMemoryTokenStore::new();
+        store.put(
+            "http://127.0.0.1:9/mcp",
+            &TokenSet {
+                access_token: "widened-token".into(),
+                token_type: "Bearer".into(),
+                refresh_token: None,
+                // What the winner was granted, which covers the challenge.
+                scope: Some("admin".into()),
+                id_token: None,
+                expires_at: None,
+            },
+        );
+
+        let config = OAuthClientConfig::default()
+            .require_https(false)
+            .with_token_store(store);
+        let session = OAuthSession::new(config, "http://127.0.0.1:9/mcp").unwrap();
+
+        // Nothing listens on port 9, so a run that reaches discovery fails on
+        // connect rather than hanging -- the shortcut is what keeps it away
+        // from the network at all.
+        let token = session
+            .authorize(
+                Some(r#"Bearer error="insufficient_scope", scope="admin""#),
+                Some("the-refused-token"),
+            )
+            .await
+            .expect("the grant on record already covers the challenge");
+
+        assert_eq!(
+            &*token, "widened-token",
+            "the loser must reuse what the winner obtained"
+        );
+    }
+
+    /// A step-up that named no scope cannot be satisfied by a token that merely
+    /// changed.
+    ///
+    /// `scope` is optional in RFC 6750, so a server may say the grant is too
+    /// narrow without saying what it wants. There is then nothing to check
+    /// coverage against -- and a rotated token is no substitute, because a
+    /// refresh renews a grant without widening it. Handing it back would be the
+    /// refresh path wearing the step-up's clothes, and the caller would spend
+    /// its one retry on credentials short by exactly as much as before.
+    #[tokio::test]
+    async fn a_scope_less_step_up_is_not_satisfied_by_a_rotated_token() {
+        // Nothing listens on port 9, so a run that reaches discovery fails on
+        // connect: reaching the network at all is the assertion.
+        const RESOURCE: &str = "http://127.0.0.1:9/mcp";
+
+        let store = InMemoryTokenStore::new();
+        store.put(
+            RESOURCE,
+            &TokenSet {
+                // What another request's refresh left behind: a different token,
+                // covering exactly what the old one did.
+                access_token: "rotated-token".into(),
+                token_type: "Bearer".into(),
+                refresh_token: None,
+                scope: Some("read".into()),
+                id_token: None,
+                expires_at: None,
+            },
+        );
+
+        let config = OAuthClientConfig::default()
+            .require_https(false)
+            .with_token_store(store);
+        let session = OAuthSession::new(config, RESOURCE).unwrap();
+
+        let err = session
+            .authorize(
+                Some(r#"Bearer error="insufficient_scope""#),
+                Some("the-refused-token"),
+            )
+            .await
+            .expect_err("a rotated token is not evidence of a wider grant");
+        assert!(
+            !err.to_string().contains("rotated-token"),
+            "the flow must be run, not short-circuited: {err}"
+        );
+
+        // The named case is the one the shortcut exists for, and it still
+        // works: the grant on record covers what the challenge demanded.
+        let store = InMemoryTokenStore::new();
+        store.put(
+            RESOURCE,
+            &TokenSet {
+                access_token: "widened-token".into(),
+                token_type: "Bearer".into(),
+                refresh_token: None,
+                scope: Some("admin".into()),
+                id_token: None,
+                expires_at: None,
+            },
+        );
+        let config = OAuthClientConfig::default()
+            .require_https(false)
+            .with_token_store(store);
+        let session = OAuthSession::new(config, RESOURCE).unwrap();
+
+        let token = session
+            .authorize(
+                Some(r#"Bearer error="insufficient_scope", scope="admin""#),
+                Some("the-refused-token"),
+            )
+            .await
+            .expect("a demand the grant on record covers");
+        assert_eq!(&*token, "widened-token");
+    }
+
+    /// A configured scope set is a ceiling as well as a floor: the flow asks
+    /// for exactly it. So a challenge demanding something outside it describes
+    /// a grant this client cannot obtain, and running the flow would interrupt
+    /// the user for consent only to come back without the scope that was
+    /// missing -- the retry then fails identically.
+    #[tokio::test]
+    async fn a_demand_outside_the_configured_scopes_ends_the_call() {
+        // Plain HTTP, which discovery refuses before opening a socket, so this
+        // test touches no network whichever way the guard goes.
+        const RESOURCE: &str = "http://127.0.0.1:9/mcp";
+
+        let config = OAuthClientConfig::default().with_scopes(["read"]);
+        let session = OAuthSession::new(config, RESOURCE).unwrap();
+
+        let err = session
+            .authorize(
+                Some(r#"Bearer error="insufficient_scope", scope="admin""#),
+                None,
+            )
+            .await
+            .expect_err("a scope this client may not request cannot be obtained");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("admin") && msg.contains("with_scopes"),
+            "the error must name the scope and how to allow it, got: {msg}"
+        );
+
+        // A demand the configured set already covers is not this case: it is
+        // an ordinary re-authorization and proceeds to discovery, which is
+        // where this test leaves it.
+        let config = OAuthClientConfig::default().with_scopes(["read", "admin"]);
+        let session = OAuthSession::new(config, RESOURCE).unwrap();
+
+        let err = session
+            .authorize(
+                Some(r#"Bearer error="insufficient_scope", scope="admin""#),
+                None,
+            )
+            .await
+            .expect_err("the resource is unreachable, so the flow cannot finish");
+        assert!(
+            !err.to_string().contains("with_scopes"),
+            "a covered demand must not be refused up front, got: {err}"
+        );
     }
 }

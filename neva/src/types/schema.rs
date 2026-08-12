@@ -70,6 +70,17 @@ pub struct StringSchema {
     /// A specific format for the string ("email", "uri", "date", or "date-time").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<StringFormat>,
+
+    /// Every keyword this type does not model, kept verbatim.
+    ///
+    /// A schema is a document, not a fixed set of fields: `default`,
+    /// `examples`, `pattern`, `$comment` and anything a vocabulary adds are all
+    /// meaningful to the peer that reads them. Modelling the ones neva acts on
+    /// and dropping the rest would make the schema a peer receives quietly
+    /// different from the one the server declared -- so the rest round-trips
+    /// through here instead.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// Represents a specific format for the string ("email", "uri", "date", or "date-time").
@@ -114,6 +125,17 @@ pub struct NumberSchema {
     /// The maximum allowed value.
     #[serde(rename = "maximum", skip_serializing_if = "Option::is_none")]
     pub max: Option<f64>,
+
+    /// Every keyword this type does not model, kept verbatim.
+    ///
+    /// A schema is a document, not a fixed set of fields: `default`,
+    /// `examples`, `pattern`, `$comment` and anything a vocabulary adds are all
+    /// meaningful to the peer that reads them. Modelling the ones neva acts on
+    /// and dropping the rest would make the schema a peer receives quietly
+    /// different from the one the server declared -- so the rest round-trips
+    /// through here instead.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// Represents a schema for a boolean type.
@@ -134,6 +156,17 @@ pub struct BooleanSchema {
     /// The default value for the Boolean.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<bool>,
+
+    /// Every keyword this type does not model, kept verbatim.
+    ///
+    /// A schema is a document, not a fixed set of fields: `default`,
+    /// `examples`, `pattern`, `$comment` and anything a vocabulary adds are all
+    /// meaningful to the peer that reads them. Modelling the ones neva acts on
+    /// and dropping the rest would make the schema a peer receives quietly
+    /// different from the one the server declared -- so the rest round-trips
+    /// through here instead.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// Legacy enumeration schema for the protocol versions below `2025-11-25`.
@@ -161,6 +194,17 @@ pub struct LegacyTitledEnumSchema {
     /// Optional display names corresponding to the enum values
     #[serde(rename = "enumNames", skip_serializing_if = "Option::is_none")]
     pub enum_names: Option<Vec<String>>,
+
+    /// Every keyword this type does not model, kept verbatim.
+    ///
+    /// A schema is a document, not a fixed set of fields: `default`,
+    /// `examples`, `pattern`, `$comment` and anything a vocabulary adds are all
+    /// meaningful to the peer that reads them. Modelling the ones neva acts on
+    /// and dropping the rest would make the schema a peer receives quietly
+    /// different from the one the server declared -- so the rest round-trips
+    /// through here instead.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// Schema for single-selection enumeration without display titles for options.
@@ -187,6 +231,17 @@ pub struct UntitledSingleSelectEnumSchema {
     /// Optional default value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
+
+    /// Every keyword this type does not model, kept verbatim.
+    ///
+    /// A schema is a document, not a fixed set of fields: `default`,
+    /// `examples`, `pattern`, `$comment` and anything a vocabulary adds are all
+    /// meaningful to the peer that reads them. Modelling the ones neva acts on
+    /// and dropping the rest would make the schema a peer receives quietly
+    /// different from the one the server declared -- so the rest round-trips
+    /// through here instead.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// Schema for single-selection enumeration with display titles for each option.
@@ -213,6 +268,17 @@ pub struct TitledSingleSelectEnumSchema {
     /// Optional default value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
+
+    /// Every keyword this type does not model, kept verbatim.
+    ///
+    /// A schema is a document, not a fixed set of fields: `default`,
+    /// `examples`, `pattern`, `$comment` and anything a vocabulary adds are all
+    /// meaningful to the peer that reads them. Modelling the ones neva acts on
+    /// and dropping the rest would make the schema a peer receives quietly
+    /// different from the one the server declared -- so the rest round-trips
+    /// through here instead.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// Schema for multiple-selection enumeration without display titles for options.
@@ -246,6 +312,17 @@ pub struct UntitledMultiSelectEnumSchema {
     /// Optional default value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<Vec<String>>,
+
+    /// Every keyword this type does not model, kept verbatim.
+    ///
+    /// A schema is a document, not a fixed set of fields: `default`,
+    /// `examples`, `pattern`, `$comment` and anything a vocabulary adds are all
+    /// meaningful to the peer that reads them. Modelling the ones neva acts on
+    /// and dropping the rest would make the schema a peer receives quietly
+    /// different from the one the server declared -- so the rest round-trips
+    /// through here instead.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// Schema for multiple-selection enumeration with display titles for each option.
@@ -279,6 +356,17 @@ pub struct TitledMultiSelectEnumSchema {
     /// Optional default value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<Vec<String>>,
+
+    /// Every keyword this type does not model, kept verbatim.
+    ///
+    /// A schema is a document, not a fixed set of fields: `default`,
+    /// `examples`, `pattern`, `$comment` and anything a vocabulary adds are all
+    /// meaningful to the peer that reads them. Modelling the ones neva acts on
+    /// and dropping the rest would make the schema a peer receives quietly
+    /// different from the one the server declared -- so the rest round-trips
+    /// through here instead.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// Schema for the array of enumeration items.
@@ -293,6 +381,13 @@ pub struct EnumItems {
     /// The list of allowed string values for the enum.
     #[serde(rename = "enum")]
     pub r#enum: Vec<String>,
+
+    /// Every keyword this type does not model, kept verbatim -- see
+    /// [`Schema`]'s own `extra`. A schema nests, so the round trip has to hold
+    /// below the root as well: a `pattern` beside an `enum` is the server's
+    /// constraint wherever it sits.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// Schema for array items with enum options and display labels.
@@ -303,12 +398,19 @@ pub struct EnumOptions {
     /// Array of enum options with values and display labels.
     #[serde(rename = "anyOf")]
     pub any_of: Vec<EnumOption>,
+
+    /// Every keyword this type does not model, kept verbatim -- see
+    /// [`Schema`]'s own `extra`. A schema nests, so the round trip has to hold
+    /// below the root as well: a `pattern` beside an `enum` is the server's
+    /// constraint wherever it sits.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// Represents an enumeration option with a display title.
 ///
 /// See the [schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) for details
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EnumOption {
     /// The enum value.
     #[serde(rename = "const")]
@@ -316,6 +418,13 @@ pub struct EnumOption {
 
     /// Display label for this option.
     pub title: String,
+
+    /// Every keyword this type does not model, kept verbatim -- see
+    /// [`Schema`]'s own `extra`. A schema nests, so the round trip has to hold
+    /// below the root as well: a `pattern` beside an `enum` is the server's
+    /// constraint wherever it sits.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 impl<'de> Deserialize<'de> for Schema {
@@ -415,6 +524,7 @@ impl Default for StringSchema {
             format: None,
             max_length: None,
             min_length: None,
+            extra: Default::default(),
         }
     }
 }
@@ -427,6 +537,7 @@ impl Default for NumberSchema {
             descr: None,
             max: None,
             min: None,
+            extra: Default::default(),
         }
     }
 }
@@ -439,6 +550,7 @@ impl Default for BooleanSchema {
             default: Some(false),
             title: None,
             descr: None,
+            extra: Default::default(),
         }
     }
 }
@@ -452,6 +564,7 @@ impl Default for LegacyTitledEnumSchema {
             title: None,
             descr: None,
             enum_names: None,
+            extra: Default::default(),
         }
     }
 }
@@ -465,6 +578,7 @@ impl Default for UntitledSingleSelectEnumSchema {
             title: None,
             descr: None,
             default: None,
+            extra: Default::default(),
         }
     }
 }
@@ -478,6 +592,7 @@ impl Default for TitledSingleSelectEnumSchema {
             title: None,
             descr: None,
             default: None,
+            extra: Default::default(),
         }
     }
 }
@@ -493,6 +608,7 @@ impl Default for UntitledMultiSelectEnumSchema {
             title: None,
             descr: None,
             default: None,
+            extra: Default::default(),
         }
     }
 }
@@ -508,6 +624,7 @@ impl Default for TitledMultiSelectEnumSchema {
             title: None,
             descr: None,
             default: None,
+            extra: Default::default(),
         }
     }
 }
@@ -518,6 +635,7 @@ impl Default for EnumItems {
         Self {
             r#type: PropertyType::String,
             r#enum: Vec::new(),
+            extra: Default::default(),
         }
     }
 }
@@ -525,7 +643,10 @@ impl Default for EnumItems {
 impl Default for EnumOptions {
     #[inline]
     fn default() -> Self {
-        Self { any_of: Vec::new() }
+        Self {
+            any_of: Vec::new(),
+            extra: Default::default(),
+        }
     }
 }
 
@@ -535,6 +656,7 @@ impl From<&str> for Schema {
         match value {
             "string" => Self::string(),
             "number" => Self::number(),
+            "integer" => Self::integer(),
             "boolean" => Self::boolean(),
             "enum" => Self::single_titled_enum(),
             "array" => Self::multi_titled_enum(),
@@ -566,6 +688,26 @@ impl Schema {
     /// Creates a new [`Schema`] instance with a [`NumberSchema`] type.
     pub fn number() -> Self {
         Self::Number(Default::default())
+    }
+
+    /// Creates a new [`Schema`] instance typed `integer`.
+    ///
+    /// Backed by [`NumberSchema`] -- the shape is the same -- but published as
+    /// `"integer"`, which rejects `1.5` where `"number"` accepts it.
+    ///
+    /// # Examples
+    /// ```
+    /// use neva::types::Schema;
+    ///
+    /// let schema = serde_json::to_value(Schema::integer())?;
+    /// assert_eq!(schema["type"], "integer");
+    /// # Ok::<(), serde_json::Error>(())
+    /// ```
+    pub fn integer() -> Self {
+        Self::Number(NumberSchema {
+            r#type: PropertyType::Integer,
+            ..Default::default()
+        })
     }
 
     /// Creates a new [`Schema`] instance with a [`BooleanSchema`] type.   
@@ -673,6 +815,18 @@ impl NumberSchema {
             ErrorCode::InvalidParams,
             "Expected number value",
         ))?;
+
+        // `integer` and `number` share this struct because their keywords are
+        // the same, but they are different JSON Schema types and the peer was
+        // told which one applies. Checking the fractional part rather than the
+        // JSON representation is deliberate: `1.0` is a valid integer under
+        // 2020-12, and a client that sends it is not in the wrong.
+        if self.r#type == PropertyType::Integer && num_value.fract() != 0.0 {
+            return Err(Error::new(
+                ErrorCode::InvalidParams,
+                format!("Expected integer value, got: {num_value}"),
+            ));
+        }
 
         if let Some(min) = self.min
             && num_value < min
@@ -791,6 +945,7 @@ impl EnumOptions {
     pub fn new(options: impl IntoIterator<Item = EnumOption>) -> Self {
         Self {
             any_of: options.into_iter().collect(),
+            extra: Default::default(),
         }
     }
 }
@@ -802,6 +957,7 @@ impl EnumOption {
         Self {
             value: value.into(),
             title: title.into(),
+            extra: Default::default(),
         }
     }
 }
@@ -816,6 +972,7 @@ impl EnumItems {
         Self {
             r#type: PropertyType::String,
             r#enum: items.into_iter().map(|s| s.into()).collect(),
+            extra: Default::default(),
         }
     }
 }
@@ -919,6 +1076,42 @@ mod tests {
         assert!(schema.validate(&json!(20)).is_ok());
         assert!(schema.validate(&json!(9)).is_err());
         assert!(schema.validate(&json!(21)).is_err());
+    }
+
+    /// A field published as `"integer"` must be held to it: the peer was told
+    /// `1.5` is not a legal value there, and validating it as a plain number
+    /// would accept exactly what the declared schema rules out.
+    #[test]
+    fn an_integer_field_is_held_to_whole_values() {
+        let Schema::Number(schema) = Schema::integer() else {
+            panic!("Schema::integer must be backed by NumberSchema");
+        };
+
+        assert!(schema.validate(&json!(1)).is_ok());
+        assert!(schema.validate(&json!(-7)).is_ok());
+        // 2020-12 judges the value, not how it was written: a zero fractional
+        // part is an integer.
+        assert!(schema.validate(&json!(1.0)).is_ok());
+        assert!(schema.validate(&json!(1.5)).is_err());
+
+        // ...and `number` still accepts what `integer` refuses.
+        assert!(NumberSchema::default().validate(&json!(1.5)).is_ok());
+    }
+
+    /// The integer check runs before the bounds, but must not shadow them:
+    /// both refusals stay reachable.
+    #[test]
+    fn an_integer_field_still_carries_its_bounds() {
+        let schema = NumberSchema {
+            r#type: PropertyType::Integer,
+            min: Some(1.0),
+            max: Some(10.0),
+            ..Default::default()
+        };
+
+        assert!(schema.validate(&json!(5)).is_ok());
+        assert!(schema.validate(&json!(11)).is_err(), "above the maximum");
+        assert!(schema.validate(&json!(5.5)).is_err(), "not an integer");
     }
 
     #[test]
@@ -1256,5 +1449,106 @@ mod tests {
                 "default": ["Red", "Green"]
             })
         )
+    }
+
+    /// A schema is a document: the keywords neva does not model are the peer's
+    /// business, and must come out the way they went in.
+    #[test]
+    fn unmodelled_keywords_survive_a_round_trip() {
+        let declared = json!({
+            "type": "string",
+            "description": "a name",
+            "default": "John Doe",
+            "pattern": "^[A-Z]",
+            "$comment": "kept verbatim"
+        });
+
+        let schema: Schema = serde_json::from_value(declared.clone()).expect("parses");
+        assert_eq!(
+            serde_json::to_value(&schema).expect("serializes"),
+            declared,
+            "every declared keyword must survive"
+        );
+    }
+
+    /// A schema nests, so the round trip has to hold below the root.
+    ///
+    /// The enum forms put a schema inside `items` (and another inside each
+    /// `anyOf` option), and a keyword sitting there is the peer's constraint
+    /// just as much as one at the top. Keeping only the root's would publish an
+    /// array of anything-shaped strings where the server declared a pattern.
+    #[test]
+    fn unmodelled_keywords_survive_inside_the_enum_forms() {
+        for declared in [
+            json!({
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": ["x"],
+                    "pattern": "^x",
+                    "$comment": "inside items"
+                }
+            }),
+            json!({
+                "type": "array",
+                "items": {
+                    "anyOf": [
+                        { "const": "x", "title": "Ex", "description": "the x one" }
+                    ],
+                    "$comment": "inside anyOf"
+                }
+            }),
+        ] {
+            let schema: Schema = serde_json::from_value(declared.clone())
+                .unwrap_or_else(|e| panic!("{declared} must parse: {e}"));
+            assert_eq!(
+                serde_json::to_value(&schema).expect("serializes"),
+                declared,
+                "a keyword below the root must survive too"
+            );
+        }
+    }
+
+    /// `default` is the one SEP-1034 is about, and it is dropped by a type that
+    /// only models what it validates.
+    #[test]
+    fn defaults_survive_on_every_primitive() {
+        for declared in [
+            json!({ "type": "string", "default": "John Doe" }),
+            json!({ "type": "integer", "default": 30 }),
+            json!({ "type": "number", "default": 95.5 }),
+            json!({ "type": "boolean", "default": true }),
+            json!({ "type": "string", "enum": ["active", "inactive"], "default": "active" }),
+        ] {
+            let schema: Schema = serde_json::from_value(declared.clone())
+                .unwrap_or_else(|e| panic!("{declared} must parse: {e}"));
+            assert_eq!(serde_json::to_value(&schema).expect("serializes"), declared);
+        }
+    }
+
+    /// `integer` and `number` are different types in JSON Schema -- the first
+    /// rejects `1.5`. They shared a variant, so a declared `integer` was
+    /// published as the wider `number`.
+    #[test]
+    fn an_integer_stays_an_integer() {
+        let schema: Schema = serde_json::from_value(json!({ "type": "integer" })).expect("parses");
+        assert_eq!(
+            serde_json::to_value(&schema).expect("serializes")["type"],
+            "integer"
+        );
+
+        // ...and the two are still distinct when built rather than parsed.
+        assert_eq!(
+            serde_json::to_value(Schema::integer()).expect("serializes")["type"],
+            "integer"
+        );
+        assert_eq!(
+            serde_json::to_value(Schema::number()).expect("serializes")["type"],
+            "number"
+        );
+        assert_eq!(
+            serde_json::to_value(Schema::from("integer")).expect("serializes")["type"],
+            "integer"
+        );
     }
 }

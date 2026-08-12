@@ -243,7 +243,12 @@ pub struct CallToolRequestParams {
     pub name: String,
 
     /// Optional arguments to pass to the tool.
-    #[serde(rename = "arguments")]
+    ///
+    /// Omitted from the wire when absent rather than written as `null`: the
+    /// schema types this as an optional object, and `null` is not one -- a
+    /// strict peer rejects the call for the field it was not given rather than
+    /// for the arguments it was.
+    #[serde(rename = "arguments", default, skip_serializing_if = "Option::is_none")]
     pub args: Option<HashMap<String, Value>>,
 
     /// If specified, the caller is requesting task-augmented execution for this request.
@@ -281,18 +286,48 @@ pub struct ToolSchema {
     /// The required properties of the schema
     #[serde(skip_serializing_if = "Option::is_none")]
     pub required: Option<Vec<String>>,
+
+    /// Every keyword this type does not model, kept verbatim.
+    ///
+    /// `type` / `properties` / `required` are what neva itself reads; a schema
+    /// is a whole document, and `$schema`, `$defs`, `$ref`, `additionalProperties`,
+    /// `allOf` and the `if`/`then`/`else` triple are all meaningful to the peer
+    /// that receives it. Dropping them would publish a schema quietly wider
+    /// than the one the tool declared -- SEP-2106 requires the vocabulary to
+    /// survive untouched -- so everything else round-trips through here.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// Represents schema property description
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SchemaProperty {
-    /// Property type
-    #[serde(rename = "type", default)]
+    /// Property type.
+    ///
+    /// Absent rather than assumed when the declaration states none: a
+    /// `{"$ref": ...}` property has no `type`, and answering it with `object`
+    /// would publish a constraint the tool never wrote.
+    #[serde(
+        rename = "type",
+        default = "PropertyType::unstated",
+        skip_serializing_if = "PropertyType::is_unstated"
+    )]
     pub r#type: PropertyType,
 
     /// A Human-readable description of a property
     #[serde(rename = "description", skip_serializing_if = "Option::is_none")]
     pub descr: Option<String>,
+
+    /// Every keyword this type does not model, kept verbatim.
+    ///
+    /// The same reason the legacy `ToolSchema` keeps its own: a property schema
+    /// is part of the document, and `enum`, `format`, `$ref`, `minimum`, and
+    /// the rest are what tell a peer which values are actually legal. Modelling
+    /// only `type` and `description` and dropping the rest would publish a
+    /// property quietly wider than the one declared -- a client validating
+    /// against it would accept values the tool refuses.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 /// One value-carrying argument of a tool handler.
@@ -433,6 +468,7 @@ impl Default for ToolSchema {
             r#type: PropertyType::Object,
             properties: Some(HashMap::new()),
             required: None,
+            extra: Default::default(),
         }
     }
 }
@@ -483,6 +519,7 @@ impl ToolSchema {
             r#type: PropertyType::Object,
             properties: props,
             required,
+            extra: Default::default(),
         }
     }
 
@@ -656,6 +693,7 @@ impl ToolSchema {
             SchemaProperty {
                 r#type: property_type,
                 descr: Some(descr.into()),
+                extra: Default::default(),
             },
         );
         self
@@ -682,6 +720,7 @@ impl SchemaProperty {
         Self {
             r#type: T::category(),
             descr: None,
+            extra: Default::default(),
         }
     }
 }
@@ -1775,6 +1814,44 @@ mod tests {
             assert_eq!(props["arg0"]["type"], "boolean");
         }
         assert!(tool.arg_name_conflict().is_none());
+    }
+
+    /// A property schema is part of the document too. Keeping only `type` and
+    /// `description` publishes a property wider than the one declared -- a
+    /// client validating against it would accept values the tool refuses -- and
+    /// answering an untyped property with `object` publishes a constraint the
+    /// author never wrote.
+    #[test]
+    #[cfg(feature = "legacy-spec")]
+    fn a_property_keeps_the_keywords_it_was_declared_with() {
+        let declared = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "address": { "$ref": "#/$defs/address" },
+                "contactMethod": { "type": "string", "enum": ["phone", "email"] },
+                "age": { "type": "integer", "minimum": 0, "maximum": 130 }
+            }
+        });
+
+        let schema: ToolSchema =
+            serde_json::from_value(declared.clone()).expect("a legacy tool schema");
+        let republished = serde_json::to_value(&schema).expect("serializable");
+
+        assert_eq!(
+            republished["properties"], declared["properties"],
+            "every property must come back out as it went in, got: {republished}"
+        );
+        // Spelled out, because these are the two ways it used to differ.
+        assert_eq!(
+            republished["properties"]["address"],
+            serde_json::json!({ "$ref": "#/$defs/address" }),
+            "an untyped property must not acquire a type"
+        );
+        assert_eq!(
+            republished["properties"]["contactMethod"]["enum"],
+            serde_json::json!(["phone", "email"]),
+            "the values a property is limited to are the point of declaring it"
+        );
     }
 
     #[test]

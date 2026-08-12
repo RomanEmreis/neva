@@ -40,6 +40,15 @@ use crate::types::{
     GetTaskPayloadRequestParams, ListTasksRequestParams, ListTasksResult, Task, TaskPayload,
 };
 
+/// How many `tools/list` pages the `HeaderMismatch` recovery will walk looking
+/// for the tool it was sent back for.
+///
+/// The traversal ends on its own at a page without a `nextCursor`; this is the
+/// bound for a server that never stops handing them out, which would otherwise
+/// keep a single failed call walking forever with nothing above it able to see.
+#[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+const MAX_REFRESH_PAGES: usize = 64;
+
 pub mod batch;
 mod handler;
 mod notification_handler;
@@ -260,11 +269,24 @@ impl Client {
     /// }
     /// ```
     pub async fn disconnect(mut self) -> Result<(), Error> {
-        self.send_notification(crate::types::notification::commands::CANCELLED, None)
-            .await?;
-        if let Some(token) = self.cancellation_token {
+        // Closing the transport is the whole goodbye. This used to send a
+        // param-less `notifications/cancelled` first, which was wrong twice
+        // over: that notification cancels one named in-flight request and its
+        // `params.requestId` is required, so without params it fails the spec's
+        // own schema -- and no server has anything to act on either, neva's
+        // included, which drops it for want of a request id. Under
+        // MCP 2026-07-28 there is nothing to send in any case: the revision
+        // defines no client-to-server notification on Streamable HTTP, where
+        // closing the stream *is* the cancellation.
+        //
+        // It only reached the wire when the transport task picked it up before
+        // the cancellation below landed, which is why it read as a flake rather
+        // than a bug.
+        if let Some(token) = self.cancellation_token.take() {
             token.cancel();
         }
+        // Let the transport task observe the cancellation and drain before the
+        // runtime goes away under it.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         Ok(())
     }
@@ -275,6 +297,14 @@ impl Client {
     /// [`crate::LATEST_PROTOCOL_VERSION`]: a `with_mcp_version` override only
     /// selects which legacy version the dual-mode fallback negotiates --
     /// it must never make `server/discover` reject a valid 2026-07-28 server.
+    ///
+    /// On the legacy profile the offered version is a proposal the server may
+    /// answer with another supported one, so nothing downstream reads it back:
+    /// the sole consumer there is the (tracing-gated) negotiation log.
+    #[cfg_attr(
+        all(feature = "legacy-spec", not(feature = "tracing")),
+        allow(dead_code)
+    )]
     fn expected_protocol_ver(&self) -> &'static str {
         #[cfg(not(feature = "legacy-spec"))]
         {
@@ -290,8 +320,16 @@ impl Client {
         }
     }
 
-    /// Validates a server-reported protocol version against what this client
-    /// negotiated, cancelling the transport on mismatch.
+    /// Validates the protocol version the server answered the handshake with,
+    /// cancelling the transport when this client cannot speak it.
+    ///
+    /// The version the client offers is a proposal, not a demand: a server that
+    /// does not speak it answers with one it does, and the handshake succeeds if
+    /// the client speaks that. Only a version outside
+    /// [`PROTOCOL_VERSIONS`](crate::PROTOCOL_VERSIONS) ends the connection --
+    /// insisting on the offered version instead would refuse every server a
+    /// notch older than the client, which is the case the negotiation exists
+    /// for.
     fn validate_server_version(&mut self, server_ver: &str) -> Result<(), Error> {
         if !crate::PROTOCOL_VERSIONS.contains(&server_ver) {
             self.cancel_transport();
@@ -300,15 +338,13 @@ impl Client {
                 format!("Unsupported server protocol version: {server_ver}"),
             ));
         }
+        #[cfg(feature = "tracing")]
         if server_ver != self.expected_protocol_ver() {
-            self.cancel_transport();
-            return Err(Error::new(
-                ErrorCode::InvalidRequest,
-                format!(
-                    "Server protocol version mismatch: expected {}, got {server_ver}",
-                    self.expected_protocol_ver()
-                ),
-            ));
+            tracing::info!(
+                logger = "neva",
+                "Server answered with protocol version {server_ver}, not the offered {}",
+                self.expected_protocol_ver()
+            );
         }
         Ok(())
     }
@@ -530,6 +566,26 @@ impl Client {
     /// }
     /// ```
     pub async fn list_tools(&mut self, cursor: Option<Cursor>) -> Result<ListToolsResult, Error> {
+        self.list_tools_inner(
+            cursor,
+            #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::list_tools`], plus the name of the tool this listing was fetched
+    /// to retry -- whose registration becomes usable once regardless of its
+    /// TTL. Only that one: every other tool on the page is an ordinary
+    /// registration, and handing it the same exception would let a later call
+    /// mirror from a listing it never refreshed.
+    ///
+    /// See [`Self::retry_after_header_mismatch`].
+    async fn list_tools_inner(
+        &mut self,
+        cursor: Option<Cursor>,
+        #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))] grace: Option<&str>,
+    ) -> Result<ListToolsResult, Error> {
         // A cursor-less call starts the listing over, so it replaces what the
         // previous traversal registered rather than merging into it.
         #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
@@ -543,7 +599,7 @@ impl Client {
             .into_result()?;
 
         #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
-        self.register_param_headers(&mut result, fresh);
+        self.register_param_headers(&mut result, fresh, grace);
 
         Ok(result)
     }
@@ -561,7 +617,7 @@ impl Client {
         let Ok(mut result) = serde_json::from_value::<ListToolsResult>(ok.result.clone()) else {
             return;
         };
-        self.register_param_headers(&mut result, true);
+        self.register_param_headers(&mut result, true, None);
         if let Ok(value) = serde_json::to_value(&result) {
             ok.result = value;
         }
@@ -588,13 +644,23 @@ impl Client {
     /// from the listing is not all that hiding it does -- see
     /// [`Self::blocked_tool_error`].
     #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
-    fn register_param_headers(&mut self, result: &mut ListToolsResult, fresh: bool) {
+    fn register_param_headers(
+        &mut self,
+        result: &mut ListToolsResult,
+        fresh: bool,
+        grace: Option<&str>,
+    ) {
         use crate::shared::param_headers;
 
         if fresh {
             self.options.param_headers.clear();
             self.options.rejected_tools.clear();
         }
+
+        // How long this listing may be mirrored from. The spec makes `ttlMs`
+        // mandatory and reads an absent one as `0` -- immediately stale -- so
+        // every registration is stamped with the listing that produced it.
+        let ttl_ms = result.ttl_ms;
 
         result.tools.retain(|tool| {
             self.options.param_headers.remove(&*tool.name);
@@ -606,9 +672,14 @@ impl Client {
             match param_headers::collect(&schema) {
                 Ok(headers) => {
                     if !headers.is_empty() {
-                        self.options
-                            .param_headers
-                            .insert(tool.name.to_string(), headers);
+                        self.options.param_headers.insert(
+                            tool.name.to_string(),
+                            param_headers::Registration::new(
+                                headers,
+                                ttl_ms,
+                                grace == Some(&*tool.name),
+                            ),
+                        );
                     }
                     true
                 }
@@ -923,13 +994,108 @@ impl Client {
     ) -> Result<Response, Error> {
         let id = self.generate_id()?;
 
+        // Held back for the SEP-2243 retry: `with_meta` consumes the params,
+        // and the call cannot be reconstructed from its own answer. A handful
+        // of small allocations next to the round trip they may save.
+        #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+        let for_retry = params.clone();
+
         let request = Request::new(
             Some(id.clone()),
             crate::types::tool::commands::CALL,
             Some(params.with_meta(RequestParamsMeta::new(&id))),
         );
 
+        #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+        {
+            let resp = self.send_request(request).await?;
+            self.retry_after_header_mismatch(resp, for_retry).await
+        }
+        #[cfg(not(all(feature = "http-client", not(feature = "legacy-spec"))))]
         self.send_request(request).await
+    }
+
+    /// The second half of SEP-2243's stale-schema rule: re-list, then retry.
+    ///
+    /// Omitting `Mcp-Param-*` for a stale listing is what the client owes; a
+    /// server that *requires* those headers answers the omission with
+    /// `HeaderMismatch` (`-32020`). The spec's remedy is to fetch the current
+    /// `inputSchema` and send the call again -- which is the whole reason
+    /// omitting is safe: a caller never has to know its cached listing aged
+    /// out.
+    ///
+    /// Exactly one retry, and only for `-32020`. A server that answers the
+    /// fresh attempt the same way is saying something the listing cannot fix,
+    /// and repeating would turn that into a loop the caller cannot see.
+    ///
+    /// The refresh follows `nextCursor` to the end of the listing, not merely
+    /// until the refused tool turns up: a traversal that restarts clears what
+    /// the previous one registered, so every page it does not reach is left
+    /// with nothing -- no annotations for the tools on it, and no record of the
+    /// ones that were dropped for a malformed declaration.
+    #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+    async fn retry_after_header_mismatch(
+        &mut self,
+        resp: Response,
+        params: CallToolRequestParams,
+    ) -> Result<Response, Error> {
+        let Response::Err(ref err) = resp else {
+            return Ok(resp);
+        };
+        if err.error.code != ErrorCode::HeaderMismatch {
+            return Ok(resp);
+        }
+
+        // The whole listing, not just up to the refused tool. A cursor-less
+        // call starts the traversal over and clears what the last one recorded,
+        // so stopping early would leave every later page unregistered against a
+        // registry that no longer holds their old entries: their calls would go
+        // out without the headers they need, and a tool dropped for a malformed
+        // annotation would stop being blocked -- which is the one outcome
+        // dropping it exists to prevent.
+        //
+        // Fetched with grace: this listing is the server's current answer, and
+        // the retry below is what it was fetched for. Judging it by its own TTL
+        // instead would make the remedy impossible against the `ttlMs: 0` that
+        // an absent `ttlMs` also means -- the re-fetch would be stale on
+        // arrival, the retry would omit the headers again, and the call could
+        // never succeed.
+        //
+        // A listing this client cannot obtain leaves the original answer as the
+        // truthful one: it says the headers were wrong, and they still are.
+        let name = params.name.clone();
+        let mut cursor = None;
+        let mut refreshed = false;
+        // A server that keeps handing out cursors would otherwise walk this
+        // recovery forever, and nothing above it can see that happening.
+        for _ in 0..MAX_REFRESH_PAGES {
+            let Ok(page) = self.list_tools_inner(cursor, Some(&name)).await else {
+                return Ok(resp);
+            };
+            refreshed |= page.tools.iter().any(|tool| *tool.name == *name);
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+
+        // The traversal ran out -- the listing no longer carries this tool, or
+        // it is paged further out than the cap reaches. Either way there is
+        // nothing to retry *with*: the refresh started over and cleared the
+        // registration, so a second attempt would go out exactly as bare as the
+        // first and answer a different question. The original `HeaderMismatch`
+        // is the useful answer and it stands.
+        if !refreshed {
+            return Ok(resp);
+        }
+
+        let id = self.generate_id()?;
+        let retry = Request::new(
+            Some(id.clone()),
+            crate::types::tool::commands::CALL,
+            Some(params.with_meta(RequestParamsMeta::new(&id))),
+        );
+        self.send_request(retry).await
     }
 
     /// Requests resource contents from MCP server
@@ -1576,18 +1742,19 @@ impl Client {
         // `ListRootsResult` is a valid answer, so a client that opted in must
         // not be gated out of being asked.
         meta.client_capabilities = Some(crate::types::mrtr::ClientMrtrCapabilities {
-            elicitation: self.options.elicitation_handler.is_some(),
+            // Declared without naming modes, which is the honest answer: the
+            // handler is handed the whole `ElicitRequestParams` union, so what
+            // it does with a `url` request is the caller's business and not
+            // something this client can promise on its behalf. An unstated set
+            // rules nothing out, which is exactly that.
+            elicitation: self
+                .options
+                .elicitation_handler
+                .is_some()
+                .then(crate::types::mrtr::ElicitationModes::default),
             sampling: self.options.sampling_handler.is_some(),
             roots: self.options.roots_capability().is_some(),
         });
-
-        if input_responses.is_some() {
-            meta.input_responses = input_responses;
-        }
-
-        if request_state.is_some() {
-            meta.request_state = request_state;
-        }
 
         if let Some(provider) = self.options.trace_context_provider.as_ref()
             && let Some(tc) = provider()
@@ -1603,6 +1770,28 @@ impl Client {
         }
 
         req.set_meta(meta);
+
+        // The MRTR re-run fields are *params*, not metadata: the spec puts
+        // `inputResponses` and `requestState` on `InputResponseRequestParams`,
+        // next to `name` / `arguments`. They are written after `set_meta` so
+        // neither can clobber the other -- both edit the same params object.
+        if input_responses.is_some() || request_state.is_some() {
+            let mut params = match req.params.take() {
+                Some(serde_json::Value::Object(map)) => map,
+                // A retry of a request that carried no params at all still has
+                // somewhere to put the answers.
+                _ => serde_json::Map::new(),
+            };
+            if let Some(responses) = input_responses
+                && let Ok(value) = serde_json::to_value(responses)
+            {
+                params.insert("inputResponses".into(), value);
+            }
+            if let Some(state) = request_state {
+                params.insert("requestState".into(), serde_json::Value::String(state));
+            }
+            req.params = Some(serde_json::Value::Object(params));
+        }
     }
 
     /// Applies the initial per-request 2026-07-28 client metadata (`clientInfo` /
@@ -2313,10 +2502,11 @@ mod tests {
         };
         let meta = &req.params.as_ref().expect("params present")["_meta"];
         // Without this injection a batched eliciting tools/call is rejected as
-        // if the client did not support elicitation.
+        // if the client did not support elicitation. The spec spells a declared
+        // capability as an object, not a boolean.
         assert_eq!(
             meta["io.modelcontextprotocol/clientCapabilities"]["elicitation"],
-            json!(true)
+            json!({})
         );
         assert!(meta["io.modelcontextprotocol/clientInfo"].is_object());
         assert_eq!(
@@ -2329,6 +2519,38 @@ mod tests {
             panic!("second item must be a notification");
         };
         assert!(notif.params.is_none());
+    }
+
+    /// An MRTR retry states its answers where the spec puts them: on the
+    /// params, beside `name` and `arguments`. They used to go into `_meta`,
+    /// where no other implementation looks for them.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn a_retry_states_its_answers_in_the_params() {
+        use serde_json::json;
+
+        let client = Client::new();
+        let mut req = Request::new(
+            Some(RequestId::Number(2)),
+            "tools/call",
+            Some(json!({ "name": "greet", "arguments": {} })),
+        );
+
+        let answers: crate::types::mrtr::InputResponses =
+            [("who".to_string(), json!({ "action": "accept" }))]
+                .into_iter()
+                .collect();
+        client.apply_client_meta(&mut req, Some(answers), Some("v1.0.sealed".into()));
+
+        let params = req.params.as_ref().expect("params present");
+        assert_eq!(params["requestState"], json!("v1.0.sealed"));
+        assert_eq!(params["inputResponses"]["who"]["action"], json!("accept"));
+        // The params it is a retry *of* are untouched...
+        assert_eq!(params["name"], json!("greet"));
+        // ...and `_meta` keeps the envelope without duplicating the answers.
+        assert!(params["_meta"]["io.modelcontextprotocol/clientInfo"].is_object());
+        assert!(params["_meta"].get("inputResponses").is_none());
+        assert!(params["_meta"].get("requestState").is_none());
     }
 
     /// A configured trace-context provider is invoked during 2026-07-28 metadata
@@ -2984,6 +3206,11 @@ mod param_header_registry_tests {
         serde_json::from_value(serde_json::json!({ "tools": tools })).expect("valid listing")
     }
 
+    fn listing_with_ttl(tools: serde_json::Value, ttl_ms: u64) -> ListToolsResult {
+        serde_json::from_value(serde_json::json!({ "tools": tools, "ttlMs": ttl_ms }))
+            .expect("valid listing")
+    }
+
     fn annotated(name: &str) -> serde_json::Value {
         serde_json::json!({
             "name": name,
@@ -3006,14 +3233,124 @@ mod param_header_registry_tests {
         let mut client = Client::new();
 
         let mut first = listing(serde_json::json!([annotated("search")]));
-        client.register_param_headers(&mut first, true);
+        client.register_param_headers(&mut first, true, None);
         assert!(client.options.param_headers.contains_key("search"));
 
         // The tool is gone from the refreshed listing -- a later direct
         // `call_tool("search", ..)` must not keep mirroring its argument.
         let mut second = listing(serde_json::json!([plain("other")]));
-        client.register_param_headers(&mut second, true);
+        client.register_param_headers(&mut second, true, None);
         assert!(client.options.param_headers.is_empty());
+    }
+
+    /// SEP-2243 has a client omit `Mcp-Param-*` while its cached `inputSchema`
+    /// is stale, and SEP-2549 supplies the clock: `ttlMs: 0` -- which is also
+    /// what an absent `ttlMs` means -- is stale on arrival. The annotation is
+    /// still *recorded*: it says what the tool declared, and a fresh listing is
+    /// what makes it sendable again.
+    #[test]
+    fn a_stale_listing_mirrors_nothing() {
+        let mut client = Client::new();
+
+        let mut immediate = listing(serde_json::json!([annotated("search")]));
+        client.register_param_headers(&mut immediate, true, None);
+        {
+            let entry = client
+                .options
+                .param_headers
+                .get("search")
+                .expect("registered");
+            assert_eq!(
+                entry.declared().len(),
+                1,
+                "the declaration is still what the tool said"
+            );
+            assert!(
+                entry.usable().is_none(),
+                "but nothing may be mirrored from a listing that is already stale"
+            );
+        }
+
+        let mut with_room = listing_with_ttl(serde_json::json!([annotated("search")]), 60_000);
+        client.register_param_headers(&mut with_room, true, None);
+        let entry = client
+            .options
+            .param_headers
+            .get("search")
+            .expect("registered");
+        assert_eq!(
+            entry.usable().map(<[_]>::len),
+            Some(1),
+            "a listing with time left mirrors as before"
+        );
+    }
+
+    /// SEP-2243's remedy for a refused call is to fetch the current schema and
+    /// retry "with the appropriate headers". Against a server stating
+    /// `ttlMs: 0` -- which is also what an absent `ttlMs` means, and what neva's
+    /// own server sends by default -- that re-fetch is stale the instant it
+    /// lands. Judging it by its own TTL would leave the retry omitting the
+    /// headers again, so the remedy could never work and an annotated tool
+    /// would be uncallable. The listing fetched *for* a retry is good for it,
+    /// once.
+    #[test]
+    fn a_listing_fetched_for_a_retry_is_good_for_that_retry() {
+        let mut client = Client::new();
+
+        let mut refetched = listing(serde_json::json!([annotated("search")]));
+        client.register_param_headers(&mut refetched, true, Some("search"));
+
+        let entry = client
+            .options
+            .param_headers
+            .get("search")
+            .expect("registered");
+        assert_eq!(
+            entry.usable().map(<[_]>::len),
+            Some(1),
+            "the retry this listing was fetched for must carry the headers"
+        );
+        assert!(
+            entry.usable().is_none(),
+            "and only that one: the listing is still stale for everything after"
+        );
+    }
+
+    /// The grace belongs to the call that earned it. A refresh triggered by one
+    /// tool re-registers every tool on the page, and handing them all the same
+    /// exception would let the next call to a *different* tool mirror from a
+    /// listing that was stale on arrival and that nothing refreshed on its
+    /// behalf.
+    #[test]
+    fn the_retry_grace_does_not_spill_onto_other_tools() {
+        let mut client = Client::new();
+
+        let mut refetched = listing(serde_json::json!([
+            annotated("search"),
+            annotated("translate")
+        ]));
+        client.register_param_headers(&mut refetched, true, Some("search"));
+
+        assert!(
+            client
+                .options
+                .param_headers
+                .get("search")
+                .expect("registered")
+                .usable()
+                .is_some(),
+            "the refused tool carries its retry"
+        );
+        assert!(
+            client
+                .options
+                .param_headers
+                .get("translate")
+                .expect("registered")
+                .usable()
+                .is_none(),
+            "a tool that was merely on the same page mirrors nothing"
+        );
     }
 
     #[test]
@@ -3021,10 +3358,10 @@ mod param_header_registry_tests {
         let mut client = Client::new();
 
         let mut first = listing(serde_json::json!([annotated("search")]));
-        client.register_param_headers(&mut first, true);
+        client.register_param_headers(&mut first, true, None);
 
         let mut second = listing(serde_json::json!([plain("search")]));
-        client.register_param_headers(&mut second, true);
+        client.register_param_headers(&mut second, true, None);
         assert!(client.options.param_headers.is_empty());
     }
 
@@ -3092,11 +3429,11 @@ mod param_header_registry_tests {
         let mut client = Client::new();
 
         let mut page1 = listing(serde_json::json!([annotated("search")]));
-        client.register_param_headers(&mut page1, true);
+        client.register_param_headers(&mut page1, true, None);
 
         // A tool absent from page two was not withdrawn, only listed earlier.
         let mut page2 = listing(serde_json::json!([annotated("lookup")]));
-        client.register_param_headers(&mut page2, false);
+        client.register_param_headers(&mut page2, false, None);
 
         assert!(client.options.param_headers.contains_key("search"));
         assert!(client.options.param_headers.contains_key("lookup"));
@@ -3107,7 +3444,7 @@ mod param_header_registry_tests {
         let mut client = Client::new();
 
         let mut first = listing(serde_json::json!([annotated("search")]));
-        client.register_param_headers(&mut first, true);
+        client.register_param_headers(&mut first, true, None);
 
         // Same tool, now annotated somewhere the client cannot reach.
         let mut second = listing(serde_json::json!([{
@@ -3119,7 +3456,7 @@ mod param_header_registry_tests {
                 }
             }
         }]));
-        client.register_param_headers(&mut second, true);
+        client.register_param_headers(&mut second, true, None);
 
         assert!(second.tools.is_empty(), "a malformed tool is not callable");
         assert!(client.options.param_headers.is_empty());
@@ -3150,7 +3487,7 @@ mod param_header_registry_tests {
                 }
             }
         ]));
-        client.register_param_headers(&mut listed, true);
+        client.register_param_headers(&mut listed, true, None);
 
         let err = client
             .blocked_tool_error(&call("broken"))
@@ -3182,16 +3519,16 @@ mod param_header_registry_tests {
                 "properties": { "p": { "type": "array", "items": { "x-mcp-header": "P" } } }
             }
         }]));
-        client.register_param_headers(&mut first, true);
+        client.register_param_headers(&mut first, true, None);
         assert!(client.blocked_tool_error(&call("broken")).is_some());
 
         let mut fixed = listing(serde_json::json!([annotated("broken")]));
-        client.register_param_headers(&mut fixed, true);
+        client.register_param_headers(&mut fixed, true, None);
         assert!(client.blocked_tool_error(&call("broken")).is_none());
 
-        client.register_param_headers(&mut first, true);
+        client.register_param_headers(&mut first, true, None);
         let mut gone = listing(serde_json::json!([plain("other")]));
-        client.register_param_headers(&mut gone, true);
+        client.register_param_headers(&mut gone, true, None);
         assert!(client.blocked_tool_error(&call("broken")).is_none());
     }
 }

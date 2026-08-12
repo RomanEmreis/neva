@@ -108,13 +108,22 @@ pub struct RequestParamsMeta {
     pub(crate) client_info: Option<super::Implementation>,
 
     /// MRTR: the client's results for a prior `InputRequiredResult`.
+    ///
+    /// **Read-only, and only for peers older than 0.5.3.** The spec puts this
+    /// on the params (`InputResponseRequestParams`), which is where neva now
+    /// writes it and where [`Request::input_responses`] looks first; the field
+    /// survives here so a request from a 0.5.x neva client is still understood.
+    /// It is never serialized, so nothing this build sends can carry it.
     #[cfg(not(feature = "legacy-spec"))]
-    #[serde(rename = "inputResponses", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "inputResponses", default, skip_serializing)]
     pub(crate) input_responses: Option<crate::types::mrtr::InputResponses>,
 
     /// MRTR: the opaque `requestState` echoed back from `InputRequiredResult`.
+    ///
+    /// Read-only for the same reason as [`Self::input_responses`]; see
+    /// [`Request::state`].
     #[cfg(not(feature = "legacy-spec"))]
-    #[serde(rename = "requestState", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "requestState", default, skip_serializing)]
     pub(crate) request_state: Option<String>,
 
     /// Request-scoped logging level (MCP 2026-07-28).
@@ -313,6 +322,133 @@ impl Request {
             .get("_meta")?
             .get("io.modelcontextprotocol/protocolVersion")?
             .as_str()
+    }
+
+    /// The MRTR answers this request carries, if any.
+    ///
+    /// The spec puts `inputResponses` on the params themselves
+    /// (`InputResponseRequestParams`), next to `name` / `arguments` -- not in
+    /// `_meta`. neva wrote them into `_meta` up to 0.5.2, so a request is read
+    /// from the spec location first and from the old one only as a fallback:
+    /// that keeps a 0.5.x client talking to a newer server, and costs one
+    /// lookup on a request that has neither.
+    ///
+    /// # Examples
+    /// ```
+    /// use neva::types::Request;
+    ///
+    /// let req = Request::new(None, "tools/call", Some(serde_json::json!({
+    ///     "name": "greet",
+    ///     "inputResponses": { "who": { "action": "accept" } }
+    /// })));
+    /// assert!(req.input_responses().is_some());
+    /// ```
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn input_responses(&self) -> Option<crate::types::mrtr::InputResponses> {
+        let from_params = self
+            .params
+            .as_ref()
+            .and_then(|p| p.get("inputResponses"))
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+        from_params.or_else(|| self.meta().and_then(|m| m.input_responses))
+    }
+
+    /// The opaque MRTR `requestState` this request echoes back, if any.
+    ///
+    /// Named for the receiver rather than the wire: `req.state()` says what
+    /// `req.request_state()` would, without the stutter. The field it reads is
+    /// `requestState`, in either of the two places below.
+    ///
+    /// Same two locations, same order, and the same reason as
+    /// [`Self::input_responses`].
+    ///
+    /// # Examples
+    /// ```
+    /// use neva::types::Request;
+    ///
+    /// let req = Request::new(None, "tools/call", Some(serde_json::json!({
+    ///     "name": "greet",
+    ///     "requestState": "v1.0.sealed"
+    /// })));
+    /// assert_eq!(req.state().as_deref(), Some("v1.0.sealed"));
+    /// ```
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn state(&self) -> Option<String> {
+        let from_params = self
+            .params
+            .as_ref()
+            .and_then(|p| p.get("requestState"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+
+        from_params.or_else(|| self.meta().and_then(|m| m.request_state))
+    }
+
+    /// Why this request's MRTR fields are not acceptable, if they are not.
+    ///
+    /// [`Self::state`] and [`Self::input_responses`] both answer `None` for a
+    /// field that is present but of the wrong JSON type, because neither can
+    /// say anything else. Left at that, a `requestState` of the wrong type
+    /// would read as *no state at all*: the retry would take the absent-state
+    /// path, its `inputResponses` would be treated as answers offered up front
+    /// rather than as the continuation of a round, and the client would be told
+    /// nothing about why. Worse, with the field malformed in one of the two
+    /// locations and well-formed in the other, the accessors would quietly read
+    /// the other one.
+    ///
+    /// So the accessors keep their `Option`, and stating a recognized field
+    /// with the wrong type is rejected here instead -- a property of the
+    /// message, checked where [`Self::required_meta_error`] is.
+    ///
+    /// # Examples
+    /// ```
+    /// use neva::types::Request;
+    ///
+    /// let good = Request::new(None, "tools/call", Some(serde_json::json!({
+    ///     "name": "greet",
+    ///     "requestState": "v1.0.sealed"
+    /// })));
+    /// assert!(good.malformed_mrtr_error().is_none());
+    ///
+    /// let bad = Request::new(None, "tools/call", Some(serde_json::json!({
+    ///     "name": "greet",
+    ///     "requestState": 42
+    /// })));
+    /// assert!(bad.malformed_mrtr_error().is_some());
+    /// ```
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn malformed_mrtr_error(&self) -> Option<crate::error::Error> {
+        use crate::error::{Error, ErrorCode};
+
+        let params = self.params.as_ref()?;
+        let malformed = |key: &str, expected: &str| {
+            Some(Error::new(
+                ErrorCode::InvalidParams,
+                format!("`{key}` must be {expected}"),
+            ))
+        };
+
+        // `null` counts as stating the field, and stating it wrong. The spec
+        // types these as `string` and `object` and makes them optional by
+        // *absence* -- an omitted property, not a null one -- so `null` is a
+        // value of the wrong type like any other. Excusing it would leave the
+        // hole this check exists to close: a retry meaning to continue a chain
+        // would read as starting fresh, and its answers be taken as offered up
+        // front.
+        //
+        // Both locations the accessors read, in the same order and for the same
+        // reason: a 0.5.x peer states these in `_meta`, a current one on the
+        // params, and either may be the malformed one.
+        for source in [Some(params), params.get("_meta")].into_iter().flatten() {
+            if source.get("requestState").is_some_and(|v| !v.is_string()) {
+                return malformed("requestState", "a string");
+            }
+            if source.get("inputResponses").is_some_and(|v| !v.is_object()) {
+                return malformed("inputResponses", "an object");
+            }
+        }
+        None
     }
 
     /// Why the protocol version this request states is one this build cannot
@@ -555,6 +691,142 @@ mod tests {
         assert!(got.request_state.is_none());
         // pre-existing params keys are untouched.
         assert_eq!(req.params.expect("params present")["x"], json!(1));
+    }
+
+    /// The MRTR re-run fields are params. `_meta` is read only as a fallback,
+    /// for a 0.5.x neva client, and the params win when both are present.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn mrtr_fields_are_read_from_params_first() {
+        use serde_json::json;
+
+        let spec = Request::new(
+            None,
+            "tools/call",
+            Some(json!({
+                "name": "greet",
+                "requestState": "from-params",
+                "inputResponses": { "who": { "action": "accept" } }
+            })),
+        );
+        assert_eq!(spec.state().as_deref(), Some("from-params"));
+        assert!(spec.input_responses().expect("answers").contains_key("who"));
+
+        let legacy = Request::new(
+            None,
+            "tools/call",
+            Some(json!({
+                "name": "greet",
+                "_meta": {
+                    "requestState": "from-meta",
+                    "inputResponses": { "who": { "action": "accept" } }
+                }
+            })),
+        );
+        assert_eq!(legacy.state().as_deref(), Some("from-meta"));
+        assert!(
+            legacy
+                .input_responses()
+                .expect("answers")
+                .contains_key("who")
+        );
+
+        let both = Request::new(
+            None,
+            "tools/call",
+            Some(json!({
+                "name": "greet",
+                "requestState": "from-params",
+                "_meta": { "requestState": "from-meta" }
+            })),
+        );
+        assert_eq!(both.state().as_deref(), Some("from-params"));
+
+        let neither = Request::new(None, "tools/call", Some(json!({ "name": "greet" })));
+        assert!(neither.state().is_none());
+        assert!(neither.input_responses().is_none());
+    }
+
+    /// A recognized field stated with the wrong JSON type is malformed params,
+    /// not an absent field: read as absent, a bad `requestState` turns a retry
+    /// into a fresh call whose answers look like ones offered up front.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn a_mrtr_field_of_the_wrong_type_is_rejected() {
+        use serde_json::json;
+
+        let call = |params| Request::new(None, "tools/call", Some(params));
+
+        for params in [
+            json!({ "name": "greet", "requestState": 42 }),
+            json!({ "name": "greet", "requestState": { "sealed": true } }),
+            json!({ "name": "greet", "inputResponses": "who" }),
+            json!({ "name": "greet", "inputResponses": ["who"] }),
+            // The old location is read too, so it is checked too.
+            json!({ "name": "greet", "_meta": { "requestState": 42 } }),
+            json!({ "name": "greet", "_meta": { "inputResponses": 7 } }),
+            // Malformed where the accessors look first, well-formed where they
+            // look second: without this check the request would be served
+            // against a state it did not state here.
+            json!({
+                "name": "greet",
+                "requestState": 42,
+                "_meta": { "requestState": "from-meta" }
+            }),
+            // `null` states the field, and states it wrong: the spec makes
+            // these optional by absence, so a peer with nothing to say leaves
+            // them out. Excusing `null` would read a retry as a fresh call and
+            // take its answers as offered up front.
+            json!({ "name": "greet", "requestState": null }),
+            json!({ "name": "greet", "inputResponses": null }),
+        ] {
+            assert!(
+                call(params.clone()).malformed_mrtr_error().is_some(),
+                "{params} must be rejected"
+            );
+        }
+
+        for params in [
+            json!({ "name": "greet" }),
+            json!({ "name": "greet", "requestState": "v1.0.sealed" }),
+            json!({
+                "name": "greet",
+                "requestState": "v1.0.sealed",
+                "inputResponses": { "who": { "action": "accept" } }
+            }),
+        ] {
+            assert!(
+                call(params.clone()).malformed_mrtr_error().is_none(),
+                "{params} must be accepted"
+            );
+        }
+
+        assert!(
+            Request::new(None, "tools/list", None::<()>)
+                .malformed_mrtr_error()
+                .is_none(),
+            "a request without params states no MRTR fields at all"
+        );
+    }
+
+    /// Nothing this build sends may carry the old location, or a peer reading
+    /// the spec one would see an answered retry as a fresh call.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn mrtr_meta_fields_are_never_written() {
+        let meta = RequestParamsMeta {
+            request_state: Some("sealed".into()),
+            input_responses: Some(
+                [("who".to_string(), serde_json::json!({ "action": "accept" }))]
+                    .into_iter()
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_value(&meta).expect("serialize");
+        assert!(json.get("requestState").is_none(), "got: {json}");
+        assert!(json.get("inputResponses").is_none(), "got: {json}");
     }
 
     #[cfg(all(feature = "client", not(feature = "legacy-spec")))]

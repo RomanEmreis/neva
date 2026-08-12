@@ -75,8 +75,17 @@ pub enum PropertyType {
     String,
 
     /// Number type
-    #[serde(rename = "number", alias = "integer")]
+    #[serde(rename = "number")]
     Number,
+
+    /// Integer type.
+    ///
+    /// Distinct from [`Self::Number`] because JSON Schema treats them as
+    /// different types: `integer` rejects `1.5` where `number` accepts it.
+    /// They used to share a variant, so a declared `"integer"` came back out as
+    /// `"number"` and the peer was told a wider type than the server meant.
+    #[serde(rename = "integer")]
+    Integer,
 
     /// Boolean type
     #[serde(rename = "boolean")]
@@ -94,13 +103,34 @@ impl Default for PropertyType {
     }
 }
 
+impl PropertyType {
+    /// The reading for a declaration that states no `type` at all.
+    ///
+    /// Distinct from the [`Default`] (`object`), which is the right answer for
+    /// a *schema* -- the root of an `inputSchema` is an object whether or not
+    /// it says so. A single property is not: `{"$ref": ...}` and
+    /// `{"enum": [..]}` state no type on purpose, and inventing one for them
+    /// publishes a constraint the author did not write.
+    #[inline]
+    pub(crate) fn unstated() -> Self {
+        Self::None
+    }
+
+    /// Whether this is [`Self::unstated`], and so must not be serialized.
+    #[inline]
+    pub(crate) fn is_unstated(&self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
 impl From<&str> for PropertyType {
     #[inline]
     fn from(s: &str) -> Self {
         match s {
             "array" => PropertyType::Array,
             "string" => PropertyType::String,
-            "number" | "integer" => PropertyType::Number,
+            "number" => PropertyType::Number,
+            "integer" => PropertyType::Integer,
             "bool" | "boolean" => PropertyType::Bool,
             "object" => PropertyType::Object,
             "none" => PropertyType::None,
@@ -123,6 +153,7 @@ impl Display for PropertyType {
             PropertyType::Array => write!(f, "array"),
             PropertyType::String => write!(f, "string"),
             PropertyType::Number => write!(f, "number"),
+            PropertyType::Integer => write!(f, "integer"),
             PropertyType::Bool => write!(f, "boolean"),
             PropertyType::Object => write!(f, "object"),
             PropertyType::None => write!(f, "none"),

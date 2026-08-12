@@ -168,6 +168,17 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
     let mut headers = req.headers().clone();
     let id = get_or_create_mcp_session(&headers);
 
+    // DNS-rebinding gate, before anything else is read: a request addressed by
+    // a name this server does not answer to gets no further, and learns
+    // nothing about what is here. The spec pins the status to `403`.
+    if let Some(err) = ctx.origin_policy.rejection(&headers) {
+        return PostPrep::Reply(build_json_response(
+            http::StatusCode::FORBIDDEN,
+            id,
+            &Message::Response(Response::error(RequestId::Null, err)),
+        ));
+    }
+
     // Stateless 2026-07-28 transport requires every POST to carry the exact 2026-07-28
     // `MCP-Protocol-Version` header; reject before body dispatch otherwise.
     // `PROTOCOL_VERSIONS` still lists legacy versions (e.g. 2025-06-18) for
@@ -267,10 +278,15 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
     // waiting on ids too.
     #[cfg(not(feature = "legacy-spec"))]
     {
+        let header_version = headers
+            .get(crate::transport::http::MCP_PROTOCOL_VERSION)
+            .and_then(|v| v.to_str().ok());
         let invalid = match &msg {
-            Message::Request(r) => request_meta_error(r).is_some(),
+            Message::Request(r) => request_meta_error(r, header_version).is_some(),
             Message::Batch(batch) => batch.iter().any(|env| match env {
-                crate::types::MessageEnvelope::Request(r) => request_meta_error(r).is_some(),
+                crate::types::MessageEnvelope::Request(r) => {
+                    request_meta_error(r, header_version).is_some()
+                }
                 _ => false,
             }),
             _ => false,
@@ -278,7 +294,7 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
 
         if invalid {
             let reply = reject_post_each(&msg, |r| {
-                request_meta_error(r).unwrap_or_else(|| {
+                request_meta_error(r, header_version).unwrap_or_else(|| {
                     Error::new(
                         ErrorCode::InvalidRequest,
                         "Not processed: another request in this batch was rejected",
@@ -383,13 +399,47 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
     }
 
     // Pre-register on the initialize handshake so the server can emit
-    // events between the init POST response and the SSE GET. Stateless 2026-07-28
-    // transport has no SSE GET, so this is skipped under the flag.
+    // events between the init POST response and the SSE GET, and so the session
+    // is one this server knows from here on. Stateless 2026-07-28 transport has
+    // neither an SSE GET nor sessions, so this is skipped under the flag.
     #[cfg(feature = "legacy-spec")]
-    if let Message::Request(ref r) = msg
-        && r.method == crate::commands::INIT
-    {
+    let is_init = matches!(msg, Message::Request(ref r) if r.method == crate::commands::INIT);
+    #[cfg(feature = "legacy-spec")]
+    if is_init {
         ctx.sse_registry.pre_register(id);
+    }
+
+    // A session id this server does not hold is a terminated (or expired) one,
+    // and the spec answers it with `404` so the client knows to open a new
+    // session with a fresh `initialize` rather than retry into a void. Only an
+    // id the client actually stated is judged: a request without the header is
+    // handed a newly minted session, as it always was.
+    //
+    // `initialize` is exempt on purpose. It is the one message that may name a
+    // session the server has never heard of -- the id was just minted above --
+    // and answering the handshake with "start a new session" would be a loop.
+    #[cfg(feature = "legacy-spec")]
+    if !is_init && headers.contains_key(MCP_SESSION_ID) && !ctx.sse_registry.is_live(&id) {
+        // A notification is never answered, rejection included: it carries no
+        // id, so a JSON-RPC reply to it addresses nothing and matches nothing
+        // on the other side. `reject_post_each` says so by answering `None`
+        // here (and for a batch that is notifications throughout), and the
+        // `404` alone carries the refusal -- which is all the caller needs to
+        // learn that its session is gone.
+        let reply = reject_post_each(&msg, |_| {
+            Error::new(ErrorCode::InvalidRequest, "Session not found")
+        });
+
+        let mut builder = http::Response::builder().status(http::StatusCode::NOT_FOUND);
+        let body = match reply {
+            Some(reply) => {
+                builder = builder.header(http::header::CONTENT_TYPE, "application/json");
+                Bytes::from(serde_json::to_vec(&reply).unwrap_or_default())
+            }
+            None => Bytes::new(),
+        };
+
+        return PostPrep::Reply(builder.body(body).unwrap_or_default());
     }
 
     // Notification fast-path: 202 Accepted, no oneshot.
@@ -808,7 +858,6 @@ fn get_or_create_mcp_session(
 ///
 /// `None` when the body carried no request at all -- a notification is never
 /// answered, rejection included.
-#[cfg(not(feature = "legacy-spec"))]
 fn reject_post_each(
     msg: &Message,
     verdict: impl Fn(&crate::types::Request) -> Error,
@@ -840,8 +889,13 @@ fn reject_post_each(
 /// header that was wrong for every request underneath it -- where the verdict
 /// on each request is the same one.
 ///
-/// Falls back to an unaddressed reply when there is no request to address:
-/// the POST is still answered, since the status is what carries the rejection.
+/// Falls back to an unaddressed reply when there is no request to address.
+///
+/// That fallback is for the header gates below, where the 2026-07-28 revision
+/// leaves a notification POST's requirements undefined and the diagnostic is
+/// worth more than the empty body. Where the protocol *does* speak -- the
+/// legacy stale-session `404` -- the caller uses [`reject_post_each`] directly
+/// and sends nothing, because a notification is never answered.
 #[cfg(not(feature = "legacy-spec"))]
 fn reject_post(msg: &Message, err: Error) -> Message {
     // `Error` is not `Clone` -- its cause is a boxed `dyn StdError` -- and a
@@ -859,30 +913,60 @@ fn reject_post(msg: &Message, err: Error) -> Message {
 
 /// Why a request's `_meta` is unacceptable, if it is.
 ///
-/// Two rules, in order. MCP 2026-07-28 makes `protocolVersion` (a string) and
+/// Three rules, in order. MCP 2026-07-28 makes `protocolVersion` (a string) and
 /// `clientCapabilities` (an object) mandatory on every request -- capabilities
 /// are declared per request precisely so a stateless server never has to infer
 /// them from earlier traffic. A request that omits either, or states it with
 /// the wrong JSON type, is malformed params (`-32602`): a version that is not
 /// a string is not a version, and treating it as absent would let the next
-/// rule be skipped by sending a number. A version that *is* stated must be one
-/// this build serves, or it is `UnsupportedProtocolVersion` (`-32022`) naming
-/// what is on offer.
+/// rules be skipped by sending a number.
 ///
-/// Both rules belong to the message rather than to HTTP, so both live on
-/// [`crate::types::Request`] and are enforced again at the dispatch seam for
-/// the transports that have no preamble of their own. Catching them here is
-/// what earns them the `400` the spec mandates on this one; the caller
+/// A version that *is* stated must first **agree with the `MCP-Protocol-Version`
+/// header**, or it is `HeaderMismatch` (`-32020`). This outranks the third rule
+/// even though a disagreeing body version is, on this build, also unsupported:
+/// the two errors say different things to whoever has to fix them. `-32022`
+/// means "retry with a version from this list"; `-32020` means the header and
+/// the body disagree, which is a bug in the sender or in an intermediary that
+/// rewrote one of them -- and picking a version off the offered list would not
+/// fix it. Only then, with the two in agreement, must the version be one this
+/// build serves or it is `UnsupportedProtocolVersion` (`-32022`) naming what is
+/// on offer.
+///
+/// The first and last rules belong to the message rather than to HTTP, so both
+/// live on [`crate::types::Request`] and are enforced again at the dispatch seam
+/// for the transports that have no preamble of their own. The middle one is
+/// HTTP's alone -- no other transport mirrors the version into an envelope --
+/// which is why it is applied here rather than there. Catching them here is
+/// what earns them the `400` the spec mandates on this transport; the caller
 /// supplies the status.
-///
-/// The header carrying the version was checked before the body was read, and
-/// only this version passes that gate -- so a stated version that disagrees
-/// with the header is exactly one this build does not serve, and the second
-/// rule already covers it.
 #[cfg(not(feature = "legacy-spec"))]
-fn request_meta_error(req: &crate::types::Request) -> Option<Error> {
+fn request_meta_error(req: &crate::types::Request, header_version: Option<&str>) -> Option<Error> {
     req.required_meta_error()
+        .or_else(|| header_version_mismatch(req, header_version))
         .or_else(|| req.unsupported_version_error())
+}
+
+/// Why the version this request states disagrees with the one its
+/// `MCP-Protocol-Version` header carries, if it does.
+///
+/// A request that arrived without a readable header never gets here -- the
+/// preamble rejects that before the body is parsed -- so `None` for the header
+/// can only mean "not an HTTP request", and there is nothing to disagree with.
+#[cfg(not(feature = "legacy-spec"))]
+fn header_version_mismatch(
+    req: &crate::types::Request,
+    header_version: Option<&str>,
+) -> Option<Error> {
+    let stated = req.stated_protocol_version()?;
+    let header = header_version?;
+    (stated != header).then(|| {
+        Error::new(
+            ErrorCode::HeaderMismatch,
+            format!(
+                "Header mismatch: MCP-Protocol-Version header value {header:?} does not match body value {stated:?}"
+            ),
+        )
+    })
 }
 
 /// The body value `Mcp-Name` mirrors for `req`, if its method has one.
@@ -971,6 +1055,12 @@ fn routing_header_error(req: &crate::types::Request, headers: &HeaderMap) -> Opt
 /// raised during dispatch rather than in the transport preamble, so the status
 /// has to be recovered here from the reply.
 ///
+/// `MethodNotFound` is pinned to `404 Not Found` for a different reason: it is
+/// what lets a client tell "this endpoint speaks MCP and has no such method"
+/// from "this URL is not an MCP endpoint at all" without parsing the body --
+/// the same `404` a pre-2026 HTTP+SSE server returns for the modern endpoint.
+/// The JSON-RPC error body is what distinguishes the two.
+///
 /// A batch keeps `200 OK` even when some of its items carry such an error: one
 /// status covers every item, and the per-item codes are in the body.
 #[cfg(not(feature = "legacy-spec"))]
@@ -980,6 +1070,7 @@ fn dispatched_status(msg: &Message) -> http::StatusCode {
             ErrorCode::HeaderMismatch
             | ErrorCode::MissingRequiredClientCapability
             | ErrorCode::UnsupportedProtocolVersion => http::StatusCode::BAD_REQUEST,
+            ErrorCode::MethodNotFound => http::StatusCode::NOT_FOUND,
             _ => http::StatusCode::OK,
         },
         _ => http::StatusCode::OK,
@@ -1038,12 +1129,32 @@ fn status_response(
 /// SSE session in the registry (and unregisters its log channel, when
 /// tracing is enabled) and replies 200 with the session id echoed back.
 pub async fn handle_delete(req: HttpRequest, ctx: &HttpContext) -> HttpResponse {
+    // Same gate as POST: terminating someone else's session is as much an
+    // effect as sending a request.
+    if ctx.origin_policy.rejection(req.headers()).is_some() {
+        return http::Response::builder()
+            .status(http::StatusCode::FORBIDDEN)
+            .body(Bytes::new())
+            .unwrap_or_default();
+    }
+
     let Some(id) = parse_session_id(req.headers()) else {
         return http::Response::builder()
             .status(http::StatusCode::BAD_REQUEST)
             .body(Bytes::new())
             .unwrap_or_default();
     };
+
+    // Terminating a session that is already gone is the same "no such session"
+    // the next POST would get, and answering `200` would tell a client that
+    // retried the DELETE it had just ended a live session.
+    #[cfg(feature = "legacy-spec")]
+    if !ctx.sse_registry.is_live(&id) {
+        return http::Response::builder()
+            .status(http::StatusCode::NOT_FOUND)
+            .body(Bytes::new())
+            .unwrap_or_default();
+    }
 
     #[cfg(feature = "tracing")]
     crate::types::notification::fmt::LOG_REGISTRY.unregister(&id);
@@ -1154,6 +1265,17 @@ pub async fn handle_get_sse<E: HttpEngine>(
     req: HttpRequest,
     ctx: &HttpContext,
 ) -> StreamResponse<impl Stream<Item = E::SseEvent> + Send + 'static> {
+    // The stream is the most valuable thing here to hand to the wrong caller:
+    // it carries everything the server pushes for the whole session.
+    if ctx.origin_policy.rejection(req.headers()).is_some() {
+        return StreamResponse::Complete(
+            http::Response::builder()
+                .status(http::StatusCode::FORBIDDEN)
+                .body(Bytes::new())
+                .unwrap_or_default(),
+        );
+    }
+
     let Some(id) = parse_session_id(req.headers()) else {
         return StreamResponse::Complete(
             http::Response::builder()
@@ -1162,6 +1284,19 @@ pub async fn handle_get_sse<E: HttpEngine>(
                 .unwrap_or_default(),
         );
     };
+
+    // `register` below creates the session when it finds none, which on a
+    // terminated id would resurrect what a DELETE just ended -- and hand the
+    // caller the stream carrying everything the server pushes for it.
+    #[cfg(feature = "legacy-spec")]
+    if !ctx.sse_registry.is_live(&id) {
+        return StreamResponse::Complete(
+            http::Response::builder()
+                .status(http::StatusCode::NOT_FOUND)
+                .body(Bytes::new())
+                .unwrap_or_default(),
+        );
+    }
 
     let (msg_tx, msg_rx) =
         tokio::sync::mpsc::channel::<(u64, Arc<Message>)>(ctx.sse_live_queue_capacity);
@@ -1248,6 +1383,10 @@ mod tests {
             inbound_tx,
             sse_live_queue_capacity: 64,
             sse_log_queue_capacity: 64,
+            // These tests send no `Origin`/`Host`, so either policy would pass
+            // them; `Any` states that the gate is not what they are about.
+            // `origin_gate_rejects_a_rebound_name` sets its own.
+            origin_policy: crate::transport::http::core::origin::OriginPolicy::Any,
             #[cfg(feature = "server-oauth")]
             oauth: None,
         };
@@ -1425,12 +1564,13 @@ mod tests {
         assert_eq!(body["error"]["code"], -32022);
     }
 
-    /// The body states the version the request is made under, and a version
-    /// this build does not serve is refused there too -- putting it past the
-    /// header gate does not make it servable.
+    /// A version this build does not serve is refused whether it is stated in
+    /// the header or in the body -- here they agree on it, which is the case
+    /// `-32022` is actually for, and the caller is told what is on offer so it
+    /// can retry rather than guess.
     #[cfg(not(feature = "legacy-spec"))]
     #[tokio::test]
-    async fn rejects_a_body_version_this_build_does_not_serve() {
+    async fn rejects_a_version_this_build_does_not_serve() {
         let (ctx, _rx) = make_ctx();
         let body = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "tools/list",
@@ -1439,19 +1579,120 @@ mod tests {
                 "io.modelcontextprotocol/clientCapabilities": {}
             } }
         });
-        let req = post_builder()
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(crate::transport::http::MCP_PROTOCOL_VERSION, "2025-06-18")
+            .header(crate::transport::http::MCP_METHOD, "tools/list")
             .body(bytes::Bytes::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
         let resp = handle_post(req, &ctx).await;
         assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
         let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
         assert_eq!(body["error"]["code"], -32022);
-        // Told what is on offer, so it can retry rather than guess.
         assert_eq!(body["error"]["data"]["requested"], "2025-06-18");
         assert_eq!(
             body["error"]["data"]["supported"],
             serde_json::json!(["2026-07-28"])
         );
+    }
+
+    /// A request addressed by a name this server does not answer to is
+    /// refused with `403`, before its body is read -- that is what stops a page
+    /// on a rebound domain from driving a local server.
+    #[tokio::test]
+    async fn origin_gate_rejects_a_rebound_name() {
+        let (mut ctx, _rx) = make_ctx();
+        ctx.origin_policy = crate::transport::http::core::origin::OriginPolicy::Loopback;
+
+        let rebound = post_builder()
+            .header("host", "evil.example.com")
+            .header("origin", "http://evil.example.com")
+            .body(make_request_body("tools/list"))
+            .unwrap();
+        let resp = handle_post(rebound, &ctx).await;
+        assert_eq!(resp.status(), http::StatusCode::FORBIDDEN);
+
+        // The legitimate caller gets past the gate. The body is deliberately
+        // unparseable so the preamble answers it here: a well-formed request
+        // would be dispatched, and nothing in this test context is listening
+        // on the other end of `inbound_tx` to answer it.
+        let local = post_builder()
+            .header("host", "127.0.0.1:3000")
+            .header("origin", "http://127.0.0.1:3000")
+            .body(bytes::Bytes::from_static(b"{ not json"))
+            .unwrap();
+        let resp = handle_post(local, &ctx).await;
+        assert_ne!(resp.status(), http::StatusCode::FORBIDDEN);
+    }
+
+    /// A body version that disagrees with the header is a *header mismatch*,
+    /// not an unsupported version. On this build every disagreeing version is
+    /// also one we do not serve, so the two rules would both fire -- and the
+    /// one that fires decides what the sender is told to do: `-32022` says
+    /// "retry with a version from this list", which would not fix a header and
+    /// body that disagree.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[tokio::test]
+    async fn rejects_a_body_version_disagreeing_with_the_header() {
+        let (ctx, _rx) = make_ctx();
+        let body = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+            "params": { "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "v999.0.0",
+                "io.modelcontextprotocol/clientCapabilities": {}
+            } }
+        });
+        // `post_builder` sets the header to the version this build serves, so
+        // the header is good and only the body disagrees.
+        let req = post_builder()
+            .body(bytes::Bytes::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = handle_post(req, &ctx).await;
+
+        assert_eq!(resp.status(), http::StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+        assert_eq!(body["error"]["code"], -32020);
+        assert_eq!(body["id"], 1);
+    }
+
+    /// A method this build does not implement answers `404`, not `200`: that
+    /// is what lets a caller tell "no such method here" from "not an MCP
+    /// endpoint" without reading the body. The other status-bearing codes keep
+    /// their `400`, and an ordinary application error still rides on `200`.
+    ///
+    /// `dispatched_status` is exercised directly because `handle_post` only
+    /// reaches it after a real dispatch, and the test context here has nothing
+    /// on the other end of `inbound_tx` to do the dispatching. The end-to-end
+    /// path is covered in `tests/stateless_http.rs`.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn method_not_found_is_a_404() {
+        let status = |code: ErrorCode| {
+            dispatched_status(&Message::Response(Response::error(
+                RequestId::Number(1),
+                Error::from(code),
+            )))
+        };
+
+        assert_eq!(
+            status(ErrorCode::MethodNotFound),
+            http::StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            status(ErrorCode::HeaderMismatch),
+            http::StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status(ErrorCode::UnsupportedProtocolVersion),
+            http::StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status(ErrorCode::MissingRequiredClientCapability),
+            http::StatusCode::BAD_REQUEST
+        );
+        // An error from the handler is not an error about the request.
+        assert_eq!(status(ErrorCode::InternalError), http::StatusCode::OK);
     }
 
     /// `protocolVersion` and `clientCapabilities` are required on every
@@ -1679,9 +1920,13 @@ mod tests {
 
     /// A batch must not be a way around the version gate a standalone request
     /// faces: the offending item is caught while the array is still unopened.
+    ///
+    /// The item states a version the header does not, so what it earns is a
+    /// header mismatch -- see `rejects_a_body_version_disagreeing_with_the_header`
+    /// for why that outranks "unsupported version".
     #[cfg(not(feature = "legacy-spec"))]
     #[tokio::test]
-    async fn rejects_a_batched_body_version_this_build_does_not_serve() {
+    async fn rejects_a_batched_body_version_disagreeing_with_the_header() {
         let (ctx, _rx) = make_ctx();
         let body = serde_json::json!([
             { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": meta() } },
@@ -1704,7 +1949,7 @@ mod tests {
 
         // The offender hears what is wrong with it...
         assert_eq!(items[1]["id"], 2);
-        assert_eq!(items[1]["error"]["code"], -32022);
+        assert_eq!(items[1]["error"]["code"], -32020);
         // ...and the item that rode in with it hears that the POST carrying it
         // was not processed, rather than nothing at all.
         assert_eq!(items[0]["id"], 1);
@@ -1814,6 +2059,9 @@ mod tests {
     async fn delete_with_session_id_echoes_it_back() {
         let (ctx, _rx) = make_ctx();
         let id = uuid::Uuid::new_v4();
+        // Ending a session the server holds -- the handshake would have put it
+        // there. An id it never issued is a different answer, below.
+        ctx.sse_registry.pre_register(id);
         let req = http::Request::builder()
             .method("DELETE")
             .uri("/mcp")
@@ -1827,6 +2075,171 @@ mod tests {
                 .get(MCP_SESSION_ID)
                 .and_then(|v| v.to_str().ok()),
             Some(id.to_string().as_str())
+        );
+    }
+
+    #[cfg(feature = "legacy-spec")]
+    #[tokio::test]
+    async fn a_terminated_session_is_gone_for_every_verb() {
+        // The whole point of terminating a session is that nothing reaches it
+        // afterwards, so all three verbs have to agree. A GET is the one that
+        // would otherwise recreate it -- opening the stream registers the id.
+        let (ctx, _rx) = make_ctx();
+        let id = uuid::Uuid::new_v4();
+        ctx.sse_registry.pre_register(id);
+        ctx.sse_registry.terminate(&id);
+
+        let post = post_builder()
+            .header(MCP_SESSION_ID, id.to_string())
+            .body(make_request_body("tools/list"))
+            .unwrap();
+        assert_eq!(
+            handle_post(post, &ctx).await.status(),
+            http::StatusCode::NOT_FOUND
+        );
+
+        let delete = http::Request::builder()
+            .method("DELETE")
+            .uri("/mcp")
+            .header(MCP_SESSION_ID, id.to_string())
+            .body(Bytes::new())
+            .unwrap();
+        assert_eq!(
+            handle_delete(delete, &ctx).await.status(),
+            http::StatusCode::NOT_FOUND
+        );
+
+        let get = http::Request::builder()
+            .method("GET")
+            .uri("/mcp")
+            .header(MCP_SESSION_ID, id.to_string())
+            .body(Bytes::new())
+            .unwrap();
+        match handle_get_sse::<TestEngine>(get, &ctx).await {
+            StreamResponse::Complete(r) => assert_eq!(r.status(), http::StatusCode::NOT_FOUND),
+            StreamResponse::Stream { .. } => panic!("a terminated session opened a stream"),
+        }
+    }
+
+    #[cfg(feature = "legacy-spec")]
+    #[tokio::test]
+    async fn a_404_on_a_dead_session_is_addressed_to_the_caller() {
+        // A JSON-RPC error reaches its caller by id; one carrying `null` matches
+        // no pending request, and the client would sit on the call until it
+        // timed out instead of learning to re-initialize.
+        let (ctx, _rx) = make_ctx();
+        let req = post_builder()
+            .header(MCP_SESSION_ID, uuid::Uuid::new_v4().to_string())
+            .body(make_request_body("tools/list"))
+            .unwrap();
+
+        let resp = handle_post(req, &ctx).await;
+        assert_eq!(resp.status(), http::StatusCode::NOT_FOUND);
+
+        let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+        assert_eq!(body["id"], 1);
+        assert_eq!(body["error"]["code"], i32::from(ErrorCode::InvalidRequest));
+    }
+
+    /// The `404` still applies to a notification -- the session really is gone
+    /// -- but a notification carries no id, so a JSON-RPC reply to it addresses
+    /// nothing and matches nothing on the other side. The status is the whole
+    /// answer.
+    #[cfg(feature = "legacy-spec")]
+    #[tokio::test]
+    async fn a_dead_session_answers_a_notification_with_status_alone() {
+        let dead = uuid::Uuid::new_v4().to_string();
+
+        let notification = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": { "requestId": 1 }
+        });
+        let batch = serde_json::json!([notification, notification]);
+
+        for body in [notification.clone(), batch] {
+            let (ctx, _rx) = make_ctx();
+            let req = post_builder()
+                .header(MCP_SESSION_ID, &dead)
+                .body(Bytes::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap();
+
+            let resp = handle_post(req, &ctx).await;
+            assert_eq!(resp.status(), http::StatusCode::NOT_FOUND);
+            assert!(
+                resp.body().is_empty(),
+                "a notification must not be answered, rejection included; got {}",
+                String::from_utf8_lossy(resp.body())
+            );
+            assert!(
+                !resp.headers().contains_key(http::header::CONTENT_TYPE),
+                "an empty body claims no content type"
+            );
+        }
+    }
+
+    /// A batch that mixes the two is answered for its requests only: they have
+    /// slots waiting, and the notifications alongside them still get nothing.
+    #[cfg(feature = "legacy-spec")]
+    #[tokio::test]
+    async fn a_dead_session_answers_only_the_requests_in_a_mixed_batch() {
+        let (ctx, _rx) = make_ctx();
+        let body = serde_json::json!([
+            { "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": 9 } },
+            { "jsonrpc": "2.0", "method": "tools/list", "id": 7 }
+        ]);
+
+        let req = post_builder()
+            .header(MCP_SESSION_ID, uuid::Uuid::new_v4().to_string())
+            .body(Bytes::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let resp = handle_post(req, &ctx).await;
+        assert_eq!(resp.status(), http::StatusCode::NOT_FOUND);
+
+        let replies: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+        let replies = replies.as_array().expect("a batch is answered by a batch");
+        assert_eq!(replies.len(), 1, "only the request is answered");
+        assert_eq!(replies[0]["id"], 7);
+    }
+
+    #[cfg(feature = "legacy-spec")]
+    #[tokio::test]
+    async fn an_initialize_naming_an_unknown_session_still_opens_one() {
+        // The handshake is the one message allowed to name a session the server
+        // has never held: answering it with "start a new session" is the advice
+        // it is already following.
+        let (ctx, _rx) = make_ctx();
+        let id = uuid::Uuid::new_v4();
+        let req = post_builder()
+            .header(MCP_SESSION_ID, id.to_string())
+            .body(make_request_body(crate::commands::INIT))
+            .unwrap();
+
+        let ctx = Arc::new(ctx);
+        let ctx_clone = ctx.clone();
+        let _h = tokio::spawn(async move { handle_post(req, &ctx_clone).await });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(
+            ctx.sse_registry.is_live(&id),
+            "the handshake did not open the session it named"
+        );
+    }
+
+    #[cfg(feature = "legacy-spec")]
+    #[tokio::test]
+    async fn a_post_without_a_session_header_is_not_judged_against_one() {
+        // Nothing was stated, so there is nothing to have gone stale: the
+        // request gets a freshly minted session, exactly as before.
+        let (ctx, _rx) = make_ctx();
+        let req = post_builder()
+            .body(make_notification_body("notifications/initialized"))
+            .unwrap();
+
+        assert_eq!(
+            handle_post(req, &ctx).await.status(),
+            http::StatusCode::ACCEPTED
         );
     }
 

@@ -17,6 +17,14 @@ pub(super) struct McpSession {
     url: Arc<str>,
     session_id: OnceCell<uuid::Uuid>,
     last_event_id: RwLock<Option<String>>,
+
+    /// The reconnection delay the server last asked for with an SSE `retry:`
+    /// field, in milliseconds; [`UNSTATED_RETRY`] while it has asked for none.
+    ///
+    /// The field is the server's, not a suggestion: a client that reconnects on
+    /// its own schedule either hammers a server that asked for room or leaves a
+    /// stream down long after it said to come back.
+    retry_ms: std::sync::atomic::AtomicU64,
     cancellation_token: CancellationToken,
 
     /// Abort handles for in-flight requests whose reply is a long-lived stream
@@ -30,6 +38,12 @@ pub(super) struct McpSession {
     #[cfg(not(feature = "legacy-spec"))]
     streams: dashmap::DashMap<crate::types::RequestId, CancellationToken>,
 }
+
+/// The stored `retry:` when the server has not stated one.
+///
+/// A sentinel rather than `0`, because `0` is a legal delay the server may
+/// actually ask for; no server states a reconnection pause of 2^64-1 ms.
+const UNSTATED_RETRY: u64 = u64::MAX;
 
 impl McpSession {
     /// Creates a new [`McpSession`].
@@ -50,6 +64,7 @@ impl McpSession {
             sse_ready: Notify::new(),
             session_id: OnceCell::new(),
             last_event_id: RwLock::new(None),
+            retry_ms: std::sync::atomic::AtomicU64::new(UNSTATED_RETRY),
             cancellation_token: token,
             url: Arc::from(url.to_url()),
             #[cfg(not(feature = "legacy-spec"))]
@@ -129,6 +144,28 @@ impl McpSession {
     pub(super) fn set_last_event_id(&self, id: String) {
         if let Ok(mut guard) = self.last_event_id.write() {
             *guard = Some(id);
+        }
+    }
+
+    /// Records an SSE `retry:` field as the reconnection delay to use from now
+    /// on.
+    ///
+    /// `0` is a delay like any other -- a server asking to be reconnected
+    /// immediately -- so it is stored rather than dropped. "Nothing was asked
+    /// for" is a state of its own, and [`UNSTATED_RETRY`] is what says it;
+    /// using `0` for both would silently turn a request for an immediate
+    /// reconnect into the multi-second default.
+    pub(super) fn set_retry(&self, ms: u64) {
+        self.retry_ms
+            .store(ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// How long to wait before reconnecting a dropped stream: what the server
+    /// last asked for, or `default` while it has asked for nothing.
+    pub(super) fn retry_delay(&self, default: std::time::Duration) -> std::time::Duration {
+        match self.retry_ms.load(std::sync::atomic::Ordering::Relaxed) {
+            UNSTATED_RETRY => default,
+            ms => std::time::Duration::from_millis(ms),
         }
     }
 
@@ -227,6 +264,39 @@ mod tests {
         session.set_last_event_id("first".to_string());
         session.set_last_event_id("second".to_string());
         assert_eq!(session.last_event_id(), Some("second".to_string()));
+    }
+
+    #[test]
+    fn the_reconnect_delay_is_the_servers_to_state() {
+        let default = std::time::Duration::from_secs(3);
+        let session = create_session();
+        assert_eq!(
+            session.retry_delay(default),
+            default,
+            "a server that stated nothing gets the default"
+        );
+
+        session.set_retry(500);
+        assert_eq!(
+            session.retry_delay(default),
+            std::time::Duration::from_millis(500)
+        );
+
+        // Zero is a delay the server is entitled to ask for -- come back at
+        // once -- and it is not the same statement as having asked for nothing.
+        session.set_retry(0);
+        assert_eq!(
+            session.retry_delay(default),
+            std::time::Duration::ZERO,
+            "a server asking for an immediate reconnect must get one"
+        );
+
+        session.set_retry(1200);
+        assert_eq!(
+            session.retry_delay(default),
+            std::time::Duration::from_millis(1200),
+            "the latest statement wins"
+        );
     }
 
     #[tokio::test]

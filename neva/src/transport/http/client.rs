@@ -138,8 +138,13 @@ fn param_headers(
     let Some(entry) = registry.get(name) else {
         return Vec::new();
     };
+    // Nothing is mirrored from a listing that has gone stale: the schema that
+    // declared these annotations may no longer be the server's.
+    let Some(headers) = entry.usable() else {
+        return Vec::new();
+    };
     let args = params.get("arguments").cloned().unwrap_or_default();
-    crate::shared::param_headers::extract(entry.value(), &args)
+    crate::shared::param_headers::extract(headers, &args)
 }
 
 pub(super) async fn connect(rt: ClientRuntimeContext, token: CancellationToken) {
@@ -254,6 +259,29 @@ async fn handle_connection(
     }
 }
 
+/// The `Mcp-Param-*` headers a request mirrors -- read once per exchange.
+///
+/// Once, because reading can *spend* something. A listing fetched to recover
+/// from a `HeaderMismatch` is good for exactly one call, and an exchange builds
+/// its `POST` more than once whenever a managed-OAuth `401` sends it back
+/// through authorization. Reading again there would find the grace gone and the
+/// listing stale, so the retry -- the very call the recovery was for -- would go
+/// out without the headers the server refused it for, and be refused again.
+#[cfg(not(feature = "legacy-spec"))]
+fn mirrored_param_headers(
+    session: &McpSession,
+    req: &Message,
+    registry: &crate::shared::param_headers::Registry,
+) -> Vec<(String, String)> {
+    // A legacy peer never negotiated these, so asking would spend a grace on a
+    // request that is not going to carry them.
+    if session.is_legacy() {
+        return Vec::new();
+    }
+
+    param_headers(req, registry)
+}
+
 /// Builds the JSON-RPC POST with all transport headers and the current
 /// bearer credential attached.
 fn build_post(
@@ -261,12 +289,16 @@ fn build_post(
     session: &McpSession,
     req: &Message,
     bearer: Option<&str>,
-    #[cfg(not(feature = "legacy-spec"))] param_registry: &crate::shared::param_headers::Registry,
+    #[cfg(not(feature = "legacy-spec"))] mirrored: &[(String, String)],
 ) -> RequestBuilder {
+    // `.json()` already sets `Content-Type: application/json`, and `.header()`
+    // *appends* rather than replaces -- setting it again put the header on the
+    // wire twice. A receiver that reads the header as a list then sees
+    // `"application/json, application/json"`, which matches no media type it
+    // knows, and answers `415 Unsupported Media Type`.
     let mut resp = client
         .post(session.url())
         .json(req)
-        .header(CONTENT_TYPE, "application/json")
         .header(ACCEPT, "application/json, text/event-stream");
 
     if let Some(session_id) = session.session_id() {
@@ -287,9 +319,14 @@ fn build_post(
                 resp = resp.header(crate::transport::http::MCP_NAME, n);
             }
         }
-        for (name, value) in param_headers(req, param_registry) {
-            resp = resp.header(name, crate::transport::http::encode_header_value(&value));
+
+        for (name, value) in mirrored {
+            resp = resp.header(
+                name.as_str(),
+                crate::transport::http::encode_header_value(value),
+            );
         }
+
         resp = resp.header(
             crate::transport::http::MCP_PROTOCOL_VERSION,
             crate::LATEST_PROTOCOL_VERSION,
@@ -359,14 +396,20 @@ async fn exchange(
     auth: ClientAuth,
     #[cfg(not(feature = "legacy-spec"))] param_registry: crate::shared::param_headers::Registry,
 ) {
+    // Only this exchange's own requests use it. A resumption `GET` asks `auth`
+    // again when its turn comes, so a flow completing in between -- here or
+    // anywhere else -- reaches it without being threaded through.
     let bearer = auth.fresh_bearer().await;
+    // Once for the whole exchange -- see `mirrored_param_headers`.
+    #[cfg(not(feature = "legacy-spec"))]
+    let mirrored = mirrored_param_headers(&session, &req, &param_registry);
     let sent = build_post(
         &client,
         &session,
         &req,
         bearer.as_deref(),
         #[cfg(not(feature = "legacy-spec"))]
-        &param_registry,
+        &mirrored,
     )
     .send()
     .await;
@@ -384,30 +427,36 @@ async fn exchange(
     // flow (single-flight across concurrent requests) and one retry with
     // the fresh token. On flow failure the original 401 falls through to
     // the regular response path.
+    //
+    // A `403` counts when its challenge says `insufficient_scope`: the token is
+    // valid and simply does not cover this call, which is the one 403 a fresh
+    // authorization can fix. Any other 403 is a decision about the caller, not
+    // about the token, and re-authorizing would only ask the user to approve
+    // something that will be refused again.
     #[cfg(feature = "client-oauth")]
     let resp = match (&auth, resp.status()) {
-        (ClientAuth::OAuth(oauth), reqwest::StatusCode::UNAUTHORIZED) => {
-            let challenge = resp
-                .headers()
-                .get(reqwest::header::WWW_AUTHENTICATE)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned);
+        (ClientAuth::OAuth(oauth), status)
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || (status == reqwest::StatusCode::FORBIDDEN
+                    && insufficient_scope(resp.headers())) =>
+        {
+            let challenge = bearer_challenge(resp.headers());
             match oauth
                 .authorize(challenge.as_deref(), bearer.as_deref())
                 .await
             {
                 Ok(fresh) => {
-                    match build_post(
+                    let retried = build_post(
                         &client,
                         &session,
                         &req,
                         Some(&fresh),
                         #[cfg(not(feature = "legacy-spec"))]
-                        &param_registry,
+                        &mirrored,
                     )
                     .send()
-                    .await
-                    {
+                    .await;
+                    match retried {
                         Ok(retried) => retried,
                         Err(_err) => {
                             #[cfg(feature = "tracing")]
@@ -475,7 +524,35 @@ async fn exchange(
         let stream = sse_stream::SseStream::from_bytes_stream(resp.bytes_stream());
         let ids = request_ids(&req);
 
-        let answered = drain_post_sse(stream, &resp_tx, &ids).await;
+        let Drained {
+            mut owed,
+            last_event_id,
+            retry,
+        } = drain_post_sse(stream, &resp_tx, &ids).await;
+
+        // A stream that ended before the response is not necessarily a failed
+        // request: on the session-bound transport the server may finish the
+        // answer on a resumed stream, which is what event ids and the `retry:`
+        // field are for. One attempt, and only when the server named an id to
+        // resume from -- without one there is nothing to ask it to replay, and
+        // more than one turns a server that keeps dropping the stream into a
+        // reconnect loop the caller cannot see.
+        //
+        // Both the id and the delay are the ones *this* stream stated. The
+        // session's other stream has its own position and its own idea of how
+        // long to wait; borrowing either would ask the server to replay from
+        // somewhere this request never was, or to be reconnected on a schedule
+        // it never asked this stream for.
+        //
+        // The resumption asks for what is still owed rather than for everything
+        // the `POST` carried: a batch whose stream died midway has some of its
+        // answers already, and re-delivering those would resolve nothing.
+        if !owed.is_empty()
+            && resumable(&session)
+            && let Some(last_id) = last_event_id
+        {
+            owed = resume_stream(&client, &session, &auth, &last_id, retry, &resp_tx, &owed).await;
+        }
 
         // A truncated stream, an unparseable frame, or EOF before the final
         // response would otherwise leave the originating request sitting in the
@@ -483,10 +560,10 @@ async fn exchange(
         // the non-JSON-RPC reply path below. `InternalError` (not `ParseError`)
         // on purpose: the peer clearly speaks 2026-07-28, so this must not be mistaken
         // for dual-mode fallback evidence.
-        if !answered {
+        if !owed.is_empty() {
             #[cfg(feature = "tracing")]
             tracing::error!(logger = "neva", STREAM_ENDED_BEFORE_RESPONSE);
-            for id in ids {
+            for id in owed {
                 let resp = crate::types::Response::error(
                     id,
                     Error::new(ErrorCode::InternalError, STREAM_ENDED_BEFORE_RESPONSE),
@@ -743,6 +820,9 @@ async fn handle_sse_connection(
     // accepted and the session must fail rather than loop.
     #[cfg(feature = "client-oauth")]
     let mut reauthorized = false;
+    // Whether this session has ever had the standalone stream open. It is what
+    // tells the two meanings of a `404` on this verb apart; see below.
+    let mut streamed = false;
     loop {
         let bearer = auth.fresh_bearer().await;
         let mut req = client
@@ -774,16 +854,21 @@ async fn handle_sse_connection(
 
         // A 401 under a managed OAuth session re-runs the authorization
         // flow once and retries the subscription with the fresh token.
+        //
+        // So does a `403` whose challenge says `insufficient_scope`, on the
+        // same reasoning the `POST` path uses: the token is valid and simply
+        // does not cover this, which is the one `403` a wider grant fixes. A
+        // server that guards its session stream with a scope its `POST`s do not
+        // need would otherwise be unusable -- the client would never ask for
+        // that scope, and the stream would die with the session.
         #[cfg(feature = "client-oauth")]
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+        if (resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            || (resp.status() == reqwest::StatusCode::FORBIDDEN
+                && insufficient_scope(resp.headers())))
             && !reauthorized
             && let ClientAuth::OAuth(oauth) = &auth
         {
-            let challenge = resp
-                .headers()
-                .get(reqwest::header::WWW_AUTHENTICATE)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned);
+            let challenge = bearer_challenge(resp.headers());
             match oauth
                 .authorize(challenge.as_deref(), bearer.as_deref())
                 .await
@@ -799,6 +884,38 @@ async fn handle_sse_connection(
             }
         }
 
+        // A server that hosts no standalone stream says so with `405 Method Not
+        // Allowed`, the status the spec names for exactly this. That is not a
+        // failure: the GET stream is optional, and a client that reads "there
+        // is no stream here" as a dead session refuses to talk to a conformant
+        // server that simply chose not to offer one.
+        //
+        // The init POST is waiting on `sse_ready`, so it is released rather
+        // than cancelled, and the session carries on over POST alone.
+        //
+        // `404` carries both meanings on this verb, and *when* it arrives is
+        // what separates them. Before the stream has ever opened it is the
+        // endpoint not routing `GET` at all -- servers answer a verb they do
+        // not handle that way, the spec's `405` notwithstanding -- and the
+        // handshake that just completed says the session is live. After a
+        // stream that worked, the route plainly exists, so a `404` is the
+        // session the request named being one the server no longer holds. That
+        // one must not be swallowed: releasing the wait would leave the client
+        // running on a session id every later POST is going to be refused for,
+        // so it falls through to the cancellation below.
+        if resp.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED
+            || (resp.status() == reqwest::StatusCode::NOT_FOUND && !streamed)
+        {
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                logger = "neva",
+                "server offers no standalone SSE stream ({}); continuing over POST only",
+                resp.status()
+            );
+            session.notify_sse_initialized();
+            return;
+        }
+
         if !resp.status().is_success() {
             #[cfg(feature = "tracing")]
             tracing::error!(
@@ -806,8 +923,10 @@ async fn handle_sse_connection(
                 "SSE request failed with status: {}",
                 resp.status()
             );
-            // Cancel the session so any in-flight init POST waiting on sse_ready()
-            // is unblocked instead of hanging forever.
+            // Any other non-2xx is about the session itself, not about the
+            // stream being on offer -- a 401 says the credentials the POSTs
+            // carry are wrong too. Cancel, so an in-flight init POST waiting on
+            // `sse_ready()` fails with that rather than hanging forever.
             session.cancellation_token().cancel();
             return;
         }
@@ -822,6 +941,8 @@ async fn handle_sse_connection(
             .map_ok(|event| handle_event(event, &session, &resp_tx))
             .map_err(handle_error);
 
+        // The route exists, so from here a `404` can only be about the session.
+        streamed = true;
         session.notify_sse_initialized();
 
         loop {
@@ -839,11 +960,14 @@ async fn handle_sse_connection(
             }
         }
 
-        // Stream ended -- wait before reconnecting to avoid hammering the server
+        // Stream ended -- wait before reconnecting to avoid hammering the
+        // server. How long is the server's call when it has stated one with an
+        // SSE `retry:` field; the constant is only the answer for a server that
+        // never said.
         tokio::select! {
             biased;
             _ = token.cancelled() => return,
-            _ = tokio::time::sleep(SSE_RECONNECT_DELAY) => {}
+            _ = tokio::time::sleep(session.retry_delay(SSE_RECONNECT_DELAY)) => {}
         }
     }
 }
@@ -851,26 +975,63 @@ async fn handle_sse_connection(
 /// Drains a request-scoped SSE `POST` reply, forwarding every JSON-RPC message
 /// it carries to the receive loop.
 ///
-/// Returns whether the terminal reply arrived, so the caller can fail the
-/// originating request when the stream ends without one. `ids` are the requests
-/// this `POST` carried -- a reply answers it only by answering one of them.
+/// `ids` are the requests still owed an answer; [`Drained::owed`] is whatever
+/// is *still* owed when the stream stops, so the caller can resume for exactly
+/// those and fail exactly those.
+///
+/// Reading stops as soon as nothing is owed. That matters on the resumption
+/// path: the stream replaying a truncated answer is the session's own `GET`,
+/// which is long-lived and does not close once it has replayed. Draining it to
+/// EOF would park this task on the session stream for the life of the client,
+/// one leaked connection per truncated reply, competing with the standalone
+/// `GET` for the traffic that follows.
+///
+/// The event id and the `retry:` delay are reported back rather than written to
+/// the session. A legacy session runs two streams at once -- the standalone
+/// `GET` and this request-scoped `POST` -- and each has its own position and its
+/// own reconnection time. Sharing either lets a `GET` frame arriving between the
+/// truncation and the resumption send this `POST` back to a place it never
+/// reached, or reconnect it on a schedule the server named for the other stream;
+/// and lets a `POST` frame do the same to the `GET`.
 async fn drain_post_sse<S>(
     mut stream: S,
     resp_tx: &mpsc::Sender<Result<Message, Error>>,
     ids: &[crate::types::RequestId],
-) -> bool
+) -> Drained
 where
     S: futures_util::Stream<Item = Result<sse_stream::Sse, sse_stream::Error>> + Unpin,
 {
-    let mut answered = false;
-    while let Some(event) = stream.next().await {
+    let mut owed = ids.to_vec();
+    let mut last_event_id = None;
+    let mut retry = None;
+    while !owed.is_empty()
+        && let Some(event) = stream.next().await
+    {
         match event {
-            Ok(sse) if is_message_event(&sse) => {
-                if forward_sse_message(sse, resp_tx, ids).await {
-                    answered = true;
+            Ok(sse) => {
+                // Recorded before the frame is judged: a priming frame carries
+                // no message, and is exactly where a server states the id to
+                // resume from and how long to wait before doing so.
+                //
+                // Both stay with this stream. A reconnection time belongs to
+                // the connection that was told it -- that is what the SSE
+                // standard makes it -- and a legacy session runs two streams
+                // whose lifetimes have nothing to do with each other: the
+                // long-lived `GET` and this request-scoped reply. Writing this
+                // one to the session would let whichever frame arrived last set
+                // the other stream's delay, so a `retry: 0` here would have a
+                // dropped `GET` reconnect instantly, and a patient `GET` would
+                // hold up this resumption.
+                if let Some(ms) = sse.retry {
+                    retry = Some(ms);
+                }
+                if let Some(id) = sse.id.clone() {
+                    last_event_id = Some(id);
+                }
+                if is_message_event(&sse) {
+                    forward_sse_message(sse, resp_tx, &mut owed).await;
                 }
             }
-            Ok(_) => {}
             Err(_err) => {
                 #[cfg(feature = "tracing")]
                 tracing::error!(logger = "neva", "SSE POST stream error: {}", _err);
@@ -878,7 +1039,291 @@ where
             }
         }
     }
-    answered
+    Drained {
+        owed,
+        last_event_id,
+        retry,
+    }
+}
+
+/// What one pass over a request-scoped SSE stream left behind.
+#[derive(Debug)]
+struct Drained {
+    /// Requests this `POST` carried that are still unanswered.
+    owed: Vec<crate::types::RequestId>,
+    /// The last `id:` this stream stated -- where a resumption of *this*
+    /// stream picks up, which is not where the session's other stream is.
+    last_event_id: Option<String>,
+    /// The `retry:` this stream stated, in milliseconds, if it stated one --
+    /// how long before reopening *this* stream, and nobody else's.
+    retry: Option<u64>,
+}
+
+/// Whether a `403` is the authorization server's `insufficient_scope`, and so
+/// something a wider grant would fix.
+///
+/// RFC 6750 puts the code in the `WWW-Authenticate` challenge; a `403` without
+/// one is the resource server refusing the caller, not the token.
+///
+/// The challenge is parsed rather than searched. `insufficient_scope` is a
+/// value of the `error` parameter, and the same bytes appear in places that
+/// mean the opposite of it: an `error_description` explaining the code, or a
+/// scope name that merely contains it. Reading those as the error would send a
+/// caller through an interactive flow -- replacing a perfectly good token -- to
+/// retry a request that re-authorization was never going to fix.
+///
+/// The question is asked of [`bearer_challenge`], which is also what the flow
+/// is handed -- so what decides a step-up and what is acted on cannot be two
+/// different challenges.
+#[cfg(feature = "client-oauth")]
+fn insufficient_scope(headers: &reqwest::header::HeaderMap) -> bool {
+    use volga_oauth_client::{BearerChallenge, OAuthErrorCode};
+
+    bearer_challenge(headers)
+        .and_then(|challenge| BearerChallenge::parse(&challenge).ok())
+        .is_some_and(|challenge| {
+            matches!(challenge.error(), Some(OAuthErrorCode::InsufficientScope))
+        })
+}
+
+/// The `WWW-Authenticate` value carrying the Bearer challenge that applies, if
+/// any.
+///
+/// `WWW-Authenticate` may be sent more than once, and one value may carry
+/// several challenges -- including several *Bearer* ones, which RFC 9110 allows
+/// and a server distinguishing realms produces. Both are walked:
+/// [`bearer_challenges`] takes one value apart, and this takes them all.
+///
+/// Among them the one naming `insufficient_scope` wins, wherever it sits. It is
+/// the only error a client can answer with anything beyond authenticating again,
+/// and answering it takes what that challenge carries -- the `scope` the request
+/// was short of. Handing the flow whichever came first, a
+/// `Bearer error="invalid_token"` say, would have it re-authorize for exactly the
+/// grant it already held and spend the exchange's one retry being refused
+/// identically. Where none names the code the first is as good as any: a
+/// `resource_metadata` pointer is the server's own and does not depend on which
+/// error accompanies it.
+#[cfg(feature = "client-oauth")]
+fn bearer_challenge(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    use volga_oauth_client::{BearerChallenge, OAuthErrorCode};
+
+    let mut first = None;
+    for value in headers
+        .get_all(reqwest::header::WWW_AUTHENTICATE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+    {
+        for challenge in bearer_challenges(value) {
+            let Ok(parsed) = BearerChallenge::parse(&challenge) else {
+                continue;
+            };
+            if matches!(parsed.error(), Some(OAuthErrorCode::InsufficientScope)) {
+                return Some(challenge);
+            }
+            first.get_or_insert(challenge);
+        }
+    }
+    first
+}
+
+/// The Bearer challenges inside one `WWW-Authenticate` value, each rendered on
+/// its own.
+///
+/// `BearerChallenge::parse` returns the *first* Bearer challenge in a value and
+/// stops where the next scheme begins, which is the right contract for reading
+/// one challenge and the wrong one for finding the applicable challenge among
+/// several. Iterating header values does not help: RFC 9110 section 11.6.1 lets a
+/// server put the whole list in one value, so
+/// `Bearer error="invalid_token", Bearer error="insufficient_scope", scope="admin"`
+/// is a single value whose second challenge is the one that matters.
+///
+/// Splitting is by challenge boundary, not by comma: a list element begins a new
+/// challenge when its first token is not `name=value` (RFC 9110 section 11.1),
+/// and commas inside a quoted string separate nothing. Parameters are left to
+/// `BearerChallenge::parse`, which each rendered challenge is handed whole.
+#[cfg(feature = "client-oauth")]
+fn bearer_challenges(value: &str) -> Vec<String> {
+    let mut groups: Vec<Vec<&str>> = Vec::new();
+    for element in list_elements(value) {
+        // A parameter is `token BWS "=" BWS value` (RFC 9110 section 11.2), so
+        // what tells it from a scheme is whether an `=` follows the first token
+        // -- not whether whitespace precedes the `=`, which that grammar allows.
+        // Reading `scope = "admin"` as a scheme would break the challenge in two
+        // and leave the step-up asking for nothing.
+        let rest = element.trim_start();
+        let token_end = rest
+            .find(|c: char| c.is_whitespace() || c == '=')
+            .unwrap_or(rest.len());
+
+        let starts_challenge = !rest[token_end..].trim_start().starts_with('=');
+        if starts_challenge {
+            groups.push(vec![element]);
+        } else if let Some(group) = groups.last_mut() {
+            group.push(element);
+        }
+    }
+
+    groups
+        .into_iter()
+        .filter(|group| {
+            group[0]
+                .split_ascii_whitespace()
+                .next()
+                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("Bearer"))
+        })
+        .map(|group| group.join(", "))
+        .collect()
+}
+
+/// Splits a header value on the commas that separate list elements -- the ones
+/// outside a quoted string, since a quoted `scope="a,b"` carries its own.
+#[cfg(feature = "client-oauth")]
+fn list_elements(value: &str) -> Vec<&str> {
+    let mut elements = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (i, byte) in value.bytes().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match byte {
+            b'\\' if quoted => escaped = true,
+            b'"' => quoted = !quoted,
+            b',' if !quoted => {
+                elements.push(value[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    elements.push(value[start..].trim());
+    elements.retain(|element| !element.is_empty());
+    elements
+}
+
+/// Whether this session can resume a dropped stream.
+///
+/// Resumption is a session-bound-transport affair: MCP 2026-07-28 removed both
+/// the session and `Last-Event-ID`, so a 2026-07-28 peer has nothing to resume
+/// against and a dropped stream there is simply a failed request.
+fn resumable(
+    #[cfg_attr(feature = "legacy-spec", allow(unused_variables))] session: &McpSession,
+) -> bool {
+    #[cfg(not(feature = "legacy-spec"))]
+    {
+        session.is_legacy()
+    }
+    #[cfg(feature = "legacy-spec")]
+    {
+        true
+    }
+}
+
+/// Reopens a dropped response stream and drains it for the answer it owed.
+///
+/// The server said when to come back (`retry:`) and where to resume from
+/// (`id:`); both are honored, because reconnecting sooner hammers a server that
+/// asked for room and reconnecting without the id makes it replay from the
+/// start -- or from nothing. Both are what the dropped stream itself stated:
+/// `retry` is `None` when it stated nothing, and the constant answers for it
+/// rather than the standalone `GET`'s opinion of when to come back.
+///
+/// Returns what is still owed after this attempt.
+async fn resume_stream(
+    client: &reqwest::Client,
+    session: &McpSession,
+    auth: &ClientAuth,
+    last_event_id: &str,
+    retry: Option<u64>,
+    resp_tx: &mpsc::Sender<Result<Message, Error>>,
+    ids: &[crate::types::RequestId],
+) -> Vec<crate::types::RequestId> {
+    let delay = retry.map_or(SSE_RECONNECT_DELAY, std::time::Duration::from_millis);
+    let token = session.cancellation_token();
+    tokio::select! {
+        biased;
+        _ = token.cancelled() => return ids.to_vec(),
+        _ = tokio::time::sleep(delay) => {}
+    }
+
+    // Asked for here rather than carried from the `POST`, because the wait in
+    // between is the server's to choose and may outlast the token that request
+    // went out with. A managed session renews one that is about to expire
+    // without troubling anybody.
+    #[cfg_attr(not(feature = "client-oauth"), allow(unused_mut))]
+    let mut bearer = auth.fresh_bearer().await;
+    #[cfg(feature = "client-oauth")]
+    let mut reauthorized = false;
+
+    // Without the OAuth retry there is nothing to come back for, and the loop
+    // is one pass by construction.
+    #[cfg_attr(not(feature = "client-oauth"), allow(clippy::never_loop))]
+    let resp = loop {
+        let mut req = client
+            .get(session.url())
+            .header(ACCEPT, "application/json, text/event-stream")
+            .header(CACHE_CONTROL, "no-cache")
+            .header(LAST_EVENT_ID, last_event_id);
+
+        if let Some(session_id) = session.session_id() {
+            req = req.header(MCP_SESSION_ID, session_id.to_string());
+        }
+        if let Some(bearer) = bearer.as_deref() {
+            req = req.bearer_auth(bearer);
+        }
+
+        let resp = match req.send().await {
+            Ok(resp) => resp,
+            Err(_err) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(logger = "neva", "Failed to resume SSE stream: {}", _err);
+                return ids.to_vec();
+            }
+        };
+        if resp.status().is_success() {
+            break resp;
+        }
+
+        // The same authorization retry the `POST` and the standalone `GET` get,
+        // for the same reason and once only. Treating a `401` here as final
+        // throws away the answer this reconnection went back for -- the request
+        // fails with an `InternalError` over a credential the client could have
+        // renewed.
+        #[cfg(feature = "client-oauth")]
+        if !reauthorized
+            && (resp.status() == reqwest::StatusCode::UNAUTHORIZED
+                || (resp.status() == reqwest::StatusCode::FORBIDDEN
+                    && insufficient_scope(resp.headers())))
+            && let ClientAuth::OAuth(oauth) = auth
+        {
+            let challenge = bearer_challenge(resp.headers());
+            if let Ok(fresh) = oauth
+                .authorize(challenge.as_deref(), bearer.as_deref())
+                .await
+            {
+                bearer = Some(fresh);
+                reauthorized = true;
+                continue;
+            }
+        }
+
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            logger = "neva",
+            "SSE resumption refused with status: {}",
+            resp.status()
+        );
+        return ids.to_vec();
+    };
+
+    let stream = sse_stream::SseStream::from_bytes_stream(resp.bytes_stream());
+    tokio::select! {
+        biased;
+        _ = token.cancelled() => ids.to_vec(),
+        drained = drain_post_sse(stream, resp_tx, ids) => drained.owed,
+    }
 }
 
 /// Whether an SSE frame carries a JSON-RPC message.
@@ -900,6 +1345,9 @@ async fn handle_event(
     session: &Arc<McpSession>,
     resp_tx: &mpsc::Sender<Result<Message, Error>>,
 ) {
+    if let Some(retry) = event.retry {
+        session.set_retry(retry);
+    }
     let id = event.id.clone();
     let delivered = if is_message_event(&event) {
         handle_msg(event, resp_tx).await
@@ -950,10 +1398,10 @@ async fn handle_msg(
 
 /// Forwards one frame of a request-scoped SSE `POST` reply to the receive loop.
 ///
-/// Returns `true` only for the *terminal* reply -- a response to one of `ids`,
-/// the requests this `POST` carried, whether standalone or inside a batch -- so
-/// the caller can tell an orderly stream end from a truncated one
-/// (notifications, and frames that fail to parse, return `false`).
+/// Strikes off `owed` every request this frame answers -- a response to one of
+/// them, whether standalone or inside a batch -- so the caller can tell an
+/// orderly stream end from a truncated one. Notifications, and frames that fail
+/// to parse or to reach the receive loop, strike off nothing.
 ///
 /// Both halves of that matter. A batch is not terminal by virtue of being a
 /// batch: a subscription stream may deliver its acknowledgment and its events
@@ -962,13 +1410,16 @@ async fn handle_msg(
 /// mistake makes a stream that dies before the real response look orderly,
 /// leaving a listen slot -- which carries no TTL -- with nothing to fail it and
 /// `Subscription::closed` waiting on a result that is never coming.
+///
+/// A batch reply is struck off per response rather than wholesale: one frame
+/// may answer some of what a batched `POST` asked and leave the rest to come.
 async fn forward_sse_message(
     event: sse_stream::Sse,
     resp_tx: &mpsc::Sender<Result<Message, Error>>,
-    ids: &[crate::types::RequestId],
-) -> bool {
+    owed: &mut Vec<crate::types::RequestId>,
+) {
     let Some(data) = event.data else {
-        return false;
+        return;
     };
 
     let msg = match serde_json::from_str::<Message>(&data) {
@@ -976,26 +1427,32 @@ async fn forward_sse_message(
         Err(_err) => {
             #[cfg(feature = "tracing")]
             tracing::error!(logger = "neva", "Failed to parse SSE POST event: {}", _err);
-            return false;
+            return;
         }
     };
 
-    let answers = |resp: &crate::types::Response| ids.contains(&resp.full_id());
-    let terminal = match &msg {
-        Message::Response(resp) => answers(resp),
-        Message::Batch(batch) => batch.iter().any(
-            |env| matches!(env, crate::types::MessageEnvelope::Response(resp) if answers(resp)),
-        ),
-        _ => false,
+    let answered: Vec<_> = match &msg {
+        Message::Response(resp) => vec![resp.full_id()],
+        Message::Batch(batch) => batch
+            .iter()
+            .filter_map(|env| match env {
+                crate::types::MessageEnvelope::Response(resp) => Some(resp.full_id()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
     };
 
+    // Struck off only once the message is on its way to the receive loop: a
+    // frame that never gets there has resolved nothing, and the caller must
+    // still fail the request rather than assume it was answered.
     if let Err(_err) = resp_tx.send(Ok(msg)).await {
         #[cfg(feature = "tracing")]
         tracing::error!(logger = "neva", "Failed to send response: {}", _err);
-        return false;
+        return;
     }
 
-    terminal
+    owed.retain(|id| !answered.contains(id));
 }
 
 #[inline]
@@ -1034,6 +1491,192 @@ mod tests {
     use super::*;
     use crate::transport::http::ServiceUrl;
 
+    /// `insufficient_scope` is a value of the challenge's `error` parameter,
+    /// and the same bytes turn up where they mean the opposite: describing the
+    /// code in prose, or inside a scope name. Mistaking those for the error
+    /// sends the caller through an interactive flow -- discarding a valid token
+    /// -- to retry a request re-authorization cannot fix.
+    #[test]
+    #[cfg(feature = "client-oauth")]
+    fn only_the_challenge_error_parameter_says_the_scope_is_short() {
+        let headers_of = |value: &str| {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::WWW_AUTHENTICATE,
+                value.parse().expect("a header value"),
+            );
+            headers
+        };
+
+        let challenged = |value: &str| insufficient_scope(&headers_of(value));
+
+        assert!(challenged(r#"Bearer error="insufficient_scope""#));
+        assert!(challenged(
+            r#"Bearer realm="mcp", error="insufficient_scope", scope="admin""#
+        ));
+
+        // The words, but as prose about a different error.
+        assert!(!challenged(
+            r#"Bearer error="invalid_token", error_description="missing insufficient_scope claim""#
+        ));
+        // The words, but as part of a scope name.
+        assert!(!challenged(
+            r#"Bearer error="invalid_token", scope="insufficient_scope_admin""#
+        ));
+        // No error parameter at all: a resource server refusing the caller.
+        assert!(!challenged(r#"Bearer realm="mcp""#));
+        assert!(!challenged("Basic realm=\"mcp\""));
+
+        // And no challenge at all.
+        assert!(!insufficient_scope(&reqwest::header::HeaderMap::new()));
+
+        // `WWW-Authenticate` may be sent more than once, and the Bearer
+        // challenge need not come first. Reading only the first value would
+        // answer as if none had been offered.
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.append(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"Basic realm="legacy""#.parse().expect("a header value"),
+        );
+        headers.append(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"Bearer error="insufficient_scope", scope="admin""#
+                .parse()
+                .expect("a header value"),
+        );
+        assert!(
+            insufficient_scope(&headers),
+            "the Bearer challenge counts wherever in the list it sits"
+        );
+
+        // Several challenges inside *one* value are the parser's job, and it
+        // does them -- so this must not regress into scanning only the first.
+        assert!(challenged(
+            r#"Basic realm="legacy", Bearer error="insufficient_scope""#
+        ));
+
+        // Two *Bearer* challenges, the applicable one second. Stopping at the
+        // first that parses answers "not a step-up" on a response that asked
+        // for one, and the token gets refreshed into the same refusal.
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.append(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"Bearer realm="legacy", error="invalid_token""#
+                .parse()
+                .expect("a header value"),
+        );
+        headers.append(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"Bearer realm="mcp", error="insufficient_scope", scope="admin""#
+                .parse()
+                .expect("a header value"),
+        );
+        assert!(
+            insufficient_scope(&headers),
+            "the challenge that names the code is the one that answers"
+        );
+        // And it is the one handed to the flow, or the step-up would go asking
+        // for the grant it already had: the scope it was short of lives on that
+        // challenge and nowhere else.
+        assert_eq!(
+            bearer_challenge(&headers).as_deref(),
+            Some(r#"Bearer realm="mcp", error="insufficient_scope", scope="admin""#),
+            "the flow must be given the challenge that says what is missing"
+        );
+
+        // With no such challenge, the first that parses is as good as any --
+        // and a Bearer behind a Basic is still found.
+        let mut plain = reqwest::header::HeaderMap::new();
+        plain.append(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"Basic realm="legacy""#.parse().expect("a header value"),
+        );
+        plain.append(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"Bearer resource_metadata="https://rs.example/.well-known/oauth-protected-resource""#
+                .parse()
+                .expect("a header value"),
+        );
+        assert_eq!(
+            bearer_challenge(&plain).as_deref(),
+            Some(
+                r#"Bearer resource_metadata="https://rs.example/.well-known/oauth-protected-resource""#
+            )
+        );
+        assert!(!insufficient_scope(&plain));
+
+        // The same list, in *one* value. RFC 9110 lets a server send it that
+        // way, and the dependency's parser stops at the second scheme -- so
+        // walking header values alone would never reach the challenge that
+        // matters.
+        assert!(challenged(
+            r#"Bearer realm="legacy", error="invalid_token", Bearer realm="mcp", error="insufficient_scope", scope="admin""#
+        ));
+        let mut combined = reqwest::header::HeaderMap::new();
+        combined.insert(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"Bearer realm="legacy", error="invalid_token", Bearer realm="mcp", error="insufficient_scope", scope="admin""#
+                .parse()
+                .expect("a header value"),
+        );
+        assert_eq!(
+            bearer_challenge(&combined).as_deref(),
+            Some(r#"Bearer realm="mcp", error="insufficient_scope", scope="admin""#),
+            "the applicable challenge is handed over on its own"
+        );
+
+        // The demanded scope has to survive the split, or the step-up asks for
+        // nothing and the retry is refused identically. Spaced around the `=`,
+        // which RFC 9110 allows and the challenge parser accepts.
+        let spaced = r#"Bearer error = "insufficient_scope", scope = "admin""#;
+        assert!(challenged(spaced));
+        let parsed = volga_oauth_client::BearerChallenge::parse(
+            bearer_challenge(&headers_of(spaced))
+                .as_deref()
+                .expect("a challenge"),
+        )
+        .expect("it parses");
+        assert_eq!(parsed.scope(), Some("admin"));
+    }
+
+    /// A comma inside a quoted string separates nothing, and a parameter is not
+    /// a scheme however much it looks like one at a glance.
+    #[test]
+    #[cfg(feature = "client-oauth")]
+    fn a_header_value_is_split_on_challenge_boundaries() {
+        assert_eq!(
+            bearer_challenges(r#"Bearer scope="a,b", error="insufficient_scope""#),
+            vec![r#"Bearer scope="a,b", error="insufficient_scope""#],
+            "a quoted comma is part of the value, not a list separator"
+        );
+        assert_eq!(
+            bearer_challenges(r#"Basic realm="legacy", Bearer realm="mcp""#),
+            vec![r#"Bearer realm="mcp""#],
+            "the other scheme's parameters stay with it"
+        );
+        assert_eq!(
+            bearer_challenges(r#"Bearer, Bearer error="insufficient_scope""#),
+            vec![r#"Bearer"#, r#"Bearer error="insufficient_scope""#],
+            "a bare challenge is still a challenge"
+        );
+        assert!(bearer_challenges(r#"Basic realm="legacy""#).is_empty());
+        // `token BWS "=" BWS value` is a parameter, not a scheme -- splitting
+        // there would leave the challenge without the scope it demanded.
+        assert_eq!(
+            bearer_challenges(r#"Bearer error="insufficient_scope", scope = "admin""#),
+            vec![r#"Bearer error="insufficient_scope", scope = "admin""#]
+        );
+        // A token68 payload has whitespace after its scheme and an `=` of its
+        // own, and is still a challenge of another scheme.
+        assert!(bearer_challenges("Basic dXNlcjpwYXNz==").is_empty());
+        // A quoted escape must not end the string early and turn the rest of
+        // the value into challenges of its own.
+        assert_eq!(
+            bearer_challenges(r#"Bearer error_description="say \" then, stop""#),
+            vec![r#"Bearer error_description="say \" then, stop""#]
+        );
+    }
+
     fn make_session() -> Arc<McpSession> {
         Arc::new(McpSession::new(
             ServiceUrl::default(),
@@ -1041,6 +1684,218 @@ mod tests {
             #[cfg(not(feature = "legacy-spec"))]
             Default::default(),
         ))
+    }
+
+    /// An exchange that builds its `POST` twice must send the same
+    /// `Mcp-Param-*` headers both times.
+    ///
+    /// The second build is the managed-OAuth retry, and the headers may be
+    /// mirrored on a grace: one call's worth, granted because the server refused
+    /// the first attempt for missing them. Reading the registry again there
+    /// finds the grace spent and the listing stale, so the retry would go out
+    /// bare -- and be refused for exactly what the recovery had just fixed.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn a_retried_post_mirrors_what_the_first_one_did() {
+        use crate::shared::param_headers::{ParamHeader, Registration};
+
+        let session = make_session();
+        let registry: crate::shared::param_headers::Registry = Default::default();
+        // `ttlMs: 0` -- stale on arrival, which is what an absent `ttlMs` means
+        // too, so the grace is the only thing that lets this call mirror at all.
+        registry.insert(
+            "route".to_string(),
+            Registration::new(
+                vec![ParamHeader {
+                    path: vec!["region".into()],
+                    header: "Region".into(),
+                }],
+                0,
+                true,
+            ),
+        );
+
+        let req = Message::Request(crate::types::Request::new(
+            Some(crate::types::RequestId::Number(1)),
+            crate::types::tool::commands::CALL,
+            Some(serde_json::json!({
+                "name": "route",
+                "arguments": { "region": "us-west1" }
+            })),
+        ));
+
+        let mirrored = mirrored_param_headers(&session, &req, &registry);
+        assert_eq!(
+            mirrored,
+            vec![("Mcp-Param-Region".to_string(), "us-west1".to_string())],
+            "the grace covers this call"
+        );
+        assert!(
+            mirrored_param_headers(&session, &req, &registry).is_empty(),
+            "and reading is what spends it -- hence reading once"
+        );
+
+        let client = create_client(
+            #[cfg(feature = "client-tls")]
+            None,
+        )
+        .expect("a client");
+        for attempt in ["first", "retry"] {
+            let built = build_post(&client, &session, &req, None, &mirrored)
+                .build()
+                .expect("a request");
+            assert_eq!(
+                built
+                    .headers()
+                    .get("Mcp-Param-Region")
+                    .and_then(|v| v.to_str().ok()),
+                Some("us-west1"),
+                "the {attempt} attempt must carry the mirrored header"
+            );
+        }
+    }
+
+    /// A resumption refused for a credential must not cost the answer.
+    ///
+    /// The wait before reconnecting is the server's to name, and it can outlast
+    /// the token the original `POST` went out with. The `POST` and the
+    /// standalone `GET` both re-authorize once on a `401`; this path treating it
+    /// as final loses the terminal response the reconnection went back for, and
+    /// the request fails with an `InternalError` over a credential the client
+    /// could simply have renewed.
+    #[cfg(feature = "client-oauth")]
+    #[tokio::test]
+    async fn a_resumption_refused_for_its_token_authorizes_and_tries_again() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // One socket playing both parts: the MCP endpoint that refuses the
+        // resumption until it carries the granted token, and the authorization
+        // server that issues it.
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let read = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+                let root = format!("http://{addr}");
+
+                let resp = if request.starts_with("GET /mcp") {
+                    if request.contains("Bearer granted-token") {
+                        let body = "id: 2\nevent: message\ndata: \
+                             {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n";
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                    } else {
+                        format!(
+                            "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer resource_metadata=\"{root}/.well-known/oauth-protected-resource/mcp\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        )
+                    }
+                } else {
+                    let body = if request.contains("/.well-known/oauth-protected-resource") {
+                        format!(r#"{{"resource":"{root}/mcp","authorization_servers":["{root}"]}}"#)
+                    } else if request.contains("/.well-known/") {
+                        format!(
+                            r#"{{"issuer":"{root}","token_endpoint":"{root}/token",
+                                 "authorization_endpoint":"{root}/authorize",
+                                 "registration_endpoint":"{root}/register",
+                                 "response_types_supported":["code"]}}"#
+                        )
+                    } else if request.contains("/register") {
+                        r#"{"client_id":"registered-client"}"#.to_string()
+                    } else {
+                        r#"{"access_token":"granted-token","token_type":"Bearer","expires_in":3600}"#
+                            .to_string()
+                    };
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let url = format!("http://{addr}/mcp");
+        // `From<&str>` takes `addr[/endpoint]`, without a scheme; the endpoint
+        // defaults to `/mcp`, which is where this mock listens.
+        let session = Arc::new(McpSession::new(
+            ServiceUrl::from(addr.to_string().as_str()),
+            CancellationToken::new(),
+            #[cfg(not(feature = "legacy-spec"))]
+            Default::default(),
+        ));
+        let config = oauth::OAuthClientConfig::default()
+            .require_https(false)
+            .with_handler(EchoesState);
+        let auth = ClientAuth::OAuth(Arc::new(
+            oauth::OAuthSession::new(config, &url).expect("a session"),
+        ));
+
+        let (tx, mut rx) = mpsc::channel(2);
+        let owed = resume_stream(
+            &create_client(
+                #[cfg(feature = "client-tls")]
+                None,
+            )
+            .expect("a client"),
+            &session,
+            &auth,
+            "1",
+            Some(0),
+            &tx,
+            &[crate::types::RequestId::Number(1)],
+        )
+        .await;
+
+        assert!(
+            owed.is_empty(),
+            "the resumption must recover the answer rather than give up on a 401"
+        );
+        assert!(matches!(rx.try_recv(), Ok(Ok(Message::Response(_)))));
+    }
+
+    /// Completes the flow without a browser by reading the `state` back off the
+    /// authorization URL -- which is what the redirect would have carried.
+    #[cfg(feature = "client-oauth")]
+    struct EchoesState;
+
+    #[cfg(feature = "client-oauth")]
+    impl crate::auth::oauth::AuthorizationHandler for EchoesState {
+        fn redirect_uri(
+            &self,
+        ) -> futures_util::future::BoxFuture<'_, Result<String, crate::error::Error>> {
+            Box::pin(async { Ok("http://127.0.0.1:8919/callback".to_string()) })
+        }
+
+        fn authorize(
+            &self,
+            url: String,
+        ) -> futures_util::future::BoxFuture<
+            '_,
+            Result<crate::auth::oauth::CallbackParams, crate::error::Error>,
+        > {
+            Box::pin(async move {
+                let state = url
+                    .split(['?', '&'])
+                    .find_map(|param| param.strip_prefix("state="))
+                    .ok_or_else(|| {
+                        Error::new(
+                            ErrorCode::InvalidRequest,
+                            "the authorization URL carried no `state`",
+                        )
+                    })?
+                    .to_owned();
+                Ok(crate::auth::oauth::CallbackParams {
+                    code: "the-code".into(),
+                    state,
+                    iss: None,
+                })
+            })
+        }
     }
 
     // A minimal valid JSON-RPC notification that Message will accept
@@ -1203,13 +2058,70 @@ mod tests {
             drain_post_sse(
                 futures_util::stream::iter(frames),
                 &tx,
-                &[crate::types::RequestId::Number(1)]
+                &[crate::types::RequestId::Number(1)],
             )
-            .await,
-            "the POST stream must count as answered"
+            .await
+            .owed
+            .is_empty(),
+            "the POST stream must leave nothing owed"
         );
         assert!(matches!(rx.try_recv(), Ok(Ok(Message::Notification(_)))));
         assert!(matches!(rx.try_recv(), Ok(Ok(Message::Response(_)))));
+    }
+
+    /// A priming frame carries no message, and is exactly where a server states
+    /// where to resume from and how long to wait -- so both have to be taken off
+    /// a frame the message path skips.
+    ///
+    /// Both belong to this stream alone -- a legacy session also runs the
+    /// standalone `GET`, with its own position and its own reconnection time,
+    /// and either one shared would have each stream reconnect on the other's
+    /// terms: from a place it never reached, or after a delay named for
+    /// somebody else.
+    #[tokio::test]
+    async fn a_priming_frame_still_states_where_to_resume_from() {
+        let session = make_session();
+        session.set_last_event_id("get-stream-7".to_string());
+        session.set_retry(9_000);
+        let (tx, mut rx) = mpsc::channel(2);
+
+        let mut priming = sse_stream::Sse::default().id("event-1");
+        priming.retry = Some(500);
+        let frames = vec![Ok(priming)];
+
+        let drained = drain_post_sse(
+            futures_util::stream::iter(frames),
+            &tx,
+            &[crate::types::RequestId::Number(1)],
+        )
+        .await;
+
+        assert_eq!(
+            drained.owed,
+            vec![crate::types::RequestId::Number(1)],
+            "a priming frame answers nothing"
+        );
+        assert!(rx.try_recv().is_err(), "and delivers nothing");
+        assert_eq!(
+            drained.last_event_id,
+            Some("event-1".to_string()),
+            "this stream resumes from where this stream got to"
+        );
+        assert_eq!(
+            drained.retry,
+            Some(500),
+            "and after the delay this stream was given"
+        );
+        assert_eq!(
+            session.last_event_id(),
+            Some("get-stream-7".to_string()),
+            "leaving the standalone GET's own position alone"
+        );
+        assert_eq!(
+            session.retry_delay(SSE_RECONNECT_DELAY),
+            Duration::from_millis(9_000),
+            "and its own reconnection delay with it"
+        );
     }
 
     /// Frames of some other event type are skipped without answering the
@@ -1223,13 +2135,15 @@ mod tests {
                 .event("endpoint")
                 .data(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#)),
         ];
-        assert!(
-            !drain_post_sse(
+        assert_eq!(
+            drain_post_sse(
                 futures_util::stream::iter(frames),
                 &tx,
-                &[crate::types::RequestId::Number(1)]
+                &[crate::types::RequestId::Number(1)],
             )
             .await
+            .owed,
+            vec![crate::types::RequestId::Number(1)]
         );
         assert!(rx.try_recv().is_err(), "no frame should be delivered");
     }
@@ -1270,20 +2184,85 @@ mod tests {
         for (frame, terminal) in cases {
             let (tx, mut rx) = mpsc::channel(1);
             let event = sse_stream::Sse::default().data(frame);
-            assert_eq!(
-                forward_sse_message(event, &tx, &[crate::types::RequestId::Number(1)]).await,
-                terminal,
-                "wrong terminal flag for {frame}"
-            );
+            let mut owed = vec![crate::types::RequestId::Number(1)];
+            forward_sse_message(event, &tx, &mut owed).await;
+            assert_eq!(owed.is_empty(), terminal, "wrong terminal flag for {frame}");
             assert!(rx.try_recv().is_ok(), "{frame} should still be delivered");
         }
+    }
+
+    /// A batched `POST` is answered request by request: a frame that resolves
+    /// one of them leaves the others owed, and the caller must resume for --
+    /// and ultimately fail -- only those.
+    #[tokio::test]
+    async fn a_batch_is_struck_off_one_answer_at_a_time() {
+        let ids = [
+            crate::types::RequestId::Number(1),
+            crate::types::RequestId::Number(2),
+        ];
+        let (tx, _rx) = mpsc::channel(2);
+        let mut owed = ids.to_vec();
+
+        forward_sse_message(
+            sse_stream::Sse::default().data(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#),
+            &tx,
+            &mut owed,
+        )
+        .await;
+        assert_eq!(
+            owed,
+            vec![crate::types::RequestId::Number(2)],
+            "only the answered request may be struck off"
+        );
+
+        forward_sse_message(
+            sse_stream::Sse::default().data(r#"{"jsonrpc":"2.0","id":2,"result":{}}"#),
+            &tx,
+            &mut owed,
+        )
+        .await;
+        assert!(owed.is_empty(), "the batch is now fully answered");
+    }
+
+    /// The resumed stream is the session's own long-lived `GET`: it does not
+    /// close once it has replayed what was missed. Draining it to EOF would
+    /// park this task on the session stream for the life of the client, so the
+    /// drain has to stop the moment nothing is owed.
+    #[tokio::test]
+    async fn draining_stops_once_nothing_is_owed() {
+        let (tx, mut rx) = mpsc::channel(8);
+        // The response, then traffic that keeps coming -- as a live session
+        // stream does. `pending()` after them stands in for a stream that never
+        // ends: reaching it at all would hang this test.
+        let frames = futures_util::stream::iter(vec![
+            Ok(sse_stream::Sse::default().data(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#)),
+            Ok(sse_stream::Sse::default()
+                .data(r#"{"jsonrpc":"2.0","method":"notifications/message"}"#)),
+        ])
+        .chain(futures_util::stream::pending());
+
+        let owed = tokio::time::timeout(
+            Duration::from_secs(1),
+            drain_post_sse(Box::pin(frames), &tx, &[crate::types::RequestId::Number(1)]),
+        )
+        .await
+        .expect("the drain must return instead of holding the session stream open");
+
+        assert!(owed.owed.is_empty());
+        assert!(matches!(rx.try_recv(), Ok(Ok(Message::Response(_)))));
+        assert!(
+            rx.try_recv().is_err(),
+            "nothing past the answer belongs to this exchange"
+        );
     }
 
     #[tokio::test]
     async fn forward_sse_message_reports_unparseable_frame_as_unanswered() {
         let (tx, mut rx) = mpsc::channel(1);
         let event = sse_stream::Sse::default().data("not json");
-        assert!(!forward_sse_message(event, &tx, &[crate::types::RequestId::Number(1)]).await);
+        let mut owed = vec![crate::types::RequestId::Number(1)];
+        forward_sse_message(event, &tx, &mut owed).await;
+        assert_eq!(owed, vec![crate::types::RequestId::Number(1)]);
         assert!(
             rx.try_recv().is_err(),
             "a malformed frame must not reach the receive loop"
@@ -1391,6 +2370,19 @@ mod routing_hints_tests {
         assert_eq!(encode_header_value(" lead"), "=?base64?IGxlYWQ=?=");
         assert_eq!(encode_header_value("trail "), "=?base64?dHJhaWwg?=");
         assert_eq!(encode_header_value("a\nb"), "=?base64?YQpi?=");
+        // Horizontal tab is in the safe set the spec states, so an interior one
+        // is sent as it came -- RFC 9110's `field-content` admits HTAB between
+        // field-vchars. Only at an edge does it need encoding, and then by the
+        // leading/trailing whitespace rule.
+        //
+        // The conformance suite's own predicate encodes any byte below 0x20,
+        // interior tab included, but its `x-mcp-header` scenario only ever
+        // sends a *leading* tab -- which both readings encode. Nothing on the
+        // wire distinguishes them; this assertion is what keeps the library on
+        // the spec's side of a difference no scenario exercises.
+        assert_eq!(encode_header_value("a\tb"), "a\tb");
+        assert_eq!(encode_header_value("\tindented"), "=?base64?CWluZGVudGVk?=");
+        assert_eq!(encode_header_value("trailing\t"), "=?base64?dHJhaWxpbmcJ?=");
         // A plain value that looks like the sentinel must be encoded too, or a
         // server would decode something the client never encoded.
         assert_eq!(

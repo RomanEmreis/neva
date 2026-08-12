@@ -221,32 +221,237 @@ impl InputRequest {
 /// The server gates each input-request kind on the matching flag: asking for an
 /// input the client never declared is a server bug, and is reported as such
 /// rather than stalling the round-trip.
+///
+/// # Wire shape
+///
+/// This is the `io.modelcontextprotocol/clientCapabilities` value of a request's
+/// `_meta`, which the spec types as `ClientCapabilities`: each capability is an
+/// **optional object** whose mere presence declares support. The flags here are
+/// therefore serialized as empty objects and deserialized from any object; a
+/// bare boolean is also accepted on the way in, since earlier neva clients wrote
+/// one.
+///
+/// `elicitation` is the one capability with sub-capabilities the server acts on
+/// -- see [`ElicitationModes`].
+///
+/// # Examples
+/// ```
+/// use neva::types::mrtr::ClientMrtrCapabilities;
+///
+/// // Spec shape: presence of the object is the declaration.
+/// let caps: ClientMrtrCapabilities = serde_json::from_value(serde_json::json!({
+///     "elicitation": { "form": {} },
+///     "roots": {}
+/// }))?;
+/// let modes = caps.elicitation.expect("elicitation declared");
+/// assert!(modes.form);
+/// assert!(!modes.url);
+/// assert!(caps.roots);
+/// assert!(!caps.sampling);
+///
+/// assert_eq!(
+///     serde_json::to_value(caps)?,
+///     serde_json::json!({ "elicitation": { "form": {} }, "roots": {} })
+/// );
+/// # Ok::<(), serde_json::Error>(())
+/// ```
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct ClientMrtrCapabilities {
-    /// Whether the client can fulfil `elicitation/create` input requests.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub elicitation: bool,
+    /// Which `elicitation/create` modes the client can fulfil, or `None` when it
+    /// declared no elicitation support at all.
+    #[serde(
+        default,
+        deserialize_with = "de_elicitation",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub elicitation: Option<ElicitationModes>,
 
     /// Whether the client can fulfil `sampling/createMessage` input requests.
     ///
     /// A **deprecated** request kind -- see [`InputRequest::Sampling`].
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        deserialize_with = "de_declared",
+        serialize_with = "ser_declared",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
     pub sampling: bool,
 
     /// Whether the client can fulfil `roots/list` input requests.
     ///
     /// A **deprecated** request kind -- see [`InputRequest::Roots`].
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        deserialize_with = "de_declared",
+        serialize_with = "ser_declared",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
     pub roots: bool,
+}
+
+/// The `elicitation/create` modes a client declared it can fulfil.
+///
+/// The spec spells these as sub-capability objects inside `elicitation`, and
+/// neither is required -- so a client may declare the capability and say nothing
+/// about modes. That is what an all-`false` value means here, and it is read as
+/// *unconstrained*: a client that named no modes has not ruled any out, and a
+/// server that refused it would refuse every peer that spells its capabilities
+/// the shortest legal way. Naming even one mode is the opposite -- it is a list
+/// of what the client can do, and a mode missing from it is one the client is
+/// saying it cannot answer.
+///
+/// # Examples
+/// ```
+/// use neva::types::mrtr::ElicitationModes;
+///
+/// let stated: ElicitationModes =
+///     serde_json::from_value(serde_json::json!({ "form": {} }))?;
+/// assert!(stated.form && !stated.url);
+///
+/// // Declared, modes unstated: nothing is ruled out.
+/// let unstated: ElicitationModes = serde_json::from_value(serde_json::json!({}))?;
+/// assert!(unstated.unconstrained());
+/// # Ok::<(), serde_json::Error>(())
+/// ```
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct ElicitationModes {
+    /// Whether the client stated it can answer a `form` elicitation.
+    #[serde(
+        default,
+        deserialize_with = "de_declared",
+        serialize_with = "ser_declared",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub form: bool,
+
+    /// Whether the client stated it can answer a `url` elicitation.
+    #[serde(
+        default,
+        deserialize_with = "de_declared",
+        serialize_with = "ser_declared",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub url: bool,
+}
+
+impl ElicitationModes {
+    /// Whether the client named no mode at all, and so ruled none out.
+    pub fn unconstrained(&self) -> bool {
+        !self.form && !self.url
+    }
+
+    /// Whether `params` asks for a mode this client can answer.
+    pub fn allows(&self, params: &crate::types::elicitation::ElicitRequestParams) -> bool {
+        use crate::types::elicitation::ElicitRequestParams;
+        self.unconstrained()
+            || match params {
+                ElicitRequestParams::Form(_) => self.form,
+                ElicitRequestParams::Url(_) => self.url,
+            }
+    }
+}
+
+// Only a server tells a client what it should have declared.
+#[cfg(feature = "server")]
+impl ElicitationModes {
+    /// The modes required to answer `params`, as the declaration a client would
+    /// have had to send.
+    fn requiring(params: &crate::types::elicitation::ElicitRequestParams) -> Self {
+        use crate::types::elicitation::ElicitRequestParams;
+        match params {
+            ElicitRequestParams::Form(_) => Self {
+                form: true,
+                url: false,
+            },
+            ElicitRequestParams::Url(_) => Self {
+                form: false,
+                url: true,
+            },
+        }
+    }
+}
+
+/// How the `elicitation` capability may be spelled: the spec's object, whose
+/// contents are the modes, or the boolean older neva clients wrote.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ElicitationDeclaration {
+    Modes(ElicitationModes),
+    Flag(bool),
+}
+
+/// Reads `elicitation` into the modes it declares, `None` when it declares
+/// nothing. A bare `true` becomes a declaration that names no mode -- which is
+/// what it always meant.
+fn de_elicitation<'de, D>(deserializer: D) -> Result<Option<ElicitationModes>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(
+        match Option::<ElicitationDeclaration>::deserialize(deserializer)? {
+            Some(ElicitationDeclaration::Modes(modes)) => Some(modes),
+            Some(ElicitationDeclaration::Flag(true)) => Some(ElicitationModes::default()),
+            Some(ElicitationDeclaration::Flag(false)) | None => None,
+        },
+    )
+}
+
+/// How a single capability may be spelled inside
+/// `io.modelcontextprotocol/clientCapabilities`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Declaration {
+    /// The spec shape: an object, possibly carrying sub-capabilities. Present
+    /// means supported, whatever it contains.
+    Object(AnyObject),
+    /// What neva's own client wrote before it followed the spec shape.
+    Flag(bool),
+}
+
+/// Any JSON object, whatever it holds -- the spec declares a capability by the
+/// presence of its object, not by anything inside it. Sub-capabilities are
+/// accepted and ignored (serde skips unknown fields of a fieldless struct).
+#[derive(Deserialize)]
+struct AnyObject {}
+
+/// Reads a capability that the spec spells as an optional object, tolerating the
+/// boolean older neva clients sent.
+fn de_declared<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Option::<Declaration>::deserialize(deserializer)? {
+        Some(Declaration::Object(_)) => true,
+        Some(Declaration::Flag(flag)) => flag,
+        None => false,
+    })
+}
+
+/// Writes a declared capability in the spec shape: an empty object. Only ever
+/// called for a `true` flag -- a `false` one is skipped, which is how the spec
+/// spells "not supported".
+fn ser_declared<S>(_declared: &bool, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeMap;
+    serializer.serialize_map(Some(0))?.end()
 }
 
 #[cfg(feature = "server")]
 impl ClientMrtrCapabilities {
     /// Whether the client declared support for the kind `request` asks for.
+    ///
+    /// An elicitation is judged by its mode as well: a client that named `form`
+    /// and nothing else has said it cannot answer a `url` request, and sending
+    /// one anyway stalls the round rather than being refused where the server
+    /// can still do something about it.
     pub(crate) fn allows(&self, request: &InputRequest) -> bool {
         #[allow(deprecated)]
         match request {
-            InputRequest::Elicitation(_) => self.elicitation,
+            InputRequest::Elicitation(params) => {
+                self.elicitation.is_some_and(|modes| modes.allows(params))
+            }
             InputRequest::Sampling(_) => self.sampling,
             InputRequest::Roots(_) => self.roots,
         }
@@ -260,7 +465,13 @@ impl ClientMrtrCapabilities {
     pub(crate) fn requiring(&self, request: &InputRequest) -> Self {
         #[allow(deprecated)]
         Self {
-            elicitation: matches!(request, InputRequest::Elicitation(_)),
+            // Named down to the mode, so a client told what to declare is told
+            // the whole of it -- "elicitation" alone would send it back with
+            // the same declaration it already had.
+            elicitation: match request {
+                InputRequest::Elicitation(params) => Some(ElicitationModes::requiring(params)),
+                _ => None,
+            },
             sampling: matches!(request, InputRequest::Sampling(_)),
             roots: matches!(request, InputRequest::Roots(_)),
         }
@@ -279,13 +490,19 @@ pub enum InputRequiredTag {
 // deserializes it from the wire.
 #[cfg(feature = "server")]
 impl InputRequiredResult {
-    /// Builds an `InputRequiredResult` for a single input request of any kind.
-    pub(crate) fn single(key: String, request: InputRequest, state: String) -> Self {
-        let mut input_requests = HashMap::with_capacity(1);
-        input_requests.insert(key, request);
+    /// Builds an `InputRequiredResult` asking for `requests`, of any kinds.
+    ///
+    /// `inputRequests` is a map rather than a single request precisely so a
+    /// round can ask for everything it needs at once: a handler that needs a
+    /// name, a completion and the caller's roots costs one round-trip, not
+    /// three.
+    pub(crate) fn new(
+        requests: impl IntoIterator<Item = (String, InputRequest)>,
+        state: String,
+    ) -> Self {
         Self {
             result_type: InputRequiredTag::InputRequired,
-            input_requests: Some(input_requests),
+            input_requests: Some(requests.into_iter().collect()),
             request_state: Some(state),
         }
     }
@@ -306,17 +523,114 @@ mod tests {
     use super::*;
 
     #[test]
+    fn client_capabilities_read_the_spec_object_shape() {
+        // What a spec-conformant client (e.g. MCP Inspector) puts in `_meta`:
+        // every capability is an object, sub-capabilities and all.
+        let caps: ClientMrtrCapabilities = serde_json::from_value(serde_json::json!({
+            "elicitation": { "form": {}, "url": {} },
+            "sampling": { "context": {}, "tools": {} },
+            "roots": {}
+        }))
+        .expect("object-shaped capabilities must parse");
+
+        let modes = caps.elicitation.expect("elicitation declared");
+        assert!(modes.form && modes.url, "both modes were named");
+        assert!(caps.sampling);
+        assert!(caps.roots);
+    }
+
+    #[test]
+    fn client_capabilities_read_the_legacy_boolean_shape() {
+        let caps: ClientMrtrCapabilities = serde_json::from_value(serde_json::json!({
+            "elicitation": true,
+            "sampling": false
+        }))
+        .expect("boolean-shaped capabilities must still parse");
+
+        let modes = caps.elicitation.expect("elicitation declared");
+        assert!(
+            modes.unconstrained(),
+            "a bare boolean names no mode, and so rules none out"
+        );
+        assert!(!caps.sampling);
+        assert!(!caps.roots);
+    }
+
+    #[test]
+    fn absent_and_null_client_capabilities_declare_nothing() {
+        let empty: ClientMrtrCapabilities =
+            serde_json::from_value(serde_json::json!({})).expect("empty object must parse");
+        assert!(empty.elicitation.is_none() && !empty.sampling && !empty.roots);
+
+        let nulls: ClientMrtrCapabilities =
+            serde_json::from_value(serde_json::json!({ "elicitation": null, "roots": null }))
+                .expect("null capabilities must parse");
+        assert!(nulls.elicitation.is_none() && !nulls.roots);
+    }
+
+    #[test]
+    fn client_capabilities_write_the_spec_object_shape() {
+        let caps = ClientMrtrCapabilities {
+            elicitation: Some(ElicitationModes::default()),
+            sampling: false,
+            roots: true,
+        };
+
+        assert_eq!(
+            serde_json::to_value(caps).expect("serialize"),
+            serde_json::json!({ "elicitation": {}, "roots": {} }),
+            "a capability declared without modes writes the bare object"
+        );
+
+        let formal = ClientMrtrCapabilities {
+            elicitation: Some(ElicitationModes {
+                form: true,
+                url: false,
+            }),
+            sampling: false,
+            roots: false,
+        };
+        assert_eq!(
+            serde_json::to_value(formal).expect("serialize"),
+            serde_json::json!({ "elicitation": { "form": {} } }),
+            "a named mode survives the round trip to the wire"
+        );
+    }
+
+    #[test]
+    fn client_capabilities_roundtrip() {
+        let caps = ClientMrtrCapabilities {
+            elicitation: Some(ElicitationModes {
+                form: true,
+                url: true,
+            }),
+            sampling: true,
+            roots: false,
+        };
+        let back: ClientMrtrCapabilities =
+            serde_json::from_value(serde_json::to_value(caps).expect("serialize"))
+                .expect("deserialize");
+
+        let modes = back.elicitation.expect("elicitation declared");
+        assert!(modes.form && modes.url);
+        assert!(back.sampling);
+        assert!(!back.roots);
+    }
+
+    #[test]
     fn input_required_result_roundtrips_with_tag_and_envelope() {
+        // The elicitation params sit flat in `params`, the way the spec's
+        // `ElicitRequestFormParams | ElicitRequestURLParams` union spells them
+        // -- no variant name wraps them, and a form omits `mode` entirely.
         let json = r#"{
             "resultType": "input_required",
             "inputRequests": {
                 "ask_name": {
                     "method": "elicitation/create",
-                    "params": { "Form": {
+                    "params": {
                         "message": "Your name?",
-                        "mode": null,
                         "requestedSchema": { "type": "object", "properties": {}, "required": null }
-                    }}
+                    }
                 }
             },
             "requestState": "abc.def"
@@ -336,6 +650,11 @@ mod tests {
             back["inputRequests"]["ask_name"]["method"],
             serde_json::json!("elicitation/create")
         );
+        // Round-tripped flat, and with no `mode: null` invented on the way out.
+        let params = &back["inputRequests"]["ask_name"]["params"];
+        assert_eq!(params["message"], serde_json::json!("Your name?"));
+        assert!(params.get("Form").is_none(), "got: {params}");
+        assert!(params.get("mode").is_none(), "got: {params}");
     }
 
     /// The union must keep the flat `{ method, params }` envelope for every
@@ -418,7 +737,7 @@ mod tests {
         let elicitation = InputRequest::Elicitation(ElicitRequestParams::form("m").into());
 
         let only_elicitation = ClientMrtrCapabilities {
-            elicitation: true,
+            elicitation: Some(ElicitationModes::default()),
             ..Default::default()
         };
         assert!(only_elicitation.allows(&elicitation));
@@ -428,11 +747,48 @@ mod tests {
         );
 
         let all = ClientMrtrCapabilities {
-            elicitation: true,
+            elicitation: Some(ElicitationModes::default()),
             sampling: true,
             roots: true,
         };
         assert!(all.allows(&sampling));
+    }
+
+    /// A declared mode is a list of what the client can answer, so a request in
+    /// a mode missing from it is refused where the server can still act on it --
+    /// rather than sent out to a client with no way to answer, which stalls the
+    /// round until it times out.
+    #[cfg(feature = "server")]
+    #[test]
+    fn a_named_elicitation_mode_is_the_only_one_allowed() {
+        let form = InputRequest::Elicitation(ElicitRequestParams::form("m").into());
+        let url = InputRequest::Elicitation(ElicitRequestParams::url("m", "https://e.io").into());
+
+        let forms_only = ClientMrtrCapabilities {
+            elicitation: Some(ElicitationModes {
+                form: true,
+                url: false,
+            }),
+            ..Default::default()
+        };
+        assert!(forms_only.allows(&form));
+        assert!(
+            !forms_only.allows(&url),
+            "a client that named only `form` cannot answer a URL request"
+        );
+
+        // Naming nothing rules nothing out -- the shortest legal way to declare
+        // the capability, and the shape neva's own client writes.
+        let unstated = ClientMrtrCapabilities {
+            elicitation: Some(ElicitationModes::default()),
+            ..Default::default()
+        };
+        assert!(unstated.allows(&form) && unstated.allows(&url));
+
+        // And what the client is told to declare names the mode, not just the
+        // capability it already had.
+        let required = forms_only.requiring(&url).elicitation.expect("named");
+        assert!(required.url && !required.form);
     }
 
     /// The flags are additive on the wire: a peer that predates
@@ -442,7 +798,7 @@ mod tests {
     fn capabilities_decode_from_an_older_peer() {
         let caps: ClientMrtrCapabilities =
             serde_json::from_value(serde_json::json!({ "elicitation": true })).unwrap();
-        assert!(caps.elicitation);
+        assert!(caps.elicitation.is_some());
         assert!(!caps.sampling);
         assert!(!caps.roots);
 

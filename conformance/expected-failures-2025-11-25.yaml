@@ -1,0 +1,59 @@
+# Known failures of the `legacy-spec` build against the 2025-11-25 requirement
+# set of @modelcontextprotocol/conformance, at the version pinned in
+# `conformance/.conformance-version`.
+#
+# Same strict semantics as the 2026-07-28 baseline: an unlisted failure and a
+# listed entry that starts passing both fail the build. This file is the only
+# automated statement of what the legacy profile still gets wrong -- nothing
+# else in CI exercises that wire.
+
+server: []
+  # Nothing left to excuse: the legacy server profile is green end to end.
+  #
+  # `tools-call-elicitation` and `elicitation-sep1330-enums` are green: the
+  # `{"Form": {...}}` wrapper around elicitation params is gone.
+
+  # `elicitation-sep1034-defaults` and `json-schema-2020-12` are green: schemas
+  # keep the keywords they were declared with, and `integer` stays `integer`.
+
+  # `tools-call-with-progress` is green. The delivery path was fine; the fixture
+  # was not. It reported three times and returned without ever awaiting, and on
+  # this transport the reports ride the session's SSE `GET` while the result
+  # rides the call's own `POST` -- two connections, so only the work between the
+  # reports orders them. The tool now waits between reports, as the scenario
+  # spells out.
+
+  # `server-session-lifecycle` is green: a session id the server no longer
+  # holds is answered `404` on POST, GET and DELETE alike, so a client learns
+  # to open a new one instead of retrying into a session that ended.
+
+  # `dns-rebinding-protection` is green on this profile too -- the gate lives in
+  # the shared HTTP layer.
+
+client:
+  # `tools_call`, `elicitation-sep1034-client-defaults` and
+  # `json-schema-2020-12-preservation` are green: a server that hosts no
+  # standalone GET stream no longer ends the session, the POST carries one
+  # `Content-Type`, and an argument-less call omits `arguments` rather than
+  # sending `null`.
+
+  # `sse-retry` is green: a response stream that ends before the response is
+  # resumed with a `GET` carrying `Last-Event-ID`, after the pause the server
+  # asked for with `retry:`.
+
+  # The authorization-code flow is green here too -- the OAuth client is shared
+  # between the profiles. What remains needs a credential that flow does not
+  # have; see the 2026-07-28 baseline for the same block, spelled out.
+
+  # -- Client id metadata documents (#86) --------------------------------
+  - auth/basic-cimd
+
+  # -- Grant types beyond authorization_code (#86) -----------------------
+  - auth/client-credentials-jwt
+  - auth/client-credentials-basic
+  - auth/enterprise-managed-authorization
+  - auth/wif-jwt-bearer
+
+  # -- DPoP (#86) --------------------------------------------------------
+  - auth/dpop
+  - auth/dpop-nonce

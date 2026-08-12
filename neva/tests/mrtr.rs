@@ -12,7 +12,7 @@
 use neva::{
     App, Context,
     client::Client,
-    error::Error,
+    error::{Error, ErrorCode},
     types::elicitation::{ElicitRequestParams, ElicitResult},
 };
 
@@ -45,11 +45,14 @@ async fn tool_elicits_then_completes_over_two_rounds() {
         .expect("test client");
     let url = format!("http://{addr}/mcp");
 
-    // Round 1: tools/call -> input_required.
+    // Round 1: tools/call -> input_required. Capabilities are spelled the way
+    // the spec does -- an object per capability, presence being the
+    // declaration -- which is what a conformant client (MCP Inspector) sends.
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": { "name": "greet", "arguments": {},
-            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": { "elicitation": { "form": {} } } } }
     });
     let r1: serde_json::Value = routed(client.post(&url), &call)
         .json(&call)
@@ -76,14 +79,16 @@ async fn tool_elicits_then_completes_over_two_rounds() {
         .expect("one input request")
         .clone();
 
-    // Round 2: retry with a new id + inputResponses + echoed state.
+    // Round 2: retry with a new id + inputResponses + echoed state. Both ride
+    // on the params, next to `name` and `arguments`, which is where the spec's
+    // `InputResponseRequestParams` puts them -- not in `_meta`.
     let retry = serde_json::json!({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": { "name": "greet", "arguments": {},
+            "requestState": state,
+            "inputResponses": { key: { "action": "accept", "content": { "name": "octocat" } } },
             "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-                "io.modelcontextprotocol/clientCapabilities": { "elicitation": true },
-                "requestState": state,
-                "inputResponses": { key: { "action": "accept", "content": { "name": "octocat" } } }
+                "io.modelcontextprotocol/clientCapabilities": { "elicitation": { "form": {} } }
             } }
     });
     let r2: serde_json::Value = routed(client.post(&url), &retry)
@@ -111,13 +116,102 @@ async fn tool_elicits_then_completes_over_two_rounds() {
     handle.abort();
 }
 
+/// neva wrote `inputResponses` / `requestState` into `_meta` up to 0.5.2. A
+/// client on that version must keep working against a newer server, so the old
+/// location is still read -- after the spec one, and only if it is empty.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_stating_its_answers_in_meta_is_still_understood() {
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("greet", |mut ctx: Context| async move {
+        let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
+            .with_required("name", "string")
+            .into();
+        let res = ctx.elicit("name", params).await?;
+        let name = res
+            .content
+            .and_then(|c| c.get("name").and_then(|v| v.as_str().map(str::to_owned)))
+            .unwrap_or_else(|| "stranger".into());
+        Ok::<String, Error>(format!("hello {name}"))
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
+    let url = format!("http://{addr}/mcp");
+
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "greet", "arguments": {},
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
+    });
+    let r1: serde_json::Value = routed(client.post(&url), &call)
+        .json(&call)
+        .send()
+        .await
+        .expect("round 1 send")
+        .json()
+        .await
+        .expect("round 1 json");
+    let state = r1["result"]["requestState"]
+        .as_str()
+        .expect("requestState present")
+        .to_string();
+    let key = r1["result"]["inputRequests"]
+        .as_object()
+        .expect("inputRequests object")
+        .keys()
+        .next()
+        .expect("one input request")
+        .clone();
+
+    // The 0.5.2 shape: both fields inside `_meta`.
+    let retry = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": { "name": "greet", "arguments": {},
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": { "elicitation": true },
+                "requestState": state,
+                "inputResponses": { key: { "action": "accept", "content": { "name": "octocat" } } }
+            } }
+    });
+    let r2: serde_json::Value = routed(client.post(&url), &retry)
+        .json(&retry)
+        .send()
+        .await
+        .expect("round 2 send")
+        .json()
+        .await
+        .expect("round 2 json");
+
+    assert_eq!(
+        r2.pointer("/result/content/0/text")
+            .and_then(|v| v.as_str()),
+        Some("hello octocat"),
+        "a 0.5.2-shaped retry must still complete: {r2}"
+    );
+
+    handle.abort();
+}
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static FETCHES: AtomicUsize = AtomicUsize::new(0);
 static CHARGES: AtomicUsize = AtomicUsize::new(0);
 static RECEIPTS: AtomicUsize = AtomicUsize::new(0);
 static LOST_RESPONSE_COMMITS: AtomicUsize = AtomicUsize::new(0);
+static IGNORED_ANSWER_COMMITS: AtomicUsize = AtomicUsize::new(0);
 static CONCURRENT_FINAL_COMMITS: AtomicUsize = AtomicUsize::new(0);
+static PARTIAL_COMMIT_CHARGES: AtomicUsize = AtomicUsize::new(0);
 
 #[tokio::test(flavor = "multi_thread")]
 async fn final_round_replay_is_idempotent_after_a_lost_response() {
@@ -240,6 +334,270 @@ async fn final_round_replay_is_idempotent_after_a_lost_response() {
         LOST_RESPONSE_COMMITS.load(Ordering::SeqCst),
         1,
         "on_commit must not fire again on a lost-response retry"
+    );
+
+    handle.abort();
+}
+
+/// An answer the server ignores must not buy a fresh run of the final round.
+///
+/// The idempotency key folds in a digest of the round's answers, so that one
+/// minted state echoed with two *different* answers cannot serve the first
+/// answer's result for the second. But the server drops an answer that is
+/// unsolicited or already settled -- so a replay can add a junk key, change
+/// nothing the handler sees, and still present a different raw
+/// `inputResponses`. Keyed on the raw map that is a different key, the cache
+/// misses, and the final handler runs again with its `on_commit` effects: an
+/// idempotency guard that anyone can step around by appending a byte.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ignored_answer_does_not_buy_a_second_run_of_the_final_round() {
+    IGNORED_ANSWER_COMMITS.store(0, Ordering::SeqCst);
+
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("greet", |mut ctx: Context| async move {
+        let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
+            .with_required("name", "string")
+            .into();
+        let res = ctx.elicit("name", params).await?;
+        let name = res
+            .content
+            .and_then(|c| c.get("name").and_then(|v| v.as_str().map(str::to_owned)))
+            .unwrap_or_else(|| "stranger".into());
+        ctx.on_commit(async move {
+            IGNORED_ANSWER_COMMITS.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        Ok::<String, Error>(format!("hello {name}"))
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
+    let url = format!("http://{addr}/mcp");
+
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "greet", "arguments": {},
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
+    });
+    let r1: serde_json::Value = routed(client.post(&url), &call)
+        .json(&call)
+        .send()
+        .await
+        .expect("round 1 send")
+        .json()
+        .await
+        .expect("round 1 json");
+    let state = r1["result"]["requestState"]
+        .as_str()
+        .expect("requestState present")
+        .to_string();
+    let key = r1["result"]["inputRequests"]
+        .as_object()
+        .expect("inputRequests object")
+        .keys()
+        .next()
+        .expect("one input request")
+        .clone();
+
+    let answer = serde_json::json!({ "action": "accept", "content": { "name": "octocat" } });
+    let final_round = |id: i32, responses: serde_json::Value| {
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": { "name": "greet", "arguments": {},
+                "requestState": state,
+                "inputResponses": responses,
+                "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
+        })
+    };
+
+    let first = final_round(2, serde_json::json!({ key.clone(): answer }));
+    let r2: serde_json::Value = routed(client.post(&url), &first)
+        .json(&first)
+        .send()
+        .await
+        .expect("final send")
+        .json()
+        .await
+        .expect("final json");
+    assert_eq!(
+        r2.pointer("/result/content/0/text")
+            .and_then(|v| v.as_str()),
+        Some("hello octocat"),
+        "final round must complete: {r2}"
+    );
+    assert_eq!(IGNORED_ANSWER_COMMITS.load(Ordering::SeqCst), 1);
+
+    // The same state and the same accepted answer, plus a key the server never
+    // asked for. The handler sees exactly what it saw the first time.
+    let padded = final_round(
+        3,
+        serde_json::json!({
+            key: answer,
+            "never-requested": { "action": "accept", "content": { "name": "impostor" } }
+        }),
+    );
+    let r3: serde_json::Value = routed(client.post(&url), &padded)
+        .json(&padded)
+        .send()
+        .await
+        .expect("padded send")
+        .json()
+        .await
+        .expect("padded json");
+
+    assert_eq!(
+        r3.pointer("/result/content/0/text")
+            .and_then(|v| v.as_str()),
+        Some("hello octocat"),
+        "the padded replay must be served from the cache: {r3}"
+    );
+    assert_eq!(
+        IGNORED_ANSWER_COMMITS.load(Ordering::SeqCst),
+        1,
+        "an answer the server ignores must not re-run the final round"
+    );
+
+    handle.abort();
+}
+
+/// A final round that fails partway through its commits must not be repeatable.
+///
+/// Commits run in registration order and the first `Err` becomes the response
+/// error -- but by then the earlier ones have already applied their effects.
+/// Caching only successful rounds would leave that state open: a client whose
+/// error response went missing re-sends the identical request, misses the
+/// cache, and the handler plus every commit before the failing one runs a
+/// second time. Charged twice, to be told the same thing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_round_that_failed_midway_through_its_commits_is_not_repeatable() {
+    PARTIAL_COMMIT_CHARGES.store(0, Ordering::SeqCst);
+
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("checkout", |mut ctx: Context| async move {
+        let params: ElicitRequestParams = ElicitRequestParams::form("Confirm?")
+            .with_required("card", "string")
+            .into();
+        ctx.elicit("card", params).await?;
+        // The money moves first and the receipt fails after it -- the ordering
+        // that makes a re-run cost something real.
+        ctx.on_commit(async move {
+            PARTIAL_COMMIT_CHARGES.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        ctx.on_commit(async move {
+            Err::<(), Error>(Error::new(ErrorCode::InternalError, "receipt service down"))
+        });
+        Ok::<String, Error>("charged".into())
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
+    let url = format!("http://{addr}/mcp");
+
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "checkout", "arguments": {},
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
+    });
+    let r1: serde_json::Value = routed(client.post(&url), &call)
+        .json(&call)
+        .send()
+        .await
+        .expect("round 1 send")
+        .json()
+        .await
+        .expect("round 1 json");
+    let state = r1["result"]["requestState"]
+        .as_str()
+        .expect("requestState present")
+        .to_string();
+    let key = r1["result"]["inputRequests"]
+        .as_object()
+        .expect("inputRequests object")
+        .keys()
+        .next()
+        .expect("one input request")
+        .clone();
+
+    let answer = serde_json::json!({ "action": "accept", "content": { "card": "4242" } });
+    let final_round = |id: i32| {
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": { "name": "checkout", "arguments": {},
+                "requestState": state,
+                "inputResponses": { key.clone(): answer },
+                "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
+        })
+    };
+
+    let first = final_round(2);
+    let r2: serde_json::Value = routed(client.post(&url), &first)
+        .json(&first)
+        .send()
+        .await
+        .expect("final send")
+        .json()
+        .await
+        .expect("final json");
+    assert!(
+        r2["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("receipt service down")),
+        "the failing commit must be the response error: {r2}"
+    );
+    assert_eq!(
+        PARTIAL_COMMIT_CHARGES.load(Ordering::SeqCst),
+        1,
+        "the commit before the failure applied once"
+    );
+
+    // The client never saw that answer and asks again, byte for byte.
+    let again = final_round(3);
+    let r3: serde_json::Value = routed(client.post(&url), &again)
+        .json(&again)
+        .send()
+        .await
+        .expect("retry send")
+        .json()
+        .await
+        .expect("retry json");
+    assert!(
+        r3["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("receipt service down")),
+        "the retry must replay the cached failure: {r3}"
+    );
+    assert_eq!(
+        r3["id"],
+        serde_json::json!(3),
+        "the cached response adopts the retry id"
+    );
+    assert_eq!(
+        PARTIAL_COMMIT_CHARGES.load(Ordering::SeqCst),
+        1,
+        "a retry of a failed round must not charge again"
     );
 
     handle.abort();
@@ -836,6 +1194,15 @@ async fn eliciting_without_declared_capability_is_rejected() {
     assert!(
         msg.contains("did not declare support"),
         "elicitation without declared capability must be rejected: {r1}"
+    );
+    // What the client is told to declare comes back in the spec's shape -- the
+    // capability is an object, not a boolean -- and names the mode. A client
+    // refused for a `url` request it cannot answer learns to declare `url`,
+    // which "elicitation" on its own would not have told it.
+    assert_eq!(
+        r1.pointer("/error/data/requiredCapabilities"),
+        Some(&serde_json::json!({ "elicitation": { "form": {} } })),
+        "requiredCapabilities must name the missing capability: {r1}"
     );
 
     handle.abort();
@@ -1562,6 +1929,247 @@ async fn sampling_without_declared_capability_is_rejected() {
     handle.abort();
 }
 
+/// A handler that needs three inputs spends one round on them, not three.
+///
+/// Each helper records its request and hands back the same "input required"
+/// signal, so it is the handler's `?` that decides: unwind at the first miss and
+/// the round carries one request; hold the `?` until everything has been asked
+/// for and they all travel together.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_round_carries_every_input_the_handler_asked_for() {
+    use neva::types::sampling::{CreateMessageRequestParams, SamplingMessage};
+
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("intake", |mut ctx: Context| async move {
+        let form: ElicitRequestParams = ElicitRequestParams::form("Your name?")
+            .with_required("name", "string")
+            .into();
+        let sampling = CreateMessageRequestParams::new()
+            .with_message(SamplingMessage::user().with("Greet them"))
+            .with_max_tokens(50);
+
+        let name = ctx.elicit("who", form).await;
+        #[allow(deprecated)]
+        let greeting = ctx.sample("greeting", sampling).await;
+        #[allow(deprecated)]
+        let roots = ctx.list_roots("dirs").await;
+
+        let (name, _greeting, roots) = (name?, greeting?, roots?);
+        let name = name
+            .content
+            .and_then(|c| c.get("name").and_then(|v| v.as_str().map(str::to_owned)))
+            .unwrap_or_else(|| "stranger".into());
+        Ok::<String, Error>(format!("{name} has {} roots", roots.roots.len()))
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
+    let url = format!("http://{addr}/mcp");
+    let caps = serde_json::json!({ "elicitation": {}, "sampling": {}, "roots": {} });
+
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "intake", "arguments": {},
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": caps } }
+    });
+    let r1: serde_json::Value = routed(client.post(&url), &call)
+        .json(&call)
+        .send()
+        .await
+        .expect("round 1 send")
+        .json()
+        .await
+        .expect("round 1 json");
+
+    let requests = r1["result"]["inputRequests"]
+        .as_object()
+        .unwrap_or_else(|| panic!("inputRequests object: {r1}"));
+    assert_eq!(requests.len(), 3, "all three must ride one round: {r1}");
+    let mut methods = requests
+        .values()
+        .filter_map(|r| r["method"].as_str())
+        .collect::<Vec<_>>();
+    methods.sort_unstable();
+    assert_eq!(
+        methods,
+        ["elicitation/create", "roots/list", "sampling/createMessage"],
+        "every kind must be named in the round: {r1}"
+    );
+
+    let state = r1["result"]["requestState"]
+        .as_str()
+        .unwrap_or_else(|| panic!("requestState present: {r1}"))
+        .to_string();
+
+    let retry = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": { "name": "intake", "arguments": {},
+            "requestState": state,
+            "inputResponses": {
+                "who": { "action": "accept", "content": { "name": "octocat" } },
+                "greeting": { "role": "assistant", "content": { "type": "text", "text": "hi" }, "model": "m" },
+                "dirs": { "roots": [{ "uri": "file:///work", "name": "work" }] }
+            },
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": caps } }
+    });
+    let r2: serde_json::Value = routed(client.post(&url), &retry)
+        .json(&retry)
+        .send()
+        .await
+        .expect("round 2 send")
+        .json()
+        .await
+        .expect("round 2 json");
+    assert_eq!(
+        r2.pointer("/result/content/0/text")
+            .and_then(|v| v.as_str()),
+        Some("octocat has 1 roots"),
+        "one retry answering all three must finish the call: {r2}"
+    );
+
+    handle.abort();
+}
+
+/// An answer of the wrong shape is the client getting the protocol wrong, and
+/// is answered as such.
+///
+/// It must not be re-requested -- asking again for a key the client already
+/// answered wrongly is how a chain loops -- and it must not arrive as an in-band
+/// tool error either, which on the wire is a *complete* result and reads as the
+/// call having run and failed.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_of_the_wrong_shape_is_a_protocol_error() {
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("greet", |mut ctx: Context| async move {
+        let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
+            .with_required("name", "string")
+            .into();
+        ctx.elicit("who", params).await?;
+        Ok::<String, Error>("done".into())
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
+    let url = format!("http://{addr}/mcp");
+
+    // A number where an elicitation result belongs.
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "greet", "arguments": {},
+            "inputResponses": { "who": 12345 },
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": { "elicitation": {} } } }
+    });
+    let r: serde_json::Value = routed(client.post(&url), &call)
+        .json(&call)
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+
+    assert_eq!(
+        r["error"]["code"], -32602,
+        "a malformed answer must be a JSON-RPC error, not a result: {r}"
+    );
+    assert!(
+        r["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("elicitation/create"),
+        "the error must name the kind the answer failed to be: {r}"
+    );
+
+    handle.abort();
+}
+
+/// A handler can read what the caller declared and ask only for that.
+///
+/// Without it the only feedback is the refusal, which ends the call -- so a tool
+/// that could have got its answer another way never gets the chance.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_handler_asks_only_for_what_the_caller_declared() {
+    use neva::types::sampling::{CreateMessageRequestParams, SamplingMessage};
+
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("ask", |mut ctx: Context| async move {
+        if ctx.client_capabilities().elicitation.is_some() {
+            let form: ElicitRequestParams = ElicitRequestParams::form("Your name?")
+                .with_required("name", "string")
+                .into();
+            ctx.elicit("who", form).await?;
+            return Ok::<String, Error>("asked the user".into());
+        }
+        let sampling = CreateMessageRequestParams::new()
+            .with_message(SamplingMessage::user().with("Guess a name"))
+            .with_max_tokens(50);
+        #[allow(deprecated)]
+        ctx.sample("who", sampling).await?;
+        Ok::<String, Error>("asked the model".into())
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
+    let url = format!("http://{addr}/mcp");
+
+    // Sampling only: the handler must not reach for elicitation.
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "ask", "arguments": {},
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": { "sampling": {} } } }
+    });
+    let r1: serde_json::Value = routed(client.post(&url), &call)
+        .json(&call)
+        .send()
+        .await
+        .expect("round 1 send")
+        .json()
+        .await
+        .expect("round 1 json");
+
+    assert_eq!(
+        r1["result"]["inputRequests"]["who"]["method"],
+        serde_json::json!("sampling/createMessage"),
+        "the handler must ask the kind the caller declared: {r1}"
+    );
+
+    handle.abort();
+}
+
 fn pick_free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -1571,6 +2179,58 @@ fn pick_free_port() -> u16 {
 
 /// Attaches the routing headers MCP 2026-07-28 requires on every request, the
 /// way a conforming client derives them: from the body it is about to send.
+/// `requestState` and `inputResponses` are protocol fields on the methods MRTR
+/// runs on -- `tools/call`, `prompts/get`, `resources/read` -- and nowhere
+/// else. A custom method registered with `map_handler` owns its own params, so
+/// a numeric `requestState` there is a perfectly good argument and judging it
+/// by the MRTR shapes would refuse a request this server was written to serve.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_custom_method_owns_its_own_params() {
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new().with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_handler("custom/echo", || async move { "served" });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
+    let url = format!("http://{addr}/mcp");
+
+    // Both names, both of a shape MRTR would refuse.
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "custom/echo",
+        "params": {
+            "requestState": 42,
+            "inputResponses": ["not", "an", "object"],
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }
+        }
+    });
+
+    let resp: serde_json::Value = routed(client.post(&url), &call)
+        .json(&call)
+        .send()
+        .await
+        .expect("send")
+        .json()
+        .await
+        .expect("json");
+
+    assert!(
+        resp.get("error").is_none(),
+        "a custom method's own params must reach its handler: {resp}"
+    );
+
+    handle.abort();
+}
+
 fn routed(req: reqwest::RequestBuilder, body: &serde_json::Value) -> reqwest::RequestBuilder {
     let method = body["method"].as_str().unwrap_or_default();
     let req = req

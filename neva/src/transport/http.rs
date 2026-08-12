@@ -77,10 +77,20 @@ pub(crate) const B64_SUFFIX: &str = "?=";
 /// Encodes `raw` for use as an HTTP header value, per the spec's value-encoding
 /// rules.
 ///
-/// RFC 9110 limits field values to visible ASCII, space and horizontal tab,
-/// with no leading or trailing whitespace. Anything outside that -- and any
-/// plain value that would otherwise be mistaken for the sentinel -- travels
-/// Base64-encoded instead.
+/// A value travels as it was written when it is visible ASCII, space or
+/// horizontal tab, with no leading or trailing whitespace. Anything else -- and
+/// any plain value that would otherwise be mistaken for the sentinel -- travels
+/// Base64-encoded.
+///
+/// The safe set is the one the spec states, quoting RFC 9110: visible ASCII
+/// (0x21-0x7E), space (0x20) and horizontal tab (0x09). HTAB is in it, so an
+/// interior tab is sent as it came; RFC 9110's `field-content` admits `HTAB`
+/// between field-vchars, and nothing there lets a recipient rewrite it. The
+/// spec's list of reasons to encode -- non-ASCII, control characters,
+/// leading/trailing whitespace -- is introduced with "e.g." and describes the
+/// ways a value falls outside that set, so it does not withdraw the tab it just
+/// admitted. An *edge* tab is still encoded, by the leading/trailing whitespace
+/// rule rather than by the safe set.
 #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
 pub(crate) fn encode_header_value(raw: &str) -> String {
     use base64::{Engine, engine::general_purpose::STANDARD};
@@ -128,6 +138,21 @@ pub(crate) fn decode_header_value(value: &str) -> Option<String> {
 /// (validates it), so it is not gated on `http-client`.
 #[cfg(not(feature = "legacy-spec"))]
 pub(crate) const MCP_PROTOCOL_VERSION: &str = "MCP-Protocol-Version";
+
+/// `X-Content-Type-Options: nosniff`, sent on every SSE response.
+///
+/// A browser client reading the stream with `fetch()` is the case this exists
+/// for: without the header Firefox buffers the body to sniff its type, and an
+/// SSE stream that stays open never reaches the size that ends the sniff -- so
+/// no event is delivered and the connection simply appears to hang. Chrome does
+/// not sniff a declared `text/event-stream`, which is what makes the failure
+/// look like a browser quirk rather than a missing header.
+///
+/// Non-browser consumers (neva's own client, an SDK proxy) never sniff, so this
+/// costs them nothing. It is also the ordinary hardening answer for any
+/// endpoint whose content type must be taken at its word.
+#[cfg(feature = "http-server-volga")]
+pub(crate) const CONTENT_TYPE_OPTIONS: (&str, &str) = ("X-Content-Type-Options", "nosniff");
 
 const DEFAULT_ADDR: &str = "127.0.0.1:3000";
 const DEFAULT_MCP_ENDPOINT: &str = "/mcp";
@@ -191,6 +216,9 @@ where
     sse_log_queue_capacity: usize,
     sse_cleanup_interval: Duration,
     sse_session_ttl: Duration,
+    /// `None` means "derive from the bind address" -- see
+    /// [`Self::with_allowed_origins`].
+    origin_policy: Option<core::origin::OriginPolicy>,
     #[cfg(feature = "server-oauth")]
     oauth: Option<core::oauth::OAuthResourceOptions>,
     sender: HttpSender,
@@ -280,6 +308,7 @@ impl Default for HttpServer<server::DefaultClaims, server::VolgaEngine> {
             sse_log_queue_capacity: DEFAULT_SSE_LOG_QUEUE_CAPACITY,
             sse_cleanup_interval: DEFAULT_SSE_CLEANUP_INTERVAL,
             sse_session_ttl: DEFAULT_SSE_SESSION_TTL,
+            origin_policy: None,
             #[cfg(feature = "server-oauth")]
             oauth: None,
             receiver: HttpReceiver::new(),
@@ -430,6 +459,7 @@ where
             sse_log_queue_capacity: DEFAULT_SSE_LOG_QUEUE_CAPACITY,
             sse_cleanup_interval: DEFAULT_SSE_CLEANUP_INTERVAL,
             sse_session_ttl: DEFAULT_SSE_SESSION_TTL,
+            origin_policy: None,
             #[cfg(feature = "server-oauth")]
             oauth: None,
             receiver: HttpReceiver::new(),
@@ -458,6 +488,85 @@ where
         self
     }
 
+    /// Names the hosts this server answers to, in addition to the loopback
+    /// ones, and turns on `Origin` / `Host` checking if the bind address did
+    /// not already.
+    ///
+    /// # Why this exists
+    ///
+    /// A server on loopback is reachable by any page the browser loads: point
+    /// `evil.example.com` at `127.0.0.1` and the browser will connect. The
+    /// request is genuinely local; what gives the attack away is the name it
+    /// was addressed by. The spec therefore requires local servers to validate
+    /// these headers and answer `403 Forbidden` when they do not check out.
+    ///
+    /// # The default needs no call
+    ///
+    /// Bound to loopback, a server already accepts only loopback names --
+    /// `localhost`, anything in `127.0.0.0/8`, `[::1]` -- on any port. Bound to
+    /// anything else it accepts everything, because the names a deployment is
+    /// legitimately reached by are not knowable from here: behind a proxy the
+    /// `Host` is whatever that proxy forwards. This method is how such a
+    /// deployment states them.
+    ///
+    /// # What an entry means
+    ///
+    /// Write the whole origin -- `https://app.example.com` -- and the `Origin`
+    /// has to match all of it: scheme, host and port, with a missing port
+    /// meaning the scheme's default. That is what an origin is, and it is the
+    /// form to prefer: a bare host trusts everything served under that name,
+    /// including whatever sits on another port.
+    ///
+    /// A bare host -- `app.example.com` -- says nothing about scheme or port and
+    /// so holds neither against the request, narrowed to one port if the entry
+    /// names one (`app.example.com:8443`).
+    ///
+    /// `Host` is matched by hostname against every entry either way: it says
+    /// where the request landed rather than who sent it, carries no scheme, and
+    /// behind a proxy its port is the proxy's business. Matching is
+    /// case-insensitive throughout, loopback is always accepted, and a request
+    /// carrying neither header is not from a browser and is left alone -- there
+    /// is no rebinding without a name.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use neva::transport::http::HttpServer;
+    ///
+    /// let server = HttpServer::new("0.0.0.0:3000")
+    ///     .with_allowed_origins(["https://mcp.example.com", "https://app.example.com"]);
+    /// ```
+    pub fn with_allowed_origins<I, S>(mut self, hosts: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let hosts = hosts
+            .into_iter()
+            .map(|h| Box::from(h.as_ref()))
+            .collect::<Vec<Box<str>>>();
+        self.origin_policy = Some(core::origin::OriginPolicy::Allowlist(hosts.into()));
+        self
+    }
+
+    /// Answers to any `Origin` and `Host`, turning off the DNS-rebinding gate.
+    ///
+    /// Only meaningful on a loopback bind, where the gate is on by default.
+    /// Reach for this when something in front of the server already validates
+    /// the name -- not to quiet a rejection whose cause has not been read,
+    /// since that rejection is the protection working.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use neva::transport::http::HttpServer;
+    ///
+    /// // A tunnel terminates the browser-facing name and forwards here.
+    /// let server = HttpServer::new("127.0.0.1:3000").allow_any_origin();
+    /// ```
+    pub fn allow_any_origin(mut self) -> Self {
+        self.origin_policy = Some(core::origin::OriginPolicy::Any);
+        self
+    }
+
     /// Swap the HTTP engine. Engine-specific config (auth, TLS) does not
     /// carry over -- the new engine starts with its own defaults.
     pub fn with_engine<E2>(self, engine: E2) -> HttpServer<C, E2>
@@ -472,6 +581,9 @@ where
             sse_log_queue_capacity: self.sse_log_queue_capacity,
             sse_cleanup_interval: self.sse_cleanup_interval,
             sse_session_ttl: self.sse_session_ttl,
+            // Carried across the swap: the DNS-rebinding gate is a property of
+            // the deployment, not of which engine serves it.
+            origin_policy: self.origin_policy,
             #[cfg(feature = "server-oauth")]
             oauth: self.oauth,
             sender: self.sender,
@@ -630,6 +742,10 @@ where
             inbound_tx: self.receiver.tx.clone(),
             sse_live_queue_capacity: self.sse_live_queue_capacity,
             sse_log_queue_capacity: self.sse_log_queue_capacity,
+            origin_policy: self
+                .origin_policy
+                .clone()
+                .unwrap_or_else(|| core::origin::OriginPolicy::for_addr(&self.url.addr)),
             #[cfg(feature = "server-oauth")]
             oauth,
         };
@@ -661,6 +777,7 @@ impl HttpServer<server::DefaultClaims, VolgaEngine> {
             sse_log_queue_capacity: DEFAULT_SSE_LOG_QUEUE_CAPACITY,
             sse_cleanup_interval: DEFAULT_SSE_CLEANUP_INTERVAL,
             sse_session_ttl: DEFAULT_SSE_SESSION_TTL,
+            origin_policy: None,
             #[cfg(feature = "server-oauth")]
             oauth: None,
             receiver: HttpReceiver::new(),
