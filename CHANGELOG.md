@@ -10,15 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 * **DNS-rebinding protection.** The HTTP server validates `Origin` and `Host`:
   on a loopback bind it refuses non-loopback names with `403` before reading the
-  body. `HttpServer::with_allowed_origins([...])` names more; `allow_any_origin()`
-  turns the gate off. An entry naming a scheme (`https://app.example.com`) is an
-  origin and is matched as one -- scheme, host and port, a missing port meaning
-  the scheme's default -- so trusting an application does not also trust whatever
-  else its host serves on another port. A bare host stays a host: it says nothing
-  about scheme or port and holds neither against the request, beyond a port it
-  does name -- matched against the port the origin is really on, so a pinned
-  `:443` is the `:443` a browser leaves implicit. `Host` is matched by name
-  either way, since it says where the request landed rather than who sent it.
+  body. `HttpServer::with_allowed_origins([...])` names more;
+  `allow_any_origin()` turns the gate off. An entry naming a scheme
+  (`https://app.example.com`) is an origin and matched as one, so trusting an
+  application does not trust what else its host serves; a bare host holds
+  neither scheme nor port against the request. `Host` is matched by name either
+  way.
 * **`Context::client_capabilities()`** reports what the caller declared in this
   request's `_meta`, so a handler can branch before asking for an input kind it
   would be refused for (`MissingRequiredClientCapability`). Elicitation is
@@ -76,9 +73,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * `PropertyType` gains an `Integer` variant and `"integer"` no longer
   deserializes into `Number`; a match needs the new arm.
 * The schema structs in `neva::types::schema` gain an `extra` field, so an
-  exhaustive struct literal needs it (or `..Default::default()`). `EnumItems`,
-  `EnumOptions` and `EnumOption` are among them, and `EnumOption` gives up its
-  `Eq` impl in the process -- an arbitrary JSON value is not `Eq`. `PartialEq`
+  exhaustive struct literal needs it (or `..Default::default()`). `EnumOption`
+  gives up `Eq` with it -- an arbitrary JSON value is not `Eq`; `PartialEq`
   stays.
 * **Wire:** a tool registered from a bare closure advertises `arg0`, `arg1`, ...
   instead of the former type names. `#[tool]` tools are unaffected.
@@ -92,38 +88,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   optional in RFC 6750.
 * **The applicable Bearer challenge is found wherever the server put it** --
   behind another scheme, in a second `WWW-Authenticate` value, or later in the
-  same one, which RFC 9110 allows and the parser's "first Bearer wins" contract
-  stops at. Among several, the one naming `insufficient_scope` is acted on: a
-  `Bearer error="invalid_token"` ahead of it would otherwise answer for both,
-  giving either no step-up or one asking for the grant already held, since the
-  `scope` the request was short of lives on the challenge that named the code.
-  Detection and the challenge handed to the flow are the same selection, so they
-  cannot disagree.
+  same one, all of which RFC 9110 allows. Among several the one naming
+  `insufficient_scope` is acted on: it carries the `scope` the request was short
+  of, and reading any other leaves the step-up asking for the grant it had.
 * **A `403` on the standalone SSE `GET` re-authorizes** like one on a `POST`
   (legacy profile).
-* **A step-up that lost the race reuses the winner's token** instead of walking
-  the user through consent for a grant it already holds -- but only on evidence
-  it holds it. A challenge that named no scope leaves nothing to check coverage
-  against, and a token that merely changed proves nothing there: a refresh
-  rotates one without widening it. That case runs the flow.
-* **A stored refresh token survives a restart.** The refresh is retried once the
-  client and metadata have been rebuilt, on the way to the interactive flow --
-  and only with a configured `client_id`, since a refresh token belongs to the
-  client it was issued to.
-* **A renewal leaves the session holding what the renewed token holds.** A
-  refresh response may omit `scope` when the grant is unchanged (RFC 6749 5.1),
-  and the renewed set replaces the stored one -- so the grant was carried over
-  rather than erased, and the next step-up had something to widen. A response
-  that *narrows* the grant now updates the in-memory record too: it outranks the
-  store, so a remembered wider grant would have a challenge read as already
-  covered and hand the caller back a token that lacks the scope.
-* **The session records what was *granted*, not what was asked for**, so a
-  granted subset no longer reads as a token that merely expired. When the
-  response omits `scope` -- the server's way of saying "exactly what you asked
-  for" -- the inferred grant is written into the stored token too, not just held
-  in memory, so it is still there after a restart.
-* **A step-up widens the grant a restored token holds**, taken from the stored
-  token's own `scope` when memory is empty after a restart.
+* **A step-up that lost the race reuses the winner's token**, but only when the
+  grant on record covers what was demanded. A challenge that named no scope
+  gives nothing to check that against, and a changed token proves nothing -- a
+  refresh rotates one without widening it -- so that case runs the flow.
+* **A stored refresh token survives a restart**: the refresh is retried once the
+  client and metadata have been rebuilt, on the way to the interactive flow.
+  Only with a configured `client_id` -- a refresh token belongs to the client it
+  was issued to.
+* **What the session believes it was granted follows the token.** It records
+  what the response *granted*, not what was asked for, so a granted subset no
+  longer reads as a token that merely expired; one that omits `scope` (RFC 6749
+  5.1) has the grant carried over, one that narrows it updates the record. All
+  of it reaches the token store, so a step-up after a restart widens the stored
+  grant rather than replacing it.
 * **A challenge naming a scope outside `with_scopes` fails, naming it**, rather
   than running a flow that cannot obtain it.
 * **Only a `404` opens the Protected Resource Metadata origin fallback** -- a
@@ -131,22 +114,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   answering, and its answer is authoritative.
 * **The RFC 8707 resource indicator is the one the accepted metadata declares**,
   not the endpoint URL.
-* **A resumption asks for a token when its turn comes**, rather than carrying
-  the one the original `POST` was sent with. The wait before reconnecting is the
-  server's to name and can outlast that token, so it is renewed if it is about
-  to expire -- and a `401` (or a `403` saying the scope is short) re-authorizes
-  once and tries again, as the `POST` and the standalone `GET` already did.
-  Treating it as final threw away the answer the reconnection went back for.
+* **A resumption asks for a token when its turn comes**, not carrying the one
+  the original `POST` used: the server names the wait, and it can outlast that
+  token. A `401` there re-authorizes once and tries again, as the `POST` and the
+  standalone `GET` already did, instead of losing the answer.
 
 #### HTTP transport and sessions
 * **SSE responses carry `X-Content-Type-Options: nosniff`.** Without it Firefox
   buffers the stream to sniff its type and a `fetch()` reader sees nothing.
-* **Each stream carries its own `Last-Event-ID` cursor and its own `retry:`
-  delay.** Both lived on the session, so the `POST` and standalone `GET` streams
-  sent each other back to positions they had never reached, and whichever frame
-  landed last set the other's reconnection time -- a `retry: 0` on a `POST` reply
-  had a dropped `GET` reconnect instantly, and a patient `GET` held up a `POST`
-  resumption. A reconnection time belongs to the connection it was stated on.
+* **Each stream carries its own `Last-Event-ID` cursor and `retry:` delay.**
+  Both lived on the session, so the `POST` and standalone `GET` streams sent
+  each other back to positions they had never reached, and whichever frame
+  landed last set the other's reconnection time.
 * **A resumed response stream is released once it has answered**, instead of
   being read forever -- one leaked connection per truncated reply. What is owed
   is tracked per request, so a batch resumes only what is still unanswered.
@@ -159,14 +138,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   connection, instead of carrying on dead (legacy profile).
 * **A terminated session answers `404` on `POST`, `GET` and `DELETE`** (legacy
   profile), the POST body carrying a JSON-RPC error addressed to the request's
-  own id. `initialize` is exempt, and any request on a live id counts as
-  activity against the idle sweep.
+  own id. `initialize` is exempt; a live id counts as activity against the
+  idle sweep.
 * **A stale session answers a notification with the status alone**, not a
   `null`-id JSON-RPC error that matches nothing on the other side.
 * **A notification reaches the session stream the moment it is emitted** (legacy
   profile), so a handler's response can no longer overtake the progress it just
   reported. Per-session delivery replaces one shared 100-slot queue, and
-  `layer()` no longer spawns, so it can be built before the runtime runs.
+  `layer()` no longer spawns.
 * **A full notification queue no longer logs itself to death** (legacy profile)
   -- the warning fed straight back into the layer until the stack ran out.
 * **The POST no longer carries `Content-Type` twice**, which drew `415` from
@@ -185,33 +164,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * **A `requestState` / `inputResponses` of the wrong JSON type is
   `InvalidParams`**, not silently absent. An explicit `null` counts as stating
   the field wrongly -- the spec makes both optional by *absence*.
-* **A declared elicitation mode is honored.** `elicitation` was flattened to one
-  flag, so a client declaring `{"form": {}}` was also considered able to answer a
-  `url` request -- which it had said nothing about, and the round stalled waiting
-  for an answer that could not come. Named modes are now a list of what the
-  client can do, and `MissingRequiredClientCapability` names the mode rather than
-  just the capability. An `elicitation` that names no mode rules none out, which
-  is what a bare `{}` (or the boolean older neva clients wrote) has always meant.
+* **A declared elicitation mode is honored.** `elicitation` was one flag, so a
+  client declaring `{"form": {}}` was sent `url` requests it had said nothing
+  about and the round stalled. Named modes are a list of what the client can do,
+  and `MissingRequiredClientCapability` names the mode; naming none rules none
+  out, which is what a bare `{}` has always meant.
 * **`x-mcp-header` registrations expire with the listing that carried them**
-  (SEP-2243 with SEP-2549's clock): a listing is usable for its `ttlMs`, and an
+  (SEP-2243 with SEP-2549's clock): usable for the listing's `ttlMs`, and an
   absent `ttlMs` reads as `0`. A `HeaderMismatch` (`-32020`) then has the client
-  re-list to the end of the listing -- a restarted traversal clears what the
-  last one recorded, so a page it never reaches loses both its annotations and
-  its record of the tools that were dropped -- and retry once; that listing is
-  good for that retry regardless of TTL, scoped to the refused tool
-  and spent on the first call either way -- it covers the retry it was fetched
-  for, never a later call the TTL has since disowned. "One call" is the whole
-  exchange, not one HTTP attempt: the mirrored headers are read once and reused,
-  so a managed-OAuth `401` that sends the request back through authorization
-  does not lose them on the way.
+  re-list and retry once; that listing is good for the retry whatever its TTL,
+  for the refused tool and that one exchange only. The re-listing runs to the
+  end -- a restarted traversal clears what the last one recorded, so a page it
+  never reaches loses its annotations and its record of the dropped tools.
 
 #### Schemas and arguments
 * **A schema is published the way it was declared.** `Schema` and (legacy
   profile) `ToolSchema` keep every unmodelled keyword verbatim in a flattened
   `extra`: `default` (SEP-1034), `pattern`, `examples`, and the `$schema`,
-  `$defs`, `$ref`, `additionalProperties`, `allOf`/`anyOf` and `if`/`then`/`else`
-  that SEP-2106 requires to survive untouched. Below the root too: an enum
-  form's `items`, and each `anyOf` option under it, keep theirs the same way.
+  `$defs`, `$ref`, `additionalProperties`, `allOf`/`anyOf` and
+  `if`/`then`/`else` that SEP-2106 requires to survive untouched -- below the
+  root as well, in an enum form's `items` and each `anyOf` option under it.
 * **A tool property keeps its own keywords too** (legacy profile): `enum`,
   `format`, `$ref` and `minimum` were dropped, and a property stating no `type`
   no longer acquires `"object"`.
@@ -223,8 +195,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   -- classified from the *resolved* type, so type aliases are recognised.
 * **Tools registered from a closure publish one property per argument**, instead
   of keying them by type name and collapsing `|a: i32, b: i32|` into one.
-* **A tool call with no arguments omits `arguments`** rather than sending `null`,
-  which a validating peer rejects.
+* **A tool call with no arguments omits `arguments`** rather than sending
+  `null`, which a validating peer rejects.
 
 #### Wire and protocol
 * **Per-request `clientCapabilities` are read as the spec's optional objects**,
@@ -242,7 +214,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * **A body protocol version disagreeing with the `MCP-Protocol-Version` header
   is a `HeaderMismatch` (`-32020`)**, not `UnsupportedProtocolVersion` -- "retry
   with a version from this list" does not fix a header and a body that disagree.
-* **`resources/read` names the unknown URI in `error.data.uri`** (a spec SHOULD).
+* **`resources/read` names the unknown URI in `error.data.uri`** (a spec
+  SHOULD).
 
 ## 0.5.1
 
