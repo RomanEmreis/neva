@@ -101,7 +101,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * **A `403` on the standalone SSE `GET` re-authorizes** like one on a `POST`
   (legacy profile).
 * **A step-up that lost the race reuses the winner's token** instead of walking
-  the user through consent for a grant it already holds.
+  the user through consent for a grant it already holds -- but only on evidence
+  it holds it. A challenge that named no scope leaves nothing to check coverage
+  against, and a token that merely changed proves nothing there: a refresh
+  rotates one without widening it. That case runs the flow.
 * **A stored refresh token survives a restart.** The refresh is retried once the
   client and metadata have been rebuilt, on the way to the interactive flow --
   and only with a configured `client_id`, since a refresh token belongs to the

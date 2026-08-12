@@ -742,25 +742,32 @@ impl OAuthSession {
         let held = self.requested_scopes();
         let uncovered = demanded.iter().any(|scope| !held.contains(scope));
 
+        let step_up = insufficient || uncovered;
+
+        // A step-up that named no scope leaves nothing to check coverage
+        // against, and a token that merely changed proves nothing: a refresh
+        // rotates the access token without touching what it covers, and any
+        // other request in this process may have run one while this caller
+        // queued. Taking it would be the refresh path under another name --
+        // exactly what reading `insufficient_scope` was meant to stop -- and the
+        // exchange's one retry would go out just as short as before.
+        let unverifiable = step_up && demanded.is_empty();
+
         // Someone else may have completed a widening flow while this caller
         // waited on the lock, and its token is right here. Taking it is the
         // whole point of the single-flight lock: two callers refused for the
         // same missing scope must not walk the user through consent twice.
         //
         // Trustworthy only because both halves are checked: the grant on record
-        // now covers what the challenge demanded, *and* the token is not the
-        // one that was just refused. When the challenge named no scope there is
-        // nothing to check coverage against, so a token that has since changed
-        // is the only evidence there is -- and it is the same evidence the
-        // non-step-up path already acts on.
+        // now covers what the challenge demanded, *and* the token is not the one
+        // that was just refused.
         if !uncovered
+            && !unverifiable
             && let Some(current) = self.bearer()
             && used != Some(&*current)
         {
             return Ok(current);
         }
-
-        let step_up = insufficient || uncovered;
 
         // A configured set is the caller's decision about what this client may
         // ever ask for, and the flow below honors it to the letter -- so a
@@ -2092,6 +2099,82 @@ mod tests {
             &*token, "widened-token",
             "the loser must reuse what the winner obtained"
         );
+    }
+
+    /// A step-up that named no scope cannot be satisfied by a token that merely
+    /// changed.
+    ///
+    /// `scope` is optional in RFC 6750, so a server may say the grant is too
+    /// narrow without saying what it wants. There is then nothing to check
+    /// coverage against -- and a rotated token is no substitute, because a
+    /// refresh renews a grant without widening it. Handing it back would be the
+    /// refresh path wearing the step-up's clothes, and the caller would spend
+    /// its one retry on credentials short by exactly as much as before.
+    #[tokio::test]
+    async fn a_scope_less_step_up_is_not_satisfied_by_a_rotated_token() {
+        // Nothing listens on port 9, so a run that reaches discovery fails on
+        // connect: reaching the network at all is the assertion.
+        const RESOURCE: &str = "http://127.0.0.1:9/mcp";
+
+        let store = InMemoryTokenStore::new();
+        store.put(
+            RESOURCE,
+            &TokenSet {
+                // What another request's refresh left behind: a different token,
+                // covering exactly what the old one did.
+                access_token: "rotated-token".into(),
+                token_type: "Bearer".into(),
+                refresh_token: None,
+                scope: Some("read".into()),
+                id_token: None,
+                expires_at: None,
+            },
+        );
+
+        let config = OAuthClientConfig::default()
+            .require_https(false)
+            .with_token_store(store);
+        let session = OAuthSession::new(config, RESOURCE).unwrap();
+
+        let err = session
+            .authorize(
+                Some(r#"Bearer error="insufficient_scope""#),
+                Some("the-refused-token"),
+            )
+            .await
+            .expect_err("a rotated token is not evidence of a wider grant");
+        assert!(
+            !err.to_string().contains("rotated-token"),
+            "the flow must be run, not short-circuited: {err}"
+        );
+
+        // The named case is the one the shortcut exists for, and it still
+        // works: the grant on record covers what the challenge demanded.
+        let store = InMemoryTokenStore::new();
+        store.put(
+            RESOURCE,
+            &TokenSet {
+                access_token: "widened-token".into(),
+                token_type: "Bearer".into(),
+                refresh_token: None,
+                scope: Some("admin".into()),
+                id_token: None,
+                expires_at: None,
+            },
+        );
+        let config = OAuthClientConfig::default()
+            .require_https(false)
+            .with_token_store(store);
+        let session = OAuthSession::new(config, RESOURCE).unwrap();
+
+        let token = session
+            .authorize(
+                Some(r#"Bearer error="insufficient_scope", scope="admin""#),
+                Some("the-refused-token"),
+            )
+            .await
+            .expect("a demand the grant on record covers");
+        assert_eq!(&*token, "widened-token");
     }
 
     /// A configured scope set is a ceiling as well as a floor: the flow asks
