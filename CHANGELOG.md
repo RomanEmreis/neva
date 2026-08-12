@@ -15,9 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   origin and is matched as one -- scheme, host and port, a missing port meaning
   the scheme's default -- so trusting an application does not also trust whatever
   else its host serves on another port. A bare host stays a host: it says nothing
-  about scheme or port and holds neither against the request. `Host` is matched
-  by name either way, since it says where the request landed rather than who sent
-  it.
+  about scheme or port and holds neither against the request, beyond a port it
+  does name -- matched against the port the origin is really on, so a pinned
+  `:443` is the `:443` a browser leaves implicit. `Host` is matched by name
+  either way, since it says where the request landed rather than who sent it.
 * **`Context::client_capabilities()`** reports what the caller declared in this
   request's `_meta`, so a handler can branch before asking for an input kind it
   would be refused for (`MissingRequiredClientCapability`). Elicitation is
@@ -194,8 +195,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * **`x-mcp-header` registrations expire with the listing that carried them**
   (SEP-2243 with SEP-2549's clock): a listing is usable for its `ttlMs`, and an
   absent `ttlMs` reads as `0`. A `HeaderMismatch` (`-32020`) then has the client
-  re-list, following `nextCursor` until it finds the tool, and retry once; that
-  listing is good for that retry regardless of TTL, scoped to the refused tool
+  re-list to the end of the listing -- a restarted traversal clears what the
+  last one recorded, so a page it never reaches loses both its annotations and
+  its record of the tools that were dropped -- and retry once; that listing is
+  good for that retry regardless of TTL, scoped to the refused tool
   and spent on the first call either way -- it covers the retry it was fetched
   for, never a later call the TTL has since disowned. "One call" is the whole
   exchange, not one HTTP attempt: the mirrored headers are read once and reused,

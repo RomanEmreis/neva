@@ -1028,10 +1028,11 @@ impl Client {
     /// fresh attempt the same way is saying something the listing cannot fix,
     /// and repeating would turn that into a loop the caller cannot see.
     ///
-    /// The refresh follows `nextCursor` until the refused tool is back in the
-    /// registry: a traversal that restarts clears what the previous one
-    /// registered, so a tool the server pages later would otherwise be left
-    /// without the annotations the retry needs.
+    /// The refresh follows `nextCursor` to the end of the listing, not merely
+    /// until the refused tool turns up: a traversal that restarts clears what
+    /// the previous one registered, so every page it does not reach is left
+    /// with nothing -- no annotations for the tools on it, and no record of the
+    /// ones that were dropped for a malformed declaration.
     #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
     async fn retry_after_header_mismatch(
         &mut self,
@@ -1045,11 +1046,13 @@ impl Client {
             return Ok(resp);
         }
 
-        // Refresh until the tool that was refused has actually been re-listed.
-        // Stopping at the first page would leave a tool the server pages later
-        // with no registration at all -- the traversal starts over, so the old
-        // one is cleared -- and the retry would omit exactly the headers it was
-        // sent back for.
+        // The whole listing, not just up to the refused tool. A cursor-less
+        // call starts the traversal over and clears what the last one recorded,
+        // so stopping early would leave every later page unregistered against a
+        // registry that no longer holds their old entries: their calls would go
+        // out without the headers they need, and a tool dropped for a malformed
+        // annotation would stop being blocked -- which is the one outcome
+        // dropping it exists to prevent.
         //
         // Fetched with grace: this listing is the server's current answer, and
         // the retry below is what it was fetched for. Judging it by its own TTL
@@ -1069,10 +1072,7 @@ impl Client {
             let Ok(page) = self.list_tools_inner(cursor, Some(&name)).await else {
                 return Ok(resp);
             };
-            if page.tools.iter().any(|tool| *tool.name == *name) {
-                refreshed = true;
-                break;
-            }
+            refreshed |= page.tools.iter().any(|tool| *tool.name == *name);
             match page.next_cursor {
                 Some(next) => cursor = Some(next),
                 None => break,

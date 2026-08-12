@@ -385,6 +385,117 @@ async fn the_refusal_recovery_pages_until_it_finds_the_tool() {
     handle.abort();
 }
 
+/// The recovery has to finish the listing, not stop where it found its tool.
+///
+/// A refreshed traversal starts over and clears what the last one recorded, so
+/// every page the recovery does not reach is left with nothing. For a tool that
+/// was dropped for a malformed `x-mcp-header` that is the sharp end: the client
+/// stops knowing it was dropped, and a tool whose annotations it cannot honor
+/// becomes callable again -- the one outcome dropping it exists to prevent.
+/// Here the refused tool sits on the first page and the malformed one is named
+/// to sort onto the second.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recovery_that_stops_early_would_unblock_a_later_page() {
+    use neva::client::Client;
+
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app =
+        App::new().with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("a_query", |region: String| async move { region })
+        .with_input_schema(|_| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "region": { "type": "string", "x-mcp-header": "Region" }
+                }
+            })
+            .into()
+        })
+        .with_arg_names(["region"]);
+
+    // Nine more, so the first page (ten) ends before the malformed tool.
+    for i in 0..9 {
+        app.map_tool(
+            format!("b{i:02}_filler"),
+            || async move { "ok".to_string() },
+        );
+    }
+
+    // A header name that is not an HTTP token: the client drops the tool and
+    // refuses to call it.
+    app.map_tool("z_bad", |region: String| async move { region })
+        .with_input_schema(|_| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "region": { "type": "string", "x-mcp-header": "not a token" }
+                }
+            })
+            .into()
+        })
+        .with_arg_names(["region"]);
+
+    let handle = tokio::spawn(async move { app.run().await });
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match tokio::net::TcpStream::connect(&addr).await {
+            Ok(_) => break,
+            Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await
+            }
+            Err(err) => panic!("server never became reachable: {err}"),
+        }
+    }
+
+    let mut client = Client::new().with_options(|opt| {
+        opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
+            .with_timeout(std::time::Duration::from_secs(5))
+    });
+    client.connect().await.expect("connect");
+
+    // Walk the whole listing first, which is what puts the malformed tool on
+    // record as dropped.
+    let first = client.list_tools(None).await.expect("tools/list");
+    let cursor = first
+        .next_cursor
+        .expect("this test needs the malformed tool to sit past the first page");
+    assert!(!first.tools.iter().any(|t| &*t.name == "z_bad"));
+    client
+        .list_tools(Some(cursor))
+        .await
+        .expect("the second page");
+
+    let blocked = client
+        .call_tool("z_bad", [("region", "us-west1")])
+        .await
+        .expect_err("a tool dropped for a malformed declaration cannot be called");
+    assert!(
+        blocked.to_string().contains("invalid `x-mcp-header`"),
+        "got: {blocked}"
+    );
+
+    // The listing is stale on arrival (`ttlMs: 0`), so this call goes out bare,
+    // is refused, and runs the recovery -- finding its tool on the first page.
+    client
+        .call_tool("a_query", [("region", "us-west1")])
+        .await
+        .expect("the recovery re-lists and the retry carries the headers");
+
+    let still_blocked = client
+        .call_tool("z_bad", [("region", "us-west1")])
+        .await
+        .expect_err("the recovery must not have forgotten the second page");
+    assert!(
+        still_blocked.to_string().contains("invalid `x-mcp-header`"),
+        "a recovery that stopped early left a malformed tool callable: {still_blocked}"
+    );
+
+    handle.abort();
+}
+
 /// A refresh that does not turn up the refused tool must leave the original
 /// answer standing.
 ///

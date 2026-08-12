@@ -171,8 +171,12 @@ fn entry_allows_origin(entry: &str, scheme: &str, host: &str, port: Option<&str>
                 && stated_port(entry_scheme, port_of(rest)) == stated_port(scheme, port)
         }
         None => {
+            // Against the *effective* port: a browser sends
+            // `https://app.example.com` with the `:443` left implicit, and an
+            // entry that spelled it out means the same place.
             host_of(entry).eq_ignore_ascii_case(host)
-                && port_of(entry).is_none_or(|entry_port| Some(entry_port) == port)
+                && port_of(entry)
+                    .is_none_or(|entry_port| Some(entry_port) == stated_port(scheme, port))
         }
     }
 }
@@ -420,6 +424,22 @@ mod tests {
             pinned
                 .rejection(&headers(&[("origin", "https://app.example.com")]))
                 .is_some()
+        );
+
+        // A pinned default port is the port the browser leaves implicit, and
+        // the two spellings name one place.
+        let default_port = OriginPolicy::Allowlist(Arc::from([Box::from("app.example.com:443")]));
+        assert!(
+            default_port
+                .rejection(&headers(&[("origin", "https://app.example.com")]))
+                .is_none(),
+            "an implicit :443 is the :443 the entry pinned"
+        );
+        assert!(
+            default_port
+                .rejection(&headers(&[("origin", "http://app.example.com")]))
+                .is_some(),
+            "but plain HTTP is port 80, which the entry did not pin"
         );
         // `Host` is matched by name either way: it says where the request
         // landed, not who sent it, and behind a proxy its port is the proxy's.
