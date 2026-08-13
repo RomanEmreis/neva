@@ -36,9 +36,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   accepted. A mismatch is `InvalidParams`, like the principal guard, and the
   check runs both ways: a state naming an audience is refused by a server that
   configures none.
-* `ClientMetadata` re-exported from `neva::auth::oauth`.
 
-#### Authorization
+  **Wire:** an audience-bound state is sealed under its own version (`v2.`
+  rather than `v1.`), so a binary predating the option refuses it instead of
+  decrypting it and dropping the member it does not know -- which would leave
+  the binding unenforced by exactly the instance still to be upgraded. A
+  deployment that configures no audience keeps minting `v1`; both versions
+  decode.
+* `ClientMetadata` re-exported from `neva::auth::oauth`.
 * **A stored refresh token is only offered to the authorization server that
   minted it.** A refresh token is a bearer credential for its token endpoint,
   and the server a flow discovers is vouched for by the resource alone -- which

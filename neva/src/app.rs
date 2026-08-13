@@ -456,17 +456,24 @@ impl App {
     /// sealed in.
     ///
     /// Set it to whatever names this service and nothing else -- its canonical
-    /// resource URI, the value
-    /// [`OAuthResourceOptions::with_resource`](crate::auth::oauth::OAuthResourceOptions::with_resource)
-    /// carries, is the natural one. It has to be **identical on every instance
-    /// of the same service**, since a retry may land on any of them; a value
-    /// that varies per instance rejects every retry that moves.
+    /// resource URI, the value `OAuthResourceOptions::with_resource` carries,
+    /// is the natural one (link omitted: that type needs the `server-oauth`
+    /// feature). It has to be **identical on every instance of the same
+    /// service**, since a retry may land on any of them; a value that varies
+    /// per instance rejects every retry that moves.
     ///
     /// Unset, states are minted and demanded without an audience -- and a state
     /// carrying one is refused just as firmly, so the guard cannot be shed by
-    /// omitting it. Setting it while a fleet is mid-upgrade rejects the states
-    /// already in flight; they lapse within the `requestState` TTL (5 minutes),
-    /// and the client's next round mints one under the new binding.
+    /// omitting it.
+    ///
+    /// An audience-bound state is also sealed under its own wire version, which
+    /// a binary predating this option refuses outright. Without that, such a
+    /// binary would decrypt the state, ignore the field it does not know, and
+    /// run the round -- so the binding would be worth nothing against exactly
+    /// the service that has not been upgraded yet. The cost is that states in
+    /// flight when the option is turned on are rejected; they lapse within the
+    /// `requestState` TTL (5 minutes), and the client's next round mints one
+    /// under the new binding.
     ///
     /// # Example
     /// ```no_run

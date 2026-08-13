@@ -1455,7 +1455,32 @@ fn validate_client_id_document_url(url: &str, require_https: bool) -> Result<(),
         ))
     };
 
-    let rest = match url.split_once("://") {
+    // A fragment never reaches the server, so an id carrying one could never
+    // match the document it is fetched from -- the match the server checks.
+    // Named separately from the syntax check below, which would only call it
+    // an invalid URI.
+    if url.contains('#') {
+        return invalid("must not carry a fragment");
+    }
+
+    // URI syntax, from the parser the rest of this module already trusts:
+    // scheme, brackets around an IPv6 host, a numeric port, the characters a
+    // path and query may hold. Checking those by hand is what lets
+    // `https://[::1/client.json` or `https://example.com:bad/client.json`
+    // through -- both have a non-empty something before the first `/` and
+    // neither is a URL an authorization server could dereference.
+    //
+    // The *canonical* form is what gets inspected below, so the checks see
+    // one spelling. It is deliberately not what gets sent: a Client ID
+    // Metadata Document has to declare a `client_id` matching the URL the
+    // server fetched, byte for byte, so lowercasing a host or dropping a
+    // default port here would break the very match it exists for.
+    let canonical = match canonicalize_resource_uri(url) {
+        Ok(canonical) => canonical,
+        Err(err) => return invalid(&format!("is not a valid URL: {err}")),
+    };
+
+    let rest = match canonical.split_once("://") {
         Some(("https", rest)) => rest,
         Some(("http", rest)) if !require_https => rest,
         Some(("http", _)) => {
@@ -1464,21 +1489,14 @@ fn validate_client_id_document_url(url: &str, require_https: bool) -> Result<(),
         _ => return invalid("must be an absolute `https` URL"),
     };
 
-    // A fragment never reaches the server, so an id carrying one could never
-    // match the document it is fetched from -- the match the server checks.
-    if rest.contains('#') {
-        return invalid("must not carry a fragment");
-    }
+    // Canonicalization drops a lone root slash, so `https://example.com` and
+    // `https://example.com/` arrive here alike -- both being the origin, which
+    // as a client id would make every client hosted there the same client.
+    let has_path = rest
+        .split_once('/')
+        .is_some_and(|(_, path)| !path.split('?').next().unwrap_or_default().is_empty());
 
-    let Some((authority, path)) = rest.split_once('/') else {
-        return invalid("must contain a path component, e.g. `https://example.com/client.json`");
-    };
-    if authority.is_empty() {
-        return invalid("must name a host");
-    }
-    // `https://example.com/` is the origin spelled with a trailing slash, not
-    // a document location.
-    if path.split(['?', '#']).next().unwrap_or_default().is_empty() {
+    if !has_path {
         return invalid("must contain a path component, e.g. `https://example.com/client.json`");
     }
 
@@ -1708,11 +1726,14 @@ mod tests {
     fn a_client_id_document_url_must_be_https_with_a_path() {
         assert!(validate_client_id_document_url(CIMD_URL, true).is_ok());
         assert!(validate_client_id_document_url("https://example.com/c", true).is_ok());
+        assert!(validate_client_id_document_url("https://example.com:8443/c", true).is_ok());
+        assert!(validate_client_id_document_url("https://[::1]:8443/c.json", false).is_ok());
 
         // No path: the bare origin would make every client hosted there one
         // and the same client.
         assert!(validate_client_id_document_url("https://example.com", true).is_err());
         assert!(validate_client_id_document_url("https://example.com/", true).is_err());
+        assert!(validate_client_id_document_url("https://example.com/?x=1", true).is_err());
         // A fragment never reaches the server, so it could never match the
         // document it is fetched from.
         assert!(validate_client_id_document_url("https://example.com/c#f", true).is_err());
@@ -1724,6 +1745,25 @@ mod tests {
         // Plain http only under the same knob that admits a plain-http issuer.
         assert!(validate_client_id_document_url("http://localhost:9/c.json", true).is_err());
         assert!(validate_client_id_document_url("http://localhost:9/c.json", false).is_ok());
+    }
+
+    /// A malformed authority has a non-empty something before the first `/`,
+    /// so a hand-rolled split calls it valid and the client is built around an
+    /// id no authorization server can dereference. Only real URI parsing
+    /// catches these.
+    #[test]
+    fn a_malformed_client_id_document_url_is_refused() {
+        for url in [
+            "https://[::1/client.json",           // unclosed IPv6 bracket
+            "https://example.com:bad/c.json",     // port that is not a number
+            "https://user@example.com/c.json",    // userinfo
+            "https://exa mple.com/c.json",        // whitespace in the authority
+            "https://exam\u{00a0}ple.com/c.json", // non-ASCII
+        ] {
+            let err = validate_client_id_document_url(url, true)
+                .expect_err("a URL a server cannot fetch must be refused");
+            assert!(err.to_string().contains("not a valid URL"), "{url}: {err}");
+        }
     }
 
     /// The message has to name the fix, not just the refusal -- the URL is a
