@@ -530,6 +530,12 @@ impl OAuthClientConfig {
     /// server that never issued them, and a stored refresh token is only
     /// offered to the server that minted it.
     ///
+    /// It is also what the [`TokenStore`] entry is filed under, so credentials
+    /// obtained from two different servers never share a slot. Pointing this
+    /// at a new server -- migrating -- therefore starts from an empty one:
+    /// the old server's tokens stay where they are and are not offered to the
+    /// new server, which is the whole point.
+    ///
     /// Without it the credentials are unbound: they still work against a
     /// server that never changes its authorization server, but a stored
     /// refresh token is not reused across a restart, since nothing records
@@ -739,9 +745,13 @@ const REFRESH_LEEWAY: std::time::Duration = std::time::Duration::from_secs(30);
 /// single-flight authorization flow.
 pub(crate) struct OAuthSession {
     config: OAuthClientConfig,
-    /// Canonicalized server URL -- the RFC 8707 resource indicator and
-    /// the token-store key.
+    /// Canonicalized server URL -- the RFC 8707 resource indicator and the
+    /// discovery base.
     resource: String,
+    /// Where this session's credentials live in the [`TokenStore`]: the
+    /// resource, prefixed by the issuer they were obtained from when one is
+    /// configured. See [`OAuthSession::store_key`].
+    store_key: String,
     /// Current bearer token, read on every outgoing request.
     token: RwLock<Option<Arc<str>>>,
     /// Serializes authorization flows (concurrent 401s run one flow) and
@@ -775,19 +785,52 @@ impl OAuthSession {
         let resource = canonicalize_resource_uri(server_url)
             .map_err(|err| Error::new(ErrorCode::InternalError, err.to_string()))?;
 
+        let store_key = Self::store_key(&config, &resource);
+
         let token = config
             .store
-            .get(&resource)
+            .get(&store_key)
             .filter(|tokens| !tokens.is_expired())
             .map(|tokens| tokens.access_token.into());
 
         Ok(Self {
             config,
             resource,
+            store_key,
             token: RwLock::new(token),
             flow: Mutex::new(None),
             requested_scopes: RwLock::new(Vec::new()),
         })
+    }
+
+    /// Where this session's credentials live in the [`TokenStore`].
+    ///
+    /// The issuer is part of the key whenever one is configured, which is the
+    /// spec's own prescription -- credentials are to be associated with the
+    /// authorization server that issued them, "keyed by the authorization
+    /// server's `issuer` identifier". Keying by the resource alone records
+    /// nothing about where a stored credential came from, so after a migration
+    /// the *current* configuration is all a check has to go on -- and the
+    /// current configuration is exactly what an operator updates when the
+    /// resource moves. The old server's refresh token would then be read back
+    /// under the same key and offered to the new one. Under this key it is not
+    /// found at all: it lives under the issuer that minted it, and nothing
+    /// looks there again.
+    ///
+    /// The client id is deliberately not part of it. A stale one is refused by
+    /// the server that issued the token rather than leaking it to another, so
+    /// it costs a round trip, not a credential -- and a dynamically registered
+    /// client has no id to key by until the flow it is about to run mints one.
+    ///
+    /// Unbound, the key is the resource alone, exactly as before: such a
+    /// session never refreshes from the store
+    /// ([`Self::may_reuse_stored_refresh`]), so its entry is only ever the
+    /// warm start's access token.
+    fn store_key(config: &OAuthClientConfig, resource: &str) -> String {
+        match &config.issuer {
+            Some(issuer) => format!("{issuer}|{resource}"),
+            None => resource.to_owned(),
+        }
     }
 
     /// Scopes this session is known to hold, most authoritative source first.
@@ -817,7 +860,7 @@ impl OAuthSession {
 
         self.config
             .store
-            .get(&self.resource)
+            .get(&self.store_key)
             .and_then(|tokens| tokens.scope)
             .map(|granted| split_scopes(&granted))
             .filter(|granted| !granted.is_empty())
@@ -857,7 +900,7 @@ impl OAuthSession {
         let stale = self
             .config
             .store
-            .get(&self.resource)
+            .get(&self.store_key)
             .is_some_and(|tokens| tokens.expires_within(REFRESH_LEEWAY));
 
         if !stale {
@@ -896,10 +939,10 @@ impl OAuthSession {
         let carried = self
             .config
             .store
-            .get(&self.resource)
+            .get(&self.store_key)
             .and_then(|tokens| tokens.scope);
 
-        match client.token(&self.resource, metadata).await {
+        match client.token(&self.store_key, metadata).await {
             Ok(Some(mut tokens)) => {
                 // What the renewed token covers: what the response said it
                 // granted, or -- when it said nothing -- the grant it did not
@@ -909,7 +952,7 @@ impl OAuthSession {
                     && let Some(scope) = granted.clone()
                 {
                     tokens.scope = Some(scope);
-                    self.config.store.put(&self.resource, &tokens);
+                    self.config.store.put(&self.store_key, &tokens);
                 }
                 // And the in-memory record moves with it. A refresh may
                 // *narrow* the grant, and this process's memory of the earlier,
@@ -1174,7 +1217,7 @@ impl OAuthSession {
             tokens.scope = Some(granted.join(" "));
         }
 
-        self.config.store.put(&self.resource, &tokens);
+        self.config.store.put(&self.store_key, &tokens);
         // Keep the client + metadata so future refreshes stay
         // non-interactive.
         *flight = Some(FlowState {
@@ -1241,10 +1284,19 @@ impl OAuthSession {
     /// issued to. And the token has to have come from *this* authorization
     /// server -- a refresh token is a bearer credential for the endpoint that
     /// minted it, so sending it to a server that did not is handing that
-    /// server a credential for another one. Nothing in the store records
-    /// which server that was, so the binding has to be configured; without
-    /// one the session re-authorizes interactively, which is a worse
-    /// experience and the only safe answer.
+    /// server a credential for another one. Without a configured issuer
+    /// nothing says where the stored token came from, so the session
+    /// re-authorizes interactively: a worse experience and the only safe
+    /// answer.
+    ///
+    /// The issuer check here and the store key work as a pair, and the pair is
+    /// what makes the binding hold across a migration. [`Self::store_key`] is
+    /// built from the *configured* issuer, which is a claim about the past
+    /// that an operator rewrites when the resource moves; this check is what
+    /// ties that claim to the server actually discovered now. Together they
+    /// mean a token is only ever read back under the issuer that minted it,
+    /// and only ever sent to that same issuer. Drop either and a token from
+    /// the old server goes to the new one.
     fn may_reuse_stored_refresh(
         &self,
         source: ClientIdSource<'_>,
@@ -2293,6 +2345,9 @@ mod tests {
         OAuthSession {
             config,
             resource: "http://127.0.0.1:3000/mcp".into(),
+            // No issuer configured, so the key is the resource -- which is what
+            // every `store.put` in these tests writes under.
+            store_key: "http://127.0.0.1:3000/mcp".into(),
             token: RwLock::new(Some("stale-token".into())),
             flow: Mutex::new(flow),
             requested_scopes: RwLock::new(Vec::new()),
@@ -2841,16 +2896,17 @@ mod tests {
     /// is still good, and spending it is the difference between a silent
     /// renewal and walking the user through consent again.
     ///
-    /// It takes a named issuer, because the store says nothing about where the
-    /// token came from -- see
-    /// [`an_unbound_refresh_token_is_not_offered_after_a_restart`].
+    /// It takes a named issuer, because that is what the entry is filed under
+    /// -- see [`an_unbound_refresh_token_is_not_offered_after_a_restart`] and
+    /// [`a_refresh_token_does_not_follow_the_resource_to_a_new_issuer`].
     #[tokio::test]
     async fn a_stored_refresh_token_survives_a_restart() {
         let addr = spawn_authorization_server().await;
         let resource = format!("http://{addr}/mcp");
 
         let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
-        store.put(&resource, &stale_tokens());
+        // Under the issuer that minted it, which is where the next run looks.
+        store.put(&format!("http://{addr}|{resource}"), &stale_tokens());
 
         // A fresh process: a store with a usable refresh token, and no flow
         // state at all.
@@ -2912,6 +2968,58 @@ mod tests {
         assert!(
             err.to_string().contains("should have been used instead",),
             "the flow must reach the interactive step, not fail earlier: {err}"
+        );
+    }
+
+    /// The migration case, and the one a configured issuer alone does not
+    /// cover: the store holds a refresh token from the *old* authorization
+    /// server, and the operator has since pointed `with_issuer` at the new one
+    /// -- which is exactly what migrating means. Checking the configuration
+    /// against the discovered issuer then says "these match" about a token
+    /// neither of them minted, and the old server's credential goes to the new
+    /// server.
+    ///
+    /// What stops it is where the token is filed: under the issuer that minted
+    /// it, so the new issuer's key finds nothing and the user is asked instead.
+    #[tokio::test]
+    async fn a_refresh_token_does_not_follow_the_resource_to_a_new_issuer() {
+        let addr = spawn_authorization_server().await;
+        let resource = format!("http://{addr}/mcp");
+
+        // Everything the previous deployment left behind, filed under the
+        // server that issued it.
+        let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+        let previous_issuer = "https://old-auth.example.com";
+        store.put(&format!("{previous_issuer}|{resource}"), &stale_tokens());
+
+        // And the configuration as it reads after the migration: the new
+        // issuer, which is also the one discovery returns.
+        let config = OAuthClientConfig {
+            store: store.clone(),
+            ..OAuthClientConfig::default()
+                .require_https(false)
+                .with_client_id("cid")
+                .with_issuer(format!("http://{addr}"))
+                .with_handler(NoInteraction)
+        };
+        let session = OAuthSession::new(config, &resource).unwrap();
+
+        let err = session
+            .authorize(None, Some("the-expired-token"))
+            .await
+            .expect_err("the old server's refresh token must not be spent at the new one");
+        assert!(
+            err.to_string().contains("should have been used instead"),
+            "the flow must reach the interactive step, not fail earlier: {err}"
+        );
+
+        // Untouched, rather than renewed into the new server's tokens.
+        assert_eq!(
+            store
+                .get(&format!("{previous_issuer}|{resource}"))
+                .map(|tokens| tokens.access_token),
+            Some("stale-token".to_owned()),
+            "the old entry must be left exactly where it was"
         );
     }
 

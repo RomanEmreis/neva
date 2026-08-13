@@ -28,7 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * **`OAuthClientConfig::with_issuer`** names the authorization server the
   configured credentials belong to. A pre-registered `client_id` meeting a
   different issuer now fails, naming both, instead of being presented to a
-  server that never issued it.
+  server that never issued it. It is also what the `TokenStore` entry is keyed
+  by, as the spec prescribes, so tokens from two servers never share a slot.
+
+  **Custom `TokenStore` implementations:** with an issuer configured the key is
+  now `{issuer}|{resource}` rather than the resource alone. Entries written by
+  an earlier version are not found under it and are left in place; the affected
+  sessions re-authorize once. Without a configured issuer the key is unchanged.
 * **`App::with_request_state_audience`** binds MRTR `requestState` to this
   service's identity. The sealed state already carried a binding to its request
   and to the principal, but not to the service -- so where several share one
@@ -49,10 +55,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and the server a flow discovers is vouched for by the resource alone -- which
   is exactly what an attacker who controls the resource rewrites. The
   after-restart refresh added in 0.5.2 therefore now requires
-  [`with_issuer`](https://docs.rs/neva/latest/neva/auth/oauth/struct.OAuthClientConfig.html#method.with_issuer);
-  without it the session re-authorizes interactively rather than sending the
-  token somewhere unverified. Dynamically registered clients never reuse one:
-  the next run registers a different id.
+  [`with_issuer`](https://docs.rs/neva/latest/neva/auth/oauth/struct.OAuthClientConfig.html#method.with_issuer),
+  and reads the token back under it; without one the session re-authorizes
+  interactively rather than sending the token somewhere unverified. That covers
+  a migration too: pointing `with_issuer` at a new server does not carry the
+  old server's token over to it, since the configuration says where credentials
+  are going, not where the ones already stored came from. Dynamically
+  registered clients never reuse one: the next run registers a different id.
 
 ## 0.5.2
 
