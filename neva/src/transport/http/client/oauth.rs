@@ -1590,14 +1590,23 @@ fn client_id_metadata_document_supported(server: &AuthorizationServerMetadata) -
 }
 
 /// Checks a Client ID Metadata Document URL against the two requirements the
-/// spec puts on it: the `https` scheme and a path component.
+/// spec puts on it -- the `https` scheme and a path component -- and against
+/// being a URL at all.
 ///
-/// Both are load-bearing. The scheme is what makes the document's contents --
-/// the redirect URIs an authorization server will accept -- something an
-/// attacker on the path cannot rewrite. The path component keeps a client id
-/// from naming a bare origin, which would make every client hosted there the
-/// same client. `require_https(false)` relaxes the first for a local
-/// development server, the same way it does for the issuer's own endpoints.
+/// Both spec requirements are load-bearing. The scheme is what makes the
+/// document's contents -- the redirect URIs an authorization server will
+/// accept -- something an attacker on the path cannot rewrite. The path
+/// component keeps a client id from naming a bare origin, which would make
+/// every client hosted there the same client. `require_https(false)` relaxes
+/// the first for a local development server, the same way it does for the
+/// issuer's own endpoints.
+///
+/// The rest is what an authorization server has to be able to dereference,
+/// which is the whole point of the value: full URI syntax through the
+/// canonicalizer (scheme, IPv6 literals, percent-encoding, no userinfo, no
+/// fragment) and a port in range. A client id this refuses is one no
+/// conforming server could fetch, so refusing it here -- where it was
+/// written -- beats a browser round ending in `invalid_client`.
 fn validate_client_id_document_url(url: &str, require_https: bool) -> Result<(), Error> {
     let invalid = |reason: &str| {
         Err(Error::new(
@@ -1650,12 +1659,22 @@ fn validate_client_id_document_url(url: &str, require_https: bool) -> Result<(),
     // here alike -- both being the origin, which as a client id would make
     // every client hosted there the same client.
     let authority_and_path = rest.split('?').next().unwrap_or_default();
-    let has_path = authority_and_path
-        .split_once('/')
-        .is_some_and(|(_, path)| !path.is_empty());
-
-    if !has_path {
+    let Some((authority, path)) = authority_and_path.split_once('/') else {
         return invalid("must contain a path component, e.g. `https://example.com/client.json`");
+    };
+    if path.is_empty() {
+        return invalid("must contain a path component, e.g. `https://example.com/client.json`");
+    }
+
+    // The one thing the canonicalizer above does not settle. It holds the port
+    // to digits, which keeps the authority well-formed, but not to a range --
+    // and `:99999` is a number no socket has: every standard URL parser refuses
+    // it, so the server that would fetch this document never gets as far as
+    // trying.
+    if let Some(port) = host_and_port(authority).1
+        && port.parse::<u16>().is_err()
+    {
+        return invalid("must name a port in the 0-65535 range");
     }
 
     Ok(())
@@ -1698,15 +1717,28 @@ fn is_loopback_redirect(uri: &str) -> bool {
         return false;
     };
     let authority = rest.split(['/', '?']).next().unwrap_or_default();
-    // Bracketed IPv6 hosts carry colons of their own -- split on the
-    // closing bracket first, then strip a `:port` for everything else.
-    let host = match authority.split_once(']') {
-        Some((bracketed, _)) => &authority[..bracketed.len() + 1],
-        None => authority
-            .rsplit_once(':')
-            .map_or(authority, |(host, _port)| host),
-    };
-    matches!(host, "127.0.0.1" | "localhost" | "[::1]")
+    matches!(
+        host_and_port(authority).0,
+        "127.0.0.1" | "localhost" | "[::1]"
+    )
+}
+
+/// Splits an authority into its host and its port, if it names one.
+///
+/// A bracketed IPv6 literal carries colons of its own, so the closing bracket
+/// is what the host ends at; everything else ends at the last colon. An empty
+/// port (`example.com:`) is no port at all.
+fn host_and_port(authority: &str) -> (&str, Option<&str>) {
+    match authority.split_once(']') {
+        Some((bracketed, after)) => (
+            &authority[..bracketed.len() + 1],
+            after.strip_prefix(':').filter(|port| !port.is_empty()),
+        ),
+        None => match authority.rsplit_once(':') {
+            Some((host, port)) => (host, (!port.is_empty()).then_some(port)),
+            None => (authority, None),
+        },
+    }
 }
 
 /// Validates the RFC 9207 `iss` authorization-response parameter.
@@ -1825,6 +1857,21 @@ mod tests {
     }
 
     #[test]
+    fn an_authority_splits_into_a_host_and_a_port() {
+        assert_eq!(host_and_port("example.com"), ("example.com", None));
+        assert_eq!(
+            host_and_port("example.com:8443"),
+            ("example.com", Some("8443"))
+        );
+        // A bracketed IPv6 literal carries colons that are not the separator.
+        assert_eq!(host_and_port("[::1]"), ("[::1]", None));
+        assert_eq!(host_and_port("[::1]:9000"), ("[::1]", Some("9000")));
+        // An empty port is no port -- and must not read as one, or the range
+        // check would refuse a URL that names none.
+        assert_eq!(host_and_port("example.com:"), ("example.com", None));
+    }
+
+    #[test]
     fn loopback_redirects_are_detected() {
         assert!(is_loopback_redirect("http://127.0.0.1:8919/callback"));
         assert!(is_loopback_redirect("http://localhost/callback"));
@@ -1898,6 +1945,14 @@ mod tests {
         assert!(
             validate_client_id_document_url("https://example.com?to=/client.json", true).is_err()
         );
+
+        // Digits alone do not make a port. `:99999` is a number no socket has,
+        // and the URL parser on the server's side refuses it before it can
+        // fetch anything.
+        let err = validate_client_id_document_url("https://example.com:99999/c.json", true)
+            .expect_err("a port outside the range must be refused");
+        assert!(err.to_string().contains("0-65535"), "{err}");
+        assert!(validate_client_id_document_url("https://example.com:65535/c.json", true).is_ok());
         // A fragment never reaches the server, so it could never match the
         // document it is fetched from.
         assert!(validate_client_id_document_url("https://example.com/c#f", true).is_err());
@@ -3493,3 +3548,4 @@ mod tests {
         );
     }
 }
+
