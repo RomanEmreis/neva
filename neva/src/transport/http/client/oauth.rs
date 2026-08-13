@@ -703,6 +703,21 @@ impl OAuthClientConfig {
         }
     }
 
+    /// What names this client across restarts, for the purpose of keeping one
+    /// client's stored grant apart from another's.
+    ///
+    /// A pre-registered id or a document URL both do; a client that registers
+    /// dynamically has nothing that outlives the flow, so it names nothing.
+    /// Which of the two applies is not [`Self::client_id_source`]'s question --
+    /// that one depends on what the server advertises, and a key has to be the
+    /// same before and after discovery.
+    fn client_identity(&self) -> &str {
+        self.client_id
+            .as_deref()
+            .or(self.client_id_document.as_deref())
+            .unwrap_or_default()
+    }
+
     /// Which of the three registration mechanisms identifies this client to
     /// `server`, in the priority order the spec sets out.
     fn client_id_source<'a>(&'a self, server: &AuthorizationServerMetadata) -> ClientIdSource<'a> {
@@ -846,38 +861,47 @@ impl OAuthSession {
 
     /// Where this session's credentials live in the [`TokenStore`].
     ///
-    /// The issuer is part of the key whenever one is configured, which is the
-    /// spec's own prescription -- credentials are to be associated with the
-    /// authorization server that issued them, "keyed by the authorization
-    /// server's `issuer` identifier". Keying by the resource alone records
-    /// nothing about where a stored credential came from, so after a migration
-    /// the *current* configuration is all a check has to go on -- and the
-    /// current configuration is exactly what an operator updates when the
-    /// resource moves. The old server's refresh token would then be read back
-    /// under the same key and offered to the new one. Under this key it is not
-    /// found at all: it lives under the issuer that minted it, and nothing
-    /// looks there again.
+    /// The key names the whole identity a credential belongs to -- which
+    /// authorization server issued it, which client it was issued to, and
+    /// which resource it is for -- as `{issuer}|{client}|{resource}`. Any part
+    /// the configuration does not name is left empty, and a credential whose
+    /// identity is not fully named is never reused
+    /// ([`Self::may_reuse_stored_refresh`] holds to exactly that).
     ///
-    /// The client id is deliberately not part of it. A stale one is refused by
-    /// the server that issued the token rather than leaking it to another, so
-    /// it costs a round trip, not a credential -- and a dynamically registered
-    /// client has no id to key by until the flow it is about to run mints one.
+    /// **Issuer.** The spec's own prescription: credentials are to be
+    /// associated with the authorization server that issued them, "keyed by
+    /// the authorization server's `issuer` identifier". Keyed by the resource
+    /// alone, nothing records where a stored credential came from, so after a
+    /// migration the *current* configuration is all a check has to go on -- and
+    /// the current configuration is exactly what an operator updates when the
+    /// resource moves. The old server's refresh token would be read back under
+    /// the same key and offered to the new one.
     ///
-    /// Unbound, the key is the resource alone, exactly as before: such a
-    /// session never refreshes from the store
-    /// ([`Self::may_reuse_stored_refresh`]), so its entry is only ever the
-    /// warm start's access token -- audience-bound to the resource and only
-    /// ever presented there, which is why an unlabelled slot is safe.
+    /// **Client.** Two clients are two grants: the user consented to each
+    /// separately, for scopes they chose separately. Sharing a slot has the
+    /// second client send the first one's access token -- consent it was never
+    /// given -- and, worse, present the first one's refresh token under its own
+    /// id, which an authorization server reads as a stolen token and answers by
+    /// revoking the grant for both. Naming the client keeps the two apart. A
+    /// pre-registered id and a document URL are both stable across restarts, so
+    /// either serves; a dynamically registered client has none until the flow
+    /// it is about to run mints one, and leaves this empty.
+    ///
+    /// A segment is a configured value, so a `|` written into one blurs the
+    /// boundary with the next. It takes an operator putting one there, and the
+    /// values that come from elsewhere -- a document URL, the resource -- are
+    /// validated URIs, where `|` is not a legal character.
     ///
     /// This one is built from the *configured* issuer, because it is read
     /// before any discovery has happened. Once a flow knows which server it is
     /// actually talking to, [`Self::store_key_for`] is what files what that
     /// server minted.
     fn initial_store_key(config: &OAuthClientConfig, resource: &str) -> String {
-        match &config.issuer {
-            Some(issuer) => format!("{issuer}|{resource}"),
-            None => resource.to_owned(),
-        }
+        Self::compose_store_key(
+            config.issuer.as_deref().unwrap_or_default(),
+            config.client_identity(),
+            resource,
+        )
     }
 
     /// Where credentials minted by `issuer` belong -- the key every read and
@@ -893,13 +917,20 @@ impl OAuthSession {
     /// back, the configured key would hand the *old* server a refresh token
     /// the *new* one minted, which is the leak the keying exists to stop.
     ///
-    /// An unbound session has one unlabelled slot and keeps it, so that its
-    /// warm start still finds what its own flow wrote.
-    fn store_key_for(&self, issuer: &str) -> std::borrow::Cow<'_, str> {
-        match self.config.issuer {
-            Some(_) => std::borrow::Cow::Owned(format!("{issuer}|{}", self.resource)),
-            None => std::borrow::Cow::Borrowed(&self.resource),
-        }
+    /// An unbound session names no issuer here either: it has nothing to say
+    /// about where its tokens came from, so the segment stays empty and the
+    /// slot stays the one its own warm start reads.
+    fn store_key_for(&self, issuer: &str) -> String {
+        let issuer = match self.config.issuer {
+            Some(_) => issuer,
+            None => "",
+        };
+        Self::compose_store_key(issuer, self.config.client_identity(), &self.resource)
+    }
+
+    /// Joins the three parts of a credential's identity into its store key.
+    fn compose_store_key(issuer: &str, client: &str, resource: &str) -> String {
+        format!("{issuer}|{client}|{resource}")
     }
 
     /// Scopes this session is known to hold, most authoritative source first.
@@ -1923,6 +1954,11 @@ mod tests {
         assert!(json.get("application_type").is_none());
     }
 
+    /// The store key a credential with this identity is filed under.
+    fn key(issuer: &str, client: &str, resource: &str) -> String {
+        format!("{issuer}|{client}|{resource}")
+    }
+
     const CIMD_URL: &str = "https://app.example.com/mcp-client.json";
 
     /// The two requirements the spec puts on a CIMD `client_id`: the `https`
@@ -2274,6 +2310,48 @@ mod tests {
         );
     }
 
+    /// Two clients are two grants: the user consented to each separately, for
+    /// scopes they chose separately. Sharing one durable store -- an encrypted
+    /// file, a keychain -- must not have them share a slot, or the second
+    /// client sends the first one's access token as if the consent behind it
+    /// were its own.
+    #[test]
+    fn two_client_identities_do_not_share_a_slot() {
+        const RESOURCE: &str = "https://api.example.com/mcp";
+        let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+
+        let config = |document: &str| OAuthClientConfig {
+            store: store.clone(),
+            ..OAuthClientConfig::default()
+                .with_client_id_document(document)
+                .with_issuer("https://auth.example.com")
+        };
+
+        let first = OAuthSession::new(config(CIMD_URL), RESOURCE).unwrap();
+        store.put(
+            &first.store_key(),
+            &TokenSet {
+                access_token: "the-first-clients-token".into(),
+                token_type: "Bearer".into(),
+                refresh_token: Some("the-first-clients-refresh".into()),
+                scope: None,
+                id_token: None,
+                expires_at: None,
+            },
+        );
+
+        // Same resource, same authorization server, a different client.
+        let second =
+            OAuthSession::new(config("https://other.example.com/client.json"), RESOURCE).unwrap();
+
+        assert_ne!(&*first.store_key(), &*second.store_key());
+        assert_eq!(
+            second.bearer(),
+            None,
+            "a client must not start out holding another client's token"
+        );
+    }
+
     /// A dynamically registered id is not the one the stored token was issued
     /// to -- this flow is about to mint a different one -- so the token cannot
     /// be renewed under it however well the issuer matches.
@@ -2589,7 +2667,7 @@ mod tests {
             resource: "http://127.0.0.1:3000/mcp".into(),
             // No issuer configured, so the key is the resource -- which is what
             // every `store.put` in these tests writes under.
-            store_key: RwLock::new("http://127.0.0.1:3000/mcp".into()),
+            store_key: RwLock::new(key("", "", "http://127.0.0.1:3000/mcp").into()),
             token: RwLock::new(Some("stale-token".into())),
             flow: Mutex::new(flow),
             requested_scopes: RwLock::new(Vec::new()),
@@ -2604,7 +2682,7 @@ mod tests {
         .await;
 
         let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
-        store.put("http://127.0.0.1:3000/mcp", &stale_tokens());
+        store.put(&key("", "", "http://127.0.0.1:3000/mcp"), &stale_tokens());
 
         let flow = FlowState {
             client: OAuthClient::new("cid")
@@ -2618,7 +2696,9 @@ mod tests {
         let token = session.refreshed_bearer().await;
 
         assert_eq!(token.as_deref(), Some("fresh-token"));
-        let stored = store.get("http://127.0.0.1:3000/mcp").unwrap();
+        let stored = store
+            .get(&key("", "", "http://127.0.0.1:3000/mcp"))
+            .unwrap();
         assert_eq!(stored.access_token, "fresh-token");
         // No rotation in the response -- the old refresh token carries over.
         assert_eq!(stored.refresh_token.as_deref(), Some("refresh-1"));
@@ -2641,7 +2721,7 @@ mod tests {
         let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
         let mut restored = stale_tokens();
         restored.scope = Some("read".into());
-        store.put("http://127.0.0.1:3000/mcp", &restored);
+        store.put(&key("", "", "http://127.0.0.1:3000/mcp"), &restored);
 
         let flow = FlowState {
             client: OAuthClient::new("cid")
@@ -2660,7 +2740,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .get("http://127.0.0.1:3000/mcp")
+                .get(&key("", "", "http://127.0.0.1:3000/mcp"))
                 .and_then(|tokens| tokens.scope)
                 .as_deref(),
             Some("read"),
@@ -2690,7 +2770,7 @@ mod tests {
         let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
         let mut restored = stale_tokens();
         restored.scope = Some("read write".into());
-        store.put("http://127.0.0.1:3000/mcp", &restored);
+        store.put(&key("", "", "http://127.0.0.1:3000/mcp"), &restored);
 
         let flow = FlowState {
             client: OAuthClient::new("cid")
@@ -2709,7 +2789,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .get("http://127.0.0.1:3000/mcp")
+                .get(&key("", "", "http://127.0.0.1:3000/mcp"))
                 .and_then(|tokens| tokens.scope)
                 .as_deref(),
             Some("read"),
@@ -2728,7 +2808,7 @@ mod tests {
         let mut tokens = stale_tokens();
         tokens.expires_at =
             Some(std::time::SystemTime::now() + std::time::Duration::from_secs(3600));
-        store.put("http://127.0.0.1:3000/mcp", &tokens);
+        store.put(&key("", "", "http://127.0.0.1:3000/mcp"), &tokens);
 
         // No flow state -- a refresh attempt would return None; a fresh
         // token must never get that far.
@@ -2743,7 +2823,7 @@ mod tests {
     #[tokio::test]
     async fn stale_token_without_flow_state_stays_usable() {
         let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
-        store.put("http://127.0.0.1:3000/mcp", &stale_tokens());
+        store.put(&key("", "", "http://127.0.0.1:3000/mcp"), &stale_tokens());
 
         let session = session_with(store, None);
 
@@ -2759,7 +2839,7 @@ mod tests {
     async fn session_serves_stored_unexpired_token() {
         let store = InMemoryTokenStore::new();
         store.put(
-            "http://127.0.0.1:3000/mcp",
+            &key("", "", "http://127.0.0.1:3000/mcp"),
             &TokenSet {
                 access_token: "stored-token".into(),
                 token_type: "Bearer".into(),
@@ -2785,7 +2865,7 @@ mod tests {
         let stored = |scope: Option<&str>| {
             let store = InMemoryTokenStore::new();
             store.put(
-                "http://127.0.0.1:3000/mcp",
+                &key("", "", "http://127.0.0.1:3000/mcp"),
                 &TokenSet {
                     access_token: "stored-token".into(),
                     token_type: "Bearer".into(),
@@ -3116,19 +3196,19 @@ mod tests {
         assert_eq!(&*token, "cimd-token");
 
         assert!(
-            store.get(&format!("{stale_config}|{resource}")).is_none(),
+            store.get(&key(stale_config, CIMD_URL, &resource)).is_none(),
             "nothing may be filed under a server that minted none of it"
         );
         assert_eq!(
             store
-                .get(&format!("http://{addr}|{resource}"))
+                .get(&key(&format!("http://{addr}"), CIMD_URL, &resource))
                 .map(|tokens| tokens.access_token),
             Some("cimd-token".to_owned()),
             "the tokens belong to the server the flow actually ran against"
         );
         assert_eq!(
             &*session.store_key(),
-            format!("http://{addr}|{resource}"),
+            key(&format!("http://{addr}"), CIMD_URL, &resource),
             "and the session follows them there, so its staleness probe is not \
              left watching an empty slot"
         );
@@ -3144,7 +3224,10 @@ mod tests {
         let resource = format!("http://{addr}/mcp");
 
         let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
-        store.put(&format!("http://{addr}|{resource}"), &stale_tokens());
+        store.put(
+            &key(&format!("http://{addr}"), CIMD_URL, &resource),
+            &stale_tokens(),
+        );
 
         let config = OAuthClientConfig {
             store,
@@ -3205,7 +3288,7 @@ mod tests {
 
         assert_eq!(
             store
-                .get(&resource)
+                .get(&key("", "", &resource))
                 .and_then(|tokens| tokens.scope)
                 .as_deref(),
             Some("admin"),
@@ -3263,8 +3346,12 @@ mod tests {
         let resource = format!("http://{addr}/mcp");
 
         let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
-        // Under the issuer that minted it, which is where the next run looks.
-        store.put(&format!("http://{addr}|{resource}"), &stale_tokens());
+        // Under the identity that obtained it, which is where the next run
+        // looks: the server that minted it and the client it was issued to.
+        store.put(
+            &key(&format!("http://{addr}"), "cid", &resource),
+            &stale_tokens(),
+        );
 
         // A fresh process: a store with a usable refresh token, and no flow
         // state at all.
@@ -3306,7 +3393,7 @@ mod tests {
         let resource = format!("http://{addr}/mcp");
 
         let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
-        store.put(&resource, &stale_tokens());
+        store.put(&key("", "cid", &resource), &stale_tokens());
 
         let config = OAuthClientConfig {
             store,
@@ -3348,7 +3435,7 @@ mod tests {
         // server that issued it.
         let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
         let previous_issuer = "https://old-auth.example.com";
-        store.put(&format!("{previous_issuer}|{resource}"), &stale_tokens());
+        store.put(&key(previous_issuer, "cid", &resource), &stale_tokens());
 
         // And the configuration as it reads after the migration: the new
         // issuer, which is also the one discovery returns.
@@ -3374,7 +3461,7 @@ mod tests {
         // Untouched, rather than renewed into the new server's tokens.
         assert_eq!(
             store
-                .get(&format!("{previous_issuer}|{resource}"))
+                .get(&key(previous_issuer, "cid", &resource))
                 .map(|tokens| tokens.access_token),
             Some("stale-token".to_owned()),
             "the old entry must be left exactly where it was"
@@ -3392,7 +3479,7 @@ mod tests {
     async fn the_loser_of_a_step_up_takes_the_winners_token() {
         let store = InMemoryTokenStore::new();
         store.put(
-            "http://127.0.0.1:9/mcp",
+            &key("", "", "http://127.0.0.1:9/mcp"),
             &TokenSet {
                 access_token: "widened-token".into(),
                 token_type: "Bearer".into(),
@@ -3443,7 +3530,7 @@ mod tests {
 
         let store = InMemoryTokenStore::new();
         store.put(
-            RESOURCE,
+            &key("", "", RESOURCE),
             &TokenSet {
                 // What another request's refresh left behind: a different token,
                 // covering exactly what the old one did.
@@ -3477,7 +3564,7 @@ mod tests {
         // works: the grant on record covers what the challenge demanded.
         let store = InMemoryTokenStore::new();
         store.put(
-            RESOURCE,
+            &key("", "", RESOURCE),
             &TokenSet {
                 access_token: "widened-token".into(),
                 token_type: "Bearer".into(),

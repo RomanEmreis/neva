@@ -32,10 +32,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   server that never issued it. It is also what the `TokenStore` entry is keyed
   by, as the spec prescribes, so tokens from two servers never share a slot.
 
-  **Custom `TokenStore` implementations:** with an issuer configured the key is
-  now `{issuer}|{resource}` rather than the resource alone. Entries written by
-  an earlier version are not found under it and are left in place; the affected
-  sessions re-authorize once. Without a configured issuer the key is unchanged.
+  **Custom `TokenStore` implementations:** the key is now
+  `{issuer}|{client}|{resource}` -- the whole identity a credential belongs to
+  -- rather than the resource alone, with any part the configuration does not
+  name left empty. Naming the client is what keeps two clients sharing one
+  durable store from sharing a slot, which would have the second send the
+  first's access token and offer its refresh token under the wrong id. Entries
+  written by an earlier version are not found under the new key and are left in
+  place; the affected sessions re-authorize once.
 * **`App::with_request_state_audience`** binds MRTR `requestState` to this
   service's identity. The sealed state already carried a binding to its request
   and to the principal, but not to the service -- so where several share one
