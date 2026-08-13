@@ -1144,6 +1144,111 @@ async fn replaying_request_state_against_a_different_request_is_rejected() {
     handle.abort();
 }
 
+/// Two services that share a `requestState` secret -- one fleet-wide shared
+/// secret is exactly that -- can decrypt each other's states. Give them a
+/// method and parameters they both serve and the request binding matches too,
+/// so without an audience the second one picks up a round the first started,
+/// answers and all. The audience is what makes it refuse.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_state_minted_by_another_service_is_rejected() {
+    /// Both servers are the same MCP service by name, tool and parameters, and
+    /// differ only in the identity they bind their states to.
+    async fn spawn(addr: &str, audience: &str) -> tokio::task::JoinHandle<()> {
+        let mut app = App::new()
+            .with_request_state_secret(b"fleet-wide-secret")
+            .with_request_state_audience(audience)
+            .with_options(|o| o.with_http(|h| h.bind(addr).with_endpoint("/mcp")));
+
+        app.map_tool("greet", |mut ctx: Context| async move {
+            let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
+                .with_required("name", "string")
+                .into();
+            let _ = ctx.elicit("name", params).await?;
+            Ok::<String, Error>("ok".into())
+        });
+
+        tokio::spawn(async move { app.run().await })
+    }
+
+    let weather_addr = format!("127.0.0.1:{}", pick_free_port());
+    let billing_addr = format!("127.0.0.1:{}", pick_free_port());
+    let weather = spawn(&weather_addr, "https://weather.example.com/mcp").await;
+    let billing = spawn(&billing_addr, "https://billing.example.com/mcp").await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
+
+    // Round 1 against the first service.
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "greet", "arguments": {},
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
+    });
+    let weather_url = format!("http://{weather_addr}/mcp");
+    let r1: serde_json::Value = routed(client.post(&weather_url), &call)
+        .json(&call)
+        .send()
+        .await
+        .expect("round 1 send")
+        .json()
+        .await
+        .expect("round 1 json");
+    let state = r1["result"]["requestState"]
+        .as_str()
+        .expect("requestState present")
+        .to_string();
+
+    // The same round, continued against the second one: same secret, same
+    // method, same parameters -- only the service differs.
+    let replay = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": { "name": "greet", "arguments": {},
+            "requestState": state,
+            "inputResponses": { "name": { "action": "accept", "content": { "name": "Ada" } } },
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": { "elicitation": true } } }
+    });
+    let billing_url = format!("http://{billing_addr}/mcp");
+    let r2: serde_json::Value = routed(client.post(&billing_url), &replay)
+        .json(&replay)
+        .send()
+        .await
+        .expect("replay send")
+        .json()
+        .await
+        .expect("replay json");
+
+    let msg = r2
+        .pointer("/error/message")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        msg.contains("audience mismatch"),
+        "a state minted for another service must be refused: {r2}"
+    );
+
+    // And the same retry against the service that minted it goes through, so
+    // what the audience refuses is the service, not the retry.
+    let accepted: serde_json::Value = routed(client.post(&weather_url), &replay)
+        .json(&replay)
+        .send()
+        .await
+        .expect("retry send")
+        .json()
+        .await
+        .expect("retry json");
+    assert!(
+        accepted.pointer("/result/content").is_some(),
+        "the minting service must still accept its own state: {accepted}"
+    );
+
+    weather.abort();
+    billing.abort();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn eliciting_without_declared_capability_is_rejected() {
     let port = pick_free_port();

@@ -147,6 +147,13 @@ pub struct McpOptions {
     #[cfg(not(feature = "legacy-spec"))]
     request_state_ttl_secs: u64,
 
+    /// Service identity bound into MRTR `requestState`, set via
+    /// [`crate::App::with_request_state_audience`]. `None` mints and demands
+    /// an unbound state, which is what a deployment whose keyring is its own
+    /// wants.
+    #[cfg(not(feature = "legacy-spec"))]
+    request_state_audience: Option<Box<str>>,
+
     /// Max encoded `requestState` blob length (bytes) before the server
     /// rejects the round-trip with "requestState too large".
     #[cfg(not(feature = "legacy-spec"))]
@@ -226,6 +233,8 @@ impl Default for McpOptions {
             request_state_secret_explicit: false,
             #[cfg(not(feature = "legacy-spec"))]
             request_state_ttl_secs: 300,
+            #[cfg(not(feature = "legacy-spec"))]
+            request_state_audience: None,
             #[cfg(not(feature = "legacy-spec"))]
             max_state_bytes: 8 * 1024,
             #[cfg(not(feature = "legacy-spec"))]
@@ -863,6 +872,18 @@ impl McpOptions {
     #[cfg(not(feature = "legacy-spec"))]
     pub(crate) fn request_state_ttl_secs(&self) -> u64 {
         self.request_state_ttl_secs
+    }
+
+    /// Sets the service identity bound into MRTR `requestState`.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(crate) fn set_request_state_audience(&mut self, audience: &str) {
+        self.request_state_audience = Some(Box::from(audience));
+    }
+
+    /// Returns the service identity bound into MRTR `requestState`.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(crate) fn request_state_audience(&self) -> Option<&str> {
+        self.request_state_audience.as_deref()
     }
 
     /// Sets the max encoded `requestState` size in bytes.

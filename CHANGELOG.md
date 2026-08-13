@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.5.3
+
+### Added
+
+#### Authorization
+* **Client ID Metadata Documents (CIMD).**
+  `OAuthClientConfig::with_client_id_document(url)` identifies the client by an
+  https URL the authorization server dereferences, so a client and server with
+  no prior relationship need no registration request at all. The URL is checked
+  for the scheme and path component the spec requires when the client is built,
+  and pairing it with a client secret is refused -- a document describes a
+  public client. `client_metadata_document([redirect_uris])` builds the JSON to
+  host there from the same code that would have registered, so the two cannot
+  drift.
+* **All three registration mechanisms, in the spec's priority order**: a
+  pre-registered `client_id` first, then a metadata document where the server
+  advertises `client_id_metadata_document_supported`, then Dynamic Client
+  Registration -- which the 2026-07-28 spec deprecates and which stays for
+  servers that offer nothing else. Nothing changes for a client that configures
+  no document.
+* **`OAuthClientConfig::with_issuer`** names the authorization server the
+  configured credentials belong to. A pre-registered `client_id` meeting a
+  different issuer now fails, naming both, instead of being presented to a
+  server that never issued it.
+* **`App::with_request_state_audience`** binds MRTR `requestState` to this
+  service's identity. The sealed state already carried a binding to its request
+  and to the principal, but not to the service -- so where several share one
+  `with_request_state_secret`, a state minted by one was a state the others
+  accepted. A mismatch is `InvalidParams`, like the principal guard, and the
+  check runs both ways: a state naming an audience is refused by a server that
+  configures none.
+* `ClientMetadata` re-exported from `neva::auth::oauth`.
+
+#### Authorization
+* **A stored refresh token is only offered to the authorization server that
+  minted it.** A refresh token is a bearer credential for its token endpoint,
+  and the server a flow discovers is vouched for by the resource alone -- which
+  is exactly what an attacker who controls the resource rewrites. The
+  after-restart refresh added in 0.5.2 therefore now requires
+  [`with_issuer`](https://docs.rs/neva/latest/neva/auth/oauth/struct.OAuthClientConfig.html#method.with_issuer);
+  without it the session re-authorizes interactively rather than sending the
+  token somewhere unverified. Dynamically registered clients never reuse one:
+  the next run registers a different id.
+
 ## 0.5.2
 
 ### Added

@@ -66,6 +66,21 @@ pub(crate) struct StatePayload {
     pub req: String,
     /// Authenticated principal (subject), when auth is enabled.
     pub principal: Option<String>,
+    /// Service identity this state was minted for, when one is configured
+    /// with [`crate::App::with_request_state_audience`].
+    ///
+    /// [`Self::req`] binds a state to a *request* and [`Self::principal`] to
+    /// *who* made it, but neither says *where*: two services sharing a
+    /// keyring -- which is what a shared secret across a fleet amounts to --
+    /// mint blobs each can decrypt, and a method and parameters they both
+    /// serve make one of them a state the other accepts. The audience is what
+    /// that leaves missing.
+    ///
+    /// Defaults to `None` so a payload minted before this field existed still
+    /// decodes; a server that configures an audience then finds `None` where
+    /// it demands a match and refuses it, which is the safe direction.
+    #[serde(default)]
+    pub aud: Option<String>,
 }
 
 /// The secrets accepted for `requestState` decryption plus the active one used
@@ -350,6 +365,7 @@ mod tests {
             exp: now_secs() + 300,
             req: request_binding("tools/call", &serde_json::json!({"name":"t"})),
             principal: Some("alice".into()),
+            aud: Some("https://weather.example.com/mcp".into()),
         }
     }
 
@@ -389,6 +405,24 @@ mod tests {
         assert!(got.memos.is_empty());
         assert!(got.effects.is_empty());
         assert!(got.requested.is_empty());
+        // A payload predating the audience decodes unbound -- which a server
+        // that demands one then refuses, rather than letting the omission
+        // stand in for a match.
+        assert!(got.aud.is_none());
+    }
+
+    #[test]
+    fn the_audience_survives_the_seal() {
+        let ring = ring(b"secret-key");
+        let codec = StateCodec::new(&ring);
+        let blob = codec.encode(&payload()).unwrap();
+        assert_eq!(
+            codec.decode(&blob).unwrap().aud.as_deref(),
+            Some("https://weather.example.com/mcp")
+        );
+        // Sealed, not merely appended: the identity a state was minted for is
+        // no more readable off the wire than its memos are.
+        assert!(!blob.contains("weather.example.com"));
     }
 
     #[test]

@@ -109,6 +109,18 @@ fn dictated_calls() -> Vec<DictatedCall> {
 /// will accept and register.
 const CALLBACK_URI: &str = "http://127.0.0.1:8919/callback";
 
+/// This client's Client ID Metadata Document, standing in for one a real
+/// deployment would host.
+///
+/// The suite hands this over in no scenario context -- `auth/basic-cimd`
+/// hardcodes the URL it expects to see as the `client_id` -- so the fixture
+/// has to know its own, exactly as a shipped client knows where its document
+/// is published. What the scenario judges is whether the client *uses* it when
+/// the authorization server advertises `client_id_metadata_document_supported`,
+/// and that decision is neva's: every other authorization scenario runs
+/// against a server that advertises no such thing, and registers dynamically.
+const CLIENT_ID_DOCUMENT: &str = "https://conformance-test.local/client-metadata.json";
+
 /// Client credentials the scenario issued out of band, in its context.
 ///
 /// A scenario that hands these over is testing a *pre-registered* client:
@@ -129,9 +141,15 @@ impl PreRegistered {
     }
 
     fn apply(&self, mut oauth: OAuthClientConfig) -> OAuthClientConfig {
-        if let Some(id) = &self.client_id {
-            oauth = oauth.with_client_id(id.clone());
-        }
+        let Some(id) = &self.client_id else {
+            // Nothing issued out of band, so the document is what identifies
+            // this client -- where the server resolves one, and otherwise it
+            // registers. That order is the spec's, and the two are
+            // alternatives: configuring both is refused.
+            return oauth.with_client_id_document(CLIENT_ID_DOCUMENT);
+        };
+
+        oauth = oauth.with_client_id(id.clone());
         if let Some(secret) = &self.client_secret {
             oauth = oauth.with_client_secret(secret.clone());
         }

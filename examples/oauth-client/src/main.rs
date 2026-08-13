@@ -1,7 +1,7 @@
 //! An MCP client with automatic OAuth 2.1 authorization: the first `401`
-//! drives discovery, dynamic client registration and the
-//! authorization-code + PKCE flow through the system browser; the token
-//! is attached (and refreshed) transparently afterwards.
+//! drives discovery, client registration and the authorization-code + PKCE
+//! flow through the system browser; the token is attached (and refreshed)
+//! transparently afterwards.
 //!
 //! Start a protected server first (see `examples/oauth-server` or
 //! `examples/oauth-with-keycloak`), then:
@@ -27,11 +27,23 @@ async fn main() -> Result<(), Error> {
                 //
                 // Against an issuer that requires a pre-registered
                 // client and a fixed redirect port (e.g. the Keycloak
-                // example):
+                // example). `with_issuer` is what binds those credentials
+                // to the server that issued them:
                 //
                 //   .with_oauth(|oauth| oauth
                 //       .with_client_id("neva-mcp-client")
+                //       .with_issuer("http://localhost:8080/realms/neva")
                 //       .require_https(false)
+                //       .with_handler(LoopbackHandler::new().with_port(8919)))
+                //
+                // Or, where the issuer resolves URL client ids, publish a
+                // Client ID Metadata Document and skip registration
+                // entirely -- the forward path, and what the spec now
+                // prefers over RFC 7591. `client_metadata_document` builds
+                // the JSON to host at that URL:
+                //
+                //   .with_oauth(|oauth| oauth
+                //       .with_client_id_document("https://app.example.com/mcp-client.json")
                 //       .with_handler(LoopbackHandler::new().with_port(8919)))
                 .with_oauth(|oauth| oauth)
         })
