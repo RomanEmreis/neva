@@ -534,10 +534,10 @@ impl OAuthClientConfig {
     /// offered to the server that minted it.
     ///
     /// It is also what the [`TokenStore`] entry is filed under, so credentials
-    /// obtained from two different servers never share a slot. Pointing this
-    /// at a new server -- migrating -- therefore starts from an empty one:
-    /// the old server's tokens stay where they are and are not offered to the
-    /// new server, which is the whole point.
+    /// from two different servers never share a slot and a stored refresh
+    /// token is only ever read back under the server that minted it. Migrating
+    /// therefore leaves the old server's tokens where they are rather than
+    /// offering them to the new one, which is the whole point.
     ///
     /// Without it the credentials are unbound: they still work against a
     /// server that never changes its authorization server, but a stored
@@ -760,9 +760,16 @@ pub(crate) struct OAuthSession {
     /// discovery base.
     resource: String,
     /// Where this session's credentials live in the [`TokenStore`]: the
-    /// resource, prefixed by the issuer they were obtained from when one is
-    /// configured. See [`OAuthSession::store_key`].
-    store_key: String,
+    /// resource, prefixed by the issuer they came from when one is configured.
+    ///
+    /// It starts out naming the *configured* issuer, because it is read before
+    /// any discovery has happened, and moves to the issuer a flow actually ran
+    /// against -- which is the slot that flow filed its tokens in. The two
+    /// differ only where a portable identity is allowed to outlive a migration
+    /// ([`OAuthSession::store_key_for`]); left at the configured one, the
+    /// staleness probe would keep looking into an empty slot and every renewal
+    /// would have to wait for a `401` to notice.
+    store_key: RwLock<Arc<str>>,
     /// Current bearer token, read on every outgoing request.
     token: RwLock<Option<Arc<str>>>,
     /// Serializes authorization flows (concurrent 401s run one flow) and
@@ -796,7 +803,7 @@ impl OAuthSession {
         let resource = canonicalize_resource_uri(server_url)
             .map_err(|err| Error::new(ErrorCode::InternalError, err.to_string()))?;
 
-        let store_key = Self::store_key(&config, &resource);
+        let store_key = Self::initial_store_key(&config, &resource);
 
         let token = config
             .store
@@ -807,11 +814,34 @@ impl OAuthSession {
         Ok(Self {
             config,
             resource,
-            store_key,
+            store_key: RwLock::new(store_key.into()),
             token: RwLock::new(token),
             flow: Mutex::new(None),
             requested_scopes: RwLock::new(Vec::new()),
         })
+    }
+
+    /// The key this session reads before it has discovered anything.
+    fn store_key(&self) -> Arc<str> {
+        self.store_key
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Moves the session onto the slot `issuer` files its tokens in, so the
+    /// pre-discovery reads that follow -- the staleness probe, the stored
+    /// grant -- look where the last flow actually wrote.
+    fn record_issuer(&self, issuer: &str) {
+        let key = self.store_key_for(issuer);
+        let mut current = self
+            .store_key
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        if **current != *key {
+            *current = Arc::from(&*key);
+        }
     }
 
     /// Where this session's credentials live in the [`TokenStore`].
@@ -843,7 +873,7 @@ impl OAuthSession {
     /// before any discovery has happened. Once a flow knows which server it is
     /// actually talking to, [`Self::store_key_for`] is what files what that
     /// server minted.
-    fn store_key(config: &OAuthClientConfig, resource: &str) -> String {
+    fn initial_store_key(config: &OAuthClientConfig, resource: &str) -> String {
         match &config.issuer {
             Some(issuer) => format!("{issuer}|{resource}"),
             None => resource.to_owned(),
@@ -899,7 +929,7 @@ impl OAuthSession {
 
         self.config
             .store
-            .get(&self.store_key)
+            .get(&self.store_key())
             .and_then(|tokens| tokens.scope)
             .map(|granted| split_scopes(&granted))
             .filter(|granted| !granted.is_empty())
@@ -939,7 +969,7 @@ impl OAuthSession {
         let stale = self
             .config
             .store
-            .get(&self.store_key)
+            .get(&self.store_key())
             .is_some_and(|tokens| tokens.expires_within(REFRESH_LEEWAY));
 
         if !stale {
@@ -1003,6 +1033,10 @@ impl OAuthSession {
                         self.set_requested_scopes(scopes);
                     }
                 }
+                // This slot is where the session's credentials live now, which
+                // matters when the key moved: a portable identity may have
+                // renewed against a server the configuration does not name.
+                self.record_issuer(&metadata.issuer);
                 let token: Arc<str> = tokens.access_token.into();
                 self.set_token(token.clone());
                 Some(token)
@@ -1274,6 +1308,8 @@ impl OAuthSession {
             .store
             .put(&self.store_key_for(&server_metadata.issuer), &tokens);
 
+        self.record_issuer(&server_metadata.issuer);
+
         // Keep the client + metadata so future refreshes stay
         // non-interactive.
         *flight = Some(FlowState {
@@ -1340,19 +1376,24 @@ impl OAuthSession {
     /// issued to. And the token has to have come from *this* authorization
     /// server -- a refresh token is a bearer credential for the endpoint that
     /// minted it, so sending it to a server that did not is handing that
-    /// server a credential for another one. Without a configured issuer
-    /// nothing says where the stored token came from, so the session
-    /// re-authorizes interactively: a worse experience and the only safe
-    /// answer.
+    /// server a credential for another one.
     ///
-    /// The issuer check here and the store key work as a pair, and the pair is
-    /// what makes the binding hold across a migration. [`Self::store_key`] is
-    /// built from the *configured* issuer, which is a claim about the past
-    /// that an operator rewrites when the resource moves; this check is what
-    /// ties that claim to the server actually discovered now. Together they
-    /// mean a token is only ever read back under the issuer that minted it,
-    /// and only ever sent to that same issuer. Drop either and a token from
-    /// the old server goes to the new one.
+    /// The second is settled by [`Self::store_key_for`] rather than here: the
+    /// read goes to the slot `metadata`'s issuer files its own tokens in, so
+    /// whatever comes back came from the server it is about to be sent to. All
+    /// that is left to check is whether this session's slots carry an issuer
+    /// at all. Unbound they do not -- there is one unlabelled slot, and a
+    /// credential out of it proves nothing about where it came from, so the
+    /// session re-authorizes interactively instead: a worse experience and the
+    /// only safe answer.
+    ///
+    /// Deliberately *not* a comparison against the configured issuer. That
+    /// would refuse a portable identity whose resource has migrated -- a CIMD
+    /// client is allowed to complete a flow against a server its configuration
+    /// does not name, and refusing to renew what that flow obtained would walk
+    /// the user through consent on every restart. The slot it renews from is
+    /// labelled with that same server, which is the assurance the comparison
+    /// was standing in for.
     fn may_reuse_stored_refresh(
         &self,
         source: ClientIdSource<'_>,
@@ -1362,19 +1403,18 @@ impl OAuthSession {
             return false;
         }
 
-        match &self.config.issuer {
-            Some(bound_to) => bound_to == &metadata.issuer,
-            None => {
-                #[cfg(feature = "tracing")]
-                tracing::debug!(
-                    logger = "neva",
-                    "not offering the stored refresh token to {}: the credentials name no \
-                     issuer, so nothing says it came from there. Set `with_issuer` to reuse it.",
-                    metadata.issuer
-                );
-                false
-            }
+        if self.config.issuer.is_none() {
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                logger = "neva",
+                "not offering the stored refresh token to {}: the credentials name no \
+                 issuer, so nothing says it came from there. Set `with_issuer` to reuse it.",
+                metadata.issuer
+            );
+            return false;
         }
+
+        true
     }
 
     /// Finds the Protected Resource Metadata for a server that issued a `401`
@@ -1600,12 +1640,19 @@ fn validate_client_id_document_url(url: &str, require_https: bool) -> Result<(),
         _ => return invalid("must be an absolute `https` URL"),
     };
 
-    // Canonicalization drops a lone root slash, so `https://example.com` and
-    // `https://example.com/` arrive here alike -- both being the origin, which
-    // as a client id would make every client hosted there the same client.
-    let has_path = rest
+    // The query goes first, because it may hold slashes of its own:
+    // `https://example.com?location=/client.json` has no path component at all,
+    // and looking for a slash across the whole of `rest` would find the one
+    // inside the query and call it one.
+    //
+    // What is left is the authority and the path. Canonicalization drops a lone
+    // root slash, so `https://example.com` and `https://example.com/` arrive
+    // here alike -- both being the origin, which as a client id would make
+    // every client hosted there the same client.
+    let authority_and_path = rest.split('?').next().unwrap_or_default();
+    let has_path = authority_and_path
         .split_once('/')
-        .is_some_and(|(_, path)| !path.split('?').next().unwrap_or_default().is_empty());
+        .is_some_and(|(_, path)| !path.is_empty());
 
     if !has_path {
         return invalid("must contain a path component, e.g. `https://example.com/client.json`");
@@ -1840,11 +1887,17 @@ mod tests {
         assert!(validate_client_id_document_url("https://example.com:8443/c", true).is_ok());
         assert!(validate_client_id_document_url("https://[::1]:8443/c.json", false).is_ok());
 
+        assert!(validate_client_id_document_url("https://example.com/c?v=2", true).is_ok());
+
         // No path: the bare origin would make every client hosted there one
         // and the same client.
         assert!(validate_client_id_document_url("https://example.com", true).is_err());
         assert!(validate_client_id_document_url("https://example.com/", true).is_err());
         assert!(validate_client_id_document_url("https://example.com/?x=1", true).is_err());
+        // Still the bare origin: the only slash belongs to the query.
+        assert!(
+            validate_client_id_document_url("https://example.com?to=/client.json", true).is_err()
+        );
         // A fragment never reaches the server, so it could never match the
         // document it is fetched from.
         assert!(validate_client_id_document_url("https://example.com/c#f", true).is_err());
@@ -2125,21 +2178,45 @@ mod tests {
     /// credentials, so an unbound one is left alone rather than offered to
     /// whichever server the resource names now.
     #[test]
-    fn a_stored_refresh_token_is_only_offered_to_the_issuer_it_is_bound_to() {
+    fn an_unbound_refresh_token_is_never_offered_to_anyone() {
+        let source = ClientIdSource::PreRegistered("mcp-cli");
+
         let bound = session(
             OAuthClientConfig::default()
                 .with_client_id("mcp-cli")
                 .with_issuer("https://auth.example.com"),
         );
-        let source = ClientIdSource::PreRegistered("mcp-cli");
         assert!(bound.may_reuse_stored_refresh(source, &as_metadata(None)));
-        assert!(!bound.may_reuse_stored_refresh(
-            source,
-            &AuthorizationServerMetadata::new("https://other.example.com")
-        ));
 
         let unbound = session(OAuthClientConfig::default().with_client_id("mcp-cli"));
         assert!(!unbound.may_reuse_stored_refresh(source, &as_metadata(None)));
+    }
+
+    /// What keeps a token from reaching the wrong server is the slot it lives
+    /// in, not a comparison against the configuration. So a portable identity
+    /// meeting a server its configuration does not name may still renew --
+    /// from that server's own slot, which is a different one.
+    #[test]
+    fn a_migrated_portable_identity_renews_from_the_new_issuers_slot() {
+        let session = session(
+            OAuthClientConfig::default()
+                .with_client_id_document(CIMD_URL)
+                .with_issuer("https://auth.example.com"),
+        );
+        let moved = AuthorizationServerMetadata::new("https://other.example.com");
+
+        assert!(session.may_reuse_stored_refresh(ClientIdSource::Document(CIMD_URL), &moved));
+        assert_ne!(
+            &*session.store_key_for(&moved.issuer),
+            &*session.store_key(),
+            "and not from the slot the stale configuration names"
+        );
+        assert!(
+            session
+                .store_key_for(&moved.issuer)
+                .starts_with("https://other.example.com|"),
+            "the slot is the one that server files its own tokens in"
+        );
     }
 
     /// A dynamically registered id is not the one the stored token was issued
@@ -2457,7 +2534,7 @@ mod tests {
             resource: "http://127.0.0.1:3000/mcp".into(),
             // No issuer configured, so the key is the resource -- which is what
             // every `store.put` in these tests writes under.
-            store_key: "http://127.0.0.1:3000/mcp".into(),
+            store_key: RwLock::new("http://127.0.0.1:3000/mcp".into()),
             token: RwLock::new(Some("stale-token".into())),
             flow: Mutex::new(flow),
             requested_scopes: RwLock::new(Vec::new()),
@@ -2993,6 +3070,47 @@ mod tests {
                 .map(|tokens| tokens.access_token),
             Some("cimd-token".to_owned()),
             "the tokens belong to the server the flow actually ran against"
+        );
+        assert_eq!(
+            &*session.store_key(),
+            format!("http://{addr}|{resource}"),
+            "and the session follows them there, so its staleness probe is not \
+             left watching an empty slot"
+        );
+    }
+
+    /// The restart after that migration. The stale configuration still names
+    /// the old server, but the tokens are filed under the one that minted
+    /// them, and that is the slot the flow renews from -- so a portable
+    /// identity does not pay for consent again on every start.
+    #[tokio::test]
+    async fn a_migrated_portable_identity_renews_after_a_restart() {
+        let (addr, seen) = spawn_cimd_authorization_server().await;
+        let resource = format!("http://{addr}/mcp");
+
+        let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+        store.put(&format!("http://{addr}|{resource}"), &stale_tokens());
+
+        let config = OAuthClientConfig {
+            store,
+            ..OAuthClientConfig::default()
+                .require_https(false)
+                .with_client_id_document(CIMD_URL)
+                .with_issuer("https://old-auth.example.com")
+                .with_handler(NoInteraction)
+        };
+        let session = OAuthSession::new(config, &resource).unwrap();
+
+        let token = session
+            .authorize(None, Some("the-expired-token"))
+            .await
+            .expect("the new server's own stored token is what answers this");
+        assert_eq!(&*token, "cimd-token");
+
+        let requests = seen.lock().unwrap().clone();
+        assert!(
+            requests.iter().any(|req| req.contains("refresh_token")),
+            "renewed rather than re-authorized: {requests:?}"
         );
     }
 
