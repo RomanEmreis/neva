@@ -24,7 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   advertises `client_id_metadata_document_supported`, then Dynamic Client
   Registration -- which the 2026-07-28 spec deprecates and which stays for
   servers that offer nothing else. Nothing changes for a client that configures
-  no document.
+  no document. A server offering none of the three is refused before the
+  browser opens, naming `with_client_id` as the way out.
 * **`OAuthClientConfig::with_issuer`** names the authorization server the
   configured credentials belong to. A pre-registered `client_id` meeting a
   different issuer now fails, naming both, instead of being presented to a
