@@ -11,7 +11,9 @@
 ))]
 
 use neva::App;
+use neva::shared::Stream;
 use neva::types::{SUBSCRIPTION_ID_KEY, Tool};
+use neva::{BusNotification, NotificationBus};
 use std::time::Duration;
 
 const RESOURCE: &str = "res://watched";
@@ -580,4 +582,193 @@ fn routed(req: reqwest::RequestBuilder, body: &serde_json::Value) -> reqwest::Re
         },
         _ => req,
     }
+}
+
+// -- Cross-instance fan-out -------------------------------------------------
+
+/// A `subscriptions/listen` stream is a socket held open by one process, and
+/// the stateless transport pins nothing to an instance: the subscriber and the
+/// request that mutates the server routinely land on different ones. A
+/// `NotificationBus` is what carries the notification across.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_notification_bus_delivers_across_instances() {
+    let (tx, _) = tokio::sync::broadcast::channel(64);
+    let bus = BroadcastBus(tx);
+
+    let addr_a = format!("127.0.0.1:{}", pick_free_port());
+    let addr_b = format!("127.0.0.1:{}", pick_free_port());
+    let a = tokio::spawn(instance(&addr_a, Some(bus.clone())).run());
+    let b = tokio::spawn(instance(&addr_b, Some(bus)).run());
+    await_reachable(&addr_a).await;
+    await_reachable(&addr_b).await;
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
+
+    // The subscription lives on instance A...
+    let (mut stream, mut body) = listen(&client, &addr_a).await;
+
+    // ...and every mutation happens on instance B, which holds no subscribers
+    // at all.
+    let url_b = format!("http://{addr_b}/mcp");
+    call_tool(&client, &url_b, "grow", 2).await;
+
+    let notification = next_message(&mut stream, &mut body).await;
+    assert_eq!(
+        notification["method"], "notifications/tools/list_changed",
+        "a mutation on another instance must reach this subscription"
+    );
+    assert_eq!(
+        notification["params"]["_meta"][SUBSCRIPTION_ID_KEY],
+        "sub-1"
+    );
+
+    // `resources/updated` is the one that used to be gated on a node-local
+    // "is anybody watching?" check, which on instance B answers `false`.
+    call_tool(&client, &url_b, "touch", 3).await;
+
+    let updated = next_message(&mut stream, &mut body).await;
+    assert_eq!(updated["method"], "notifications/resources/updated");
+    assert_eq!(updated["params"]["uri"], RESOURCE);
+    assert_eq!(updated["params"]["_meta"][SUBSCRIPTION_ID_KEY], "sub-1");
+
+    a.abort();
+    b.abort();
+}
+
+/// The other half of the proof: without a bus the same two instances lose the
+/// notification, which is the behaviour the bus exists to fix. It also pins the
+/// default -- an instance delivers to its own subscribers and to nobody else's.
+#[tokio::test(flavor = "multi_thread")]
+async fn without_a_bus_a_notification_stays_on_its_own_instance() {
+    let addr_a = format!("127.0.0.1:{}", pick_free_port());
+    let addr_b = format!("127.0.0.1:{}", pick_free_port());
+    let a = tokio::spawn(instance(&addr_a, None).run());
+    let b = tokio::spawn(instance(&addr_b, None).run());
+    await_reachable(&addr_a).await;
+    await_reachable(&addr_b).await;
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test client");
+
+    let (mut stream, mut body) = listen(&client, &addr_a).await;
+
+    call_tool(&client, &format!("http://{addr_b}/mcp"), "grow", 2).await;
+    assert!(
+        no_message(&mut stream, &mut body).await,
+        "instance B cannot write into instance A's stream"
+    );
+
+    // The same mutation on the instance holding the stream still arrives, so
+    // the wait above timed out for the right reason.
+    call_tool(&client, &format!("http://{addr_a}/mcp"), "grow", 3).await;
+    let notification = next_message(&mut stream, &mut body).await;
+    assert_eq!(notification["method"], "notifications/tools/list_changed");
+
+    a.abort();
+    b.abort();
+}
+
+/// Stands in for a shared bus (Redis pub/sub, NATS, Postgres `LISTEN/NOTIFY`):
+/// one process-wide channel every instance publishes to and reads back from,
+/// its own messages included -- which is what the trait's no-echo-suppression
+/// rule asks for.
+///
+/// It ships the notification as JSON in both directions, the way a real one
+/// would, so the serde round trip `BusNotification` exists for is on the path
+/// this test exercises rather than only in its own unit tests.
+#[derive(Clone)]
+struct BroadcastBus(tokio::sync::broadcast::Sender<String>);
+
+impl NotificationBus for BroadcastBus {
+    async fn publish(&self, notification: BusNotification) {
+        let Ok(wire) = serde_json::to_string(&notification) else {
+            return;
+        };
+        // No receiver yet simply means no instance is draining, which is not
+        // an error worth failing the request that produced it.
+        let _ = self.0.send(wire);
+    }
+
+    fn subscribe(&self) -> impl Stream<Item = BusNotification> + Send + 'static {
+        let rx = self.0.subscribe();
+        futures_util::stream::unfold(rx, |mut rx| async move {
+            loop {
+                match rx.recv().await {
+                    Ok(wire) => match serde_json::from_str(&wire) {
+                        Ok(notification) => return Some((notification, rx)),
+                        Err(_) => continue,
+                    },
+                    // At-most-once: a lagging drain skips what it missed rather
+                    // than ending delivery for good.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        })
+    }
+}
+
+/// One instance of the same logical server: the tools are identical on both,
+/// only the address and the bus differ.
+fn instance(addr: &str, bus: Option<BroadcastBus>) -> App {
+    let mut app = App::new().with_options(|opt| {
+        opt.with_http(|http| http.bind(addr).with_endpoint("/mcp"))
+            .with_tools(|t| t.with_list_changed())
+            .with_resources(|r| r.with_list_changed().with_subscribe())
+    });
+    if let Some(bus) = bus {
+        app = app.with_notification_bus(bus);
+    }
+    app.map_tool("grow", |mut ctx: neva::Context| async move {
+        ctx.add_tool(Tool::new("grown", || async { "ok" })).await?;
+        Ok::<_, neva::error::Error>("grown".to_string())
+    });
+    app.map_tool("touch", |mut ctx: neva::Context| async move {
+        ctx.resource_updated(RESOURCE).await?;
+        Ok::<_, neva::error::Error>("touched".to_string())
+    });
+    app
+}
+
+/// Opens a subscription against `addr` and consumes its acknowledgment, so the
+/// caller's next `next_message` is the first real notification.
+async fn listen(client: &reqwest::Client, addr: &str) -> (reqwest::Response, String) {
+    let listen = serde_json::json!({
+        "jsonrpc": "2.0", "id": "sub-1", "method": "subscriptions/listen",
+        "params": {
+            "notifications": {
+                "toolsListChanged": true,
+                "resourceSubscriptions": [RESOURCE]
+            },
+            "_meta": meta()
+        }
+    });
+    let mut stream = routed(client.post(format!("http://{addr}/mcp")), &listen)
+        .header("Accept", "application/json, text/event-stream")
+        .json(&listen)
+        .send()
+        .await
+        .expect("listen failed");
+    assert!(stream.status().is_success());
+
+    let mut body = String::new();
+    let ack = next_message(&mut stream, &mut body).await;
+    assert_eq!(ack["method"], "notifications/subscriptions/acknowledged");
+    (stream, body)
+}
+
+/// Returns whether the stream stays silent for long enough to call it silent.
+///
+/// There is no positive signal for "nothing will arrive", so this is a bounded
+/// wait; the test that uses it follows up with a delivery that *must* arrive,
+/// which is what rules out a stream that was simply broken.
+async fn no_message(resp: &mut reqwest::Response, body: &mut String) -> bool {
+    tokio::time::timeout(Duration::from_secs(1), next_message(resp, body))
+        .await
+        .is_err()
 }

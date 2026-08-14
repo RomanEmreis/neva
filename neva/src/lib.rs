@@ -78,6 +78,8 @@ pub use app::extension::Extension;
 pub use app::extension::TasksExtension;
 #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
 pub use app::mrtr_store::{InMemoryStateStore, RequestStateStore};
+#[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+pub use app::notification_bus::{BusNotification, NotificationBus};
 #[cfg(feature = "server")]
 pub use app::{App, context::Context};
 #[cfg(feature = "client")]

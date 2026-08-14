@@ -68,6 +68,8 @@ mod greeter;
 pub(crate) mod handler;
 #[cfg(not(feature = "legacy-spec"))]
 pub mod mrtr_store;
+#[cfg(not(feature = "legacy-spec"))]
+pub mod notification_bus;
 pub mod options;
 #[cfg(not(feature = "legacy-spec"))]
 pub(crate) mod subscriptions;
@@ -325,6 +327,47 @@ impl App {
         #[cfg(not(feature = "legacy-spec"))]
         self.options.set_shutdown_token(cancellation_token.clone());
 
+        // With a notification bus installed, every subscribable notification --
+        // this instance's own included -- comes back through the bus, and this
+        // task is what turns it into a delivery to the subscribers this
+        // instance holds. Subscribing happens here rather than inside the
+        // spawned task so the stream exists before the transport accepts its
+        // first request.
+        #[cfg(not(feature = "legacy-spec"))]
+        if let Some(bus) = self.options.notification_bus() {
+            let mut stream = bus.subscribe();
+            let subscriptions = self.options.subscriptions().clone();
+            let token = cancellation_token.clone();
+
+            tokio::spawn(async move {
+                use futures_util::StreamExt;
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = token.cancelled() => break,
+                        next = stream.next() => match next {
+                            Some(notification) => {
+                                subscriptions
+                                    .broadcast(notification.method(), notification.params());
+                            }
+                            // A bus that ends its stream stops delivery for
+                            // good; an implementation able to reconnect is
+                            // expected to do so without ending it.
+                            None => {
+                                #[cfg(feature = "tracing")]
+                                tracing::warn!(
+                                    logger = "neva",
+                                    "the notification bus ended its stream: cross-instance \
+                                     subscription notifications will no longer be delivered"
+                                );
+                                break;
+                            }
+                        },
+                    }
+                }
+            });
+        }
+
         let (sender, mut receiver) = transport.split();
         let runtime = ServerRuntime::new(
             sender,
@@ -547,6 +590,54 @@ impl App {
     ) -> Self {
         self.options
             .set_request_state_store(std::sync::Arc::new(store));
+        self
+    }
+
+    /// Sets the bus that carries subscription notifications between instances
+    /// of this server (MCP 2026-07-28).
+    ///
+    /// A `subscriptions/listen` stream is a socket held open by one process,
+    /// and the stateless transport pins nothing to an instance, so the
+    /// subscriber and the request that mutates the server routinely land on
+    /// different ones. With a bus installed, a notification produced anywhere
+    /// reaches the subscribers everywhere: each instance publishes what it
+    /// produces and delivers what it receives to the streams it holds.
+    ///
+    /// Defaults to no bus at all -- notifications go straight to this
+    /// instance's own subscribers, which is what a single-instance server
+    /// wants and costs nothing. **Multi-instance deployments serving
+    /// subscriptions should set one** (e.g. Redis pub/sub), the same
+    /// constraint as
+    /// [`with_request_state_store`](Self::with_request_state_store).
+    ///
+    /// Read [`NotificationBus`](crate::app::notification_bus::NotificationBus)
+    /// before implementing one: the contract requires that `subscribe` echo
+    /// this instance's own publishes back to it.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(not(feature = "legacy-spec"))] {
+    /// # use neva::app::notification_bus::{BusNotification, NotificationBus};
+    /// # use neva::shared::Stream;
+    /// # struct RedisBus;
+    /// # impl NotificationBus for RedisBus {
+    /// #     async fn publish(&self, _: BusNotification) {}
+    /// #     fn subscribe(&self) -> impl Stream<Item = BusNotification> + Send + 'static {
+    /// #         futures_util::stream::empty()
+    /// #     }
+    /// # }
+    /// use neva::App;
+    ///
+    /// let app = App::new()
+    ///     .with_notification_bus(RedisBus);
+    /// # }
+    /// ```
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn with_notification_bus(
+        mut self,
+        bus: impl crate::app::notification_bus::NotificationBus + 'static,
+    ) -> Self {
+        self.options.set_notification_bus(std::sync::Arc::new(bus));
         self
     }
 

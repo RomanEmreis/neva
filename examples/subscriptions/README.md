@@ -56,3 +56,21 @@ Four things this shows:
 Notifications are dispatched to the handlers registered *before* listening
 (`on_tools_changed`, `on_resource_changed`); the `Subscription` handle is about
 the stream's lifecycle -- what was accepted, cancelling it, and how it ended.
+
+## Running more than one instance
+
+This example is a single process, and the fan-out above is entirely in-process:
+the subscription's socket is held open by the same server the tool call
+mutates. Scale that server horizontally and the two come apart -- nothing pins
+a client to an instance under the stateless transport, so the
+`subscriptions/listen` stream and the `tools/call` that mutates the tool list
+routinely land on different ones, and the notification is lost while the client
+has been told its filter was accepted.
+
+The seam for that is `App::with_notification_bus(..)`: each instance keeps its
+own subscribers, and a `NotificationBus` (Redis pub/sub, NATS, Postgres
+`LISTEN`/`NOTIFY` -- implementations live outside neva) carries notifications
+between them. Without one, notifications stay on the instance that produced
+them, which is exactly right for a single process and costs nothing. See the
+[`notification_bus`](https://docs.rs/neva/latest/neva/app/notification_bus/)
+module docs for a complete implementation.
