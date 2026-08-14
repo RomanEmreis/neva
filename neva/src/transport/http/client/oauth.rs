@@ -25,6 +25,8 @@ use tokio::{
 
 use crate::error::{Error, ErrorCode};
 
+use url::{Host, ParseError, Url, form_urlencoded};
+
 use volga_oauth_client::{
     AuthorizationServerMetadata, BearerChallenge, ClientConfig, ClientError, DiscoveryClient,
     OAuthClient, RegistrationClient, canonicalize_resource_uri, protected_resource_metadata_url,
@@ -76,13 +78,13 @@ impl CallbackParams {
         let mut error = None;
         let mut error_description = None;
 
-        for (key, value) in form_urlencoded_parse(query) {
-            match key.as_str() {
-                "code" => code = Some(value),
-                "state" => state = Some(value),
-                "iss" => iss = Some(value),
-                "error" => error = Some(value),
-                "error_description" => error_description = Some(value),
+        for (key, value) in form_urlencoded::parse(query.as_bytes()) {
+            match key.as_ref() {
+                "code" => code = Some(value.into_owned()),
+                "state" => state = Some(value.into_owned()),
+                "iss" => iss = Some(value.into_owned()),
+                "error" => error = Some(value.into_owned()),
+                "error_description" => error_description = Some(value.into_owned()),
                 _ => {}
             }
         }
@@ -103,42 +105,6 @@ impl CallbackParams {
             )),
         }
     }
-}
-
-/// Minimal `application/x-www-form-urlencoded` pair iterator -- enough
-/// for authorization-response queries (no `+`-space legacy handling
-/// beyond the standard).
-fn form_urlencoded_parse(query: &str) -> impl Iterator<Item = (String, String)> + '_ {
-    query.split('&').filter_map(|pair| {
-        let (key, value) = pair.split_once('=')?;
-        Some((percent_decode(key)?, percent_decode(value)?))
-    })
-}
-
-/// Percent-decodes a query component (with `+` as space).
-fn percent_decode(s: &str) -> Option<String> {
-    let mut out = Vec::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' => {
-                let hex = bytes.get(i + 1..i + 3)?;
-                let hex = std::str::from_utf8(hex).ok()?;
-                out.push(u8::from_str_radix(hex, 16).ok()?);
-                i += 3;
-            }
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8(out).ok()
 }
 
 /// The interactive step of the authorization-code flow: how the
@@ -1703,41 +1669,35 @@ fn validate_client_id_document_url(url: &str, require_https: bool) -> Result<(),
         Err(err) => return invalid(&format!("is not a valid URL: {err}")),
     };
 
-    let rest = match canonical.split_once("://") {
-        Some(("https", rest)) => rest,
-        Some(("http", rest)) if !require_https => rest,
-        Some(("http", _)) => {
+    // Parsed once, and the three checks below read components off the result.
+    // The port range is the one defect a parser can still find in a string the
+    // canonicalizer accepted: it holds the port to digits, which keeps the
+    // authority well-formed, but not to a range -- and `:99999` is a number no
+    // socket has, so the server that would fetch this document never gets as
+    // far as trying.
+    let parsed = match Url::parse(&canonical) {
+        Ok(parsed) => parsed,
+        Err(ParseError::InvalidPort) => return invalid("must name a port in the 0-65535 range"),
+        Err(err) => return invalid(&format!("is not a valid URL: {err}")),
+    };
+
+    match parsed.scheme() {
+        "https" => {}
+        "http" if !require_https => {}
+        "http" => {
             return invalid("must use the `https` scheme (or set `require_https(false)`)");
         }
         _ => return invalid("must be an absolute `https` URL"),
-    };
-
-    // The query goes first, because it may hold slashes of its own:
-    // `https://example.com?location=/client.json` has no path component at all,
-    // and looking for a slash across the whole of `rest` would find the one
-    // inside the query and call it one.
-    //
-    // What is left is the authority and the path. Canonicalization drops a lone
-    // root slash, so `https://example.com` and `https://example.com/` arrive
-    // here alike -- both being the origin, which as a client id would make
-    // every client hosted there the same client.
-    let authority_and_path = rest.split('?').next().unwrap_or_default();
-    let Some((authority, path)) = authority_and_path.split_once('/') else {
-        return invalid("must contain a path component, e.g. `https://example.com/client.json`");
-    };
-    if path.is_empty() {
-        return invalid("must contain a path component, e.g. `https://example.com/client.json`");
     }
 
-    // The one thing the canonicalizer above does not settle. It holds the port
-    // to digits, which keeps the authority well-formed, but not to a range --
-    // and `:99999` is a number no socket has: every standard URL parser refuses
-    // it, so the server that would fetch this document never gets as far as
-    // trying.
-    if let Some(port) = host_and_port(authority).1
-        && port.parse::<u16>().is_err()
-    {
-        return invalid("must name a port in the 0-65535 range");
+    // A path is a path, and a query is a query: reading the two off the parse
+    // is what keeps `https://example.com?location=/client.json` from passing on
+    // the strength of the slash inside its query. `Url` gives every http(s) URL
+    // a path of at least `/`, so the bare origin -- which as a client id would
+    // make every client hosted there the same client -- arrives here as exactly
+    // that, however it was spelled.
+    if matches!(parsed.path(), "" | "/") {
+        return invalid("must contain a path component, e.g. `https://example.com/client.json`");
     }
 
     Ok(())
@@ -1785,37 +1745,32 @@ impl ClientIdSource<'_> {
     }
 }
 
-/// Whether `uri` redirects to a loopback interface (`127.0.0.1`,
-/// `localhost` or `[::1]`), per the native-client loopback exception.
+/// Whether `uri` redirects to a loopback interface, per the native-client
+/// loopback exception.
+///
+/// RFC 8252 section 7.3 gives a native client the whole of `127.0.0.0/8`, not
+/// just `127.0.0.1` -- a handler bound to `127.0.0.2` redirects to loopback
+/// just as much, and calling it a `web` client would have an OIDC-strict
+/// authorization server refuse the plain-http redirect URI. `Host` decides
+/// that from a parsed address rather than from a string comparison, so the
+/// range comes for free and `localhost` stays the one name that counts.
 fn is_loopback_redirect(uri: &str) -> bool {
-    let Some(rest) = uri
-        .strip_prefix("http://")
-        .or_else(|| uri.strip_prefix("https://"))
-    else {
+    let Ok(url) = Url::parse(uri) else {
         return false;
     };
-    let authority = rest.split(['/', '?']).next().unwrap_or_default();
-    matches!(
-        host_and_port(authority).0,
-        "127.0.0.1" | "localhost" | "[::1]"
-    )
-}
 
-/// Splits an authority into its host and its port, if it names one.
-///
-/// A bracketed IPv6 literal carries colons of its own, so the closing bracket
-/// is what the host ends at; everything else ends at the last colon. An empty
-/// port (`example.com:`) is no port at all.
-fn host_and_port(authority: &str) -> (&str, Option<&str>) {
-    match authority.split_once(']') {
-        Some((bracketed, after)) => (
-            &authority[..bracketed.len() + 1],
-            after.strip_prefix(':').filter(|port| !port.is_empty()),
-        ),
-        None => match authority.rsplit_once(':') {
-            Some((host, port)) => (host, (!port.is_empty()).then_some(port)),
-            None => (authority, None),
-        },
+    // The exception is about http(s) redirects; a custom scheme claiming the
+    // loopback host is a private-use URI redirect, which is a different
+    // mechanism with its own rules.
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+
+    match url.host() {
+        Some(Host::Domain(host)) => host == "localhost",
+        Some(Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
     }
 }
 
@@ -1874,13 +1829,13 @@ const WELL_KNOWN_PROTECTED_RESOURCE: &str = "/.well-known/oauth-protected-resour
 
 /// The `scheme://authority` a resource identifier belongs to.
 ///
-/// Returns `None` when `resource` is not a URL with an authority -- there is no
-/// origin to hang a well-known path off then.
+/// Returns `None` when `resource` is not a URL with an authority -- an opaque
+/// origin has no host to hang a well-known path off, and neither does a string
+/// that does not parse.
 fn origin_of(resource: &str) -> Option<String> {
-    let (scheme, rest) = resource.split_once("://")?;
-    let authority = rest.split(['/', '?', '#']).next()?;
+    let origin = Url::parse(resource).ok()?.origin();
 
-    (!authority.is_empty()).then(|| format!("{scheme}://{authority}"))
+    origin.is_tuple().then(|| origin.ascii_serialization())
 }
 
 #[cfg(test)]
@@ -1935,27 +1890,30 @@ mod tests {
     }
 
     #[test]
-    fn an_authority_splits_into_a_host_and_a_port() {
-        assert_eq!(host_and_port("example.com"), ("example.com", None));
-        assert_eq!(
-            host_and_port("example.com:8443"),
-            ("example.com", Some("8443"))
-        );
-        // A bracketed IPv6 literal carries colons that are not the separator.
-        assert_eq!(host_and_port("[::1]"), ("[::1]", None));
-        assert_eq!(host_and_port("[::1]:9000"), ("[::1]", Some("9000")));
-        // An empty port is no port -- and must not read as one, or the range
-        // check would refuse a URL that names none.
-        assert_eq!(host_and_port("example.com:"), ("example.com", None));
-    }
-
-    #[test]
     fn loopback_redirects_are_detected() {
         assert!(is_loopback_redirect("http://127.0.0.1:8919/callback"));
         assert!(is_loopback_redirect("http://localhost/callback"));
         assert!(is_loopback_redirect("http://[::1]:9000/callback"));
         assert!(!is_loopback_redirect("https://my.app/oauth/callback"));
         assert!(!is_loopback_redirect("res://localhost"));
+    }
+
+    /// RFC 8252 section 7.3 hands a native client the whole loopback range, so
+    /// a handler bound anywhere in `127.0.0.0/8` is native too. Matching the
+    /// literal `127.0.0.1` registered those as `web` clients, which an
+    /// OIDC-strict authorization server refuses for a plain-http redirect URI.
+    #[test]
+    fn the_whole_loopback_range_counts_as_loopback() {
+        assert!(is_loopback_redirect("http://127.0.0.2:8919/callback"));
+        assert!(is_loopback_redirect("http://127.1.2.3/callback"));
+        assert!(is_loopback_redirect("http://[::0:0:1]:9000/callback"));
+        // Neighbouring ranges are not loopback: `127.0.0.0/8` ends at 127.
+        assert!(!is_loopback_redirect("http://128.0.0.1/callback"));
+        assert!(!is_loopback_redirect("http://126.255.255.255/callback"));
+        // A name that merely looks like one. Only `localhost` is the loopback
+        // name, and `url` will not resolve anything else to prove otherwise.
+        assert!(!is_loopback_redirect("http://localhost.evil.com/callback"));
+        assert!(!is_loopback_redirect("http://not-a-url"));
     }
 
     #[test]
@@ -2018,6 +1976,9 @@ mod tests {
         assert!(validate_client_id_document_url("https://[::1]:8443/c.json", false).is_ok());
 
         assert!(validate_client_id_document_url("https://example.com/c?v=2", true).is_ok());
+        // The scheme is case-insensitive, and both the canonicalizer and the
+        // parser normalize it -- so the check never rests on the spelling.
+        assert!(validate_client_id_document_url("HTTPS://Example.COM/c.json", true).is_ok());
 
         // No path: the bare origin would make every client hosted there one
         // and the same client.

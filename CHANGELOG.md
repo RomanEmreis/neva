@@ -68,6 +68,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   are going, not where the ones already stored came from. Dynamically
   registered clients never reuse one: the next run registers a different id.
 
+### Changed
+
+#### Authorization
+* **A redirect anywhere in `127.0.0.0/8` now registers a native client.**
+  RFC 8252 section 7.3 gives a native client the whole loopback range, but the
+  client matched the literal `127.0.0.1`, so a handler bound to `127.0.0.2`
+  declared itself a `web` client -- which an OIDC-strict authorization server
+  refuses for a plain-http redirect URI. `localhost` and `[::1]` are unchanged.
+* The OAuth client's URL and query handling now goes through
+  [`url`](https://docs.rs/url), an optional dependency gated on `client-oauth`.
+  It is already compiled for every `client-*` build via `reqwest`, so it costs
+  no build time, and it catches what a hand-rolled split does not -- an
+  out-of-range port above all, which `http::Uri` reports as no port at all.
+
+### Fixed
+
+#### HTTP transport and sessions
+* **`bind("::1:3000")` now gets DNS-rebinding protection.** `std` accepts an
+  unbracketed IPv6 bind string and takes the last colon as the port separator,
+  so that address really does listen on `[::1]:3000` -- but the default policy
+  read the string whole, where it parses as the *different*, non-loopback
+  address `::1:3000`. A server on loopback therefore defaulted to
+  `allow_any_origin`, with the `Origin`/`Host` checks the spec makes a MUST for
+  local servers switched off. Bind strings are now read the way `std` reads
+  them. `[::1]:3000`, `127.0.0.1:3000` and `localhost:3000` were never
+  affected.
+* An `Origin` header carrying userinfo is no longer matched against the
+  allowlist by the name in front of the `@`: `https://app.example.com:8443@evil.com`
+  has the host `evil.com`, not `app.example.com`. Hardening rather than a
+  reachable bypass -- a browser cannot be made to send this, and `Origin` is
+  browser-set -- but a value that only looks like an origin should not pass as
+  one.
+
 ## 0.5.2
 
 ### Added

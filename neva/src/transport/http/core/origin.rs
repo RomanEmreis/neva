@@ -56,7 +56,7 @@ impl OriginPolicy {
     /// The policy a server bound to `addr` gets when the application states
     /// none: enforcing on loopback, permissive anywhere else.
     pub(crate) fn for_addr(addr: &str) -> Self {
-        if is_loopback_host(host_of(addr)) {
+        if binds_to_loopback(addr) {
             Self::Loopback
         } else {
             Self::Any
@@ -186,11 +186,20 @@ fn entry_allows_origin(entry: &str, scheme: &str, host: &str, port: Option<&str>
 /// `https://x` and `https://x:443` are the same origin, and a list that spelled
 /// one must not miss the other.
 fn stated_port<'a>(scheme: &str, port: Option<&'a str>) -> Option<&'a str> {
-    port.or(match scheme.to_ascii_lowercase().as_str() {
-        "http" => Some("80"),
-        "https" => Some("443"),
-        _ => None,
-    })
+    if port.is_some() {
+        return port;
+    }
+
+    // `eq_ignore_ascii_case` rather than lowercasing: this runs per allowlist
+    // entry per request, and the rest of the file compares schemes and hosts
+    // the same way -- without building a `String` to throw away.
+    if scheme.eq_ignore_ascii_case("http") {
+        Some("80")
+    } else if scheme.eq_ignore_ascii_case("https") {
+        Some("443")
+    } else {
+        None
+    }
 }
 
 /// The header value as a string, if it is present and readable.
@@ -205,6 +214,17 @@ fn split_origin(origin: &str) -> Option<(&str, &str, Option<&str>)> {
     if scheme.is_empty() || rest.is_empty() {
         return None;
     }
+
+    // A serialized origin is scheme, host and port and nothing else -- no
+    // userinfo, no path. `host_of` cuts at the first colon, so it would read
+    // `app.example.com:8443@evil.com` as the host `app.example.com`: the name
+    // in front of the `@` is the credential, and the host is what follows it.
+    // A browser never sends this, but a hand-rolled split is exactly where a
+    // value that only looks like an origin gets to pass as one.
+    if rest.contains(['@', '/']) {
+        return None;
+    }
+
     Some((scheme, host_of(rest), port_of(rest)))
 }
 
@@ -226,9 +246,13 @@ fn port_of(value: &str) -> Option<&str> {
 /// Strips the port from `host[:port]`, keeping a bracketed IPv6 literal whole.
 ///
 /// `[::1]:3000` -> `[::1]`, `localhost:3000` -> `localhost`, and a bare IPv6
-/// address with no brackets (which is not valid in a `Host`, but may reach us
-/// from a bind string like `::1:3000`) is left alone rather than cut at its
-/// first colon.
+/// address with no brackets is left alone rather than cut at its first colon.
+///
+/// This reads header grammar -- `Host`, and the authority inside an `Origin` --
+/// where an unbracketed literal is all host and states no port. A bind string
+/// is the other grammar, where the last colon *is* the port separator, and it
+/// goes to [`binds_to_loopback`] instead; running one through the other is what
+/// made `bind("::1:3000")` look like it was not on loopback.
 fn host_of(value: &str) -> &str {
     let value = value.trim();
     if let Some(end) = value.find(']') {
@@ -240,6 +264,28 @@ fn host_of(value: &str) -> &str {
         Some((host, _)) => host,
         None => value,
     }
+}
+
+/// Whether a bind string lands on the local machine.
+///
+/// A bind string is a socket address, not a `Host` header, and it is read here
+/// the way `std` reads it on the way to `bind` -- because that is what decides
+/// which interface the server ends up on. Reading it with [`host_of`] instead
+/// got `::1:3000` wrong in the direction that matters: `std` takes it as the
+/// address `::1` on port 3000 (loopback), while `host_of` leaves it whole and
+/// it parses as the *different*, non-loopback address `::1:3000`. The server
+/// bound to loopback and the protection this module exists for was off.
+fn binds_to_loopback(addr: &str) -> bool {
+    // The bracketed forms `std` parses outright: `127.0.0.1:3000`, `[::1]:3000`.
+    if let Ok(socket) = addr.parse::<std::net::SocketAddr>() {
+        return socket.ip().is_loopback();
+    }
+
+    // Everything else `std` splits at the *last* colon and resolves the front
+    // half -- a name (`localhost:3000`) or an unbracketed literal (`::1:3000`).
+    let host = addr.rsplit_once(':').map_or(addr, |(host, _)| host);
+
+    is_loopback_host(host)
 }
 
 /// Whether `host` names the local machine.
@@ -259,6 +305,7 @@ fn is_loopback_host(host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::ToSocketAddrs;
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut map = HeaderMap::new();
@@ -465,6 +512,25 @@ mod tests {
         assert_eq!(split_origin("null"), None);
         assert_eq!(split_origin("app.example.com"), None);
         assert_eq!(split_origin("https://"), None);
+        // Userinfo makes the name in front of the `@` the credential, not the
+        // host -- so a value shaped like this is not an origin at all, and must
+        // not be matched as one against `app.example.com`.
+        assert_eq!(split_origin("https://app.example.com:8443@evil.com"), None);
+        assert_eq!(split_origin("https://app.example.com/path"), None);
+    }
+
+    /// A value that only looks like an allowlisted origin does not get in.
+    #[test]
+    fn an_origin_carrying_userinfo_is_not_the_host_it_names_first() {
+        let policy = OriginPolicy::Allowlist(Arc::from([Box::from("app.example.com")]));
+        assert!(
+            policy
+                .rejection(&headers(&[(
+                    "origin",
+                    "https://app.example.com:8443@evil.com"
+                )]))
+                .is_some()
+        );
     }
 
     #[test]
@@ -501,6 +567,36 @@ mod tests {
         ));
         assert!(matches!(
             OriginPolicy::for_addr("192.168.1.5:3000"),
+            OriginPolicy::Any
+        ));
+    }
+
+    /// `std` accepts an unbracketed IPv6 bind string and takes the last colon
+    /// as the port separator, so `bind("::1:3000")` really does listen on
+    /// `[::1]:3000`. Read whole instead, it parses as the address `::1:3000`
+    /// -- a different one, and not loopback -- which left a loopback server
+    /// with rebinding protection switched off.
+    #[test]
+    fn an_unbracketed_ipv6_bind_address_is_still_loopback() {
+        let bound = "::1:3000"
+            .to_socket_addrs()
+            .ok()
+            .and_then(|mut addrs| addrs.next())
+            .expect("`std` accepts this bind string");
+        assert!(
+            bound.ip().is_loopback(),
+            "the premise: `{bound}` is what the server actually binds to"
+        );
+        assert!(matches!(
+            OriginPolicy::for_addr("::1:3000"),
+            OriginPolicy::Loopback
+        ));
+
+        // And the reverse still holds: `::` is the unspecified address, which
+        // `std` reads out of `bind("::1")` as `[::]:1` -- every interface.
+        assert!(matches!(OriginPolicy::for_addr("::1"), OriginPolicy::Any));
+        assert!(matches!(
+            OriginPolicy::for_addr("[::]:3000"),
             OriginPolicy::Any
         ));
     }
