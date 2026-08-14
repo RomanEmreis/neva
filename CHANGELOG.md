@@ -5,6 +5,69 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.5.3
+
+### Added
+
+#### Authorization
+* **Client ID Metadata Documents (CIMD).**
+  `OAuthClientConfig::with_client_id_document(url)` identifies the client by an
+  https URL the authorization server dereferences, so a client and server with
+  no prior relationship need no registration request at all. The URL is checked
+  for the scheme and path component the spec requires when the client is built,
+  and pairing it with a client secret is refused -- a document describes a
+  public client. `client_metadata_document([redirect_uris])` builds the JSON to
+  host there from the same code that would have registered, so the two cannot
+  drift.
+* **All three registration mechanisms, in the spec's priority order**: a
+  pre-registered `client_id` first, then a metadata document where the server
+  advertises `client_id_metadata_document_supported`, then Dynamic Client
+  Registration -- which the 2026-07-28 spec deprecates and which stays for
+  servers that offer nothing else. Nothing changes for a client that configures
+  no document. A server offering none of the three is refused before the
+  browser opens, naming `with_client_id` as the way out.
+* **`OAuthClientConfig::with_issuer`** names the authorization server the
+  configured credentials belong to. A pre-registered `client_id` meeting a
+  different issuer now fails, naming both, instead of being presented to a
+  server that never issued it. It is also what the `TokenStore` entry is keyed
+  by, as the spec prescribes, so tokens from two servers never share a slot.
+
+  **Custom `TokenStore` implementations:** the key is now
+  `{issuer}|{client}|{resource}` -- the whole identity a credential belongs to
+  -- rather than the resource alone, with any part the configuration does not
+  name left empty. Naming the client is what keeps two clients sharing one
+  durable store from sharing a slot, which would have the second send the
+  first's access token and offer its refresh token under the wrong id. Entries
+  written by an earlier version are not found under the new key and are left in
+  place; the affected sessions re-authorize once.
+* **`App::with_request_state_audience`** binds MRTR `requestState` to this
+  service's identity. The sealed state already carried a binding to its request
+  and to the principal, but not to the service -- so where several share one
+  `with_request_state_secret`, a state minted by one was a state the others
+  accepted. A mismatch is `InvalidParams`, like the principal guard, and the
+  check runs both ways: a state naming an audience is refused by a server that
+  configures none.
+
+  **Wire:** an audience-bound state is sealed under its own version (`v2.`
+  rather than `v1.`), so a binary predating the option refuses it instead of
+  decrypting it and dropping the member it does not know -- which would leave
+  the binding unenforced by exactly the instance still to be upgraded. A
+  deployment that configures no audience keeps minting `v1`; both versions
+  decode.
+* `ClientMetadata` re-exported from `neva::auth::oauth`.
+* **A stored refresh token is only offered to the authorization server that
+  minted it.** A refresh token is a bearer credential for its token endpoint,
+  and the server a flow discovers is vouched for by the resource alone -- which
+  is exactly what an attacker who controls the resource rewrites. The
+  after-restart refresh added in 0.5.2 therefore now requires
+  [`with_issuer`](https://docs.rs/neva/latest/neva/auth/oauth/struct.OAuthClientConfig.html#method.with_issuer),
+  and reads the token back under it; without one the session re-authorizes
+  interactively rather than sending the token somewhere unverified. That covers
+  a migration too: pointing `with_issuer` at a new server does not carry the
+  old server's token over to it, since the configuration says where credentials
+  are going, not where the ones already stored came from. Dynamically
+  registered clients never reuse one: the next run registers a different id.
+
 ## 0.5.2
 
 ### Added

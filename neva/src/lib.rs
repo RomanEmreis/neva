@@ -234,8 +234,8 @@ pub mod auth {
 
         #[cfg(feature = "client-oauth")]
         pub use crate::transport::http::client::oauth::{
-            AuthorizationHandler, CallbackParams, InMemoryTokenStore, LoopbackHandler,
-            OAuthClientConfig, TokenSet, TokenStore,
+            AuthorizationHandler, CallbackParams, ClientMetadata, InMemoryTokenStore,
+            LoopbackHandler, OAuthClientConfig, TokenSet, TokenStore,
         };
     }
 }

@@ -35,20 +35,21 @@ server: []
 
 client:
   # The authorization-code flow is green end to end: metadata discovery in all
-  # four layouts, dynamic registration, PKCE S256, scope selection (challenge
-  # first, then `scopes_supported`, omitted when neither), step-up with the
-  # SEP-2350 scope union, every token-endpoint auth method, pre-registered
-  # credentials, offline access, issuer migration and the RFC 9207 `iss` rules.
+  # four layouts, PKCE S256, scope selection (challenge first, then
+  # `scopes_supported`, omitted when neither), step-up with the SEP-2350 scope
+  # union, every token-endpoint auth method, offline access, issuer migration
+  # and the RFC 9207 `iss` rules.
+  #
+  # `basic-cimd` is green as of #86: all three registration mechanisms are
+  # implemented in the priority order the spec sets out -- a pre-registered id
+  # first, then a Client ID Metadata Document where the server resolves one,
+  # then dynamic registration. The fixture configures a document URL whenever
+  # the scenario hands it no pre-registered credentials, so which mechanism
+  # runs is decided by what each mock server advertises.
   #
   # What is left needs a credential the flow does not have.
 
-  # -- Client id metadata documents (#86) --------------------------------
-  # A server advertising `client_id_metadata_document_supported` expects a
-  # *URL* client id resolving to a hosted client metadata document. neva
-  # registers dynamically instead, which the scenario reports as a warning.
-  - auth/basic-cimd
-
-  # -- Grant types beyond authorization_code (#86) -----------------------
+  # -- Grant types beyond authorization_code (#109) ----------------------
   # Each of these authenticates the *client* rather than a user, and needs a
   # grant neva's OAuth client does not implement: `client_credentials` (with a
   # signed JWT assertion or Basic), the enterprise token-exchange profile, and
@@ -58,7 +59,7 @@ client:
   - auth/enterprise-managed-authorization
   - auth/wif-jwt-bearer
 
-  # -- DPoP (#86) --------------------------------------------------------
+  # -- DPoP (#110) -------------------------------------------------------
   # Sender-constrained tokens: every request carries a fresh signed proof bound
   # to the key, method and URL, and the nonce variant adds a challenge-response
   # round. neva issues bearer tokens only.

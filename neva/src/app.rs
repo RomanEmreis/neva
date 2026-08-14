@@ -442,6 +442,55 @@ impl App {
         self
     }
 
+    /// Binds MRTR `requestState` to this service's identity, so a state minted
+    /// for one service cannot be replayed against another
+    /// (MCP 2026-07-28).
+    ///
+    /// The sealed state already carries a binding to the request that produced
+    /// it and to the authenticated principal, but neither says which *service*
+    /// minted it. That only matters where more than one can decrypt it -- which
+    /// is exactly what a fleet sharing one
+    /// [`with_request_state_secret`](Self::with_request_state_secret) is: give
+    /// two services a method and parameters they both serve, and a state minted
+    /// by one is a state the other accepts, mid-flow, with its answers already
+    /// sealed in.
+    ///
+    /// Set it to whatever names this service and nothing else -- its canonical
+    /// resource URI, the value `OAuthResourceOptions::with_resource` carries,
+    /// is the natural one (link omitted: that type needs the `server-oauth`
+    /// feature). It has to be **identical on every instance of the same
+    /// service**, since a retry may land on any of them; a value that varies
+    /// per instance rejects every retry that moves.
+    ///
+    /// Unset, states are minted and demanded without an audience -- and a state
+    /// carrying one is refused just as firmly, so the guard cannot be shed by
+    /// omitting it.
+    ///
+    /// An audience-bound state is also sealed under its own wire version, which
+    /// a binary predating this option refuses outright. Without that, such a
+    /// binary would decrypt the state, ignore the field it does not know, and
+    /// run the round -- so the binding would be worth nothing against exactly
+    /// the service that has not been upgraded yet. The cost is that states in
+    /// flight when the option is turned on are rejected; they lapse within the
+    /// `requestState` TTL (5 minutes), and the client's next round mints one
+    /// under the new binding.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(not(feature = "legacy-spec"))] {
+    /// use neva::App;
+    ///
+    /// let app = App::new()
+    ///     .with_request_state_secret(b"shared-secret")
+    ///     .with_request_state_audience("https://weather.example.com/mcp");
+    /// # }
+    /// ```
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn with_request_state_audience(mut self, audience: impl AsRef<str>) -> Self {
+        self.options.set_request_state_audience(audience.as_ref());
+        self
+    }
+
     /// Sets the maximum encoded `requestState` size (bytes). When a round-trip
     /// would emit a larger blob, the server returns an error result instead
     /// (MCP 2026-07-28).
@@ -1950,6 +1999,17 @@ fn seed_mrtr_ctx(
             ));
         }
 
+        // Which service minted it. Compared both ways, like the principal
+        // above: a state that names an audience is refused by a server that
+        // configures none, so the binding cannot be shed by dropping the claim
+        // on the way back in.
+        if payload.aud.as_deref() != options.request_state_audience() {
+            return Err(Error::new(
+                ErrorCode::InvalidParams,
+                "requestState audience mismatch",
+            ));
+        }
+
         answers = payload.answers;
         memos = payload.memos;
         effects = payload.effects;
@@ -2054,6 +2114,7 @@ fn build_input_required(
         exp: now_secs() + options.request_state_ttl_secs(),
         req: request_binding(method, salient),
         principal,
+        aud: options.request_state_audience().map(str::to_owned),
     };
 
     let state = StateCodec::new(options.request_state_keys()).encode(&payload)?;
@@ -2644,6 +2705,7 @@ mod tests {
                 exp: now_secs().saturating_sub(1), // already in the past
                 req: request_binding(METHOD, &salient()),
                 principal: None,
+                aud: None,
             };
             let req = request_with_state(&encode(&payload));
             let err = super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), None)
@@ -2663,6 +2725,7 @@ mod tests {
                 exp: now_secs() + 300,
                 req: request_binding(METHOD, &salient()),
                 principal: Some("alice".into()),
+                aud: None,
             };
             let req = request_with_state(&encode(&payload));
             // ...replayed by "bob".
@@ -2671,6 +2734,77 @@ mod tests {
                     .expect_err("principal mismatch must be rejected");
             assert_eq!(err.code, ErrorCode::InvalidParams);
             assert!(format!("{err}").contains("principal mismatch"), "{err}");
+        }
+
+        const AUDIENCE: &str = "https://weather.example.com/mcp";
+
+        fn options_for(audience: &str) -> crate::app::options::RuntimeMcpOptions {
+            App::new()
+                .with_request_state_secret(SECRET)
+                .with_request_state_audience(audience)
+                .options
+                .into_runtime()
+        }
+
+        fn payload_for(audience: Option<&str>) -> StatePayload {
+            StatePayload {
+                answers: Default::default(),
+                requested: Default::default(),
+                memos: Default::default(),
+                effects: Default::default(),
+                exp: now_secs() + 300,
+                req: request_binding(METHOD, &salient()),
+                principal: None,
+                aud: audience.map(str::to_owned),
+            }
+        }
+
+        /// Two services sharing a `requestState` secret can decrypt each
+        /// other's states, and a method and parameters they both serve make one
+        /// of them a state the other would otherwise accept mid-flow. The
+        /// audience is what tells them apart.
+        #[test]
+        fn a_state_minted_for_another_service_is_rejected() {
+            let req = request_with_state(&encode(&payload_for(Some(
+                "https://billing.example.com/mcp",
+            ))));
+            let err =
+                super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options_for(AUDIENCE), None)
+                    .expect_err("a state minted for another service must be rejected");
+            assert_eq!(err.code, ErrorCode::InvalidParams);
+            assert!(format!("{err}").contains("audience mismatch"), "{err}");
+        }
+
+        #[test]
+        fn a_state_minted_for_this_service_is_accepted() {
+            let req = request_with_state(&encode(&payload_for(Some(AUDIENCE))));
+            assert!(
+                super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options_for(AUDIENCE), None)
+                    .is_ok()
+            );
+        }
+
+        /// Checked in both directions, like the principal guard. A payload
+        /// predating the field decodes with no audience, and a server that
+        /// demands one refuses it -- so the binding cannot be shed by dropping
+        /// the claim, whether the state is old or forged.
+        #[test]
+        fn an_unbound_state_is_refused_where_an_audience_is_demanded() {
+            let req = request_with_state(&encode(&payload_for(None)));
+            let err =
+                super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options_for(AUDIENCE), None)
+                    .expect_err("an unbound state must not pass an audience check");
+            assert!(format!("{err}").contains("audience mismatch"), "{err}");
+        }
+
+        /// And the other way: a server that configures no audience refuses a
+        /// state that names one, rather than treating the claim as decoration.
+        #[test]
+        fn a_bound_state_is_refused_where_no_audience_is_configured() {
+            let req = request_with_state(&encode(&payload_for(Some(AUDIENCE))));
+            let err = super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), None)
+                .expect_err("a bound state must not pass an unbound server");
+            assert!(format!("{err}").contains("audience mismatch"), "{err}");
         }
 
         /// An accepted elicitation answer tagged so two answers for one key can
@@ -2718,6 +2852,7 @@ mod tests {
                 exp: now_secs() + 300,
                 req: request_binding(METHOD, &salient()),
                 principal: None,
+                aud: None,
             };
             encode(&payload)
         }

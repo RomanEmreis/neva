@@ -5,12 +5,11 @@
 //! independent -- plain hyper): a `401` challenge is parsed for its
 //! `resource_metadata` pointer (RFC 9728 section 5.1), the Protected Resource
 //! Metadata and the authorization server metadata are discovered
-//! (RFC 8414, OIDC fallback), the client registers dynamically when no
-//! `client_id` is configured (RFC 7591, `application_type: "native"` for
-//! loopback redirects), and the authorization-code + PKCE flow runs with
-//! the server's canonical URI as the RFC 8707 resource indicator. The
-//! callback is checked for `state` and the RFC 9207 `iss` parameter
-//! before the code is exchanged.
+//! (RFC 8414, OIDC fallback), the client obtains a `client_id` through one of
+//! the three registration mechanisms (see [`OAuthClientConfig`]), and the
+//! authorization-code + PKCE flow runs with the server's canonical URI as the
+//! RFC 8707 resource indicator. The callback is checked for `state` and the
+//! RFC 9207 `iss` parameter before the code is exchanged.
 //!
 //! The interactive step is pluggable through [`AuthorizationHandler`];
 //! the default [`LoopbackHandler`] serves desktop/CLI clients by opening
@@ -27,11 +26,10 @@ use tokio::{
 use crate::error::{Error, ErrorCode};
 
 use volga_oauth_client::{
-    AuthorizationServerMetadata, BearerChallenge, ClientConfig, ClientError, ClientMetadata,
-    DiscoveryClient, OAuthClient, RegistrationClient, canonicalize_resource_uri,
-    protected_resource_metadata_url,
+    AuthorizationServerMetadata, BearerChallenge, ClientConfig, ClientError, DiscoveryClient,
+    OAuthClient, RegistrationClient, canonicalize_resource_uri, protected_resource_metadata_url,
 };
-pub use volga_oauth_client::{InMemoryTokenStore, TokenSet, TokenStore};
+pub use volga_oauth_client::{ClientMetadata, InMemoryTokenStore, TokenSet, TokenStore};
 
 /// Default time the [`LoopbackHandler`] waits for the user to complete
 /// authorization in the browser.
@@ -384,11 +382,27 @@ fn open_in_browser(url: &str) {
 /// OAuth client configuration, set with
 /// [`HttpClient::with_oauth`](crate::transport::http::HttpClient::with_oauth).
 ///
-/// Everything is optional: without a `client_id` the client registers
-/// dynamically (RFC 7591); without scopes the resource's advertised
+/// Everything is optional: without scopes the resource's advertised
 /// `scopes_supported` are requested; tokens live in an in-process store
 /// and the interactive step runs through [`LoopbackHandler`] unless
 /// replaced.
+///
+/// # Obtaining a `client_id`
+///
+/// MCP defines three registration mechanisms and a priority order among
+/// them, which this configuration follows:
+///
+/// 1. [`with_client_id`](Self::with_client_id) -- credentials issued out of
+///    band by one authorization server (pre-registration). Used whenever
+///    they are configured. Bind them to their server with
+///    [`with_issuer`](Self::with_issuer).
+/// 2. [`with_client_id_document`](Self::with_client_id_document) -- a Client
+///    ID Metadata Document (CIMD): an https URL the authorization server
+///    dereferences for the client's metadata. Used when the server
+///    advertises `client_id_metadata_document_supported`.
+/// 3. Dynamic Client Registration (RFC 7591), the fallback when neither is
+///    configured or the server does not support CIMD. **Deprecated** by the
+///    2026-07-28 spec and retained for servers that offer nothing else.
 ///
 /// # Example
 /// ```no_run
@@ -404,6 +418,8 @@ fn open_in_browser(url: &str) {
 pub struct OAuthClientConfig {
     client_id: Option<String>,
     client_secret: Option<String>,
+    client_id_document: Option<String>,
+    issuer: Option<String>,
     scopes: Option<Vec<String>>,
     require_https: bool,
     store: Arc<dyn TokenStore>,
@@ -414,6 +430,8 @@ impl std::fmt::Debug for OAuthClientConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OAuthClientConfig")
             .field("client_id", &self.client_id)
+            .field("client_id_document", &self.client_id_document)
+            .field("issuer", &self.issuer)
             .field("scopes", &self.scopes)
             .field("require_https", &self.require_https)
             .finish()
@@ -425,6 +443,8 @@ impl Default for OAuthClientConfig {
         Self {
             client_id: None,
             client_secret: None,
+            client_id_document: None,
+            issuer: None,
             scopes: None,
             require_https: true,
             store: Arc::new(InMemoryTokenStore::new()),
@@ -434,10 +454,111 @@ impl Default for OAuthClientConfig {
 }
 
 impl OAuthClientConfig {
-    /// Uses a pre-registered OAuth client id instead of dynamic
-    /// registration.
+    /// Uses a pre-registered OAuth client id instead of registering.
+    ///
+    /// Pre-registered credentials belong to one authorization server; name
+    /// it with [`with_issuer`](Self::with_issuer) so a server that later
+    /// points at a different one is refused rather than handed credentials
+    /// it never issued.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::Client;
+    ///
+    /// let mut client = Client::new()
+    ///     .with_options(|opt| opt
+    ///         .with_http(|http| http
+    ///             .with_oauth(|oauth| oauth
+    ///                 .with_client_id("mcp-cli")
+    ///                 .with_issuer("https://auth.example.com"))
+    ///         )
+    ///     );
+    /// ```
     pub fn with_client_id(mut self, client_id: impl Into<String>) -> Self {
         self.client_id = Some(client_id.into());
+        self
+    }
+
+    /// Identifies this client with a Client ID Metadata Document: `url` is
+    /// both the `client_id` sent to the authorization server and the https
+    /// location it dereferences for the client's metadata
+    /// ([draft-ietf-oauth-client-id-metadata-document-00](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-client-id-metadata-document-00)).
+    ///
+    /// This is the forward path for a client and server with no prior
+    /// relationship, and needs no registration request: the server fetches
+    /// the document instead. Used when the authorization server advertises
+    /// `client_id_metadata_document_supported`, and otherwise only when the
+    /// server has said nothing either way and offers no registration endpoint
+    /// -- there being nothing else left to try. A server that answered `false`
+    /// has stated it cannot resolve a URL id, so the flow registers
+    /// dynamically instead of spending a browser round on an id that will be
+    /// refused.
+    ///
+    /// `url` must use the `https` scheme and carry a path component. It is
+    /// checked when the client connects, so a malformed one fails there
+    /// rather than mid-flow. A Client ID Metadata Document describes a
+    /// *public* client, so pairing this with
+    /// [`with_client_secret`](Self::with_client_secret) is rejected.
+    ///
+    /// Hosting the document is the deployer's job -- it is a static file.
+    /// Generate its contents with
+    /// [`client_metadata_document`](Self::client_metadata_document) so what
+    /// is published cannot drift from what the flow sends.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::Client;
+    ///
+    /// let mut client = Client::new()
+    ///     .with_options(|opt| opt
+    ///         .with_http(|http| http
+    ///             .with_oauth(|oauth| oauth
+    ///                 .with_client_id_document("https://app.example.com/mcp-client.json"))
+    ///         )
+    ///     );
+    /// ```
+    pub fn with_client_id_document(mut self, url: impl Into<String>) -> Self {
+        self.client_id_document = Some(url.into());
+        self
+    }
+
+    /// Names the authorization server the configured credentials belong to,
+    /// by its `issuer` identifier.
+    ///
+    /// A `client_id` is issued by one authorization server and means nothing
+    /// at another, and neither does a refresh token. Naming the issuer is
+    /// what lets this client tell "the same server as before" from "the
+    /// resource now points somewhere else": pre-registered credentials meeting
+    /// a different issuer fail with an error instead of being presented to a
+    /// server that never issued them, and a stored refresh token is only
+    /// offered to the server that minted it.
+    ///
+    /// It is also what the [`TokenStore`] entry is filed under, so credentials
+    /// from two different servers never share a slot and a stored refresh
+    /// token is only ever read back under the server that minted it. Migrating
+    /// therefore leaves the old server's tokens where they are rather than
+    /// offering them to the new one, which is the whole point.
+    ///
+    /// Without it the credentials are unbound: they still work against a
+    /// server that never changes its authorization server, but a stored
+    /// refresh token is not reused across a restart, since nothing records
+    /// which server it came from.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::Client;
+    ///
+    /// let mut client = Client::new()
+    ///     .with_options(|opt| opt
+    ///         .with_http(|http| http
+    ///             .with_oauth(|oauth| oauth
+    ///                 .with_client_id("mcp-cli")
+    ///                 .with_issuer("https://auth.example.com"))
+    ///         )
+    ///     );
+    /// ```
+    pub fn with_issuer(mut self, issuer: impl Into<String>) -> Self {
+        self.issuer = Some(issuer.into());
         self
     }
 
@@ -482,6 +603,156 @@ impl OAuthClientConfig {
         self
     }
 
+    /// Builds the metadata document to publish at the URL configured with
+    /// [`with_client_id_document`](Self::with_client_id_document), listing
+    /// `redirect_uris` as the locations authorization responses may be
+    /// delivered to.
+    ///
+    /// The document is the same one dynamic registration would have sent,
+    /// plus the `client_id` the spec requires it to carry -- so hosting this
+    /// is publishing exactly what the flow claims about itself. Serialize it
+    /// as JSON and serve it as a static file.
+    ///
+    /// Every redirect URI the [`AuthorizationHandler`] may produce has to be
+    /// listed: an authorization server validates the one it is sent against
+    /// this list. A [`LoopbackHandler`] on an ephemeral port therefore cannot
+    /// be described by any document -- pin it with
+    /// [`with_port`](LoopbackHandler::with_port) and list both the
+    /// `127.0.0.1` and `localhost` spellings of that port.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::auth::oauth::OAuthClientConfig;
+    ///
+    /// let config = OAuthClientConfig::default()
+    ///     .with_client_id_document("https://app.example.com/mcp-client.json");
+    ///
+    /// let document = config.client_metadata_document([
+    ///     "http://127.0.0.1:8919/callback",
+    ///     "http://localhost:8919/callback",
+    /// ])?;
+    ///
+    /// println!("{}", serde_json::to_string_pretty(&document)?);
+    /// # Ok::<(), neva::error::Error>(())
+    /// ```
+    pub fn client_metadata_document<I, S>(&self, redirect_uris: I) -> Result<ClientMetadata, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let Some(client_id) = &self.client_id_document else {
+            return Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "no client id document is configured; set one with `with_client_id_document`",
+            ));
+        };
+
+        validate_client_id_document_url(client_id, self.require_https)?;
+
+        let uris = redirect_uris
+            .into_iter()
+            .map(|uri| uri.as_ref().to_owned())
+            .collect::<Vec<_>>();
+
+        if uris.is_empty() {
+            return Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "a client id document must list at least one redirect URI",
+            ));
+        }
+
+        // `client_id` is what separates a metadata document from a
+        // registration request: the server fetches the document and checks
+        // that the id inside matches the URL it fetched. `ClientMetadata` does
+        // not model the field -- a registration request never carries one --
+        // so it travels as an extension, which serde flattens to the top level
+        // where the server reads it.
+        let mut metadata = registration_metadata_for(&uris);
+        metadata.additional_fields.insert(
+            "client_id".to_owned(),
+            serde_json::Value::String(client_id.clone()),
+        );
+
+        Ok(metadata)
+    }
+
+    /// Fails the configuration that cannot produce a working flow, at the
+    /// point the client is built rather than at the first `401`.
+    fn validate(&self) -> Result<(), Error> {
+        match (&self.client_id, &self.client_id_document) {
+            (Some(_), Some(_)) => Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "`with_client_id` and `with_client_id_document` are alternatives; \
+                 configure the pre-registered id or the document URL, not both",
+            )),
+            // A document describes a public client -- it is fetched by any
+            // authorization server that meets the URL, and the metadata this
+            // client publishes says `token_endpoint_auth_method: "none"`.
+            // Attaching a secret would contradict the document while quietly
+            // sending the secret anyway, so it is a configuration error rather
+            // than something to honor.
+            (None, Some(url)) if self.client_secret.is_some() => Err(Error::new(
+                ErrorCode::InvalidRequest,
+                format!(
+                    "a client id document describes a public client, so `{url}` \
+                     cannot be paired with a client secret"
+                ),
+            )),
+            (None, Some(url)) => validate_client_id_document_url(url, self.require_https),
+            _ => Ok(()),
+        }
+    }
+
+    /// What this client is *expected* to be identified by, before any
+    /// discovery has happened -- the store key the warm start reads.
+    ///
+    /// A guess, because which mechanism actually runs depends on what the
+    /// server advertises, and there is nothing to ask before the first
+    /// request. When it turns out wrong -- a configured document meeting a
+    /// server that resolves none, so the flow registers instead -- the read
+    /// simply finds an empty slot, which is the right answer: what is stored
+    /// there belongs to an identity this session will not be presenting.
+    /// The flow then files its own credentials under
+    /// [`ClientIdSource::persistent_id`], which is what actually ran, and the
+    /// session moves onto that slot.
+    fn client_identity(&self) -> &str {
+        self.client_id
+            .as_deref()
+            .or(self.client_id_document.as_deref())
+            .unwrap_or_default()
+    }
+
+    /// Which of the three registration mechanisms identifies this client to
+    /// `server`, in the priority order the spec sets out.
+    fn client_id_source<'a>(&'a self, server: &AuthorizationServerMetadata) -> ClientIdSource<'a> {
+        if let Some(client_id) = &self.client_id {
+            return ClientIdSource::PreRegistered(client_id);
+        }
+
+        let advertised = client_id_metadata_document_supported(server);
+        match &self.client_id_document {
+            // Advertised: the mechanism the spec puts ahead of registration.
+            Some(url) if advertised == Some(true) => ClientIdSource::Document(url),
+            // Said nothing either way, and offers no registration endpoint to
+            // fall back to. The document is the only thing left to try, and a
+            // server that resolves URL ids without advertising it -- the draft
+            // is younger than the servers -- would accept it.
+            //
+            // A server that said `false` is not this case, however little else
+            // it offers. It has stated it cannot resolve a URL id, so sending
+            // one buys an `invalid_client` at best, and only after walking the
+            // user through a browser first.
+            Some(url) if advertised.is_none() && server.registration_endpoint.is_none() => {
+                ClientIdSource::Document(url)
+            }
+            // Registering dynamically is what the spec has a client fall back
+            // to when the server does not resolve metadata documents -- an id
+            // it does not know how to resolve would simply be an unknown
+            // client.
+            _ => ClientIdSource::Dynamic,
+        }
+    }
+
     fn client_config(&self) -> ClientConfig {
         ClientConfig::new().require_https(self.require_https)
     }
@@ -493,6 +764,10 @@ impl OAuthClientConfig {
 struct FlowState {
     client: OAuthClient,
     metadata: AuthorizationServerMetadata,
+    /// The [`TokenStore`] slot this flow's credentials went into -- the
+    /// identity they actually belong to, which is not always the one the
+    /// configuration names. See [`OAuthSession::store_key_for`].
+    store_key: Arc<str>,
 }
 
 /// How early before expiration a stored access token is proactively
@@ -504,9 +779,20 @@ const REFRESH_LEEWAY: std::time::Duration = std::time::Duration::from_secs(30);
 /// single-flight authorization flow.
 pub(crate) struct OAuthSession {
     config: OAuthClientConfig,
-    /// Canonicalized server URL -- the RFC 8707 resource indicator and
-    /// the token-store key.
+    /// Canonicalized server URL -- the RFC 8707 resource indicator and the
+    /// discovery base.
     resource: String,
+    /// Where this session's credentials live in the [`TokenStore`]: the
+    /// resource, prefixed by the issuer they came from when one is configured.
+    ///
+    /// It starts out naming the *configured* issuer, because it is read before
+    /// any discovery has happened, and moves to the issuer a flow actually ran
+    /// against -- which is the slot that flow filed its tokens in. The two
+    /// differ only where a portable identity is allowed to outlive a migration
+    /// ([`OAuthSession::store_key_for`]); left at the configured one, the
+    /// staleness probe would keep looking into an empty slot and every renewal
+    /// would have to wait for a `401` to notice.
+    store_key: RwLock<Arc<str>>,
     /// Current bearer token, read on every outgoing request.
     token: RwLock<Option<Arc<str>>>,
     /// Serializes authorization flows (concurrent 401s run one flow) and
@@ -532,20 +818,137 @@ impl std::fmt::Debug for OAuthSession {
 impl OAuthSession {
     /// Builds a session for the MCP server at `server_url`.
     pub(crate) fn new(config: OAuthClientConfig, server_url: &str) -> Result<Self, Error> {
+        // Before anything else, so a configuration that cannot produce a
+        // working flow is reported where it was written rather than at the
+        // first `401` -- which may be a long-running process away.
+        config.validate()?;
+
         let resource = canonicalize_resource_uri(server_url)
             .map_err(|err| Error::new(ErrorCode::InternalError, err.to_string()))?;
+
+        let store_key = Self::initial_store_key(&config, &resource);
+
         let token = config
             .store
-            .get(&resource)
+            .get(&store_key)
             .filter(|tokens| !tokens.is_expired())
             .map(|tokens| tokens.access_token.into());
+
         Ok(Self {
             config,
             resource,
+            store_key: RwLock::new(store_key.into()),
             token: RwLock::new(token),
             flow: Mutex::new(None),
             requested_scopes: RwLock::new(Vec::new()),
         })
+    }
+
+    /// The key this session reads before it has discovered anything.
+    fn store_key(&self) -> Arc<str> {
+        self.store_key
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Moves the session onto the slot the last flow actually used, so the
+    /// pre-discovery reads that follow -- the staleness probe, the stored
+    /// grant -- look where that flow wrote rather than where the
+    /// configuration guessed.
+    fn set_store_key(&self, key: &str) {
+        let mut current = self
+            .store_key
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        if **current != *key {
+            *current = Arc::from(key);
+        }
+    }
+
+    /// Where this session's credentials live in the [`TokenStore`].
+    ///
+    /// The key names the whole identity a credential belongs to -- which
+    /// authorization server issued it, which client it was issued to, and
+    /// which resource it is for -- as `{issuer}|{client}|{resource}`. Any part
+    /// the configuration does not name is left empty, and a credential whose
+    /// identity is not fully named is never reused
+    /// ([`Self::may_reuse_stored_refresh`] holds to exactly that).
+    ///
+    /// **Issuer.** The spec's own prescription: credentials are to be
+    /// associated with the authorization server that issued them, "keyed by
+    /// the authorization server's `issuer` identifier". Keyed by the resource
+    /// alone, nothing records where a stored credential came from, so after a
+    /// migration the *current* configuration is all a check has to go on -- and
+    /// the current configuration is exactly what an operator updates when the
+    /// resource moves. The old server's refresh token would be read back under
+    /// the same key and offered to the new one.
+    ///
+    /// **Client.** Two clients are two grants: the user consented to each
+    /// separately, for scopes they chose separately. Sharing a slot has the
+    /// second client send the first one's access token -- consent it was never
+    /// given -- and, worse, present the first one's refresh token under its own
+    /// id, which an authorization server reads as a stolen token and answers by
+    /// revoking the grant for both. Naming the client keeps the two apart. A
+    /// pre-registered id and a document URL are both stable across restarts, so
+    /// either serves; a dynamically registered client has none until the flow
+    /// it is about to run mints one, and leaves this empty.
+    ///
+    /// A segment is a configured value, so a `|` written into one blurs the
+    /// boundary with the next. It takes an operator putting one there, and the
+    /// values that come from elsewhere -- a document URL, the resource -- are
+    /// validated URIs, where `|` is not a legal character.
+    ///
+    /// This one is built from the *configured* issuer, because it is read
+    /// before any discovery has happened. Once a flow knows which server it is
+    /// actually talking to, [`Self::store_key_for`] is what files what that
+    /// server minted.
+    fn initial_store_key(config: &OAuthClientConfig, resource: &str) -> String {
+        Self::compose_store_key(
+            config.issuer.as_deref().unwrap_or_default(),
+            config.client_identity(),
+            resource,
+        )
+    }
+
+    /// Where credentials minted by `issuer` belong -- the key every read and
+    /// write from inside a flow uses, once discovery has named the server.
+    ///
+    /// It is the discovered issuer rather than the configured one because the
+    /// key is a statement about where these tokens *came from*, and the two
+    /// part company exactly where a portable identity is allowed to: a Client
+    /// ID Metadata Document resolves at whichever server meets it, so a CIMD
+    /// client whose resource has moved completes its flow against a server the
+    /// configuration does not name. Filing that server's tokens under the
+    /// configured issuer would mislabel them -- and if the resource ever moved
+    /// back, the configured key would hand the *old* server a refresh token
+    /// the *new* one minted, which is the leak the keying exists to stop.
+    ///
+    /// An unbound session names no issuer here either: it has nothing to say
+    /// about where its tokens came from, so the segment stays empty and the
+    /// slot stays the one its own warm start reads.
+    ///
+    /// The client segment comes from `source` rather than from the
+    /// configuration, because the two part company when a configured document
+    /// meets a server that does not resolve one: the flow falls back to
+    /// registration, and what it obtains belongs to that throwaway client, not
+    /// to the document. Filing it under the document would have a later flow
+    /// -- against a server that has since enabled documents, say -- read it
+    /// back as the document's own and present it under a client id that never
+    /// held it, which the server answers with `invalid_grant` and this client
+    /// answers by discarding the entry and asking the user again.
+    fn store_key_for(&self, issuer: &str, source: ClientIdSource<'_>) -> String {
+        let issuer = match self.config.issuer {
+            Some(_) => issuer,
+            None => "",
+        };
+        Self::compose_store_key(issuer, source.persistent_id(), &self.resource)
+    }
+
+    /// Joins the three parts of a credential's identity into its store key.
+    fn compose_store_key(issuer: &str, client: &str, resource: &str) -> String {
+        format!("{issuer}|{client}|{resource}")
     }
 
     /// Scopes this session is known to hold, most authoritative source first.
@@ -575,7 +978,7 @@ impl OAuthSession {
 
         self.config
             .store
-            .get(&self.resource)
+            .get(&self.store_key())
             .and_then(|tokens| tokens.scope)
             .map(|granted| split_scopes(&granted))
             .filter(|granted| !granted.is_empty())
@@ -615,7 +1018,7 @@ impl OAuthSession {
         let stale = self
             .config
             .store
-            .get(&self.resource)
+            .get(&self.store_key())
             .is_some_and(|tokens| tokens.expires_within(REFRESH_LEEWAY));
 
         if !stale {
@@ -632,8 +1035,12 @@ impl OAuthSession {
     /// `OAuthClient::token`). Returns `None` when interactive
     /// authorization is required or no flow has completed yet.
     async fn maintain(&self, state: &mut Option<FlowState>) -> Option<Arc<str>> {
-        let FlowState { client, metadata } = state.as_ref()?;
-        self.refresh_with(client, metadata).await
+        let FlowState {
+            client,
+            metadata,
+            store_key,
+        } = state.as_ref()?;
+        self.refresh_with(client, metadata, store_key.clone()).await
     }
 
     /// [`Self::maintain`] for a client and metadata held directly rather than
@@ -642,6 +1049,7 @@ impl OAuthSession {
         &self,
         client: &OAuthClient,
         metadata: &AuthorizationServerMetadata,
+        store_key: Arc<str>,
     ) -> Option<Arc<str>> {
         // What the grant was known to cover going in. A refresh response may
         // leave `scope` out when the grant is unchanged (RFC 6749 section 5.1),
@@ -654,10 +1062,10 @@ impl OAuthSession {
         let carried = self
             .config
             .store
-            .get(&self.resource)
+            .get(&store_key)
             .and_then(|tokens| tokens.scope);
 
-        match client.token(&self.resource, metadata).await {
+        match client.token(&store_key, metadata).await {
             Ok(Some(mut tokens)) => {
                 // What the renewed token covers: what the response said it
                 // granted, or -- when it said nothing -- the grant it did not
@@ -667,7 +1075,7 @@ impl OAuthSession {
                     && let Some(scope) = granted.clone()
                 {
                     tokens.scope = Some(scope);
-                    self.config.store.put(&self.resource, &tokens);
+                    self.config.store.put(&store_key, &tokens);
                 }
                 // And the in-memory record moves with it. A refresh may
                 // *narrow* the grant, and this process's memory of the earlier,
@@ -682,6 +1090,10 @@ impl OAuthSession {
                         self.set_requested_scopes(scopes);
                     }
                 }
+                // This slot is where the session's credentials live now, which
+                // matters when the key moved: a portable identity may have
+                // renewed against a server the configuration does not name.
+                self.set_store_key(&store_key);
                 let token: Arc<str> = tokens.access_token.into();
                 self.set_token(token.clone());
                 Some(token)
@@ -829,8 +1241,30 @@ impl OAuthSession {
             .await
             .map_err(flow_error)?;
 
+        let source = self.config.client_id_source(&server_metadata);
+        self.check_issuer_binding(source, &server_metadata)?;
+
+        // Nothing configured, nowhere to register, and the server does not
+        // resolve document URLs: there is no way for this client to obtain an
+        // id here, and the spec's last resort -- ask a human for one -- means
+        // saying so. Said now, before a redirect listener is bound and long
+        // before a browser opens on a flow that ends in `invalid_client`.
+        if source == ClientIdSource::Dynamic && server_metadata.registration_endpoint.is_none() {
+            return Err(Error::new(
+                ErrorCode::InvalidRequest,
+                format!(
+                    "`{}` supports neither dynamic client registration nor client id \
+                     metadata documents, so this client cannot obtain a client id there; \
+                     register one out of band and configure it with `with_client_id`",
+                    server_metadata.issuer
+                ),
+            ));
+        }
+
         let redirect_uri = self.config.handler.redirect_uri().await?;
-        let client = self.build_client(&server_metadata, &redirect_uri).await?;
+        let client = self
+            .build_client(source, &server_metadata, &redirect_uri)
+            .await?;
 
         // A durable [`TokenStore`] outlives the process; the flow state that
         // knows how to use it does not. So after a restart the refresh attempt
@@ -838,20 +1272,23 @@ impl OAuthSession {
         // and a stored refresh token, still perfectly good, went unused while
         // the user was walked through consent again. Both halves have just been
         // rebuilt, so ask once more before that.
-        //
-        // Only with a configured `client_id`. Without one `build_client`
-        // registers a *new* client (RFC 7591), and a refresh token belongs to
-        // the client it was issued to -- offering it under a new identity asks
-        // the authorization server to refuse.
+        // The slot this flow's credentials belong in, named once and used for
+        // every read and write below.
+        let store_key: Arc<str> =
+            Arc::from(self.store_key_for(&server_metadata.issuer, source).as_str());
+
         if !step_up
-            && self.config.client_id.is_some()
-            && let Some(token) = self.refresh_with(&client, &server_metadata).await
+            && self.may_reuse_stored_refresh(source, &server_metadata)
+            && let Some(token) = self
+                .refresh_with(&client, &server_metadata, store_key.clone())
+                .await
             && used != Some(&*token)
         {
             // Keep what made it work, so the next refresh is the cheap path.
             *flight = Some(FlowState {
                 client,
                 metadata: server_metadata,
+                store_key,
             });
             return Ok(token);
         }
@@ -932,18 +1369,115 @@ impl OAuthSession {
             tokens.scope = Some(granted.join(" "));
         }
 
-        self.config.store.put(&self.resource, &tokens);
+        self.config.store.put(&store_key, &tokens);
+        self.set_store_key(&store_key);
+
         // Keep the client + metadata so future refreshes stay
         // non-interactive.
         *flight = Some(FlowState {
             client,
             metadata: server_metadata,
+            store_key,
         });
         self.set_requested_scopes(granted);
 
         let token: Arc<str> = tokens.access_token.into();
         self.set_token(token.clone());
         Ok(token)
+    }
+
+    /// Refuses credentials that belong to a different authorization server
+    /// than the one the resource now points at.
+    ///
+    /// A `client_id` obtained out of band is issued *by* one authorization
+    /// server; it identifies nothing at another. So when the resource's
+    /// metadata starts naming a different issuer, presenting it there is at
+    /// best an `invalid_client` refusal and at worst hands an attacker-run
+    /// server a credential and the user's consent for it. The spec has the
+    /// client surface an error instead, and only the client knows which
+    /// server its configured credentials came from -- hence
+    /// [`with_issuer`](OAuthClientConfig::with_issuer).
+    ///
+    /// A Client ID Metadata Document URL is deliberately exempt: it is
+    /// resolved by whichever server meets it, so it is portable across them
+    /// by design and a change of issuer asks nothing of it. Dynamic
+    /// registration is exempt for the opposite reason -- the id is minted
+    /// against this very server, moments from now.
+    fn check_issuer_binding(
+        &self,
+        source: ClientIdSource<'_>,
+        metadata: &AuthorizationServerMetadata,
+    ) -> Result<(), Error> {
+        let ClientIdSource::PreRegistered(client_id) = source else {
+            return Ok(());
+        };
+        let Some(bound_to) = &self.config.issuer else {
+            return Ok(());
+        };
+        if bound_to == &metadata.issuer {
+            return Ok(());
+        }
+
+        Err(Error::new(
+            ErrorCode::InvalidRequest,
+            format!(
+                "client `{client_id}` is registered with `{bound_to}`, but \
+                 `{}` now names `{}` as its authorization server; \
+                 credentials are not portable between them",
+                self.resource, metadata.issuer
+            ),
+        ))
+    }
+
+    /// Whether the refresh token sitting in the store may be offered to
+    /// `metadata`'s token endpoint.
+    ///
+    /// Two things have to hold, and neither is implied by the other. The
+    /// client id must be the one the token was issued to, which rules out
+    /// dynamic registration: the id this flow is about to mint is not the one
+    /// from last time, and a refresh token belongs to the client it was
+    /// issued to. And the token has to have come from *this* authorization
+    /// server -- a refresh token is a bearer credential for the endpoint that
+    /// minted it, so sending it to a server that did not is handing that
+    /// server a credential for another one.
+    ///
+    /// The second is settled by [`Self::store_key_for`] rather than here: the
+    /// read goes to the slot `metadata`'s issuer files its own tokens in, so
+    /// whatever comes back came from the server it is about to be sent to. All
+    /// that is left to check is whether this session's slots carry an issuer
+    /// at all. Unbound they do not -- there is one unlabelled slot, and a
+    /// credential out of it proves nothing about where it came from, so the
+    /// session re-authorizes interactively instead: a worse experience and the
+    /// only safe answer.
+    ///
+    /// Deliberately *not* a comparison against the configured issuer. That
+    /// would refuse a portable identity whose resource has migrated -- a CIMD
+    /// client is allowed to complete a flow against a server its configuration
+    /// does not name, and refusing to renew what that flow obtained would walk
+    /// the user through consent on every restart. The slot it renews from is
+    /// labelled with that same server, which is the assurance the comparison
+    /// was standing in for.
+    fn may_reuse_stored_refresh(
+        &self,
+        source: ClientIdSource<'_>,
+        metadata: &AuthorizationServerMetadata,
+    ) -> bool {
+        if !source.survives_a_restart() {
+            return false;
+        }
+
+        if self.config.issuer.is_none() {
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                logger = "neva",
+                "not offering the stored refresh token to {}: the credentials name no \
+                 issuer, so nothing says it came from there. Set `with_issuer` to reuse it.",
+                metadata.issuer
+            );
+            return false;
+        }
+
+        true
     }
 
     /// Finds the Protected Resource Metadata for a server that issued a `401`
@@ -1025,22 +1559,30 @@ impl OAuthSession {
             })
     }
 
-    /// Builds the [`OAuthClient`] -- from the configured `client_id` or
+    /// Builds the [`OAuthClient`] for the identity `source` names: a
+    /// configured id, a Client ID Metadata Document URL, or one obtained
     /// through dynamic registration (RFC 7591).
     async fn build_client(
         &self,
+        source: ClientIdSource<'_>,
         server_metadata: &AuthorizationServerMetadata,
         redirect_uri: &str,
     ) -> Result<OAuthClient, Error> {
-        let client = match &self.config.client_id {
-            Some(client_id) => {
-                let mut client = OAuthClient::new(client_id.clone());
+        let client = match source {
+            ClientIdSource::PreRegistered(client_id) => {
+                let mut client = OAuthClient::new(client_id);
                 if let Some(secret) = &self.config.client_secret {
                     client = client.with_secret(secret.clone());
                 }
                 client
             }
-            None => {
+            // Nothing to register: the URL *is* the id, and the server
+            // resolves it to the document the deployer published. A CIMD
+            // client is public by construction, so no secret is attached even
+            // if one were configured -- and `OAuthClientConfig::validate`
+            // refuses that pairing before it can get this far.
+            ClientIdSource::Document(url) => OAuthClient::new(url),
+            ClientIdSource::Dynamic => {
                 let registration = RegistrationClient::with_config(self.config.client_config());
                 let response = registration
                     .register(server_metadata, &registration_metadata(redirect_uri))
@@ -1059,24 +1601,188 @@ impl OAuthSession {
 
 /// Builds the RFC 7591 registration document for a public
 /// authorization-code client.
+fn registration_metadata(redirect_uri: &str) -> ClientMetadata {
+    registration_metadata_for(std::slice::from_ref(&redirect_uri))
+}
+
+/// [`registration_metadata`] over a set of redirect URIs -- what a hosted
+/// Client ID Metadata Document needs, since it is written once and has to
+/// cover every URI the handler may redirect to.
 ///
 /// A loopback redirect URI makes this a **native** client
 /// (`application_type: "native"`) -- authorization servers reject `web`
 /// clients with plain-http loopback redirects, which is exactly the
 /// desktop/CLI case.
-fn registration_metadata(redirect_uri: &str) -> ClientMetadata {
+fn registration_metadata_for<S: AsRef<str>>(redirect_uris: &[S]) -> ClientMetadata {
     let mut metadata = ClientMetadata::default()
-        .with_redirect_uris([redirect_uri])
+        .with_redirect_uris(redirect_uris.iter().map(AsRef::as_ref))
         .with_grant_types(["authorization_code", "refresh_token"])
         .with_response_types(["code"])
         .with_token_endpoint_auth_method("none")
         .with_client_name(DEFAULT_CLIENT_NAME);
 
-    if is_loopback_redirect(redirect_uri) {
+    // One loopback URI is enough: a client that redirects to loopback at all
+    // is a native one, and declaring `web` would have the server reject that
+    // URI. A document listing both spellings of the same loopback port is the
+    // ordinary case and stays native.
+    if redirect_uris
+        .iter()
+        .any(|uri| is_loopback_redirect(uri.as_ref()))
+    {
         metadata = metadata.with_application_type("native");
     }
 
     metadata
+}
+
+/// What `server` says about resolving URL-formatted client ids into hosted
+/// Client ID Metadata Documents -- `None` when it says nothing.
+///
+/// Silence and a stated `false` are different answers, and the difference
+/// decides what a client with a document may try: see
+/// [`OAuthClientConfig::client_id_source`].
+///
+/// Read out of the unmodelled fields because RFC 8414 does not define the
+/// member; the CIMD draft adds it, and `volga-oauth-core` keeps anything it
+/// does not model in `additional_fields`.
+fn client_id_metadata_document_supported(server: &AuthorizationServerMetadata) -> Option<bool> {
+    server
+        .additional_fields
+        .get("client_id_metadata_document_supported")
+        .and_then(serde_json::Value::as_bool)
+}
+
+/// Checks a Client ID Metadata Document URL against the two requirements the
+/// spec puts on it -- the `https` scheme and a path component -- and against
+/// being a URL at all.
+///
+/// Both spec requirements are load-bearing. The scheme is what makes the
+/// document's contents -- the redirect URIs an authorization server will
+/// accept -- something an attacker on the path cannot rewrite. The path
+/// component keeps a client id from naming a bare origin, which would make
+/// every client hosted there the same client. `require_https(false)` relaxes
+/// the first for a local development server, the same way it does for the
+/// issuer's own endpoints.
+///
+/// The rest is what an authorization server has to be able to dereference,
+/// which is the whole point of the value: full URI syntax through the
+/// canonicalizer (scheme, IPv6 literals, percent-encoding, no userinfo, no
+/// fragment) and a port in range. A client id this refuses is one no
+/// conforming server could fetch, so refusing it here -- where it was
+/// written -- beats a browser round ending in `invalid_client`.
+fn validate_client_id_document_url(url: &str, require_https: bool) -> Result<(), Error> {
+    let invalid = |reason: &str| {
+        Err(Error::new(
+            ErrorCode::InvalidRequest,
+            format!("client id document URL `{url}` {reason}"),
+        ))
+    };
+
+    // A fragment never reaches the server, so an id carrying one could never
+    // match the document it is fetched from -- the match the server checks.
+    // Named separately from the syntax check below, which would only call it
+    // an invalid URI.
+    if url.contains('#') {
+        return invalid("must not carry a fragment");
+    }
+
+    // URI syntax, from the parser the rest of this module already trusts:
+    // scheme, brackets around an IPv6 host, a numeric port, the characters a
+    // path and query may hold. Checking those by hand is what lets
+    // `https://[::1/client.json` or `https://example.com:bad/client.json`
+    // through -- both have a non-empty something before the first `/` and
+    // neither is a URL an authorization server could dereference.
+    //
+    // The *canonical* form is what gets inspected below, so the checks see
+    // one spelling. It is deliberately not what gets sent: a Client ID
+    // Metadata Document has to declare a `client_id` matching the URL the
+    // server fetched, byte for byte, so lowercasing a host or dropping a
+    // default port here would break the very match it exists for.
+    let canonical = match canonicalize_resource_uri(url) {
+        Ok(canonical) => canonical,
+        Err(err) => return invalid(&format!("is not a valid URL: {err}")),
+    };
+
+    let rest = match canonical.split_once("://") {
+        Some(("https", rest)) => rest,
+        Some(("http", rest)) if !require_https => rest,
+        Some(("http", _)) => {
+            return invalid("must use the `https` scheme (or set `require_https(false)`)");
+        }
+        _ => return invalid("must be an absolute `https` URL"),
+    };
+
+    // The query goes first, because it may hold slashes of its own:
+    // `https://example.com?location=/client.json` has no path component at all,
+    // and looking for a slash across the whole of `rest` would find the one
+    // inside the query and call it one.
+    //
+    // What is left is the authority and the path. Canonicalization drops a lone
+    // root slash, so `https://example.com` and `https://example.com/` arrive
+    // here alike -- both being the origin, which as a client id would make
+    // every client hosted there the same client.
+    let authority_and_path = rest.split('?').next().unwrap_or_default();
+    let Some((authority, path)) = authority_and_path.split_once('/') else {
+        return invalid("must contain a path component, e.g. `https://example.com/client.json`");
+    };
+    if path.is_empty() {
+        return invalid("must contain a path component, e.g. `https://example.com/client.json`");
+    }
+
+    // The one thing the canonicalizer above does not settle. It holds the port
+    // to digits, which keeps the authority well-formed, but not to a range --
+    // and `:99999` is a number no socket has: every standard URL parser refuses
+    // it, so the server that would fetch this document never gets as far as
+    // trying.
+    if let Some(port) = host_and_port(authority).1
+        && port.parse::<u16>().is_err()
+    {
+        return invalid("must name a port in the 0-65535 range");
+    }
+
+    Ok(())
+}
+
+/// Which of MCP's three registration mechanisms supplies the `client_id` for
+/// one authorization server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientIdSource<'a> {
+    /// Issued out of band by one authorization server, and meaningless at
+    /// any other.
+    PreRegistered(&'a str),
+    /// An https URL the server dereferences for a hosted metadata document.
+    /// Portable: it is resolved on demand, so it needs no registration
+    /// anywhere and stays valid when the resource changes servers.
+    Document(&'a str),
+    /// Registered per flow through RFC 7591 and never persisted, so nothing
+    /// survives to be presented to the wrong server.
+    Dynamic,
+}
+
+impl ClientIdSource<'_> {
+    /// What names this identity in a [`TokenStore`] key, across restarts.
+    ///
+    /// A dynamically registered client names nothing: the id it is about to be
+    /// given is not the one it had last time, so credentials obtained under it
+    /// belong to no identity that outlives the flow. They still get a slot --
+    /// the warm start reads it -- but an unnamed one, which
+    /// [`OAuthSession::may_reuse_stored_refresh`] never renews from.
+    fn persistent_id(&self) -> &str {
+        match self {
+            Self::PreRegistered(client_id) => client_id,
+            Self::Document(url) => url,
+            Self::Dynamic => "",
+        }
+    }
+
+    /// Whether this identity is the same on the next run of the process.
+    ///
+    /// A dynamically registered id is not: the next run registers again and
+    /// gets another one, which is why credentials tied to the old id -- a
+    /// stored refresh token above all -- are worthless after a restart.
+    fn survives_a_restart(&self) -> bool {
+        !matches!(self, Self::Dynamic)
+    }
 }
 
 /// Whether `uri` redirects to a loopback interface (`127.0.0.1`,
@@ -1089,15 +1795,28 @@ fn is_loopback_redirect(uri: &str) -> bool {
         return false;
     };
     let authority = rest.split(['/', '?']).next().unwrap_or_default();
-    // Bracketed IPv6 hosts carry colons of their own -- split on the
-    // closing bracket first, then strip a `:port` for everything else.
-    let host = match authority.split_once(']') {
-        Some((bracketed, _)) => &authority[..bracketed.len() + 1],
-        None => authority
-            .rsplit_once(':')
-            .map_or(authority, |(host, _port)| host),
-    };
-    matches!(host, "127.0.0.1" | "localhost" | "[::1]")
+    matches!(
+        host_and_port(authority).0,
+        "127.0.0.1" | "localhost" | "[::1]"
+    )
+}
+
+/// Splits an authority into its host and its port, if it names one.
+///
+/// A bracketed IPv6 literal carries colons of its own, so the closing bracket
+/// is what the host ends at; everything else ends at the last colon. An empty
+/// port (`example.com:`) is no port at all.
+fn host_and_port(authority: &str) -> (&str, Option<&str>) {
+    match authority.split_once(']') {
+        Some((bracketed, after)) => (
+            &authority[..bracketed.len() + 1],
+            after.strip_prefix(':').filter(|port| !port.is_empty()),
+        ),
+        None => match authority.rsplit_once(':') {
+            Some((host, port)) => (host, (!port.is_empty()).then_some(port)),
+            None => (authority, None),
+        },
+    }
 }
 
 /// Validates the RFC 9207 `iss` authorization-response parameter.
@@ -1216,6 +1935,21 @@ mod tests {
     }
 
     #[test]
+    fn an_authority_splits_into_a_host_and_a_port() {
+        assert_eq!(host_and_port("example.com"), ("example.com", None));
+        assert_eq!(
+            host_and_port("example.com:8443"),
+            ("example.com", Some("8443"))
+        );
+        // A bracketed IPv6 literal carries colons that are not the separator.
+        assert_eq!(host_and_port("[::1]"), ("[::1]", None));
+        assert_eq!(host_and_port("[::1]:9000"), ("[::1]", Some("9000")));
+        // An empty port is no port -- and must not read as one, or the range
+        // check would refuse a URL that names none.
+        assert_eq!(host_and_port("example.com:"), ("example.com", None));
+    }
+
+    #[test]
     fn loopback_redirects_are_detected() {
         assert!(is_loopback_redirect("http://127.0.0.1:8919/callback"));
         assert!(is_loopback_redirect("http://localhost/callback"));
@@ -1265,6 +1999,413 @@ mod tests {
         assert!(metadata.application_type.is_none());
         let json = serde_json::to_value(&metadata).unwrap();
         assert!(json.get("application_type").is_none());
+    }
+
+    /// The store key a credential with this identity is filed under.
+    fn key(issuer: &str, client: &str, resource: &str) -> String {
+        format!("{issuer}|{client}|{resource}")
+    }
+
+    const CIMD_URL: &str = "https://app.example.com/mcp-client.json";
+
+    /// The two requirements the spec puts on a CIMD `client_id`: the `https`
+    /// scheme and a path component.
+    #[test]
+    fn a_client_id_document_url_must_be_https_with_a_path() {
+        assert!(validate_client_id_document_url(CIMD_URL, true).is_ok());
+        assert!(validate_client_id_document_url("https://example.com/c", true).is_ok());
+        assert!(validate_client_id_document_url("https://example.com:8443/c", true).is_ok());
+        assert!(validate_client_id_document_url("https://[::1]:8443/c.json", false).is_ok());
+
+        assert!(validate_client_id_document_url("https://example.com/c?v=2", true).is_ok());
+
+        // No path: the bare origin would make every client hosted there one
+        // and the same client.
+        assert!(validate_client_id_document_url("https://example.com", true).is_err());
+        assert!(validate_client_id_document_url("https://example.com/", true).is_err());
+        assert!(validate_client_id_document_url("https://example.com/?x=1", true).is_err());
+        // Still the bare origin: the only slash belongs to the query.
+        assert!(
+            validate_client_id_document_url("https://example.com?to=/client.json", true).is_err()
+        );
+
+        // Digits alone do not make a port. `:99999` is a number no socket has,
+        // and the URL parser on the server's side refuses it before it can
+        // fetch anything.
+        let err = validate_client_id_document_url("https://example.com:99999/c.json", true)
+            .expect_err("a port outside the range must be refused");
+        assert!(err.to_string().contains("0-65535"), "{err}");
+        assert!(validate_client_id_document_url("https://example.com:65535/c.json", true).is_ok());
+        // A fragment never reaches the server, so it could never match the
+        // document it is fetched from.
+        assert!(validate_client_id_document_url("https://example.com/c#f", true).is_err());
+        assert!(validate_client_id_document_url("https://example.com/#f", true).is_err());
+        assert!(validate_client_id_document_url("https:///client.json", true).is_err());
+        assert!(validate_client_id_document_url("not-a-url", true).is_err());
+        assert!(validate_client_id_document_url("client.json", true).is_err());
+
+        // Plain http only under the same knob that admits a plain-http issuer.
+        assert!(validate_client_id_document_url("http://localhost:9/c.json", true).is_err());
+        assert!(validate_client_id_document_url("http://localhost:9/c.json", false).is_ok());
+    }
+
+    /// A malformed authority has a non-empty something before the first `/`,
+    /// so a hand-rolled split calls it valid and the client is built around an
+    /// id no authorization server can dereference. Only real URI parsing
+    /// catches these.
+    #[test]
+    fn a_malformed_client_id_document_url_is_refused() {
+        for url in [
+            "https://[::1/client.json",           // unclosed IPv6 bracket
+            "https://example.com:bad/c.json",     // port that is not a number
+            "https://user@example.com/c.json",    // userinfo
+            "https://exa mple.com/c.json",        // whitespace in the authority
+            "https://exam\u{00a0}ple.com/c.json", // non-ASCII
+        ] {
+            let err = validate_client_id_document_url(url, true)
+                .expect_err("a URL a server cannot fetch must be refused");
+            assert!(err.to_string().contains("not a valid URL"), "{url}: {err}");
+        }
+    }
+
+    /// The message has to name the fix, not just the refusal -- the URL is a
+    /// deployment detail its author can correct in one edit.
+    #[test]
+    fn a_bad_client_id_document_url_fails_when_the_client_is_built() {
+        let config = OAuthClientConfig::default().with_client_id_document("https://example.com");
+        let err = OAuthSession::new(config, "https://api.example.com/mcp").unwrap_err();
+        assert!(err.to_string().contains("path component"), "{err}");
+    }
+
+    /// A document says `token_endpoint_auth_method: "none"`; a secret says the
+    /// opposite. Honoring the pair would send the secret while publishing that
+    /// there is none.
+    #[test]
+    fn a_client_id_document_cannot_be_paired_with_a_secret() {
+        let config = OAuthClientConfig::default()
+            .with_client_id_document(CIMD_URL)
+            .with_client_secret("s3cret");
+        let err = OAuthSession::new(config, "https://api.example.com/mcp").unwrap_err();
+        assert!(err.to_string().contains("public client"), "{err}");
+    }
+
+    #[test]
+    fn a_pre_registered_id_and_a_document_are_alternatives() {
+        let config = OAuthClientConfig::default()
+            .with_client_id("mcp-cli")
+            .with_client_id_document(CIMD_URL);
+        let err = OAuthSession::new(config, "https://api.example.com/mcp").unwrap_err();
+        assert!(err.to_string().contains("alternatives"), "{err}");
+    }
+
+    /// Authorization server metadata as it arrives on the wire, so the CIMD
+    /// flag is read the way a real document delivers it -- through serde's
+    /// flatten catch-all, since RFC 8414 does not model the member.
+    fn as_supporting_cimd(supported: bool) -> AuthorizationServerMetadata {
+        serde_json::from_value(serde_json::json!({
+            "issuer": "https://auth.example.com",
+            "response_types_supported": ["code"],
+            "registration_endpoint": "https://auth.example.com/register",
+            "client_id_metadata_document_supported": supported,
+        }))
+        .unwrap()
+    }
+
+    /// Silence and a stated `false` are different answers, and the difference
+    /// is what a client with a document may try -- so the tri-state has to
+    /// survive the wire.
+    #[test]
+    fn the_cimd_capability_is_read_off_the_wire_document() {
+        assert_eq!(
+            client_id_metadata_document_supported(&as_supporting_cimd(true)),
+            Some(true)
+        );
+        assert_eq!(
+            client_id_metadata_document_supported(&as_supporting_cimd(false)),
+            Some(false)
+        );
+        assert_eq!(
+            client_id_metadata_document_supported(&as_metadata(None)),
+            None,
+            "a server that never mentions the member has said nothing, not no"
+        );
+    }
+
+    /// The spec's priority order: pre-registration first, then a metadata
+    /// document when the server resolves them, then registration.
+    #[test]
+    fn the_client_id_source_follows_the_spec_priority_order() {
+        let pre_registered = OAuthClientConfig::default().with_client_id("mcp-cli");
+        assert_eq!(
+            pre_registered.client_id_source(&as_supporting_cimd(true)),
+            ClientIdSource::PreRegistered("mcp-cli"),
+            "a configured id outranks everything the server advertises"
+        );
+
+        let document = OAuthClientConfig::default().with_client_id_document(CIMD_URL);
+        assert_eq!(
+            document.client_id_source(&as_supporting_cimd(true)),
+            ClientIdSource::Document(CIMD_URL)
+        );
+        assert_eq!(
+            document.client_id_source(&as_supporting_cimd(false)),
+            ClientIdSource::Dynamic,
+            "a server that does not resolve URL ids would see an unknown client"
+        );
+
+        assert_eq!(
+            OAuthClientConfig::default().client_id_source(&as_supporting_cimd(true)),
+            ClientIdSource::Dynamic,
+            "with no document configured there is no URL to send"
+        );
+    }
+
+    /// Falling back to registration is only an answer when registration is on
+    /// offer. A server that has said *nothing* about metadata documents and
+    /// offers nowhere to register leaves the document as the one thing left to
+    /// try -- and it may well resolve one, the draft being younger than the
+    /// servers.
+    #[test]
+    fn a_document_is_used_when_registration_is_not_on_offer() {
+        let document = OAuthClientConfig::default().with_client_id_document(CIMD_URL);
+        assert_eq!(
+            document.client_id_source(&as_metadata(None)),
+            ClientIdSource::Document(CIMD_URL)
+        );
+    }
+
+    /// A server that answered `false`, though, has stated it cannot resolve a
+    /// URL id. Sending one anyway buys an `invalid_client` -- after walking the
+    /// user through a browser to get it.
+    #[test]
+    fn a_document_is_not_used_where_the_server_said_it_resolves_none() {
+        let refuses = serde_json::from_value::<AuthorizationServerMetadata>(serde_json::json!({
+            "issuer": "https://auth.example.com",
+            "response_types_supported": ["code"],
+            "client_id_metadata_document_supported": false,
+        }))
+        .unwrap();
+
+        let document = OAuthClientConfig::default().with_client_id_document(CIMD_URL);
+        assert_eq!(
+            document.client_id_source(&refuses),
+            ClientIdSource::Dynamic,
+            "however little else the server offers"
+        );
+    }
+
+    /// And with registration equally absent there is no mechanism left, which
+    /// is worth saying plainly: the flow ends before a listener is bound,
+    /// naming the one thing that resolves it.
+    #[tokio::test]
+    async fn a_server_offering_no_registration_mechanism_says_so() {
+        let addr = spawn_bare_authorization_server().await;
+        let resource = format!("http://{addr}/mcp");
+
+        let config = OAuthClientConfig::default()
+            .require_https(false)
+            .with_client_id_document(CIMD_URL)
+            .with_handler(NoInteraction);
+        let session = OAuthSession::new(config, &resource).unwrap();
+
+        let err = session
+            .authorize(None, None)
+            .await
+            .expect_err("no mechanism can produce a client id here");
+        assert!(err.to_string().contains("with_client_id"), "{err}");
+    }
+
+    /// What the deployer publishes has to be what the flow claims: the same
+    /// builder, plus the `client_id` that makes it a metadata document.
+    #[test]
+    fn the_metadata_document_carries_the_client_id_and_its_redirect_uris() {
+        let config = OAuthClientConfig::default().with_client_id_document(CIMD_URL);
+        let document = config
+            .client_metadata_document([
+                "http://127.0.0.1:8919/callback",
+                "http://localhost:8919/callback",
+            ])
+            .unwrap();
+
+        let json = serde_json::to_value(&document).unwrap();
+        assert_eq!(json["client_id"], serde_json::json!(CIMD_URL));
+        assert_eq!(json["client_name"], serde_json::json!(DEFAULT_CLIENT_NAME));
+        assert_eq!(
+            json["redirect_uris"],
+            serde_json::json!([
+                "http://127.0.0.1:8919/callback",
+                "http://localhost:8919/callback"
+            ])
+        );
+        // Loopback redirects make it a native client here for the same reason
+        // they do in a registration request.
+        assert_eq!(json["application_type"], serde_json::json!("native"));
+        assert_eq!(
+            json["token_endpoint_auth_method"],
+            serde_json::json!("none")
+        );
+    }
+
+    #[test]
+    fn a_metadata_document_needs_a_url_and_a_redirect_uri() {
+        let no_url = OAuthClientConfig::default();
+        assert!(
+            no_url
+                .client_metadata_document(["https://my.app/cb"])
+                .is_err()
+        );
+
+        let no_redirect = OAuthClientConfig::default().with_client_id_document(CIMD_URL);
+        assert!(
+            no_redirect
+                .client_metadata_document(Vec::<String>::new())
+                .is_err()
+        );
+    }
+
+    fn session(config: OAuthClientConfig) -> OAuthSession {
+        OAuthSession::new(config, "https://api.example.com/mcp").unwrap()
+    }
+
+    /// A pre-registered `client_id` means nothing at a server that did not
+    /// issue it, so a resource that starts naming another one ends the flow
+    /// rather than presenting the credential there.
+    #[test]
+    fn pre_registered_credentials_are_refused_at_another_issuer() {
+        let session = session(
+            OAuthClientConfig::default()
+                .with_client_id("mcp-cli")
+                .with_issuer("https://auth.example.com"),
+        );
+
+        let same = as_metadata(None);
+        let source = ClientIdSource::PreRegistered("mcp-cli");
+        assert!(session.check_issuer_binding(source, &same).is_ok());
+
+        let moved = AuthorizationServerMetadata::new("https://other.example.com");
+        let err = session.check_issuer_binding(source, &moved).unwrap_err();
+        assert!(err.to_string().contains("not portable"), "{err}");
+        assert!(err.to_string().contains("other.example.com"), "{err}");
+    }
+
+    /// A metadata document is resolved by whichever server meets it, so a
+    /// change of authorization server asks nothing of it. Registration mints
+    /// its id against the server in front of it. Neither can be stale.
+    #[test]
+    fn portable_client_ids_survive_a_change_of_issuer() {
+        let session = session(
+            OAuthClientConfig::default()
+                .with_client_id_document(CIMD_URL)
+                .with_issuer("https://auth.example.com"),
+        );
+        let moved = AuthorizationServerMetadata::new("https://other.example.com");
+
+        assert!(
+            session
+                .check_issuer_binding(ClientIdSource::Document(CIMD_URL), &moved)
+                .is_ok()
+        );
+        assert!(
+            session
+                .check_issuer_binding(ClientIdSource::Dynamic, &moved)
+                .is_ok()
+        );
+    }
+
+    /// Without `with_issuer` nothing records which server issued the stored
+    /// credentials, so an unbound one is left alone rather than offered to
+    /// whichever server the resource names now.
+    #[test]
+    fn an_unbound_refresh_token_is_never_offered_to_anyone() {
+        let source = ClientIdSource::PreRegistered("mcp-cli");
+
+        let bound = session(
+            OAuthClientConfig::default()
+                .with_client_id("mcp-cli")
+                .with_issuer("https://auth.example.com"),
+        );
+        assert!(bound.may_reuse_stored_refresh(source, &as_metadata(None)));
+
+        let unbound = session(OAuthClientConfig::default().with_client_id("mcp-cli"));
+        assert!(!unbound.may_reuse_stored_refresh(source, &as_metadata(None)));
+    }
+
+    /// What keeps a token from reaching the wrong server is the slot it lives
+    /// in, not a comparison against the configuration. So a portable identity
+    /// meeting a server its configuration does not name may still renew --
+    /// from that server's own slot, which is a different one.
+    #[test]
+    fn a_migrated_portable_identity_renews_from_the_new_issuers_slot() {
+        let session = session(
+            OAuthClientConfig::default()
+                .with_client_id_document(CIMD_URL)
+                .with_issuer("https://auth.example.com"),
+        );
+        let moved = AuthorizationServerMetadata::new("https://other.example.com");
+
+        assert!(session.may_reuse_stored_refresh(ClientIdSource::Document(CIMD_URL), &moved));
+        assert_ne!(
+            &*session.store_key_for(&moved.issuer, ClientIdSource::Document(CIMD_URL)),
+            &*session.store_key(),
+            "and not from the slot the stale configuration names"
+        );
+        assert!(
+            session
+                .store_key_for(&moved.issuer, ClientIdSource::Document(CIMD_URL))
+                .starts_with("https://other.example.com|"),
+            "the slot is the one that server files its own tokens in"
+        );
+    }
+
+    /// Two clients are two grants: the user consented to each separately, for
+    /// scopes they chose separately. Sharing one durable store -- an encrypted
+    /// file, a keychain -- must not have them share a slot, or the second
+    /// client sends the first one's access token as if the consent behind it
+    /// were its own.
+    #[test]
+    fn two_client_identities_do_not_share_a_slot() {
+        const RESOURCE: &str = "https://api.example.com/mcp";
+        let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+
+        let config = |document: &str| OAuthClientConfig {
+            store: store.clone(),
+            ..OAuthClientConfig::default()
+                .with_client_id_document(document)
+                .with_issuer("https://auth.example.com")
+        };
+
+        let first = OAuthSession::new(config(CIMD_URL), RESOURCE).unwrap();
+        store.put(
+            &first.store_key(),
+            &TokenSet {
+                access_token: "the-first-clients-token".into(),
+                token_type: "Bearer".into(),
+                refresh_token: Some("the-first-clients-refresh".into()),
+                scope: None,
+                id_token: None,
+                expires_at: None,
+            },
+        );
+
+        // Same resource, same authorization server, a different client.
+        let second =
+            OAuthSession::new(config("https://other.example.com/client.json"), RESOURCE).unwrap();
+
+        assert_ne!(&*first.store_key(), &*second.store_key());
+        assert_eq!(
+            second.bearer(),
+            None,
+            "a client must not start out holding another client's token"
+        );
+    }
+
+    /// A dynamically registered id is not the one the stored token was issued
+    /// to -- this flow is about to mint a different one -- so the token cannot
+    /// be renewed under it however well the issuer matches.
+    #[test]
+    fn a_dynamically_registered_client_never_reuses_a_stored_refresh_token() {
+        let session = session(OAuthClientConfig::default().with_issuer("https://auth.example.com"));
+        assert!(!session.may_reuse_stored_refresh(ClientIdSource::Dynamic, &as_metadata(None)));
     }
 
     /// The flag is a *modelled* field, so it must be set through the builder:
@@ -1571,6 +2712,9 @@ mod tests {
         OAuthSession {
             config,
             resource: "http://127.0.0.1:3000/mcp".into(),
+            // No issuer configured, so the key is the resource -- which is what
+            // every `store.put` in these tests writes under.
+            store_key: RwLock::new(key("", "", "http://127.0.0.1:3000/mcp").into()),
             token: RwLock::new(Some("stale-token".into())),
             flow: Mutex::new(flow),
             requested_scopes: RwLock::new(Vec::new()),
@@ -1585,7 +2729,7 @@ mod tests {
         .await;
 
         let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
-        store.put("http://127.0.0.1:3000/mcp", &stale_tokens());
+        store.put(&key("", "", "http://127.0.0.1:3000/mcp"), &stale_tokens());
 
         let flow = FlowState {
             client: OAuthClient::new("cid")
@@ -1593,13 +2737,16 @@ mod tests {
                 .with_token_store(store.clone()),
             metadata: AuthorizationServerMetadata::new("http://issuer.local")
                 .with_token_endpoint(format!("http://{addr}/token")),
+            store_key: key("", "", "http://127.0.0.1:3000/mcp").into(),
         };
         let session = session_with(store.clone(), Some(flow));
 
         let token = session.refreshed_bearer().await;
 
         assert_eq!(token.as_deref(), Some("fresh-token"));
-        let stored = store.get("http://127.0.0.1:3000/mcp").unwrap();
+        let stored = store
+            .get(&key("", "", "http://127.0.0.1:3000/mcp"))
+            .unwrap();
         assert_eq!(stored.access_token, "fresh-token");
         // No rotation in the response -- the old refresh token carries over.
         assert_eq!(stored.refresh_token.as_deref(), Some("refresh-1"));
@@ -1622,7 +2769,7 @@ mod tests {
         let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
         let mut restored = stale_tokens();
         restored.scope = Some("read".into());
-        store.put("http://127.0.0.1:3000/mcp", &restored);
+        store.put(&key("", "", "http://127.0.0.1:3000/mcp"), &restored);
 
         let flow = FlowState {
             client: OAuthClient::new("cid")
@@ -1630,6 +2777,7 @@ mod tests {
                 .with_token_store(store.clone()),
             metadata: AuthorizationServerMetadata::new("http://issuer.local")
                 .with_token_endpoint(format!("http://{addr}/token")),
+            store_key: key("", "", "http://127.0.0.1:3000/mcp").into(),
         };
         // Nothing recorded in memory: the state a restart leaves behind, where
         // the store is the only thing that knows what was granted.
@@ -1641,7 +2789,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .get("http://127.0.0.1:3000/mcp")
+                .get(&key("", "", "http://127.0.0.1:3000/mcp"))
                 .and_then(|tokens| tokens.scope)
                 .as_deref(),
             Some("read"),
@@ -1671,7 +2819,7 @@ mod tests {
         let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
         let mut restored = stale_tokens();
         restored.scope = Some("read write".into());
-        store.put("http://127.0.0.1:3000/mcp", &restored);
+        store.put(&key("", "", "http://127.0.0.1:3000/mcp"), &restored);
 
         let flow = FlowState {
             client: OAuthClient::new("cid")
@@ -1679,6 +2827,7 @@ mod tests {
                 .with_token_store(store.clone()),
             metadata: AuthorizationServerMetadata::new("http://issuer.local")
                 .with_token_endpoint(format!("http://{addr}/token")),
+            store_key: key("", "", "http://127.0.0.1:3000/mcp").into(),
         };
         let session = session_with(store.clone(), Some(flow));
         // What an earlier round in this process was granted.
@@ -1690,7 +2839,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .get("http://127.0.0.1:3000/mcp")
+                .get(&key("", "", "http://127.0.0.1:3000/mcp"))
                 .and_then(|tokens| tokens.scope)
                 .as_deref(),
             Some("read"),
@@ -1709,7 +2858,7 @@ mod tests {
         let mut tokens = stale_tokens();
         tokens.expires_at =
             Some(std::time::SystemTime::now() + std::time::Duration::from_secs(3600));
-        store.put("http://127.0.0.1:3000/mcp", &tokens);
+        store.put(&key("", "", "http://127.0.0.1:3000/mcp"), &tokens);
 
         // No flow state -- a refresh attempt would return None; a fresh
         // token must never get that far.
@@ -1724,7 +2873,7 @@ mod tests {
     #[tokio::test]
     async fn stale_token_without_flow_state_stays_usable() {
         let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
-        store.put("http://127.0.0.1:3000/mcp", &stale_tokens());
+        store.put(&key("", "", "http://127.0.0.1:3000/mcp"), &stale_tokens());
 
         let session = session_with(store, None);
 
@@ -1740,7 +2889,7 @@ mod tests {
     async fn session_serves_stored_unexpired_token() {
         let store = InMemoryTokenStore::new();
         store.put(
-            "http://127.0.0.1:3000/mcp",
+            &key("", "", "http://127.0.0.1:3000/mcp"),
             &TokenSet {
                 access_token: "stored-token".into(),
                 token_type: "Bearer".into(),
@@ -1766,7 +2915,7 @@ mod tests {
         let stored = |scope: Option<&str>| {
             let store = InMemoryTokenStore::new();
             store.put(
-                "http://127.0.0.1:3000/mcp",
+                &key("", "", "http://127.0.0.1:3000/mcp"),
                 &TokenSet {
                     access_token: "stored-token".into(),
                     token_type: "Bearer".into(),
@@ -1907,6 +3056,86 @@ mod tests {
         addr
     }
 
+    /// [`spawn_registering_authorization_server`] that also advertises
+    /// `client_id_metadata_document_supported`, and records every request line
+    /// it served so a test can assert what the client did *not* ask for.
+    async fn spawn_cimd_authorization_server()
+    -> (std::net::SocketAddr, Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let read = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+                let root = format!("http://{addr}");
+                if let Ok(mut seen) = recorder.lock() {
+                    seen.push(request.clone());
+                }
+
+                let body = if request.contains("/.well-known/oauth-protected-resource") {
+                    format!(r#"{{"resource":"{root}/mcp","authorization_servers":["{root}"]}}"#)
+                } else if request.contains("/.well-known/") {
+                    // Registration is on offer as well: what decides the flow
+                    // here is the CIMD flag, not the absence of an alternative.
+                    format!(
+                        r#"{{"issuer":"{root}","token_endpoint":"{root}/token",
+                             "authorization_endpoint":"{root}/authorize",
+                             "registration_endpoint":"{root}/register",
+                             "client_id_metadata_document_supported":true,
+                             "response_types_supported":["code"]}}"#
+                    )
+                } else {
+                    r#"{"access_token":"cimd-token","token_type":"Bearer","expires_in":3600}"#
+                        .to_string()
+                };
+
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+        (addr, seen)
+    }
+
+    /// An authorization server offering neither a registration endpoint nor
+    /// client id metadata documents -- it says `false` to the latter, so there
+    /// is nothing left for a client without a pre-registered id.
+    async fn spawn_bare_authorization_server() -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let read = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+                let root = format!("http://{addr}");
+
+                let body = if request.contains("/.well-known/oauth-protected-resource") {
+                    format!(r#"{{"resource":"{root}/mcp","authorization_servers":["{root}"]}}"#)
+                } else {
+                    format!(
+                        r#"{{"issuer":"{root}","token_endpoint":"{root}/token",
+                             "authorization_endpoint":"{root}/authorize",
+                             "client_id_metadata_document_supported":false,
+                             "response_types_supported":["code"]}}"#
+                    )
+                };
+
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+        addr
+    }
+
     /// Completes the flow without a browser by reading the `state` back off the
     /// authorization URL -- which is what the redirect would have carried.
     struct EchoesState;
@@ -1935,6 +3164,184 @@ mod tests {
                 })
             })
         }
+    }
+
+    /// [`EchoesState`] that also keeps the authorization URL, so a test can
+    /// read the parameters the user's browser would have carried.
+    #[derive(Default)]
+    struct RecordsTheUrl(std::sync::Mutex<Option<String>>);
+
+    impl AuthorizationHandler for Arc<RecordsTheUrl> {
+        fn redirect_uri(&self) -> BoxFuture<'_, Result<String, Error>> {
+            Box::pin(async { Ok("http://127.0.0.1:8919/callback".to_string()) })
+        }
+
+        fn authorize(&self, url: String) -> BoxFuture<'_, Result<CallbackParams, Error>> {
+            if let Ok(mut seen) = self.0.lock() {
+                *seen = Some(url.clone());
+            }
+            EchoesState.authorize(url)
+        }
+    }
+
+    /// A Client ID Metadata Document needs no registration: the URL *is* the
+    /// id, and the server resolves it. So the flow completes with the URL on
+    /// the authorization request and never touches the registration endpoint
+    /// -- which this server offers, to show it is the advertised CIMD support
+    /// and not the lack of an alternative that decided it.
+    #[tokio::test]
+    async fn a_cimd_client_authorizes_without_registering() {
+        let (addr, seen) = spawn_cimd_authorization_server().await;
+        let resource = format!("http://{addr}/mcp");
+
+        let handler = Arc::new(RecordsTheUrl::default());
+        let config = OAuthClientConfig::default()
+            .require_https(false)
+            .with_client_id_document(CIMD_URL)
+            .with_handler(handler.clone());
+        let session = OAuthSession::new(config, &resource).unwrap();
+
+        let token = session.authorize(None, None).await.expect("the flow runs");
+        assert_eq!(&*token, "cimd-token");
+
+        let url = handler.0.lock().unwrap().clone().expect("a URL was built");
+        assert!(
+            url.contains("client_id=https%3A%2F%2Fapp.example.com%2Fmcp-client.json"),
+            "the document URL is what identifies the client: {url}"
+        );
+
+        let requests = seen.lock().unwrap().clone();
+        assert!(
+            !requests.iter().any(|req| req.contains("/register")),
+            "a CIMD client has nothing to register: {requests:?}"
+        );
+    }
+
+    /// A document identity is portable, so a CIMD client whose resource has
+    /// moved completes its flow against a server its configuration does not
+    /// name. What it must not do is file that server's tokens under the
+    /// configured issuer: the label would be a lie, and if the resource ever
+    /// moved back, the configured key would hand the old server a refresh
+    /// token the new one minted -- the leak the keying exists to stop.
+    #[tokio::test]
+    async fn a_portable_client_files_tokens_under_the_server_that_minted_them() {
+        let (addr, _) = spawn_cimd_authorization_server().await;
+        let resource = format!("http://{addr}/mcp");
+        let stale_config = "https://old-auth.example.com";
+
+        let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+        let config = OAuthClientConfig {
+            store: store.clone(),
+            ..OAuthClientConfig::default()
+                .require_https(false)
+                .with_client_id_document(CIMD_URL)
+                // Names the server this resource used to use. A portable
+                // identity is exempt from the mismatch check, so the flow runs.
+                .with_issuer(stale_config)
+                .with_handler(EchoesState)
+        };
+        let session = OAuthSession::new(config, &resource).unwrap();
+
+        let token = session.authorize(None, None).await.expect("the flow runs");
+        assert_eq!(&*token, "cimd-token");
+
+        assert!(
+            store.get(&key(stale_config, CIMD_URL, &resource)).is_none(),
+            "nothing may be filed under a server that minted none of it"
+        );
+        assert_eq!(
+            store
+                .get(&key(&format!("http://{addr}"), CIMD_URL, &resource))
+                .map(|tokens| tokens.access_token),
+            Some("cimd-token".to_owned()),
+            "the tokens belong to the server the flow actually ran against"
+        );
+        assert_eq!(
+            &*session.store_key(),
+            key(&format!("http://{addr}"), CIMD_URL, &resource),
+            "and the session follows them there, so its staleness probe is not \
+             left watching an empty slot"
+        );
+    }
+
+    /// The restart after that migration. The stale configuration still names
+    /// the old server, but the tokens are filed under the one that minted
+    /// them, and that is the slot the flow renews from -- so a portable
+    /// identity does not pay for consent again on every start.
+    #[tokio::test]
+    async fn a_migrated_portable_identity_renews_after_a_restart() {
+        let (addr, seen) = spawn_cimd_authorization_server().await;
+        let resource = format!("http://{addr}/mcp");
+
+        let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+        store.put(
+            &key(&format!("http://{addr}"), CIMD_URL, &resource),
+            &stale_tokens(),
+        );
+
+        let config = OAuthClientConfig {
+            store,
+            ..OAuthClientConfig::default()
+                .require_https(false)
+                .with_client_id_document(CIMD_URL)
+                .with_issuer("https://old-auth.example.com")
+                .with_handler(NoInteraction)
+        };
+        let session = OAuthSession::new(config, &resource).unwrap();
+
+        let token = session
+            .authorize(None, Some("the-expired-token"))
+            .await
+            .expect("the new server's own stored token is what answers this");
+        assert_eq!(&*token, "cimd-token");
+
+        let requests = seen.lock().unwrap().clone();
+        assert!(
+            requests.iter().any(|req| req.contains("refresh_token")),
+            "renewed rather than re-authorized: {requests:?}"
+        );
+    }
+
+    /// A document configured against a server that does not resolve one falls
+    /// back to registration -- and what that registration obtains belongs to a
+    /// throwaway client, not to the document. Filed under the document, it
+    /// would be read back as the document's own by a later flow (against a
+    /// server that has since enabled documents, say) and presented under a
+    /// client id that never held it: `invalid_grant`, the entry discarded, and
+    /// the user asked again for no reason.
+    #[tokio::test]
+    async fn a_fallback_registration_is_not_filed_under_the_document() {
+        let addr = spawn_registering_authorization_server().await;
+        let resource = format!("http://{addr}/mcp");
+        let issuer = format!("http://{addr}");
+
+        let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+        let config = OAuthClientConfig {
+            store: store.clone(),
+            ..OAuthClientConfig::default()
+                .require_https(false)
+                // Configured, but this server advertises no support for it and
+                // does offer a registration endpoint.
+                .with_client_id_document(CIMD_URL)
+                .with_issuer(&issuer)
+                .with_handler(EchoesState)
+        };
+        let session = OAuthSession::new(config, &resource).unwrap();
+
+        let token = session.authorize(None, None).await.expect("the flow runs");
+        assert_eq!(&*token, "granted-token");
+
+        assert!(
+            store.get(&key(&issuer, CIMD_URL, &resource)).is_none(),
+            "a registered client's tokens must not be filed under the document"
+        );
+        assert_eq!(
+            store
+                .get(&key(&issuer, "", &resource))
+                .map(|tokens| tokens.access_token),
+            Some("granted-token".to_owned()),
+            "they belong to an identity that outlives nothing, and are filed as such"
+        );
     }
 
     /// A grant the token response did not restate is inferred from the request
@@ -1973,7 +3380,7 @@ mod tests {
 
         assert_eq!(
             store
-                .get(&resource)
+                .get(&key("", "", &resource))
                 .and_then(|tokens| tokens.scope)
                 .as_deref(),
             Some("admin"),
@@ -2021,13 +3428,22 @@ mod tests {
     /// how to use it does not. After a restart the refresh token in that store
     /// is still good, and spending it is the difference between a silent
     /// renewal and walking the user through consent again.
+    ///
+    /// It takes a named issuer, because that is what the entry is filed under
+    /// -- see [`an_unbound_refresh_token_is_not_offered_after_a_restart`] and
+    /// [`a_refresh_token_does_not_follow_the_resource_to_a_new_issuer`].
     #[tokio::test]
     async fn a_stored_refresh_token_survives_a_restart() {
         let addr = spawn_authorization_server().await;
         let resource = format!("http://{addr}/mcp");
 
         let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
-        store.put(&resource, &stale_tokens());
+        // Under the identity that obtained it, which is where the next run
+        // looks: the server that minted it and the client it was issued to.
+        store.put(
+            &key(&format!("http://{addr}"), "cid", &resource),
+            &stale_tokens(),
+        );
 
         // A fresh process: a store with a usable refresh token, and no flow
         // state at all.
@@ -2036,6 +3452,7 @@ mod tests {
             ..OAuthClientConfig::default()
                 .require_https(false)
                 .with_client_id("cid")
+                .with_issuer(format!("http://{addr}"))
                 .with_handler(NoInteraction)
         };
         let session = OAuthSession::new(config, &resource).unwrap();
@@ -2056,6 +3473,93 @@ mod tests {
         );
     }
 
+    /// The same restart, with nothing saying which authorization server minted
+    /// the stored token. A refresh token is a bearer credential for the
+    /// endpoint that issued it, and the server this flow discovered is only
+    /// vouched for by the resource -- which is precisely what an attacker who
+    /// controls the resource would rewrite. So the token stays in the store
+    /// and the user is asked instead.
+    #[tokio::test]
+    async fn an_unbound_refresh_token_is_not_offered_after_a_restart() {
+        let addr = spawn_authorization_server().await;
+        let resource = format!("http://{addr}/mcp");
+
+        let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+        store.put(&key("", "cid", &resource), &stale_tokens());
+
+        let config = OAuthClientConfig {
+            store,
+            ..OAuthClientConfig::default()
+                .require_https(false)
+                .with_client_id("cid")
+                .with_handler(NoInteraction)
+        };
+        let session = OAuthSession::new(config, &resource).unwrap();
+
+        // `NoInteraction` fails rather than opening a browser, so reaching the
+        // interactive step is what this asserts.
+        let err = session
+            .authorize(None, Some("the-expired-token"))
+            .await
+            .expect_err("an unbound refresh token must not be spent");
+        assert!(
+            err.to_string().contains("should have been used instead",),
+            "the flow must reach the interactive step, not fail earlier: {err}"
+        );
+    }
+
+    /// The migration case, and the one a configured issuer alone does not
+    /// cover: the store holds a refresh token from the *old* authorization
+    /// server, and the operator has since pointed `with_issuer` at the new one
+    /// -- which is exactly what migrating means. Checking the configuration
+    /// against the discovered issuer then says "these match" about a token
+    /// neither of them minted, and the old server's credential goes to the new
+    /// server.
+    ///
+    /// What stops it is where the token is filed: under the issuer that minted
+    /// it, so the new issuer's key finds nothing and the user is asked instead.
+    #[tokio::test]
+    async fn a_refresh_token_does_not_follow_the_resource_to_a_new_issuer() {
+        let addr = spawn_authorization_server().await;
+        let resource = format!("http://{addr}/mcp");
+
+        // Everything the previous deployment left behind, filed under the
+        // server that issued it.
+        let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+        let previous_issuer = "https://old-auth.example.com";
+        store.put(&key(previous_issuer, "cid", &resource), &stale_tokens());
+
+        // And the configuration as it reads after the migration: the new
+        // issuer, which is also the one discovery returns.
+        let config = OAuthClientConfig {
+            store: store.clone(),
+            ..OAuthClientConfig::default()
+                .require_https(false)
+                .with_client_id("cid")
+                .with_issuer(format!("http://{addr}"))
+                .with_handler(NoInteraction)
+        };
+        let session = OAuthSession::new(config, &resource).unwrap();
+
+        let err = session
+            .authorize(None, Some("the-expired-token"))
+            .await
+            .expect_err("the old server's refresh token must not be spent at the new one");
+        assert!(
+            err.to_string().contains("should have been used instead"),
+            "the flow must reach the interactive step, not fail earlier: {err}"
+        );
+
+        // Untouched, rather than renewed into the new server's tokens.
+        assert_eq!(
+            store
+                .get(&key(previous_issuer, "cid", &resource))
+                .map(|tokens| tokens.access_token),
+            Some("stale-token".to_owned()),
+            "the old entry must be left exactly where it was"
+        );
+    }
+
     /// Two callers refused for the same missing scope must not walk the user
     /// through consent twice.
     ///
@@ -2067,7 +3571,7 @@ mod tests {
     async fn the_loser_of_a_step_up_takes_the_winners_token() {
         let store = InMemoryTokenStore::new();
         store.put(
-            "http://127.0.0.1:9/mcp",
+            &key("", "", "http://127.0.0.1:9/mcp"),
             &TokenSet {
                 access_token: "widened-token".into(),
                 token_type: "Bearer".into(),
@@ -2118,7 +3622,7 @@ mod tests {
 
         let store = InMemoryTokenStore::new();
         store.put(
-            RESOURCE,
+            &key("", "", RESOURCE),
             &TokenSet {
                 // What another request's refresh left behind: a different token,
                 // covering exactly what the old one did.
@@ -2152,7 +3656,7 @@ mod tests {
         // works: the grant on record covers what the challenge demanded.
         let store = InMemoryTokenStore::new();
         store.put(
-            RESOURCE,
+            &key("", "", RESOURCE),
             &TokenSet {
                 access_token: "widened-token".into(),
                 token_type: "Bearer".into(),

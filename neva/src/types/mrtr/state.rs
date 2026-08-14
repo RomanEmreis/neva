@@ -23,8 +23,32 @@ const NONCE_LEN: usize = 12;
 /// Codec version written as the blob's first wire segment and bound into the
 /// AEAD associated data, so a blob minted under one format cannot be
 /// transplanted into a future one. Bump when the wire format or the
-/// [`StatePayload`] semantics change; [`StateCodec::decode`] rejects anything else.
+/// [`StatePayload`] semantics change; [`StateCodec::decode`] rejects anything
+/// outside [`ACCEPTED_STATE_VERSIONS`].
 pub(crate) const STATE_VERSION: &str = "v1";
+
+/// Version [`StateCodec::encode`] writes instead when the payload carries an
+/// audience ([`StatePayload::aud`]).
+///
+/// The version is what makes the binding hold during a rolling upgrade. A
+/// binary predating the field decrypts a `v1` blob happily and lets serde drop
+/// the member it does not know, so the audience would go unchecked by exactly
+/// the instance that has not been upgraded yet -- which, where several services
+/// share a keyring, may be another service that upgrades weeks later. Under
+/// `v2` that binary refuses the blob outright, so the guarantee does not wait
+/// on the slowest deployment.
+///
+/// Conditional rather than a plain bump, so a deployment that configures no
+/// audience keeps minting `v1` and pays no cross-version cost for a guard it
+/// did not ask for.
+pub(crate) const STATE_VERSION_AUD: &str = "v2";
+
+/// Wire versions [`StateCodec::decode`] accepts. Both are the current format;
+/// they differ in whether the sealed payload is audience-bound, and a state
+/// cannot cross between them -- the version is part of the AEAD associated
+/// data, so a `v2` blob relabelled `v1` fails the tag rather than shedding its
+/// audience.
+pub(crate) const ACCEPTED_STATE_VERSIONS: [&str; 2] = [STATE_VERSION, STATE_VERSION_AUD];
 
 /// Key id used when a single secret is configured (the
 /// [`crate::App::with_request_state_secret`] path).
@@ -66,6 +90,21 @@ pub(crate) struct StatePayload {
     pub req: String,
     /// Authenticated principal (subject), when auth is enabled.
     pub principal: Option<String>,
+    /// Service identity this state was minted for, when one is configured
+    /// with [`crate::App::with_request_state_audience`].
+    ///
+    /// [`Self::req`] binds a state to a *request* and [`Self::principal`] to
+    /// *who* made it, but neither says *where*: two services sharing a
+    /// keyring -- which is what a shared secret across a fleet amounts to --
+    /// mint blobs each can decrypt, and a method and parameters they both
+    /// serve make one of them a state the other accepts. The audience is what
+    /// that leaves missing.
+    ///
+    /// Defaults to `None` so a payload minted before this field existed still
+    /// decodes; a server that configures an audience then finds `None` where
+    /// it demands a match and refuses it, which is the safe direction.
+    #[serde(default)]
+    pub aud: Option<String>,
 }
 
 /// The secrets accepted for `requestState` decryption plus the active one used
@@ -176,7 +215,14 @@ impl<'a> StateCodec<'a> {
                 "requestState nonce generation failed",
             )
         })?;
-        let header = format!("{STATE_VERSION}.{kid}");
+        // An audience-bound payload goes out under a version a binary
+        // predating the option cannot read -- see [`STATE_VERSION_AUD`].
+        let version = if payload.aud.is_some() {
+            STATE_VERSION_AUD
+        } else {
+            STATE_VERSION
+        };
+        let header = format!("{version}.{kid}");
         let sealed = cipher
             .encrypt(
                 &nonce,
@@ -214,7 +260,7 @@ impl<'a> StateCodec<'a> {
                 "malformed requestState",
             ));
         };
-        if version != STATE_VERSION {
+        if !ACCEPTED_STATE_VERSIONS.contains(&version) {
             return Err(Error::new(
                 ErrorCode::InvalidParams,
                 "unsupported requestState version",
@@ -233,7 +279,11 @@ impl<'a> StateCodec<'a> {
         let nonce: [u8; NONCE_LEN] = nonce
             .try_into()
             .map_err(|_| Error::new(ErrorCode::InvalidParams, "bad requestState nonce"))?;
-        let header = format!("{STATE_VERSION}.{kid}");
+        // The version as the blob spells it, now that more than one is
+        // accepted. It is associated data, so a blob whose version segment was
+        // edited fails the tag here rather than decoding into the other
+        // format's semantics.
+        let header = format!("{version}.{kid}");
         let json = Self::cipher(secret)?
             .decrypt(
                 &Nonce::from(nonce),
@@ -350,6 +400,18 @@ mod tests {
             exp: now_secs() + 300,
             req: request_binding("tools/call", &serde_json::json!({"name":"t"})),
             principal: Some("alice".into()),
+            aud: None,
+        }
+    }
+
+    const AUDIENCE: &str = "https://weather.example.com/mcp";
+
+    /// [`payload`] bound to a service identity, which is what sends it out
+    /// under [`STATE_VERSION_AUD`].
+    fn audience_bound_payload() -> StatePayload {
+        StatePayload {
+            aud: Some(AUDIENCE.into()),
+            ..payload()
         }
     }
 
@@ -389,6 +451,59 @@ mod tests {
         assert!(got.memos.is_empty());
         assert!(got.effects.is_empty());
         assert!(got.requested.is_empty());
+        // A payload predating the audience decodes unbound -- which a server
+        // that demands one then refuses, rather than letting the omission
+        // stand in for a match.
+        assert!(got.aud.is_none());
+    }
+
+    #[test]
+    fn the_audience_survives_the_seal() {
+        let ring = ring(b"secret-key");
+        let codec = StateCodec::new(&ring);
+        let blob = codec.encode(&audience_bound_payload()).unwrap();
+        assert_eq!(codec.decode(&blob).unwrap().aud.as_deref(), Some(AUDIENCE));
+        // Sealed, not merely appended: the identity a state was minted for is
+        // no more readable off the wire than its memos are.
+        assert!(!blob.contains("weather.example.com"));
+    }
+
+    /// The version is what carries the binding across a rolling upgrade: a
+    /// binary that predates the audience would decrypt a `v1` blob and let
+    /// serde drop the member it does not know, leaving the guard unenforced by
+    /// exactly the instance still to be upgraded. `v2` is refused by such a
+    /// binary outright -- its version check accepted one value.
+    #[test]
+    fn an_audience_bound_state_is_sealed_under_its_own_version() {
+        let ring = ring(b"secret-key");
+        let codec = StateCodec::new(&ring);
+
+        let bound = codec.encode(&audience_bound_payload()).unwrap();
+        assert!(bound.starts_with("v2."), "{bound}");
+
+        // And a deployment that configures no audience keeps minting the
+        // version every instance already reads, paying nothing for a guard it
+        // did not ask for.
+        let unbound = codec.encode(&payload()).unwrap();
+        assert!(unbound.starts_with("v1."), "{unbound}");
+
+        // Both are current, so both decode here.
+        assert!(codec.decode(&bound).is_ok());
+        assert!(codec.decode(&unbound).is_ok());
+    }
+
+    /// Relabelling a bound state `v1` is the way to make an upgraded server
+    /// read it as unbound -- and the way to make an old one accept it. The
+    /// version is associated data, so the tag fails instead.
+    #[test]
+    fn a_bound_state_cannot_be_relabelled_as_unbound() {
+        let ring = ring(b"secret-key");
+        let codec = StateCodec::new(&ring);
+        let blob = codec.encode(&audience_bound_payload()).unwrap();
+
+        let downgraded = format!("v1{}", blob.strip_prefix("v2").unwrap());
+        let err = codec.decode(&downgraded).unwrap_err();
+        assert!(format!("{err}").contains("integrity check failed"), "{err}");
     }
 
     #[test]
