@@ -703,14 +703,18 @@ impl OAuthClientConfig {
         }
     }
 
-    /// What names this client across restarts, for the purpose of keeping one
-    /// client's stored grant apart from another's.
+    /// What this client is *expected* to be identified by, before any
+    /// discovery has happened -- the store key the warm start reads.
     ///
-    /// A pre-registered id or a document URL both do; a client that registers
-    /// dynamically has nothing that outlives the flow, so it names nothing.
-    /// Which of the two applies is not [`Self::client_id_source`]'s question --
-    /// that one depends on what the server advertises, and a key has to be the
-    /// same before and after discovery.
+    /// A guess, because which mechanism actually runs depends on what the
+    /// server advertises, and there is nothing to ask before the first
+    /// request. When it turns out wrong -- a configured document meeting a
+    /// server that resolves none, so the flow registers instead -- the read
+    /// simply finds an empty slot, which is the right answer: what is stored
+    /// there belongs to an identity this session will not be presenting.
+    /// The flow then files its own credentials under
+    /// [`ClientIdSource::persistent_id`], which is what actually ran, and the
+    /// session moves onto that slot.
     fn client_identity(&self) -> &str {
         self.client_id
             .as_deref()
@@ -760,6 +764,10 @@ impl OAuthClientConfig {
 struct FlowState {
     client: OAuthClient,
     metadata: AuthorizationServerMetadata,
+    /// The [`TokenStore`] slot this flow's credentials went into -- the
+    /// identity they actually belong to, which is not always the one the
+    /// configuration names. See [`OAuthSession::store_key_for`].
+    store_key: Arc<str>,
 }
 
 /// How early before expiration a stored access token is proactively
@@ -844,18 +852,18 @@ impl OAuthSession {
             .clone()
     }
 
-    /// Moves the session onto the slot `issuer` files its tokens in, so the
+    /// Moves the session onto the slot the last flow actually used, so the
     /// pre-discovery reads that follow -- the staleness probe, the stored
-    /// grant -- look where the last flow actually wrote.
-    fn record_issuer(&self, issuer: &str) {
-        let key = self.store_key_for(issuer);
+    /// grant -- look where that flow wrote rather than where the
+    /// configuration guessed.
+    fn set_store_key(&self, key: &str) {
         let mut current = self
             .store_key
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         if **current != *key {
-            *current = Arc::from(&*key);
+            *current = Arc::from(key);
         }
     }
 
@@ -920,12 +928,22 @@ impl OAuthSession {
     /// An unbound session names no issuer here either: it has nothing to say
     /// about where its tokens came from, so the segment stays empty and the
     /// slot stays the one its own warm start reads.
-    fn store_key_for(&self, issuer: &str) -> String {
+    ///
+    /// The client segment comes from `source` rather than from the
+    /// configuration, because the two part company when a configured document
+    /// meets a server that does not resolve one: the flow falls back to
+    /// registration, and what it obtains belongs to that throwaway client, not
+    /// to the document. Filing it under the document would have a later flow
+    /// -- against a server that has since enabled documents, say -- read it
+    /// back as the document's own and present it under a client id that never
+    /// held it, which the server answers with `invalid_grant` and this client
+    /// answers by discarding the entry and asking the user again.
+    fn store_key_for(&self, issuer: &str, source: ClientIdSource<'_>) -> String {
         let issuer = match self.config.issuer {
             Some(_) => issuer,
             None => "",
         };
-        Self::compose_store_key(issuer, self.config.client_identity(), &self.resource)
+        Self::compose_store_key(issuer, source.persistent_id(), &self.resource)
     }
 
     /// Joins the three parts of a credential's identity into its store key.
@@ -1017,8 +1035,12 @@ impl OAuthSession {
     /// `OAuthClient::token`). Returns `None` when interactive
     /// authorization is required or no flow has completed yet.
     async fn maintain(&self, state: &mut Option<FlowState>) -> Option<Arc<str>> {
-        let FlowState { client, metadata } = state.as_ref()?;
-        self.refresh_with(client, metadata).await
+        let FlowState {
+            client,
+            metadata,
+            store_key,
+        } = state.as_ref()?;
+        self.refresh_with(client, metadata, store_key.clone()).await
     }
 
     /// [`Self::maintain`] for a client and metadata held directly rather than
@@ -1027,6 +1049,7 @@ impl OAuthSession {
         &self,
         client: &OAuthClient,
         metadata: &AuthorizationServerMetadata,
+        store_key: Arc<str>,
     ) -> Option<Arc<str>> {
         // What the grant was known to cover going in. A refresh response may
         // leave `scope` out when the grant is unchanged (RFC 6749 section 5.1),
@@ -1036,10 +1059,13 @@ impl OAuthSession {
         // trade the grant away, which is the very thing SEP-2350 forbids. The
         // refresh token itself is carried over for the same reason one step
         // down, inside `OAuthClient::token`.
-        let key = self.store_key_for(&metadata.issuer);
-        let carried = self.config.store.get(&key).and_then(|tokens| tokens.scope);
+        let carried = self
+            .config
+            .store
+            .get(&store_key)
+            .and_then(|tokens| tokens.scope);
 
-        match client.token(&key, metadata).await {
+        match client.token(&store_key, metadata).await {
             Ok(Some(mut tokens)) => {
                 // What the renewed token covers: what the response said it
                 // granted, or -- when it said nothing -- the grant it did not
@@ -1049,7 +1075,7 @@ impl OAuthSession {
                     && let Some(scope) = granted.clone()
                 {
                     tokens.scope = Some(scope);
-                    self.config.store.put(&key, &tokens);
+                    self.config.store.put(&store_key, &tokens);
                 }
                 // And the in-memory record moves with it. A refresh may
                 // *narrow* the grant, and this process's memory of the earlier,
@@ -1067,7 +1093,7 @@ impl OAuthSession {
                 // This slot is where the session's credentials live now, which
                 // matters when the key moved: a portable identity may have
                 // renewed against a server the configuration does not name.
-                self.record_issuer(&metadata.issuer);
+                self.set_store_key(&store_key);
                 let token: Arc<str> = tokens.access_token.into();
                 self.set_token(token.clone());
                 Some(token)
@@ -1246,15 +1272,23 @@ impl OAuthSession {
         // and a stored refresh token, still perfectly good, went unused while
         // the user was walked through consent again. Both halves have just been
         // rebuilt, so ask once more before that.
+        // The slot this flow's credentials belong in, named once and used for
+        // every read and write below.
+        let store_key: Arc<str> =
+            Arc::from(self.store_key_for(&server_metadata.issuer, source).as_str());
+
         if !step_up
             && self.may_reuse_stored_refresh(source, &server_metadata)
-            && let Some(token) = self.refresh_with(&client, &server_metadata).await
+            && let Some(token) = self
+                .refresh_with(&client, &server_metadata, store_key.clone())
+                .await
             && used != Some(&*token)
         {
             // Keep what made it work, so the next refresh is the cheap path.
             *flight = Some(FlowState {
                 client,
                 metadata: server_metadata,
+                store_key,
             });
             return Ok(token);
         }
@@ -1335,17 +1369,15 @@ impl OAuthSession {
             tokens.scope = Some(granted.join(" "));
         }
 
-        self.config
-            .store
-            .put(&self.store_key_for(&server_metadata.issuer), &tokens);
-
-        self.record_issuer(&server_metadata.issuer);
+        self.config.store.put(&store_key, &tokens);
+        self.set_store_key(&store_key);
 
         // Keep the client + metadata so future refreshes stay
         // non-interactive.
         *flight = Some(FlowState {
             client,
             metadata: server_metadata,
+            store_key,
         });
         self.set_requested_scopes(granted);
 
@@ -1728,6 +1760,21 @@ enum ClientIdSource<'a> {
 }
 
 impl ClientIdSource<'_> {
+    /// What names this identity in a [`TokenStore`] key, across restarts.
+    ///
+    /// A dynamically registered client names nothing: the id it is about to be
+    /// given is not the one it had last time, so credentials obtained under it
+    /// belong to no identity that outlives the flow. They still get a slot --
+    /// the warm start reads it -- but an unnamed one, which
+    /// [`OAuthSession::may_reuse_stored_refresh`] never renews from.
+    fn persistent_id(&self) -> &str {
+        match self {
+            Self::PreRegistered(client_id) => client_id,
+            Self::Document(url) => url,
+            Self::Dynamic => "",
+        }
+    }
+
     /// Whether this identity is the same on the next run of the process.
     ///
     /// A dynamically registered id is not: the next run registers again and
@@ -2298,13 +2345,13 @@ mod tests {
 
         assert!(session.may_reuse_stored_refresh(ClientIdSource::Document(CIMD_URL), &moved));
         assert_ne!(
-            &*session.store_key_for(&moved.issuer),
+            &*session.store_key_for(&moved.issuer, ClientIdSource::Document(CIMD_URL)),
             &*session.store_key(),
             "and not from the slot the stale configuration names"
         );
         assert!(
             session
-                .store_key_for(&moved.issuer)
+                .store_key_for(&moved.issuer, ClientIdSource::Document(CIMD_URL))
                 .starts_with("https://other.example.com|"),
             "the slot is the one that server files its own tokens in"
         );
@@ -2690,6 +2737,7 @@ mod tests {
                 .with_token_store(store.clone()),
             metadata: AuthorizationServerMetadata::new("http://issuer.local")
                 .with_token_endpoint(format!("http://{addr}/token")),
+            store_key: key("", "", "http://127.0.0.1:3000/mcp").into(),
         };
         let session = session_with(store.clone(), Some(flow));
 
@@ -2729,6 +2777,7 @@ mod tests {
                 .with_token_store(store.clone()),
             metadata: AuthorizationServerMetadata::new("http://issuer.local")
                 .with_token_endpoint(format!("http://{addr}/token")),
+            store_key: key("", "", "http://127.0.0.1:3000/mcp").into(),
         };
         // Nothing recorded in memory: the state a restart leaves behind, where
         // the store is the only thing that knows what was granted.
@@ -2778,6 +2827,7 @@ mod tests {
                 .with_token_store(store.clone()),
             metadata: AuthorizationServerMetadata::new("http://issuer.local")
                 .with_token_endpoint(format!("http://{addr}/token")),
+            store_key: key("", "", "http://127.0.0.1:3000/mcp").into(),
         };
         let session = session_with(store.clone(), Some(flow));
         // What an earlier round in this process was granted.
@@ -3249,6 +3299,48 @@ mod tests {
         assert!(
             requests.iter().any(|req| req.contains("refresh_token")),
             "renewed rather than re-authorized: {requests:?}"
+        );
+    }
+
+    /// A document configured against a server that does not resolve one falls
+    /// back to registration -- and what that registration obtains belongs to a
+    /// throwaway client, not to the document. Filed under the document, it
+    /// would be read back as the document's own by a later flow (against a
+    /// server that has since enabled documents, say) and presented under a
+    /// client id that never held it: `invalid_grant`, the entry discarded, and
+    /// the user asked again for no reason.
+    #[tokio::test]
+    async fn a_fallback_registration_is_not_filed_under_the_document() {
+        let addr = spawn_registering_authorization_server().await;
+        let resource = format!("http://{addr}/mcp");
+        let issuer = format!("http://{addr}");
+
+        let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+        let config = OAuthClientConfig {
+            store: store.clone(),
+            ..OAuthClientConfig::default()
+                .require_https(false)
+                // Configured, but this server advertises no support for it and
+                // does offer a registration endpoint.
+                .with_client_id_document(CIMD_URL)
+                .with_issuer(&issuer)
+                .with_handler(EchoesState)
+        };
+        let session = OAuthSession::new(config, &resource).unwrap();
+
+        let token = session.authorize(None, None).await.expect("the flow runs");
+        assert_eq!(&*token, "granted-token");
+
+        assert!(
+            store.get(&key(&issuer, CIMD_URL, &resource)).is_none(),
+            "a registered client's tokens must not be filed under the document"
+        );
+        assert_eq!(
+            store
+                .get(&key(&issuer, "", &resource))
+                .map(|tokens| tokens.access_token),
+            Some("granted-token".to_owned()),
+            "they belong to an identity that outlives nothing, and are filed as such"
         );
     }
 
