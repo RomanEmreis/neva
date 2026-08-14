@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+#### Subscriptions
+* **`App::with_notification_bus(..)` fans subscription notifications out across
+  instances** (#104). A `subscriptions/listen` stream is a socket held open by
+  one process, and the stateless 2026-07-28 transport pins nothing to an
+  instance -- so in a horizontally scaled deployment the subscriber and the
+  request that mutates the server routinely land on different ones, and the
+  notification is lost with the client having been told its filter was
+  accepted. The new
+  [`NotificationBus`](https://docs.rs/neva/latest/neva/trait.NotificationBus.html)
+  trait carries notifications between instances: each one publishes what it
+  produces and delivers what it receives to the streams it actually holds. The
+  subscriber table itself stays node-local by construction -- half of every
+  entry is a handle to a socket on one node, so a shared registry could not
+  deliver anyway. neva ships the trait; shared implementations (Redis pub/sub,
+  NATS, Postgres `LISTEN`/`NOTIFY`) live outside the crate, as for
+  `RequestStateStore`. Implementations must not echo-suppress: local delivery
+  goes through the same `subscribe` stream, which is what keeps local and
+  remote fan-out on one code path.
+
+  **Nothing changes without one.** There is no bus by default and a
+  notification goes straight to this instance's own subscribers -- no channel,
+  no allocation, no task. A multi-instance stateless deployment now configures
+  three things rather than two:
+  [`with_request_state_secret`](https://docs.rs/neva/latest/neva/struct.App.html#method.with_request_state_secret),
+  [`with_request_state_store`](https://docs.rs/neva/latest/neva/struct.App.html#method.with_request_state_store)
+  and, if it serves subscriptions, `with_notification_bus`.
+
 #### Authorization
 * **Client ID Metadata Documents (CIMD).**
   `OAuthClientConfig::with_client_id_document(url)` identifies the client by an
@@ -69,6 +96,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   registered clients never reuse one: the next run registers a different id.
 
 ### Changed
+
+#### Subscriptions
+* **`Context::resource_updated` no longer pre-checks `is_subscribed`.** It
+  publishes the notification unconditionally and lets the subscription filters
+  route it, which is what they already did. The pre-check could only ever
+  answer for the instance running the handler, so under a `NotificationBus` it
+  would skip an update a subscriber on another instance was waiting for.
+  `Context::is_subscribed` is unchanged and still answers truthfully -- it is
+  now documented as node-local, and is for skipping expensive local work rather
+  than for deciding whether to notify.
 
 #### Authorization
 * **A redirect anywhere in `127.0.0.0/8` now registers a native client.**

@@ -6,6 +6,14 @@
 //! [`McpOptions`](crate::app::options::McpOptions), so a tool handler calling
 //! [`Context::add_tool`](crate::Context::add_tool) reaches every listener
 //! without knowing anything about them.
+//!
+//! This registry is **node-local by construction**: half of every entry is a
+//! handle to a socket on this process (an `mpsc::Sender` into one held-open
+//! response body, an in-process cancellation token), which no other instance
+//! could write into however the entry were shared. Reaching subscribers on
+//! *other* instances is the job of
+//! [`NotificationBus`](crate::app::notification_bus::NotificationBus), which
+//! carries the notification across and lets each instance broadcast it here.
 
 use crate::types::{
     Message, RequestId, SubscriptionFilter, SubscriptionMeta, Uri, notification::Notification,
@@ -185,9 +193,12 @@ impl SubscriptionRegistry {
     /// each copy with its own subscription id.
     ///
     /// Returns whether `method` is a subscription-delivered notification type
-    /// at all, so the caller can tell "nobody is listening" from "this
-    /// notification never travels on a subscription" (progress, task status and
-    /// elicitation notifications stay request-scoped).
+    /// at all -- progress, task status and elicitation notifications stay
+    /// request-scoped and are dropped here. `Context::send_notification` makes
+    /// the same check before it publishes, so on that path this is a
+    /// no-op; it earns its keep on the other caller, the task draining a
+    /// [`NotificationBus`](crate::app::notification_bus::NotificationBus),
+    /// which has no such guarantee about what an out-of-crate bus hands it.
     ///
     /// Delivery is best-effort: a subscription whose buffer is full drops the
     /// notification rather than blocking the request that produced it, exactly

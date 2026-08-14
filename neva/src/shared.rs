@@ -88,6 +88,35 @@ mod task_tracker;
 /// ```
 pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
+/// The stream returned by neva's object-safe traits -- a boxed, `Send` stream
+/// borrowing for `'a`.
+///
+/// The counterpart of [`BoxFuture`] for traits that hand back a sequence rather
+/// than a single value, such as `NotificationBus::subscribe` (the
+/// cross-instance fan-out for subscription notifications). Owning the alias
+/// here means implementing one needs no `futures` dependency of your own.
+///
+/// It is a plain alias for `Pin<Box<dyn Stream<Item = T> + Send + 'a>>`
+/// (identical to `futures_util::stream::BoxStream`).
+///
+/// # Example
+/// ```
+/// use neva::shared::BoxStream;
+///
+/// trait Ticker {
+///     fn ticks(&self) -> BoxStream<'static, u64>;
+/// }
+///
+/// struct Once;
+///
+/// impl Ticker for Once {
+///     fn ticks(&self) -> BoxStream<'static, u64> {
+///         Box::pin(futures_util::stream::once(async { 1 }))
+///     }
+/// }
+/// ```
+pub type BoxStream<'a, T> = std::pin::Pin<Box<dyn futures_util::Stream<Item = T> + Send + 'a>>;
+
 #[inline]
 #[cfg(any(feature = "server", feature = "client"))]
 pub(crate) fn wait_for_shutdown_signal(token: CancellationToken) {

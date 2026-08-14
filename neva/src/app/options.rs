@@ -164,6 +164,15 @@ pub struct McpOptions {
     /// via [`crate::App::with_request_state_store`].
     #[cfg(not(feature = "legacy-spec"))]
     request_state_store: Arc<dyn crate::app::mrtr_store::RequestStateStore>,
+
+    /// Carries subscribable notifications between instances of one logical
+    /// server, set via [`crate::App::with_notification_bus`].
+    ///
+    /// `None` -- the default -- means notifications go straight to this
+    /// instance's own [`Self::subscriptions`], which is all a single-instance
+    /// server ever needs and costs nothing.
+    #[cfg(not(feature = "legacy-spec"))]
+    notification_bus: Option<Arc<dyn crate::app::notification_bus::NotificationBus>>,
 }
 
 impl Debug for McpOptions {
@@ -239,6 +248,8 @@ impl Default for McpOptions {
             max_state_bytes: 8 * 1024,
             #[cfg(not(feature = "legacy-spec"))]
             request_state_store: Arc::new(crate::app::mrtr_store::InMemoryStateStore::new()),
+            #[cfg(not(feature = "legacy-spec"))]
+            notification_bus: None,
         }
     }
 }
@@ -911,6 +922,24 @@ impl McpOptions {
     #[cfg(not(feature = "legacy-spec"))]
     pub(crate) fn request_state_store(&self) -> &dyn crate::app::mrtr_store::RequestStateStore {
         self.request_state_store.as_ref()
+    }
+
+    /// Sets the bus carrying subscription notifications between instances.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(crate) fn set_notification_bus(
+        &mut self,
+        bus: Arc<dyn crate::app::notification_bus::NotificationBus>,
+    ) {
+        self.notification_bus = Some(bus);
+    }
+
+    /// Returns the bus carrying subscription notifications between instances,
+    /// or `None` when notifications are delivered to local subscribers only.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(crate) fn notification_bus(
+        &self,
+    ) -> Option<&Arc<dyn crate::app::notification_bus::NotificationBus>> {
+        self.notification_bus.as_ref()
     }
 
     /// Turns [`McpOptions`] into [`RuntimeMcpOptions`]

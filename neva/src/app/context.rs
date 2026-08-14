@@ -670,6 +670,7 @@ impl Context {
     }
 
     /// Sends a notification that the resource with the `uri` has been updated
+    #[cfg(feature = "legacy-spec")]
     pub async fn resource_updated(&mut self, uri: impl Into<Uri>) -> Result<(), Error> {
         if !self.options.is_resource_subscription_supported() {
             return Err(Error::new(
@@ -686,6 +687,31 @@ impl Context {
         } else {
             Ok(())
         }
+    }
+
+    /// Sends a notification that the resource with the `uri` has been updated
+    ///
+    /// The notification is emitted unconditionally and routed by the
+    /// subscription filters it reaches: every live stream that named this URI
+    /// gets it, every other stream gets nothing. There is deliberately no
+    /// "is anybody watching?" pre-check -- [`Self::is_subscribed`] can only
+    /// answer for *this* instance, so under a
+    /// [`NotificationBus`](crate::app::notification_bus::NotificationBus) it
+    /// would skip an update a subscriber on another instance was waiting for.
+    /// Publishing one nobody wants is cheap; dropping one somebody wants is a
+    /// bug.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub async fn resource_updated(&mut self, uri: impl Into<Uri>) -> Result<(), Error> {
+        if !self.options.is_resource_subscription_supported() {
+            return Err(Error::new(
+                ErrorCode::MethodNotFound,
+                "Server does not support sending resource/updated notifications",
+            ));
+        }
+
+        let params = serde_json::to_value(SubscribeRequestParams::from(uri.into())).ok();
+        self.send_notification(crate::types::resource::commands::UPDATED, params)
+            .await
     }
 
     /// Adds a subscription to the resource with the [`Uri`]
@@ -714,6 +740,16 @@ impl Context {
 
     /// Returns `true` if any live `subscriptions/listen` stream watches the
     /// resource with the [`Uri`].
+    ///
+    /// **Node-local.** A subscription lives in the process holding its socket
+    /// open, so this answers for *this instance only*. In a horizontally
+    /// scaled deployment a `false` here means "nobody on this instance", not
+    /// "nobody anywhere" -- so do not use it to decide whether to emit a
+    /// notification. [`Self::resource_updated`] deliberately does not:
+    /// notifications are published unconditionally and routed by the
+    /// subscription filters they reach, wherever those live. Use this only
+    /// where a node-local answer is what you actually want, such as skipping
+    /// expensive local work no one on this instance is streaming.
     ///
     /// # Examples
     /// ```no_run
@@ -1843,6 +1879,14 @@ impl Context {
     /// fanned out to every stream whose filter admits it. The rest -- progress,
     /// task status, elicitation -- are request-scoped and have no subscription
     /// to travel on.
+    ///
+    /// With a
+    /// [`NotificationBus`](crate::app::notification_bus::NotificationBus)
+    /// installed the fan-out goes through the bus instead, and comes back to
+    /// every instance -- this one included -- through the drain task
+    /// `App::run` spawns. That is one code path rather than two, at the cost of
+    /// a round trip the local case does not otherwise pay; the default is no
+    /// bus, which delivers straight to the local registry.
     #[inline]
     async fn send_notification(
         &mut self,
@@ -1851,20 +1895,25 @@ impl Context {
     ) -> Result<(), Error> {
         #[cfg(not(feature = "legacy-spec"))]
         {
-            if self
-                .options
-                .subscriptions()
-                .broadcast(method, params.as_ref())
-            {
+            if !crate::types::subscription::is_subscribable(method) {
+                // Not a type a client can subscribe to. Surface it once at debug so
+                // a server author who expects a push isn't silently misled.
+                #[cfg(feature = "tracing")]
+                tracing::debug!(
+                    method,
+                    "notification is not deliverable under MCP 2026-07-28: no subscription carries this type"
+                );
                 return Ok(());
             }
-            // Not a type a client can subscribe to. Surface it once at debug so
-            // a server author who expects a push isn't silently misled.
-            #[cfg(feature = "tracing")]
-            tracing::debug!(
-                method,
-                "notification is not deliverable under MCP 2026-07-28: no subscription carries this type"
-            );
+
+            match self.options.notification_bus() {
+                Some(bus) => bus.publish(method, params.as_ref()).await,
+                None => {
+                    self.options
+                        .subscriptions()
+                        .broadcast(method, params.as_ref());
+                }
+            }
             Ok(())
         }
         #[cfg(feature = "legacy-spec")]
