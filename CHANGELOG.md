@@ -12,109 +12,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 #### Subscriptions
 * **`App::with_notification_bus(..)` fans subscription notifications out across
   instances** (#104). A `subscriptions/listen` stream is a socket held open by
-  one process, and the stateless 2026-07-28 transport pins nothing to an
-  instance -- so in a horizontally scaled deployment the subscriber and the
-  request that mutates the server routinely land on different ones, and the
-  notification is lost with the client having been told its filter was
-  accepted. The new
+  one process, and the stateless transport pins nothing to an instance, so the
+  subscriber and the request that mutates the server routinely land on
+  different ones and the notification is silently lost. The new
   [`NotificationBus`](https://docs.rs/neva/latest/neva/trait.NotificationBus.html)
-  trait carries notifications between instances: each one publishes what it
-  produces and delivers what it receives to the streams it actually holds. The
-  subscriber table itself stays node-local by construction -- half of every
-  entry is a handle to a socket on one node, so a shared registry could not
-  deliver anyway. neva ships the trait; shared implementations (Redis pub/sub,
-  NATS, Postgres `LISTEN`/`NOTIFY`) live outside the crate, as for
-  `RequestStateStore`. Implementations must not echo-suppress: local delivery
-  goes through the same `subscribe` stream, which is what keeps local and
-  remote fan-out on one code path.
+  carries them across: each instance publishes what it produces and delivers
+  what it receives to the streams it holds. The subscriber table stays
+  node-local -- half of every entry is a handle to a socket on one node, so a
+  shared registry could not deliver anyway. Implementing a bus is a plain
+  `async fn publish(&self, BusNotification)` plus a `subscribe` returning any
+  `Stream`; it must not echo-suppress, since local delivery goes through that
+  same stream. neva ships the trait, shared implementations (Redis pub/sub,
+  NATS) live outside the crate, as for `RequestStateStore`.
 
-  Implementing one is plain `async fn publish(&self, BusNotification)` plus a
-  `subscribe` returning any `Stream` -- no `Pin<Box<..>>` anywhere in the
-  signature, and no `futures` dependency of your own
-  ([`neva::shared::Stream`](https://docs.rs/neva/latest/neva/shared/trait.Stream.html)
-  re-exports the trait). The payload is a named
-  [`BusNotification`](https://docs.rs/neva/latest/neva/struct.BusNotification.html)
-  that serializes as the notification body it describes, so a bus shipping JSON
-  hands it to `serde_json` in both directions instead of inventing an envelope.
-
-  **Nothing changes without one.** There is no bus by default and a
-  notification goes straight to this instance's own subscribers -- no channel,
-  no allocation, no task. A multi-instance stateless deployment now configures
-  three things rather than two:
-  [`with_request_state_secret`](https://docs.rs/neva/latest/neva/struct.App.html#method.with_request_state_secret),
-  [`with_request_state_store`](https://docs.rs/neva/latest/neva/struct.App.html#method.with_request_state_store)
-  and, if it serves subscriptions, `with_notification_bus`.
+  Nothing changes without one: there is no bus by default and notifications go
+  straight to this instance's subscribers. A multi-instance stateless
+  deployment now configures three things rather than two --
+  `with_request_state_secret`, `with_request_state_store`, and this.
 
 #### Authorization
 * **Client ID Metadata Documents (CIMD).**
   `OAuthClientConfig::with_client_id_document(url)` identifies the client by an
   https URL the authorization server dereferences, so a client and server with
   no prior relationship need no registration request at all. The URL is checked
-  for the scheme and path component the spec requires when the client is built,
-  and pairing it with a client secret is refused -- a document describes a
-  public client. `client_metadata_document([redirect_uris])` builds the JSON to
-  host there from the same code that would have registered, so the two cannot
-  drift.
+  against the spec's scheme and path rules when the client is built, and
+  pairing it with a client secret is refused -- a document describes a public
+  client. `client_metadata_document([redirect_uris])` builds the JSON to host
+  there from the same code that would have registered, so the two cannot drift.
 * **All three registration mechanisms, in the spec's priority order**: a
   pre-registered `client_id` first, then a metadata document where the server
   advertises `client_id_metadata_document_supported`, then Dynamic Client
-  Registration -- which the 2026-07-28 spec deprecates and which stays for
-  servers that offer nothing else. Nothing changes for a client that configures
-  no document. A server offering none of the three is refused before the
-  browser opens, naming `with_client_id` as the way out.
+  Registration, which the 2026-07-28 spec deprecates. Nothing changes for a
+  client that configures no document. A server offering none of the three is
+  refused before the browser opens, naming `with_client_id` as the way out.
 * **`OAuthClientConfig::with_issuer`** names the authorization server the
   configured credentials belong to. A pre-registered `client_id` meeting a
   different issuer now fails, naming both, instead of being presented to a
-  server that never issued it. It is also what the `TokenStore` entry is keyed
-  by, as the spec prescribes, so tokens from two servers never share a slot.
+  server that never issued it.
 
   **Custom `TokenStore` implementations:** the key is now
   `{issuer}|{client}|{resource}` -- the whole identity a credential belongs to
   -- rather than the resource alone, with any part the configuration does not
-  name left empty. Naming the client is what keeps two clients sharing one
-  durable store from sharing a slot, which would have the second send the
-  first's access token and offer its refresh token under the wrong id. Entries
-  written by an earlier version are not found under the new key and are left in
-  place; the affected sessions re-authorize once.
+  name left empty, so two servers (or two clients sharing one durable store)
+  never share a slot. Entries written by an earlier version are not found under
+  the new key and are left in place; the affected sessions re-authorize once.
 * **`App::with_request_state_audience`** binds MRTR `requestState` to this
-  service's identity. The sealed state already carried a binding to its request
-  and to the principal, but not to the service -- so where several share one
+  service's identity. The sealed state was bound to its request and principal
+  but not to the service, so where several share one
   `with_request_state_secret`, a state minted by one was a state the others
-  accepted. A mismatch is `InvalidParams`, like the principal guard, and the
-  check runs both ways: a state naming an audience is refused by a server that
-  configures none.
+  accepted. A mismatch is `InvalidParams`, and the check runs both ways: a
+  state naming an audience is refused by a server that configures none.
 
   **Wire:** an audience-bound state is sealed under its own version (`v2.`
   rather than `v1.`), so a binary predating the option refuses it instead of
-  decrypting it and dropping the member it does not know -- which would leave
-  the binding unenforced by exactly the instance still to be upgraded. A
-  deployment that configures no audience keeps minting `v1`; both versions
-  decode.
+  dropping the member it does not know -- which would leave the binding
+  unenforced by exactly the instance still to be upgraded. A deployment that
+  configures no audience keeps minting `v1`; both versions decode.
 * `ClientMetadata` re-exported from `neva::auth::oauth`.
 * **A stored refresh token is only offered to the authorization server that
-  minted it.** A refresh token is a bearer credential for its token endpoint,
-  and the server a flow discovers is vouched for by the resource alone -- which
-  is exactly what an attacker who controls the resource rewrites. The
-  after-restart refresh added in 0.5.2 therefore now requires
-  [`with_issuer`](https://docs.rs/neva/latest/neva/auth/oauth/struct.OAuthClientConfig.html#method.with_issuer),
+  minted it.** It is a bearer credential for its token endpoint, and the server
+  a flow discovers is vouched for by the resource alone -- exactly what an
+  attacker controlling the resource rewrites. The after-restart refresh added
+  in 0.5.2 therefore now requires
+  [`with_issuer`](https://docs.rs/neva/latest/neva/auth/oauth/struct.OAuthClientConfig.html#method.with_issuer)
   and reads the token back under it; without one the session re-authorizes
-  interactively rather than sending the token somewhere unverified. That covers
-  a migration too: pointing `with_issuer` at a new server does not carry the
-  old server's token over to it, since the configuration says where credentials
-  are going, not where the ones already stored came from. Dynamically
-  registered clients never reuse one: the next run registers a different id.
+  interactively. Pointing `with_issuer` at a new server does not carry the old
+  server's token over, and dynamically registered clients never reuse one.
 
 ### Changed
 
 #### Subscriptions
 * **`Context::resource_updated` no longer pre-checks `is_subscribed`.** It
-  publishes the notification unconditionally and lets the subscription filters
-  route it, which is what they already did. The pre-check could only ever
-  answer for the instance running the handler, so under a `NotificationBus` it
-  would skip an update a subscriber on another instance was waiting for.
-  `Context::is_subscribed` is unchanged and still answers truthfully -- it is
-  now documented as node-local, and is for skipping expensive local work rather
-  than for deciding whether to notify.
+  publishes unconditionally and lets the subscription filters route it, which
+  is what they already did. The pre-check could only answer for the instance
+  running the handler, so under a `NotificationBus` it would skip an update a
+  subscriber elsewhere was waiting for. `Context::is_subscribed` is unchanged,
+  and is now documented as node-local: use it to skip expensive local work, not
+  to decide whether to notify.
 
 #### Authorization
 * **A redirect anywhere in `127.0.0.0/8` now registers a native client.**
@@ -123,29 +97,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   declared itself a `web` client -- which an OIDC-strict authorization server
   refuses for a plain-http redirect URI. `localhost` and `[::1]` are unchanged.
 * The OAuth client's URL and query handling now goes through
-  [`url`](https://docs.rs/url), an optional dependency gated on `client-oauth`.
-  It is already compiled for every `client-*` build via `reqwest`, so it costs
-  no build time, and it catches what a hand-rolled split does not -- an
-  out-of-range port above all, which `http::Uri` reports as no port at all.
+  [`url`](https://docs.rs/url), an optional dependency gated on `client-oauth`
+  and already compiled for every `client-*` build via `reqwest`. It catches
+  what a hand-rolled split does not -- an out-of-range port above all, which
+  `http::Uri` reports as no port at all.
 
 ### Fixed
 
 #### HTTP transport and sessions
-* **`bind("::1:3000")` now gets DNS-rebinding protection.** `std` accepts an
-  unbracketed IPv6 bind string and takes the last colon as the port separator,
-  so that address really does listen on `[::1]:3000` -- but the default policy
-  read the string whole, where it parses as the *different*, non-loopback
-  address `::1:3000`. A server on loopback therefore defaulted to
-  `allow_any_origin`, with the `Origin`/`Host` checks the spec makes a MUST for
-  local servers switched off. Bind strings are now read the way `std` reads
-  them. `[::1]:3000`, `127.0.0.1:3000` and `localhost:3000` were never
-  affected.
+* **`bind("::1:3000")` now gets DNS-rebinding protection.** `std` takes the last
+  colon of an unbracketed IPv6 bind string as the port separator, so that
+  address really does listen on `[::1]:3000` -- but the default policy read the
+  string whole, where it parses as the *different*, non-loopback address
+  `::1:3000`. A server on loopback therefore defaulted to `allow_any_origin`,
+  with the `Origin`/`Host` checks the spec makes a MUST for local servers
+  switched off. Bind strings are now read the way `std` reads them;
+  `[::1]:3000`, `127.0.0.1:3000` and `localhost:3000` were never affected.
 * An `Origin` header carrying userinfo is no longer matched against the
   allowlist by the name in front of the `@`: `https://app.example.com:8443@evil.com`
-  has the host `evil.com`, not `app.example.com`. Hardening rather than a
-  reachable bypass -- a browser cannot be made to send this, and `Origin` is
-  browser-set -- but a value that only looks like an origin should not pass as
-  one.
+  has the host `evil.com`. Hardening rather than a reachable bypass -- `Origin`
+  is browser-set and a browser cannot be made to send this.
 
 ## 0.5.2
 
