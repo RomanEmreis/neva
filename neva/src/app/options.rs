@@ -172,7 +172,7 @@ pub struct McpOptions {
     /// instance's own [`Self::subscriptions`], which is all a single-instance
     /// server ever needs and costs nothing.
     #[cfg(not(feature = "legacy-spec"))]
-    notification_bus: Option<Arc<dyn crate::app::notification_bus::NotificationBus>>,
+    notification_bus: Option<Arc<dyn crate::app::notification_bus::DynNotificationBus>>,
 }
 
 impl Debug for McpOptions {
@@ -928,7 +928,7 @@ impl McpOptions {
     #[cfg(not(feature = "legacy-spec"))]
     pub(crate) fn set_notification_bus(
         &mut self,
-        bus: Arc<dyn crate::app::notification_bus::NotificationBus>,
+        bus: Arc<dyn crate::app::notification_bus::DynNotificationBus>,
     ) {
         self.notification_bus = Some(bus);
     }
@@ -938,7 +938,7 @@ impl McpOptions {
     #[cfg(not(feature = "legacy-spec"))]
     pub(crate) fn notification_bus(
         &self,
-    ) -> Option<&Arc<dyn crate::app::notification_bus::NotificationBus>> {
+    ) -> Option<&Arc<dyn crate::app::notification_bus::DynNotificationBus>> {
         self.notification_bus.as_ref()
     }
 

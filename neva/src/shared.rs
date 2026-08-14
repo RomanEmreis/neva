@@ -88,34 +88,32 @@ mod task_tracker;
 /// ```
 pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
-/// The stream returned by neva's object-safe traits -- a boxed, `Send` stream
-/// borrowing for `'a`.
+/// The boxed counterpart of [`BoxFuture`] for a sequence of values, used
+/// internally where a stream has to cross a `dyn` boundary.
 ///
-/// The counterpart of [`BoxFuture`] for traits that hand back a sequence rather
-/// than a single value, such as `NotificationBus::subscribe` (the
-/// cross-instance fan-out for subscription notifications). Owning the alias
-/// here means implementing one needs no `futures` dependency of your own.
+/// Not part of any public trait signature -- implementors of
+/// [`NotificationBus`](crate::app::notification_bus::NotificationBus) return
+/// `impl Stream` and never name this.
+#[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+pub(crate) type BoxStream<'a, T> =
+    std::pin::Pin<Box<dyn futures_util::Stream<Item = T> + Send + 'a>>;
+
+/// The asynchronous sequence trait, re-exported so implementing a neva trait
+/// that returns one needs no `futures` dependency of your own -- and no version
+/// of it kept in lockstep with neva's.
 ///
-/// It is a plain alias for `Pin<Box<dyn Stream<Item = T> + Send + 'a>>`
-/// (identical to `futures_util::stream::BoxStream`).
+/// This is `futures_core::Stream`, the same trait `futures`, `tokio-stream` and
+/// `async-stream` all speak, so a stream built with any of them satisfies it.
 ///
 /// # Example
 /// ```
-/// use neva::shared::BoxStream;
+/// use neva::shared::Stream;
 ///
-/// trait Ticker {
-///     fn ticks(&self) -> BoxStream<'static, u64>;
-/// }
-///
-/// struct Once;
-///
-/// impl Ticker for Once {
-///     fn ticks(&self) -> BoxStream<'static, u64> {
-///         Box::pin(futures_util::stream::once(async { 1 }))
-///     }
+/// fn count() -> impl Stream<Item = u64> + Send {
+///     futures_util::stream::iter(0..3)
 /// }
 /// ```
-pub type BoxStream<'a, T> = std::pin::Pin<Box<dyn futures_util::Stream<Item = T> + Send + 'a>>;
+pub use futures_util::Stream;
 
 #[inline]
 #[cfg(any(feature = "server", feature = "client"))]

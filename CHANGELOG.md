@@ -28,6 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   goes through the same `subscribe` stream, which is what keeps local and
   remote fan-out on one code path.
 
+  Implementing one is plain `async fn publish(&self, BusNotification)` plus a
+  `subscribe` returning any `Stream` -- no `Pin<Box<..>>` anywhere in the
+  signature, and no `futures` dependency of your own
+  ([`neva::shared::Stream`](https://docs.rs/neva/latest/neva/shared/trait.Stream.html)
+  re-exports the trait). The payload is a named
+  [`BusNotification`](https://docs.rs/neva/latest/neva/struct.BusNotification.html)
+  that serializes as the notification body it describes, so a bus shipping JSON
+  hands it to `serde_json` in both directions instead of inventing an envelope.
+
   **Nothing changes without one.** There is no bus by default and a
   notification goes straight to this instance's own subscribers -- no channel,
   no allocation, no task. A multi-instance stateless deployment now configures

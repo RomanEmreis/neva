@@ -346,8 +346,9 @@ impl App {
                         biased;
                         _ = token.cancelled() => break,
                         next = stream.next() => match next {
-                            Some((method, params)) => {
-                                subscriptions.broadcast(&method, params.as_ref());
+                            Some(notification) => {
+                                subscriptions
+                                    .broadcast(notification.method(), notification.params());
                             }
                             // A bus that ends its stream stops delivery for
                             // good; an implementation able to reconnect is
@@ -616,15 +617,13 @@ impl App {
     /// # Example
     /// ```no_run
     /// # #[cfg(not(feature = "legacy-spec"))] {
-    /// # use neva::app::notification_bus::NotificationBus;
-    /// # use neva::shared::{BoxFuture, BoxStream};
+    /// # use neva::app::notification_bus::{BusNotification, NotificationBus};
+    /// # use neva::shared::Stream;
     /// # struct RedisBus;
     /// # impl NotificationBus for RedisBus {
-    /// #     fn publish<'a>(&'a self, _: &'a str, _: Option<&'a serde_json::Value>) -> BoxFuture<'a, ()> {
-    /// #         Box::pin(async {})
-    /// #     }
-    /// #     fn subscribe(&self) -> BoxStream<'static, (String, Option<serde_json::Value>)> {
-    /// #         Box::pin(futures_util::stream::empty())
+    /// #     async fn publish(&self, _: BusNotification) {}
+    /// #     fn subscribe(&self) -> impl Stream<Item = BusNotification> + Send + 'static {
+    /// #         futures_util::stream::empty()
     /// #     }
     /// # }
     /// use neva::App;

@@ -1907,7 +1907,15 @@ impl Context {
             }
 
             match self.options.notification_bus() {
-                Some(bus) => bus.publish(method, params.as_ref()).await,
+                // `params` is moved rather than cloned here, and `method` is a
+                // `&'static str` constant at every call site, so a bus costs
+                // one small allocation on top of its own round trip.
+                Some(bus) => {
+                    bus.publish(crate::app::notification_bus::BusNotification::new(
+                        method, params,
+                    ))
+                    .await
+                }
                 None => {
                     self.options
                         .subscriptions()

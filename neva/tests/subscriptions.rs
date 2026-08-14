@@ -11,7 +11,9 @@
 ))]
 
 use neva::App;
+use neva::shared::Stream;
 use neva::types::{SUBSCRIPTION_ID_KEY, Tool};
+use neva::{BusNotification, NotificationBus};
 use std::time::Duration;
 
 const RESOURCE: &str = "res://watched";
@@ -675,36 +677,39 @@ async fn without_a_bus_a_notification_stays_on_its_own_instance() {
 /// one process-wide channel every instance publishes to and reads back from,
 /// its own messages included -- which is what the trait's no-echo-suppression
 /// rule asks for.
+///
+/// It ships the notification as JSON in both directions, the way a real one
+/// would, so the serde round trip `BusNotification` exists for is on the path
+/// this test exercises rather than only in its own unit tests.
 #[derive(Clone)]
-struct BroadcastBus(tokio::sync::broadcast::Sender<(String, Option<serde_json::Value>)>);
+struct BroadcastBus(tokio::sync::broadcast::Sender<String>);
 
-impl neva::NotificationBus for BroadcastBus {
-    fn publish<'a>(
-        &'a self,
-        method: &'a str,
-        params: Option<&'a serde_json::Value>,
-    ) -> neva::shared::BoxFuture<'a, ()> {
-        let msg = (method.to_owned(), params.cloned());
-        Box::pin(async move {
-            // No receiver yet simply means no instance is draining, which is
-            // not an error worth failing the request that produced it.
-            let _ = self.0.send(msg);
-        })
+impl NotificationBus for BroadcastBus {
+    async fn publish(&self, notification: BusNotification) {
+        let Ok(wire) = serde_json::to_string(&notification) else {
+            return;
+        };
+        // No receiver yet simply means no instance is draining, which is not
+        // an error worth failing the request that produced it.
+        let _ = self.0.send(wire);
     }
 
-    fn subscribe(&self) -> neva::shared::BoxStream<'static, (String, Option<serde_json::Value>)> {
+    fn subscribe(&self) -> impl Stream<Item = BusNotification> + Send + 'static {
         let rx = self.0.subscribe();
-        Box::pin(futures_util::stream::unfold(rx, |mut rx| async move {
+        futures_util::stream::unfold(rx, |mut rx| async move {
             loop {
                 match rx.recv().await {
-                    Ok(msg) => return Some((msg, rx)),
+                    Ok(wire) => match serde_json::from_str(&wire) {
+                        Ok(notification) => return Some((notification, rx)),
+                        Err(_) => continue,
+                    },
                     // At-most-once: a lagging drain skips what it missed rather
                     // than ending delivery for good.
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(_) => return None,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
                 }
             }
-        }))
+        })
     }
 }
 
