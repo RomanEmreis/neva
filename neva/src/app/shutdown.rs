@@ -1,4 +1,4 @@
-//! Programmatic shutdown for [`App`](crate::App).
+//! Programmatic shutdown for [`App`].
 //!
 //! A server otherwise stops only on an OS signal (SIGINT / SIGTERM and the
 //! Windows equivalents). That is the right default for a process whose whole
@@ -10,15 +10,38 @@
 //! handler rather than replacing it -- whichever fires first wins -- so a
 //! server that takes a handle still stops on Ctrl+C.
 
+use super::App;
+use crate::shared;
+#[cfg(not(feature = "legacy-spec"))]
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-/// Stops a running [`App`](crate::App) without an OS signal.
+/// How long shutdown waits for live `subscriptions/listen` streams to answer
+/// before the transport goes down regardless.
+///
+/// Only ever paid by a server that has a subscription open. It is a ceiling,
+/// not a delay: the wait ends as soon as the last result is queued, which is
+/// immediate in the ordinary case. Two seconds sits well inside the ten Volga
+/// gives an in-flight connection during its own graceful shutdown, so the
+/// response body a subscription is written onto is still open when the result
+/// arrives.
+#[cfg(not(feature = "legacy-spec"))]
+pub(super) const DEFAULT_SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How often the drain re-checks whether the subscriptions have finished.
+///
+/// Short enough not to add a visible tail to shutdown, long enough that the
+/// poll is not a spin.
+#[cfg(not(feature = "legacy-spec"))]
+const DRAIN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// Stops a running [`App`] without an OS signal.
 ///
 /// Clones share one signal: any clone calling [`shutdown`](Self::shutdown)
 /// stops the server the handle came from.
 ///
 /// Shutdown is *requested* by this handle, not completed by it. Await
-/// [`App::run`](crate::App::run) to know the server is actually finished.
+/// [`App::run`] to know the server is actually finished.
 #[cfg_attr(
     not(feature = "legacy-spec"),
     doc = "
@@ -137,6 +160,84 @@ impl From<CancellationToken> for ShutdownHandle {
     #[inline]
     fn from(token: CancellationToken) -> Self {
         Self::from_token(token)
+    }
+}
+
+impl App {
+    /// Turns one shutdown request into the ordered teardown the spec asks for:
+    /// end the subscriptions, let their results out, then stop the transport.
+    ///
+    /// The spec says a server ending a subscription on its own initiative
+    /// **SHOULD** answer the `subscriptions/listen` request with its empty
+    /// result before closing the stream. That result is produced by a handler
+    /// and travels the same channel as everything else, so it only lands if
+    /// the writers are still reading when it is written -- which is exactly
+    /// what one shared token made impossible.
+    ///
+    /// The wait is skipped when nothing was subscribed, so a server that never
+    /// opens a subscription shuts down as immediately as it always did.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(super) fn relay_shutdown(
+        shutdown: CancellationToken,
+        subscriptions_token: CancellationToken,
+        transport_token: CancellationToken,
+        subscriptions: crate::app::subscriptions::SubscriptionRegistry,
+        in_flight: Arc<std::sync::atomic::AtomicUsize>,
+        drain: std::time::Duration,
+    ) {
+        tokio::spawn(async move {
+            tokio::select! {
+                // The transport going down on its own (a bind failure, a dead
+                // engine) ends this task too -- otherwise it would sit on a
+                // signal that is never coming.
+                _ = transport_token.cancelled() => return,
+                _ = shutdown.cancelled() => {}
+            }
+
+            // Phase 1: end the subscriptions. Each listen handler wakes,
+            // deregisters, drains what its stream still owes and answers.
+            let owed = !subscriptions.is_empty();
+            subscriptions_token.cancel();
+
+            // Phase 2: wait for those answers to reach the outbound channel.
+            // `is_empty` says every handler deregistered; the in-flight count
+            // says every one of them also got its response as far as the
+            // sender, since the terminal middleware awaits that send before it
+            // returns. Both, because either alone is reached too early.
+            if owed {
+                let _ = tokio::time::timeout(drain, async {
+                    while !subscriptions.is_empty()
+                        || in_flight.load(std::sync::atomic::Ordering::Acquire) > 0
+                    {
+                        tokio::time::sleep(DRAIN_POLL_INTERVAL).await;
+                    }
+                })
+                .await;
+            }
+
+            // Phase 3: stop the transport. Its writers drain what is queued
+            // before they exit, which is what carries the results written in
+            // phase 2 onto the wire.
+            transport_token.cancel();
+        });
+    }
+
+    /// The legacy profile has no `subscriptions/listen` and so nothing to
+    /// drain: shutdown reaches the transport directly.
+    #[cfg(feature = "legacy-spec")]
+    pub(super) fn relay_shutdown(shutdown: CancellationToken, transport_token: CancellationToken) {
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = transport_token.cancelled() => return,
+                _ = shutdown.cancelled() => {}
+            }
+            transport_token.cancel();
+        });
+    }
+
+    #[inline]
+    pub(super) fn wait_for_shutdown_signal(&mut self, token: CancellationToken) {
+        shared::wait_for_shutdown_signal(token);
     }
 }
 
