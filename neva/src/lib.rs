@@ -81,7 +81,7 @@ pub use app::mrtr_store::{InMemoryStateStore, RequestStateStore};
 #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
 pub use app::notification_bus::{BusNotification, NotificationBus};
 #[cfg(feature = "server")]
-pub use app::{App, context::Context};
+pub use app::{App, ShutdownHandle, context::Context};
 #[cfg(feature = "client")]
 pub use client::Client;
 

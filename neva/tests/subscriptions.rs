@@ -476,6 +476,79 @@ async fn disconnecting_ends_the_subscription_abruptly() {
     handle.abort();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn shutting_down_ends_live_subscriptions_gracefully() {
+    // The spec: a server ending a subscription on its own initiative SHOULD
+    // answer the `subscriptions/listen` request with its empty result before
+    // closing the stream, so the client can tell an orderly end from a dropped
+    // connection. Shutdown is the canonical case, and the whole point of the
+    // drain phase is that this result gets out ahead of the transport.
+    use neva::Client;
+    use neva::client::SubscriptionEnd;
+
+    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let app = App::new().with_options(|opt| {
+        opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
+            .with_tools(|t| t.with_list_changed())
+            .with_resources(|r| r.with_list_changed().with_subscribe())
+    });
+    let (app, shutdown) = app.with_shutdown();
+
+    let handle = tokio::spawn(async move { app.run().await });
+    await_reachable(&addr).await;
+
+    let mut client = Client::new().with_options(|opt| {
+        opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
+            .with_timeout(Duration::from_secs(5))
+    });
+    client.connect().await.expect("connect");
+
+    let subscription = client
+        .listen(neva::types::SubscriptionFilter::new().with_resource("res://config"))
+        .await
+        .expect("listen");
+
+    shutdown.shutdown();
+
+    let ended = tokio::time::timeout(Duration::from_secs(10), subscription.closed())
+        .await
+        .expect("closed() must not hang once the server is shutting down");
+    assert!(
+        matches!(ended, SubscriptionEnd::Graceful(_)),
+        "a subscription the server ends on shutdown must be closed gracefully, got {ended:?}"
+    );
+
+    // The handle is the whole point of it being testable: the server task ends
+    // on its own, so nothing here has to `abort()` past the graceful path.
+    tokio::time::timeout(Duration::from_secs(10), handle)
+        .await
+        .expect("the server must stop after a shutdown request")
+        .expect("the server task panicked");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shutting_down_without_subscriptions_does_not_wait() {
+    // The drain is owed only to live subscriptions. A server that never opened
+    // one must shut down as immediately as it did before the drain existed --
+    // otherwise every server pays a subscription feature it does not use.
+    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let app = App::new()
+        .with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")))
+        // Long enough that waiting it out would be unmistakable.
+        .with_shutdown_drain(Duration::from_secs(30));
+    let (app, shutdown) = app.with_shutdown();
+
+    let handle = tokio::spawn(async move { app.run().await });
+    await_reachable(&addr).await;
+
+    shutdown.shutdown();
+
+    tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("a server with no subscriptions must not sit out the drain window")
+        .expect("the server task panicked");
+}
+
 /// Asks the server whether anything is currently listening for `res://config`.
 async fn watched(client: &mut neva::Client) -> Option<String> {
     let resp = client.call_tool("watched", ()).await.expect("watched call");

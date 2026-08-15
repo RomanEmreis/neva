@@ -8,6 +8,8 @@ use dashmap::DashMap;
 #[cfg(feature = "legacy-spec")]
 use dashmap::DashSet;
 use std::fmt::{Debug, Formatter};
+#[cfg(not(feature = "legacy-spec"))]
+use std::sync::atomic::AtomicUsize;
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
@@ -77,8 +79,23 @@ pub struct McpOptions {
     /// Cancelled when the server shuts down, so long-lived requests
     /// (`subscriptions/listen`) can close gracefully instead of being dropped
     /// mid-stream.
+    ///
+    /// Deliberately *not* the transport's token. Both used to be one, and a
+    /// subscription's graceful-close result then raced a writer that broke out
+    /// of its loop on the very same signal -- see
+    /// [`App::run`](crate::App::run) for the two-phase shutdown that replaced
+    /// it.
     #[cfg(not(feature = "legacy-spec"))]
     pub(crate) shutdown: CancellationToken,
+
+    /// Messages whose middleware pipeline has started and not yet finished.
+    ///
+    /// The count drops only after the terminal middleware has handed the
+    /// response to the transport sender, which is what makes "zero" mean
+    /// "everything produced so far is queued" -- the condition the shutdown
+    /// drain waits on.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(crate) in_flight: Arc<AtomicUsize>,
 
     /// An ordered list of middlewares
     pub(super) middlewares: Option<Middlewares>,
@@ -224,6 +241,8 @@ impl Default for McpOptions {
             subscriptions: Default::default(),
             #[cfg(not(feature = "legacy-spec"))]
             shutdown: CancellationToken::new(),
+            #[cfg(not(feature = "legacy-spec"))]
+            in_flight: Default::default(),
             middlewares: None,
             #[cfg(all(feature = "tracing", feature = "legacy-spec"))]
             log_level: Default::default(),
@@ -723,12 +742,20 @@ impl McpOptions {
         self.shutdown.clone()
     }
 
-    /// Points the server's shutdown token at the transport's, so long-lived
-    /// requests observe the same signal the dispatch loop does.
+    /// Points long-lived requests at the token the shutdown relay ends them
+    /// with -- the first phase of shutdown, ahead of the transport teardown.
     #[cfg(not(feature = "legacy-spec"))]
     #[inline]
     pub(crate) fn set_shutdown_token(&mut self, token: CancellationToken) {
         self.shutdown = token;
+    }
+
+    /// Returns the counter of messages currently inside the middleware
+    /// pipeline. See [`McpOptions::in_flight`].
+    #[cfg(not(feature = "legacy-spec"))]
+    #[inline]
+    pub(crate) fn in_flight(&self) -> Arc<AtomicUsize> {
+        self.in_flight.clone()
     }
 
     /// Returns [`ServerTasksCapability`] if configured.
