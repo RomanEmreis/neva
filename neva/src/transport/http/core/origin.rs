@@ -275,6 +275,17 @@ fn host_of(value: &str) -> &str {
 /// address `::1` on port 3000 (loopback), while `host_of` leaves it whole and
 /// it parses as the *different*, non-loopback address `::1:3000`. The server
 /// bound to loopback and the protection this module exists for was off.
+///
+/// What this has to agree with is the engine, since the engine is what calls
+/// `bind`. Every engine neva ships follows the `std` grammar, so `std` is the
+/// thing to read the string like; an engine that read it differently would put
+/// the server on an interface this function did not predict.
+///
+/// One case it answers conservatively: a *name* that resolves to loopback
+/// (`myapp.test` in `/etc/hosts`) is not recognised as one, because deciding
+/// that needs a resolver and this runs while the server is being built. Such a
+/// server gets [`OriginPolicy::Any`] and states its hosts with
+/// [`HttpServer::with_allowed_origins`](crate::transport::http::HttpServer::with_allowed_origins).
 fn binds_to_loopback(addr: &str) -> bool {
     // The bracketed forms `std` parses outright: `127.0.0.1:3000`, `[::1]:3000`.
     if let Ok(socket) = addr.parse::<std::net::SocketAddr>() {
@@ -592,13 +603,20 @@ mod tests {
             OriginPolicy::Loopback
         ));
 
-        // And the reverse still holds: `::` is the unspecified address, which
-        // `std` reads out of `bind("::1")` as `[::]:1` -- every interface.
-        assert!(matches!(OriginPolicy::for_addr("::1"), OriginPolicy::Any));
+        // `[::]` is the unspecified address -- every interface, and not a
+        // case for the loopback policy.
         assert!(matches!(
             OriginPolicy::for_addr("[::]:3000"),
             OriginPolicy::Any
         ));
+
+        // `::1` with no port is not an address at all: the last colon is the
+        // port separator, which leaves the host `:`, and nothing resolves
+        // that. The server does not start, so the permissive answer here is
+        // one nothing ever reads -- it just must not be the one that claims
+        // loopback.
+        assert!("::1".to_socket_addrs().is_err());
+        assert!(matches!(OriginPolicy::for_addr("::1"), OriginPolicy::Any));
     }
 
     #[test]

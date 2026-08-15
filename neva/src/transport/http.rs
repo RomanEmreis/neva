@@ -474,7 +474,28 @@ impl<C, E> HttpServer<C, E>
 where
     E: HttpEngine,
 {
-    /// Binds HTTP serve to address and port
+    /// Binds this server to an address and port.
+    ///
+    /// The address takes the grammar `TcpListener::bind` takes: an IPv4 or
+    /// IPv6 socket address literal, or a host name and a port. A name is
+    /// resolved when the server starts, and an address that cannot be
+    /// understood or resolved fails the start rather than being replaced by
+    /// a different one.
+    ///
+    /// Binding to loopback also turns on `Origin` / `Host` checking, since
+    /// that is the case the spec makes it a MUST for -- see
+    /// [`with_allowed_origins`](Self::with_allowed_origins) for the rest.
+    /// A name that happens to resolve to loopback is not read as loopback
+    /// here: that would take a resolver, and this is decided before the
+    /// server starts. Write `127.0.0.1` or `localhost` to get the check.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use neva::App;
+    ///
+    /// let app = App::new()
+    ///     .with_options(|opt| opt.with_http(|http| http.bind("[::1]:3000")));
+    /// ```
     pub fn bind(mut self, addr: impl AsRef<str>) -> Self {
         self.url.addr = addr.as_ref().to_owned();
         self
@@ -831,7 +852,19 @@ impl HttpServer<server::DefaultClaims, VolgaEngine> {
 
 #[cfg(feature = "http-client")]
 impl HttpClient {
-    /// Binds HTTP serve to address and port    
+    /// Points this client at the server's address and port.
+    ///
+    /// This is the authority half of the URL the client calls, not a socket
+    /// it listens on, so it is written the way a URL writes one: an IPv6
+    /// literal is bracketed (`[::1]:3000`).
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use neva::Client;
+    ///
+    /// let client = Client::new()
+    ///     .with_options(|opt| opt.with_http(|http| http.bind("127.0.0.1:3000")));
+    /// ```
     pub fn bind(mut self, addr: impl AsRef<str>) -> Self {
         self.url.addr = addr.as_ref().to_owned();
         self
@@ -1021,8 +1054,17 @@ where
                 ),
                 async {
                     if let Err(_e) = engine.run(ctx, engine_token.clone()).await {
+                        // The engine never starting is the whole server not
+                        // starting -- most often the bind address, which the
+                        // engine reports rather than quietly listening
+                        // somewhere else. Said on stderr when there is no
+                        // subscriber to say it to, as `App::run_blocking`
+                        // does for a runtime that fails to build: a server
+                        // that exits without a word looks like a hang.
                         #[cfg(feature = "tracing")]
                         tracing::error!(logger = "neva", "HTTP engine error: {:?}", _e);
+                        #[cfg(not(feature = "tracing"))]
+                        eprintln!("HTTP engine error: {_e:?}");
                         engine_token.cancel();
                     }
                 }
