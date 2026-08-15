@@ -88,3 +88,25 @@ impl Client {
         self.subscribe(crate::types::task::commands::STATUS, handler);
     }
 }
+
+impl Client {
+    /// Maps the `handler` to a specific `event`
+    pub fn subscribe<E, F, R>(&mut self, event: E, handler: F)
+    where
+        E: Into<String>,
+        F: Fn(Notification) -> R + Clone + Send + Sync + 'static,
+        R: Future<Output = ()> + Send,
+    {
+        self.options
+            .notification_handler
+            .get_or_insert_default()
+            .subscribe(event, handler);
+    }
+
+    /// Unsubscribe a handler from the `event`
+    pub fn unsubscribe(&mut self, event: impl AsRef<str>) {
+        if let Some(notification_handler) = &self.options.notification_handler {
+            notification_handler.unsubscribe(event);
+        }
+    }
+}
