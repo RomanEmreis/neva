@@ -517,12 +517,33 @@ answered, bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
                 _ = cancellation_token.cancelled() => break,
                 msg = receiver.recv() => {
                     match msg {
-                        Ok(msg) => match msg {
-                            Message::Batch(batch) => {
-                                tokio::spawn(Self::execute_batch(batch, runtime.clone()));
-                            },
-                            msg => {
-                                tokio::spawn(Self::execute(msg, runtime.clone()));
+                        Ok(msg) => {
+                            // Taken here, on the accepting task, and not inside
+                            // the spawned future: `tokio::spawn` only queues
+                            // that future, so a guard created in it does not
+                            // exist until the runtime first polls it. Shutdown
+                            // landing in between would see no listen owed and
+                            // skip the drain for one it had already accepted.
+                            #[cfg(not(feature = "legacy-spec"))]
+                            let arriving = dispatch::opens_subscription(&msg)
+                                .then(|| runtime.options().subscriptions().arriving());
+
+                            let runtime = runtime.clone();
+                            match msg {
+                                Message::Batch(batch) => {
+                                    tokio::spawn(async move {
+                                        #[cfg(not(feature = "legacy-spec"))]
+                                        let _arriving = arriving;
+                                        Self::execute_batch(batch, runtime).await;
+                                    });
+                                },
+                                msg => {
+                                    tokio::spawn(async move {
+                                        #[cfg(not(feature = "legacy-spec"))]
+                                        let _arriving = arriving;
+                                        Self::execute(msg, runtime).await;
+                                    });
+                                }
                             }
                         },
                         Err(_err) => {

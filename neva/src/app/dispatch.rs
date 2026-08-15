@@ -38,11 +38,6 @@ impl App {
         // response that is queued from one that is still being produced.
         #[cfg(not(feature = "legacy-spec"))]
         let _in_flight = InFlightGuard::enter(runtime.in_flight());
-        // A listen counts against shutdown from here -- the earliest point its
-        // method is known -- and not from `register`, which it only reaches
-        // after awaiting its response sink. See `SubscriptionRegistry::arriving`.
-        #[cfg(not(feature = "legacy-spec"))]
-        let _arriving = is_listen(&msg).then(|| runtime.options().subscriptions().arriving());
         // Closing the request notification sink here -- once the *whole*
         // middleware pipeline has run -- is what lets a request-scoped SSE POST
         // response know no more notifications are coming, so logs emitted by
@@ -697,16 +692,28 @@ fn create_tracing_span(
     }
 }
 
-/// Whether `msg` is a `subscriptions/listen` request.
+/// Whether `msg` would open a subscription -- a `subscriptions/listen`
+/// request, alone or inside a batch.
 ///
-/// Batches are not checked: a batched listen is refused before it reaches a
-/// handler (a batch slot has no stream to hold the subscription open), so none
-/// can be in flight to wait for.
+/// Batches count. Nothing on the server refuses a batched listen: it reaches
+/// `App::subscriptions_listen` like any other request, and the HTTP transport
+/// holds an acknowledgment permit for it (`is_subscription_stream` there makes
+/// the same batch-aware check), so it can register and is owed the same
+/// graceful close as any other. Reading only the top-level request would leave
+/// exactly that case undrained.
 #[cfg(not(feature = "legacy-spec"))]
-#[inline]
-fn is_listen(msg: &Message) -> bool {
-    matches!(msg, Message::Request(req)
-        if req.method == crate::types::subscription::commands::LISTEN)
+pub(super) fn opens_subscription(msg: &Message) -> bool {
+    fn is_listen(req: &crate::types::Request) -> bool {
+        req.method == crate::types::subscription::commands::LISTEN
+    }
+
+    match msg {
+        Message::Request(req) => is_listen(req),
+        Message::Batch(batch) => batch
+            .iter()
+            .any(|env| matches!(env, MessageEnvelope::Request(req) if is_listen(req))),
+        _ => false,
+    }
 }
 
 /// Counts one message as inside the middleware pipeline for as long as it is
@@ -858,6 +865,50 @@ async fn param_header_error(
     }
 
     None
+}
+
+#[cfg(all(test, not(feature = "legacy-spec")))]
+mod opens_subscription_tests {
+    use super::opens_subscription;
+    use crate::types::{Message, MessageBatch, MessageEnvelope, Request, RequestId};
+
+    fn req(method: &str, id: i64) -> Request {
+        Request::new(Some(RequestId::Number(id)), method, None::<()>)
+    }
+
+    fn listen(id: i64) -> Request {
+        req(crate::types::subscription::commands::LISTEN, id)
+    }
+
+    #[test]
+    fn a_bare_listen_opens_one() {
+        assert!(opens_subscription(&Message::Request(listen(1))));
+        assert!(!opens_subscription(&Message::Request(req("tools/call", 1))));
+    }
+
+    /// Nothing on the server refuses a batched listen, and the HTTP transport
+    /// holds an acknowledgment permit for one, so it registers like any other
+    /// and is owed the same graceful close. Reading only the top-level request
+    /// left exactly that case undrained on shutdown.
+    #[test]
+    fn a_listen_buried_in_a_batch_opens_one_too() {
+        let batch = MessageBatch::new(vec![
+            MessageEnvelope::Request(req("tools/call", 1)),
+            MessageEnvelope::Request(listen(2)),
+        ])
+        .expect("non-empty batch");
+        assert!(opens_subscription(&Message::Batch(batch)));
+    }
+
+    #[test]
+    fn a_batch_without_a_listen_opens_nothing() {
+        let batch = MessageBatch::new(vec![
+            MessageEnvelope::Request(req("tools/call", 1)),
+            MessageEnvelope::Request(req("tools/list", 2)),
+        ])
+        .expect("non-empty batch");
+        assert!(!opens_subscription(&Message::Batch(batch)));
+    }
 }
 
 #[cfg(test)]
