@@ -131,7 +131,7 @@ impl shared::TaskApi for Client {
             id: id.into(),
             input_responses: responses,
         };
-        
+
         self.command(crate::types::task::commands::UPDATE, Some(params))
             .await
             .map(|_| ())
