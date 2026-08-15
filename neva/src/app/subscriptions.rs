@@ -76,6 +76,28 @@ struct Subscription {
 pub(crate) struct SubscriptionRegistry {
     entries: Arc<DashMap<Key, Subscription>>,
     next_key: Arc<AtomicU64>,
+
+    /// Listen requests that have been dispatched but have not registered yet.
+    ///
+    /// [`Context::listen`](crate::Context) awaits its response sink before it
+    /// can register, so between those two points a subscription exists as far
+    /// as the client is concerned while [`Self::is_empty`] still answers
+    /// `true`. Shutdown reads this alongside the entries: deciding on the
+    /// entries alone let a listen in exactly that window be told the
+    /// subscription token was cancelled and then find the transport already
+    /// gone -- an abrupt close, which is the thing the drain exists to prevent.
+    arriving: Arc<AtomicU64>,
+}
+
+/// Counts one dispatched `subscriptions/listen` as arriving until its handler
+/// is done, whether or not it got as far as registering.
+#[derive(Debug)]
+pub(crate) struct ArrivingGuard(Arc<AtomicU64>);
+
+impl Drop for ArrivingGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Removes a subscription from the registry when the `subscriptions/listen`
@@ -182,14 +204,23 @@ impl SubscriptionRegistry {
         found
     }
 
-    /// Returns whether no subscription is live.
+    /// Returns whether no subscription is live *and* none is on its way in.
     ///
     /// Read twice on the shutdown path: once to decide whether a drain is owed
     /// at all -- a server that never opened a subscription must not pay for
     /// one -- and then repeatedly, to learn when every listen handler has woken
     /// and deregistered.
+    ///
+    /// Both halves matter for the first read. See [`Self::arriving`].
     pub(crate) fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.is_empty() && self.arriving.load(Ordering::Acquire) == 0
+    }
+
+    /// Counts a dispatched listen request as arriving until the returned guard
+    /// drops, closing the window between dispatch and [`Self::register`].
+    pub(crate) fn arriving(&self) -> ArrivingGuard {
+        self.arriving.fetch_add(1, Ordering::AcqRel);
+        ArrivingGuard(self.arriving.clone())
     }
 
     /// Returns whether any live subscription is watching `uri`.
@@ -270,6 +301,44 @@ mod tests {
     use super::*;
     use crate::types::{prompt, resource, subscription::SUBSCRIPTION_ID_KEY, tool};
     use tokio::sync::mpsc::channel;
+
+    /// A listen that has been dispatched but has not registered yet still counts
+    /// against shutdown. Reading the entries alone, the shutdown relay decided
+    /// no drain was owed, cancelled the transport, and left that request unable
+    /// to deliver the graceful close it was about to produce.
+    #[test]
+    fn a_listen_that_has_not_registered_yet_still_counts() {
+        let registry = SubscriptionRegistry::default();
+        assert!(registry.is_empty(), "nothing dispatched yet");
+
+        let arriving = registry.arriving();
+        assert!(
+            !registry.is_empty(),
+            "a dispatched listen counts before it reaches `register`"
+        );
+
+        drop(arriving);
+        assert!(
+            registry.is_empty(),
+            "and stops counting once its handler is done"
+        );
+    }
+
+    #[test]
+    fn arriving_listens_are_counted_not_flagged() {
+        let registry = SubscriptionRegistry::default();
+        let first = registry.arriving();
+        let second = registry.arriving();
+
+        drop(first);
+        assert!(
+            !registry.is_empty(),
+            "one of two concurrent listens finishing must not clear the other"
+        );
+
+        drop(second);
+        assert!(registry.is_empty());
+    }
 
     async fn registry_with(
         id: RequestId,

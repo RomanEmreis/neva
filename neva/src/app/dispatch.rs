@@ -38,6 +38,11 @@ impl App {
         // response that is queued from one that is still being produced.
         #[cfg(not(feature = "legacy-spec"))]
         let _in_flight = InFlightGuard::enter(runtime.in_flight());
+        // A listen counts against shutdown from here -- the earliest point its
+        // method is known -- and not from `register`, which it only reaches
+        // after awaiting its response sink. See `SubscriptionRegistry::arriving`.
+        #[cfg(not(feature = "legacy-spec"))]
+        let _arriving = is_listen(&msg).then(|| runtime.options().subscriptions().arriving());
         // Closing the request notification sink here -- once the *whole*
         // middleware pipeline has run -- is what lets a request-scoped SSE POST
         // response know no more notifications are coming, so logs emitted by
@@ -690,6 +695,18 @@ fn create_tracing_span(
         }
         (None, None) => tracing::error_span!("request"),
     }
+}
+
+/// Whether `msg` is a `subscriptions/listen` request.
+///
+/// Batches are not checked: a batched listen is refused before it reaches a
+/// handler (a batch slot has no stream to hold the subscription open), so none
+/// can be in flight to wait for.
+#[cfg(not(feature = "legacy-spec"))]
+#[inline]
+fn is_listen(msg: &Message) -> bool {
+    matches!(msg, Message::Request(req)
+        if req.method == crate::types::subscription::commands::LISTEN)
 }
 
 /// Counts one message as inside the middleware pipeline for as long as it is
