@@ -62,7 +62,7 @@ pub(super) fn build_post(
     if let Some(bearer) = bearer {
         resp = resp.bearer_auth(bearer)
     }
-    
+
     resp
 }
 

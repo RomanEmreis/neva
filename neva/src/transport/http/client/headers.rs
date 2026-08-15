@@ -87,7 +87,7 @@ pub(super) fn param_headers(
     let Some(headers) = entry.usable() else {
         return Vec::new();
     };
-    
+
     let args = params.get("arguments").cloned().unwrap_or_default();
     crate::shared::param_headers::extract(headers, &args)
 }
