@@ -417,6 +417,13 @@ impl ServerRuntime {
         self.sender.clone()
     }
 
+    /// Provides the counter of messages currently inside the middleware
+    /// pipeline, which the shutdown drain waits on.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(crate) fn in_flight(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        self.options.in_flight()
+    }
+
     /// Returns a clone of this runtime with its sender replaced by `sender`.
     ///
     /// Used by `execute_batch` to give each batch request an intercepted sender
@@ -1945,14 +1952,15 @@ impl Context {
     /// answers the long-lived `subscriptions/listen` request with its
     /// graceful-close result.
     ///
-    /// On the shutdown path that answer is **best-effort**: both transports
-    /// break out of their writer loops on the same token (`biased` selects in
-    /// `http::core::dispatch` and `stdio`), so the result races a channel that
-    /// may already have stopped being read. The branch is still what stops the
-    /// handler from outliving the runtime, and a client that sees the stream
-    /// close without a result treats it as an abrupt end -- which is what the
-    /// spec prescribes, and subscriptions are not resumable anyway. Delivering
-    /// it reliably needs a drain phase ahead of the transport teardown.
+    /// On the shutdown path the answer is delivered, not merely attempted: the
+    /// signal ends subscriptions one phase ahead of the transport, waits for
+    /// the results they produce to reach the outbound channel, and only then
+    /// tears the writers down -- and the writers drain what is queued before
+    /// they exit. See [`App::run`](crate::App::run) and
+    /// [`App::with_shutdown_drain`](crate::App::with_shutdown_drain), which
+    /// caps that wait; a server whose subscriptions cannot flush inside it
+    /// still closes abruptly, which is what the spec tells a client to treat
+    /// as a reason to reconnect.
     pub(crate) async fn listen(
         &self,
         id: RequestId,
@@ -1991,8 +1999,9 @@ impl Context {
 
         // Whichever comes first: the client cancelled this subscription, the
         // stream went away under us (an HTTP client that closed the response
-        // body), or the server is shutting down (see the best-effort caveat
-        // above).
+        // body), or the server is shutting down. The shutdown token is the
+        // subscriptions' own, cancelled a phase before the transport's, which
+        // is what leaves room for the result below to be written.
         let shutdown = self.options.shutdown_token();
         tokio::select! {
             _ = token.cancelled() => {},

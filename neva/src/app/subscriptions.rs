@@ -182,6 +182,16 @@ impl SubscriptionRegistry {
         found
     }
 
+    /// Returns whether no subscription is live.
+    ///
+    /// Read twice on the shutdown path: once to decide whether a drain is owed
+    /// at all -- a server that never opened a subscription must not pay for
+    /// one -- and then repeatedly, to learn when every listen handler has woken
+    /// and deregistered.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     /// Returns whether any live subscription is watching `uri`.
     pub(crate) fn is_resource_subscribed(&self, uri: &Uri) -> bool {
         self.entries

@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.5.4
+
+### Added
+
+#### Shutdown
+* **`App::with_shutdown()` / `App::with_shutdown_signal(..)` stop a server
+  without an OS signal** (#103). Shutdown used to be signal-driven only, which
+  left neva awkward to embed in a service that owns its own lifecycle and
+  impossible to test: a test could only `handle.abort()` the server task, which
+  skips every graceful path by construction. A `ShutdownHandle` composes with
+  the signal handler rather than replacing it, so a server built this way still
+  stops on Ctrl+C.
+
+### Fixed
+
+#### Subscriptions
+* **A server shutting down now answers its live `subscriptions/listen` requests
+  before closing their streams** (#103). The spec says a server ending a
+  subscription on its own initiative SHOULD send the empty result first, so a
+  client can tell an orderly end from a dropped connection. neva constructed
+  that result but rarely delivered it: one cancellation token drove both the
+  subscription and the transport, so the result raced a writer that had already
+  broken out of its loop on the very same signal, and clients saw
+  `SubscriptionEnd::Abrupt` where `Graceful` was owed.
+
+  Shutdown is two-phase now. The signal ends the subscriptions, waits until the
+  registry is empty and no message is still inside the middleware pipeline --
+  together that means every result has reached the outbound channel -- and only
+  then tears the transport down; the writers drain what is queued before they
+  exit. `App::with_shutdown_drain(..)` caps the wait (2 seconds by default),
+  and it is skipped outright when no subscription is open, so a server that
+  never uses them shuts down exactly as fast as it did before.
+
 ## 0.5.3
 
 ### Added

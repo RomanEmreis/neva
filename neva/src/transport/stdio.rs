@@ -95,32 +95,46 @@ impl StdIoSender {
                     _ = token.cancelled() => break,
                     resp = receiver.recv() => {
                         match resp {
-                            Some(resp) => {
-                                match serde_json::to_vec(&resp) {
-                                    Ok(mut json_bytes) => {
-                                        json_bytes.push(b'\n');
-                                        if let Err(_err) = writer.write_all(&json_bytes).await {
-                                            #[cfg(feature = "tracing")]
-                                            tracing::error!(
-                                                logger = "neva",
-                                                "stdout write error: {:?}", _err);
-                                        }
-                                        let _ = writer.flush().await;
-                                    },
-                                    Err(_err) => {
-                                        #[cfg(feature = "tracing")]
-                                        tracing::error!(
-                                            logger = "neva",
-                                            "Serialization error: {:?}", _err);
-                                    }
-                                }
-                            },
-                            None => break,
+                            Some(resp) => write_message(&mut writer, resp).await,
+                            None => return,
                         }
                     }
                 }
             }
+
+            // Cancellation stops new work, it does not discard queued work.
+            // What sits in the channel here was written by a handler that
+            // finished before the teardown got this far -- notably the
+            // graceful-close result of a `subscriptions/listen` stream, which
+            // the shutdown drain waited for on purpose. `try_recv`, since the
+            // senders outlive this task and `recv` would never return `None`.
+            while let Ok(resp) = receiver.try_recv() {
+                write_message(&mut writer, resp).await;
+            }
         });
+    }
+}
+
+/// Serializes one message as a line of JSON on stdout, flushing it.
+///
+/// Neither failure is fatal to the writer: a message that cannot be serialized
+/// is this message's problem, and a write error on stdout is reported by the
+/// next one too.
+#[inline]
+async fn write_message<T: AsyncWrite + Unpin + Send>(writer: &mut BufWriter<T>, resp: Message) {
+    match serde_json::to_vec(&resp) {
+        Ok(mut json_bytes) => {
+            json_bytes.push(b'\n');
+            if let Err(_err) = writer.write_all(&json_bytes).await {
+                #[cfg(feature = "tracing")]
+                tracing::error!(logger = "neva", "stdout write error: {:?}", _err);
+            }
+            let _ = writer.flush().await;
+        }
+        Err(_err) => {
+            #[cfg(feature = "tracing")]
+            tracing::error!(logger = "neva", "Serialization error: {:?}", _err);
+        }
     }
 }
 
@@ -729,6 +743,99 @@ mod parse_line_tests {
 
 #[cfg(test)]
 mod tests {
+    /// A sink the test can read back while the writer task owns it.
+    #[derive(Clone, Default)]
+    struct SharedSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl SharedSink {
+        /// How many complete lines have been written so far.
+        fn lines(&self) -> usize {
+            match self.0.lock() {
+                Ok(buf) => buf.iter().filter(|b| **b == b'\n').count(),
+                Err(_) => 0,
+            }
+        }
+    }
+
+    impl tokio::io::AsyncWrite for SharedSink {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            if let Ok(mut sink) = self.get_mut().0.lock() {
+                sink.extend_from_slice(buf);
+            }
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Shutdown cancels the writer, but whatever a handler already queued still
+    /// has to reach stdout -- the graceful-close result of a
+    /// `subscriptions/listen` stream is written in exactly that window, after
+    /// the drain phase woke the handler and before the transport goes down.
+    /// Breaking out of the loop on cancellation without draining is what used
+    /// to lose it.
+    #[tokio::test]
+    async fn a_cancelled_writer_still_flushes_what_was_queued() {
+        use super::StdIoSender;
+        use crate::types::{Message, notification::Notification};
+        use tokio::io::BufWriter;
+        use tokio_util::sync::CancellationToken;
+
+        const QUEUED: usize = 3;
+
+        let mut sender = StdIoSender::new();
+        let tx = sender.tx.clone();
+
+        // Queued before the writer starts, so all of it is sitting in the
+        // channel by the time cancellation is observed.
+        for i in 0..QUEUED {
+            tx.send(Message::Notification(Notification::new(
+                "notifications/message",
+                Some(serde_json::json!({ "seq": i })),
+            )))
+            .await
+            .expect("the channel has room");
+        }
+
+        // Cancelled up front: the writer's very first poll takes the `biased`
+        // cancellation arm, which is the case that used to drop the queue.
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let sink = SharedSink::default();
+        sender.start(BufWriter::new(sink.clone()), token);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while sink.lines() < QUEUED {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "a cancelled writer must drain the queue instead of dropping it: \
+                 {} of {QUEUED} messages reached the sink",
+                sink.lines()
+            )
+        });
+    }
+
     #[tokio::test]
     #[cfg(all(feature = "client", target_os = "windows"))]
     async fn it_tests_handshake() {

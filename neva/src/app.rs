@@ -71,10 +71,32 @@ pub mod mrtr_store;
 #[cfg(not(feature = "legacy-spec"))]
 pub mod notification_bus;
 pub mod options;
+pub mod shutdown;
 #[cfg(not(feature = "legacy-spec"))]
 pub(crate) mod subscriptions;
 
+pub use shutdown::ShutdownHandle;
+
 const DEFAULT_PAGE_SIZE: usize = 10;
+
+/// How long shutdown waits for live `subscriptions/listen` streams to answer
+/// before the transport goes down regardless.
+///
+/// Only ever paid by a server that has a subscription open. It is a ceiling,
+/// not a delay: the wait ends as soon as the last result is queued, which is
+/// immediate in the ordinary case. Two seconds sits well inside the ten Volga
+/// gives an in-flight connection during its own graceful shutdown, so the
+/// response body a subscription is written onto is still open when the result
+/// arrives.
+#[cfg(not(feature = "legacy-spec"))]
+const DEFAULT_SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How often the drain re-checks whether the subscriptions have finished.
+///
+/// Short enough not to add a visible tail to shutdown, long enough that the
+/// poll is not a spin.
+#[cfg(not(feature = "legacy-spec"))]
+const DRAIN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
 
 type RequestHandlers = HashMap<String, RequestHandler<Response>>;
 
@@ -92,6 +114,15 @@ pub struct App {
 
     /// MCP server request handlers
     handlers: RequestHandlers,
+
+    /// What a shutdown request arrives on, whether from an OS signal or from a
+    /// [`ShutdownHandle`] the caller kept.
+    shutdown: ShutdownHandle,
+
+    /// Ceiling on the wait for live subscriptions to answer before the
+    /// transport is torn down. See [`DEFAULT_SHUTDOWN_DRAIN`].
+    #[cfg(not(feature = "legacy-spec"))]
+    shutdown_drain: std::time::Duration,
 }
 
 impl Debug for App {
@@ -117,6 +148,9 @@ impl App {
             handlers: HashMap::new(),
             #[cfg(feature = "di")]
             container: ContainerBuilder::new(),
+            shutdown: ShutdownHandle::new(),
+            #[cfg(not(feature = "legacy-spec"))]
+            shutdown_drain: DEFAULT_SHUTDOWN_DRAIN,
         };
 
         #[cfg(feature = "legacy-spec")]
@@ -232,6 +266,91 @@ impl App {
         runtime.block_on(async { self.run().await });
     }
 
+    /// Takes a handle that stops this server without an OS signal.
+    ///
+    /// The handle composes with the signal handler rather than replacing it:
+    /// whichever fires first shuts the server down, so a server built this way
+    /// still stops on Ctrl+C.
+    ///
+    /// Await [`run`](Self::run) to know the server actually finished: this
+    /// only requests the stop.
+    #[cfg_attr(
+        not(feature = "legacy-spec"),
+        doc = "
+Under MCP 2026-07-28 that gap is where live `subscriptions/listen` streams get
+answered, bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
+    )]
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::App;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let (app, shutdown) = App::new().with_shutdown();
+    /// let server = tokio::spawn(app.run());
+    ///
+    /// shutdown.shutdown();
+    /// server.await.expect("the server task panicked");
+    /// # }
+    /// ```
+    pub fn with_shutdown(self) -> (Self, ShutdownHandle) {
+        let handle = self.shutdown.clone();
+        (self, handle)
+    }
+
+    /// Stops this server on a [`ShutdownHandle`] the caller already has --
+    /// one signal shared with the rest of a larger service, rather than one
+    /// this server hands out.
+    ///
+    /// Composes with the OS signal handler exactly as
+    /// [`with_shutdown`](Self::with_shutdown) does.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::{App, app::ShutdownHandle};
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let shutdown = ShutdownHandle::new();
+    /// let app = App::new().with_shutdown_signal(shutdown.clone());
+    ///
+    /// let server = tokio::spawn(app.run());
+    /// shutdown.shutdown();
+    /// server.await.expect("the server task panicked");
+    /// # }
+    /// ```
+    pub fn with_shutdown_signal(mut self, handle: ShutdownHandle) -> Self {
+        self.shutdown = handle;
+        self
+    }
+
+    /// Caps how long shutdown waits for live `subscriptions/listen` streams to
+    /// answer before the transport is torn down anyway.
+    ///
+    /// This is a ceiling, not a delay: the wait ends the moment the last
+    /// result is queued, and is skipped outright when no subscription is open.
+    /// Raise it for a server whose subscriptions have deep buffers to flush;
+    /// `Duration::ZERO` opts out and restores an abrupt close.
+    ///
+    /// Default: 2 seconds.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(not(feature = "legacy-spec"))] {
+    /// use neva::App;
+    /// use std::time::Duration;
+    ///
+    /// let app = App::new()
+    ///     .with_shutdown_drain(Duration::from_secs(5));
+    /// # }
+    /// ```
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn with_shutdown_drain(mut self, drain: std::time::Duration) -> Self {
+        self.shutdown_drain = drain;
+        self
+    }
+
     /// Run the MCP server
     ///
     /// # Example
@@ -320,12 +439,35 @@ impl App {
 
         let mut transport = self.options.transport();
         let cancellation_token = transport.start();
-        self.wait_for_shutdown_signal(cancellation_token.clone());
-        // Long-lived requests (`subscriptions/listen`) watch the same signal
-        // the dispatch loop breaks on, so they can close gracefully instead of
-        // being dropped mid-stream.
+
+        // Shutdown arrives here -- from an OS signal, or from a
+        // `ShutdownHandle` the caller kept -- and is relayed to the transport
+        // rather than being the transport's own token. What happens in between
+        // is the drain, below.
+        let shutdown = self.shutdown.token();
+        self.wait_for_shutdown_signal(shutdown.clone());
+
+        // Long-lived requests (`subscriptions/listen`) end one phase ahead of
+        // the transport: they watch a token of their own, so their
+        // graceful-close results are produced while the writers are still
+        // reading. Sharing one token is what made those results race a channel
+        // whose reader had already gone.
         #[cfg(not(feature = "legacy-spec"))]
-        self.options.set_shutdown_token(cancellation_token.clone());
+        let subscriptions_token = CancellationToken::new();
+        #[cfg(not(feature = "legacy-spec"))]
+        self.options.set_shutdown_token(subscriptions_token.clone());
+
+        #[cfg(not(feature = "legacy-spec"))]
+        Self::relay_shutdown(
+            shutdown,
+            subscriptions_token,
+            cancellation_token.clone(),
+            self.options.subscriptions().clone(),
+            self.options.in_flight(),
+            self.shutdown_drain,
+        );
+        #[cfg(feature = "legacy-spec")]
+        Self::relay_shutdown(shutdown, cancellation_token.clone());
 
         // With a notification bus installed, every subscribable notification --
         // this instance's own included -- comes back through the bus, and this
@@ -1232,6 +1374,10 @@ impl App {
 
     #[inline]
     async fn execute(msg: Message, runtime: ServerRuntime) {
+        // Held for the whole pipeline, so the shutdown drain can tell a
+        // response that is queued from one that is still being produced.
+        #[cfg(not(feature = "legacy-spec"))]
+        let _in_flight = InFlightGuard::enter(runtime.in_flight());
         // Closing the request notification sink here -- once the *whole*
         // middleware pipeline has run -- is what lets a request-scoped SSE POST
         // response know no more notifications are coming, so logs emitted by
@@ -1256,6 +1402,8 @@ impl App {
         // `ServerRuntime::execute`, so they never close the shared sink early):
         // the request-scoped SSE response stays open until every inner request
         // and its middleware have finished. See `App::execute`.
+        #[cfg(not(feature = "legacy-spec"))]
+        let _in_flight = InFlightGuard::enter(runtime.in_flight());
         #[cfg(all(not(feature = "legacy-spec"), feature = "http-server"))]
         let _sink_guard = RequestSinkGuard(batch_session_id);
         #[cfg(feature = "http-server")]
@@ -1842,6 +1990,107 @@ impl App {
     #[inline]
     fn wait_for_shutdown_signal(&mut self, token: CancellationToken) {
         shared::wait_for_shutdown_signal(token);
+    }
+
+    /// Turns one shutdown request into the ordered teardown the spec asks for:
+    /// end the subscriptions, let their results out, then stop the transport.
+    ///
+    /// The spec says a server ending a subscription on its own initiative
+    /// **SHOULD** answer the `subscriptions/listen` request with its empty
+    /// result before closing the stream. That result is produced by a handler
+    /// and travels the same channel as everything else, so it only lands if
+    /// the writers are still reading when it is written -- which is exactly
+    /// what one shared token made impossible.
+    ///
+    /// The wait is skipped when nothing was subscribed, so a server that never
+    /// opens a subscription shuts down as immediately as it always did.
+    #[cfg(not(feature = "legacy-spec"))]
+    fn relay_shutdown(
+        shutdown: CancellationToken,
+        subscriptions_token: CancellationToken,
+        transport_token: CancellationToken,
+        subscriptions: crate::app::subscriptions::SubscriptionRegistry,
+        in_flight: Arc<std::sync::atomic::AtomicUsize>,
+        drain: std::time::Duration,
+    ) {
+        tokio::spawn(async move {
+            tokio::select! {
+                // The transport going down on its own (a bind failure, a dead
+                // engine) ends this task too -- otherwise it would sit on a
+                // signal that is never coming.
+                _ = transport_token.cancelled() => return,
+                _ = shutdown.cancelled() => {}
+            }
+
+            // Phase 1: end the subscriptions. Each listen handler wakes,
+            // deregisters, drains what its stream still owes and answers.
+            let owed = !subscriptions.is_empty();
+            subscriptions_token.cancel();
+
+            // Phase 2: wait for those answers to reach the outbound channel.
+            // `is_empty` says every handler deregistered; the in-flight count
+            // says every one of them also got its response as far as the
+            // sender, since the terminal middleware awaits that send before it
+            // returns. Both, because either alone is reached too early.
+            if owed {
+                let _ = tokio::time::timeout(drain, async {
+                    while !subscriptions.is_empty()
+                        || in_flight.load(std::sync::atomic::Ordering::Acquire) > 0
+                    {
+                        tokio::time::sleep(DRAIN_POLL_INTERVAL).await;
+                    }
+                })
+                .await;
+            }
+
+            // Phase 3: stop the transport. Its writers drain what is queued
+            // before they exit, which is what carries the results written in
+            // phase 2 onto the wire.
+            transport_token.cancel();
+        });
+    }
+
+    /// The legacy profile has no `subscriptions/listen` and so nothing to
+    /// drain: shutdown reaches the transport directly.
+    #[cfg(feature = "legacy-spec")]
+    fn relay_shutdown(shutdown: CancellationToken, transport_token: CancellationToken) {
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = transport_token.cancelled() => return,
+                _ = shutdown.cancelled() => {}
+            }
+            transport_token.cancel();
+        });
+    }
+}
+
+/// Counts one message as inside the middleware pipeline for as long as it is
+/// held.
+///
+/// A `Drop` guard rather than a pair of calls so a panicking or cancelled
+/// handler cannot leave the count raised -- a leaked count would make the
+/// shutdown drain wait out its whole window on every shutdown thereafter.
+///
+/// The count is what makes "nothing in flight" mean "every response produced so
+/// far is already queued on the transport sender": the terminal middleware
+/// awaits that send before it returns, so the guard outlives it.
+#[cfg(not(feature = "legacy-spec"))]
+struct InFlightGuard(Arc<std::sync::atomic::AtomicUsize>);
+
+#[cfg(not(feature = "legacy-spec"))]
+impl InFlightGuard {
+    #[inline]
+    fn enter(counter: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        counter.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Self(counter)
+    }
+}
+
+#[cfg(not(feature = "legacy-spec"))]
+impl Drop for InFlightGuard {
+    #[inline]
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 
