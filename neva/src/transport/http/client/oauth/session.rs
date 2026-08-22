@@ -229,11 +229,21 @@ impl OAuthSession {
         }
     }
 
-    /// A build that cannot sign a proof cannot present a bound token either,
-    /// and never obtained one: everything it finds in the store is its own.
+    /// The same answer for a build that cannot sign a proof at all, which is
+    /// the `None` arm above: a bound token is refused on every request without
+    /// the key it names, and this build has no way whatever to prove
+    /// possession of one.
+    ///
+    /// It is not enough that such a build never *asked* for a bound token. A
+    /// `TokenStore` may be durable and is shared by whoever points at it, so
+    /// an entry written by a DPoP-enabled deployment can reach this one --
+    /// and `token_type` says so whether or not the feature is compiled in.
+    /// Taking it would present a sender-constrained token as a bearer one and
+    /// spend a `401` finding out. `OAuthClient::can_present` refuses it one
+    /// layer down for the same reason.
     #[cfg(not(feature = "client-oauth-dpop"))]
-    pub(super) fn can_present(&self, _tokens: &TokenSet) -> bool {
-        true
+    pub(super) fn can_present(&self, tokens: &TokenSet) -> bool {
+        !tokens.is_dpop()
     }
 
     /// The credential that presents `tokens`.

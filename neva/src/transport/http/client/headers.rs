@@ -149,13 +149,26 @@ pub(super) fn insufficient_scope(headers: &reqwest::header::HeaderMap) -> bool {
 /// with any response, including a successful one, and that nonce is for the
 /// *next* request rather than a demand to repeat this one. What makes it a
 /// refusal is the `error` in the challenge.
+///
+/// *Every* challenge is asked, not the one [`bearer_challenge`] picks. A
+/// resource that takes both schemes answers with both (RFC 9449 section 7.1),
+/// so `Bearer error="invalid_token", DPoP error="use_dpop_nonce"` is an
+/// ordinary thing to receive -- and the challenge selected for authorization
+/// is the Bearer one, whose error says nothing about the nonce. Reading only
+/// that would send the client through a whole authorization flow, user
+/// interaction included, to answer a server that had simply not handed out its
+/// nonce yet.
 #[cfg(feature = "client-oauth-dpop")]
 pub(super) fn use_dpop_nonce(headers: &reqwest::header::HeaderMap) -> bool {
     use volga_oauth_client::OAuthErrorCode;
 
-    bearer_challenge(headers)
-        .and_then(|challenge| super::oauth::parse_challenge(&challenge))
-        .is_some_and(|challenge| matches!(challenge.error(), Some(OAuthErrorCode::UseDpopNonce)))
+    headers
+        .get_all(reqwest::header::WWW_AUTHENTICATE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(bearer_challenges)
+        .filter_map(|challenge| super::oauth::parse_challenge(&challenge))
+        .any(|challenge| matches!(challenge.error(), Some(OAuthErrorCode::UseDpopNonce)))
 }
 
 /// The `WWW-Authenticate` value carrying the Bearer challenge that applies, if

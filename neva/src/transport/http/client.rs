@@ -206,7 +206,16 @@ async fn send_authorized(
             && Some(demanded.as_str()) != nonce_sent.as_deref()
         {
             let (retried, _) = credential.attach(build(), method, url, Some(&demanded))?;
-            return retried.send().await.map_err(transport);
+            let retried = retried.send().await.map_err(transport)?;
+
+            // The retry gets a nonce of its own read off it too. RFC 9449
+            // section 8.2 permits one on a response the server was willing to
+            // give, and a resource that rotates on every response gives one
+            // here every time -- dropping it would leave the key holding the
+            // nonce just consumed, so the *next* request would go out stale,
+            // be refused, and retry. Every request would then cost two.
+            key.accept_nonce(url, retried.headers());
+            return Ok(retried);
         }
     }
 
@@ -673,6 +682,32 @@ mod tests {
             !use_dpop_nonce(&headers),
             "an expired token is not answered by repeating the request"
         );
+
+        // A resource that takes both schemes answers with both (RFC 9449
+        // section 7.1), and the challenge picked for authorization is then the
+        // Bearer one -- whose error says nothing about a nonce. Reading only
+        // that one would run a whole authorization flow to answer a server
+        // that had simply not handed its nonce out yet.
+        headers.insert(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"Bearer error="invalid_token", DPoP error="use_dpop_nonce""#
+                .parse()
+                .unwrap(),
+        );
+        assert!(use_dpop_nonce(&headers));
+
+        // The same list, split across two header values -- which RFC 9110
+        // section 11.6.1 allows just as much.
+        headers.remove(reqwest::header::WWW_AUTHENTICATE);
+        headers.append(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"Bearer error="invalid_token""#.parse().unwrap(),
+        );
+        headers.append(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"DPoP error="use_dpop_nonce""#.parse().unwrap(),
+        );
+        assert!(use_dpop_nonce(&headers));
     }
 
     /// Every request gets its own proof, bound to that request's method, URL
@@ -953,10 +988,18 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         const AS_NONCE: &str = "as-nonce-1";
-        const RS_NONCE: &str = "rs-nonce-1";
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+
+        // The resource's nonce, and how many requests it has had to refuse for
+        // want of one. It rotates on every answer it gives -- which RFC 9449
+        // section 9 permits and a resource with a short nonce lifetime does --
+        // so a client that fails to read the rotation off the *retry* is
+        // refused once per request from then on. One refusal, ever, is the
+        // assertion at the end.
+        let resource = Arc::new(std::sync::Mutex::new((1_usize, 0_usize)));
+        let nonces = resource.clone();
 
         // One socket playing both parts, as the other transport tests do.
         tokio::spawn(async move {
@@ -971,23 +1014,33 @@ mod tests {
                 };
 
                 let resp = if request.starts_with("POST /mcp") {
+                    let mut state = nonces.lock().unwrap();
+                    let (issued, refusals) = &mut *state;
+                    let current = format!("rs-nonce-{issued}");
+
                     if !request.contains("authorization: DPoP bound-token") {
                         format!(
                             "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: DPoP resource_metadata=\"{root}/.well-known/oauth-protected-resource/mcp\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                         )
-                    } else if !carried(RS_NONCE) {
+                    } else if !carried(&current) {
                         // RFC 9449 section 9: the resource hands out its nonce
                         // by refusing once, and the refusal is not about the
-                        // token.
+                        // token. The nonce on offer does not change here --
+                        // rotating on a refusal would refuse the retry too.
+                        *refusals += 1;
                         let body = r#"{"error":"use_dpop_nonce"}"#;
                         format!(
-                            "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: DPoP error=\"use_dpop_nonce\"\r\nDPoP-Nonce: {RS_NONCE}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: DPoP error=\"use_dpop_nonce\"\r\nDPoP-Nonce: {current}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                             body.len()
                         )
                     } else {
+                        // Served -- and the nonce just spent is retired, so the
+                        // answer carries the one the next request must use.
+                        *issued += 1;
+                        let next = format!("rs-nonce-{issued}");
                         let body = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
                         format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            "HTTP/1.1 200 OK\r\nDPoP-Nonce: {next}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                             body.len()
                         )
                     }
@@ -1038,29 +1091,40 @@ mod tests {
         let oauth_session = Arc::new(oauth::OAuthSession::new(config, &url).expect("a session"));
         let auth = ClientAuth::OAuth(oauth_session.clone());
 
-        let (tx, mut rx) = mpsc::channel(2);
-        exchange(
-            create_client(
-                #[cfg(feature = "client-tls")]
-                None,
-            )
-            .expect("a client"),
-            session,
-            Message::Request(crate::types::Request::new(
-                Some(crate::types::RequestId::Number(1)),
-                "ping",
-                None::<serde_json::Value>,
-            )),
-            tx,
-            auth,
-            #[cfg(not(feature = "legacy-spec"))]
-            Default::default(),
+        let client = create_client(
+            #[cfg(feature = "client-tls")]
+            None,
         )
-        .await;
+        .expect("a client");
 
-        assert!(
-            matches!(rx.try_recv(), Ok(Ok(Message::Response(_)))),
-            "the call must be served once both nonce rounds are answered"
+        let (tx, mut rx) = mpsc::channel(4);
+        for id in [1, 2] {
+            exchange(
+                client.clone(),
+                session.clone(),
+                Message::Request(crate::types::Request::new(
+                    Some(crate::types::RequestId::Number(id)),
+                    "ping",
+                    None::<serde_json::Value>,
+                )),
+                tx.clone(),
+                auth.clone(),
+                #[cfg(not(feature = "legacy-spec"))]
+                Default::default(),
+            )
+            .await;
+
+            assert!(
+                matches!(rx.try_recv(), Ok(Ok(Message::Response(_)))),
+                "call {id} must be served once both nonce rounds are answered"
+            );
+        }
+
+        assert_eq!(
+            resource.lock().unwrap().1,
+            1,
+            "only the first request may be refused for want of a nonce: the \
+             rotation the retry was answered with is what the second one carries"
         );
 
         let credential = oauth_session.credential().expect("a credential");
