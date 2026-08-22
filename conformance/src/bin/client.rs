@@ -220,8 +220,18 @@ impl Credentials {
         // it produced is what buys a token at the MCP server's authorization
         // server -- traded at the IdP first.
         if let (Some(issuer), Some(id_token)) = (&self.idp_issuer, &self.idp_id_token) {
+            // The registration this client signed the user in under, which is
+            // not the one it holds at the MCP server's authorization server.
+            let idp_client_id = self.idp_client_id.as_deref().ok_or_else(|| {
+                Error::new(
+                    ErrorCode::InvalidParams,
+                    "the scenario handed over an IdP id token but no `idp_client_id`",
+                )
+            })?;
+            
             let mut assertion =
-                IdentityAssertion::new(issuer.clone(), id_token.clone()).require_https(false);
+                IdentityAssertion::new(issuer.clone(), idp_client_id, id_token.clone())
+                    .require_https(false);
             // The scenario names the endpoint, which is what a client that
             // signed the user in there would already hold. The mock IdP
             // publishes an OpenID configuration too, but not a complete
@@ -229,10 +239,6 @@ impl Credentials {
             // authorization server.
             if let Some(endpoint) = &self.idp_token_endpoint {
                 assertion = assertion.with_token_endpoint(endpoint.clone());
-            }
-
-            if let Some(idp_client_id) = &self.idp_client_id {
-                assertion = assertion.with_client_id(idp_client_id.clone());
             }
 
             return Ok(oauth.with_identity_assertion(assertion));

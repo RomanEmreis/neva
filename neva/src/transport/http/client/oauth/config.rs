@@ -409,9 +409,8 @@ impl OAuthClientConfig {
     ///             .with_oauth(|oauth| oauth
     ///                 .with_client_id("mcp-app")
     ///                 .with_client_secret("s3cret")
-    ///                 .with_identity_assertion(
-    ///                     IdentityAssertion::new("https://acme.idp.example", id_token)
-    ///                         .with_client_id("idp-app")))
+    ///                 .with_identity_assertion(IdentityAssertion::new(
+    ///                     "https://acme.idp.example", "idp-app", id_token)))
     ///         )
     ///     );
     /// # }

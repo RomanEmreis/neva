@@ -159,18 +159,18 @@ impl<T: AssertionProvider> DynAssertionProvider for T {
 ///                 .with_client_secret("s3cret")
 ///                 // ...and, separately, with the enterprise IdP
 ///                 .with_identity_assertion(
-///                     IdentityAssertion::new("https://acme.idp.example", id_token)
-///                         .with_client_id("idp-app")))
+///                     IdentityAssertion::new(
+///                         "https://acme.idp.example", "idp-app", id_token)))
 ///         )
 ///     );
 /// # }
 /// ```
 pub struct IdentityAssertion {
     issuer: String,
+    client_id: String,
     token_endpoint: Option<String>,
     subject_token: String,
     subject_token_type: String,
-    client_id: Option<String>,
     client_secret: Option<String>,
     require_https: bool,
 }
@@ -182,9 +182,9 @@ impl std::fmt::Debug for IdentityAssertion {
         // reaching a log
         f.debug_struct("IdentityAssertion")
             .field("issuer", &self.issuer)
+            .field("client_id", &self.client_id)
             .field("token_endpoint", &self.token_endpoint)
             .field("subject_token_type", &self.subject_token_type)
-            .field("client_id", &self.client_id)
             .field(
                 "client_secret",
                 &self.client_secret.as_ref().map(|_| "[redacted]"),
@@ -200,24 +200,37 @@ impl IdentityAssertion {
     /// to the MCP server's authorization server.
     ///
     /// `issuer` is the identity provider's `issuer` identifier, not its
-    /// token endpoint: the endpoint is discovered from it, so the two
-    /// cannot drift apart.
+    /// token endpoint: the endpoint is discovered from it, so the two cannot
+    /// drift apart.
+    ///
+    /// `client_id` is this client's registration at *that* provider, which is
+    /// not the one it holds at the MCP server's authorization server. It is
+    /// required rather than optional because a client that signed a user in
+    /// there has one by construction -- and because it is what the exchange
+    /// is identified by: a request carrying no id names no client for the
+    /// provider to evaluate its policy against, or to check a
+    /// [`with_client_secret`](Self::with_client_secret) against.
     ///
     /// # Examples
     /// ```no_run
     /// use neva::auth::oauth::IdentityAssertion;
     ///
     /// # fn run(id_token: String) {
-    /// let assertion = IdentityAssertion::new("https://acme.idp.example", id_token);
+    /// let assertion =
+    ///     IdentityAssertion::new("https://acme.idp.example", "idp-app", id_token);
     /// # }
     /// ```
-    pub fn new(issuer: impl Into<String>, subject_token: impl Into<String>) -> Self {
+    pub fn new(
+        issuer: impl Into<String>,
+        client_id: impl Into<String>,
+        subject_token: impl Into<String>,
+    ) -> Self {
         Self {
             issuer: issuer.into(),
+            client_id: client_id.into(),
             token_endpoint: None,
             subject_token: subject_token.into(),
             subject_token_type: token_type::ID_TOKEN.to_owned(),
-            client_id: None,
             client_secret: None,
             require_https: true,
         }
@@ -238,7 +251,7 @@ impl IdentityAssertion {
     /// use neva::auth::oauth::IdentityAssertion;
     ///
     /// # fn run(id_token: String) {
-    /// let assertion = IdentityAssertion::new("https://acme.idp.example", id_token)
+    /// let assertion = IdentityAssertion::new("https://acme.idp.example", "idp-app", id_token)
     ///     .with_token_endpoint("https://acme.idp.example/oauth2/token");
     /// # }
     /// ```
@@ -258,30 +271,13 @@ impl IdentityAssertion {
     /// use neva::auth::oauth::{IdentityAssertion, token_type};
     ///
     /// # fn run(refresh_token: String) {
-    /// let assertion = IdentityAssertion::new("https://acme.idp.example", refresh_token)
-    ///     .with_subject_token_type(token_type::REFRESH_TOKEN);
+    /// let assertion =
+    ///     IdentityAssertion::new("https://acme.idp.example", "idp-app", refresh_token)
+    ///         .with_subject_token_type(token_type::REFRESH_TOKEN);
     /// # }
     /// ```
     pub fn with_subject_token_type(mut self, token_type: impl Into<String>) -> Self {
         self.subject_token_type = token_type.into();
-        self
-    }
-
-    /// Identifies this client to the *identity provider* -- the registration
-    /// it signed the user in under, which is not the one it holds at the
-    /// MCP server's authorization server.
-    ///
-    /// # Examples
-    /// ```no_run
-    /// use neva::auth::oauth::IdentityAssertion;
-    ///
-    /// # fn run(id_token: String) {
-    /// let assertion = IdentityAssertion::new("https://acme.idp.example", id_token)
-    ///     .with_client_id("idp-app");
-    /// # }
-    /// ```
-    pub fn with_client_id(mut self, client_id: impl Into<String>) -> Self {
-        self.client_id = Some(client_id.into());
         self
     }
 
@@ -292,13 +288,15 @@ impl IdentityAssertion {
     /// token: an IdP that authenticated the client then authenticates it
     /// here too.
     ///
+    /// The registration it is checked against is the `client_id` given to
+    /// [`new`](Self::new), which is why that one is not optional.
+    ///
     /// # Examples
     /// ```no_run
     /// use neva::auth::oauth::IdentityAssertion;
     ///
     /// # fn run(id_token: String) {
-    /// let assertion = IdentityAssertion::new("https://acme.idp.example", id_token)
-    ///     .with_client_id("idp-app")
+    /// let assertion = IdentityAssertion::new("https://acme.idp.example", "idp-app", id_token)
     ///     .with_client_secret("s3cret");
     /// # }
     /// ```
@@ -320,7 +318,7 @@ impl IdentityAssertion {
     /// use neva::auth::oauth::IdentityAssertion;
     ///
     /// # fn run(id_token: String) {
-    /// let assertion = IdentityAssertion::new("http://localhost:9000", id_token)
+    /// let assertion = IdentityAssertion::new("http://localhost:9000", "idp-app", id_token)
     ///     .require_https(false);
     /// # }
     /// ```
@@ -372,8 +370,7 @@ impl AssertionProvider for IdentityAssertion {
     async fn assertion(&self, request: AssertionRequest) -> Result<String, Error> {
         let metadata = self.discover().await?;
 
-        let mut client = OAuthClient::new(self.client_id.clone().unwrap_or_default())
-            .with_config(self.client_config());
+        let mut client = OAuthClient::new(self.client_id.clone()).with_config(self.client_config());
 
         if let Some(secret) = &self.client_secret {
             // The identity provider is a second authorization server with its
@@ -443,11 +440,12 @@ mod tests {
 
     #[test]
     fn it_defaults_an_identity_assertion_to_an_id_token() {
-        let assertion = IdentityAssertion::new("https://idp.example", "id.token");
+        let assertion = IdentityAssertion::new("https://idp.example", "idp-app", "id.token");
 
         assert_eq!(assertion.subject_token_type, token_type::ID_TOKEN);
+        assert_eq!(assertion.client_id, "idp-app");
         assert!(assertion.require_https);
-        assert!(assertion.client_id.is_none());
+        assert!(assertion.client_secret.is_none());
         assert!(assertion.token_endpoint.is_none());
     }
 
@@ -455,7 +453,7 @@ mod tests {
     /// provider, so nothing is fetched for it.
     #[tokio::test]
     async fn a_named_token_endpoint_is_taken_at_its_word() {
-        let assertion = IdentityAssertion::new("https://idp.example", "id.token")
+        let assertion = IdentityAssertion::new("https://idp.example", "idp-app", "id.token")
             .with_token_endpoint("https://idp.example/oauth2/token");
 
         let metadata = assertion
@@ -479,14 +477,13 @@ mod tests {
 
     #[test]
     fn it_overrides_the_subject_token_type() {
-        let assertion = IdentityAssertion::new("https://idp.example", "refresh.token")
+        let assertion = IdentityAssertion::new("https://idp.example", "idp-app", "refresh.token")
             .with_subject_token_type(token_type::REFRESH_TOKEN)
-            .with_client_id("idp-app")
             .with_client_secret("s3cret")
             .require_https(false);
 
         assert_eq!(assertion.subject_token_type, token_type::REFRESH_TOKEN);
-        assert_eq!(assertion.client_id.as_deref(), Some("idp-app"));
+        assert!(assertion.client_secret.is_some());
         assert!(!assertion.require_https);
     }
 
@@ -552,8 +549,7 @@ mod tests {
     async fn it_authenticates_to_the_provider_the_way_the_provider_accepts() {
         let (addr, seen) = spawn_identity_provider(r#""client_secret_post""#).await;
 
-        let assertion = IdentityAssertion::new(format!("http://{addr}"), "id.token")
-            .with_client_id("idp-app")
+        let assertion = IdentityAssertion::new(format!("http://{addr}"), "idp-app", "id.token")
             .with_client_secret("s3cret")
             .require_https(false);
 
@@ -568,6 +564,7 @@ mod tests {
             .find(|request| request.contains("POST /token"))
             .expect("the exchange must have reached the provider");
 
+        assert!(exchange.contains("client_id=idp-app"), "{exchange}");
         assert!(exchange.contains("client_secret=s3cret"), "{exchange}");
         assert!(!exchange.contains("authorization: Basic"), "{exchange}");
     }
@@ -580,8 +577,7 @@ mod tests {
     async fn it_pins_the_audience_and_resource_of_the_exchange() {
         let (addr, seen) = spawn_identity_provider(r#""client_secret_basic""#).await;
 
-        let assertion = IdentityAssertion::new(format!("http://{addr}"), "id.token")
-            .with_client_id("idp-app")
+        let assertion = IdentityAssertion::new(format!("http://{addr}"), "idp-app", "id.token")
             .with_client_secret("s3cret")
             .require_https(false);
 
@@ -618,8 +614,8 @@ mod tests {
 
     #[test]
     fn it_keeps_credentials_out_of_debug_output() {
-        let assertion =
-            IdentityAssertion::new("https://idp.example", "id.token").with_client_secret("s3cret");
+        let assertion = IdentityAssertion::new("https://idp.example", "idp-app", "id.token")
+            .with_client_secret("s3cret");
 
         let rendered = format!("{assertion:?}");
 
