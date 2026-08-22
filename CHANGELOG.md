@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## 0.5.5
+## 0.5.4
 
 ### Added
 
@@ -73,6 +73,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   authorization server meets the URL, so there is nobody to have shared one
   with.
 
+#### Shutdown
+* **`App::with_shutdown()` / `App::with_shutdown_signal(..)` stop a server
+  without an OS signal** (#103). Shutdown used to be signal-driven only, which
+  left neva awkward to embed in a service that owns its own lifecycle and
+  impossible to test: a test could only `handle.abort()` the server task, which
+  skips every graceful path by construction. A `ShutdownHandle` composes with
+  the signal handler rather than replacing it, so a server built this way still
+  stops on Ctrl+C.
+
 ### Fixed
 
 #### Authorization
@@ -90,21 +99,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   said it does not accept. Two documents from one server cannot both be right,
   and the one describing the token endpoint decides; left alone, such a flow
   registered successfully and then failed at the token request.
-
-## 0.5.4
-
-### Added
-
-#### Shutdown
-* **`App::with_shutdown()` / `App::with_shutdown_signal(..)` stop a server
-  without an OS signal** (#103). Shutdown used to be signal-driven only, which
-  left neva awkward to embed in a service that owns its own lifecycle and
-  impossible to test: a test could only `handle.abort()` the server task, which
-  skips every graceful path by construction. A `ShutdownHandle` composes with
-  the signal handler rather than replacing it, so a server built this way still
-  stops on Ctrl+C.
-
-### Fixed
 
 #### Subscriptions
 * **A server shutting down now answers its live `subscriptions/listen` requests
