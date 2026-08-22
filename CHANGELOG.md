@@ -13,39 +13,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * **DPoP sender-constrained tokens**, behind the new **`client-oauth-dpop`**
   feature (#110). A bearer token is a password: whoever steals it may spend it.
   A DPoP-bound one ([RFC 9449](https://www.rfc-editor.org/rfc/rfc9449)) is
-  worth nothing without the key it is bound to, because every request carries a
-  proof signed over its own method and URL and over the token itself.
+  worth nothing without the key, because every request carries a proof signed
+  over its own method and URL and over the token itself. Both nonce rounds are
+  answered -- the token endpoint's (section 8) and the resource's (section 9),
+  the second costing one repeat of the request rather than a re-authorization,
+  since the token and the key were never in question.
 
-  Two ways to turn it on. `OAuthClientConfig::with_dpop(key)` binds every token
-  this client obtains to a key of the caller's choosing --
-  `Dpop::generate()` for a throwaway one per session, `Dpop::from_pem` for a
-  lasting one whose thumbprint a server was told about out of band -- and an
-  authorization server that answers with an ordinary bearer token is refused
-  rather than taken. `with_dpop_auto()` mints an `ES256` key the first time a
-  server asks: a resource that challenges with the `DPoP` scheme
-  (section 7.1), or an authorization server that advertises
-  `dpop_signing_alg_values_supported` (section 5.1). That is the setting for a
-  client talking to servers it does not control -- it never turns a working
-  bearer flow into a refusal.
+  `OAuthClientConfig::with_dpop(key)` binds every token this client obtains to
+  a key of the caller's choosing -- `Dpop::generate()` for a throwaway one per
+  session, `Dpop::from_pem` for a lasting one -- and refuses an authorization
+  server that answers with an unbound token. `with_dpop_auto()` mints an
+  `ES256` key the first time a server asks, by challenging with the `DPoP`
+  scheme or by advertising `dpop_signing_alg_values_supported`; that is the
+  setting for a client talking to servers it does not control, since it never
+  turns a working bearer flow into a refusal.
 
-  Both nonce rounds are answered: the one an authorization server may demand
-  of the token request (section 8) and the one a resource may demand of an MCP
-  request (section 9). The resource's is not a re-authorization -- the token is
-  good and so is the key, the server has simply not handed out its nonce yet --
-  so it costs one repeat of the request rather than the exchange's one
-  authorization retry.
+  One behavior to know: a DPoP connection does not follow HTTP redirects. A
+  proof covers one method and one URL, nothing can re-sign it mid-chain, and
+  neither retry recovers from a hop that carried the wrong one, so a `3xx` is
+  surfaced as itself. Bearer connections are unaffected.
 
-  One behavior to know: a connection configured for DPoP does not follow HTTP
-  redirects. A proof is signed over one method and one URL, nothing can re-sign
-  it mid-chain, and a followed hop would present a good token under a proof
-  naming the URL before it -- which the target must reject, and which neither
-  retry can recover from. A `3xx` from the MCP endpoint is surfaced as itself
-  instead. Bearer connections keep following redirects as before.
-
-  Off by default, and nothing turns it on by itself: SEP-1932 is still
-  unmerged, DPoP appears nowhere in the 2026-07-28 specification text, and the
-  conformance suite scores `auth/dpop` and `auth/dpop-nonce` as extensions.
-  Both are green as of this change, on both protocol profiles.
+  Off by default and never self-enabling: SEP-1932 is unmerged and DPoP appears
+  nowhere in the 2026-07-28 text, so the conformance suite scores `auth/dpop`
+  and `auth/dpop-nonce` as extensions. Both are green on both profiles.
 
 * **The OAuth grants that authenticate the client itself** (#109). neva's
   client implemented the authorization-code flow only, so a deployment with no
