@@ -2194,6 +2194,241 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
         );
     }
 
+    /// RFC 6749 section 4.4 restricts this grant to confidential clients, and
+    /// a client id is identification rather than authentication. Reaching the
+    /// token endpoint with nothing to present is refused on every run, so it
+    /// is refused where the credential would have been written.
+    #[test]
+    fn client_credentials_needs_a_credential_to_present() {
+        let err = OAuthSession::new(
+            OAuthClientConfig::default()
+                .with_client_id("mcp-service")
+                .with_client_credentials(),
+            "https://api.example.com/mcp",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("with_client_secret"), "{err}");
+
+        // A document cannot be paired with a secret, so the only remedy it
+        // has is a key -- and naming the secret would send its author around
+        // a second refusal.
+        let err = OAuthSession::new(
+            OAuthClientConfig::default()
+                .with_client_id_document(CIMD_URL)
+                .with_client_credentials(),
+            "https://api.example.com/mcp",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("with_private_key_jwt"), "{err}");
+        assert!(!err.to_string().contains("with_client_secret"), "{err}");
+    }
+
+    /// The JWT-bearer grant is not held to that: its assertion *is* the
+    /// grant, and the workload-identity profile has the client authenticate
+    /// with nothing at all -- the authorization server trusts whoever issued
+    /// the assertion, not a registration.
+    #[test]
+    fn jwt_bearer_needs_no_client_credential() {
+        assert!(
+            OAuthSession::new(
+                OAuthClientConfig::default()
+                    .with_client_id("customer-router-agent")
+                    .with_jwt_bearer("a.workload.jwt".to_owned()),
+                "https://api.example.com/mcp",
+            )
+            .is_ok()
+        );
+    }
+
+    /// A registration cannot carry a signing key: it would have to publish
+    /// the public half *and* come back saying the server accepted
+    /// `private_key_jwt` rather than the `none` that was asked for, neither
+    /// of which is knowable until the registration is spent. Registering as a
+    /// public client and quietly not using the key is the outcome this
+    /// refuses.
+    #[cfg(feature = "client-oauth-jwt")]
+    #[test]
+    fn a_signing_key_needs_an_identity_that_outlives_a_registration() {
+        let err = OAuthSession::new(
+            OAuthClientConfig::default().with_private_key_jwt(test_key()),
+            "https://api.example.com/mcp",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("with_client_id"), "{err}");
+        assert!(err.to_string().contains("with_client_id_document"), "{err}");
+
+        // Either identity is stable across restarts, so either carries it.
+        for config in [
+            OAuthClientConfig::default()
+                .with_client_id("mcp-service")
+                .with_private_key_jwt(test_key()),
+            OAuthClientConfig::default()
+                .with_client_id_document(CIMD_URL)
+                .with_private_key_jwt(test_key()),
+        ] {
+            assert!(OAuthSession::new(config, "https://api.example.com/mcp").is_ok());
+        }
+    }
+
+    /// `expires_in` is only RECOMMENDED by RFC 6749 section 5.1, so a token
+    /// whose lifetime the server never stated is no evidence of freshness.
+    /// For a grant that renews with one request and no user, holding it until
+    /// the resource refuses it is the `401` the probe exists to spare -- and
+    /// `ClientCredentialsRequest::token` re-runs the grant for exactly this
+    /// reason, which a probe answering "fresh" would short-circuit ahead of.
+    #[test]
+    fn a_client_grant_treats_an_unknown_lifetime_as_due_for_renewal() {
+        let unknown = TokenSet {
+            access_token: "service-token".into(),
+            token_type: "Bearer".into(),
+            refresh_token: None,
+            scope: None,
+            id_token: None,
+            expires_at: None,
+            dpop_jkt: None,
+        };
+
+        let client_grant = session(
+            OAuthClientConfig::default()
+                .with_client_id("mcp-service")
+                .with_client_secret("s3cret")
+                .with_client_credentials(),
+        );
+        assert!(client_grant.is_due_for_renewal(&unknown));
+
+        // The interactive flow renews with a refresh token or with the user,
+        // and neither is worth spending on a guess.
+        let interactive = session(OAuthClientConfig::default().with_client_id("mcp-cli"));
+        assert!(!interactive.is_due_for_renewal(&unknown));
+
+        // A stated lifetime decides for itself, whichever grant asked.
+        let fresh = TokenSet {
+            expires_at: Some(std::time::SystemTime::now() + std::time::Duration::from_secs(3600)),
+            ..unknown.clone()
+        };
+        assert!(!client_grant.is_due_for_renewal(&fresh));
+        assert!(!interactive.is_due_for_renewal(&fresh));
+    }
+
+    /// And the probe in front of the flow lock has to ask that question
+    /// rather than the narrower one it used to: reading `expires_within`
+    /// directly answers "fresh" for an unknown lifetime and returns the held
+    /// token before the renewal branch below it can run at all.
+    #[tokio::test]
+    async fn the_staleness_probe_renews_a_client_grant_of_unknown_lifetime() {
+        let addr = spawn_token_endpoint(
+            r#"{"access_token":"re-run-token","token_type":"Bearer","scope":"mcp:read"}"#,
+        )
+        .await;
+
+        let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+        let store_key = key("", "mcp-service", "http://127.0.0.1:3000/mcp");
+        // A service token the server never put a lifetime on.
+        store.put(
+            &store_key,
+            &TokenSet {
+                access_token: "held-token".into(),
+                token_type: "Bearer".into(),
+                refresh_token: None,
+                scope: Some("mcp:read".into()),
+                id_token: None,
+                expires_at: None,
+                dpop_jkt: None,
+            },
+        );
+
+        let session = OAuthSession {
+            config: OAuthClientConfig {
+                store: store.clone(),
+                ..OAuthClientConfig::default()
+                    .with_client_id("mcp-service")
+                    .with_client_secret("s3cret")
+                    .with_client_credentials()
+                    .require_https(false)
+            },
+            resource: "http://127.0.0.1:3000/mcp".into(),
+            store_key: RwLock::new(store_key.as_str().into()),
+            token: RwLock::new(Some("held-token".into())),
+            flow: Mutex::new(Some(FlowState {
+                client: OAuthClient::new("mcp-service")
+                    .with_secret("s3cret")
+                    .with_config(ClientConfig::new().require_https(false))
+                    .with_token_store(store.clone()),
+                metadata: AuthorizationServerMetadata::new("http://issuer.local")
+                    .with_token_endpoint(format!("http://{addr}/token"))
+                    .with_grant_types([grant::CLIENT_CREDENTIALS]),
+                store_key: store_key.as_str().into(),
+                resource: "http://127.0.0.1:3000/mcp".into(),
+            })),
+            requested_scopes: RwLock::new(vec!["mcp:read".to_string()]),
+        };
+
+        assert_eq!(
+            session.refreshed_bearer().await.as_deref(),
+            Some("re-run-token"),
+            "an unknown lifetime is not evidence of freshness; re-running the \
+             grant is what this profile renews with"
+        );
+    }
+
+    /// A renewal that came back without `scope` still has to leave a record
+    /// of what the grant covers. `ClientCredentialsRequest::token` writes the
+    /// response through verbatim, so a durable store would otherwise hold a
+    /// token that says nothing -- and the next process would let the first
+    /// step-up trade the grant away instead of widening it.
+    #[tokio::test]
+    async fn a_renewed_client_credentials_token_records_the_scope_it_asked_for() {
+        let addr = spawn_token_endpoint(
+            r#"{"access_token":"renewed-token","token_type":"Bearer","expires_in":3600}"#,
+        )
+        .await;
+
+        let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+        let store_key = key("", "mcp-service", "http://127.0.0.1:3000/mcp");
+
+        let config = OAuthClientConfig::default()
+            .with_client_id("mcp-service")
+            .with_client_secret("s3cret")
+            .with_client_credentials()
+            .require_https(false);
+        let config = OAuthClientConfig {
+            store: store.clone(),
+            ..config
+        };
+        let session = OAuthSession::new(config, "http://127.0.0.1:3000/mcp").unwrap();
+
+        let client = OAuthClient::new("mcp-service")
+            .with_secret("s3cret")
+            .with_config(ClientConfig::new().require_https(false))
+            .with_token_store(store.clone());
+        let metadata = AuthorizationServerMetadata::new("http://issuer.local")
+            .with_token_endpoint(format!("http://{addr}/token"))
+            .with_grant_types([grant::CLIENT_CREDENTIALS]);
+
+        let tokens = session
+            .run_client_grant(
+                &client,
+                &metadata,
+                &store_key,
+                "http://127.0.0.1:3000/mcp",
+                vec!["mcp:read".to_string()],
+                // The staleness path, which is the one that writes through.
+                true,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(tokens.access_token, "renewed-token");
+        assert_eq!(
+            store
+                .get(&store_key)
+                .and_then(|stored| stored.scope)
+                .as_deref(),
+            Some("mcp:read"),
+            "a response that said nothing about scope granted what was asked for"
+        );
+    }
+
     /// A refusal is the answer, not the start of a search. The client
     /// presented the only credential it has, so it neither resends it nor
     /// reaches for another grant -- and the cached state that produced it is

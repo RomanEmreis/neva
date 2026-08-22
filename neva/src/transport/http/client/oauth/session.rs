@@ -284,7 +284,7 @@ impl OAuthSession {
             .config
             .store
             .get(&self.store_key())
-            .is_some_and(|tokens| tokens.expires_within(REFRESH_LEEWAY));
+            .is_some_and(|tokens| self.is_due_for_renewal(&tokens));
 
         if !stale {
             return self.bearer();
@@ -292,6 +292,33 @@ impl OAuthSession {
 
         let mut flow = self.flow.lock().await;
         self.maintain(&mut flow).await.or_else(|| self.bearer())
+    }
+
+    /// Whether the stored set should be renewed before the next request goes
+    /// out.
+    ///
+    /// A lifetime the server never stated is not evidence of freshness --
+    /// RFC 6749 section 5.1 only RECOMMENDS `expires_in` -- so what to make
+    /// of one depends on what renewal costs.
+    ///
+    /// For a client-authenticating grant it costs one request and no user, so
+    /// an unknown lifetime counts as due: `ClientCredentialsRequest::token`
+    /// re-runs the grant for exactly this reason, and a probe that answered
+    /// "fresh" here would short-circuit ahead of it and hold a service token
+    /// until the resource refused it -- which is the `401` this probe exists
+    /// to spare. Against a server that omits `expires_in` that means a token
+    /// request per outgoing request; that is the price of not presenting a
+    /// credential long after it died, and it is the same trade the layer
+    /// below already makes.
+    ///
+    /// The interactive flow has no such option. Renewal there is a refresh
+    /// token or the user, and neither is worth spending on a guess, so an
+    /// unknown lifetime is left to the `401` path.
+    pub(super) fn is_due_for_renewal(&self, tokens: &TokenSet) -> bool {
+        match tokens.expires_at {
+            Some(_) => tokens.expires_within(REFRESH_LEEWAY),
+            None => !self.config.grant.is_interactive(),
+        }
     }
 
     /// Non-interactive token maintenance through the cached client:
@@ -378,6 +405,11 @@ impl OAuthSession {
         scopes: Vec<String>,
         cached: bool,
     ) -> Result<TokenSet, Error> {
+        // Whether what comes back is already in the store. Only one of the
+        // paths below writes through on its own, and the scope record at the
+        // end has to know whether it is adding to the store or correcting it.
+        let mut stored = false;
+
         let tokens = match &self.config.grant {
             ClientGrant::AuthorizationCode => {
                 return Err(Error::new(
@@ -395,9 +427,19 @@ impl OAuthSession {
                     // Serves the stored token while it is fresh and re-runs
                     // the grant when it is not, writing through either way --
                     // which is exactly this profile's renewal.
-                    return request.token(store_key).await.map_err(flow_error);
+                    //
+                    // Deliberately not an early return: what it stored is the
+                    // response verbatim, and a response that omitted `scope`
+                    // would leave a durable store holding a token with no
+                    // record of what the grant covers. The next process would
+                    // read that slot, believe it holds nothing, and let the
+                    // first step-up trade the grant away instead of widening
+                    // it -- the very thing the record below exists to stop.
+                    stored = true;
+                    request.token(store_key).await.map_err(flow_error)?
+                } else {
+                    request.send().await.map_err(flow_error)?
                 }
-                request.send().await.map_err(flow_error)?
             }
             ClientGrant::JwtBearer(provider) => {
                 // Asked for every request rather than once, so a workload
@@ -426,11 +468,16 @@ impl OAuthSession {
         // keeps a restart from believing it holds nothing -- and letting the
         // first step-up replace the grant instead of widening it.
         let mut tokens = tokens;
-        if tokens.scope.is_none() && !scopes.is_empty() {
+        let inferred = tokens.scope.is_none() && !scopes.is_empty();
+        if inferred {
             tokens.scope = Some(scopes.join(" "));
         }
 
-        self.config.store.put(store_key, &tokens);
+        // An inferred scope has to reach the store however the token got
+        // here; anything not written through yet has to reach it regardless.
+        if inferred || !stored {
+            self.config.store.put(store_key, &tokens);
+        }
 
         Ok(tokens)
     }

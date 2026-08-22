@@ -532,6 +532,20 @@ impl OAuthClientConfig {
         Ok(metadata)
     }
 
+    /// Whether this client has anything to authenticate to a token endpoint
+    /// with.
+    ///
+    /// A `client_id` alone is identification, not authentication -- it is
+    /// public by construction, which is why the authorization-code flow leans
+    /// on PKCE instead.
+    fn authenticates(&self) -> bool {
+        #[cfg(feature = "client-oauth-jwt")]
+        if self.private_key_jwt.is_some() {
+            return true;
+        }
+        self.client_secret.is_some()
+    }
+
     /// Fails the configuration that cannot produce a working flow, at the
     /// point the client is built rather than at the first `401`.
     pub(super) fn validate(&self) -> Result<(), Error> {
@@ -547,6 +561,31 @@ impl OAuthClientConfig {
                 "`with_private_key_jwt` and `with_client_secret` are alternatives; \
                  a client authenticates with a signed assertion or with a secret, \
                  not both",
+            ));
+        }
+
+        // A key says how this client authenticates, and dynamic registration
+        // is the one identity that cannot carry it: the registration would
+        // have to publish the public half for the server to verify against,
+        // *and* the server would have to answer that it accepted
+        // `private_key_jwt` rather than the `none` that was asked for.
+        // Neither is knowable until a registration has been spent, and a
+        // registered client that quietly does not use its key is the one
+        // outcome nobody wants. A key is anyway the credential of a client
+        // whose identity outlives a single registration -- which is what a
+        // pre-registered id, or the metadata document the CIMD draft section
+        // 6.2 pairs with exactly this method, is for.
+        #[cfg(feature = "client-oauth-jwt")]
+        if self.private_key_jwt.is_some()
+            && self.client_id.is_none()
+            && self.client_id_document.is_none()
+        {
+            return Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "`with_private_key_jwt` needs an identity that outlives a \
+                 registration: name the pre-registered id with `with_client_id`, \
+                 or publish the key alongside the client's metadata with \
+                 `with_client_id_document`",
             ));
         }
 
@@ -566,6 +605,42 @@ impl OAuthClientConfig {
                     "the `{}` grant authenticates the client itself and is not \
                      registered for dynamically; configure the credentials it was \
                      issued with `with_client_id`",
+                    self.grant.grant_type()
+                ),
+            ));
+        }
+
+        // RFC 6749 section 4.4 restricts this grant to confidential clients,
+        // and the extension spells out the two ways to be one: a signed
+        // assertion (RECOMMENDED) or a client secret. A client holding
+        // neither reaches the token endpoint with nothing but its `client_id`
+        // and is refused there -- deterministically, on every run -- so it is
+        // refused here instead, where the credential would have been written.
+        //
+        // The JWT-bearer grant is deliberately not held to this. Its
+        // assertion *is* the grant rather than the client's credential, and
+        // the workload-identity profile has the client authenticate with
+        // nothing at all: the authorization server trusts the issuer of the
+        // assertion, not a registration.
+        if matches!(self.grant, ClientGrant::ClientCredentials) && !self.authenticates() {
+            // A document cannot be paired with a secret -- the rule below
+            // says why -- so naming one here would send its author around a
+            // second refusal.
+            let remedy = match (&self.client_id_document, cfg!(feature = "client-oauth-jwt")) {
+                (Some(_), true) => "`with_private_key_jwt`",
+                (Some(_), false) => "`with_private_key_jwt`, under the `client-oauth-jwt` feature",
+                (None, true) => "`with_client_secret` or `with_private_key_jwt`",
+                (None, false) => {
+                    "`with_client_secret`, or `with_private_key_jwt` under the \
+                     `client-oauth-jwt` feature"
+                }
+            };
+
+            return Err(Error::new(
+                ErrorCode::InvalidRequest,
+                format!(
+                    "the `{}` grant authenticates the client itself, so this client \
+                     needs a credential to present: set {remedy}",
                     self.grant.grant_type()
                 ),
             ));
