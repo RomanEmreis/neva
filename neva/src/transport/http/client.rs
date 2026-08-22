@@ -108,6 +108,10 @@ impl std::fmt::Debug for Credential {
 impl Credential {
     /// The access token itself -- what a caller compares to decide whether a
     /// flow produced something new.
+    ///
+    /// Only a managed OAuth session asks: a static credential is never
+    /// replaced, so nothing compares it against what a request carried.
+    #[cfg(feature = "client-oauth")]
     pub(crate) fn access_token(&self) -> &str {
         match self {
             Self::Bearer(token) => token,
