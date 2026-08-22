@@ -6,7 +6,24 @@ publish = false
 
 [dependencies]
 neva = { path = "../../neva", features = ["http-server", "server-macros", "tracing", "di"] }
-actix-web = "4"
+# Default features minus `http2`, which is the only thing that pulls `h2` 0.3
+# (RUSTSEC-2026-0258, unbounded empty DATA frames). The 0.3 line has no fixed
+# release -- the advisory's remedy is 0.4.16+, and `actix-http` still requires
+# `h2 ^0.3` as of 3.13.3 -- so opting out is the only way this workspace stops
+# carrying the vulnerable crate. Nothing here serves HTTP/2: the example
+# exists to show `HttpEngine` wired to actix, and `cargo audit` runs over the
+# whole workspace lockfile, examples included. Drop `default-features` and
+# this list once actix-http moves to `h2` 0.4.
+actix-web = { version = "4", default-features = false, features = [
+    "macros",
+    "compress-brotli",
+    "compress-gzip",
+    "compress-zstd",
+    "cookies",
+    "unicode",
+    "compat",
+    "ws",
+] }
 bytes = "1.11"
 http = "1.4"
 serde_json = "1"
