@@ -47,6 +47,7 @@ mod config;
 mod handler;
 mod session;
 
+pub(super) use assertion::DynAssertionProvider;
 pub use assertion::{AssertionProvider, AssertionRequest, IdentityAssertion};
 pub use config::OAuthClientConfig;
 pub use handler::{AuthorizationHandler, CallbackParams, LoopbackHandler};
@@ -215,7 +216,7 @@ pub(super) enum ClientGrant {
     /// Covers both the workload-identity profile, where the platform mints
     /// the assertion, and the enterprise profile, where an identity provider
     /// does ([`IdentityAssertion`]).
-    JwtBearer(Arc<dyn AssertionProvider>),
+    JwtBearer(Arc<dyn DynAssertionProvider>),
 }
 
 impl std::fmt::Debug for ClientGrant {

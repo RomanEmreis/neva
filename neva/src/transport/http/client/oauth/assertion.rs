@@ -56,11 +56,10 @@ pub struct AssertionRequest {
 /// credential -- a projected service account token, a SPIFFE SVID -- reads it
 /// fresh each time rather than caching what the platform already rotated away.
 ///
-/// The method returns a [`BoxFuture`] rather than being an `async fn`: the
-/// provider is held behind `Arc<dyn AssertionProvider>`, and `async fn` in a
-/// trait is not dyn-compatible. `Box::pin(async move { ... })` is all an
-/// implementation needs, and the alias is neva's own, so implementing this
-/// trait pulls in no `futures` dependency.
+/// Implement it with a plain `async fn`. The `+ Send` the trait puts on the
+/// returned future is what lets the session drive it from a spawned task; an
+/// `async fn` whose body holds nothing thread-bound across an `.await`
+/// satisfies that without having to say so.
 ///
 /// A `String` implements it, which covers the credential that does not
 /// change for the lifetime of the process.
@@ -69,33 +68,56 @@ pub struct AssertionRequest {
 /// ```no_run
 /// use neva::auth::oauth::{AssertionProvider, AssertionRequest};
 /// use neva::error::{Error, ErrorCode};
-/// use neva::shared::BoxFuture;
 ///
 /// /// Reads the workload JWT its platform projects into the container.
 /// struct ProjectedToken(std::path::PathBuf);
 ///
 /// impl AssertionProvider for ProjectedToken {
-///     fn assertion(&self, _request: AssertionRequest) -> BoxFuture<'_, Result<String, Error>> {
-///         Box::pin(async move {
-///             tokio::fs::read_to_string(&self.0)
-///                 .await
-///                 .map(|jwt| jwt.trim().to_owned())
-///                 .map_err(|err| Error::new(ErrorCode::InternalError, err.to_string()))
-///         })
+///     async fn assertion(&self, _request: AssertionRequest) -> Result<String, Error> {
+///         tokio::fs::read_to_string(&self.0)
+///             .await
+///             .map(|jwt| jwt.trim().to_owned())
+///             .map_err(|err| Error::new(ErrorCode::InternalError, err.to_string()))
 ///     }
 /// }
 /// ```
 pub trait AssertionProvider: Send + Sync + 'static {
     /// Returns the JWT to send as the `assertion` parameter of the
     /// JWT-bearer grant.
-    fn assertion(&self, request: AssertionRequest) -> BoxFuture<'_, Result<String, Error>>;
+    fn assertion(
+        &self,
+        request: AssertionRequest,
+    ) -> impl Future<Output = Result<String, Error>> + Send;
 }
 
 /// A credential that does not change while the process runs -- the whole of
 /// what a fixture, a test, or a workload with a long-lived token needs.
 impl AssertionProvider for String {
-    fn assertion(&self, _request: AssertionRequest) -> BoxFuture<'_, Result<String, Error>> {
-        Box::pin(async move { Ok(self.clone()) })
+    async fn assertion(&self, _request: AssertionRequest) -> Result<String, Error> {
+        Ok(self.clone())
+    }
+}
+
+/// The dyn-compatible half of [`AssertionProvider`].
+///
+/// One configuration holds one provider whose type it does not know, so the
+/// session reaches it through `Arc<dyn ..>` -- and a trait method returning
+/// `impl Future` cannot be made into one. The boxing that bridges the two
+/// lives here rather than in the signature an implementor writes: it costs
+/// one allocation per token request, which is the same request that opens a
+/// TCP connection.
+///
+/// Nothing implements this by hand. The blanket impl below covers every
+/// [`AssertionProvider`], so it is a detail of the storage rather than a
+/// second thing to write.
+pub(crate) trait DynAssertionProvider: Send + Sync + 'static {
+    /// [`AssertionProvider::assertion`] with its future boxed.
+    fn boxed_assertion(&self, request: AssertionRequest) -> BoxFuture<'_, Result<String, Error>>;
+}
+
+impl<T: AssertionProvider> DynAssertionProvider for T {
+    fn boxed_assertion(&self, request: AssertionRequest) -> BoxFuture<'_, Result<String, Error>> {
+        Box::pin(self.assertion(request))
     }
 }
 
@@ -347,53 +369,51 @@ impl IdentityAssertion {
 }
 
 impl AssertionProvider for IdentityAssertion {
-    fn assertion(&self, request: AssertionRequest) -> BoxFuture<'_, Result<String, Error>> {
-        Box::pin(async move {
-            let metadata = self.discover().await?;
+    async fn assertion(&self, request: AssertionRequest) -> Result<String, Error> {
+        let metadata = self.discover().await?;
 
-            let mut client = OAuthClient::new(self.client_id.clone().unwrap_or_default())
-                .with_config(self.client_config());
+        let mut client = OAuthClient::new(self.client_id.clone().unwrap_or_default())
+            .with_config(self.client_config());
 
-            if let Some(secret) = &self.client_secret {
-                client = client.with_secret(secret.clone());
-            }
+        if let Some(secret) = &self.client_secret {
+            client = client.with_secret(secret.clone());
+        }
 
-            let exchanged = client
-                .exchange_token(&metadata, &self.subject_token, &self.subject_token_type)
-                .with_requested_token_type(token_type::ID_JAG)
-                // The profile pins both: `audience` is the issuer identifier
-                // of the authorization server that will be handed the grant,
-                // and `resource` the identifier the MCP server declares for
-                // itself. An identity provider evaluates its policy against
-                // exactly this pair -- which client, for which server -- so a
-                // wrong one is not a wrong parameter but a different question.
-                .with_audience(request.issuer)
-                .with_resource(request.resource)
-                .with_scopes(request.scopes)
-                .send()
-                .await
-                .map_err(flow_error)?;
+        let exchanged = client
+            .exchange_token(&metadata, &self.subject_token, &self.subject_token_type)
+            .with_requested_token_type(token_type::ID_JAG)
+            // The profile pins both: `audience` is the issuer identifier of
+            // the authorization server that will be handed the grant, and
+            // `resource` the identifier the MCP server declares for itself.
+            // An identity provider evaluates its policy against exactly this
+            // pair -- which client, for which server -- so a wrong one is not
+            // a wrong parameter but a different question.
+            .with_audience(request.issuer)
+            .with_resource(request.resource)
+            .with_scopes(request.scopes)
+            .send()
+            .await
+            .map_err(flow_error)?;
 
-            // The response says what was issued, and only an ID-JAG is a
-            // grant. A server that answered with an access token answered a
-            // different request; presenting it as an assertion would buy an
-            // `invalid_grant` one round later, with nothing in the message to
-            // say the type was wrong.
-            if exchanged.issued_token_type != token_type::ID_JAG {
-                return Err(Error::new(
-                    ErrorCode::InvalidRequest,
-                    format!(
-                        "`{}` answered the token exchange with `{}` rather than an \
-                         identity assertion grant (`{}`)",
-                        self.issuer,
-                        exchanged.issued_token_type,
-                        token_type::ID_JAG
-                    ),
-                ));
-            }
+        // The response says what was issued, and only an ID-JAG is a grant. A
+        // server that answered with an access token answered a different
+        // request; presenting it as an assertion would buy an `invalid_grant`
+        // one round later, with nothing in the message to say the type was
+        // wrong.
+        if exchanged.issued_token_type != token_type::ID_JAG {
+            return Err(Error::new(
+                ErrorCode::InvalidRequest,
+                format!(
+                    "`{}` answered the token exchange with `{}` rather than an \
+                     identity assertion grant (`{}`)",
+                    self.issuer,
+                    exchanged.issued_token_type,
+                    token_type::ID_JAG
+                ),
+            ));
+        }
 
-            Ok(exchanged.token)
-        })
+        Ok(exchanged.token)
     }
 }
 

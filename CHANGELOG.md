@@ -16,8 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   enterprise-managed client -- had nothing to run. Three profiles now do:
   `OAuthClientConfig::with_client_credentials()` (RFC 6749 section 4.4, the
   `io.modelcontextprotocol/oauth-client-credentials` extension),
-  `with_jwt_bearer(..)` over the new `AssertionProvider` seam (RFC 7523
-  section 2.1, workload identity federation), and `with_identity_assertion(..)`
+  `with_jwt_bearer(..)` over the new `AssertionProvider` seam -- a plain
+  `async fn`, no `BoxFuture` in the signature (RFC 7523 section 2.1, workload
+  identity federation) -- and `with_identity_assertion(..)`
   for the enterprise-managed profile, where `IdentityAssertion` trades an ID
   token at the identity provider for the RFC 8693 grant the resource's
   authorization server accepts.

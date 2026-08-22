@@ -404,7 +404,7 @@ impl OAuthSession {
                 // whose platform rotates the credential presents the current
                 // one instead of the one this session started with.
                 let assertion = provider
-                    .assertion(AssertionRequest {
+                    .boxed_assertion(AssertionRequest {
                         issuer: metadata.issuer.clone(),
                         resource: resource.to_owned(),
                         scopes: scopes.clone(),
