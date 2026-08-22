@@ -58,8 +58,18 @@ pub(crate) struct OAuthSession {
     /// staleness probe would keep looking into an empty slot and every renewal
     /// would have to wait for a `401` to notice.
     pub(super) store_key: RwLock<Arc<str>>,
-    /// Current bearer token, read on every outgoing request.
-    pub(super) token: RwLock<Option<Arc<str>>>,
+    /// The credential every outgoing request reads: the current token, and
+    /// -- when it is DPoP-bound -- the key that proves it belongs to this
+    /// client.
+    pub(super) credential: RwLock<Option<Credential>>,
+    /// The DPoP key this session binds its tokens to, once it has one.
+    ///
+    /// `Always` seeds it at construction; `Auto` mints one the first time a
+    /// server asks (see [`OAuthSession::arm_dpop`]), and it stays for the rest
+    /// of the session -- a token is bound to the key that obtained it, so
+    /// swapping keys mid-session would strand every token already issued.
+    #[cfg(feature = "client-oauth-dpop")]
+    pub(super) dpop: RwLock<Option<Dpop>>,
     /// Serializes authorization flows (concurrent 401s run one flow) and
     /// caches the client + metadata for non-interactive refresh.
     pub(super) flow: Mutex<Option<FlowState>>,
@@ -93,32 +103,174 @@ impl OAuthSession {
 
         let store_key = Self::initial_store_key(&config, &resource);
 
+        // A configured key is this session's from the start; `Auto` waits to
+        // be asked, and `Disabled` never is.
+        #[cfg(feature = "client-oauth-dpop")]
+        let dpop = match &config.dpop {
+            DpopPolicy::Always(key) => Some(key.clone()),
+            DpopPolicy::Auto | DpopPolicy::Disabled => None,
+        };
+
+        let session = Self {
+            config,
+            resource,
+            store_key: RwLock::new(store_key.as_str().into()),
+            credential: RwLock::new(None),
+            #[cfg(feature = "client-oauth-dpop")]
+            dpop: RwLock::new(dpop),
+            flow: Mutex::new(None),
+            requested_scopes: RwLock::new(Vec::new()),
+        };
+
         // The warm start, and the one place a token of unknown provenance is
         // adopted on the strength of its key alone -- everything written
         // later in this session's life it also minted. A grant whose key does
         // not name who the token is *for* cannot answer for what is in that
         // slot, so it starts cold and runs instead
         // ([`ClientGrant::survives_a_restart`]).
-        let token = config
-            .grant
-            .may_restore_persisted_grant()
-            .then(|| {
-                config
-                    .store
-                    .get(&store_key)
-                    .filter(|tokens| !tokens.is_expired())
-                    .map(|tokens| tokens.access_token.into())
-            })
-            .flatten();
+        if session.config.grant.may_restore_persisted_grant()
+            && let Some(tokens) = session
+                .config
+                .store
+                .get(&store_key)
+                .filter(|tokens| !tokens.is_expired())
+                .filter(|tokens| session.can_present(tokens))
+        {
+            session.set_credential(session.credential_for(tokens));
+        }
 
-        Ok(Self {
-            config,
-            resource,
-            store_key: RwLock::new(store_key.into()),
-            token: RwLock::new(token),
-            flow: Mutex::new(None),
-            requested_scopes: RwLock::new(Vec::new()),
-        })
+        Ok(session)
+    }
+
+    /// Whether this session may ever present a DPoP-bound token.
+    ///
+    /// A question about the configuration rather than about what is held: an
+    /// `Auto` session that nothing has asked yet answers `true`, because the
+    /// first `401` may arm it. What turns on this is decided once per
+    /// connection and must not change underneath it -- see
+    /// `ClientAuth::follows_redirects`.
+    #[cfg(feature = "client-oauth-dpop")]
+    pub(crate) fn may_bind_tokens(&self) -> bool {
+        !matches!(self.config.dpop, DpopPolicy::Disabled)
+    }
+
+    /// The DPoP key this session binds its tokens to, if it has one.
+    #[cfg(feature = "client-oauth-dpop")]
+    pub(super) fn dpop(&self) -> Option<Dpop> {
+        self.dpop
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Mints the session's DPoP key, if a server has just asked for one and
+    /// there is none yet. Returns whether this call is what armed it.
+    ///
+    /// Only `Auto` reaches the generator: `Always` was armed at construction
+    /// and `Disabled` is the deployer's answer to this very question, which a
+    /// server does not get to overrule -- a client told to present bearer
+    /// tokens that quietly started signing proofs would be doing something
+    /// nobody asked for.
+    ///
+    /// Arming is one-way and one-time. The key outlives the flow that
+    /// prompted it because every token bound to it needs it for as long as
+    /// the token lives.
+    #[cfg(feature = "client-oauth-dpop")]
+    pub(super) fn arm_dpop(&self) -> Result<bool, Error> {
+        if !matches!(self.config.dpop, DpopPolicy::Auto) {
+            return Ok(false);
+        }
+
+        let mut held = self
+            .dpop
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        if held.is_some() {
+            return Ok(false);
+        }
+
+        // ES256: the algorithm every DPoP implementation supports, and what a
+        // server that advertises nothing in particular will accept. A server
+        // that wants something else says so in
+        // `dpop_signing_alg_values_supported`, and the token request refuses
+        // rather than guessing -- naming a key to configure with `with_dpop`
+        // beats a remote `invalid_dpop_proof`.
+        let key = Dpop::generate()
+            .map_err(|err| Error::new(ErrorCode::InternalError, err.to_string()))?;
+
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            logger = "neva",
+            jkt = key.thumbprint(),
+            "DPoP key generated for this session"
+        );
+
+        *held = Some(key);
+        Ok(true)
+    }
+
+    /// [`arm_dpop`](Self::arm_dpop) for the other way a server asks: an
+    /// authorization server that advertises the proof algorithms it accepts
+    /// (RFC 9449 section 5.1) is one that issues sender-constrained tokens.
+    #[cfg(feature = "client-oauth-dpop")]
+    pub(super) fn arm_dpop_for(
+        &self,
+        metadata: &AuthorizationServerMetadata,
+    ) -> Result<bool, Error> {
+        if metadata.dpop_signing_alg_values_supported.is_empty() {
+            return Ok(false);
+        }
+        self.arm_dpop()
+    }
+
+    /// Whether this session can present `tokens` -- the check
+    /// `OAuthClient::can_present` makes on the store, applied to the reads
+    /// that happen before any client exists.
+    ///
+    /// A store outlives a process and is shared across deployments, so an
+    /// entry may be bound to a key nothing here holds, and an unbound entry
+    /// may turn up after this client was given a key. Neither is an error:
+    /// it is a stale cache, and the answer is to obtain a token that fits.
+    #[cfg(feature = "client-oauth-dpop")]
+    pub(super) fn can_present(&self, tokens: &TokenSet) -> bool {
+        match self.dpop() {
+            Some(key) => tokens.is_dpop() && tokens.dpop_jkt.as_deref() == Some(key.thumbprint()),
+            // No key to present it with, so a bound entry is dead weight
+            None => !tokens.is_dpop(),
+        }
+    }
+
+    /// The same answer for a build that cannot sign a proof at all, which is
+    /// the `None` arm above: a bound token is refused on every request without
+    /// the key it names, and this build has no way whatever to prove
+    /// possession of one.
+    ///
+    /// It is not enough that such a build never *asked* for a bound token. A
+    /// `TokenStore` may be durable and is shared by whoever points at it, so
+    /// an entry written by a DPoP-enabled deployment can reach this one --
+    /// and `token_type` says so whether or not the feature is compiled in.
+    /// Taking it would present a sender-constrained token as a bearer one and
+    /// spend a `401` finding out. `OAuthClient::can_present` refuses it one
+    /// layer down for the same reason.
+    #[cfg(not(feature = "client-oauth-dpop"))]
+    pub(super) fn can_present(&self, tokens: &TokenSet) -> bool {
+        !tokens.is_dpop()
+    }
+
+    /// The credential that presents `tokens`.
+    pub(super) fn credential_for(&self, tokens: TokenSet) -> Credential {
+        #[cfg(feature = "client-oauth-dpop")]
+        if let Some(key) = self.dpop()
+            && tokens.is_dpop()
+        {
+            return Credential::Dpop {
+                tokens: Arc::new(tokens),
+                key,
+            };
+        }
+
+        Credential::Bearer(tokens.access_token.into())
     }
 
     /// The key this session reads before it has discovered anything.
@@ -305,27 +457,37 @@ impl OAuthSession {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = scopes;
     }
 
-    /// The current bearer token, if any.
-    pub(crate) fn bearer(&self) -> Option<Arc<str>> {
-        self.token
+    /// The credential this session currently presents, if any.
+    pub(crate) fn credential(&self) -> Option<Credential> {
+        self.credential
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
-    pub(super) fn set_token(&self, token: Arc<str>) {
+    pub(super) fn set_credential(&self, credential: Credential) {
         *self
-            .token
+            .credential
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(token);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(credential);
     }
 
-    /// The bearer token to attach to the next request, proactively
+    /// Forgets the current credential -- what arming a DPoP key does to the
+    /// bearer token that preceded it.
+    #[cfg(feature = "client-oauth-dpop")]
+    pub(super) fn clear_credential(&self) {
+        *self
+            .credential
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    /// The credential to attach to the next request, proactively
     /// refreshed when the stored set is about to expire and a refresh
     /// token is available -- the session then renews without user
     /// interaction. Falls back to the current token when refresh is not
     /// possible; the `401` path handles the rest.
-    pub(crate) async fn refreshed_bearer(&self) -> Option<Arc<str>> {
+    pub(crate) async fn refreshed_credential(&self) -> Option<Credential> {
         // Cheap staleness probe before taking the flow lock.
         let stale = self
             .config
@@ -334,11 +496,11 @@ impl OAuthSession {
             .is_some_and(|tokens| self.is_due_for_renewal(&tokens));
 
         if !stale {
-            return self.bearer();
+            return self.credential();
         }
 
         let mut flow = self.flow.lock().await;
-        self.maintain(&mut flow).await.or_else(|| self.bearer())
+        self.maintain(&mut flow).await.or_else(|| self.credential())
     }
 
     /// Whether the stored set should be renewed before the next request goes
@@ -373,7 +535,7 @@ impl OAuthSession {
     /// carry-over and dead-entry pruning included, via
     /// `OAuthClient::token`). Returns `None` when interactive
     /// authorization is required or no flow has completed yet.
-    pub(super) async fn maintain(&self, state: &mut Option<FlowState>) -> Option<Arc<str>> {
+    pub(super) async fn maintain(&self, state: &mut Option<FlowState>) -> Option<Credential> {
         // A client-authenticating grant issues no refresh token, so running
         // the grant again *is* its renewal -- and it needs no user, which is
         // the whole reason this can happen on a staleness probe rather than
@@ -419,7 +581,7 @@ impl OAuthSession {
     pub(super) async fn renew_client_grant(
         &self,
         flight: &mut Option<FlowState>,
-    ) -> Result<Arc<str>, Error> {
+    ) -> Result<Credential, Error> {
         let Some(state) = flight.as_ref() else {
             // Nothing to renew from: discover, which also files what it
             // learns here for the next time.
@@ -448,13 +610,13 @@ impl OAuthSession {
     }
 
     /// Files `tokens` under `store_key`, makes them this session's current
-    /// credentials, and hands back the bearer token to attach.
+    /// credentials, and hands back the credential to attach.
     ///
     /// What every completed grant does with what it obtained. The store key
     /// moves with it because a flow may have run against a server the
     /// configuration does not name, and the pre-discovery reads that follow
     /// have to look where this flow actually wrote.
-    pub(super) fn adopt(&self, tokens: TokenSet, store_key: Arc<str>) -> Arc<str> {
+    pub(super) fn adopt(&self, tokens: TokenSet, store_key: Arc<str>) -> Credential {
         if let Some(granted) = tokens.scope.as_deref() {
             let granted = split_scopes(granted);
             if !granted.is_empty() {
@@ -464,10 +626,10 @@ impl OAuthSession {
 
         self.set_store_key(&store_key);
 
-        let token: Arc<str> = tokens.access_token.into();
-        self.set_token(token.clone());
+        let credential = self.credential_for(tokens);
+        self.set_credential(credential.clone());
 
-        token
+        credential
     }
 
     /// Runs the configured client-authenticating grant and returns what the
@@ -575,7 +737,7 @@ impl OAuthSession {
         client: &OAuthClient,
         metadata: &AuthorizationServerMetadata,
         store_key: Arc<str>,
-    ) -> Option<Arc<str>> {
+    ) -> Option<Credential> {
         // What the grant was known to cover going in. A refresh response may
         // leave `scope` out when the grant is unchanged (RFC 6749 section 5.1),
         // and the renewed set *replaces* the stored one -- so a renewal would
@@ -619,9 +781,11 @@ impl OAuthSession {
                 // matters when the key moved: a portable identity may have
                 // renewed against a server the configuration does not name.
                 self.set_store_key(&store_key);
-                let token: Arc<str> = tokens.access_token.into();
-                self.set_token(token.clone());
-                Some(token)
+
+                let credential = self.credential_for(tokens);
+                self.set_credential(credential.clone());
+
+                Some(credential)
             }
             // Nothing renewable -- interactive authorization it is.
             Ok(None) => None,
@@ -636,7 +800,7 @@ impl OAuthSession {
     }
 
     /// Runs the authorization flow triggered by a `401` and returns the
-    /// fresh bearer token.
+    /// fresh credential.
     ///
     /// `www_authenticate` is the challenge header value, when present --
     /// its `resource_metadata` pointer takes precedence over well-known
@@ -647,10 +811,38 @@ impl OAuthSession {
         &self,
         www_authenticate: Option<&str>,
         used: Option<&str>,
-    ) -> Result<Arc<str>, Error> {
+    ) -> Result<Credential, Error> {
         let mut flight = self.flow.lock().await;
 
-        let challenge = www_authenticate.and_then(|header| BearerChallenge::parse(header).ok());
+        let challenge = www_authenticate.and_then(parse_challenge);
+
+        // A resource that challenges with the `DPoP` scheme (RFC 9449
+        // section 7.1) is one that will refuse a bearer token however fresh
+        // it is, so a session allowed to decide for itself mints a key here
+        // -- before anything below builds a client that would ask for the
+        // wrong kind of token.
+        //
+        // A resource that takes both schemes answers with both, and which of
+        // those challenges arrives here is `bearer_challenge`'s decision: it
+        // prefers the `DPoP` one among challenges naming no actionable error,
+        // for exactly this reason. The alternative -- reading the scheme off
+        // whichever was written first -- leaves this branch blind, and an
+        // authorization server is free to leave
+        // `dpop_signing_alg_values_supported` out, so nothing further down
+        // would catch it either.
+        //
+        // What was held until now was obtained for a different scheme, and so
+        // was the flow state that renews it: both are dropped, or the paths
+        // below would hand back exactly the credential this `401` refused.
+        #[cfg(feature = "client-oauth-dpop")]
+        if challenge
+            .as_ref()
+            .is_some_and(|challenge| challenge.scheme().eq_ignore_ascii_case(auth_scheme::DPOP))
+            && self.arm_dpop()?
+        {
+            self.clear_credential();
+            *flight = None;
+        }
         // Scopes the challenge demands that this session has never asked for.
         // A refresh cannot widen a grant, so their presence is what separates
         // "this token expired" from "this token is not enough" -- the second
@@ -700,8 +892,8 @@ impl OAuthSession {
         // that was just refused.
         if !uncovered
             && !unverifiable
-            && let Some(current) = self.bearer()
-            && used != Some(&*current)
+            && let Some(current) = self.credential()
+            && used != Some(current.access_token())
         {
             return Ok(current);
         }
@@ -760,10 +952,10 @@ impl OAuthSession {
         // renews the session silently. A token identical to the rejected
         // one is no help though (revoked server-side) -- interactive then.
         if !step_up
-            && let Some(token) = self.maintain(&mut flight).await
-            && used != Some(&*token)
+            && let Some(credential) = self.maintain(&mut flight).await
+            && used != Some(credential.access_token())
         {
-            return Ok(token);
+            return Ok(credential);
         }
 
         let discovery = DiscoveryClient::with_config(self.config.client_config());
@@ -775,6 +967,16 @@ impl OAuthSession {
             .discover_authorization_server(&resource_metadata)
             .await
             .map_err(flow_error)?;
+
+        // The other way a server asks for sender-constrained tokens: the
+        // authorization server naming the proof algorithms it accepts. Same
+        // consequence as a `DPoP` challenge -- what was held is not what this
+        // flow is about to obtain.
+        #[cfg(feature = "client-oauth-dpop")]
+        if self.arm_dpop_for(&server_metadata)? {
+            self.clear_credential();
+            *flight = None;
+        }
 
         let source = self.config.client_id_source(&server_metadata);
         self.check_issuer_binding(source, &server_metadata)?;
@@ -815,10 +1017,10 @@ impl OAuthSession {
 
         if !step_up
             && self.may_reuse_stored_refresh(source, &server_metadata)
-            && let Some(token) = self
+            && let Some(credential) = self
                 .refresh_with(&client, &server_metadata, store_key.clone())
                 .await
-            && used != Some(&*token)
+            && used != Some(credential.access_token())
         {
             // Keep what made it work, so the next refresh is the cheap path.
             *flight = Some(FlowState {
@@ -827,7 +1029,8 @@ impl OAuthSession {
                 store_key,
                 resource,
             });
-            return Ok(token);
+
+            return Ok(credential);
         }
 
         // What to ask for, most specific first. A configured set is the
@@ -912,9 +1115,10 @@ impl OAuthSession {
         });
         self.set_requested_scopes(granted);
 
-        let token: Arc<str> = tokens.access_token.into();
-        self.set_token(token.clone());
-        Ok(token)
+        let credential = self.credential_for(tokens);
+        self.set_credential(credential.clone());
+
+        Ok(credential)
     }
 
     /// SEP-2350: carries everything earlier rounds asked for into `scopes`,
@@ -967,7 +1171,7 @@ impl OAuthSession {
         flight: &mut Option<FlowState>,
         demanded: &[String],
         stated: Option<&str>,
-    ) -> Result<Arc<str>, Error> {
+    ) -> Result<Credential, Error> {
         // What to ask for when nothing has been discovered yet: the caller's
         // decision, else what this very request was challenged for, widened
         // by whatever the session already holds.
@@ -982,6 +1186,16 @@ impl OAuthSession {
             .discover_authorization_server(&resource_metadata)
             .await
             .map_err(flow_error)?;
+
+        // See `authorize`: an authorization server advertising the proof
+        // algorithms it accepts is one that issues sender-constrained tokens,
+        // and this grant's renewal is to run again -- so the state that would
+        // renew the wrong kind of token goes with it.
+        #[cfg(feature = "client-oauth-dpop")]
+        if self.arm_dpop_for(&server_metadata)? {
+            self.clear_credential();
+            *flight = None;
+        }
 
         let source = self.config.client_id_source(&server_metadata);
         self.check_issuer_binding(source, &server_metadata)?;
@@ -1028,7 +1242,7 @@ impl OAuthSession {
             )
             .await?;
 
-        let token = self.adopt(tokens, store_key.clone());
+        let credential = self.adopt(tokens, store_key.clone());
 
         // Keep what made it work: the next renewal is then one request.
         *flight = Some(FlowState {
@@ -1038,7 +1252,7 @@ impl OAuthSession {
             resource,
         });
 
-        Ok(token)
+        Ok(credential)
     }
 
     /// Refuses credentials that belong to a different authorization server
@@ -1112,6 +1326,9 @@ impl OAuthSession {
     /// the user through consent on every restart. The slot it renews from is
     /// labelled with that same server, which is the assurance the comparison
     /// was standing in for.
+    // `metadata` names the server in the explanation, which only a build with
+    // `tracing` emits.
+    #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
     pub(super) fn may_reuse_stored_refresh(
         &self,
         source: ClientIdSource<'_>,
@@ -1334,6 +1551,16 @@ impl OAuthSession {
         let client = client
             .with_config(self.config.client_config())
             .with_token_store(self.config.store.clone());
+
+        // Every token this client obtains is bound to the session's key, and
+        // every token request carries a proof of possession -- including the
+        // nonce round an authorization server may demand (RFC 9449
+        // section 8), which `OAuthClient` answers on its own.
+        #[cfg(feature = "client-oauth-dpop")]
+        let client = match self.dpop() {
+            Some(key) => client.with_dpop(key),
+            None => client,
+        };
 
         Ok(match redirect_uri {
             Some(uri) => client.with_redirect_uri(uri),

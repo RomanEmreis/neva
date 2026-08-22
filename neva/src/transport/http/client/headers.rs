@@ -133,13 +133,42 @@ pub(super) fn mirrored_param_headers(
 /// different challenges.
 #[cfg(feature = "client-oauth")]
 pub(super) fn insufficient_scope(headers: &reqwest::header::HeaderMap) -> bool {
-    use volga_oauth_client::{BearerChallenge, OAuthErrorCode};
+    use volga_oauth_client::OAuthErrorCode;
 
     bearer_challenge(headers)
-        .and_then(|challenge| BearerChallenge::parse(&challenge).ok())
+        .and_then(|challenge| super::oauth::parse_challenge(&challenge))
         .is_some_and(|challenge| {
             matches!(challenge.error(), Some(OAuthErrorCode::InsufficientScope))
         })
+}
+
+/// Whether this response is the `use_dpop_nonce` refusal that asks for one
+/// retry (RFC 9449 sections 8 and 9).
+///
+/// The `DPoP-Nonce` header alone does not say so: a server may supply a nonce
+/// with any response, including a successful one, and that nonce is for the
+/// *next* request rather than a demand to repeat this one. What makes it a
+/// refusal is the `error` in the challenge.
+///
+/// *Every* challenge is asked, not the one [`bearer_challenge`] picks. A
+/// resource that takes both schemes answers with both (RFC 9449 section 7.1),
+/// so `Bearer error="invalid_token", DPoP error="use_dpop_nonce"` is an
+/// ordinary thing to receive -- and the challenge selected for authorization
+/// is the Bearer one, whose error says nothing about the nonce. Reading only
+/// that would send the client through a whole authorization flow, user
+/// interaction included, to answer a server that had simply not handed out its
+/// nonce yet.
+#[cfg(feature = "client-oauth-dpop")]
+pub(super) fn use_dpop_nonce(headers: &reqwest::header::HeaderMap) -> bool {
+    use volga_oauth_client::OAuthErrorCode;
+
+    headers
+        .get_all(reqwest::header::WWW_AUTHENTICATE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(bearer_challenges)
+        .filter_map(|challenge| super::oauth::parse_challenge(&challenge))
+        .any(|challenge| matches!(challenge.error(), Some(OAuthErrorCode::UseDpopNonce)))
 }
 
 /// The `WWW-Authenticate` value carrying the Bearer challenge that applies, if
@@ -156,34 +185,67 @@ pub(super) fn insufficient_scope(headers: &reqwest::header::HeaderMap) -> bool {
 /// was short of. Handing the flow whichever came first, a
 /// `Bearer error="invalid_token"` say, would have it re-authorize for exactly the
 /// grant it already held and spend the exchange's one retry being refused
-/// identically. Where none names the code the first is as good as any: a
-/// `resource_metadata` pointer is the server's own and does not depend on which
-/// error accompanies it.
+/// identically.
+///
+/// Where none names the code, a `DPoP` challenge wins over a `Bearer` one, and
+/// otherwise the first is as good as any. What these challenges carry is the
+/// same either way -- a `resource_metadata` pointer is the server's own and
+/// does not depend on which challenge it accompanies -- so the scheme is the
+/// one thing that differs between them and the one thing the caller acts on:
+/// it is what tells a session allowed to decide for itself to bind its tokens
+/// to a key (RFC 9449 section 7.1). A resource that takes both schemes answers
+/// with both, and handing over the `Bearer` one because it was written first
+/// would have the client authorize for, and then present, exactly the
+/// credential the resource asked it to replace -- an authorization server that
+/// leaves `dpop_signing_alg_values_supported` out, as it may, then has nothing
+/// left to say so either.
+///
+/// A challenge naming `insufficient_scope` still outranks that, and needs to:
+/// the credential it refused was *accepted as a credential*, so the scheme is
+/// already settled, and what is unresolved is the grant.
 #[cfg(feature = "client-oauth")]
 pub(super) fn bearer_challenge(headers: &reqwest::header::HeaderMap) -> Option<String> {
-    use volga_oauth_client::{BearerChallenge, OAuthErrorCode};
+    use volga_oauth_client::OAuthErrorCode;
 
-    let mut first = None;
+    // The challenge to fall back on, and whether it is one of the preferred
+    // scheme -- which is what decides whether a later one may displace it.
+    let mut fallback: Option<(String, bool)> = None;
+
     for value in headers
         .get_all(reqwest::header::WWW_AUTHENTICATE)
         .iter()
         .filter_map(|value| value.to_str().ok())
     {
         for challenge in bearer_challenges(value) {
-            let Ok(parsed) = BearerChallenge::parse(&challenge) else {
+            let Some(parsed) = super::oauth::parse_challenge(&challenge) else {
                 continue;
             };
             if matches!(parsed.error(), Some(OAuthErrorCode::InsufficientScope)) {
                 return Some(challenge);
             }
-            first.get_or_insert(challenge);
+
+            #[cfg(feature = "client-oauth-dpop")]
+            let preferred = parsed
+                .scheme()
+                .eq_ignore_ascii_case(volga_oauth_client::auth_scheme::DPOP);
+            #[cfg(not(feature = "client-oauth-dpop"))]
+            let preferred = false;
+
+            match fallback {
+                // Nothing held yet, or a plain challenge giving way to one
+                // that names the scheme this client has more to offer under.
+                None => fallback = Some((challenge, preferred)),
+                Some((_, false)) if preferred => fallback = Some((challenge, preferred)),
+                Some(_) => {}
+            }
         }
     }
-    first
+
+    fallback.map(|(challenge, _)| challenge)
 }
 
-/// The Bearer challenges inside one `WWW-Authenticate` value, each rendered on
-/// its own.
+/// The challenges inside one `WWW-Authenticate` value that this client can
+/// answer, each rendered on its own.
 ///
 /// `BearerChallenge::parse` returns the *first* Bearer challenge in a value and
 /// stops where the next scheme begins, which is the right contract for reading
@@ -225,10 +287,30 @@ pub(super) fn bearer_challenges(value: &str) -> Vec<String> {
             group[0]
                 .split_ascii_whitespace()
                 .next()
-                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("Bearer"))
+                .is_some_and(is_understood_scheme)
         })
         .map(|group| group.join(", "))
         .collect()
+}
+
+/// Whether a challenge in `scheme` is one this client can answer.
+///
+/// `Bearer` always. `DPoP` only where the client can sign a proof: a build
+/// without that support reading a DPoP challenge would discover the resource's
+/// metadata, run a whole flow, and present a bearer token the server already
+/// said it does not take -- so the challenge is left unanswered instead, which
+/// is what an unsupported scheme means (RFC 9110 section 11.6.1).
+#[cfg(feature = "client-oauth")]
+fn is_understood_scheme(scheme: &str) -> bool {
+    if scheme.eq_ignore_ascii_case(volga_oauth_client::auth_scheme::BEARER) {
+        return true;
+    }
+
+    #[cfg(feature = "client-oauth-dpop")]
+    return scheme.eq_ignore_ascii_case(volga_oauth_client::auth_scheme::DPOP);
+
+    #[cfg(not(feature = "client-oauth-dpop"))]
+    false
 }
 
 /// Splits a header value on the commas that separate list elements -- the ones

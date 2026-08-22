@@ -5,11 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## 0.5.5
+## 0.5.4
 
 ### Added
 
 #### Authorization
+* **DPoP sender-constrained tokens**, behind the new **`client-oauth-dpop`**
+  feature (#110). A bearer token is a password: whoever steals it may spend it.
+  A DPoP-bound one ([RFC 9449](https://www.rfc-editor.org/rfc/rfc9449)) is
+  worth nothing without the key, because every request carries a proof signed
+  over its own method and URL and over the token itself. Both nonce rounds are
+  answered -- the token endpoint's (section 8) and the resource's (section 9),
+  the second costing one repeat of the request rather than a re-authorization,
+  since the token and the key were never in question.
+
+  `OAuthClientConfig::with_dpop(key)` binds every token this client obtains to
+  a key of the caller's choosing -- `Dpop::generate()` for a throwaway one per
+  session, `Dpop::from_pem` for a lasting one -- and refuses an authorization
+  server that answers with an unbound token. `with_dpop_auto()` mints an
+  `ES256` key the first time a server asks, by challenging with the `DPoP`
+  scheme or by advertising `dpop_signing_alg_values_supported`; that is the
+  setting for a client talking to servers it does not control, since it never
+  turns a working bearer flow into a refusal.
+
+  One behavior to know: a DPoP connection does not follow HTTP redirects. A
+  proof covers one method and one URL, nothing can re-sign it mid-chain, and
+  neither retry recovers from a hop that carried the wrong one, so a `3xx` is
+  surfaced as itself. Bearer connections are unaffected.
+
+  Off by default and never self-enabling: SEP-1932 is unmerged and DPoP appears
+  nowhere in the 2026-07-28 text, so the conformance suite scores `auth/dpop`
+  and `auth/dpop-nonce` as extensions. Both are green on both profiles.
+
 * **The OAuth grants that authenticate the client itself** (#109). neva's
   client implemented the authorization-code flow only, so a deployment with no
   user in front of a browser had nothing to run. Three profiles now do:
@@ -46,6 +73,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   authorization server meets the URL, so there is nobody to have shared one
   with.
 
+#### Shutdown
+* **`App::with_shutdown()` / `App::with_shutdown_signal(..)` stop a server
+  without an OS signal** (#103). Shutdown used to be signal-driven only, which
+  left neva awkward to embed in a service that owns its own lifecycle and
+  impossible to test: a test could only `handle.abort()` the server task, which
+  skips every graceful path by construction. A `ShutdownHandle` composes with
+  the signal handler rather than replacing it, so a server built this way still
+  stops on Ctrl+C.
+
 ### Fixed
 
 #### Authorization
@@ -63,21 +99,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   said it does not accept. Two documents from one server cannot both be right,
   and the one describing the token endpoint decides; left alone, such a flow
   registered successfully and then failed at the token request.
-
-## 0.5.4
-
-### Added
-
-#### Shutdown
-* **`App::with_shutdown()` / `App::with_shutdown_signal(..)` stop a server
-  without an OS signal** (#103). Shutdown used to be signal-driven only, which
-  left neva awkward to embed in a service that owns its own lifecycle and
-  impossible to test: a test could only `handle.abort()` the server task, which
-  skips every graceful path by construction. A `ShutdownHandle` composes with
-  the signal handler rather than replacing it, so a server built this way still
-  stops on Ctrl+C.
-
-### Fixed
 
 #### Subscriptions
 * **A server shutting down now answers its live `subscriptions/listen` requests

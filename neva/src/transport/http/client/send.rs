@@ -8,13 +8,15 @@
 
 use super::*;
 
-/// Builds the JSON-RPC POST with all transport headers and the current
-/// bearer credential attached.
+/// Builds the JSON-RPC POST with all transport headers set.
+///
+/// The credential is not among them: a DPoP proof is signed over the request
+/// it accompanies and cannot be reused across attempts, so attaching one is
+/// [`send_authorized`]'s job and happens once per attempt.
 pub(super) fn build_post(
     client: &reqwest::Client,
     session: &McpSession,
     req: &Message,
-    bearer: Option<&str>,
     #[cfg(not(feature = "legacy-spec"))] mirrored: &[(String, String)],
 ) -> RequestBuilder {
     // `.json()` already sets `Content-Type: application/json`, and `.header()`
@@ -57,10 +59,6 @@ pub(super) fn build_post(
             crate::transport::http::MCP_PROTOCOL_VERSION,
             crate::LATEST_PROTOCOL_VERSION,
         );
-    }
-
-    if let Some(bearer) = bearer {
-        resp = resp.bearer_auth(bearer)
     }
 
     resp
@@ -126,19 +124,27 @@ pub(super) async fn exchange(
     // Only this exchange's own requests use it. A resumption `GET` asks `auth`
     // again when its turn comes, so a flow completing in between -- here or
     // anywhere else -- reaches it without being threaded through.
-    let bearer = auth.fresh_bearer().await;
+    let credential = auth.fresh_credential().await;
     // Once for the whole exchange -- see `mirrored_param_headers`.
     #[cfg(not(feature = "legacy-spec"))]
     let mirrored = mirrored_param_headers(&session, &req, &param_registry);
-    let sent = build_post(
-        &client,
-        &session,
-        &req,
-        bearer.as_deref(),
-        #[cfg(not(feature = "legacy-spec"))]
-        &mirrored,
+
+    let post = || {
+        build_post(
+            &client,
+            &session,
+            &req,
+            #[cfg(not(feature = "legacy-spec"))]
+            &mirrored,
+        )
+    };
+
+    let sent = send_authorized(
+        credential.as_ref(),
+        &reqwest::Method::POST,
+        session.url(),
+        post,
     )
-    .send()
     .await;
 
     let resp = match sent {
@@ -169,20 +175,17 @@ pub(super) async fn exchange(
         {
             let challenge = bearer_challenge(resp.headers());
             match oauth
-                .authorize(challenge.as_deref(), bearer.as_deref())
+                .authorize(
+                    challenge.as_deref(),
+                    credential.as_ref().map(Credential::access_token),
+                )
                 .await
             {
                 Ok(fresh) => {
-                    let retried = build_post(
-                        &client,
-                        &session,
-                        &req,
-                        Some(&fresh),
-                        #[cfg(not(feature = "legacy-spec"))]
-                        &mirrored,
-                    )
-                    .send()
-                    .await;
+                    let retried =
+                        send_authorized(Some(&fresh), &reqwest::Method::POST, session.url(), post)
+                            .await;
+
                     match retried {
                         Ok(retried) => retried,
                         Err(_err) => {

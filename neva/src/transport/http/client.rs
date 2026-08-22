@@ -42,15 +42,15 @@ enum ClientAuth {
 }
 
 impl ClientAuth {
-    /// The bearer token to attach to the next request, if any. Under a
+    /// The credential to attach to the next request, if any. Under a
     /// managed OAuth session a token about to expire is refreshed first
     /// (non-interactive, when a refresh token is available).
-    async fn fresh_bearer(&self) -> Option<Arc<str>> {
+    async fn fresh_credential(&self) -> Option<Credential> {
         match self {
             ClientAuth::None => None,
-            ClientAuth::Static(token) => Some(token.clone()),
+            ClientAuth::Static(token) => Some(Credential::Bearer(token.clone())),
             #[cfg(feature = "client-oauth")]
-            ClientAuth::OAuth(session) => session.refreshed_bearer().await,
+            ClientAuth::OAuth(session) => session.refreshed_credential().await,
         }
     }
 
@@ -60,6 +60,200 @@ impl ClientAuth {
             None => ClientAuth::None,
         }
     }
+
+    /// Whether requests on this connection may be handed to a redirect.
+    ///
+    /// A bearer token survives one: the same header value is the whole
+    /// credential wherever the request lands, so the transport keeps reqwest's
+    /// default of following up to ten hops.
+    ///
+    /// A DPoP proof does not survive one. It is signed over exactly one method
+    /// and one URL (RFC 9449 section 4.2), reqwest cannot re-sign in the
+    /// middle of a chain, and it strips only `Authorization` and only when the
+    /// hop crosses origins -- so a same-origin redirect arrives carrying a
+    /// perfectly valid token under a proof that names the URL *before* it,
+    /// which the target is required to reject (section 4.3). Nothing here
+    /// recovers from that either: the nonce retry and the authorization retry
+    /// both rebuild against the configured endpoint, so each is refused
+    /// identically. So a connection that binds its tokens to a key does not
+    /// follow redirects at all, and a server that answers with one surfaces as
+    /// the `3xx` it actually sent.
+    ///
+    /// The question is asked of the *configuration*, not of the credential in
+    /// hand: under `with_dpop_auto` the key is armed part-way through the
+    /// connection's life, and a client whose redirect behaviour changed
+    /// underneath it would be worse than one that never redirects.
+    #[cfg(feature = "client-oauth-dpop")]
+    fn follows_redirects(&self) -> bool {
+        !matches!(self, ClientAuth::OAuth(session) if session.may_bind_tokens())
+    }
+
+    /// A build that cannot sign a proof has nothing a redirect could
+    /// invalidate.
+    #[cfg(not(feature = "client-oauth-dpop"))]
+    fn follows_redirects(&self) -> bool {
+        true
+    }
+}
+
+/// What one request presents to prove it may be made.
+///
+/// A bearer token is the whole credential: the same header value serves every
+/// request, and holding it is what authorizes them. A DPoP-bound token is only
+/// half of one (RFC 9449) -- the other half is a proof signed over the method
+/// and URL of *this* request and over the token itself, so it cannot be
+/// prepared once per connection the way a bearer token can. That is why this
+/// is a credential rather than a header value, and why attaching it is a
+/// fallible step taken per request.
+#[derive(Clone)]
+pub(crate) enum Credential {
+    /// `Authorization: Bearer <token>` -- RFC 6750.
+    Bearer(Arc<str>),
+    /// `Authorization: DPoP <token>` plus a freshly signed `DPoP` proof --
+    /// RFC 9449 sections 4 and 7.1.
+    #[cfg(feature = "client-oauth-dpop")]
+    Dpop {
+        /// The bound token set. Carried whole because the proof binds to
+        /// `dpop_jkt`, and presenting a token under the wrong key is refused
+        /// by the resource on every request.
+        tokens: Arc<oauth::TokenSet>,
+        /// The key the tokens are bound to, shared with the OAuth session so
+        /// both see the same nonces.
+        key: oauth::Dpop,
+    },
+}
+
+impl std::fmt::Debug for Credential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // An access token is a credential whatever binds it, so what is shown
+        // is the scheme and -- for a bound one -- the key it names, which is a
+        // public value and the one thing worth telling two of these apart by.
+        match self {
+            Self::Bearer(_) => f.debug_struct("Bearer").finish_non_exhaustive(),
+            #[cfg(feature = "client-oauth-dpop")]
+            Self::Dpop { key, .. } => f
+                .debug_struct("Dpop")
+                .field("jkt", &key.thumbprint())
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+impl Credential {
+    /// The access token itself -- what a caller compares to decide whether a
+    /// flow produced something new.
+    ///
+    /// Only a managed OAuth session asks: a static credential is never
+    /// replaced, so nothing compares it against what a request carried.
+    #[cfg(feature = "client-oauth")]
+    pub(crate) fn access_token(&self) -> &str {
+        match self {
+            Self::Bearer(token) => token,
+            #[cfg(feature = "client-oauth-dpop")]
+            Self::Dpop { tokens, .. } => &tokens.access_token,
+        }
+    }
+
+    /// Puts this credential on `req`, which is about to be sent as `method`
+    /// to `url`.
+    ///
+    /// Returns the DPoP nonce the proof carried, if any: a `use_dpop_nonce`
+    /// refusal has to be compared against what *this* request sent rather than
+    /// against the shared nonce state, which a concurrent request to the same
+    /// origin may have moved on in the meantime (RFC 9449 section 8).
+    ///
+    /// `nonce` forces the proof to carry exactly that value, which is what the
+    /// retry of a refused request does.
+    #[cfg_attr(not(feature = "client-oauth-dpop"), allow(unused_variables))]
+    fn attach(
+        &self,
+        req: RequestBuilder,
+        method: &reqwest::Method,
+        url: &str,
+        nonce: Option<&str>,
+    ) -> Result<(RequestBuilder, Option<String>), Error> {
+        match self {
+            Self::Bearer(token) => Ok((req.bearer_auth(token), None)),
+            #[cfg(feature = "client-oauth-dpop")]
+            Self::Dpop { tokens, key } => {
+                let mut headers = reqwest::header::HeaderMap::new();
+                let sent = match nonce {
+                    Some(nonce) => {
+                        key.authorize_with_nonce(&mut headers, method, url, tokens, nonce)
+                    }
+                    None => key.authorize(&mut headers, method, url, tokens),
+                }
+                .map_err(|err| Error::new(ErrorCode::InvalidRequest, err.to_string()))?;
+
+                Ok((req.headers(headers), sent))
+            }
+        }
+    }
+}
+
+/// Sends the request `build` produces with `credential` attached, answering a
+/// `use_dpop_nonce` refusal with the one retry it asks for.
+///
+/// The request is built rather than handed over because it may go out twice,
+/// and the second attempt needs a fresh proof: a DPoP proof covers one request,
+/// carries a one-shot `jti`, and a resource that remembers them refuses a
+/// replay (RFC 9449 section 4.3).
+///
+/// That retry is not an authorization: the token is good and so is the key.
+/// The server has simply not handed out its nonce yet, which it cannot do
+/// before being asked -- so the first request of a session to a nonce-taking
+/// resource is expected to be refused exactly once, and answering it here
+/// keeps it from being read as a credential problem and spending the caller's
+/// one re-authorization on it.
+#[cfg_attr(not(feature = "client-oauth-dpop"), allow(unused_variables))]
+async fn send_authorized(
+    credential: Option<&Credential>,
+    method: &reqwest::Method,
+    url: &str,
+    build: impl Fn() -> RequestBuilder,
+) -> Result<reqwest::Response, Error> {
+    let transport = |err: reqwest::Error| Error::new(ErrorCode::InternalError, err.to_string());
+
+    let Some(credential) = credential else {
+        return build().send().await.map_err(transport);
+    };
+
+    let (request, nonce_sent) = credential.attach(build(), method, url, None)?;
+    #[cfg(not(feature = "client-oauth-dpop"))]
+    let _ = nonce_sent;
+
+    let resp = request.send().await.map_err(transport)?;
+
+    #[cfg(feature = "client-oauth-dpop")]
+    if let Credential::Dpop { key, .. } = credential {
+        // Worth doing on every response, not only a refusal: a server may
+        // supply the nonce alongside an answer it was willing to give, and
+        // adopting it there spares the next request the round trip of being
+        // told. What comes back is what *this* response demanded, which is
+        // what a retry has to answer with -- the shared state may have moved
+        // on if another request to the same origin was in flight.
+        let demanded = key.accept_nonce(url, resp.headers());
+
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && let Some(demanded) = demanded
+            && use_dpop_nonce(resp.headers())
+            && Some(demanded.as_str()) != nonce_sent.as_deref()
+        {
+            let (retried, _) = credential.attach(build(), method, url, Some(&demanded))?;
+            let retried = retried.send().await.map_err(transport)?;
+
+            // The retry gets a nonce of its own read off it too. RFC 9449
+            // section 8.2 permits one on a response the server was willing to
+            // give, and a resource that rotates on every response gives one
+            // here every time -- dropping it would leave the key holding the
+            // nonce just consumed, so the *next* request would go out stale,
+            // be refused, and retry. Every request would then cost two.
+            key.accept_nonce(url, retried.headers());
+            return Ok(retried);
+        }
+    }
+
+    Ok(resp)
 }
 
 // SSE constants -- the standalone GET stream serves legacy peers only;
@@ -131,7 +325,7 @@ async fn handle_connection(
     #[cfg(feature = "client-tls")] tls_config: Option<ClientTlsConfig>,
 ) {
     #[cfg(not(feature = "client-tls"))]
-    let client = match create_client() {
+    let client = match create_client(auth.follows_redirects()) {
         Ok(client) => client,
         Err(_err) => {
             #[cfg(feature = "tracing")]
@@ -141,7 +335,7 @@ async fn handle_connection(
     };
 
     #[cfg(feature = "client-tls")]
-    let client = match create_client(tls_config) {
+    let client = match create_client(auth.follows_redirects(), tls_config) {
         Ok(client) => client,
         Err(_err) => {
             #[cfg(feature = "tracing")]
@@ -255,14 +449,24 @@ fn request_ids(msg: &Message) -> Vec<crate::types::RequestId> {
 
 #[inline]
 #[cfg(not(feature = "client-tls"))]
-fn create_client() -> Result<reqwest::Client, Error> {
-    reqwest::Client::builder().build().map_err(Error::from)
+fn create_client(follow_redirects: bool) -> Result<reqwest::Client, Error> {
+    let mut builder = reqwest::Client::builder();
+    if !follow_redirects {
+        builder = builder.redirect(reqwest::redirect::Policy::none());
+    }
+    builder.build().map_err(Error::from)
 }
 
 #[inline]
 #[cfg(feature = "client-tls")]
-fn create_client(mut tls_config: Option<ClientTlsConfig>) -> Result<reqwest::Client, Error> {
+fn create_client(
+    follow_redirects: bool,
+    mut tls_config: Option<ClientTlsConfig>,
+) -> Result<reqwest::Client, Error> {
     let mut builder = reqwest::ClientBuilder::new();
+    if !follow_redirects {
+        builder = builder.redirect(reqwest::redirect::Policy::none());
+    }
     if let Some(ca_cert) = tls_config.as_mut().and_then(|tls| tls.ca.take()) {
         builder = builder.add_root_certificate(ca_cert);
     }
@@ -475,6 +679,206 @@ mod tests {
         );
     }
 
+    /// A `DPoP` challenge is one this client answers, and its parameters are
+    /// read the same way a `Bearer` one's are (RFC 9449 section 7.1). A scheme
+    /// neither of those is still left alone.
+    #[cfg(feature = "client-oauth-dpop")]
+    #[test]
+    fn a_dpop_challenge_is_one_this_client_answers() {
+        let value = r#"DPoP error="use_dpop_nonce", resource_metadata="https://mcp.example/prm""#;
+        assert_eq!(bearer_challenges(value), vec![value]);
+        assert!(bearer_challenges(r#"Negotiate realm="ad""#).is_empty());
+
+        let parsed = oauth::parse_challenge(value).expect("it parses");
+        assert_eq!(parsed.scheme(), "DPoP");
+        assert_eq!(parsed.resource_metadata(), Some("https://mcp.example/prm"));
+
+        // Both schemes in one value: the DPoP one is not lost behind the
+        // bearer one, and neither swallows the other's parameters.
+        assert_eq!(
+            bearer_challenges(r#"Bearer realm="mcp", DPoP error="use_dpop_nonce""#),
+            vec![r#"Bearer realm="mcp""#, r#"DPoP error="use_dpop_nonce""#]
+        );
+    }
+
+    /// A resource that takes both schemes answers with both (RFC 9449
+    /// section 7.1), and the scheme is the one thing that differs between
+    /// those challenges and the one thing the caller acts on. Reading the one
+    /// written first would have a `with_dpop_auto` session authorize for, and
+    /// then present, exactly the credential the resource asked it to replace.
+    #[cfg(feature = "client-oauth-dpop")]
+    #[test]
+    fn a_dpop_challenge_outranks_a_bearer_one_that_says_nothing_more() {
+        let headers_of = |value: &str| {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::WWW_AUTHENTICATE,
+                value.parse().expect("a header value"),
+            );
+            headers
+        };
+        let scheme_of = |headers: &reqwest::header::HeaderMap| {
+            oauth::parse_challenge(&bearer_challenge(headers).expect("a challenge"))
+                .expect("it parses")
+                .scheme()
+                .to_owned()
+        };
+
+        assert_eq!(
+            scheme_of(&headers_of(
+                r#"Bearer resource_metadata="https://mcp.example/prm", DPoP resource_metadata="https://mcp.example/prm""#
+            )),
+            "DPoP",
+            "written second, and still the one that applies"
+        );
+        assert_eq!(
+            scheme_of(&headers_of(
+                r#"DPoP resource_metadata="https://mcp.example/prm", Bearer realm="mcp""#
+            )),
+            "DPoP",
+            "and written first it stays"
+        );
+        assert_eq!(scheme_of(&headers_of(r#"Bearer realm="mcp""#)), "Bearer");
+
+        // Across two header values, which RFC 9110 section 11.6.1 allows.
+        let mut split = reqwest::header::HeaderMap::new();
+        split.append(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"Bearer realm="mcp""#.parse().unwrap(),
+        );
+        split.append(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"DPoP realm="mcp""#.parse().unwrap(),
+        );
+        assert_eq!(scheme_of(&split), "DPoP");
+
+        // `insufficient_scope` still outranks it: that credential was accepted
+        // *as* a credential, so the scheme is settled and the grant is not.
+        assert_eq!(
+            bearer_challenge(&headers_of(
+                r#"DPoP realm="mcp", Bearer error="insufficient_scope", scope="files:write""#
+            ))
+            .as_deref(),
+            Some(r#"Bearer error="insufficient_scope", scope="files:write""#)
+        );
+    }
+
+    /// A nonce is not a demand to repeat the request -- the `error` is.
+    #[cfg(feature = "client-oauth-dpop")]
+    #[test]
+    fn only_a_use_dpop_nonce_refusal_asks_for_a_retry() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("dpop-nonce", "n-1".parse().unwrap());
+        assert!(
+            !use_dpop_nonce(&headers),
+            "a nonce handed out alongside an answer is for the next request"
+        );
+
+        headers.insert(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"DPoP error="use_dpop_nonce""#.parse().unwrap(),
+        );
+        assert!(use_dpop_nonce(&headers));
+
+        headers.insert(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"DPoP error="invalid_token""#.parse().unwrap(),
+        );
+        assert!(
+            !use_dpop_nonce(&headers),
+            "an expired token is not answered by repeating the request"
+        );
+
+        // A resource that takes both schemes answers with both (RFC 9449
+        // section 7.1), and the challenge picked for authorization is then the
+        // Bearer one -- whose error says nothing about a nonce. Reading only
+        // that one would run a whole authorization flow to answer a server
+        // that had simply not handed its nonce out yet.
+        headers.insert(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"Bearer error="invalid_token", DPoP error="use_dpop_nonce""#
+                .parse()
+                .unwrap(),
+        );
+        assert!(use_dpop_nonce(&headers));
+
+        // The same list, split across two header values -- which RFC 9110
+        // section 11.6.1 allows just as much.
+        headers.remove(reqwest::header::WWW_AUTHENTICATE);
+        headers.append(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"Bearer error="invalid_token""#.parse().unwrap(),
+        );
+        headers.append(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"DPoP error="use_dpop_nonce""#.parse().unwrap(),
+        );
+        assert!(use_dpop_nonce(&headers));
+    }
+
+    /// Every request gets its own proof, bound to that request's method, URL
+    /// and token (RFC 9449 sections 4.2 and 4.3). Reusing one is a replay, and
+    /// a resource that remembers `jti` refuses it.
+    #[cfg(feature = "client-oauth-dpop")]
+    #[test]
+    fn a_dpop_credential_signs_a_fresh_proof_per_request() {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
+
+        let key = oauth::Dpop::generate().expect("a key");
+        let credential = Credential::Dpop {
+            tokens: Arc::new(oauth::TokenSet {
+                access_token: "bound-token".into(),
+                token_type: "DPoP".into(),
+                refresh_token: None,
+                scope: None,
+                id_token: None,
+                expires_at: None,
+                dpop_jkt: Some(key.thumbprint().to_owned()),
+            }),
+            key,
+        };
+
+        let client = create_client(
+            true,
+            #[cfg(feature = "client-tls")]
+            None,
+        )
+        .expect("a client");
+        let url = "https://mcp.example.com/mcp";
+
+        let claims = |method: &reqwest::Method| {
+            let (built, nonce) = credential
+                .attach(client.post(url), method, url, None)
+                .expect("the proof signs");
+            assert_eq!(nonce, None, "no server has handed one out yet");
+
+            let built = built.build().expect("a request");
+            assert_eq!(
+                built.headers()[reqwest::header::AUTHORIZATION],
+                "DPoP bound-token",
+                "the token is presented under the DPoP scheme, not Bearer"
+            );
+
+            let proof = built.headers()["dpop"].to_str().unwrap().to_owned();
+            let claims = B64.decode(proof.split('.').nth(1).unwrap()).unwrap();
+            serde_json::from_slice::<serde_json::Value>(&claims).unwrap()
+        };
+
+        let first = claims(&reqwest::Method::POST);
+        let second = claims(&reqwest::Method::POST);
+
+        assert_eq!(first["htm"], "POST");
+        assert_eq!(first["htu"], url);
+        // base64url(sha256("bound-token")), the `ath` of RFC 9449 section 4.2
+        assert_eq!(
+            first["ath"], "1UZzyLKzndbtZN8OcOiPRvW7SJ-rr1VMAPv_rM0MfgE",
+            "the proof binds to the token the request presents"
+        );
+        assert_ne!(first["jti"], second["jti"], "a proof is not reused");
+
+        assert_eq!(claims(&reqwest::Method::GET)["htm"], "GET");
+    }
+
     fn make_session() -> Arc<McpSession> {
         Arc::new(McpSession::new(
             ServiceUrl::default(),
@@ -534,12 +938,13 @@ mod tests {
         );
 
         let client = create_client(
+            true,
             #[cfg(feature = "client-tls")]
             None,
         )
         .expect("a client");
         for attempt in ["first", "retry"] {
-            let built = build_post(&client, &session, &req, None, &mirrored)
+            let built = build_post(&client, &session, &req, &mirrored)
                 .build()
                 .expect("a request");
             assert_eq!(
@@ -636,6 +1041,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(2);
         let owed = resume_stream(
             &create_client(
+                true,
                 #[cfg(feature = "client-tls")]
                 None,
             )
@@ -654,6 +1060,317 @@ mod tests {
             "the resumption must recover the answer rather than give up on a 401"
         );
         assert!(matches!(rx.try_recv(), Ok(Ok(Message::Response(_)))));
+    }
+
+    /// The claims of the DPoP proof on a raw request, or `None` when it
+    /// carries none.
+    #[cfg(feature = "client-oauth-dpop")]
+    fn proof_claims(request: &str) -> Option<serde_json::Value> {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
+
+        let proof = request.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("dpop")
+                .then(|| value.trim())
+        })?;
+
+        let claims = B64.decode(proof.split('.').nth(1)?).ok()?;
+        serde_json::from_slice(&claims).ok()
+    }
+
+    /// A DPoP proof covers one method and one URL, so a request carrying one
+    /// must not be handed to a redirect: reqwest cannot re-sign mid-chain, and
+    /// it strips `Authorization` only across origins -- so the hop would land
+    /// carrying a good token under a proof naming the URL before it, which
+    /// RFC 9449 section 4.3 has the target reject. Nothing downstream
+    /// recovers: both retries rebuild against the configured endpoint.
+    #[cfg(feature = "client-oauth-dpop")]
+    #[tokio::test]
+    async fn a_proof_bearing_request_is_not_handed_to_a_redirect() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let followed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits = followed.clone();
+
+        // Same origin, so reqwest keeps every header it was given -- which is
+        // the case that matters. A cross-origin hop at least loses the
+        // `Authorization`.
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let read = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+
+                let resp = if request.starts_with("POST /moved") {
+                    hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let body = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                } else {
+                    // 307: the method and body survive, so this is the hop a
+                    // client would otherwise follow without noticing.
+                    "HTTP/1.1 307 Temporary Redirect\r\nLocation: /moved\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .to_string()
+                };
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let url = format!("http://{addr}/mcp");
+        let key = oauth::Dpop::generate().expect("a key");
+        let credential = Credential::Dpop {
+            tokens: Arc::new(oauth::TokenSet {
+                access_token: "bound-token".into(),
+                token_type: "DPoP".into(),
+                refresh_token: None,
+                scope: None,
+                id_token: None,
+                expires_at: None,
+                dpop_jkt: Some(key.thumbprint().to_owned()),
+            }),
+            key,
+        };
+
+        let send = async |follow_redirects: bool| {
+            let client = create_client(
+                follow_redirects,
+                #[cfg(feature = "client-tls")]
+                None,
+            )
+            .expect("a client");
+
+            send_authorized(Some(&credential), &reqwest::Method::POST, &url, || {
+                client.post(&url)
+            })
+            .await
+            .expect("the request goes out")
+            .status()
+        };
+
+        assert_eq!(
+            send(false).await,
+            reqwest::StatusCode::TEMPORARY_REDIRECT,
+            "the redirect is surfaced, not followed with a proof signed elsewhere"
+        );
+        assert_eq!(
+            followed.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the target must never have been asked"
+        );
+
+        // The same request under the policy a bearer connection keeps, so what
+        // the assertion above pins is the policy and not the mock.
+        assert_eq!(send(true).await, reqwest::StatusCode::OK);
+        assert_eq!(followed.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// Which connections get that policy is decided by the configuration, not
+    /// by the credential in hand: an `Auto` session arms its key part-way
+    /// through a connection's life, and redirect behaviour that changed
+    /// underneath it would be worse than none.
+    #[cfg(feature = "client-oauth-dpop")]
+    #[test]
+    fn only_a_key_binding_connection_stops_following_redirects() {
+        let session = |config: oauth::OAuthClientConfig| {
+            ClientAuth::OAuth(Arc::new(
+                oauth::OAuthSession::new(config, "http://127.0.0.1:3000/mcp").expect("a session"),
+            ))
+        };
+        let config = || oauth::OAuthClientConfig::default().require_https(false);
+
+        assert!(ClientAuth::None.follows_redirects());
+        assert!(ClientAuth::Static("token".into()).follows_redirects());
+        assert!(session(config()).follows_redirects(), "bearer by default");
+
+        assert!(!session(config().with_dpop_auto()).follows_redirects());
+        assert!(
+            !session(config().with_dpop(oauth::Dpop::generate().expect("a key")))
+                .follows_redirects()
+        );
+    }
+
+    /// The whole DPoP exchange, end to end, in the shape the
+    /// `auth/dpop-nonce` conformance scenario drives it: a resource that
+    /// challenges for the `DPoP` scheme, an authorization server that demands
+    /// a nonce before it will issue, and a resource that demands one of its
+    /// own before it will serve.
+    ///
+    /// The challenge here offers *both* schemes and the authorization server
+    /// advertises no proof algorithms -- the leanest thing a server can do and
+    /// still be asking for a bound token, and the case the conformance
+    /// scenarios do not cover.
+    ///
+    /// Each of those is a place a bearer-only client stops. The challenge is
+    /// in a scheme it does not read, so it never authorizes; the token request
+    /// carries no proof, so it gets no bound token; and the resource's nonce
+    /// round looks like a credential failure, which spends the one
+    /// re-authorization a `401` is allowed and arrives back at the same
+    /// refusal.
+    #[cfg(feature = "client-oauth-dpop")]
+    #[tokio::test]
+    async fn a_dpop_session_answers_both_nonce_challenges_and_is_served() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        const AS_NONCE: &str = "as-nonce-1";
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // The resource's nonce, and how many requests it has had to refuse for
+        // want of one. It rotates on every answer it gives -- which RFC 9449
+        // section 9 permits and a resource with a short nonce lifetime does --
+        // so a client that fails to read the rotation off the *retry* is
+        // refused once per request from then on. One refusal, ever, is the
+        // assertion at the end.
+        let resource = Arc::new(std::sync::Mutex::new((1_usize, 0_usize)));
+        let nonces = resource.clone();
+
+        // One socket playing both parts, as the other transport tests do.
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let read = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+                let root = format!("http://{addr}");
+                let claims = proof_claims(&request);
+                let carried = |nonce: &str| {
+                    claims.as_ref().and_then(|claims| claims["nonce"].as_str()) == Some(nonce)
+                };
+
+                let resp = if request.starts_with("POST /mcp") {
+                    let mut state = nonces.lock().unwrap();
+                    let (issued, refusals) = &mut *state;
+                    let current = format!("rs-nonce-{issued}");
+
+                    if !request.contains("authorization: DPoP bound-token") {
+                        format!(
+                            // Both schemes, as a resource that takes both
+                            // answers (RFC 9449 section 7.1) -- and the
+                            // bearer one first, so reading whichever came
+                            // first would never see the DPoP offer.
+                            "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer resource_metadata=\"{root}/.well-known/oauth-protected-resource/mcp\", DPoP resource_metadata=\"{root}/.well-known/oauth-protected-resource/mcp\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        )
+                    } else if !carried(&current) {
+                        // RFC 9449 section 9: the resource hands out its nonce
+                        // by refusing once, and the refusal is not about the
+                        // token. The nonce on offer does not change here --
+                        // rotating on a refusal would refuse the retry too.
+                        *refusals += 1;
+                        let body = r#"{"error":"use_dpop_nonce"}"#;
+                        format!(
+                            "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: DPoP error=\"use_dpop_nonce\"\r\nDPoP-Nonce: {current}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                    } else {
+                        // Served -- and the nonce just spent is retired, so the
+                        // answer carries the one the next request must use.
+                        *issued += 1;
+                        let next = format!("rs-nonce-{issued}");
+                        let body = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+                        format!(
+                            "HTTP/1.1 200 OK\r\nDPoP-Nonce: {next}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                    }
+                } else if request.starts_with("POST /token") && !carried(AS_NONCE) {
+                    // RFC 9449 section 8, the same round one step earlier.
+                    let body = r#"{"error":"use_dpop_nonce"}"#;
+                    format!(
+                        "HTTP/1.1 400 Bad Request\r\nDPoP-Nonce: {AS_NONCE}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                } else {
+                    let body = if request.contains("/.well-known/oauth-protected-resource") {
+                        format!(r#"{{"resource":"{root}/mcp","authorization_servers":["{root}"]}}"#)
+                    } else if request.contains("/.well-known/") {
+                        // No `dpop_signing_alg_values_supported`: RFC 9449
+                        // section 5.1 leaves it optional, so the challenge is
+                        // the only thing that says this resource wants a bound
+                        // token. (The conformance scenarios cover the other
+                        // way round -- an advertising server.)
+                        format!(
+                            r#"{{"issuer":"{root}","token_endpoint":"{root}/token",
+                                 "authorization_endpoint":"{root}/authorize",
+                                 "registration_endpoint":"{root}/register",
+                                 "response_types_supported":["code"]}}"#
+                        )
+                    } else if request.contains("/register") {
+                        r#"{"client_id":"registered-client"}"#.to_string()
+                    } else {
+                        r#"{"access_token":"bound-token","token_type":"DPoP","expires_in":3600}"#
+                            .to_string()
+                    };
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let url = format!("http://{addr}/mcp");
+        let session = Arc::new(McpSession::new(
+            ServiceUrl::from(addr.to_string().as_str()),
+            CancellationToken::new(),
+            #[cfg(not(feature = "legacy-spec"))]
+            Default::default(),
+        ));
+        let config = oauth::OAuthClientConfig::default()
+            .require_https(false)
+            .with_dpop_auto()
+            .with_handler(EchoesState);
+        let oauth_session = Arc::new(oauth::OAuthSession::new(config, &url).expect("a session"));
+        let auth = ClientAuth::OAuth(oauth_session.clone());
+
+        let client = create_client(
+            true,
+            #[cfg(feature = "client-tls")]
+            None,
+        )
+        .expect("a client");
+
+        let (tx, mut rx) = mpsc::channel(4);
+        for id in [1, 2] {
+            exchange(
+                client.clone(),
+                session.clone(),
+                Message::Request(crate::types::Request::new(
+                    Some(crate::types::RequestId::Number(id)),
+                    "ping",
+                    None::<serde_json::Value>,
+                )),
+                tx.clone(),
+                auth.clone(),
+                #[cfg(not(feature = "legacy-spec"))]
+                Default::default(),
+            )
+            .await;
+
+            assert!(
+                matches!(rx.try_recv(), Ok(Ok(Message::Response(_)))),
+                "call {id} must be served once both nonce rounds are answered"
+            );
+        }
+
+        assert_eq!(
+            resource.lock().unwrap().1,
+            1,
+            "only the first request may be refused for want of a nonce: the \
+             rotation the retry was answered with is what the second one carries"
+        );
+
+        let credential = oauth_session.credential().expect("a credential");
+        assert!(
+            matches!(credential, Credential::Dpop { .. }),
+            "the session must hold the bound token, not a bearer one"
+        );
+        assert_eq!(credential.access_token(), "bound-token");
     }
 
     /// Completes the flow without a browser by reading the `state` back off the

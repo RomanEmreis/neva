@@ -60,21 +60,49 @@ pub struct OAuthClientConfig {
     pub(super) scopes: Option<Vec<String>>,
     pub(super) require_https: bool,
     pub(super) grant: ClientGrant,
+    #[cfg(feature = "client-oauth-dpop")]
+    pub(super) dpop: DpopPolicy,
     pub(super) store: Arc<dyn TokenStore>,
     pub(super) handler: Arc<dyn AuthorizationHandler>,
 }
 
+/// Whether this client binds the tokens it obtains to a key it holds
+/// (RFC 9449), and which key.
+///
+/// Bearer by default: DPoP is an optional extension
+/// (`io.modelcontextprotocol/auth/dpop`), not part of the authorization
+/// specification a 2026-07-28 client has to implement, so nothing turns it on
+/// by itself.
+#[cfg(feature = "client-oauth-dpop")]
+#[derive(Clone, Debug, Default)]
+pub(super) enum DpopPolicy {
+    /// Bearer tokens -- the default.
+    #[default]
+    Disabled,
+    /// Every token this client obtains is bound to this key, whatever the
+    /// server would have settled for.
+    Always(Dpop),
+    /// A key is minted the first time a server asks for one: a `DPoP`
+    /// challenge from the resource, or an authorization server advertising
+    /// `dpop_signing_alg_values_supported`.
+    Auto,
+}
+
 impl std::fmt::Debug for OAuthClientConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OAuthClientConfig")
+        #[cfg_attr(not(feature = "client-oauth-dpop"), allow(unused_mut))]
+        let mut debug = f.debug_struct("OAuthClientConfig");
+        let debug = debug
             .field("client_id", &self.client_id)
             .field("client_id_document", &self.client_id_document)
             .field("jwks_uri", &self.jwks_uri)
             .field("issuer", &self.issuer)
             .field("scopes", &self.scopes)
             .field("require_https", &self.require_https)
-            .field("grant", &self.grant)
-            .finish()
+            .field("grant", &self.grant);
+        #[cfg(feature = "client-oauth-dpop")]
+        let debug = debug.field("dpop", &self.dpop);
+        debug.finish()
     }
 }
 
@@ -91,6 +119,8 @@ impl Default for OAuthClientConfig {
             scopes: None,
             require_https: true,
             grant: ClientGrant::AuthorizationCode,
+            #[cfg(feature = "client-oauth-dpop")]
+            dpop: DpopPolicy::Disabled,
             store: Arc::new(InMemoryTokenStore::new()),
             handler: Arc::new(LoopbackHandler::new()),
         }
@@ -432,6 +462,84 @@ impl OAuthClientConfig {
         S: Into<String>,
     {
         self.scopes = Some(scopes.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Binds every token this client obtains to `key`, and proves possession
+    /// of it on every request (DPoP, [RFC 9449](https://www.rfc-editor.org/rfc/rfc9449)).
+    ///
+    /// A bearer token is a password: whoever steals it may spend it. A
+    /// DPoP-bound one is worth nothing without the key, because each request
+    /// carries a proof signed over its own method and URL and over the token
+    /// itself.
+    ///
+    /// The key is presented to the authorization server as part of the token
+    /// request, so a server that answers with an ordinary bearer token has
+    /// ignored the binding -- and that answer is refused rather than taken,
+    /// since an unbound credential is exactly what this configuration exists
+    /// to prevent. Use [`with_dpop_auto`](Self::with_dpop_auto) against a
+    /// deployment where only some servers do DPoP.
+    ///
+    /// [`Dpop::generate`] mints a throwaway key, which is the usual choice:
+    /// one per session, losing it costs only the tokens bound to it, and
+    /// those cannot be used without it anyway. Load a lasting one with
+    /// [`Dpop::from_pem`] where the key's thumbprint is something a server
+    /// was told about out of band.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::{Client, auth::oauth::Dpop};
+    ///
+    /// # fn main() -> Result<(), neva::error::Error> {
+    /// let key = Dpop::generate()
+    ///     .map_err(|err| neva::error::Error::new(
+    ///         neva::error::ErrorCode::InternalError, err.to_string()))?;
+    ///
+    /// let mut client = Client::new()
+    ///     .with_options(|opt| opt
+    ///         .with_http(|http| http
+    ///             .with_oauth(|oauth| oauth.with_dpop(key))
+    ///         )
+    ///     );
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "client-oauth-dpop")]
+    pub fn with_dpop(mut self, key: Dpop) -> Self {
+        self.dpop = DpopPolicy::Always(key);
+        self
+    }
+
+    /// Uses DPoP where a server asks for it, and bearer tokens elsewhere.
+    ///
+    /// A throwaway `ES256` key is minted the first time one is needed and
+    /// kept for the rest of the session. What counts as asking is the
+    /// resource answering `401` with a `DPoP` challenge (RFC 9449
+    /// section 7.1), or the authorization server advertising
+    /// `dpop_signing_alg_values_supported` (section 5.1) -- the two ways a
+    /// server has of saying so.
+    ///
+    /// This is the setting for a client that talks to servers it does not
+    /// control: unlike [`with_dpop`](Self::with_dpop) it never turns a
+    /// working bearer flow into a refusal, and unlike the default it does not
+    /// present a bearer token to a server that would rather have a bound one.
+    /// It does mean the choice is the server's, so a client that must not
+    /// hold an unbound credential wants `with_dpop` instead.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::Client;
+    ///
+    /// let mut client = Client::new()
+    ///     .with_options(|opt| opt
+    ///         .with_http(|http| http
+    ///             .with_oauth(|oauth| oauth.with_dpop_auto())
+    ///         )
+    ///     );
+    /// ```
+    #[cfg(feature = "client-oauth-dpop")]
+    pub fn with_dpop_auto(mut self) -> Self {
+        self.dpop = DpopPolicy::Auto;
         self
     }
 

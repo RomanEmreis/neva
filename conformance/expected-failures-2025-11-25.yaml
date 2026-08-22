@@ -30,7 +30,9 @@ server: []
   # `dns-rebinding-protection` is green on this profile too -- the gate lives in
   # the shared HTTP layer.
 
-client:
+client: []
+  # Nothing left to excuse: the legacy client profile is green end to end.
+  #
   # `tools_call`, `elicitation-sep1034-client-defaults` and
   # `json-schema-2020-12-preservation` are green: a server that hosts no
   # standalone GET stream no longer ends the session, the POST carries one
@@ -42,8 +44,7 @@ client:
   # asked for with `retry:`.
 
   # The authorization-code flow is green here too -- the OAuth client is shared
-  # between the profiles. What remains needs a credential that flow does not
-  # have; see the 2026-07-28 baseline for the same block, spelled out.
+  # between the profiles.
 
   # `basic-cimd` is green here too, for the same reason (#86).
 
@@ -51,6 +52,6 @@ client:
   # (#109): they are the same OAuth client, and none of them touches the wire
   # surface the protocol generation decides.
 
-  # -- DPoP (#110) -------------------------------------------------------
-  - auth/dpop
-  - auth/dpop-nonce
+  # DPoP is green here too, for the same reason (#110): the OAuth client is
+  # shared between the profiles, and nothing about a sender-constrained token
+  # touches the wire surface the protocol generation decides.
