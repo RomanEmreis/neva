@@ -58,12 +58,19 @@ client:
   #
   # What is left needs a credential the flow does not have.
 
-  # -- DPoP (#110) -------------------------------------------------------
-  # Sender-constrained tokens: every request carries a fresh signed proof bound
-  # to the key, method and URL, and the nonce variant adds a challenge-response
-  # round. neva issues bearer tokens only.
-  - auth/dpop
-  - auth/dpop-nonce
+  # -- DPoP -----------------------------------------------------------------
+  # Green as of #110: sender-constrained tokens (RFC 9449). The client mints a
+  # key, proves possession of it at the token endpoint, presents the bound
+  # token under the `DPoP` scheme with a fresh proof per request, and answers
+  # the nonce round both the authorization server and the resource may demand.
+  #
+  # Which credential it presents is decided on the wire, not by the scenario
+  # name: `with_dpop_auto` arms the key when a resource challenges with the
+  # `DPoP` scheme or an authorization server advertises
+  # `dpop_signing_alg_values_supported`. SEP-1932 is still unmerged and the
+  # word DPoP appears nowhere in the 2026-07-28 text, which is why the suite
+  # scores both scenarios as `reason: extension` and why neva keeps this behind
+  # the `client-oauth-dpop` feature and an explicit opt-in.
 
   # `sep-2322-client-request-state` is green: the retry echoes `requestState`
   # byte-exact on the params, takes a fresh JSON-RPC id, omits the state when

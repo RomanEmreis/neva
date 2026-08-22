@@ -10,6 +10,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 #### Authorization
+* **DPoP sender-constrained tokens**, behind the new **`client-oauth-dpop`**
+  feature (#110). A bearer token is a password: whoever steals it may spend it.
+  A DPoP-bound one ([RFC 9449](https://www.rfc-editor.org/rfc/rfc9449)) is
+  worth nothing without the key it is bound to, because every request carries a
+  proof signed over its own method and URL and over the token itself.
+
+  Two ways to turn it on. `OAuthClientConfig::with_dpop(key)` binds every token
+  this client obtains to a key of the caller's choosing --
+  `Dpop::generate()` for a throwaway one per session, `Dpop::from_pem` for a
+  lasting one whose thumbprint a server was told about out of band -- and an
+  authorization server that answers with an ordinary bearer token is refused
+  rather than taken. `with_dpop_auto()` mints an `ES256` key the first time a
+  server asks: a resource that challenges with the `DPoP` scheme
+  (section 7.1), or an authorization server that advertises
+  `dpop_signing_alg_values_supported` (section 5.1). That is the setting for a
+  client talking to servers it does not control -- it never turns a working
+  bearer flow into a refusal.
+
+  Both nonce rounds are answered: the one an authorization server may demand
+  of the token request (section 8) and the one a resource may demand of an MCP
+  request (section 9). The resource's is not a re-authorization -- the token is
+  good and so is the key, the server has simply not handed out its nonce yet --
+  so it costs one repeat of the request rather than the exchange's one
+  authorization retry.
+
+  Off by default, and nothing turns it on by itself: SEP-1932 is still
+  unmerged, DPoP appears nowhere in the 2026-07-28 specification text, and the
+  conformance suite scores `auth/dpop` and `auth/dpop-nonce` as extensions.
+  Both are green as of this change, on both protocol profiles.
+
 * **The OAuth grants that authenticate the client itself** (#109). neva's
   client implemented the authorization-code flow only, so a deployment with no
   user in front of a browser had nothing to run. Three profiles now do:

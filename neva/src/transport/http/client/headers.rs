@@ -133,13 +133,29 @@ pub(super) fn mirrored_param_headers(
 /// different challenges.
 #[cfg(feature = "client-oauth")]
 pub(super) fn insufficient_scope(headers: &reqwest::header::HeaderMap) -> bool {
-    use volga_oauth_client::{BearerChallenge, OAuthErrorCode};
+    use volga_oauth_client::OAuthErrorCode;
 
     bearer_challenge(headers)
-        .and_then(|challenge| BearerChallenge::parse(&challenge).ok())
+        .and_then(|challenge| super::oauth::parse_challenge(&challenge))
         .is_some_and(|challenge| {
             matches!(challenge.error(), Some(OAuthErrorCode::InsufficientScope))
         })
+}
+
+/// Whether this response is the `use_dpop_nonce` refusal that asks for one
+/// retry (RFC 9449 sections 8 and 9).
+///
+/// The `DPoP-Nonce` header alone does not say so: a server may supply a nonce
+/// with any response, including a successful one, and that nonce is for the
+/// *next* request rather than a demand to repeat this one. What makes it a
+/// refusal is the `error` in the challenge.
+#[cfg(feature = "client-oauth-dpop")]
+pub(super) fn use_dpop_nonce(headers: &reqwest::header::HeaderMap) -> bool {
+    use volga_oauth_client::OAuthErrorCode;
+
+    bearer_challenge(headers)
+        .and_then(|challenge| super::oauth::parse_challenge(&challenge))
+        .is_some_and(|challenge| matches!(challenge.error(), Some(OAuthErrorCode::UseDpopNonce)))
 }
 
 /// The `WWW-Authenticate` value carrying the Bearer challenge that applies, if
@@ -161,7 +177,7 @@ pub(super) fn insufficient_scope(headers: &reqwest::header::HeaderMap) -> bool {
 /// error accompanies it.
 #[cfg(feature = "client-oauth")]
 pub(super) fn bearer_challenge(headers: &reqwest::header::HeaderMap) -> Option<String> {
-    use volga_oauth_client::{BearerChallenge, OAuthErrorCode};
+    use volga_oauth_client::OAuthErrorCode;
 
     let mut first = None;
     for value in headers
@@ -170,7 +186,7 @@ pub(super) fn bearer_challenge(headers: &reqwest::header::HeaderMap) -> Option<S
         .filter_map(|value| value.to_str().ok())
     {
         for challenge in bearer_challenges(value) {
-            let Ok(parsed) = BearerChallenge::parse(&challenge) else {
+            let Some(parsed) = super::oauth::parse_challenge(&challenge) else {
                 continue;
             };
             if matches!(parsed.error(), Some(OAuthErrorCode::InsufficientScope)) {
@@ -182,8 +198,8 @@ pub(super) fn bearer_challenge(headers: &reqwest::header::HeaderMap) -> Option<S
     first
 }
 
-/// The Bearer challenges inside one `WWW-Authenticate` value, each rendered on
-/// its own.
+/// The challenges inside one `WWW-Authenticate` value that this client can
+/// answer, each rendered on its own.
 ///
 /// `BearerChallenge::parse` returns the *first* Bearer challenge in a value and
 /// stops where the next scheme begins, which is the right contract for reading
@@ -225,10 +241,30 @@ pub(super) fn bearer_challenges(value: &str) -> Vec<String> {
             group[0]
                 .split_ascii_whitespace()
                 .next()
-                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("Bearer"))
+                .is_some_and(is_understood_scheme)
         })
         .map(|group| group.join(", "))
         .collect()
+}
+
+/// Whether a challenge in `scheme` is one this client can answer.
+///
+/// `Bearer` always. `DPoP` only where the client can sign a proof: a build
+/// without that support reading a DPoP challenge would discover the resource's
+/// metadata, run a whole flow, and present a bearer token the server already
+/// said it does not take -- so the challenge is left unanswered instead, which
+/// is what an unsupported scheme means (RFC 9110 section 11.6.1).
+#[cfg(feature = "client-oauth")]
+fn is_understood_scheme(scheme: &str) -> bool {
+    if scheme.eq_ignore_ascii_case(volga_oauth_client::auth_scheme::BEARER) {
+        return true;
+    }
+
+    #[cfg(feature = "client-oauth-dpop")]
+    return scheme.eq_ignore_ascii_case(volga_oauth_client::auth_scheme::DPOP);
+
+    #[cfg(not(feature = "client-oauth-dpop"))]
+    false
 }
 
 /// Splits a header value on the commas that separate list elements -- the ones

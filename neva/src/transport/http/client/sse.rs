@@ -67,25 +67,33 @@ pub(super) async fn handle_sse_connection(
     let mut streamed = false;
 
     loop {
-        let bearer = auth.fresh_bearer().await;
-        let mut req = client
-            .get(session.url())
-            .header(ACCEPT, "application/json, text/event-stream")
-            .header(CACHE_CONTROL, "no-cache");
+        let credential = auth.fresh_credential().await;
+        let get = || {
+            let mut req = client
+                .get(session.url())
+                .header(ACCEPT, "application/json, text/event-stream")
+                .header(CACHE_CONTROL, "no-cache");
 
-        if let Some(ref bearer) = bearer {
-            req = req.bearer_auth(bearer);
-        }
+            if let Some(session_id) = session.session_id() {
+                req = req.header(MCP_SESSION_ID, session_id.to_string());
+            }
 
-        if let Some(session_id) = session.session_id() {
-            req = req.header(MCP_SESSION_ID, session_id.to_string());
-        }
+            if let Some(last_id) = session.last_event_id() {
+                req = req.header(LAST_EVENT_ID, last_id);
+            }
 
-        if let Some(last_id) = session.last_event_id() {
-            req = req.header(LAST_EVENT_ID, last_id);
-        }
+            req
+        };
 
-        let resp = match req.send().await {
+        let sent = send_authorized(
+            credential.as_ref(),
+            &reqwest::Method::GET,
+            session.url(),
+            get,
+        )
+        .await;
+
+        let resp = match sent {
             Ok(resp) => resp,
             Err(_err) => {
                 #[cfg(feature = "tracing")]
@@ -113,7 +121,10 @@ pub(super) async fn handle_sse_connection(
         {
             let challenge = bearer_challenge(resp.headers());
             match oauth
-                .authorize(challenge.as_deref(), bearer.as_deref())
+                .authorize(
+                    challenge.as_deref(),
+                    credential.as_ref().map(Credential::access_token),
+                )
                 .await
             {
                 Ok(_) => {
@@ -354,7 +365,7 @@ pub(super) async fn resume_stream(
     // went out with. A managed session renews one that is about to expire
     // without troubling anybody.
     #[cfg_attr(not(feature = "client-oauth"), allow(unused_mut))]
-    let mut bearer = auth.fresh_bearer().await;
+    let mut credential = auth.fresh_credential().await;
     #[cfg(feature = "client-oauth")]
     let mut reauthorized = false;
 
@@ -362,21 +373,29 @@ pub(super) async fn resume_stream(
     // is one pass by construction.
     #[cfg_attr(not(feature = "client-oauth"), allow(clippy::never_loop))]
     let resp = loop {
-        let mut req = client
-            .get(session.url())
-            .header(ACCEPT, "application/json, text/event-stream")
-            .header(CACHE_CONTROL, "no-cache")
-            .header(LAST_EVENT_ID, last_event_id);
+        let get = || {
+            let mut req = client
+                .get(session.url())
+                .header(ACCEPT, "application/json, text/event-stream")
+                .header(CACHE_CONTROL, "no-cache")
+                .header(LAST_EVENT_ID, last_event_id);
 
-        if let Some(session_id) = session.session_id() {
-            req = req.header(MCP_SESSION_ID, session_id.to_string());
-        }
+            if let Some(session_id) = session.session_id() {
+                req = req.header(MCP_SESSION_ID, session_id.to_string());
+            }
 
-        if let Some(bearer) = bearer.as_deref() {
-            req = req.bearer_auth(bearer);
-        }
+            req
+        };
 
-        let resp = match req.send().await {
+        let sent = send_authorized(
+            credential.as_ref(),
+            &reqwest::Method::GET,
+            session.url(),
+            get,
+        )
+        .await;
+
+        let resp = match sent {
             Ok(resp) => resp,
             Err(_err) => {
                 #[cfg(feature = "tracing")]
@@ -403,10 +422,13 @@ pub(super) async fn resume_stream(
         {
             let challenge = bearer_challenge(resp.headers());
             if let Ok(fresh) = oauth
-                .authorize(challenge.as_deref(), bearer.as_deref())
+                .authorize(
+                    challenge.as_deref(),
+                    credential.as_ref().map(Credential::access_token),
+                )
                 .await
             {
-                bearer = Some(fresh);
+                credential = Some(fresh);
                 reauthorized = true;
                 continue;
             }

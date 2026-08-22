@@ -86,7 +86,7 @@ http-server-volga = ["http-server", "dep:volga"]
 server = ["tokio/signal", "tokio/rt-multi-thread", "dep:chacha20poly1305", "dep:sha2"]
 
 # client
-client-full = ["client-macros", "tracing", "http-client", "client-tls", "client-oauth", "client-oauth-jwt", "tasks"]
+client-full = ["client-macros", "tracing", "http-client", "client-tls", "client-oauth", "client-oauth-jwt", "client-oauth-dpop", "tasks"]
 client-macros = ["client", "macros", "neva_macros?/client"]
 # `url` is free here: it, `form_urlencoded` and `percent-encoding` are already
 # in the tree of every `http-client` build via reqwest, so gating it on this
@@ -97,6 +97,11 @@ client-oauth = ["http-client", "dep:volga-oauth-client", "dep:url"]
 # client that authenticates with a secret -- or with nothing at all -- does
 # not compile `jsonwebtoken` and its crypto tree.
 client-oauth-jwt = ["client-oauth", "volga-oauth-client?/private-key-jwt"]
+# DPoP sender-constrained tokens (RFC 9449): the client binds every token it
+# obtains to a key it holds and proves possession of that key on each request.
+# Opt-in for the same reason `client-oauth-jwt` is -- it needs the JWS signing
+# backend, and a client presenting bearer tokens has no use for it.
+client-oauth-dpop = ["client-oauth", "volga-oauth-client?/dpop"]
 client-tls = ["reqwest?/rustls"]
 http-client = ["client", "dep:reqwest", "dep:sse-stream", "dep:tokio-stream", "dep:once_cell"]
 client = ["dep:windows", "dep:nix", "dep:jsonschema", "tokio/process", "tokio/signal", "tokio/rt-multi-thread"]

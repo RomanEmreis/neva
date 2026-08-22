@@ -22,6 +22,7 @@ neva = { path = "../neva", features = [
     "http-client",
     "client-oauth",
     "client-oauth-jwt",
+    "client-oauth-dpop",
     "tracing",
     "tasks",
 ] }

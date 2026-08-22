@@ -15,6 +15,7 @@
 //! the default [`LoopbackHandler`] serves desktop/CLI clients by opening
 //! the system browser and capturing the redirect on a loopback listener.
 
+use super::Credential;
 use crate::shared::BoxFuture;
 use std::sync::{Arc, RwLock};
 use tokio::{
@@ -27,6 +28,10 @@ use crate::error::{Error, ErrorCode};
 
 use url::{Host, ParseError, Url, form_urlencoded};
 
+#[cfg(feature = "client-oauth-jwt")]
+pub use volga_oauth_client::PrivateKeyJwt;
+#[cfg(feature = "client-oauth-dpop")]
+use volga_oauth_client::auth_scheme;
 use volga_oauth_client::{
     AuthorizationServerMetadata, BearerChallenge, ClientAuthMethod, ClientConfig, DiscoveryClient,
     OAuthClient, RegistrationClient, canonicalize_resource_uri, client_auth, grant,
@@ -35,8 +40,13 @@ use volga_oauth_client::{
 pub use volga_oauth_client::{
     ClientError, ClientMetadata, InMemoryTokenStore, TokenSet, TokenStore, token_type,
 };
-#[cfg(feature = "client-oauth-jwt")]
-pub use volga_oauth_client::{JwkSet, JwsAlgorithm, PrivateKeyJwt, PublicJwk, jwk};
+// The key material types are shared by the two halves that sign: the
+// `private_key_jwt` client assertion and the DPoP proof. Either feature alone
+// brings them in.
+#[cfg(feature = "client-oauth-dpop")]
+pub use volga_oauth_client::Dpop;
+#[cfg(any(feature = "client-oauth-jwt", feature = "client-oauth-dpop"))]
+pub use volga_oauth_client::{JwkSet, JwsAlgorithm, PublicJwk, jwk};
 
 /// Client name sent with dynamic client registration when none is
 /// configured.
@@ -49,11 +59,33 @@ mod session;
 
 pub(super) use assertion::DynAssertionProvider;
 pub use assertion::{AssertionProvider, AssertionRequest, IdentityAssertion};
+#[cfg(feature = "client-oauth-dpop")]
+use config::DpopPolicy;
 pub use config::OAuthClientConfig;
 pub use handler::{AuthorizationHandler, CallbackParams, LoopbackHandler};
 #[cfg(test)]
 use session::FlowState;
 pub(crate) use session::OAuthSession;
+
+/// The `WWW-Authenticate` challenge in `header`, in whichever of the schemes
+/// this client presents credentials under.
+///
+/// `Bearer` first, because it is what everything but a DPoP deployment sends.
+/// RFC 9449 section 7.1 gives the `DPoP` scheme the same `error`,
+/// `error_description` and `scope` parameters RFC 6750 defines -- and the MCP
+/// `resource_metadata` pointer rides on either -- so one parsed challenge is
+/// read the same way whichever scheme carried it.
+pub(super) fn parse_challenge(header: &str) -> Option<BearerChallenge> {
+    if let Ok(challenge) = BearerChallenge::parse(header) {
+        return Some(challenge);
+    }
+
+    #[cfg(feature = "client-oauth-dpop")]
+    return BearerChallenge::parse_scheme(header, auth_scheme::DPOP).ok();
+
+    #[cfg(not(feature = "client-oauth-dpop"))]
+    None
+}
 
 /// Builds the RFC 7591 registration document for a public
 /// authorization-code client.
@@ -538,6 +570,13 @@ fn origin_of(resource: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The access token a credential presents -- what these tests compare,
+    /// since a credential is not itself a string and a DPoP-bound one carries
+    /// a key besides.
+    fn presented(credential: Option<Credential>) -> Option<String> {
+        credential.map(|credential| credential.access_token().to_owned())
+    }
 
     #[test]
     fn it_parses_callback_query() {
@@ -1359,7 +1398,7 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
 
         assert_ne!(&*first.store_key(), &*second.store_key());
         assert_eq!(
-            second.bearer(),
+            presented(second.credential()),
             None,
             "a client must not start out holding another client's token"
         );
@@ -1682,7 +1721,9 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
             // No issuer configured, so the key is the resource -- which is what
             // every `store.put` in these tests writes under.
             store_key: RwLock::new(key("", "", "http://127.0.0.1:3000/mcp").into()),
-            token: RwLock::new(Some("stale-token".into())),
+            credential: RwLock::new(Some(Credential::Bearer("stale-token".into()))),
+            #[cfg(feature = "client-oauth-dpop")]
+            dpop: RwLock::new(None),
             flow: Mutex::new(flow),
             requested_scopes: RwLock::new(Vec::new()),
         }
@@ -1709,7 +1750,7 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
         };
         let session = session_with(store.clone(), Some(flow));
 
-        let token = session.refreshed_bearer().await;
+        let token = presented(session.refreshed_credential().await);
 
         assert_eq!(token.as_deref(), Some("fresh-token"));
         let stored = store
@@ -1753,7 +1794,7 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
         let session = session_with(store.clone(), Some(flow));
 
         assert_eq!(
-            session.refreshed_bearer().await.as_deref(),
+            presented(session.refreshed_credential().await).as_deref(),
             Some("fresh-token")
         );
         assert_eq!(
@@ -1804,7 +1845,7 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
         session.set_requested_scopes(vec!["read".to_string(), "write".to_string()]);
 
         assert_eq!(
-            session.refreshed_bearer().await.as_deref(),
+            presented(session.refreshed_credential().await).as_deref(),
             Some("fresh-token")
         );
         assert_eq!(
@@ -1835,7 +1876,7 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
         let session = session_with(store, None);
 
         assert_eq!(
-            session.refreshed_bearer().await.as_deref(),
+            presented(session.refreshed_credential().await).as_deref(),
             Some("stale-token")
         );
     }
@@ -1850,7 +1891,7 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
         // Nothing to refresh with -- the current token is returned and
         // the 401 path decides what happens next.
         assert_eq!(
-            session.refreshed_bearer().await.as_deref(),
+            presented(session.refreshed_credential().await).as_deref(),
             Some("stale-token")
         );
     }
@@ -1872,7 +1913,10 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
         );
         let config = OAuthClientConfig::default().with_token_store(store);
         let session = OAuthSession::new(config, "http://127.0.0.1:3000/mcp").unwrap();
-        assert_eq!(session.bearer().as_deref(), Some("stored-token"));
+        assert_eq!(
+            presented(session.credential()).as_deref(),
+            Some("stored-token")
+        );
     }
 
     /// A token restored from a persistent store carries a grant this process
@@ -2144,7 +2188,7 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
         let session = OAuthSession::new(config, &resource).unwrap();
 
         let token = session.authorize(None, None).await.unwrap();
-        assert_eq!(&*token, "service-token");
+        assert_eq!(token.access_token(), "service-token");
 
         let requests = seen.lock().unwrap().clone();
         let token_request = requests
@@ -2189,7 +2233,7 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
         let session = OAuthSession::new(config, &resource).unwrap();
 
         assert_eq!(
-            &*session.authorize(None, None).await.unwrap(),
+            session.authorize(None, None).await.unwrap().access_token(),
             "service-token"
         );
 
@@ -2228,7 +2272,7 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
         let session = OAuthSession::new(config, &resource).unwrap();
 
         assert_eq!(
-            &*session.authorize(None, None).await.unwrap(),
+            session.authorize(None, None).await.unwrap().access_token(),
             "service-token"
         );
 
@@ -2334,7 +2378,7 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
             format!(r#"Bearer resource_metadata="http://{addr}/where-the-challenge-points""#);
         let token = session.authorize(Some(&challenge), None).await.unwrap();
 
-        assert_eq!(&*token, "stated-metadata-token");
+        assert_eq!(token.access_token(), "stated-metadata-token");
         assert!(
             seen.lock()
                 .unwrap()
@@ -2498,7 +2542,9 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
             },
             resource: "http://127.0.0.1:3000/mcp".into(),
             store_key: RwLock::new(store_key.as_str().into()),
-            token: RwLock::new(Some("held-token".into())),
+            credential: RwLock::new(Some(Credential::Bearer("held-token".into()))),
+            #[cfg(feature = "client-oauth-dpop")]
+            dpop: RwLock::new(None),
             flow: Mutex::new(Some(FlowState {
                 client: OAuthClient::new("mcp-service")
                     .with_secret("s3cret")
@@ -2514,7 +2560,7 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
         };
 
         assert_eq!(
-            session.refreshed_bearer().await.as_deref(),
+            presented(session.refreshed_credential().await).as_deref(),
             Some("re-run-token"),
             "an unknown lifetime is not evidence of freshness; re-running the \
              grant is what this profile renews with"
@@ -2676,14 +2722,18 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
         let session = OAuthSession::new(config, &resource).unwrap();
 
         let first = session.authorize(None, None).await.unwrap();
-        assert_eq!(&*first, "token-from-the-old-server");
+        assert_eq!(first.access_token(), "token-from-the-old-server");
 
         // The resource has moved. The old token endpoint is still reachable,
         // so a cached re-run would succeed -- with a token for a server this
         // resource no longer trusts.
-        let second = session.authorize(None, Some(&first)).await.unwrap();
+        let second = session
+            .authorize(None, Some(first.access_token()))
+            .await
+            .unwrap();
         assert_eq!(
-            &*second, "token-from-the-new-server",
+            second.access_token(),
+            "token-from-the-new-server",
             "the challenge has to send the flow back through discovery"
         );
     }
@@ -2727,13 +2777,13 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
         let config = OAuthClientConfig { store, ..config };
         let session = OAuthSession::new(config, &resource).unwrap();
         assert_eq!(
-            session.bearer().as_deref(),
+            presented(session.credential()).as_deref(),
             Some("restored-token"),
             "the warm start reads the store"
         );
 
         assert_eq!(
-            session.refreshed_bearer().await.as_deref(),
+            presented(session.refreshed_credential().await).as_deref(),
             Some("renewed-after-restart"),
             "and the probe rebuilds what the restart did not restore"
         );
@@ -2836,7 +2886,7 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
             let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
             store.put(&OAuthSession::initial_store_key(&config, resource), &stored);
             let config = OAuthClientConfig { store, ..config };
-            OAuthSession::new(config, resource).unwrap().bearer()
+            presented(OAuthSession::new(config, resource).unwrap().credential())
         };
 
         // A grant whose key fully names the identity may pick its own token
@@ -3111,6 +3161,136 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
         }
     }
 
+    /// The default is bearer, and a server asking does not change that: DPoP
+    /// is an extension the deployer opts into, and a client told to present
+    /// bearer tokens that quietly started signing proofs would be doing
+    /// something nobody asked for.
+    #[cfg(feature = "client-oauth-dpop")]
+    #[test]
+    fn dpop_stays_off_unless_it_was_configured() {
+        let session = OAuthSession::new(
+            OAuthClientConfig::default().require_https(false),
+            "http://127.0.0.1:3000/mcp",
+        )
+        .unwrap();
+
+        assert!(session.dpop().is_none());
+        assert!(!session.arm_dpop().unwrap(), "nothing arms a disabled key");
+        assert!(session.dpop().is_none());
+    }
+
+    /// `with_dpop_auto` mints one key, when a server first asks, and keeps it:
+    /// every token already bound to it needs it for as long as the token
+    /// lives.
+    #[cfg(feature = "client-oauth-dpop")]
+    #[test]
+    fn an_auto_session_mints_one_key_the_first_time_it_is_asked() {
+        let session = OAuthSession::new(
+            OAuthClientConfig::default()
+                .require_https(false)
+                .with_dpop_auto(),
+            "http://127.0.0.1:3000/mcp",
+        )
+        .unwrap();
+
+        assert!(session.dpop().is_none(), "nothing has asked yet");
+
+        assert!(session.arm_dpop().unwrap());
+        let armed = session.dpop().expect("a key").thumbprint().to_owned();
+
+        assert!(!session.arm_dpop().unwrap(), "arming happens once");
+        assert_eq!(session.dpop().expect("a key").thumbprint(), armed);
+
+        // The other way a server asks. An authorization server that advertises
+        // nothing says nothing (RFC 9449 section 5.1), so it does not arm.
+        let quiet = OAuthSession::new(
+            OAuthClientConfig::default()
+                .require_https(false)
+                .with_dpop_auto(),
+            "http://127.0.0.1:3000/mcp",
+        )
+        .unwrap();
+        let mut metadata = AuthorizationServerMetadata::default();
+        assert!(!quiet.arm_dpop_for(&metadata).unwrap());
+        assert!(quiet.dpop().is_none());
+
+        metadata.dpop_signing_alg_values_supported = vec!["ES256".into()];
+        assert!(quiet.arm_dpop_for(&metadata).unwrap());
+        assert!(quiet.dpop().is_some());
+    }
+
+    /// A configured key is the session's from the start -- there is nothing to
+    /// wait for, and the first token request already has to carry its proof.
+    #[cfg(feature = "client-oauth-dpop")]
+    #[test]
+    fn a_configured_key_is_held_from_the_start() {
+        let key = Dpop::generate().expect("a key");
+        let session = OAuthSession::new(
+            OAuthClientConfig::default()
+                .require_https(false)
+                .with_dpop(key.clone()),
+            "http://127.0.0.1:3000/mcp",
+        )
+        .unwrap();
+
+        assert_eq!(
+            session.dpop().expect("a key").thumbprint(),
+            key.thumbprint()
+        );
+    }
+
+    /// A store outlives a process, and a bound token is worth nothing without
+    /// the key it names. The warm start has to say so, or the session comes up
+    /// holding a credential it cannot prove possession of and every request
+    /// spends a `401` finding out.
+    #[cfg(feature = "client-oauth-dpop")]
+    #[test]
+    fn a_warm_start_ignores_a_token_bound_to_a_key_this_session_lacks() {
+        let resource = "http://127.0.0.1:3000/mcp";
+        let bound = |jkt: Option<&str>| TokenSet {
+            access_token: "restored-token".into(),
+            token_type: if jkt.is_some() { "DPoP" } else { "Bearer" }.into(),
+            refresh_token: None,
+            scope: None,
+            id_token: None,
+            expires_at: Some(std::time::SystemTime::now() + std::time::Duration::from_secs(3600)),
+            dpop_jkt: jkt.map(ToOwned::to_owned),
+        };
+
+        let warm_start = |key: Option<Dpop>, stored: TokenSet| {
+            let mut config = OAuthClientConfig::default().require_https(false);
+            if let Some(key) = key {
+                config = config.with_dpop(key);
+            }
+            let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+            store.put(&OAuthSession::initial_store_key(&config, resource), &stored);
+            let config = OAuthClientConfig { store, ..config };
+            presented(OAuthSession::new(config, resource).unwrap().credential())
+        };
+
+        let key = Dpop::generate().expect("a key");
+        assert_eq!(
+            warm_start(Some(key.clone()), bound(Some(key.thumbprint()))).as_deref(),
+            Some("restored-token"),
+            "its own token comes back"
+        );
+        assert_eq!(
+            warm_start(Some(key.clone()), bound(Some("another-key"))),
+            None,
+            "a token bound elsewhere cannot be presented here"
+        );
+        assert_eq!(
+            warm_start(Some(key), bound(None)),
+            None,
+            "and neither can an unbound one, once this client has a key"
+        );
+        assert_eq!(
+            warm_start(None, bound(Some("some-key"))),
+            None,
+            "nor a bound one, once it has not"
+        );
+    }
+
     /// [`EchoesState`] that also keeps the authorization URL, so a test can
     /// read the parameters the user's browser would have carried.
     #[derive(Default)]
@@ -3147,7 +3327,7 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
         let session = OAuthSession::new(config, &resource).unwrap();
 
         let token = session.authorize(None, None).await.expect("the flow runs");
-        assert_eq!(&*token, "cimd-token");
+        assert_eq!(token.access_token(), "cimd-token");
 
         let url = handler.0.lock().unwrap().clone().expect("a URL was built");
         assert!(
@@ -3188,7 +3368,7 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
         let session = OAuthSession::new(config, &resource).unwrap();
 
         let token = session.authorize(None, None).await.expect("the flow runs");
-        assert_eq!(&*token, "cimd-token");
+        assert_eq!(token.access_token(), "cimd-token");
 
         assert!(
             store.get(&key(stale_config, CIMD_URL, &resource)).is_none(),
@@ -3238,7 +3418,7 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
             .authorize(None, Some("the-expired-token"))
             .await
             .expect("the new server's own stored token is what answers this");
-        assert_eq!(&*token, "cimd-token");
+        assert_eq!(token.access_token(), "cimd-token");
 
         let requests = seen.lock().unwrap().clone();
         assert!(
@@ -3274,7 +3454,7 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
         let session = OAuthSession::new(config, &resource).unwrap();
 
         let token = session.authorize(None, None).await.expect("the flow runs");
-        assert_eq!(&*token, "granted-token");
+        assert_eq!(token.access_token(), "granted-token");
 
         assert!(
             store.get(&key(&issuer, CIMD_URL, &resource)).is_none(),
@@ -3321,7 +3501,7 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
             )
             .await
             .expect("the flow completes");
-        assert_eq!(&*token, "granted-token");
+        assert_eq!(token.access_token(), "granted-token");
 
         assert_eq!(
             store
@@ -3411,7 +3591,7 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
             .await
             .expect("the stored refresh token is what answers this");
 
-        assert_eq!(&*token, "refreshed-after-restart");
+        assert_eq!(token.access_token(), "refreshed-after-restart");
         assert!(
             session.flow.lock().await.is_some(),
             "and what made it work is kept, so the next refresh is the cheap path"
@@ -3546,7 +3726,8 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
             .expect("the grant on record already covers the challenge");
 
         assert_eq!(
-            &*token, "widened-token",
+            token.access_token(),
+            "widened-token",
             "the loser must reuse what the winner obtained"
         );
     }
@@ -3626,7 +3807,7 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
             )
             .await
             .expect("a demand the grant on record covers");
-        assert_eq!(&*token, "widened-token");
+        assert_eq!(token.access_token(), "widened-token");
     }
 
     /// A configured scope set is a ceiling as well as a floor: the flow asks

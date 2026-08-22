@@ -363,6 +363,14 @@ async fn main() -> Result<(), Error> {
             // authorization scenarios do. `require_https(false)` because
             // every mock issuer here is on loopback http.
             .require_https(false)
+            // Not keyed on the scenario, unlike the grant: which credential a
+            // client presents *is* on the wire here. The `auth/dpop`
+            // scenarios challenge with the `DPoP` scheme and advertise
+            // `dpop_signing_alg_values_supported`, and every other scenario
+            // does neither -- so this is a client that can do DPoP meeting
+            // servers that ask for it, which is the shape a shipped client
+            // has.
+            .with_dpop_auto()
             .with_handler(RedirectReader::new(CALLBACK_URI)),
     )?;
     let oauth = std::sync::Mutex::new(Some(oauth));

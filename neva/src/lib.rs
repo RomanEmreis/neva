@@ -231,7 +231,10 @@ pub mod auth {
         //! `with_jwt_bearer` over the `AssertionProvider` seam, and
         //! `with_identity_assertion` for the enterprise-managed profile.
         //! `client-oauth-jwt` adds `PrivateKeyJwt`, the signed client
-        //! assertion those grants are meant to authenticate with.
+        //! assertion those grants are meant to authenticate with, and
+        //! `client-oauth-dpop` adds `Dpop` -- sender-constrained tokens
+        //! (RFC 9449), configured through `OAuthClientConfig::with_dpop` and
+        //! `with_dpop_auto`.
 
         #[cfg(feature = "server-oauth")]
         pub use crate::transport::http::core::oauth::{
@@ -247,6 +250,16 @@ pub mod auth {
             OAuthClientConfig, TokenSet, TokenStore, token_type,
         };
 
+        /// Sender-constrained tokens (DPoP,
+        /// [RFC 9449](https://www.rfc-editor.org/rfc/rfc9449)): the client
+        /// binds every token it obtains to a key it holds and proves
+        /// possession of that key on every request, so a stolen token is
+        /// worth nothing on its own. Turned on with
+        /// `OAuthClientConfig::with_dpop` -- a key of the caller's choosing --
+        /// or `with_dpop_auto`, which mints one where a server asks for it.
+        #[cfg(feature = "client-oauth-dpop")]
+        pub use crate::transport::http::client::oauth::Dpop;
+
         /// The `private_key_jwt` client assertion (RFC 7523 section 2.2):
         /// the client signs a short-lived JWT with its own key instead of
         /// presenting a shared secret. Set with
@@ -256,9 +269,13 @@ pub mod auth {
         /// `PrivateKeyJwt::with_public_jwk` needs, so a client can publish
         /// the public half a server verifies its assertions against.
         #[cfg(feature = "client-oauth-jwt")]
-        pub use crate::transport::http::client::oauth::{
-            JwkSet, JwsAlgorithm, PrivateKeyJwt, PublicJwk, jwk,
-        };
+        pub use crate::transport::http::client::oauth::PrivateKeyJwt;
+
+        /// Key material shared by the two things this client signs: the
+        /// `private_key_jwt` assertion and the DPoP proof. Either feature
+        /// brings them in.
+        #[cfg(any(feature = "client-oauth-jwt", feature = "client-oauth-dpop"))]
+        pub use crate::transport::http::client::oauth::{JwkSet, JwsAlgorithm, PublicJwk, jwk};
     }
 }
 
