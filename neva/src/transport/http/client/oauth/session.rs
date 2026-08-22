@@ -1276,6 +1276,37 @@ impl OAuthSession {
                         "dynamic client registration needs a redirect URI to register",
                     ));
                 };
+
+                // A registration cannot carry a signing key, for the reasons
+                // `OAuthClientConfig::validate` gives when refusing the same
+                // pairing outright: the registration would have to publish
+                // the public half, and the response would have to come back
+                // saying the server accepted `private_key_jwt` rather than
+                // the `none` that was asked for. Neither is knowable until a
+                // registration has been spent.
+                //
+                // `validate` cannot catch every way here, though. A
+                // configured document is an identity that *could* carry the
+                // key -- but only where the server resolves one, which is not
+                // known until it has been asked. When it does not, the flow
+                // arrives at this fallback, and registering as a public
+                // client while quietly not using the key is the outcome that
+                // rule exists to prevent.
+                #[cfg(feature = "client-oauth-jwt")]
+                if self.config.private_key_jwt.is_some() {
+                    return Err(Error::new(
+                        ErrorCode::InvalidRequest,
+                        format!(
+                            "`{}` does not resolve client id metadata documents, so this \
+                             flow falls back to dynamic registration -- which cannot carry \
+                             the configured signing key. Register a client with it out of \
+                             band and name that id with `with_client_id`, or drop \
+                             `with_private_key_jwt` to register as a public client",
+                            server_metadata.issuer
+                        ),
+                    ));
+                }
+
                 let registration = RegistrationClient::with_config(self.config.client_config());
                 let mut response = registration
                     .register(server_metadata, &registration_metadata(redirect_uri))

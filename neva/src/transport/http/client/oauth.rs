@@ -2931,6 +2931,48 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
         );
     }
 
+    /// A configured document is an identity that *could* carry a signing key
+    /// -- but only where the server resolves one, which is not known until it
+    /// has been asked. Where it does not, the flow falls back to dynamic
+    /// registration, and `validate` could not have foreseen it: registering
+    /// as a public client while quietly not using the key is exactly what the
+    /// rule there exists to prevent, so it is caught here instead.
+    #[cfg(feature = "client-oauth-jwt")]
+    #[tokio::test]
+    async fn a_signing_key_is_refused_where_the_document_falls_back_to_registration() {
+        let session = session(
+            OAuthClientConfig::default()
+                .with_client_id_document(CIMD_URL)
+                .with_private_key_jwt(test_key()),
+        );
+
+        // What a server that resolves no document leaves: registration.
+        let err = session
+            .build_client(
+                ClientIdSource::Dynamic,
+                &as_supporting_cimd(false),
+                Some("http://127.0.0.1:8919/callback"),
+            )
+            .await
+            .expect_err("a registration cannot carry the key this client signs with");
+
+        assert!(err.to_string().contains("with_client_id"), "{err}");
+        assert!(err.to_string().contains("with_private_key_jwt"), "{err}");
+
+        // Where the server does resolve one, the document is the identity and
+        // the key travels with it.
+        assert!(
+            session
+                .build_client(
+                    ClientIdSource::Document(CIMD_URL),
+                    &as_supporting_cimd(true),
+                    Some("http://127.0.0.1:8919/callback"),
+                )
+                .await
+                .is_ok()
+        );
+    }
+
     /// A refusal is the answer, not the start of a search. The client
     /// presented the only credential it has, so it neither resends it nor
     /// reaches for another grant -- and the cached state that produced it is
