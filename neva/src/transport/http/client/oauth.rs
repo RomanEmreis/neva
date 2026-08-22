@@ -305,24 +305,30 @@ impl ClientGrant {
         }
     }
 
-    /// Whether a token this grant left in a durable [`TokenStore`] may be
-    /// picked up by a *later process* without running the grant again.
+    /// Whether what this grant left in a durable [`TokenStore`] may be picked
+    /// up by a *later process*.
+    ///
+    /// The whole record, not just the access token: the entry also carries
+    /// the `scope` the authorization server reported as granted, and that is
+    /// read back to widen the next request (SEP-2350). Both describe one
+    /// grant made to one identity, so either is only as reusable as the other
+    /// -- restoring the scopes of a grant whose token was refused as
+    /// somebody else's would ask, on the new identity's behalf, for
+    /// privileges only the old one needed.
     ///
     /// Everything a session writes during its own life it also minted, so
-    /// this is about one thing only: the warm start in
-    /// [`OAuthSession::new`](super::OAuthSession::new), where a token of
-    /// unknown provenance is adopted on the strength of its key alone.
+    /// this only governs what a *fresh* session may assume about a slot it
+    /// did not fill.
     ///
-    /// The JWT-bearer grant cannot make that promise. Its key names the
-    /// client, and the client is not who the token is *for*: an identity
-    /// assertion mints a token for whoever the subject token identified, so
-    /// two runs of the same client under two different users share a slot,
-    /// and the second would restore the first's token. What actually
-    /// distinguishes them is the assertion, which is minted per request and
-    /// so is not in hand when the warm start reads. Re-running the grant is
-    /// one request and no user -- a cheap price for not presenting somebody
-    /// else's identity.
-    pub(super) fn survives_a_restart(&self) -> bool {
+    /// The JWT-bearer grant can make no assumption at all. Its key names the
+    /// client, and the client is not who the grant was made to: an identity
+    /// assertion buys a token for whoever the subject token identified, so
+    /// two runs of the same client under two different users share a slot.
+    /// What distinguishes them is the assertion, which is minted per request
+    /// and so is not in hand when a fresh session reads. Running the grant
+    /// again is one request and no user -- a cheap price for not inheriting
+    /// somebody else's.
+    pub(super) fn may_restore_persisted_grant(&self) -> bool {
         !matches!(self, Self::JwtBearer(_))
     }
 
@@ -2855,6 +2861,73 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
             None,
             "one request and no user is a cheap price for not presenting \
              somebody else's identity"
+        );
+    }
+
+    /// And not just the token. The same entry records the `scope` the server
+    /// reported as granted, which the next request is widened by (SEP-2350).
+    /// Both describe one grant made to one identity, so inheriting the
+    /// scopes of a grant whose token was refused as somebody else's would
+    /// ask, on the new identity's behalf, for privileges only the old one
+    /// needed.
+    #[test]
+    fn a_jwt_bearer_session_does_not_inherit_a_stored_scope_record() {
+        let resource = "https://api.example.com/mcp";
+        let previous = TokenSet {
+            access_token: "somebody-elses-token".into(),
+            token_type: "Bearer".into(),
+            refresh_token: None,
+            scope: Some("payroll:write".into()),
+            id_token: None,
+            expires_at: Some(std::time::SystemTime::now() + std::time::Duration::from_secs(3600)),
+            dpop_jkt: None,
+        };
+
+        let held = |config: OAuthClientConfig| {
+            let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+            store.put(
+                &OAuthSession::initial_store_key(&config, resource),
+                &previous,
+            );
+            let config = OAuthClientConfig { store, ..config };
+            OAuthSession::new(config, resource)
+                .unwrap()
+                .requested_scopes()
+        };
+
+        // A grant whose slot names the identity it was made to reads its own
+        // record back -- which is what keeps a restart from widening from
+        // nothing and trading the grant away.
+        assert_eq!(
+            held(
+                OAuthClientConfig::default()
+                    .with_client_id("mcp-service")
+                    .with_client_secret("s3cret")
+                    .with_client_credentials()
+            ),
+            vec!["payroll:write".to_string()]
+        );
+
+        // The JWT-bearer slot does not, so the caller's own decision stands
+        // in -- and nothing here asks for what only the last subject needed.
+        assert_eq!(
+            held(
+                OAuthClientConfig::default()
+                    .with_client_id("customer-router-agent")
+                    .with_scopes(["mcp:read"])
+                    .with_jwt_bearer("a.workload.jwt".to_owned())
+            ),
+            vec!["mcp:read".to_string()]
+        );
+        assert!(
+            held(
+                OAuthClientConfig::default()
+                    .with_client_id("customer-router-agent")
+                    .with_jwt_bearer("a.workload.jwt".to_owned())
+            )
+            .is_empty(),
+            "and with nothing configured either, it asks for nothing it \
+             cannot account for"
         );
     }
 

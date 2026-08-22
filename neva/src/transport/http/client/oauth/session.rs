@@ -101,7 +101,7 @@ impl OAuthSession {
         // ([`ClientGrant::survives_a_restart`]).
         let token = config
             .grant
-            .survives_a_restart()
+            .may_restore_persisted_grant()
             .then(|| {
                 config
                     .store
@@ -263,6 +263,15 @@ impl OAuthSession {
     /// (RFC 6749 section 5.1), leaving nothing recorded. Configured scopes
     /// answer that case: they are what every flow of this session requests, so
     /// they are held by construction.
+    ///
+    /// The stored record is only consulted for a grant that may inherit one
+    /// ([`ClientGrant::may_restore_persisted_grant`]). It describes a grant
+    /// made to whoever ran last, and where that is not knowably the same
+    /// identity, widening this session's first request by it would ask on the
+    /// new identity's behalf for privileges only the old one needed -- an
+    /// `invalid_scope`, or a token broader than anything here has a use for.
+    /// The configured set answers that case: it is this caller's own
+    /// decision, held by construction.
     pub(super) fn requested_scopes(&self) -> Vec<String> {
         let asked = self
             .requested_scopes
@@ -274,9 +283,15 @@ impl OAuthSession {
         }
 
         self.config
-            .store
-            .get(&self.store_key())
-            .and_then(|tokens| tokens.scope)
+            .grant
+            .may_restore_persisted_grant()
+            .then(|| {
+                self.config
+                    .store
+                    .get(&self.store_key())
+                    .and_then(|tokens| tokens.scope)
+            })
+            .flatten()
             .map(|granted| split_scopes(&granted))
             .filter(|granted| !granted.is_empty())
             .or_else(|| self.config.scopes.clone())
