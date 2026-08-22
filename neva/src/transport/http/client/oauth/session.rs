@@ -822,6 +822,15 @@ impl OAuthSession {
         // -- before anything below builds a client that would ask for the
         // wrong kind of token.
         //
+        // A resource that takes both schemes answers with both, and which of
+        // those challenges arrives here is `bearer_challenge`'s decision: it
+        // prefers the `DPoP` one among challenges naming no actionable error,
+        // for exactly this reason. The alternative -- reading the scheme off
+        // whichever was written first -- leaves this branch blind, and an
+        // authorization server is free to leave
+        // `dpop_signing_alg_values_supported` out, so nothing further down
+        // would catch it either.
+        //
         // What was held until now was obtained for a different scheme, and so
         // was the flow state that renews it: both are dropped, or the paths
         // below would hand back exactly the credential this `401` refused.

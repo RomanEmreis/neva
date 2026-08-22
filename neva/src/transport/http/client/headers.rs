@@ -185,14 +185,32 @@ pub(super) fn use_dpop_nonce(headers: &reqwest::header::HeaderMap) -> bool {
 /// was short of. Handing the flow whichever came first, a
 /// `Bearer error="invalid_token"` say, would have it re-authorize for exactly the
 /// grant it already held and spend the exchange's one retry being refused
-/// identically. Where none names the code the first is as good as any: a
-/// `resource_metadata` pointer is the server's own and does not depend on which
-/// error accompanies it.
+/// identically.
+///
+/// Where none names the code, a `DPoP` challenge wins over a `Bearer` one, and
+/// otherwise the first is as good as any. What these challenges carry is the
+/// same either way -- a `resource_metadata` pointer is the server's own and
+/// does not depend on which challenge it accompanies -- so the scheme is the
+/// one thing that differs between them and the one thing the caller acts on:
+/// it is what tells a session allowed to decide for itself to bind its tokens
+/// to a key (RFC 9449 section 7.1). A resource that takes both schemes answers
+/// with both, and handing over the `Bearer` one because it was written first
+/// would have the client authorize for, and then present, exactly the
+/// credential the resource asked it to replace -- an authorization server that
+/// leaves `dpop_signing_alg_values_supported` out, as it may, then has nothing
+/// left to say so either.
+///
+/// A challenge naming `insufficient_scope` still outranks that, and needs to:
+/// the credential it refused was *accepted as a credential*, so the scheme is
+/// already settled, and what is unresolved is the grant.
 #[cfg(feature = "client-oauth")]
 pub(super) fn bearer_challenge(headers: &reqwest::header::HeaderMap) -> Option<String> {
     use volga_oauth_client::OAuthErrorCode;
 
-    let mut first = None;
+    // The challenge to fall back on, and whether it is one of the preferred
+    // scheme -- which is what decides whether a later one may displace it.
+    let mut fallback: Option<(String, bool)> = None;
+
     for value in headers
         .get_all(reqwest::header::WWW_AUTHENTICATE)
         .iter()
@@ -205,10 +223,25 @@ pub(super) fn bearer_challenge(headers: &reqwest::header::HeaderMap) -> Option<S
             if matches!(parsed.error(), Some(OAuthErrorCode::InsufficientScope)) {
                 return Some(challenge);
             }
-            first.get_or_insert(challenge);
+
+            #[cfg(feature = "client-oauth-dpop")]
+            let preferred = parsed
+                .scheme()
+                .eq_ignore_ascii_case(volga_oauth_client::auth_scheme::DPOP);
+            #[cfg(not(feature = "client-oauth-dpop"))]
+            let preferred = false;
+
+            match fallback {
+                // Nothing held yet, or a plain challenge giving way to one
+                // that names the scheme this client has more to offer under.
+                None => fallback = Some((challenge, preferred)),
+                Some((_, false)) if preferred => fallback = Some((challenge, preferred)),
+                Some(_) => {}
+            }
         }
     }
-    first
+
+    fallback.map(|(challenge, _)| challenge)
 }
 
 /// The challenges inside one `WWW-Authenticate` value that this client can

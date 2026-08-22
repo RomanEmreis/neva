@@ -701,6 +701,68 @@ mod tests {
         );
     }
 
+    /// A resource that takes both schemes answers with both (RFC 9449
+    /// section 7.1), and the scheme is the one thing that differs between
+    /// those challenges and the one thing the caller acts on. Reading the one
+    /// written first would have a `with_dpop_auto` session authorize for, and
+    /// then present, exactly the credential the resource asked it to replace.
+    #[cfg(feature = "client-oauth-dpop")]
+    #[test]
+    fn a_dpop_challenge_outranks_a_bearer_one_that_says_nothing_more() {
+        let headers_of = |value: &str| {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::WWW_AUTHENTICATE,
+                value.parse().expect("a header value"),
+            );
+            headers
+        };
+        let scheme_of = |headers: &reqwest::header::HeaderMap| {
+            oauth::parse_challenge(&bearer_challenge(headers).expect("a challenge"))
+                .expect("it parses")
+                .scheme()
+                .to_owned()
+        };
+
+        assert_eq!(
+            scheme_of(&headers_of(
+                r#"Bearer resource_metadata="https://mcp.example/prm", DPoP resource_metadata="https://mcp.example/prm""#
+            )),
+            "DPoP",
+            "written second, and still the one that applies"
+        );
+        assert_eq!(
+            scheme_of(&headers_of(
+                r#"DPoP resource_metadata="https://mcp.example/prm", Bearer realm="mcp""#
+            )),
+            "DPoP",
+            "and written first it stays"
+        );
+        assert_eq!(scheme_of(&headers_of(r#"Bearer realm="mcp""#)), "Bearer");
+
+        // Across two header values, which RFC 9110 section 11.6.1 allows.
+        let mut split = reqwest::header::HeaderMap::new();
+        split.append(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"Bearer realm="mcp""#.parse().unwrap(),
+        );
+        split.append(
+            reqwest::header::WWW_AUTHENTICATE,
+            r#"DPoP realm="mcp""#.parse().unwrap(),
+        );
+        assert_eq!(scheme_of(&split), "DPoP");
+
+        // `insufficient_scope` still outranks it: that credential was accepted
+        // *as* a credential, so the scheme is settled and the grant is not.
+        assert_eq!(
+            bearer_challenge(&headers_of(
+                r#"DPoP realm="mcp", Bearer error="insufficient_scope", scope="files:write""#
+            ))
+            .as_deref(),
+            Some(r#"Bearer error="insufficient_scope", scope="files:write""#)
+        );
+    }
+
     /// A nonce is not a demand to repeat the request -- the `error` is.
     #[cfg(feature = "client-oauth-dpop")]
     #[test]
@@ -1134,9 +1196,14 @@ mod tests {
 
     /// The whole DPoP exchange, end to end, in the shape the
     /// `auth/dpop-nonce` conformance scenario drives it: a resource that
-    /// challenges with the `DPoP` scheme, an authorization server that demands
+    /// challenges for the `DPoP` scheme, an authorization server that demands
     /// a nonce before it will issue, and a resource that demands one of its
     /// own before it will serve.
+    ///
+    /// The challenge here offers *both* schemes and the authorization server
+    /// advertises no proof algorithms -- the leanest thing a server can do and
+    /// still be asking for a bound token, and the case the conformance
+    /// scenarios do not cover.
     ///
     /// Each of those is a place a bearer-only client stops. The challenge is
     /// in a scheme it does not read, so it never authorizes; the token request
@@ -1182,7 +1249,11 @@ mod tests {
 
                     if !request.contains("authorization: DPoP bound-token") {
                         format!(
-                            "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: DPoP resource_metadata=\"{root}/.well-known/oauth-protected-resource/mcp\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            // Both schemes, as a resource that takes both
+                            // answers (RFC 9449 section 7.1) -- and the
+                            // bearer one first, so reading whichever came
+                            // first would never see the DPoP offer.
+                            "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer resource_metadata=\"{root}/.well-known/oauth-protected-resource/mcp\", DPoP resource_metadata=\"{root}/.well-known/oauth-protected-resource/mcp\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                         )
                     } else if !carried(&current) {
                         // RFC 9449 section 9: the resource hands out its nonce
@@ -1217,11 +1288,15 @@ mod tests {
                     let body = if request.contains("/.well-known/oauth-protected-resource") {
                         format!(r#"{{"resource":"{root}/mcp","authorization_servers":["{root}"]}}"#)
                     } else if request.contains("/.well-known/") {
+                        // No `dpop_signing_alg_values_supported`: RFC 9449
+                        // section 5.1 leaves it optional, so the challenge is
+                        // the only thing that says this resource wants a bound
+                        // token. (The conformance scenarios cover the other
+                        // way round -- an advertising server.)
                         format!(
                             r#"{{"issuer":"{root}","token_endpoint":"{root}/token",
                                  "authorization_endpoint":"{root}/authorize",
                                  "registration_endpoint":"{root}/register",
-                                 "dpop_signing_alg_values_supported":["ES256"],
                                  "response_types_supported":["code"]}}"#
                         )
                     } else if request.contains("/register") {
