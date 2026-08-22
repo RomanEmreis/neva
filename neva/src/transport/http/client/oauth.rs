@@ -127,10 +127,56 @@ fn client_id_metadata_document_supported(server: &AuthorizationServerMetadata) -
 /// conforming server could fetch, so refusing it here -- where it was
 /// written -- beats a browser round ending in `invalid_client`.
 fn validate_client_id_document_url(url: &str, require_https: bool) -> Result<(), Error> {
+    let parsed = validate_published_url("client id document URL", url, require_https)?;
+
+    // A path is a path, and a query is a query: reading the two off the parse
+    // is what keeps `https://example.com?location=/client.json` from passing on
+    // the strength of the slash inside its query. `Url` gives every http(s) URL
+    // a path of at least `/`, so the bare origin -- which as a client id would
+    // make every client hosted there the same client -- arrives here as exactly
+    // that, however it was spelled.
+    if matches!(parsed.path(), "" | "/") {
+        return Err(Error::new(
+            ErrorCode::InvalidRequest,
+            format!(
+                "client id document URL `{url}` must contain a path component, \
+                 e.g. `https://example.com/client.json`"
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Checks the `jwks_uri` a Client ID Metadata Document publishes.
+///
+/// The same syntax and transport rules as the document's own URL, and for the
+/// same reason: it is a location an authorization server has to dereference,
+/// and what it finds there is the key every assertion this client signs is
+/// verified against. Over plain http that key is whatever an attacker on the
+/// path substitutes, which gives up the one property `private_key_jwt` was
+/// chosen for -- so `require_https(false)` relaxes it exactly as far as it
+/// relaxes everything else, and no further.
+///
+/// No path component is demanded, unlike a client id: a key set served at an
+/// origin is an ordinary place to put one, and nothing is identified by this
+/// URL the way a client is identified by its document's.
+fn validate_jwks_uri(url: &str, require_https: bool) -> Result<(), Error> {
+    validate_published_url("JWKS URL", url, require_https).map(|_| ())
+}
+
+/// The rules every URL this client *publishes* has to meet, whatever it
+/// names: real URI syntax, a port in range, no fragment, and `https` unless a
+/// local development deployment has been allowed with `require_https(false)`.
+///
+/// Returns the parsed, canonical form so a caller can add the checks that are
+/// its own. `what` names the value in the message, since all of these land in
+/// front of whoever wrote the configuration.
+fn validate_published_url(what: &str, url: &str, require_https: bool) -> Result<Url, Error> {
     let invalid = |reason: &str| {
         Err(Error::new(
             ErrorCode::InvalidRequest,
-            format!("client id document URL `{url}` {reason}"),
+            format!("{what} `{url}` {reason}"),
         ))
     };
 
@@ -180,17 +226,7 @@ fn validate_client_id_document_url(url: &str, require_https: bool) -> Result<(),
         _ => return invalid("must be an absolute `https` URL"),
     }
 
-    // A path is a path, and a query is a query: reading the two off the parse
-    // is what keeps `https://example.com?location=/client.json` from passing on
-    // the strength of the slash inside its query. `Url` gives every http(s) URL
-    // a path of at least `/`, so the bare origin -- which as a client id would
-    // make every client hosted there the same client -- arrives here as exactly
-    // that, however it was spelled.
-    if matches!(parsed.path(), "" | "/") {
-        return invalid("must contain a path component, e.g. `https://example.com/client.json`");
-    }
-
-    Ok(())
+    Ok(parsed)
 }
 
 /// Which grant this client runs to obtain an access token.
@@ -242,6 +278,52 @@ impl ClientGrant {
     /// the other two are two HTTP requests and no seam in between.
     pub(super) fn is_interactive(&self) -> bool {
         matches!(self, Self::AuthorizationCode)
+    }
+
+    /// What separates one grant's persisted tokens from another's, as a
+    /// [`TokenStore`] key segment.
+    ///
+    /// A stored access token says nothing about how it was obtained, and the
+    /// three grants here obtain very different things: a user's delegated
+    /// authority, a service acting as itself, a workload federated in from
+    /// somewhere else. Filed together, a deployment that switched grants
+    /// while keeping its issuer, client id and resource would warm-start onto
+    /// the previous one's still-valid token and present it without ever
+    /// running the grant it is now configured for -- acting as a user while
+    /// configured as a service, or the reverse.
+    ///
+    /// The authorization-code flow contributes nothing, which keeps the key
+    /// byte-for-byte what it was before the other two existed: that format is
+    /// what every durable store already holds, and re-authorizing every user
+    /// once to make room for a separator is a poor trade for a distinction
+    /// they are not affected by.
+    pub(super) fn store_segment(&self) -> &'static str {
+        match self {
+            Self::AuthorizationCode => "",
+            Self::ClientCredentials => grant::CLIENT_CREDENTIALS,
+            Self::JwtBearer(_) => grant::JWT_BEARER,
+        }
+    }
+
+    /// Whether a token this grant left in a durable [`TokenStore`] may be
+    /// picked up by a *later process* without running the grant again.
+    ///
+    /// Everything a session writes during its own life it also minted, so
+    /// this is about one thing only: the warm start in
+    /// [`OAuthSession::new`](super::OAuthSession::new), where a token of
+    /// unknown provenance is adopted on the strength of its key alone.
+    ///
+    /// The JWT-bearer grant cannot make that promise. Its key names the
+    /// client, and the client is not who the token is *for*: an identity
+    /// assertion mints a token for whoever the subject token identified, so
+    /// two runs of the same client under two different users share a slot,
+    /// and the second would restore the first's token. What actually
+    /// distinguishes them is the assertion, which is minted per request and
+    /// so is not in hand when the warm start reads. Re-running the grant is
+    /// one request and no user -- a cheap price for not presenting somebody
+    /// else's identity.
+    pub(super) fn survives_a_restart(&self) -> bool {
+        !matches!(self, Self::JwtBearer(_))
     }
 
     /// What a registration -- or a Client ID Metadata Document -- declares
@@ -2610,11 +2692,19 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
         let resource_addr = spawn_migrating_resource(issuer, issuer).await;
         let resource = format!("http://{resource_addr}/mcp");
 
+        let config = OAuthClientConfig::default()
+            .require_https(false)
+            .with_client_id("mcp-service")
+            .with_client_secret("s3cret")
+            .with_client_credentials();
+
         // What a durable store hands back to a fresh process: a token, and
-        // nothing that knows how to renew it.
+        // nothing that knows how to renew it. Filed under the slot the
+        // session will read, asked of the code rather than spelled out here,
+        // so the two cannot drift apart.
         let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
         store.put(
-            &key("", "mcp-service", &resource),
+            &OAuthSession::initial_store_key(&config, &resource),
             &TokenSet {
                 access_token: "restored-token".into(),
                 token_type: "Bearer".into(),
@@ -2628,14 +2718,7 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
             },
         );
 
-        let config = OAuthClientConfig {
-            store,
-            ..OAuthClientConfig::default()
-                .require_https(false)
-                .with_client_id("mcp-service")
-                .with_client_secret("s3cret")
-                .with_client_credentials()
-        };
+        let config = OAuthClientConfig { store, ..config };
         let session = OAuthSession::new(config, &resource).unwrap();
         assert_eq!(
             session.bearer().as_deref(),
@@ -2647,6 +2730,131 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
             session.refreshed_bearer().await.as_deref(),
             Some("renewed-after-restart"),
             "and the probe rebuilds what the restart did not restore"
+        );
+    }
+
+    /// What a server finds at the published `jwks_uri` is the key every
+    /// assertion this client signs is verified against, so a location it
+    /// cannot dereference makes the document unusable -- and one over plain
+    /// http is whatever an attacker on the path substitutes, which gives up
+    /// the property `private_key_jwt` was chosen for.
+    #[cfg(feature = "client-oauth-jwt")]
+    #[test]
+    fn a_published_jwks_uri_is_checked_before_it_is_published() {
+        let document = |url: &str, require_https: bool| {
+            OAuthClientConfig::default()
+                .require_https(require_https)
+                .with_client_id_document(CIMD_URL)
+                .with_private_key_jwt(test_key())
+                .with_jwks_uri(url)
+                .with_client_credentials()
+                .client_metadata_document(Vec::<String>::new())
+        };
+
+        assert!(document("https://app.example.com/jwks.json", true).is_ok());
+
+        for (url, reason) in [
+            ("http://app.example.com/jwks.json", "https"),
+            ("not-a-url", "not a valid URL"),
+            ("https://[::1/jwks.json", "not a valid URL"),
+            ("https://app.example.com:99999/jwks.json", "0-65535"),
+            ("https://app.example.com/jwks.json#k", "fragment"),
+        ] {
+            let err = document(url, true)
+                .expect_err("a key location no server could fetch must be refused");
+            assert!(err.to_string().contains("JWKS URL"), "{url}: {err}");
+            assert!(err.to_string().contains(reason), "{url}: {err}");
+        }
+
+        // A key set served at an origin is an ordinary place to put one --
+        // nothing is identified by this URL the way a client is identified by
+        // its document's, so no path component is demanded.
+        assert!(document("https://app.example.com/", true).is_ok());
+
+        // And the same knob that admits a plain-http issuer admits this.
+        assert!(document("http://localhost:9000/jwks.json", false).is_ok());
+    }
+
+    /// A stored access token says nothing about how it was obtained, and
+    /// these grants obtain very different things. Filed together, a
+    /// deployment that switched grants while keeping its issuer, client id
+    /// and resource would warm-start onto the previous one's token and
+    /// present it without ever running the grant it is now configured for.
+    #[test]
+    fn persisted_tokens_are_partitioned_by_grant() {
+        let resource = "https://api.example.com/mcp";
+        let slot = |config: OAuthClientConfig| OAuthSession::initial_store_key(&config, resource);
+
+        let interactive = slot(OAuthClientConfig::default().with_client_id("shared-id"));
+        let service = slot(
+            OAuthClientConfig::default()
+                .with_client_id("shared-id")
+                .with_client_secret("s3cret")
+                .with_client_credentials(),
+        );
+        let workload = slot(
+            OAuthClientConfig::default()
+                .with_client_id("shared-id")
+                .with_jwt_bearer("a.workload.jwt".to_owned()),
+        );
+
+        assert_ne!(interactive, service);
+        assert_ne!(interactive, workload);
+        assert_ne!(service, workload);
+
+        // The released format, unchanged: that is what every durable store
+        // already holds, and re-authorizing every user once to make room for
+        // a separator they are not affected by is a poor trade.
+        assert_eq!(interactive, key("", "shared-id", resource));
+    }
+
+    /// The warm start is the one place a token of unknown provenance is
+    /// adopted on the strength of its key alone. A JWT-bearer key names the
+    /// client, and the client is not who the token is *for* -- an identity
+    /// assertion mints one for whoever the subject token identified -- so it
+    /// starts cold and runs the grant instead.
+    #[test]
+    fn a_jwt_bearer_session_does_not_warm_start_from_the_store() {
+        let resource = "https://api.example.com/mcp";
+        let stored = TokenSet {
+            access_token: "somebody-elses-token".into(),
+            token_type: "Bearer".into(),
+            refresh_token: None,
+            scope: None,
+            id_token: None,
+            expires_at: Some(std::time::SystemTime::now() + std::time::Duration::from_secs(3600)),
+            dpop_jkt: None,
+        };
+
+        let warm_start = |config: OAuthClientConfig| {
+            let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+            store.put(&OAuthSession::initial_store_key(&config, resource), &stored);
+            let config = OAuthClientConfig { store, ..config };
+            OAuthSession::new(config, resource).unwrap().bearer()
+        };
+
+        // A grant whose key fully names the identity may pick its own token
+        // back up -- that is what a durable store is for.
+        assert_eq!(
+            warm_start(
+                OAuthClientConfig::default()
+                    .with_client_id("mcp-service")
+                    .with_client_secret("s3cret")
+                    .with_client_credentials()
+            )
+            .as_deref(),
+            Some("somebody-elses-token")
+        );
+
+        assert_eq!(
+            warm_start(
+                OAuthClientConfig::default()
+                    .with_client_id("customer-router-agent")
+                    .with_jwt_bearer("a.workload.jwt".to_owned())
+            ),
+            None,
+            "one request and no user is a cheap price for not presenting \
+             somebody else's identity"
         );
     }
 

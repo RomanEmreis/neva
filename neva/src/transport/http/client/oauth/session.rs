@@ -93,11 +93,23 @@ impl OAuthSession {
 
         let store_key = Self::initial_store_key(&config, &resource);
 
+        // The warm start, and the one place a token of unknown provenance is
+        // adopted on the strength of its key alone -- everything written
+        // later in this session's life it also minted. A grant whose key does
+        // not name who the token is *for* cannot answer for what is in that
+        // slot, so it starts cold and runs instead
+        // ([`ClientGrant::survives_a_restart`]).
         let token = config
-            .store
-            .get(&store_key)
-            .filter(|tokens| !tokens.is_expired())
-            .map(|tokens| tokens.access_token.into());
+            .grant
+            .survives_a_restart()
+            .then(|| {
+                config
+                    .store
+                    .get(&store_key)
+                    .filter(|tokens| !tokens.is_expired())
+                    .map(|tokens| tokens.access_token.into())
+            })
+            .flatten();
 
         Ok(Self {
             config,
@@ -174,6 +186,7 @@ impl OAuthSession {
             config.issuer.as_deref().unwrap_or_default(),
             config.client_identity(),
             resource,
+            config.grant.store_segment(),
         )
     }
 
@@ -208,12 +221,31 @@ impl OAuthSession {
             Some(_) => issuer,
             None => "",
         };
-        Self::compose_store_key(issuer, source.persistent_id(), &self.resource)
+        Self::compose_store_key(
+            issuer,
+            source.persistent_id(),
+            &self.resource,
+            self.config.grant.store_segment(),
+        )
     }
 
-    /// Joins the three parts of a credential's identity into its store key.
-    pub(super) fn compose_store_key(issuer: &str, client: &str, resource: &str) -> String {
-        format!("{issuer}|{client}|{resource}")
+    /// Joins the parts of a credential's identity into its store key.
+    ///
+    /// **Grant.** A stored access token says nothing about how it was
+    /// obtained, and these grants obtain very different things -- see
+    /// [`ClientGrant::store_segment`], which is also why the
+    /// authorization-code flow contributes nothing and leaves the key exactly
+    /// what it was before the others existed.
+    pub(super) fn compose_store_key(
+        issuer: &str,
+        client: &str,
+        resource: &str,
+        grant: &str,
+    ) -> String {
+        match grant {
+            "" => format!("{issuer}|{client}|{resource}"),
+            grant => format!("{issuer}|{client}|{resource}|{grant}"),
+        }
     }
 
     /// Scopes this session is known to hold, most authoritative source first.

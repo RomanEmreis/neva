@@ -551,6 +551,12 @@ impl OAuthClientConfig {
         }
 
         if let Some(url) = &self.jwks_uri {
+            // Checked before it is published rather than after: what a server
+            // finds at this location is the key every assertion this client
+            // signs is verified against, so a location it cannot dereference
+            // -- or one an attacker on the path can rewrite -- makes the
+            // document unusable while generating it reported success.
+            validate_jwks_uri(url, self.require_https)?;
             metadata = metadata.with_jwks_uri(url.clone());
         }
 
