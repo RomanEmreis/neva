@@ -226,6 +226,12 @@ pub mod auth {
         //! `AuthorizationHandler` contract with the default
         //! `LoopbackHandler`, plus the `TokenStore` persistence
         //! abstraction -- configured through `HttpClient::with_oauth`.
+        //! The grants that authenticate the *client* rather than a user
+        //! live here too: `OAuthClientConfig::with_client_credentials`,
+        //! `with_jwt_bearer` over the `AssertionProvider` seam, and
+        //! `with_identity_assertion` for the enterprise-managed profile.
+        //! `client-oauth-jwt` adds `PrivateKeyJwt`, the signed client
+        //! assertion those grants are meant to authenticate with.
 
         #[cfg(feature = "server-oauth")]
         pub use crate::transport::http::core::oauth::{
@@ -236,9 +242,17 @@ pub mod auth {
 
         #[cfg(feature = "client-oauth")]
         pub use crate::transport::http::client::oauth::{
-            AuthorizationHandler, CallbackParams, ClientMetadata, InMemoryTokenStore,
-            LoopbackHandler, OAuthClientConfig, TokenSet, TokenStore,
+            AssertionProvider, AssertionRequest, AuthorizationHandler, CallbackParams, ClientError,
+            ClientMetadata, IdentityAssertion, InMemoryTokenStore, LoopbackHandler,
+            OAuthClientConfig, TokenSet, TokenStore, token_type,
         };
+
+        /// The `private_key_jwt` client assertion (RFC 7523 section 2.2):
+        /// the client signs a short-lived JWT with its own key instead of
+        /// presenting a shared secret. Set with
+        /// `OAuthClientConfig::with_private_key_jwt`.
+        #[cfg(feature = "client-oauth-jwt")]
+        pub use crate::transport::http::client::oauth::{JwsAlgorithm, PrivateKeyJwt, PublicJwk};
     }
 }
 

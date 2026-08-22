@@ -5,6 +5,69 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.5.5
+
+### Added
+
+#### Authorization
+* **The OAuth grants that authenticate the client itself** (#109). neva's
+  client implemented the authorization-code flow only, so every deployment
+  without a user in front of a browser -- a service, a workload, an
+  enterprise-managed client -- had nothing to run. Three profiles now do:
+  `OAuthClientConfig::with_client_credentials()` (RFC 6749 section 4.4, the
+  `io.modelcontextprotocol/oauth-client-credentials` extension),
+  `with_jwt_bearer(..)` over the new `AssertionProvider` seam (RFC 7523
+  section 2.1, workload identity federation), and `with_identity_assertion(..)`
+  for the enterprise-managed profile, where `IdentityAssertion` trades an ID
+  token at the identity provider for the RFC 8693 grant the resource's
+  authorization server accepts.
+
+  Everything ahead of the token request is unchanged -- the `401`, the
+  Protected Resource Metadata, the authorization server metadata, the RFC 8707
+  resource indicator -- and the browser round is simply not there, so the
+  `AuthorizationHandler` is never called and no redirect listener is bound. A
+  refusal is the answer rather than the start of a search: the client presented
+  the only credential it has, so it neither resends it nor reaches for another
+  grant. A client-credentials session renews by running the grant again, which
+  it does on a staleness probe rather than waiting for the next `401`, since
+  RFC 6749 section 4.4.3 issues no refresh token to renew with.
+
+* **`private_key_jwt` client authentication**, behind the new
+  **`client-oauth-jwt`** feature (#109). The client signs a short-lived
+  assertion with its own key instead of presenting a shared secret --
+  RECOMMENDED over a secret by the client-credentials extension. Configured
+  with `OAuthClientConfig::with_private_key_jwt(..)`; the feature is opt-in
+  because it is the only part of the OAuth client that needs a JWS signing
+  backend. `client-full` enables it.
+
+  A Client ID Metadata Document may now be paired with a key, which is what
+  lets a client with no pre-registration authenticate at all
+  ([CIMD draft section 6.2](https://www.ietf.org/archive/id/draft-ietf-oauth-client-id-metadata-document-00.html#section-6.2)):
+  `client_metadata_document` publishes the `token_endpoint_auth_method`, the
+  signing algorithm and, where the key carries its public half, the `jwks`.
+  Pairing a document with a client *secret* stays refused -- a document is
+  resolved by whichever authorization server meets the URL, so there is nobody
+  to have shared a secret with.
+
+### Fixed
+
+#### Authorization
+* **A client secret is now presented the way the authorization server says it
+  accepts it.** The method was always HTTP Basic, which volga 0.9.8 refuses
+  outright against a server whose `token_endpoint_auth_methods_supported`
+  does not list it. `client_secret_basic` is still the preference and the
+  fallback for a server that advertises nothing -- RFC 6749 section 2.3.1
+  requires servers to support it -- with `client_secret_post` where that is
+  all the server takes.
+
+* **A dynamic registration whose response named no
+  `token_endpoint_auth_method` is now read against the server's own
+  metadata.** RFC 7591 section 2 fills that silence with
+  `client_secret_basic`, which a server advertising only `none` has already
+  said it does not accept; the two documents cannot both be right, and the one
+  describing the token endpoint decides. Left alone, such a flow registered
+  successfully and then ended at the token request over a method nobody chose.
+
 ## 0.5.4
 
 ### Added

@@ -28,19 +28,26 @@ use crate::error::{Error, ErrorCode};
 use url::{Host, ParseError, Url, form_urlencoded};
 
 use volga_oauth_client::{
-    AuthorizationServerMetadata, BearerChallenge, ClientConfig, ClientError, DiscoveryClient,
-    OAuthClient, RegistrationClient, canonicalize_resource_uri, protected_resource_metadata_url,
+    AuthorizationServerMetadata, BearerChallenge, ClientAuthMethod, ClientConfig, DiscoveryClient,
+    OAuthClient, RegistrationClient, canonicalize_resource_uri, client_auth, grant,
+    protected_resource_metadata_url,
 };
-pub use volga_oauth_client::{ClientMetadata, InMemoryTokenStore, TokenSet, TokenStore};
+pub use volga_oauth_client::{
+    ClientError, ClientMetadata, InMemoryTokenStore, TokenSet, TokenStore, token_type,
+};
+#[cfg(feature = "client-oauth-jwt")]
+pub use volga_oauth_client::{JwsAlgorithm, PrivateKeyJwt, PublicJwk};
 
 /// Client name sent with dynamic client registration when none is
 /// configured.
 const DEFAULT_CLIENT_NAME: &str = "neva MCP client";
 
+mod assertion;
 mod config;
 mod handler;
 mod session;
 
+pub use assertion::{AssertionProvider, AssertionRequest, IdentityAssertion};
 pub use config::OAuthClientConfig;
 pub use handler::{AuthorizationHandler, CallbackParams, LoopbackHandler};
 #[cfg(test)]
@@ -183,6 +190,125 @@ fn validate_client_id_document_url(url: &str, require_https: bool) -> Result<(),
     }
 
     Ok(())
+}
+
+/// Which grant this client runs to obtain an access token.
+///
+/// The default is the authorization-code flow the MCP authorization spec
+/// builds on -- a user consents in a browser and the client acts for them.
+/// The other two authenticate the *client* itself and need no user at all,
+/// which is why they run to completion without ever reaching
+/// [`AuthorizationHandler`]: there is no URL to present and no callback to
+/// wait for.
+#[derive(Clone)]
+pub(super) enum ClientGrant {
+    /// RFC 6749 section 4.1 with PKCE. What MCP's baseline authorization
+    /// specifies, and what every client does unless told otherwise.
+    AuthorizationCode,
+
+    /// RFC 6749 section 4.4: the client presents its own credentials and
+    /// gets a token for itself. The
+    /// `io.modelcontextprotocol/oauth-client-credentials` extension.
+    ClientCredentials,
+
+    /// RFC 7523 section 2.1: a JWT some other authority issued is the grant.
+    /// Covers both the workload-identity profile, where the platform mints
+    /// the assertion, and the enterprise profile, where an identity provider
+    /// does ([`IdentityAssertion`]).
+    JwtBearer(Arc<dyn AssertionProvider>),
+}
+
+impl std::fmt::Debug for ClientGrant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.grant_type())
+    }
+}
+
+impl ClientGrant {
+    /// The `grant_type` this runs, as it goes on the wire.
+    pub(super) fn grant_type(&self) -> &'static str {
+        match self {
+            Self::AuthorizationCode => grant::AUTHORIZATION_CODE,
+            Self::ClientCredentials => grant::CLIENT_CREDENTIALS,
+            Self::JwtBearer(_) => grant::JWT_BEARER,
+        }
+    }
+
+    /// Whether the flow needs a user in front of a browser.
+    ///
+    /// The one thing every caller here actually branches on: an interactive
+    /// grant binds a redirect listener, opens a URL and waits for a callback;
+    /// the other two are two HTTP requests and no seam in between.
+    pub(super) fn is_interactive(&self) -> bool {
+        matches!(self, Self::AuthorizationCode)
+    }
+
+    /// What a registration -- or a Client ID Metadata Document -- declares
+    /// this client will use.
+    ///
+    /// `refresh_token` rides along with the authorization code because that
+    /// is the grant whose tokens are renewed that way. Neither of the others
+    /// issues a refresh token (RFC 6749 section 4.4.3 says so outright for
+    /// client credentials), and re-running the grant is their renewal, so
+    /// declaring it would claim something the client never does.
+    pub(super) fn registration_grant_types(&self) -> &'static [&'static str] {
+        match self {
+            Self::AuthorizationCode => &[grant::AUTHORIZATION_CODE, grant::REFRESH_TOKEN],
+            Self::ClientCredentials => &[grant::CLIENT_CREDENTIALS],
+            Self::JwtBearer(_) => &[grant::JWT_BEARER],
+        }
+    }
+}
+
+/// How a client holding a secret authenticates at `server`'s token endpoint.
+///
+/// RFC 6749 section 2.3.1 defines both spellings and requires servers to
+/// support Basic, so Basic is what this prefers -- and what it falls back on
+/// when the server advertises nothing, since an omitted
+/// `token_endpoint_auth_methods_supported` defaults to exactly that
+/// (RFC 8414 section 2). A server that advertises only `client_secret_post`
+/// is the case worth handling: sending Basic there is refused before the
+/// request is even built, and the credential this client holds does work --
+/// in the body.
+///
+/// Returns an error rather than guessing when the server accepts neither.
+/// A secret cannot be presented any other way, so the flow is over; saying
+/// which methods were advertised is what tells an operator whether the fix
+/// is a different credential or a different client.
+fn secret_auth_method(server: &AuthorizationServerMetadata) -> Result<ClientAuthMethod, Error> {
+    let advertised = &server.token_endpoint_auth_methods_supported;
+    let accepts = |method: &str| advertised.iter().any(|candidate| candidate == method);
+
+    if advertised.is_empty() || accepts(client_auth::CLIENT_SECRET_BASIC) {
+        return Ok(ClientAuthMethod::Basic);
+    }
+    if accepts(client_auth::CLIENT_SECRET_POST) {
+        return Ok(ClientAuthMethod::Post);
+    }
+
+    Err(Error::new(
+        ErrorCode::InvalidRequest,
+        format!(
+            "`{}` accepts none of the client secret authentication methods at its \
+             token endpoint; it advertises {advertised:?}",
+            server.issuer
+        ),
+    ))
+}
+
+/// The `token_endpoint_auth_method` a registration is read as having agreed
+/// to when the response named none.
+///
+/// [`secret_auth_method`] under another name, plus the case it treats as an
+/// error: a server accepting no secret-based method has left `none` as the
+/// only method there is, and a client that registered as public was asking
+/// for exactly that.
+fn registered_auth_method(server: &AuthorizationServerMetadata) -> &'static str {
+    match secret_auth_method(server) {
+        Ok(ClientAuthMethod::Post) => client_auth::CLIENT_SECRET_POST,
+        Ok(ClientAuthMethod::Basic) => client_auth::CLIENT_SECRET_BASIC,
+        _ => client_auth::NONE,
+    }
 }
 
 /// Which of MCP's three registration mechanisms supplies the `client_id` for
@@ -520,16 +646,17 @@ mod tests {
         assert!(err.to_string().contains("path component"), "{err}");
     }
 
-    /// A document says `token_endpoint_auth_method: "none"`; a secret says the
-    /// opposite. Honoring the pair would send the secret while publishing that
-    /// there is none.
+    /// A shared secret is shared with somebody. A document is resolved by
+    /// whichever authorization server meets the URL, so there is nobody to
+    /// have shared it with -- and honoring the pair would send the secret
+    /// while publishing that there is none.
     #[test]
     fn a_client_id_document_cannot_be_paired_with_a_secret() {
         let config = OAuthClientConfig::default()
             .with_client_id_document(CIMD_URL)
             .with_client_secret("s3cret");
         let err = OAuthSession::new(config, "https://api.example.com/mcp").unwrap_err();
-        assert!(err.to_string().contains("public client"), "{err}");
+        assert!(err.to_string().contains("client secret"), "{err}");
     }
 
     #[test]
@@ -600,6 +727,250 @@ mod tests {
             OAuthClientConfig::default().client_id_source(&as_supporting_cimd(true)),
             ClientIdSource::Dynamic,
             "with no document configured there is no URL to send"
+        );
+    }
+
+    /// A client-authenticating grant has no third mechanism: these profiles
+    /// do not register dynamically, so the document is the id whatever the
+    /// server says about resolving one. Trying costs one refused token
+    /// request, and no browser round -- which is what made silence decisive
+    /// for the interactive flow.
+    #[test]
+    fn a_client_grant_uses_its_document_whatever_the_server_advertises() {
+        let document = OAuthClientConfig::default()
+            .with_client_id_document(CIMD_URL)
+            .with_client_credentials();
+
+        for server in [
+            as_supporting_cimd(true),
+            as_supporting_cimd(false),
+            as_metadata(None),
+        ] {
+            assert_eq!(
+                document.client_id_source(&server),
+                ClientIdSource::Document(CIMD_URL)
+            );
+        }
+    }
+
+    /// Credentials for these grants are established out of band, so a client
+    /// that names none has nothing to present. Said where it was written,
+    /// rather than after a `401` and two discovery requests.
+    #[test]
+    fn a_client_grant_without_credentials_is_refused_when_the_client_is_built() {
+        let err = OAuthSession::new(
+            OAuthClientConfig::default().with_client_credentials(),
+            "https://api.example.com/mcp",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("with_client_id"), "{err}");
+        assert!(err.to_string().contains("client_credentials"), "{err}");
+
+        let err = OAuthSession::new(
+            OAuthClientConfig::default().with_jwt_bearer("a.workload.jwt".to_owned()),
+            "https://api.example.com/mcp",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains(grant::JWT_BEARER),
+            "the message names the grant that needs the id: {err}"
+        );
+
+        assert!(
+            OAuthSession::new(
+                OAuthClientConfig::default()
+                    .with_client_id("mcp-service")
+                    .with_client_secret("s3cret")
+                    .with_client_credentials(),
+                "https://api.example.com/mcp",
+            )
+            .is_ok()
+        );
+    }
+
+    /// The interactive flow is what a client runs unless told otherwise, and
+    /// it is the only one that binds a redirect listener.
+    #[test]
+    fn the_authorization_code_grant_is_the_default() {
+        assert!(OAuthClientConfig::default().grant.is_interactive());
+        assert_eq!(
+            OAuthClientConfig::default().grant.grant_type(),
+            grant::AUTHORIZATION_CODE
+        );
+
+        let client_grant = OAuthClientConfig::default().with_client_credentials();
+        assert!(!client_grant.grant.is_interactive());
+        assert_eq!(
+            client_grant.grant.grant_type(),
+            grant::CLIENT_CREDENTIALS,
+            "and it is the grant that goes on the wire"
+        );
+    }
+
+    /// Basic is what RFC 6749 requires every server to support and what an
+    /// omitted `token_endpoint_auth_methods_supported` defaults to, so it is
+    /// both the preference and the fallback. A server advertising only
+    /// `client_secret_post` is the case that would otherwise fail before the
+    /// request was built, over a credential that does work.
+    #[test]
+    fn the_secret_auth_method_follows_what_the_server_advertises() {
+        let with_methods = |methods: &[&str]| -> AuthorizationServerMetadata {
+            serde_json::from_value(serde_json::json!({
+                "issuer": "https://auth.example.com",
+                "response_types_supported": ["code"],
+                "token_endpoint_auth_methods_supported": methods,
+            }))
+            .unwrap()
+        };
+
+        assert_eq!(
+            secret_auth_method(&with_methods(&[])).unwrap(),
+            ClientAuthMethod::Basic,
+            "silence is the RFC 8414 default, which is Basic"
+        );
+        assert_eq!(
+            secret_auth_method(&with_methods(&[
+                "client_secret_basic",
+                "client_secret_post"
+            ]))
+            .unwrap(),
+            ClientAuthMethod::Basic
+        );
+        assert_eq!(
+            secret_auth_method(&with_methods(&["client_secret_post"])).unwrap(),
+            ClientAuthMethod::Post
+        );
+
+        let err = secret_auth_method(&with_methods(&["none", "private_key_jwt"])).unwrap_err();
+        assert!(
+            err.to_string().contains("private_key_jwt"),
+            "the message names what the server does accept: {err}"
+        );
+
+        // A registration that named no method is read against the same
+        // list, and the case that is an error above is `none` here: a server
+        // accepting no secret has left that as the only method there is, and
+        // this client registers as public anyway.
+        assert_eq!(
+            registered_auth_method(&with_methods(&["none"])),
+            client_auth::NONE,
+            "RFC 7591's `client_secret_basic` default is a method this server \
+             has just said it does not accept"
+        );
+        assert_eq!(
+            registered_auth_method(&with_methods(&["client_secret_post"])),
+            client_auth::CLIENT_SECRET_POST
+        );
+        assert_eq!(
+            registered_auth_method(&with_methods(&[])),
+            client_auth::CLIENT_SECRET_BASIC
+        );
+    }
+
+    /// The published document has to describe the flow that will actually
+    /// run: a client-credentials client declares that grant, and lists no
+    /// redirect URI because it receives no authorization response.
+    #[test]
+    fn a_document_declares_the_configured_grant() {
+        let config = OAuthClientConfig::default()
+            .with_client_id_document(CIMD_URL)
+            .with_client_credentials();
+
+        let document = config
+            .client_metadata_document(Vec::<String>::new())
+            .expect("a grant with no redirect needs no redirect URI");
+
+        assert_eq!(document.grant_types, [grant::CLIENT_CREDENTIALS]);
+        assert!(document.redirect_uris.is_empty());
+        assert!(
+            document.response_types.is_empty(),
+            "there is no authorization response to declare a type for"
+        );
+
+        let interactive = OAuthClientConfig::default().with_client_id_document(CIMD_URL);
+        assert!(
+            interactive
+                .client_metadata_document(Vec::<String>::new())
+                .is_err(),
+            "the redirect-based grant still needs somewhere to redirect"
+        );
+        let document = interactive
+            .client_metadata_document(["https://app.example.com/cb"])
+            .unwrap();
+        assert_eq!(
+            document.grant_types,
+            [grant::AUTHORIZATION_CODE, grant::REFRESH_TOKEN]
+        );
+    }
+
+    /// An ES256 key in PKCS#8, for the assertion tests. Generated for this
+    /// test module and used nowhere else.
+    #[cfg(feature = "client-oauth-jwt")]
+    const TEST_KEY_PEM: &[u8] = b"-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgVDjpHzWtfyocoSM0
+VaP+PFQQlBK3ZfVHGYs4mqkjLP6hRANCAASzC0XhIsW6fO+yF0/oROuFHRX9ig58
+xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
+-----END PRIVATE KEY-----
+";
+
+    #[cfg(feature = "client-oauth-jwt")]
+    fn test_key() -> PrivateKeyJwt {
+        PrivateKeyJwt::from_pem(TEST_KEY_PEM, JwsAlgorithm::ES256)
+            .expect("the embedded test key is a valid ES256 PKCS#8 document")
+    }
+
+    /// The assertion *is* the credential and a secret alongside it is never
+    /// sent, so resolving the pair silently would leave the flow working for
+    /// a reason its author did not choose.
+    #[cfg(feature = "client-oauth-jwt")]
+    #[test]
+    fn a_signed_assertion_and_a_secret_are_alternatives() {
+        let err = OAuthSession::new(
+            OAuthClientConfig::default()
+                .with_client_id("mcp-service")
+                .with_private_key_jwt(test_key())
+                .with_client_secret("s3cret")
+                .with_client_credentials(),
+            "https://api.example.com/mcp",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("alternatives"), "{err}");
+    }
+
+    /// The CIMD draft section 6.2 is what makes a document usable by a
+    /// confidential client: the server dereferences one URL and learns both
+    /// who the client is and which key verifies its assertions. So a key is
+    /// the one credential a document may be paired with.
+    #[cfg(feature = "client-oauth-jwt")]
+    #[test]
+    fn a_document_may_be_paired_with_a_signed_assertion() {
+        let config = OAuthClientConfig::default()
+            .with_client_id_document(CIMD_URL)
+            .with_private_key_jwt(test_key())
+            .with_client_credentials();
+
+        assert!(OAuthSession::new(config, "https://api.example.com/mcp").is_ok());
+
+        let config = OAuthClientConfig::default()
+            .with_client_id_document(CIMD_URL)
+            .with_private_key_jwt(test_key())
+            .with_client_credentials();
+        let document = config
+            .client_metadata_document(Vec::<String>::new())
+            .unwrap();
+
+        assert_eq!(
+            document.token_endpoint_auth_method.as_deref(),
+            Some(client_auth::PRIVATE_KEY_JWT),
+            "publishing `none` would have the server refuse the assertion it is sent"
+        );
+        assert_eq!(
+            document.token_endpoint_auth_signing_alg.as_deref(),
+            Some("ES256")
+        );
+        assert_eq!(
+            document.jwks, None,
+            "no public half was attached, so there is none to publish"
         );
     }
 
@@ -827,6 +1198,7 @@ mod tests {
                 scope: None,
                 id_token: None,
                 expires_at: None,
+                dpop_jkt: None,
             },
         );
 
@@ -1144,6 +1516,7 @@ mod tests {
             scope: None,
             id_token: None,
             expires_at: Some(std::time::SystemTime::now()),
+            dpop_jkt: None,
         }
     }
 
@@ -1181,6 +1554,7 @@ mod tests {
             metadata: AuthorizationServerMetadata::new("http://issuer.local")
                 .with_token_endpoint(format!("http://{addr}/token")),
             store_key: key("", "", "http://127.0.0.1:3000/mcp").into(),
+            resource: "http://127.0.0.1:3000/mcp".into(),
         };
         let session = session_with(store.clone(), Some(flow));
 
@@ -1221,6 +1595,7 @@ mod tests {
             metadata: AuthorizationServerMetadata::new("http://issuer.local")
                 .with_token_endpoint(format!("http://{addr}/token")),
             store_key: key("", "", "http://127.0.0.1:3000/mcp").into(),
+            resource: "http://127.0.0.1:3000/mcp".into(),
         };
         // Nothing recorded in memory: the state a restart leaves behind, where
         // the store is the only thing that knows what was granted.
@@ -1271,6 +1646,7 @@ mod tests {
             metadata: AuthorizationServerMetadata::new("http://issuer.local")
                 .with_token_endpoint(format!("http://{addr}/token")),
             store_key: key("", "", "http://127.0.0.1:3000/mcp").into(),
+            resource: "http://127.0.0.1:3000/mcp".into(),
         };
         let session = session_with(store.clone(), Some(flow));
         // What an earlier round in this process was granted.
@@ -1340,6 +1716,7 @@ mod tests {
                 scope: None,
                 id_token: None,
                 expires_at: None,
+                dpop_jkt: None,
             },
         );
         let config = OAuthClientConfig::default().with_token_store(store);
@@ -1366,6 +1743,7 @@ mod tests {
                     scope: scope.map(str::to_owned),
                     id_token: None,
                     expires_at: None,
+                    dpop_jkt: None,
                 },
             );
             store
@@ -1543,6 +1921,259 @@ mod tests {
             }
         });
         (addr, seen)
+    }
+
+    /// An authorization server that only speaks the client-authenticating
+    /// grants, recording every request so a test can assert on the token
+    /// request body -- which is the whole of what these profiles specify.
+    ///
+    /// It offers no `authorization_endpoint` and no registration endpoint:
+    /// the flows under test reach neither, and leaving them out means a flow
+    /// that wandered into the interactive path fails loudly rather than
+    /// quietly succeeding for the wrong reason.
+    async fn spawn_client_grant_server(
+        grants: &'static str,
+        auth_methods: &'static str,
+    ) -> (std::net::SocketAddr, Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let read = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+                let root = format!("http://{addr}");
+                if let Ok(mut seen) = recorder.lock() {
+                    seen.push(request.clone());
+                }
+
+                let body = if request.contains("/.well-known/oauth-protected-resource") {
+                    format!(
+                        r#"{{"resource":"{root}/mcp","authorization_servers":["{root}"],
+                             "scopes_supported":["mcp:read"]}}"#
+                    )
+                } else if request.contains("/.well-known/") {
+                    format!(
+                        r#"{{"issuer":"{root}","token_endpoint":"{root}/token",
+                             "grant_types_supported":[{grants}],
+                             "token_endpoint_auth_methods_supported":[{auth_methods}],
+                             "response_types_supported":["code"]}}"#
+                    )
+                } else {
+                    r#"{"access_token":"service-token","token_type":"Bearer","expires_in":3600}"#
+                        .to_string()
+                };
+
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+        (addr, seen)
+    }
+
+    /// The token request the client-credentials extension describes: the
+    /// grant, Basic credentials, the resource indicator, and no browser round
+    /// anywhere in it.
+    #[tokio::test]
+    async fn the_client_credentials_grant_authenticates_with_basic() {
+        let (addr, seen) =
+            spawn_client_grant_server(r#""client_credentials""#, r#""client_secret_basic""#).await;
+        let resource = format!("http://{addr}/mcp");
+
+        let config = OAuthClientConfig::default()
+            .require_https(false)
+            .with_client_id("mcp-service")
+            .with_client_secret("s3cret")
+            .with_client_credentials();
+        let session = OAuthSession::new(config, &resource).unwrap();
+
+        let token = session.authorize(None, None).await.unwrap();
+        assert_eq!(&*token, "service-token");
+
+        let requests = seen.lock().unwrap().clone();
+        let token_request = requests
+            .iter()
+            .find(|request| request.contains("POST /token"))
+            .expect("the flow must have reached the token endpoint");
+
+        assert!(token_request.contains("grant_type=client_credentials"));
+        // base64("mcp-service:s3cret")
+        assert!(
+            token_request.contains("authorization: Basic bWNwLXNlcnZpY2U6czNjcmV0"),
+            "{token_request}"
+        );
+        assert!(
+            token_request.contains("resource=http%3A%2F%2F"),
+            "the token has to be audienced to the resource: {token_request}"
+        );
+        assert!(
+            token_request.contains("scope=mcp%3Aread"),
+            "with nothing configured, the resource's advertised set is what to ask for"
+        );
+        assert!(
+            !requests.iter().any(|request| request.contains("/register")),
+            "these credentials were issued out of band; nothing is registered"
+        );
+    }
+
+    /// A server that accepts only `client_secret_post` gets the secret in the
+    /// body. Sending Basic there is refused before the request is built, over
+    /// a credential that does work.
+    #[tokio::test]
+    async fn a_post_only_server_gets_the_secret_in_the_body() {
+        let (addr, seen) =
+            spawn_client_grant_server(r#""client_credentials""#, r#""client_secret_post""#).await;
+        let resource = format!("http://{addr}/mcp");
+
+        let config = OAuthClientConfig::default()
+            .require_https(false)
+            .with_client_id("mcp-service")
+            .with_client_secret("s3cret")
+            .with_client_credentials();
+        let session = OAuthSession::new(config, &resource).unwrap();
+
+        assert_eq!(
+            &*session.authorize(None, None).await.unwrap(),
+            "service-token"
+        );
+
+        let requests = seen.lock().unwrap().clone();
+        let token_request = requests
+            .iter()
+            .find(|request| request.contains("POST /token"))
+            .expect("the flow must have reached the token endpoint");
+
+        assert!(
+            token_request.contains("client_secret=s3cret"),
+            "{token_request}"
+        );
+        assert!(
+            !token_request.contains("authorization: Basic"),
+            "{token_request}"
+        );
+    }
+
+    /// The workload-identity profile: the JWT the platform issued goes up as
+    /// the `assertion` of an RFC 7523 grant, and the client neither registers
+    /// nor opens a browser to get there.
+    #[tokio::test]
+    async fn the_jwt_bearer_grant_presents_the_assertion() {
+        let (addr, seen) = spawn_client_grant_server(
+            r#""urn:ietf:params:oauth:grant-type:jwt-bearer""#,
+            r#""none""#,
+        )
+        .await;
+        let resource = format!("http://{addr}/mcp");
+
+        let config = OAuthClientConfig::default()
+            .require_https(false)
+            .with_client_id("customer-router-agent")
+            .with_jwt_bearer("a.workload.jwt".to_owned());
+        let session = OAuthSession::new(config, &resource).unwrap();
+
+        assert_eq!(
+            &*session.authorize(None, None).await.unwrap(),
+            "service-token"
+        );
+
+        let requests = seen.lock().unwrap().clone();
+        let token_request = requests
+            .iter()
+            .find(|request| request.contains("POST /token"))
+            .expect("the flow must have reached the token endpoint");
+
+        assert!(
+            token_request
+                .contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer"),
+            "{token_request}"
+        );
+        assert!(
+            token_request.contains("assertion=a.workload.jwt"),
+            "{token_request}"
+        );
+        assert!(
+            token_request.contains("resource=http%3A%2F%2F"),
+            "{token_request}"
+        );
+    }
+
+    /// A refusal is the answer, not the start of a search. The client
+    /// presented the only credential it has, so it neither resends it nor
+    /// reaches for another grant -- and the cached state that produced it is
+    /// dropped so the next `401` starts from discovery.
+    #[tokio::test]
+    async fn a_refused_client_grant_is_not_retried() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let read = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+                let root = format!("http://{addr}");
+                if let Ok(mut seen) = recorder.lock() {
+                    seen.push(request.clone());
+                }
+
+                let (status, body) = if request.contains("/.well-known/oauth-protected-resource") {
+                    (
+                        "200 OK",
+                        format!(
+                            r#"{{"resource":"{root}/mcp","authorization_servers":["{root}"]}}"#
+                        ),
+                    )
+                } else if request.contains("/.well-known/") {
+                    (
+                        "200 OK",
+                        format!(
+                            r#"{{"issuer":"{root}","token_endpoint":"{root}/token",
+                                 "grant_types_supported":["urn:ietf:params:oauth:grant-type:jwt-bearer"],
+                                 "response_types_supported":["code"]}}"#
+                        ),
+                    )
+                } else {
+                    (
+                        "400 Bad Request",
+                        r#"{"error":"invalid_grant","error_description":"assertion expired"}"#
+                            .to_string(),
+                    )
+                };
+
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let resource = format!("http://{addr}/mcp");
+        let config = OAuthClientConfig::default()
+            .require_https(false)
+            .with_client_id("customer-router-agent")
+            .with_jwt_bearer("expired.workload.jwt".to_owned());
+        let session = OAuthSession::new(config, &resource).unwrap();
+
+        let err = session.authorize(None, None).await.unwrap_err();
+        assert!(err.to_string().contains("invalid_grant"), "{err}");
+
+        let token_requests = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.contains("POST /token"))
+            .count();
+        assert_eq!(
+            token_requests, 1,
+            "the assertion was rejected; sending it again would buy the same answer"
+        );
     }
 
     /// An authorization server offering neither a registration endpoint nor
@@ -2023,6 +2654,7 @@ mod tests {
                 scope: Some("admin".into()),
                 id_token: None,
                 expires_at: None,
+                dpop_jkt: None,
             },
         );
 
@@ -2075,6 +2707,7 @@ mod tests {
                 scope: Some("read".into()),
                 id_token: None,
                 expires_at: None,
+                dpop_jkt: None,
             },
         );
 
@@ -2107,6 +2740,7 @@ mod tests {
                 scope: Some("admin".into()),
                 id_token: None,
                 expires_at: None,
+                dpop_jkt: None,
             },
         );
         let config = OAuthClientConfig::default()

@@ -52,10 +52,13 @@ use super::*;
 pub struct OAuthClientConfig {
     pub(super) client_id: Option<String>,
     pub(super) client_secret: Option<String>,
+    #[cfg(feature = "client-oauth-jwt")]
+    pub(super) private_key_jwt: Option<PrivateKeyJwt>,
     pub(super) client_id_document: Option<String>,
     pub(super) issuer: Option<String>,
     pub(super) scopes: Option<Vec<String>>,
     pub(super) require_https: bool,
+    pub(super) grant: ClientGrant,
     pub(super) store: Arc<dyn TokenStore>,
     pub(super) handler: Arc<dyn AuthorizationHandler>,
 }
@@ -68,6 +71,7 @@ impl std::fmt::Debug for OAuthClientConfig {
             .field("issuer", &self.issuer)
             .field("scopes", &self.scopes)
             .field("require_https", &self.require_https)
+            .field("grant", &self.grant)
             .finish()
     }
 }
@@ -77,10 +81,13 @@ impl Default for OAuthClientConfig {
         Self {
             client_id: None,
             client_secret: None,
+            #[cfg(feature = "client-oauth-jwt")]
+            private_key_jwt: None,
             client_id_document: None,
             issuer: None,
             scopes: None,
             require_https: true,
+            grant: ClientGrant::AuthorizationCode,
             store: Arc::new(InMemoryTokenStore::new()),
             handler: Arc::new(LoopbackHandler::new()),
         }
@@ -199,9 +206,186 @@ impl OAuthClientConfig {
     /// Makes this a confidential client authenticating to the token
     /// endpoint with `client_secret`. Only meaningful together with
     /// [`with_client_id`](Self::with_client_id).
+    ///
+    /// Sent as HTTP Basic credentials (RFC 6749 section 2.3.1) unless the
+    /// authorization server advertises only `client_secret_post`, in which
+    /// case it travels in the request body instead. A server that accepts
+    /// neither fails the flow rather than having the secret sent a way it
+    /// said it would refuse.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::Client;
+    ///
+    /// let mut client = Client::new()
+    ///     .with_options(|opt| opt
+    ///         .with_http(|http| http
+    ///             .with_oauth(|oauth| oauth
+    ///                 .with_client_id("mcp-cli")
+    ///                 .with_client_secret("s3cret"))
+    ///         )
+    ///     );
+    /// ```
     pub fn with_client_secret(mut self, secret: impl Into<String>) -> Self {
         self.client_secret = Some(secret.into());
         self
+    }
+
+    /// Authenticates to the token endpoint with a `private_key_jwt` client
+    /// assertion (RFC 7523 section 2.2) rather than a shared secret: the
+    /// client signs a short-lived JWT with `key`, and nothing it holds ever
+    /// leaves the process.
+    ///
+    /// This is what the client-credentials extension RECOMMENDS over a
+    /// secret, and the [CIMD draft section 6.2](https://www.ietf.org/archive/id/draft-ietf-oauth-client-id-metadata-document-00.html#section-6.2)
+    /// is what makes it usable without pre-registration -- the same document
+    /// that carries the client's metadata carries the public key the server
+    /// verifies with, which
+    /// [`client_metadata_document`](Self::client_metadata_document) publishes
+    /// for you when the key was given one with `with_public_jwk`.
+    ///
+    /// The assertion *is* the credential, so pairing this with
+    /// [`with_client_secret`](Self::with_client_secret) is rejected rather
+    /// than quietly resolved in the assertion's favour.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::Client;
+    /// use neva::auth::oauth::{ClientError, JwsAlgorithm, PrivateKeyJwt};
+    ///
+    /// # fn run(pem: &[u8]) -> Result<(), ClientError> {
+    /// let key = PrivateKeyJwt::from_pem(pem, JwsAlgorithm::ES256)?;
+    ///
+    /// let mut client = Client::new()
+    ///     .with_options(|opt| opt
+    ///         .with_http(|http| http
+    ///             .with_oauth(|oauth| oauth
+    ///                 .with_client_id("mcp-service")
+    ///                 .with_private_key_jwt(key)
+    ///                 .with_client_credentials())
+    ///         )
+    ///     );
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "client-oauth-jwt")]
+    pub fn with_private_key_jwt(mut self, key: PrivateKeyJwt) -> Self {
+        self.private_key_jwt = Some(key);
+        self
+    }
+
+    /// Obtains tokens with the client credentials grant (RFC 6749
+    /// section 4.4) instead of the authorization-code flow: the client
+    /// authenticates as itself and no user is involved.
+    ///
+    /// The `io.modelcontextprotocol/oauth-client-credentials` extension.
+    /// Everything before the token request is unchanged -- the `401`, the
+    /// Protected Resource Metadata, the authorization server metadata -- and
+    /// the browser round is simply not there, so the configured
+    /// [`AuthorizationHandler`] is never called.
+    ///
+    /// Credentials for this flow are established out of band, so the client
+    /// id has to be configured: dynamic registration is not used here, and a
+    /// flow that reached the token endpoint with a freshly minted public
+    /// client would have nothing to authenticate with. Pair this with
+    /// [`with_client_secret`](Self::with_client_secret) or, better,
+    /// [`with_private_key_jwt`](Self::with_private_key_jwt).
+    ///
+    /// No refresh token is issued (RFC 6749 section 4.4.3), so re-running the
+    /// grant is how the session renews -- which it does on its own, without a
+    /// `401` to prompt it.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::Client;
+    ///
+    /// let mut client = Client::new()
+    ///     .with_options(|opt| opt
+    ///         .with_http(|http| http
+    ///             .with_oauth(|oauth| oauth
+    ///                 .with_client_id("mcp-service")
+    ///                 .with_client_secret("s3cret")
+    ///                 .with_client_credentials())
+    ///         )
+    ///     );
+    /// ```
+    pub fn with_client_credentials(mut self) -> Self {
+        self.grant = ClientGrant::ClientCredentials;
+        self
+    }
+
+    /// Obtains tokens by presenting a JWT some other authority issued, as an
+    /// RFC 7523 section 2.1 authorization grant.
+    ///
+    /// The workload-identity profile: a client running as a workload already
+    /// holds a credential its platform minted -- a projected service account
+    /// token, a SPIFFE SVID -- and federates it to the MCP server's
+    /// authorization server rather than holding a second, MCP-specific
+    /// secret. `provider` supplies that JWT, and is asked again for every
+    /// token request so a rotating credential is read fresh; a `String` is
+    /// itself an [`AssertionProvider`], for one that does not rotate.
+    ///
+    /// A refusal here is final. The assertion was either accepted or it was
+    /// not, so this client neither resends it nor falls back to another
+    /// grant: the error surfaces, and fixing the assertion -- or the trust
+    /// the server was configured with -- is what resolves it.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::Client;
+    ///
+    /// # fn run(workload_jwt: String) {
+    /// let mut client = Client::new()
+    ///     .with_options(|opt| opt
+    ///         .with_http(|http| http
+    ///             .with_oauth(|oauth| oauth
+    ///                 .with_client_id("customer-router-agent")
+    ///                 .with_jwt_bearer(workload_jwt))
+    ///         )
+    ///     );
+    /// # }
+    /// ```
+    pub fn with_jwt_bearer(mut self, provider: impl AssertionProvider) -> Self {
+        self.grant = ClientGrant::JwtBearer(Arc::new(provider));
+        self
+    }
+
+    /// Obtains tokens through the enterprise-managed authorization profile:
+    /// the identity assertion the enterprise identity provider issued at
+    /// single sign-on is exchanged there for a cross-domain grant, which is
+    /// then presented to the MCP server's authorization server.
+    ///
+    /// Sugar over [`with_jwt_bearer`](Self::with_jwt_bearer) --
+    /// [`IdentityAssertion`] is the [`AssertionProvider`] that runs the
+    /// RFC 8693 exchange -- so the same rule about a final refusal applies.
+    ///
+    /// The credentials configured here belong to the *MCP server's*
+    /// authorization server, where the grant is presented; the ones on
+    /// [`IdentityAssertion`] belong to the identity provider, where it is
+    /// obtained. They are two registrations at two servers and are not
+    /// interchangeable.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::Client;
+    /// use neva::auth::oauth::IdentityAssertion;
+    ///
+    /// # fn run(id_token: String) {
+    /// let mut client = Client::new()
+    ///     .with_options(|opt| opt
+    ///         .with_http(|http| http
+    ///             .with_oauth(|oauth| oauth
+    ///                 .with_client_id("mcp-app")
+    ///                 .with_client_secret("s3cret")
+    ///                 .with_identity_assertion(
+    ///                     IdentityAssertion::new("https://acme.idp.example", id_token)
+    ///                         .with_client_id("idp-app")))
+    ///         )
+    ///     );
+    /// # }
+    /// ```
+    pub fn with_identity_assertion(self, assertion: IdentityAssertion) -> Self {
+        self.with_jwt_bearer(assertion)
     }
 
     /// Sets the scopes to request. Defaults to the resource's advertised
@@ -252,7 +436,17 @@ impl OAuthClientConfig {
     /// this list. A [`LoopbackHandler`] on an ephemeral port therefore cannot
     /// be described by any document -- pin it with
     /// [`with_port`](LoopbackHandler::with_port) and list both the
-    /// `127.0.0.1` and `localhost` spellings of that port.
+    /// `127.0.0.1` and `localhost` spellings of that port. A client running a
+    /// grant that has no redirect -- client credentials, JWT bearer -- passes
+    /// an empty list instead, since there is no authorization response to
+    /// deliver anywhere.
+    ///
+    /// The `grant_types` follow whichever grant is configured, and a
+    /// [`with_private_key_jwt`](Self::with_private_key_jwt) key is published
+    /// as the document's `token_endpoint_auth_method` and, when the key
+    /// carries its public half, its `jwks`. That is what lets a client with
+    /// no pre-registration authenticate at all: the server dereferences one
+    /// URL and learns both who the client is and which key to verify.
     ///
     /// # Example
     /// ```no_run
@@ -288,7 +482,11 @@ impl OAuthClientConfig {
             .map(|uri| uri.as_ref().to_owned())
             .collect::<Vec<_>>();
 
-        if uris.is_empty() {
+        // Required for the redirect-based grant and meaningless for the
+        // others: RFC 7591 section 2 makes `redirect_uris` REQUIRED for
+        // clients using `authorization_code`, and a client-credentials client
+        // has no authorization response to receive.
+        if uris.is_empty() && self.grant.is_interactive() {
             return Err(Error::new(
                 ErrorCode::InvalidRequest,
                 "a client id document must list at least one redirect URI",
@@ -301,7 +499,31 @@ impl OAuthClientConfig {
         // not model the field -- a registration request never carries one --
         // so it travels as an extension, which serde flattens to the top level
         // where the server reads it.
-        let mut metadata = registration_metadata_for(&uris);
+        let mut metadata = registration_metadata_for(&uris)
+            .with_grant_types(self.grant.registration_grant_types().iter().copied());
+
+        if !self.grant.is_interactive() {
+            metadata.response_types.clear();
+        }
+
+        // A key supersedes the `none` a public client publishes: the
+        // assertion is the credential, and the document is where a server
+        // with no prior relationship learns to expect one. `jwks` rides along
+        // when the key was given its public half -- without it the server has
+        // the method but not the material, and says `invalid_client`.
+        #[cfg(feature = "client-oauth-jwt")]
+        if let Some(key) = &self.private_key_jwt {
+            metadata = metadata
+                .with_token_endpoint_auth_method(client_auth::PRIVATE_KEY_JWT)
+                .with_token_endpoint_auth_signing_alg(key.algorithm().as_str());
+
+            if let Some(jwks) = key.jwks() {
+                let jwks = serde_json::to_value(jwks)
+                    .map_err(|err| Error::new(ErrorCode::InternalError, err.to_string()))?;
+                metadata = metadata.with_jwks(jwks);
+            }
+        }
+
         metadata.additional_fields.insert(
             "client_id".to_owned(),
             serde_json::Value::String(client_id.clone()),
@@ -313,23 +535,62 @@ impl OAuthClientConfig {
     /// Fails the configuration that cannot produce a working flow, at the
     /// point the client is built rather than at the first `401`.
     pub(super) fn validate(&self) -> Result<(), Error> {
+        // The assertion *is* the credential (RFC 7523 section 2.2), and a
+        // secret alongside it is never sent. Resolving that silently in the
+        // key's favour would leave an operator who meant to use the secret
+        // with a flow that works for a reason they did not choose -- and one
+        // that breaks the day the key is removed.
+        #[cfg(feature = "client-oauth-jwt")]
+        if self.private_key_jwt.is_some() && self.client_secret.is_some() {
+            return Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "`with_private_key_jwt` and `with_client_secret` are alternatives; \
+                 a client authenticates with a signed assertion or with a secret, \
+                 not both",
+            ));
+        }
+
+        // Credentials for a client-authenticating grant are established out
+        // of band -- the client-credentials extension says dynamic
+        // registration is not used here -- so an unnamed client has nothing
+        // to present at the token endpoint. Said now rather than after a
+        // `401`, two discovery requests and a registration that could not
+        // have helped.
+        if !self.grant.is_interactive()
+            && self.client_id.is_none()
+            && self.client_id_document.is_none()
+        {
+            return Err(Error::new(
+                ErrorCode::InvalidRequest,
+                format!(
+                    "the `{}` grant authenticates the client itself and is not \
+                     registered for dynamically; configure the credentials it was \
+                     issued with `with_client_id`",
+                    self.grant.grant_type()
+                ),
+            ));
+        }
+
         match (&self.client_id, &self.client_id_document) {
             (Some(_), Some(_)) => Err(Error::new(
                 ErrorCode::InvalidRequest,
                 "`with_client_id` and `with_client_id_document` are alternatives; \
                  configure the pre-registered id or the document URL, not both",
             )),
-            // A document describes a public client -- it is fetched by any
-            // authorization server that meets the URL, and the metadata this
-            // client publishes says `token_endpoint_auth_method: "none"`.
-            // Attaching a secret would contradict the document while quietly
-            // sending the secret anyway, so it is a configuration error rather
-            // than something to honor.
+            // A document is fetched by any authorization server that meets
+            // the URL, so a shared secret cannot be what it authenticates
+            // with: there is nobody to have shared it with. Attaching one
+            // would contradict the document while quietly sending the secret
+            // anyway, so it is a configuration error rather than something to
+            // honor. A `private_key_jwt` key is the exception the CIMD draft
+            // section 6.2 makes -- the document publishes the public half, so
+            // the credential is asymmetric and travels with the identity.
             (None, Some(url)) if self.client_secret.is_some() => Err(Error::new(
                 ErrorCode::InvalidRequest,
                 format!(
-                    "a client id document describes a public client, so `{url}` \
-                     cannot be paired with a client secret"
+                    "a client id document cannot be paired with a client secret, \
+                     since `{url}` is resolved by any authorization server that \
+                     meets it; authenticate with `with_private_key_jwt` instead"
                 ),
             )),
             (None, Some(url)) => validate_client_id_document_url(url, self.require_https),
@@ -364,6 +625,20 @@ impl OAuthClientConfig {
     ) -> ClientIdSource<'_> {
         if let Some(client_id) = &self.client_id {
             return ClientIdSource::PreRegistered(client_id);
+        }
+
+        // A client-authenticating grant has no third mechanism to fall back
+        // to -- dynamic registration is not part of these profiles -- so the
+        // document is the id, whatever the server advertises about resolving
+        // one. The reasoning that makes silence decisive for the interactive
+        // flow is that a browser round would be wasted on an id the server
+        // cannot resolve; here there is no browser round, and trying buys a
+        // plain `invalid_client` from the server that says so, which beats an
+        // error this client invents about a server it has not asked.
+        if !self.grant.is_interactive()
+            && let Some(url) = &self.client_id_document
+        {
+            return ClientIdSource::Document(url);
         }
 
         let advertised = client_id_metadata_document_supported(server);

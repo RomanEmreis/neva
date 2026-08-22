@@ -23,6 +23,16 @@ pub(super) struct FlowState {
     /// identity they actually belong to, which is not always the one the
     /// configuration names. See [`OAuthSession::store_key_for`].
     pub(super) store_key: Arc<str>,
+    /// The RFC 8707 resource indicator the flow asked for: the identifier
+    /// the *accepted* Protected Resource Metadata declares, not the endpoint
+    /// this client happens to talk to.
+    ///
+    /// Kept because a client-authenticating grant renews by running again
+    /// rather than by presenting a refresh token, and the re-run has to ask
+    /// for a token audienced to the same resource. The authorization-code
+    /// path never reads it -- its renewal is `refresh_token`, which carries
+    /// the audience with it.
+    pub(super) resource: Arc<str>,
 }
 
 /// How early before expiration a stored access token is proactively
@@ -294,8 +304,135 @@ impl OAuthSession {
             client,
             metadata,
             store_key,
+            resource,
         } = state.as_ref()?;
+
+        // A client-authenticating grant issues no refresh token, so running
+        // the grant again *is* its renewal -- and it needs no user, which is
+        // the whole reason this can happen on a staleness probe rather than
+        // waiting for a `401`. `cached` keeps that cheap: a stored token that
+        // is not yet stale is served as it stands.
+        if !self.config.grant.is_interactive() {
+            return self
+                .run_client_grant(
+                    client,
+                    metadata,
+                    store_key,
+                    resource,
+                    self.requested_scopes(),
+                    true,
+                )
+                .await
+                .inspect_err(|_err| {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(logger = "neva", "token renewal failed: {_err}");
+                })
+                .ok()
+                .map(|tokens| self.adopt(tokens, store_key.clone()));
+        }
+
         self.refresh_with(client, metadata, store_key.clone()).await
+    }
+
+    /// Files `tokens` under `store_key`, makes them this session's current
+    /// credentials, and hands back the bearer token to attach.
+    ///
+    /// What every completed grant does with what it obtained. The store key
+    /// moves with it because a flow may have run against a server the
+    /// configuration does not name, and the pre-discovery reads that follow
+    /// have to look where this flow actually wrote.
+    pub(super) fn adopt(&self, tokens: TokenSet, store_key: Arc<str>) -> Arc<str> {
+        if let Some(granted) = tokens.scope.as_deref() {
+            let granted = split_scopes(granted);
+            if !granted.is_empty() {
+                self.set_requested_scopes(granted);
+            }
+        }
+
+        self.set_store_key(&store_key);
+
+        let token: Arc<str> = tokens.access_token.into();
+        self.set_token(token.clone());
+
+        token
+    }
+
+    /// Runs the configured client-authenticating grant and returns what the
+    /// authorization server issued.
+    ///
+    /// `cached` decides whether a stored token that is still fresh may be
+    /// served instead of asking again. It may on a staleness probe, where the
+    /// point is to avoid the request; it may not after a `401`, where the
+    /// stored token is precisely the one that was just refused.
+    ///
+    /// Storing is part of the grant rather than the caller's job because
+    /// `ClientCredentialsRequest::token` writes through on its own, and two
+    /// paths writing the same slot differently is how a stored `scope` goes
+    /// missing.
+    pub(super) async fn run_client_grant(
+        &self,
+        client: &OAuthClient,
+        metadata: &AuthorizationServerMetadata,
+        store_key: &str,
+        resource: &str,
+        scopes: Vec<String>,
+        cached: bool,
+    ) -> Result<TokenSet, Error> {
+        let tokens = match &self.config.grant {
+            ClientGrant::AuthorizationCode => {
+                return Err(Error::new(
+                    ErrorCode::InternalError,
+                    "the authorization code flow is not a client-authenticating grant",
+                ));
+            }
+            ClientGrant::ClientCredentials => {
+                let request = client
+                    .client_credentials(metadata)
+                    .with_scopes(scopes.clone())
+                    .with_resource(resource.to_owned());
+
+                if cached {
+                    // Serves the stored token while it is fresh and re-runs
+                    // the grant when it is not, writing through either way --
+                    // which is exactly this profile's renewal.
+                    return request.token(store_key).await.map_err(flow_error);
+                }
+                request.send().await.map_err(flow_error)?
+            }
+            ClientGrant::JwtBearer(provider) => {
+                // Asked for every request rather than once, so a workload
+                // whose platform rotates the credential presents the current
+                // one instead of the one this session started with.
+                let assertion = provider
+                    .assertion(AssertionRequest {
+                        issuer: metadata.issuer.clone(),
+                        resource: resource.to_owned(),
+                        scopes: scopes.clone(),
+                    })
+                    .await?;
+
+                client
+                    .jwt_bearer(metadata, &assertion)
+                    .with_scopes(scopes.clone())
+                    .with_resource(resource.to_owned())
+                    .send()
+                    .await
+                    .map_err(flow_error)?
+            }
+        };
+
+        // RFC 6749 section 5.1 has the response state `scope` only when it
+        // differs from the request, so recording what was asked for is what
+        // keeps a restart from believing it holds nothing -- and letting the
+        // first step-up replace the grant instead of widening it.
+        let mut tokens = tokens;
+        if tokens.scope.is_none() && !scopes.is_empty() {
+            tokens.scope = Some(scopes.join(" "));
+        }
+
+        self.config.store.put(store_key, &tokens);
+
+        Ok(tokens)
     }
 
     /// [`Self::maintain`] for a client and metadata held directly rather than
@@ -465,6 +602,16 @@ impl OAuthSession {
             }
         }
 
+        // A grant that authenticates the client has no user to interrupt and
+        // no refresh token to present, so none of what follows applies: it
+        // runs its one request and answers with what came back. Taken before
+        // the refresh attempt below, which for these grants would be that
+        // same request -- and a second attempt at a rejected assertion is
+        // exactly what RFC 7523 says not to make.
+        if !self.config.grant.is_interactive() {
+            return self.authorize_as_client(&mut flight, &demanded).await;
+        }
+
         // Refresh before interrupting the user: a stored refresh token
         // renews the session silently. A token identical to the rejected
         // one is no help though (revoked server-side) -- interactive then.
@@ -518,7 +665,7 @@ impl OAuthSession {
 
         let redirect_uri = self.config.handler.redirect_uri().await?;
         let client = self
-            .build_client(source, &server_metadata, &redirect_uri)
+            .build_client(source, &server_metadata, Some(&redirect_uri))
             .await?;
 
         // A durable [`TokenStore`] outlives the process; the flow state that
@@ -531,6 +678,7 @@ impl OAuthSession {
         // every read and write below.
         let store_key: Arc<str> =
             Arc::from(self.store_key_for(&server_metadata.issuer, source).as_str());
+        let resource: Arc<str> = Arc::from(resource_metadata.resource.as_str());
 
         if !step_up
             && self.may_reuse_stored_refresh(source, &server_metadata)
@@ -544,6 +692,7 @@ impl OAuthSession {
                 client,
                 metadata: server_metadata,
                 store_key,
+                resource,
             });
             return Ok(token);
         }
@@ -555,18 +704,11 @@ impl OAuthSession {
         // request needed, which is narrower and more current than the
         // resource's advertised set; `scopes_supported` is the fallback, and an
         // empty one means asking for no `scope` at all.
-        let mut scopes = match &self.config.scopes {
+        let scopes = self.widened_scopes(match &self.config.scopes {
             Some(configured) => configured.clone(),
             None if !demanded.is_empty() => demanded.clone(),
             None => resource_metadata.scopes_supported.clone(),
-        };
-        // SEP-2350: carry everything earlier rounds asked for, so a step-up
-        // widens the grant instead of trading one scope for another.
-        for held in self.requested_scopes() {
-            if !scopes.contains(&held) {
-                scopes.push(held);
-            }
-        }
+        });
 
         // The RFC 8707 resource indicator is the identifier the *accepted*
         // metadata declares, not the endpoint this client happens to talk to.
@@ -633,11 +775,155 @@ impl OAuthSession {
             client,
             metadata: server_metadata,
             store_key,
+            resource,
         });
         self.set_requested_scopes(granted);
 
         let token: Arc<str> = tokens.access_token.into();
         self.set_token(token.clone());
+        Ok(token)
+    }
+
+    /// SEP-2350: carries everything earlier rounds asked for into `scopes`,
+    /// so a step-up widens the grant instead of trading one scope for
+    /// another.
+    ///
+    /// A token minted for the challenged scope alone would lose access the
+    /// session already had, and the next call for the old scope would
+    /// challenge straight back.
+    pub(super) fn widened_scopes(&self, mut scopes: Vec<String>) -> Vec<String> {
+        for held in self.requested_scopes() {
+            if !scopes.contains(&held) {
+                scopes.push(held);
+            }
+        }
+        scopes
+    }
+
+    /// The whole flow for a grant that authenticates the client itself:
+    /// discover, build the client, run the grant once, keep what it produced.
+    ///
+    /// There is no browser round here and no
+    /// [`AuthorizationHandler`](super::AuthorizationHandler) call -- the
+    /// default one binds a loopback listener, and these grants have no
+    /// redirect to receive.
+    ///
+    /// A refusal ends the call. The client presented the only credential it
+    /// has, so resending it would buy the same answer, and reaching for
+    /// another grant would be answering a question the deployment already
+    /// decided. RFC 7523 says as much about an assertion outright, and it is
+    /// no less true of a secret.
+    pub(super) async fn authorize_as_client(
+        &self,
+        flight: &mut Option<FlowState>,
+        demanded: &[String],
+    ) -> Result<Arc<str>, Error> {
+        // What to ask for when nothing has been discovered yet: the caller's
+        // decision, else what this very request was challenged for, widened
+        // by whatever the session already holds.
+        let asked = self.widened_scopes(match &self.config.scopes {
+            Some(configured) => configured.clone(),
+            None => demanded.to_vec(),
+        });
+
+        // The last flow left behind everything a re-run needs, so a `401` on
+        // an expired token costs one request rather than three.
+        let cached = if let Some(state) = flight.as_ref() {
+            let store_key = state.store_key.clone();
+            let outcome = self
+                .run_client_grant(
+                    &state.client,
+                    &state.metadata,
+                    &store_key,
+                    &state.resource,
+                    asked.clone(),
+                    // The stored token is the one that was just refused.
+                    false,
+                )
+                .await;
+
+            Some((outcome, store_key))
+        } else {
+            None
+        };
+
+        if let Some((outcome, store_key)) = cached {
+            return match outcome {
+                Ok(tokens) => Ok(self.adopt(tokens, store_key)),
+                // What was cached came from a flow that worked; that it no
+                // longer does is reason to doubt it, so the next `401` starts
+                // from discovery rather than from a client that may now be
+                // pointed at the wrong server. That is not a retry of this
+                // request -- this one ends here, with the server's answer.
+                Err(err) => {
+                    *flight = None;
+                    Err(err)
+                }
+            };
+        }
+
+        let discovery = DiscoveryClient::with_config(self.config.client_config());
+        let resource_metadata = self.discover_resource_metadata(&discovery).await?;
+        let server_metadata = discovery
+            .discover_authorization_server(&resource_metadata)
+            .await
+            .map_err(flow_error)?;
+
+        let source = self.config.client_id_source(&server_metadata);
+        self.check_issuer_binding(source, &server_metadata)?;
+
+        // `validate` refuses a client-authenticating grant that names no
+        // client, and `client_id_source` hands one that names a document its
+        // document -- so this is unreachable rather than merely unlikely. It
+        // stays because the alternative is a silent registration request that
+        // these profiles do not make.
+        if source == ClientIdSource::Dynamic {
+            return Err(Error::new(
+                ErrorCode::InvalidRequest,
+                format!(
+                    "the `{}` grant is not registered for dynamically; configure the \
+                     credentials `{}` issued with `with_client_id`",
+                    self.config.grant.grant_type(),
+                    server_metadata.issuer
+                ),
+            ));
+        }
+
+        let client = self.build_client(source, &server_metadata, None).await?;
+        let store_key: Arc<str> =
+            Arc::from(self.store_key_for(&server_metadata.issuer, source).as_str());
+
+        let resource: Arc<str> = Arc::from(resource_metadata.resource.as_str());
+
+        // The resource's advertised set is the last fallback, and only
+        // reachable here: the two ahead of it were applied before discovery.
+        let scopes = if asked.is_empty() {
+            self.widened_scopes(resource_metadata.scopes_supported.clone())
+        } else {
+            asked
+        };
+
+        let tokens = self
+            .run_client_grant(
+                &client,
+                &server_metadata,
+                &store_key,
+                &resource,
+                scopes,
+                false,
+            )
+            .await?;
+
+        let token = self.adopt(tokens, store_key.clone());
+
+        // Keep what made it work: the next renewal is then one request.
+        *flight = Some(FlowState {
+            client,
+            metadata: server_metadata,
+            store_key,
+            resource,
+        });
+
         Ok(token)
     }
 
@@ -817,39 +1103,99 @@ impl OAuthSession {
     /// Builds the [`OAuthClient`] for the identity `source` names: a
     /// configured id, a Client ID Metadata Document URL, or one obtained
     /// through dynamic registration (RFC 7591).
+    ///
+    /// `redirect_uri` is `None` for a grant with no authorization response to
+    /// receive. Dynamic registration needs one -- what it registers is where
+    /// the server may redirect -- and never meets that case: it is the
+    /// fallback of the interactive flow alone.
     pub(super) async fn build_client(
         &self,
         source: ClientIdSource<'_>,
         server_metadata: &AuthorizationServerMetadata,
-        redirect_uri: &str,
+        redirect_uri: Option<&str>,
     ) -> Result<OAuthClient, Error> {
         let client = match source {
             ClientIdSource::PreRegistered(client_id) => {
-                let mut client = OAuthClient::new(client_id);
-                if let Some(secret) = &self.config.client_secret {
-                    client = client.with_secret(secret.clone());
-                }
-                client
+                self.authenticate(OAuthClient::new(client_id), server_metadata)?
             }
             // Nothing to register: the URL *is* the id, and the server
             // resolves it to the document the deployer published. A CIMD
-            // client is public by construction, so no secret is attached even
-            // if one were configured -- and `OAuthClientConfig::validate`
-            // refuses that pairing before it can get this far.
-            ClientIdSource::Document(url) => OAuthClient::new(url),
+            // client shares no secret with anyone -- there is nobody to have
+            // shared it with -- and `OAuthClientConfig::validate` refuses that
+            // pairing before it can get this far. A `private_key_jwt` key is
+            // the exception, and travels with the document.
+            ClientIdSource::Document(url) => {
+                self.authenticate(OAuthClient::new(url), server_metadata)?
+            }
             ClientIdSource::Dynamic => {
+                let Some(redirect_uri) = redirect_uri else {
+                    return Err(Error::new(
+                        ErrorCode::InternalError,
+                        "dynamic client registration needs a redirect URI to register",
+                    ));
+                };
                 let registration = RegistrationClient::with_config(self.config.client_config());
-                let response = registration
+                let mut response = registration
                     .register(server_metadata, &registration_metadata(redirect_uri))
                     .await
                     .map_err(flow_error)?;
+
+                // A response that names no `token_endpoint_auth_method` has
+                // not answered the one the registration asked for, and
+                // RFC 7591 section 2 fills the silence with
+                // `client_secret_basic` -- which a server advertising only
+                // `none`, or only `client_secret_post`, has already said it
+                // does not accept. Two documents from the same server cannot
+                // both be right, and the metadata is the one that describes
+                // the token endpoint, so it decides. Left alone, the flow
+                // ends at the token request over a method nobody chose.
+                if response.metadata.token_endpoint_auth_method.is_none() {
+                    response.metadata.token_endpoint_auth_method =
+                        Some(registered_auth_method(server_metadata).to_owned());
+                }
+
                 OAuthClient::from_registration(&response).map_err(flow_error)?
             }
         };
 
-        Ok(client
+        let client = client
             .with_config(self.config.client_config())
-            .with_redirect_uri(redirect_uri)
-            .with_token_store(self.config.store.clone()))
+            .with_token_store(self.config.store.clone());
+
+        Ok(match redirect_uri {
+            Some(uri) => client.with_redirect_uri(uri),
+            None => client,
+        })
+    }
+
+    /// Attaches whatever credential this client authenticates with, in the
+    /// way `server` says it accepts.
+    ///
+    /// A signed assertion supersedes a secret (RFC 7523 section 2.2): it is
+    /// the credential, and no secret is sent alongside it. `validate` refuses
+    /// the pairing anyway, so this only decides the order of two things that
+    /// cannot both be configured.
+    ///
+    /// Without either, the client stays public and is identified by its
+    /// `client_id` alone -- which is what the authorization-code flow relies
+    /// on PKCE for, and what the workload-identity profile relies on the
+    /// assertion in the grant for.
+    fn authenticate(
+        &self,
+        client: OAuthClient,
+        server: &AuthorizationServerMetadata,
+    ) -> Result<OAuthClient, Error> {
+        #[cfg(feature = "client-oauth-jwt")]
+        if let Some(key) = &self.config.private_key_jwt {
+            return Ok(client.with_private_key_jwt(key.clone()));
+        }
+
+        let Some(secret) = &self.config.client_secret else {
+            return Ok(client);
+        };
+
+        Ok(client
+            .with_secret(secret.clone())
+            .with_auth_method(secret_auth_method(server)?))
     }
 }

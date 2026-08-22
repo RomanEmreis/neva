@@ -47,17 +47,16 @@ client:
   # the scenario hands it no pre-registered credentials, so which mechanism
   # runs is decided by what each mock server advertises.
   #
+  # The grants that authenticate the *client* rather than a user are green as
+  # of #109: `client_credentials` with either a client secret or a
+  # `private_key_jwt` assertion, RFC 7523 JWT-bearer for workload identity,
+  # and the enterprise profile's RFC 8693 exchange into that same JWT-bearer
+  # request. Which one runs is a configuration decision -- nothing on the wire
+  # distinguishes a pre-registered authorization-code client from a
+  # client-credentials one before the token request -- so the fixture picks it
+  # from what the scenario's context hands over, the way a deployer would.
+  #
   # What is left needs a credential the flow does not have.
-
-  # -- Grant types beyond authorization_code (#109) ----------------------
-  # Each of these authenticates the *client* rather than a user, and needs a
-  # grant neva's OAuth client does not implement: `client_credentials` (with a
-  # signed JWT assertion or Basic), the enterprise token-exchange profile, and
-  # RFC 7523 JWT-bearer for workload identity.
-  - auth/client-credentials-jwt
-  - auth/client-credentials-basic
-  - auth/enterprise-managed-authorization
-  - auth/wif-jwt-bearer
 
   # -- DPoP (#110) -------------------------------------------------------
   # Sender-constrained tokens: every request carries a fresh signed proof bound
