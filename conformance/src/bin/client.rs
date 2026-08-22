@@ -228,7 +228,7 @@ impl Credentials {
                     "the scenario handed over an IdP id token but no `idp_client_id`",
                 )
             })?;
-            
+
             let mut assertion =
                 IdentityAssertion::new(issuer.clone(), idp_client_id, id_token.clone())
                     .require_https(false);
