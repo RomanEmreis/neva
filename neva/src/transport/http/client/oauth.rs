@@ -2103,6 +2103,97 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
         );
     }
 
+    /// A resource whose Protected Resource Metadata lives *only* where its
+    /// `401` says it does -- both well-known derivations answer `404`.
+    ///
+    /// RFC 9728 section 5.1 makes the challenge's pointer the authority, and
+    /// a server is free to publish nowhere else. Guessing is what a client
+    /// does when it was told nothing.
+    async fn spawn_stated_metadata_server()
+    -> (std::net::SocketAddr, Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let read = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+                let root = format!("http://{addr}");
+                if let Ok(mut seen) = recorder.lock() {
+                    seen.push(request.clone());
+                }
+
+                let (status, body) = if request.contains("/.well-known/oauth-protected-resource") {
+                    ("404 Not Found", "{}".to_string())
+                } else if request.contains("/where-the-challenge-points") {
+                    (
+                        "200 OK",
+                        format!(
+                            r#"{{"resource":"{root}/mcp","authorization_servers":["{root}"]}}"#
+                        ),
+                    )
+                } else if request.contains("/.well-known/") {
+                    (
+                        "200 OK",
+                        format!(
+                            r#"{{"issuer":"{root}","token_endpoint":"{root}/token",
+                                 "grant_types_supported":["client_credentials"],
+                                 "token_endpoint_auth_methods_supported":["client_secret_basic"],
+                                 "response_types_supported":["code"]}}"#
+                        ),
+                    )
+                } else {
+                    (
+                        "200 OK",
+                        r#"{"access_token":"stated-metadata-token","token_type":"Bearer","expires_in":3600}"#
+                            .to_string(),
+                    )
+                };
+
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+        (addr, seen)
+    }
+
+    /// Which grant a client runs says nothing about where the resource
+    /// describes itself, so the challenge's `resource_metadata` pointer is
+    /// the authority for all of them. Reaching the well-known derivation
+    /// directly had the client-authenticating grants ignore a stated URL and
+    /// fail discovery against a server whose document was perfectly good --
+    /// just not where the guess looks.
+    #[tokio::test]
+    async fn a_client_grant_follows_the_challenge_to_the_resource_metadata() {
+        let (addr, seen) = spawn_stated_metadata_server().await;
+        let resource = format!("http://{addr}/mcp");
+
+        let config = OAuthClientConfig::default()
+            .require_https(false)
+            .with_client_id("mcp-service")
+            .with_client_secret("s3cret")
+            .with_client_credentials();
+        let session = OAuthSession::new(config, &resource).unwrap();
+
+        let challenge =
+            format!(r#"Bearer resource_metadata="http://{addr}/where-the-challenge-points""#);
+        let token = session.authorize(Some(&challenge), None).await.unwrap();
+
+        assert_eq!(&*token, "stated-metadata-token");
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|request| request.contains("/where-the-challenge-points")),
+            "the flow has to fetch the document the server pointed at"
+        );
+    }
+
     /// A refusal is the answer, not the start of a search. The client
     /// presented the only credential it has, so it neither resends it nor
     /// reaches for another grant -- and the cached state that produced it is

@@ -376,7 +376,15 @@ impl AssertionProvider for IdentityAssertion {
             .with_config(self.client_config());
 
         if let Some(secret) = &self.client_secret {
-            client = client.with_secret(secret.clone());
+            // The identity provider is a second authorization server with its
+            // own registration, so its `token_endpoint_auth_methods_supported`
+            // is its own answer too -- and one that advertises only
+            // `client_secret_post` refuses the Basic an `OAuthClient` defaults
+            // to, over a secret that works in the body. Same negotiation the
+            // resource's authorization server gets.
+            client = client
+                .with_secret(secret.clone())
+                .with_auth_method(secret_auth_method(&metadata)?);
         }
 
         let exchanged = client
@@ -480,6 +488,132 @@ mod tests {
         assert_eq!(assertion.subject_token_type, token_type::REFRESH_TOKEN);
         assert_eq!(assertion.client_id.as_deref(), Some("idp-app"));
         assert!(!assertion.require_https);
+    }
+
+    /// An identity provider that publishes RFC 8414 metadata advertising
+    /// `auth_methods`, and answers one token exchange with an ID-JAG.
+    /// Records every request so a test can assert how the client
+    /// authenticated.
+    async fn spawn_identity_provider(
+        auth_methods: &'static str,
+    ) -> (std::net::SocketAddr, Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = seen.clone();
+
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let read = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+                let root = format!("http://{addr}");
+                if let Ok(mut seen) = recorder.lock() {
+                    seen.push(request.clone());
+                }
+
+                let body = if request.contains("/.well-known/") {
+                    format!(
+                        r#"{{"issuer":"{root}","token_endpoint":"{root}/token",
+                             "grant_types_supported":["urn:ietf:params:oauth:grant-type:token-exchange"],
+                             "token_endpoint_auth_methods_supported":[{auth_methods}],
+                             "response_types_supported":["code"]}}"#
+                    )
+                } else {
+                    r#"{"access_token":"the.id.jag",
+                        "issued_token_type":"urn:ietf:params:oauth:token-type:id-jag",
+                        "token_type":"N_A","expires_in":300}"#
+                        .to_string()
+                };
+
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+        (addr, seen)
+    }
+
+    fn exchange_request() -> AssertionRequest {
+        AssertionRequest {
+            issuer: "https://auth.example.com".into(),
+            resource: "https://mcp.example.com/mcp".into(),
+            scopes: vec!["mcp:read".into()],
+        }
+    }
+
+    /// The identity provider is a second authorization server with its own
+    /// registration, so what it accepts at its token endpoint is its own
+    /// answer. One that takes only `client_secret_post` refuses the Basic an
+    /// `OAuthClient` defaults to -- over a secret that works in the body.
+    #[tokio::test]
+    async fn it_authenticates_to_the_provider_the_way_the_provider_accepts() {
+        let (addr, seen) = spawn_identity_provider(r#""client_secret_post""#).await;
+
+        let assertion = IdentityAssertion::new(format!("http://{addr}"), "id.token")
+            .with_client_id("idp-app")
+            .with_client_secret("s3cret")
+            .require_https(false);
+
+        assert_eq!(
+            assertion.assertion(exchange_request()).await.unwrap(),
+            "the.id.jag"
+        );
+
+        let requests = seen.lock().unwrap().clone();
+        let exchange = requests
+            .iter()
+            .find(|request| request.contains("POST /token"))
+            .expect("the exchange must have reached the provider");
+
+        assert!(exchange.contains("client_secret=s3cret"), "{exchange}");
+        assert!(!exchange.contains("authorization: Basic"), "{exchange}");
+    }
+
+    /// And the profile's own parameters, which the identity provider
+    /// evaluates its policy against: the grant is minted for the resource's
+    /// authorization server, naming the MCP server it is meant to buy a token
+    /// for.
+    #[tokio::test]
+    async fn it_pins_the_audience_and_resource_of_the_exchange() {
+        let (addr, seen) = spawn_identity_provider(r#""client_secret_basic""#).await;
+
+        let assertion = IdentityAssertion::new(format!("http://{addr}"), "id.token")
+            .with_client_id("idp-app")
+            .with_client_secret("s3cret")
+            .require_https(false);
+
+        assertion.assertion(exchange_request()).await.unwrap();
+
+        let requests = seen.lock().unwrap().clone();
+        let exchange = requests
+            .iter()
+            .find(|request| request.contains("POST /token"))
+            .expect("the exchange must have reached the provider");
+
+        assert!(
+            exchange
+                .contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange"),
+            "{exchange}"
+        );
+        assert!(exchange.contains("subject_token=id.token"), "{exchange}");
+        assert!(
+            exchange
+                .contains("requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aid-jag"),
+            "{exchange}"
+        );
+        assert!(
+            exchange.contains("audience=https%3A%2F%2Fauth.example.com"),
+            "the grant is audienced to the resource's authorization server: {exchange}"
+        );
+        assert!(
+            exchange.contains("resource=https%3A%2F%2Fmcp.example.com%2Fmcp"),
+            "and names the MCP server it is for: {exchange}"
+        );
+        // Basic here, because that is what this provider advertised.
+        assert!(exchange.contains("authorization: Basic"), "{exchange}");
     }
 
     #[test]

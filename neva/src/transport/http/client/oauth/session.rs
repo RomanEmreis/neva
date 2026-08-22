@@ -602,6 +602,15 @@ impl OAuthSession {
             }
         }
 
+        // Where the challenge said this resource's metadata lives, when it
+        // said. Read before the grant branches below, because it is the same
+        // answer for all of them: it is the server describing itself, and
+        // which grant this client runs has no bearing on where that document
+        // is.
+        let stated = challenge
+            .as_ref()
+            .and_then(|challenge| challenge.resource_metadata().map(str::to_owned));
+
         // A grant that authenticates the client has no user to interrupt and
         // no refresh token to present, so none of what follows applies: it
         // runs its one request and answers with what came back. Taken before
@@ -609,7 +618,9 @@ impl OAuthSession {
         // same request -- and a second attempt at a rejected assertion is
         // exactly what RFC 7523 says not to make.
         if !self.config.grant.is_interactive() {
-            return self.authorize_as_client(&mut flight, &demanded).await;
+            return self
+                .authorize_as_client(&mut flight, &demanded, stated.as_deref())
+                .await;
         }
 
         // Refresh before interrupting the user: a stored refresh token
@@ -622,21 +633,10 @@ impl OAuthSession {
             return Ok(token);
         }
 
-        let stated = challenge
-            .as_ref()
-            .and_then(|challenge| challenge.resource_metadata().map(str::to_owned));
-
         let discovery = DiscoveryClient::with_config(self.config.client_config());
-        let resource_metadata = match stated {
-            // The challenge named the document: that is the answer, and a
-            // failure there is the failure -- guessing elsewhere would be
-            // discovering a document the server did not point at.
-            Some(url) => discovery
-                .fetch_resource_metadata_from_url(&url, Some(&self.resource))
-                .await
-                .map_err(flow_error)?,
-            None => self.discover_resource_metadata(&discovery).await?,
-        };
+        let resource_metadata = self
+            .resource_metadata(&discovery, stated.as_deref())
+            .await?;
 
         let server_metadata = discovery
             .discover_authorization_server(&resource_metadata)
@@ -817,6 +817,7 @@ impl OAuthSession {
         &self,
         flight: &mut Option<FlowState>,
         demanded: &[String],
+        stated: Option<&str>,
     ) -> Result<Arc<str>, Error> {
         // What to ask for when nothing has been discovered yet: the caller's
         // decision, else what this very request was challenged for, widened
@@ -863,7 +864,7 @@ impl OAuthSession {
         }
 
         let discovery = DiscoveryClient::with_config(self.config.client_config());
-        let resource_metadata = self.discover_resource_metadata(&discovery).await?;
+        let resource_metadata = self.resource_metadata(&discovery, stated).await?;
         let server_metadata = discovery
             .discover_authorization_server(&resource_metadata)
             .await
@@ -1019,6 +1020,34 @@ impl OAuthSession {
         }
 
         true
+    }
+
+    /// The Protected Resource Metadata this flow authorizes against.
+    ///
+    /// `stated` is the `resource_metadata` pointer the `401` carried, when it
+    /// carried one (RFC 9728 section 5.1). That is the server saying where its
+    /// own document is, so it wins outright and a failure there is the
+    /// failure: looking elsewhere afterwards would be discovering a document
+    /// the server did not point at. Only a challenge that named none leaves
+    /// the well-known locations to be guessed at.
+    ///
+    /// Shared by every grant, because which one this client runs says nothing
+    /// about where the resource describes itself. Reaching the derivation
+    /// directly is what let the client-authenticating grants ignore a stated
+    /// URL and fail discovery against a server that published a perfectly good
+    /// document, just not where the guess looks.
+    pub(super) async fn resource_metadata(
+        &self,
+        discovery: &DiscoveryClient,
+        stated: Option<&str>,
+    ) -> Result<volga_oauth_client::ProtectedResourceMetadata, Error> {
+        match stated {
+            Some(url) => discovery
+                .fetch_resource_metadata_from_url(url, Some(&self.resource))
+                .await
+                .map_err(flow_error),
+            None => self.discover_resource_metadata(discovery).await,
+        }
     }
 
     /// Finds the Protected Resource Metadata for a server that issued a `401`
