@@ -2477,6 +2477,165 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
         );
     }
 
+    /// A resource that moves to another authorization server between two
+    /// `401`s, with the old one still answering.
+    ///
+    /// The Protected Resource Metadata names `first` until a token has been
+    /// issued and `second` afterwards -- which is what a migration looks like
+    /// to a client that has already completed a flow.
+    async fn spawn_migrating_resource(
+        first: std::net::SocketAddr,
+        second: std::net::SocketAddr,
+    ) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Per-server, not a function-level `static`: the tests run in
+        // parallel and would otherwise share one another's migration.
+        let migrated = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let read = stream.read(&mut buf).await.unwrap_or(0);
+                let _ = read;
+
+                // Which server this resource points at now. The first
+                // document names `first`; every one after it names `second`.
+                let issuer = if migrated.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    format!("http://{second}")
+                } else {
+                    format!("http://{first}")
+                };
+
+                let body = format!(
+                    r#"{{"resource":"http://{addr}/mcp","authorization_servers":["{issuer}"]}}"#
+                );
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+        addr
+    }
+
+    /// An authorization server issuing `token`, answering client credentials.
+    async fn spawn_client_credentials_issuer(token: &'static str) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let read = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+                let root = format!("http://{addr}");
+
+                let body = if request.contains("/.well-known/") {
+                    format!(
+                        r#"{{"issuer":"{root}","token_endpoint":"{root}/token",
+                             "grant_types_supported":["client_credentials"],
+                             "token_endpoint_auth_methods_supported":["client_secret_basic"],
+                             "response_types_supported":["code"]}}"#
+                    )
+                } else {
+                    format!(
+                        r#"{{"access_token":"{token}","token_type":"Bearer","expires_in":3600}}"#
+                    )
+                };
+
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+        addr
+    }
+
+    /// A `401` on a token this session had every reason to believe in is
+    /// evidence that its cached picture is stale -- the resource may now name
+    /// a different authorization server, and the old one may still answer.
+    /// Re-running the grant there would mint a valid token for the wrong
+    /// audience, spend the transport's one retry on it, keep the cached state
+    /// and do it all again on the next `401`, forever.
+    #[tokio::test]
+    async fn a_client_grant_rediscovers_after_a_refusal_rather_than_trusting_its_cache() {
+        let old_as = spawn_client_credentials_issuer("token-from-the-old-server").await;
+        let new_as = spawn_client_credentials_issuer("token-from-the-new-server").await;
+        let resource_addr = spawn_migrating_resource(old_as, new_as).await;
+        let resource = format!("http://{resource_addr}/mcp");
+
+        let config = OAuthClientConfig::default()
+            .require_https(false)
+            .with_client_id("mcp-service")
+            .with_client_secret("s3cret")
+            .with_client_credentials();
+        let session = OAuthSession::new(config, &resource).unwrap();
+
+        let first = session.authorize(None, None).await.unwrap();
+        assert_eq!(&*first, "token-from-the-old-server");
+
+        // The resource has moved. The old token endpoint is still reachable,
+        // so a cached re-run would succeed -- with a token for a server this
+        // resource no longer trusts.
+        let second = session.authorize(None, Some(&first)).await.unwrap();
+        assert_eq!(
+            &*second, "token-from-the-new-server",
+            "the challenge has to send the flow back through discovery"
+        );
+    }
+
+    /// A restored token outlives the process; the client and metadata that
+    /// renew it do not. Reading a durable store back only to sit on the token
+    /// until a `401` wastes the point of having one -- the grant renews
+    /// without a user, so the staleness probe can rebuild what it needs.
+    #[tokio::test]
+    async fn a_client_grant_rebuilds_its_flow_state_after_a_restart() {
+        let issuer = spawn_client_credentials_issuer("renewed-after-restart").await;
+        let resource_addr = spawn_migrating_resource(issuer, issuer).await;
+        let resource = format!("http://{resource_addr}/mcp");
+
+        // What a durable store hands back to a fresh process: a token, and
+        // nothing that knows how to renew it.
+        let store: Arc<dyn TokenStore> = Arc::new(InMemoryTokenStore::new());
+        store.put(
+            &key("", "mcp-service", &resource),
+            &TokenSet {
+                access_token: "restored-token".into(),
+                token_type: "Bearer".into(),
+                refresh_token: None,
+                scope: Some("mcp:read".into()),
+                id_token: None,
+                // A lifetime the server never stated, which is what makes the
+                // probe ask rather than serve.
+                expires_at: None,
+                dpop_jkt: None,
+            },
+        );
+
+        let config = OAuthClientConfig {
+            store,
+            ..OAuthClientConfig::default()
+                .require_https(false)
+                .with_client_id("mcp-service")
+                .with_client_secret("s3cret")
+                .with_client_credentials()
+        };
+        let session = OAuthSession::new(config, &resource).unwrap();
+        assert_eq!(
+            session.bearer().as_deref(),
+            Some("restored-token"),
+            "the warm start reads the store"
+        );
+
+        assert_eq!(
+            session.refreshed_bearer().await.as_deref(),
+            Some("renewed-after-restart"),
+            "and the probe rebuilds what the restart did not restore"
+        );
+    }
+
     /// A refusal is the answer, not the start of a search. The client
     /// presented the only credential it has, so it neither resends it nor
     /// reaches for another grant -- and the cached state that produced it is

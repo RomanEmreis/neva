@@ -327,38 +327,77 @@ impl OAuthSession {
     /// `OAuthClient::token`). Returns `None` when interactive
     /// authorization is required or no flow has completed yet.
     pub(super) async fn maintain(&self, state: &mut Option<FlowState>) -> Option<Arc<str>> {
-        let FlowState {
-            client,
-            metadata,
-            store_key,
-            resource,
-        } = state.as_ref()?;
-
         // A client-authenticating grant issues no refresh token, so running
         // the grant again *is* its renewal -- and it needs no user, which is
         // the whole reason this can happen on a staleness probe rather than
-        // waiting for a `401`. `cached` keeps that cheap: a stored token that
-        // is not yet stale is served as it stands.
+        // waiting for a `401`.
         if !self.config.grant.is_interactive() {
             return self
-                .run_client_grant(
-                    client,
-                    metadata,
-                    store_key,
-                    resource,
-                    self.requested_scopes(),
-                    true,
-                )
+                .renew_client_grant(state)
                 .await
                 .inspect_err(|_err| {
                     #[cfg(feature = "tracing")]
                     tracing::warn!(logger = "neva", "token renewal failed: {_err}");
                 })
-                .ok()
-                .map(|tokens| self.adopt(tokens, store_key.clone()));
+                .ok();
         }
 
+        let FlowState {
+            client,
+            metadata,
+            store_key,
+            ..
+        } = state.as_ref()?;
+
         self.refresh_with(client, metadata, store_key.clone()).await
+    }
+
+    /// Renews a client-authenticating grant with no `401` having asked for
+    /// it -- the cheap path, and the only one that may trust cached state.
+    ///
+    /// Cheap because nothing here suggests the cached client is wrong: the
+    /// token is merely approaching its expiry, or has a lifetime the server
+    /// never stated. One request, and `cached` keeps even that from being
+    /// spent on a stored token that turns out to still be fresh.
+    ///
+    /// A restored token outlives the process; the client and metadata that
+    /// renew it do not. So a restart finds nothing cached, and rebuilding it
+    /// here is what keeps that first renewal from having to wait for a
+    /// refusal -- the store is what a durable [`TokenStore`] exists for, and
+    /// reading it back only to sit on it until a `401` wastes the point.
+    ///
+    /// A failure drops the cached state rather than propagating a stale
+    /// client into the next attempt; the caller swallows it, and the `401`
+    /// path rediscovers from scratch.
+    pub(super) async fn renew_client_grant(
+        &self,
+        flight: &mut Option<FlowState>,
+    ) -> Result<Arc<str>, Error> {
+        let Some(state) = flight.as_ref() else {
+            // Nothing to renew from: discover, which also files what it
+            // learns here for the next time.
+            return self.authorize_as_client(flight, &[], None).await;
+        };
+
+        let store_key = state.store_key.clone();
+        let outcome = self
+            .run_client_grant(
+                &state.client,
+                &state.metadata,
+                &store_key,
+                &state.resource,
+                self.requested_scopes(),
+                true,
+            )
+            .await;
+
+        match outcome {
+            Ok(tokens) => Ok(self.adopt(tokens, store_key)),
+            Err(err) => {
+                *flight = None;
+                Err(err)
+            }
+        }
     }
 
     /// Files `tokens` under `store_key`, makes them this session's current
@@ -855,6 +894,22 @@ impl OAuthSession {
     /// default one binds a loopback listener, and these grants have no
     /// redirect to receive.
     ///
+    /// Discovery runs every time, even with a completed flow already cached.
+    /// A `401` on a token this session had every reason to believe in is
+    /// itself the evidence that the cached picture is stale: the resource may
+    /// now name a different authorization server, and the old one may still
+    /// be answering. Re-running the grant against it would mint a perfectly
+    /// valid token for the wrong audience, spend the transport's one retry on
+    /// it, leave the cached state in place -- and do the same thing on the
+    /// next `401`, forever. It is also the only place
+    /// [`check_issuer_binding`](Self::check_issuer_binding) can catch a
+    /// migration, which is the whole point of running it.
+    ///
+    /// The cheap path lives where a `401` is not involved:
+    /// [`renew_client_grant`](Self::renew_client_grant) renews from the
+    /// cached client ahead of expiry, which is where the savings actually
+    /// were.
+    ///
     /// A refusal ends the call. The client presented the only credential it
     /// has, so resending it would buy the same answer, and reaching for
     /// another grant would be answering a question the deployment already
@@ -873,42 +928,6 @@ impl OAuthSession {
             Some(configured) => configured.clone(),
             None => demanded.to_vec(),
         });
-
-        // The last flow left behind everything a re-run needs, so a `401` on
-        // an expired token costs one request rather than three.
-        let cached = if let Some(state) = flight.as_ref() {
-            let store_key = state.store_key.clone();
-            let outcome = self
-                .run_client_grant(
-                    &state.client,
-                    &state.metadata,
-                    &store_key,
-                    &state.resource,
-                    asked.clone(),
-                    // The stored token is the one that was just refused.
-                    false,
-                )
-                .await;
-
-            Some((outcome, store_key))
-        } else {
-            None
-        };
-
-        if let Some((outcome, store_key)) = cached {
-            return match outcome {
-                Ok(tokens) => Ok(self.adopt(tokens, store_key)),
-                // What was cached came from a flow that worked; that it no
-                // longer does is reason to doubt it, so the next `401` starts
-                // from discovery rather than from a client that may now be
-                // pointed at the wrong server. That is not a retry of this
-                // request -- this one ends here, with the server's answer.
-                Err(err) => {
-                    *flight = None;
-                    Err(err)
-                }
-            };
-        }
 
         let discovery = DiscoveryClient::with_config(self.config.client_config());
         let resource_metadata = self.resource_metadata(&discovery, stated).await?;
