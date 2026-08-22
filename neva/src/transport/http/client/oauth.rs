@@ -1021,6 +1021,20 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
             Some("https://app.example.com/jwks.json")
         );
         assert_eq!(document.jwks, None, "one or the other, not both");
+
+        // And "not both" is a rule, not an accident of which branch ran:
+        // RFC 7591 section 2 has the two MUST NOT appear together, and which
+        // one was meant is not something to guess at.
+        let err = OAuthClientConfig::default()
+            .with_client_id_document(CIMD_URL)
+            .with_private_key_jwt(test_key().with_public_jwk(test_public_jwk()).unwrap())
+            .with_jwks_uri("https://app.example.com/jwks.json")
+            .with_client_credentials()
+            .client_metadata_document(Vec::<String>::new())
+            .expect_err("a document naming its keys twice is nonconforming");
+
+        assert!(err.to_string().contains("with_jwks_uri"), "{err}");
+        assert!(err.to_string().contains("with_public_jwk"), "{err}");
     }
 
     /// Falling back to registration is only an answer when registration is on

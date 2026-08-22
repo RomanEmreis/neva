@@ -293,6 +293,11 @@ impl OAuthClientConfig {
     /// Only read when building that document -- the flow itself never fetches
     /// it, since it holds the private half already.
     ///
+    /// The two forms are exclusive: RFC 7591 section 2 has `jwks_uri` and
+    /// `jwks` MUST NOT both appear, so a key already carrying its public half
+    /// through `PrivateKeyJwt::with_public_jwk` publishes by value and needs
+    /// none of this. Configuring both is refused rather than resolved.
+    ///
     /// # Example
     /// ```no_run
     /// use neva::auth::oauth::OAuthClientConfig;
@@ -482,9 +487,10 @@ impl OAuthClientConfig {
     /// Which is why a key has to come with the material to verify it --
     /// embedded as `jwks` by giving the key its public half with
     /// `PrivateKeyJwt::with_public_jwk`, or referenced as a `jwks_uri` with
-    /// [`with_jwks_uri`](Self::with_jwks_uri). A document declaring
-    /// `private_key_jwt` and publishing neither is refused here rather than
-    /// hosted and then answered `invalid_client` on every token request.
+    /// [`with_jwks_uri`](Self::with_jwks_uri). Exactly one of the two:
+    /// publishing neither is refused here rather than hosted and then
+    /// answered `invalid_client` on every token request, and publishing both
+    /// is what RFC 7591 section 2 forbids outright.
     ///
     /// # Example
     /// ```no_run
@@ -565,13 +571,34 @@ impl OAuthClientConfig {
                 .with_token_endpoint_auth_method(client_auth::PRIVATE_KEY_JWT)
                 .with_token_endpoint_auth_signing_alg(key.algorithm().as_str());
 
-            match key.jwks() {
-                Some(jwks) => {
+            match (key.jwks(), &self.jwks_uri) {
+                // RFC 7591 section 2: "The `jwks_uri` and `jwks` parameters
+                // MUST NOT both be present in the same request or response."
+                // They are two answers to one question -- where this client's
+                // keys are -- and a document giving both is nonconforming,
+                // which a strict server may simply refuse. Which of the two
+                // was meant is not something to guess at: dropping either one
+                // silently would publish a key location its author did not
+                // choose.
+                (Some(_), Some(url)) => {
+                    return Err(Error::new(
+                        ErrorCode::InvalidRequest,
+                        format!(
+                            "a client id document publishes its keys either by value or \
+                             by reference, not both: the signing key carries its public \
+                             half *and* `{url}` is configured. Drop the `with_jwks_uri`, \
+                             or build the key without `PrivateKeyJwt::with_public_jwk`"
+                        ),
+                    ));
+                }
+                (Some(jwks), None) => {
                     let jwks = serde_json::to_value(jwks)
                         .map_err(|err| Error::new(ErrorCode::InternalError, err.to_string()))?;
                     metadata = metadata.with_jwks(jwks);
                 }
-                None if self.jwks_uri.is_none() => {
+                // Named separately, which is the form the CIMD draft shows.
+                (None, Some(_)) => {}
+                (None, None) => {
                     return Err(Error::new(
                         ErrorCode::InvalidRequest,
                         "a client id document that authenticates with `private_key_jwt` has \
@@ -580,8 +607,6 @@ impl OAuthClientConfig {
                          key set and name it with `with_jwks_uri`",
                     ));
                 }
-                // Named separately, which is the form the CIMD draft shows.
-                None => {}
             }
         }
 
