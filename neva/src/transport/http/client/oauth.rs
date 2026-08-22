@@ -36,7 +36,7 @@ pub use volga_oauth_client::{
     ClientError, ClientMetadata, InMemoryTokenStore, TokenSet, TokenStore, token_type,
 };
 #[cfg(feature = "client-oauth-jwt")]
-pub use volga_oauth_client::{JwsAlgorithm, PrivateKeyJwt, PublicJwk};
+pub use volga_oauth_client::{JwkSet, JwsAlgorithm, PrivateKeyJwt, PublicJwk, jwk};
 
 /// Client name sent with dynamic client registration when none is
 /// configured.
@@ -914,6 +914,16 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
 -----END PRIVATE KEY-----
 ";
 
+    /// The public half of [`TEST_KEY_PEM`], as its P-256 coordinates.
+    #[cfg(feature = "client-oauth-jwt")]
+    fn test_public_jwk() -> PublicJwk {
+        PublicJwk::new(jwk::PublicKey::Ec {
+            crv: jwk::EcCurve::P256,
+            x: "swtF4SLFunzvshdP6ETrhR0V_YoOfMasPuzQnga_Wq4".into(),
+            y: "0nla4FV3bGrCGJxlsoEbMLsCgXyEFrEroze00rGRVdg".into(),
+        })
+    }
+
     #[cfg(feature = "client-oauth-jwt")]
     fn test_key() -> PrivateKeyJwt {
         PrivateKeyJwt::from_pem(TEST_KEY_PEM, JwsAlgorithm::ES256)
@@ -952,11 +962,10 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
 
         assert!(OAuthSession::new(config, "https://api.example.com/mcp").is_ok());
 
-        let config = OAuthClientConfig::default()
+        let document = OAuthClientConfig::default()
             .with_client_id_document(CIMD_URL)
-            .with_private_key_jwt(test_key())
-            .with_client_credentials();
-        let document = config
+            .with_private_key_jwt(test_key().with_public_jwk(test_public_jwk()).unwrap())
+            .with_client_credentials()
             .client_metadata_document(Vec::<String>::new())
             .unwrap();
 
@@ -970,9 +979,48 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
             Some("ES256")
         );
         assert_eq!(
-            document.jwks, None,
-            "no public half was attached, so there is none to publish"
+            document
+                .jwks
+                .as_ref()
+                .and_then(|jwks| jwks["keys"][0]["alg"].as_str()),
+            Some("ES256"),
+            "and the key the server verifies those assertions with"
         );
+    }
+
+    /// A server that never registered this client has only the document to
+    /// go on, so one declaring `private_key_jwt` and publishing no key leaves
+    /// it nothing to verify against: every token request is answered
+    /// `invalid_client`, and only after the document has been hosted and a
+    /// flow has run. Refusing to emit one is the value of generating it here.
+    #[cfg(feature = "client-oauth-jwt")]
+    #[test]
+    fn a_signed_assertion_document_has_to_publish_its_verification_key() {
+        let err = OAuthClientConfig::default()
+            .with_client_id_document(CIMD_URL)
+            .with_private_key_jwt(test_key())
+            .with_client_credentials()
+            .client_metadata_document(Vec::<String>::new())
+            .expect_err("a document nothing can verify must be refused");
+
+        assert!(err.to_string().contains("with_public_jwk"), "{err}");
+        assert!(err.to_string().contains("with_jwks_uri"), "{err}");
+
+        // Referenced rather than embedded -- the form the CIMD draft shows,
+        // and what lets keys rotate without republishing the document.
+        let document = OAuthClientConfig::default()
+            .with_client_id_document(CIMD_URL)
+            .with_private_key_jwt(test_key())
+            .with_jwks_uri("https://app.example.com/jwks.json")
+            .with_client_credentials()
+            .client_metadata_document(Vec::<String>::new())
+            .unwrap();
+
+        assert_eq!(
+            document.jwks_uri.as_deref(),
+            Some("https://app.example.com/jwks.json")
+        );
+        assert_eq!(document.jwks, None, "one or the other, not both");
     }
 
     /// Falling back to registration is only an answer when registration is on

@@ -55,6 +55,7 @@ pub struct OAuthClientConfig {
     #[cfg(feature = "client-oauth-jwt")]
     pub(super) private_key_jwt: Option<PrivateKeyJwt>,
     pub(super) client_id_document: Option<String>,
+    pub(super) jwks_uri: Option<String>,
     pub(super) issuer: Option<String>,
     pub(super) scopes: Option<Vec<String>>,
     pub(super) require_https: bool,
@@ -68,6 +69,7 @@ impl std::fmt::Debug for OAuthClientConfig {
         f.debug_struct("OAuthClientConfig")
             .field("client_id", &self.client_id)
             .field("client_id_document", &self.client_id_document)
+            .field("jwks_uri", &self.jwks_uri)
             .field("issuer", &self.issuer)
             .field("scopes", &self.scopes)
             .field("require_https", &self.require_https)
@@ -84,6 +86,7 @@ impl Default for OAuthClientConfig {
             #[cfg(feature = "client-oauth-jwt")]
             private_key_jwt: None,
             client_id_document: None,
+            jwks_uri: None,
             issuer: None,
             scopes: None,
             require_https: true,
@@ -274,6 +277,35 @@ impl OAuthClientConfig {
         self
     }
 
+    /// Publishes this client's public keys at `url` instead of inside its
+    /// Client ID Metadata Document, and names that location in the document
+    /// [`client_metadata_document`](Self::client_metadata_document) builds.
+    ///
+    /// An authorization server that has never registered this client learns
+    /// which key verifies its assertions from the document alone, so a
+    /// document declaring `private_key_jwt` has to carry the material one way
+    /// or the other: embedded, by giving the key its public half with
+    /// `PrivateKeyJwt::with_public_jwk`, or referenced, by this. The
+    /// [CIMD draft section 6.2](https://www.ietf.org/archive/id/draft-ietf-oauth-client-id-metadata-document-00.html#section-6.2)
+    /// shows the referenced form, and it is what lets keys rotate at one
+    /// hosted location instead of by republishing the document.
+    ///
+    /// Only read when building that document -- the flow itself never fetches
+    /// it, since it holds the private half already.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::auth::oauth::OAuthClientConfig;
+    ///
+    /// let config = OAuthClientConfig::default()
+    ///     .with_client_id_document("https://app.example.com/mcp-client.json")
+    ///     .with_jwks_uri("https://app.example.com/jwks.json");
+    /// ```
+    pub fn with_jwks_uri(mut self, url: impl Into<String>) -> Self {
+        self.jwks_uri = Some(url.into());
+        self
+    }
+
     /// Obtains tokens with the client credentials grant (RFC 6749
     /// section 4.4) instead of the authorization-code flow: the client
     /// authenticates as itself and no user is involved.
@@ -443,10 +475,17 @@ impl OAuthClientConfig {
     ///
     /// The `grant_types` follow whichever grant is configured, and a
     /// [`with_private_key_jwt`](Self::with_private_key_jwt) key is published
-    /// as the document's `token_endpoint_auth_method` and, when the key
-    /// carries its public half, its `jwks`. That is what lets a client with
-    /// no pre-registration authenticate at all: the server dereferences one
-    /// URL and learns both who the client is and which key to verify.
+    /// as the document's `token_endpoint_auth_method`. That is what lets a
+    /// client with no pre-registration authenticate at all: the server
+    /// dereferences one URL and learns both who the client is and which key
+    /// to verify with.
+    ///
+    /// Which is why a key has to come with the material to verify it --
+    /// embedded as `jwks` by giving the key its public half with
+    /// `PrivateKeyJwt::with_public_jwk`, or referenced as a `jwks_uri` with
+    /// [`with_jwks_uri`](Self::with_jwks_uri). A document declaring
+    /// `private_key_jwt` and publishing neither is refused here rather than
+    /// hosted and then answered `invalid_client` on every token request.
     ///
     /// # Example
     /// ```no_run
@@ -506,21 +545,44 @@ impl OAuthClientConfig {
             metadata.response_types.clear();
         }
 
+        if let Some(url) = &self.jwks_uri {
+            metadata = metadata.with_jwks_uri(url.clone());
+        }
+
         // A key supersedes the `none` a public client publishes: the
         // assertion is the credential, and the document is where a server
-        // with no prior relationship learns to expect one. `jwks` rides along
-        // when the key was given its public half -- without it the server has
-        // the method but not the material, and says `invalid_client`.
+        // with no prior relationship learns to expect one.
+        //
+        // Which is also why it has to learn *which key*. A document that
+        // declares `private_key_jwt` and carries neither `jwks` nor a
+        // `jwks_uri` leaves a server that never registered this client with
+        // no material to verify the assertion against, so every token request
+        // it ever makes is answered `invalid_client` -- deterministically,
+        // and only after the document has been published and a flow has run.
+        // Refusing to emit one is the whole value of generating it here.
         #[cfg(feature = "client-oauth-jwt")]
         if let Some(key) = &self.private_key_jwt {
             metadata = metadata
                 .with_token_endpoint_auth_method(client_auth::PRIVATE_KEY_JWT)
                 .with_token_endpoint_auth_signing_alg(key.algorithm().as_str());
 
-            if let Some(jwks) = key.jwks() {
-                let jwks = serde_json::to_value(jwks)
-                    .map_err(|err| Error::new(ErrorCode::InternalError, err.to_string()))?;
-                metadata = metadata.with_jwks(jwks);
+            match key.jwks() {
+                Some(jwks) => {
+                    let jwks = serde_json::to_value(jwks)
+                        .map_err(|err| Error::new(ErrorCode::InternalError, err.to_string()))?;
+                    metadata = metadata.with_jwks(jwks);
+                }
+                None if self.jwks_uri.is_none() => {
+                    return Err(Error::new(
+                        ErrorCode::InvalidRequest,
+                        "a client id document that authenticates with `private_key_jwt` has \
+                         to publish the key that verifies its assertions: attach the public \
+                         half to the key with `PrivateKeyJwt::with_public_jwk`, or host a \
+                         key set and name it with `with_jwks_uri`",
+                    ));
+                }
+                // Named separately, which is the form the CIMD draft shows.
+                None => {}
             }
         }
 

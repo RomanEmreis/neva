@@ -251,8 +251,14 @@ pub mod auth {
         /// the client signs a short-lived JWT with its own key instead of
         /// presenting a shared secret. Set with
         /// `OAuthClientConfig::with_private_key_jwt`.
+        ///
+        /// The `jwk` module carries the key types
+        /// `PrivateKeyJwt::with_public_jwk` needs, so a client can publish
+        /// the public half a server verifies its assertions against.
         #[cfg(feature = "client-oauth-jwt")]
-        pub use crate::transport::http::client::oauth::{JwsAlgorithm, PrivateKeyJwt, PublicJwk};
+        pub use crate::transport::http::client::oauth::{
+            JwkSet, JwsAlgorithm, PrivateKeyJwt, PublicJwk, jwk,
+        };
     }
 }
 
