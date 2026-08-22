@@ -47,11 +47,9 @@ client:
 
   # `basic-cimd` is green here too, for the same reason (#86).
 
-  # -- Grant types beyond authorization_code (#109) ----------------------
-  - auth/client-credentials-jwt
-  - auth/client-credentials-basic
-  - auth/enterprise-managed-authorization
-  - auth/wif-jwt-bearer
+  # The client-authenticating grants are green here too, for the same reason
+  # (#109): they are the same OAuth client, and none of them touches the wire
+  # surface the protocol generation decides.
 
   # -- DPoP (#110) -------------------------------------------------------
   - auth/dpop

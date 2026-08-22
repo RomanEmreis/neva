@@ -11,7 +11,10 @@
 //!     --command "$(pwd)/target/debug/conformance-client" --suite core
 //! ```
 
-use neva::auth::oauth::{AuthorizationHandler, CallbackParams, OAuthClientConfig};
+use neva::auth::oauth::{
+    AuthorizationHandler, CallbackParams, IdentityAssertion, JwsAlgorithm, OAuthClientConfig,
+    PrivateKeyJwt,
+};
 use neva::prelude::*;
 use neva::shared::BoxFuture;
 use std::time::Duration;
@@ -121,39 +124,137 @@ const CALLBACK_URI: &str = "http://127.0.0.1:8919/callback";
 /// against a server that advertises no such thing, and registers dynamically.
 const CLIENT_ID_DOCUMENT: &str = "https://conformance-test.local/client-metadata.json";
 
-/// Client credentials the scenario issued out of band, in its context.
+/// The credentials a scenario issued out of band, in its context.
 ///
-/// A scenario that hands these over is testing a *pre-registered* client:
-/// registering dynamically instead would be answering a different question.
-struct PreRegistered {
+/// A scenario that hands any of these over is testing a client that was
+/// configured with them: registering dynamically instead would be answering a
+/// different question. Which ones it hands over is also what says *which
+/// grant* it is testing -- a private key or a workload JWT belongs to no other
+/// flow -- so the grant is picked from the context rather than hardcoded, the
+/// way a real client is configured by its deployer.
+struct Credentials {
     client_id: Option<String>,
     client_secret: Option<String>,
+    /// PKCS#8 signing key for `private_key_jwt` client authentication.
+    private_key_pem: Option<String>,
+    signing_algorithm: Option<String>,
+    /// A workload JWT to present as an RFC 7523 authorization grant.
+    workload_jwt: Option<String>,
+    /// The enterprise profile: an ID token, and where to trade it.
+    idp_issuer: Option<String>,
+    idp_token_endpoint: Option<String>,
+    idp_id_token: Option<String>,
+    idp_client_id: Option<String>,
+    /// Whether the scenario name says this is the client-credentials grant.
+    ///
+    /// `auth/pre-registration` and `auth/client-credentials-basic` hand over
+    /// the identical context -- an id and a secret -- and differ only in which
+    /// grant the client is expected to run. Nothing on the wire distinguishes
+    /// them before the token request, so the scenario name stands in for the
+    /// deployer who would have configured it.
+    client_credentials: bool,
 }
 
-impl PreRegistered {
-    fn from_context() -> Self {
+impl Credentials {
+    fn from_context(scenario: &str) -> Self {
         let ctx = context();
         let field = |name: &str| ctx[name].as_str().map(str::to_owned);
         Self {
             client_id: field("client_id"),
             client_secret: field("client_secret"),
+            private_key_pem: field("private_key_pem"),
+            signing_algorithm: field("signing_algorithm"),
+            workload_jwt: field("valid_jwt"),
+            idp_issuer: field("idp_issuer"),
+            idp_token_endpoint: field("idp_token_endpoint"),
+            idp_id_token: field("idp_id_token"),
+            idp_client_id: field("idp_client_id"),
+            client_credentials: scenario.starts_with("auth/client-credentials"),
         }
     }
 
-    fn apply(&self, mut oauth: OAuthClientConfig) -> OAuthClientConfig {
+    fn apply(&self, mut oauth: OAuthClientConfig) -> Result<OAuthClientConfig, Error> {
         let Some(id) = &self.client_id else {
             // Nothing issued out of band, so the document is what identifies
             // this client -- where the server resolves one, and otherwise it
             // registers. That order is the spec's, and the two are
             // alternatives: configuring both is refused.
-            return oauth.with_client_id_document(CLIENT_ID_DOCUMENT);
+            return Ok(oauth.with_client_id_document(CLIENT_ID_DOCUMENT));
         };
 
         oauth = oauth.with_client_id(id.clone());
+
+        // A signing key and a secret are alternatives, so the key wins where
+        // the scenario handed one over -- which is the case the extension
+        // RECOMMENDS anyway.
+        if let Some(pem) = &self.private_key_pem {
+            let algorithm = self.signing_algorithm.as_deref().unwrap_or("ES256");
+            // `JwsAlgorithm`'s variant names are the registered `alg` values
+            // verbatim, so its derived `Deserialize` is the parser. There is
+            // no `FromStr` to reach for.
+            let algorithm: JwsAlgorithm = serde_json::from_value(serde_json::Value::String(
+                algorithm.to_owned(),
+            ))
+            .map_err(|err| {
+                Error::new(
+                    ErrorCode::InvalidParams,
+                    format!("unsupported signing algorithm `{algorithm}`: {err}"),
+                )
+            })?;
+
+            let key = PrivateKeyJwt::from_pem(pem.as_bytes(), algorithm).map_err(|err| {
+                Error::new(
+                    ErrorCode::InvalidParams,
+                    format!("the scenario's signing key is unusable: {err}"),
+                )
+            })?;
+
+            return Ok(oauth.with_private_key_jwt(key).with_client_credentials());
+        }
+
         if let Some(secret) = &self.client_secret {
             oauth = oauth.with_client_secret(secret.clone());
         }
-        oauth
+
+        // The enterprise profile: sign-on already happened, and the ID token
+        // it produced is what buys a token at the MCP server's authorization
+        // server -- traded at the IdP first.
+        if let (Some(issuer), Some(id_token)) = (&self.idp_issuer, &self.idp_id_token) {
+            // The registration this client signed the user in under, which is
+            // not the one it holds at the MCP server's authorization server.
+            let idp_client_id = self.idp_client_id.as_deref().ok_or_else(|| {
+                Error::new(
+                    ErrorCode::InvalidParams,
+                    "the scenario handed over an IdP id token but no `idp_client_id`",
+                )
+            })?;
+
+            let mut assertion =
+                IdentityAssertion::new(issuer.clone(), idp_client_id, id_token.clone())
+                    .require_https(false);
+            // The scenario names the endpoint, which is what a client that
+            // signed the user in there would already hold. The mock IdP
+            // publishes an OpenID configuration too, but not a complete
+            // RFC 8414 record -- it is an identity provider, not a resource's
+            // authorization server.
+            if let Some(endpoint) = &self.idp_token_endpoint {
+                assertion = assertion.with_token_endpoint(endpoint.clone());
+            }
+
+            return Ok(oauth.with_identity_assertion(assertion));
+        }
+
+        // Workload identity federation: the platform already minted the
+        // credential, and it is the grant.
+        if let Some(jwt) = &self.workload_jwt {
+            return Ok(oauth.with_jwt_bearer(jwt.clone()));
+        }
+
+        if self.client_credentials {
+            oauth = oauth.with_client_credentials();
+        }
+
+        Ok(oauth)
     }
 }
 
@@ -253,7 +354,18 @@ async fn main() -> Result<(), Error> {
     tracing::debug!(context = %context(), "scenario context");
 
     let (addr, endpoint) = split_url(&url)?;
-    let credentials = PreRegistered::from_context();
+    let credentials = Credentials::from_context(&scenario);
+    // Applied outside the closure so a scenario handing over an unusable
+    // credential fails here, naming it, rather than at the first `401`.
+    let oauth = credentials.apply(
+        OAuthClientConfig::default()
+            // Inert until something answers `401`, which only the
+            // authorization scenarios do. `require_https(false)` because
+            // every mock issuer here is on loopback http.
+            .require_https(false)
+            .with_handler(RedirectReader::new(CALLBACK_URI)),
+    )?;
+    let oauth = std::sync::Mutex::new(Some(oauth));
     let mut client = Client::new().with_options(|opt| {
         opt.with_name("neva-conformance-client")
             .with_version(env!("CARGO_PKG_VERSION"))
@@ -261,14 +373,12 @@ async fn main() -> Result<(), Error> {
             .with_http(|http| {
                 http.bind(&addr)
                     .with_endpoint(&endpoint)
-                    .with_oauth(|oauth| {
-                        // Inert until something answers `401`, which only the
-                        // authorization scenarios do. `require_https(false)`
-                        // because every mock issuer here is on loopback http.
-                        let oauth = oauth
-                            .require_https(false)
-                            .with_handler(RedirectReader::new(CALLBACK_URI));
-                        credentials.apply(oauth)
+                    .with_oauth(|default| {
+                        oauth
+                            .lock()
+                            .ok()
+                            .and_then(|mut configured| configured.take())
+                            .unwrap_or(default)
                     })
             })
     });
