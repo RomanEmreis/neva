@@ -142,6 +142,18 @@ impl OAuthSession {
         Ok(session)
     }
 
+    /// Whether this session may ever present a DPoP-bound token.
+    ///
+    /// A question about the configuration rather than about what is held: an
+    /// `Auto` session that nothing has asked yet answers `true`, because the
+    /// first `401` may arm it. What turns on this is decided once per
+    /// connection and must not change underneath it -- see
+    /// `ClientAuth::follows_redirects`.
+    #[cfg(feature = "client-oauth-dpop")]
+    pub(crate) fn may_bind_tokens(&self) -> bool {
+        !matches!(self.config.dpop, DpopPolicy::Disabled)
+    }
+
     /// The DPoP key this session binds its tokens to, if it has one.
     #[cfg(feature = "client-oauth-dpop")]
     pub(super) fn dpop(&self) -> Option<Dpop> {

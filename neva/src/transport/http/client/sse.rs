@@ -37,7 +37,7 @@ pub(super) async fn handle_sse_connection(
     #[cfg(feature = "client-tls")] tls_config: Option<ClientTlsConfig>,
 ) {
     #[cfg(not(feature = "client-tls"))]
-    let client = match create_client() {
+    let client = match create_client(auth.follows_redirects()) {
         Ok(client) => client,
         Err(_err) => {
             #[cfg(feature = "tracing")]
@@ -47,7 +47,7 @@ pub(super) async fn handle_sse_connection(
     };
 
     #[cfg(feature = "client-tls")]
-    let client = match create_client(tls_config) {
+    let client = match create_client(auth.follows_redirects(), tls_config) {
         Ok(client) => client,
         Err(_err) => {
             #[cfg(feature = "tracing")]

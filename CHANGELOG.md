@@ -35,6 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   so it costs one repeat of the request rather than the exchange's one
   authorization retry.
 
+  One behavior to know: a connection configured for DPoP does not follow HTTP
+  redirects. A proof is signed over one method and one URL, nothing can re-sign
+  it mid-chain, and a followed hop would present a good token under a proof
+  naming the URL before it -- which the target must reject, and which neither
+  retry can recover from. A `3xx` from the MCP endpoint is surfaced as itself
+  instead. Bearer connections keep following redirects as before.
+
   Off by default, and nothing turns it on by itself: SEP-1932 is still
   unmerged, DPoP appears nowhere in the 2026-07-28 specification text, and the
   conformance suite scores `auth/dpop` and `auth/dpop-nonce` as extensions.

@@ -60,6 +60,40 @@ impl ClientAuth {
             None => ClientAuth::None,
         }
     }
+
+    /// Whether requests on this connection may be handed to a redirect.
+    ///
+    /// A bearer token survives one: the same header value is the whole
+    /// credential wherever the request lands, so the transport keeps reqwest's
+    /// default of following up to ten hops.
+    ///
+    /// A DPoP proof does not survive one. It is signed over exactly one method
+    /// and one URL (RFC 9449 section 4.2), reqwest cannot re-sign in the
+    /// middle of a chain, and it strips only `Authorization` and only when the
+    /// hop crosses origins -- so a same-origin redirect arrives carrying a
+    /// perfectly valid token under a proof that names the URL *before* it,
+    /// which the target is required to reject (section 4.3). Nothing here
+    /// recovers from that either: the nonce retry and the authorization retry
+    /// both rebuild against the configured endpoint, so each is refused
+    /// identically. So a connection that binds its tokens to a key does not
+    /// follow redirects at all, and a server that answers with one surfaces as
+    /// the `3xx` it actually sent.
+    ///
+    /// The question is asked of the *configuration*, not of the credential in
+    /// hand: under `with_dpop_auto` the key is armed part-way through the
+    /// connection's life, and a client whose redirect behaviour changed
+    /// underneath it would be worse than one that never redirects.
+    #[cfg(feature = "client-oauth-dpop")]
+    fn follows_redirects(&self) -> bool {
+        !matches!(self, ClientAuth::OAuth(session) if session.may_bind_tokens())
+    }
+
+    /// A build that cannot sign a proof has nothing a redirect could
+    /// invalidate.
+    #[cfg(not(feature = "client-oauth-dpop"))]
+    fn follows_redirects(&self) -> bool {
+        true
+    }
 }
 
 /// What one request presents to prove it may be made.
@@ -291,7 +325,7 @@ async fn handle_connection(
     #[cfg(feature = "client-tls")] tls_config: Option<ClientTlsConfig>,
 ) {
     #[cfg(not(feature = "client-tls"))]
-    let client = match create_client() {
+    let client = match create_client(auth.follows_redirects()) {
         Ok(client) => client,
         Err(_err) => {
             #[cfg(feature = "tracing")]
@@ -301,7 +335,7 @@ async fn handle_connection(
     };
 
     #[cfg(feature = "client-tls")]
-    let client = match create_client(tls_config) {
+    let client = match create_client(auth.follows_redirects(), tls_config) {
         Ok(client) => client,
         Err(_err) => {
             #[cfg(feature = "tracing")]
@@ -415,14 +449,24 @@ fn request_ids(msg: &Message) -> Vec<crate::types::RequestId> {
 
 #[inline]
 #[cfg(not(feature = "client-tls"))]
-fn create_client() -> Result<reqwest::Client, Error> {
-    reqwest::Client::builder().build().map_err(Error::from)
+fn create_client(follow_redirects: bool) -> Result<reqwest::Client, Error> {
+    let mut builder = reqwest::Client::builder();
+    if !follow_redirects {
+        builder = builder.redirect(reqwest::redirect::Policy::none());
+    }
+    builder.build().map_err(Error::from)
 }
 
 #[inline]
 #[cfg(feature = "client-tls")]
-fn create_client(mut tls_config: Option<ClientTlsConfig>) -> Result<reqwest::Client, Error> {
+fn create_client(
+    follow_redirects: bool,
+    mut tls_config: Option<ClientTlsConfig>,
+) -> Result<reqwest::Client, Error> {
     let mut builder = reqwest::ClientBuilder::new();
+    if !follow_redirects {
+        builder = builder.redirect(reqwest::redirect::Policy::none());
+    }
     if let Some(ca_cert) = tls_config.as_mut().and_then(|tls| tls.ca.take()) {
         builder = builder.add_root_certificate(ca_cert);
     }
@@ -733,6 +777,7 @@ mod tests {
         };
 
         let client = create_client(
+            true,
             #[cfg(feature = "client-tls")]
             None,
         )
@@ -831,6 +876,7 @@ mod tests {
         );
 
         let client = create_client(
+            true,
             #[cfg(feature = "client-tls")]
             None,
         )
@@ -933,6 +979,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(2);
         let owed = resume_stream(
             &create_client(
+                true,
                 #[cfg(feature = "client-tls")]
                 None,
             )
@@ -968,6 +1015,121 @@ mod tests {
 
         let claims = B64.decode(proof.split('.').nth(1)?).ok()?;
         serde_json::from_slice(&claims).ok()
+    }
+
+    /// A DPoP proof covers one method and one URL, so a request carrying one
+    /// must not be handed to a redirect: reqwest cannot re-sign mid-chain, and
+    /// it strips `Authorization` only across origins -- so the hop would land
+    /// carrying a good token under a proof naming the URL before it, which
+    /// RFC 9449 section 4.3 has the target reject. Nothing downstream
+    /// recovers: both retries rebuild against the configured endpoint.
+    #[cfg(feature = "client-oauth-dpop")]
+    #[tokio::test]
+    async fn a_proof_bearing_request_is_not_handed_to_a_redirect() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let followed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits = followed.clone();
+
+        // Same origin, so reqwest keeps every header it was given -- which is
+        // the case that matters. A cross-origin hop at least loses the
+        // `Authorization`.
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let read = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+
+                let resp = if request.starts_with("POST /moved") {
+                    hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let body = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                } else {
+                    // 307: the method and body survive, so this is the hop a
+                    // client would otherwise follow without noticing.
+                    "HTTP/1.1 307 Temporary Redirect\r\nLocation: /moved\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .to_string()
+                };
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let url = format!("http://{addr}/mcp");
+        let key = oauth::Dpop::generate().expect("a key");
+        let credential = Credential::Dpop {
+            tokens: Arc::new(oauth::TokenSet {
+                access_token: "bound-token".into(),
+                token_type: "DPoP".into(),
+                refresh_token: None,
+                scope: None,
+                id_token: None,
+                expires_at: None,
+                dpop_jkt: Some(key.thumbprint().to_owned()),
+            }),
+            key,
+        };
+
+        let send = async |follow_redirects: bool| {
+            let client = create_client(
+                follow_redirects,
+                #[cfg(feature = "client-tls")]
+                None,
+            )
+            .expect("a client");
+
+            send_authorized(Some(&credential), &reqwest::Method::POST, &url, || {
+                client.post(&url)
+            })
+            .await
+            .expect("the request goes out")
+            .status()
+        };
+
+        assert_eq!(
+            send(false).await,
+            reqwest::StatusCode::TEMPORARY_REDIRECT,
+            "the redirect is surfaced, not followed with a proof signed elsewhere"
+        );
+        assert_eq!(
+            followed.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the target must never have been asked"
+        );
+
+        // The same request under the policy a bearer connection keeps, so what
+        // the assertion above pins is the policy and not the mock.
+        assert_eq!(send(true).await, reqwest::StatusCode::OK);
+        assert_eq!(followed.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// Which connections get that policy is decided by the configuration, not
+    /// by the credential in hand: an `Auto` session arms its key part-way
+    /// through a connection's life, and redirect behaviour that changed
+    /// underneath it would be worse than none.
+    #[cfg(feature = "client-oauth-dpop")]
+    #[test]
+    fn only_a_key_binding_connection_stops_following_redirects() {
+        let session = |config: oauth::OAuthClientConfig| {
+            ClientAuth::OAuth(Arc::new(
+                oauth::OAuthSession::new(config, "http://127.0.0.1:3000/mcp").expect("a session"),
+            ))
+        };
+        let config = || oauth::OAuthClientConfig::default().require_https(false);
+
+        assert!(ClientAuth::None.follows_redirects());
+        assert!(ClientAuth::Static("token".into()).follows_redirects());
+        assert!(session(config()).follows_redirects(), "bearer by default");
+
+        assert!(!session(config().with_dpop_auto()).follows_redirects());
+        assert!(
+            !session(config().with_dpop(oauth::Dpop::generate().expect("a key")))
+                .follows_redirects()
+        );
     }
 
     /// The whole DPoP exchange, end to end, in the shape the
@@ -1092,6 +1254,7 @@ mod tests {
         let auth = ClientAuth::OAuth(oauth_session.clone());
 
         let client = create_client(
+            true,
             #[cfg(feature = "client-tls")]
             None,
         )
