@@ -37,7 +37,7 @@ pub use core::{
     context::HttpContext,
     engine::HttpEngine,
     handlers,
-    types::{HttpRequest, HttpResponse, StreamResponse},
+    types::{EventId, HttpRequest, HttpResponse, StreamResponse},
 };
 
 #[cfg(feature = "http-server")]
@@ -160,7 +160,7 @@ pub(crate) const CONTENT_TYPE_OPTIONS: (&str, &str) = ("X-Content-Type-Options",
 const DEFAULT_ADDR: &str = "127.0.0.1:3000";
 const DEFAULT_MCP_ENDPOINT: &str = "/mcp";
 
-/// Default number of SSE events buffered per session for Last-Event-ID replay.
+/// Default number of SSE events buffered per stream for Last-Event-ID replay.
 #[cfg(feature = "http-server")]
 pub(crate) const DEFAULT_SSE_BUFFER_CAPACITY: usize = 64;
 /// Default number of tracked SSE events queued for a live connection.
@@ -616,7 +616,7 @@ where
         }
     }
 
-    /// Sets the SSE event buffer capacity per session for Last-Event-ID replay.
+    /// Sets the SSE event buffer capacity per stream for Last-Event-ID replay.
     ///
     /// Defaults to `64`. Pass `0` to disable buffering.
     ///
@@ -1180,7 +1180,7 @@ mod engine_smoke_tests {
             resp
         }
 
-        fn tracked_event(_seq: u64, _msg: &Message) -> Self::SseEvent {}
+        fn tracked_event(_id: EventId, _msg: &Message) -> Self::SseEvent {}
         fn ephemeral_event(_msg: &Message) -> Self::SseEvent {}
 
         fn run(
@@ -1241,7 +1241,7 @@ mod engine_smoke_tests {
             resp
         }
 
-        fn tracked_event(_seq: u64, _msg: &Message) -> Self::SseEvent {}
+        fn tracked_event(_id: EventId, _msg: &Message) -> Self::SseEvent {}
         fn ephemeral_event(_msg: &Message) -> Self::SseEvent {}
 
         async fn run(self, ctx: HttpContext, token: CancellationToken) -> Result<(), Error> {
@@ -1369,7 +1369,7 @@ mod engine_smoke_tests {
                 resp
             }
 
-            fn tracked_event(_seq: u64, _msg: &Message) -> Self::SseEvent {}
+            fn tracked_event(_id: EventId, _msg: &Message) -> Self::SseEvent {}
             fn ephemeral_event(_msg: &Message) -> Self::SseEvent {}
 
             async fn run(self, _ctx: HttpContext, _token: CancellationToken) -> Result<(), Error> {

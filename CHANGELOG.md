@@ -43,6 +43,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   pipeline's `Next` is a `dyn Fn` returning one -- and remains a plain alias
   for `Pin<Box<dyn Future<Output = T> + Send + 'a>>`.
 
+#### Streamable HTTP
+* **`HttpEngine::tracked_event` takes an `EventId` instead of a `u64`** (#108).
+  An SSE event id is now a cursor within one stream rather than within a
+  session, so it names the stream as well as the position -- see the fix
+  below for what that is for. Engines write it out the same way they wrote
+  the sequence number: `fn tracked_event(id: EventId, msg: &Message)`, with
+  `id.to_string()` (or `format!("id: {id}")`) rendering `<stream>:<seq>`.
+  `EventId` is re-exported from `neva::prelude`, and `stream()` / `seq()` are
+  there for an engine that wants the halves. The default Volga engine, and
+  every engine that just writes the id through, needs the signature change
+  and nothing else.
+
 ### Fixed
 
 #### Shutdown
@@ -80,6 +92,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   drain signal above mean anything for HTTP. `HttpEngine::run` always
   documented this contract -- an engine that ignores the token now costs its
   server the shutdown budget on every stop.
+
+#### Streamable HTTP
+* **A session hosts as many SSE streams as the client opens** (#108, legacy
+  profile: MCP 2026-07-28 has neither sessions nor the standalone `GET`
+  stream). The spec lets a client "remain connected to multiple SSE streams
+  simultaneously"; neva's server held exactly one sender per session, so a
+  second `GET` overwrote the first. The displaced stream's channel was
+  dropped, its body ended, and the client saw a clean EOF -- no status, no
+  error, nothing to tell it apart from the server closing the stream on
+  purpose. It cost a third-party client that did what the spec permits its
+  first stream, silently.
+
+  A session now holds a map of streams, each with its own sender, cursor and
+  replay buffer, and each event id names the stream it belongs to
+  (`<stream>:<seq>`). That is what the spec asks for -- ids "assigned by
+  servers on a per-stream basis, to act as a cursor within that particular
+  stream" -- and it is what makes the other half enforceable: a `GET` carrying
+  `Last-Event-ID` resumes the stream that id belongs to and is replayed that
+  stream's backlog alone, never "messages that would have been delivered on a
+  different stream". A cursor naming a stream the session does not hold is
+  answered `404` rather than served from whatever stream is at hand.
+
+  A second concurrent `GET` is now accepted as a second stream, and the first
+  is left open. Server-initiated traffic -- the messages "unrelated to any
+  concurrently-running JSON-RPC request" -- moves onto the newest standalone
+  stream, so it goes out on exactly one of them, which is the part the spec
+  makes a MUST NOT. Picking the newest is also what keeps a plain reconnect
+  working when the client's connection died without the server noticing yet:
+  that `GET` gets served rather than refused for a stream nobody is reading.
+  A session is capped at eight streams, spending the cap on live ones (a
+  disconnected stream is dropped to make room before a `GET` is refused with
+  `429`).
+
+  An id in the old per-session shape (`<seq>`, no stream) is still read, as
+  the standalone stream's cursor -- a client reconnecting across a server
+  upgrade resumes rather than starts over. neva's own client is unaffected
+  either way: it echoes back whatever id it was handed.
 
 ## 0.5.4
 

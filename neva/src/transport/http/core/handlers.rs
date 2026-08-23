@@ -8,6 +8,7 @@
 use crate::{
     auth::Claims,
     error::{Error, ErrorCode},
+    shared::StreamSlot,
     types::{Message, RequestId, Response},
 };
 use bytes::Bytes;
@@ -20,7 +21,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use super::{
     context::HttpContext,
     engine::HttpEngine,
-    types::{HttpRequest, HttpResponse, StreamResponse},
+    types::{EventId, HttpRequest, HttpResponse, StreamResponse},
 };
 
 pub(crate) const MCP_SESSION_ID: &str = "Mcp-Session-Id";
@@ -1230,12 +1231,13 @@ pub fn handle_unauthorized(ctx: &HttpContext) -> HttpResponse {
 /// `tracked_event` / `ephemeral_event` is invoked exactly once per emitted
 /// event to produce the engine-native representation.
 enum SseItem {
-    Tracked(u64, Arc<Message>),
+    Tracked(EventId, Arc<Message>),
     Ephemeral(Box<Message>),
 }
 
 struct SseConnectionCleanup {
     id: uuid::Uuid,
+    stream: u64,
     generation: u64,
     registry: Arc<crate::shared::SseSessionRegistry>,
 }
@@ -1245,21 +1247,38 @@ impl Drop for SseConnectionCleanup {
         #[cfg(feature = "tracing")]
         crate::types::notification::fmt::LOG_REGISTRY
             .unregister_if_generation(&self.id, self.generation);
-        self.registry.unregister(&self.id, self.generation);
+        self.registry
+            .unregister(&self.id, self.stream, self.generation);
     }
 }
 
 /// Handle a GET `/{endpoint}` request -- SSE stream subscribe.
 ///
-/// Returns `StreamResponse::Complete(400)` if the session id is missing,
-/// otherwise opens (or reconnects to) the session in the SSE registry
-/// and returns `StreamResponse::Stream { headers, stream }` where `stream`
-/// is an `impl Stream<Item = E::SseEvent>` produced by calling the
-/// engine's [`HttpEngine::tracked_event`] / [`HttpEngine::ephemeral_event`]
-/// for each underlying `SseItem`.
+/// Opens (or resumes) one of the session's SSE streams and returns
+/// `StreamResponse::Stream { headers, stream }`, where `stream` is an
+/// `impl Stream<Item = E::SseEvent>` produced by calling the engine's
+/// [`HttpEngine::tracked_event`] / [`HttpEngine::ephemeral_event`] for each
+/// underlying `SseItem`.
+///
+/// A session may hold several streams at once -- the spec lets a client
+/// "remain connected to multiple SSE streams simultaneously" -- so which
+/// stream this `GET` gets is decided by its `Last-Event-ID`:
+///
+/// * **With one**, it resumes the stream that id names, replaying what that
+///   stream buffered past the cursor and nothing that went out on another one.
+/// * **Without one**, it takes the session's standalone stream -- the one
+///   carrying server-initiated traffic -- when nothing is connected to it, and
+///   otherwise opens a second stream and moves that traffic onto it. The
+///   stream that was there stays open either way.
+///
+/// The refusals: `Complete(400)` when the session id is missing,
+/// `Complete(404)` when the session is gone or `Last-Event-ID` names a stream
+/// it does not hold, `Complete(403)` when the origin gate turns the request
+/// away, and `Complete(429)` when the session is already reading as many
+/// streams as it may.
 ///
 /// The stream takes ownership of an `SseConnectionCleanup` drop-guard
-/// that unregisters the session from the registry (and the log
+/// that disconnects that one stream from the registry (and the log
 /// registry, when tracing is on) when the connection closes.
 pub async fn handle_get_sse<E: HttpEngine>(
     req: HttpRequest,
@@ -1299,35 +1318,65 @@ pub async fn handle_get_sse<E: HttpEngine>(
     }
 
     let (msg_tx, msg_rx) =
-        tokio::sync::mpsc::channel::<(u64, Arc<Message>)>(ctx.sse_live_queue_capacity);
+        tokio::sync::mpsc::channel::<(EventId, Arc<Message>)>(ctx.sse_live_queue_capacity);
     let (_log_tx, log_rx) = tokio::sync::mpsc::channel::<Message>(ctx.sse_log_queue_capacity);
 
-    let generation = ctx.sse_registry.register(id, msg_tx);
-    #[cfg(feature = "tracing")]
-    crate::types::notification::fmt::LOG_REGISTRY.register(id, generation, _log_tx);
-
-    let last_seq: Option<u64> = req
+    let last_event_id = req
         .headers()
         .get("last-event-id")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse().ok());
+        .and_then(|v| v.to_str().ok());
 
-    let replay = match last_seq {
-        Some(seq) => ctx.sse_registry.replay_since(&id, seq),
-        None => ctx.sse_registry.replay_all(&id),
+    let opened = match ctx.sse_registry.open(id, msg_tx, last_event_id) {
+        StreamSlot::Open(opened) => opened,
+        // The cursor names a stream this session does not hold. Answering with
+        // any other stream would replay what was delivered elsewhere -- which
+        // the spec forbids -- and answering with an empty one leaves the caller
+        // waiting on a stream that will never carry what it came back for. The
+        // status is about the stream, and a client that reads it as the session
+        // being gone is not wrong either: its cursor names nothing here.
+        StreamSlot::UnknownStream => {
+            return StreamResponse::Complete(
+                http::Response::builder()
+                    .status(http::StatusCode::NOT_FOUND)
+                    .body(Bytes::new())
+                    .unwrap_or_default(),
+            );
+        }
+        // The session is already reading as many streams as it may. Refusing
+        // says so; the alternative is a stream that is open and silent.
+        StreamSlot::AtCapacity => {
+            return StreamResponse::Complete(
+                http::Response::builder()
+                    .status(http::StatusCode::TOO_MANY_REQUESTS)
+                    .body(Bytes::new())
+                    .unwrap_or_default(),
+            );
+        }
     };
 
-    let msg_stream = if replay.is_empty() {
+    // Log notifications are ephemeral -- they carry no id and are not replayed
+    // -- so they ride the stream server-initiated traffic is on, and only that
+    // one. Registering from a stream that is not the standalone one would take
+    // the logs off the stream the client is actually being served on.
+    #[cfg(feature = "tracing")]
+    if opened.standalone {
+        crate::types::notification::fmt::LOG_REGISTRY.register(id, opened.generation, _log_tx);
+    }
+
+    let msg_stream = if opened.replay.is_empty() {
         Either::Left(ReceiverStream::new(msg_rx).map(|(seq, arc)| SseItem::Tracked(seq, arc)))
     } else {
-        let replay_end_seq = replay.last().map(|(s, _)| *s).unwrap_or(0);
-        let replay_stream = stream::iter(replay).map(|(seq, arc)| SseItem::Tracked(seq, arc));
+        let replay_end_seq = opened.replay.last().map(|(id, _)| id.seq()).unwrap_or(0);
+        let replay_stream =
+            stream::iter(opened.replay).map(|(seq, arc)| SseItem::Tracked(seq, arc));
+
         let live = ReceiverStream::new(msg_rx)
-            .filter(move |&(seq, _)| {
-                let keep = seq > replay_end_seq;
+            .filter(move |(id, _)| {
+                let keep = id.seq() > replay_end_seq;
                 async move { keep }
             })
             .map(|(seq, arc)| SseItem::Tracked(seq, arc));
+        
         Either::Right(replay_stream.chain(live))
     };
 
@@ -1336,7 +1385,8 @@ pub async fn handle_get_sse<E: HttpEngine>(
     let merged = stream::select(log_stream, msg_stream);
     let cleanup = SseConnectionCleanup {
         id,
-        generation,
+        stream: opened.stream,
+        generation: opened.generation,
         registry: ctx.sse_registry.clone(),
     };
     let mut merged = Box::pin(merged);
@@ -1345,7 +1395,7 @@ pub async fn handle_get_sse<E: HttpEngine>(
         Pin::new(&mut merged).poll_next(cx)
     })
     .map(|item| match item {
-        SseItem::Tracked(seq, msg) => E::tracked_event(seq, &msg),
+        SseItem::Tracked(id, msg) => E::tracked_event(id, &msg),
         SseItem::Ephemeral(msg) => E::ephemeral_event(&msg),
     });
 
@@ -2251,7 +2301,7 @@ mod tests {
     impl super::HttpEngine for TestEngine {
         type Request = HttpRequest;
         type Response = HttpResponse;
-        type SseEvent = (Option<u64>, String);
+        type SseEvent = (Option<String>, String);
 
         async fn adapt_request(_req: Self::Request) -> Result<HttpRequest, crate::error::Error> {
             unreachable!()
@@ -2259,8 +2309,8 @@ mod tests {
         fn adapt_response(_resp: HttpResponse) -> Self::Response {
             unreachable!()
         }
-        fn tracked_event(seq: u64, msg: &Message) -> Self::SseEvent {
-            (Some(seq), serde_json::to_string(msg).unwrap())
+        fn tracked_event(id: EventId, msg: &Message) -> Self::SseEvent {
+            (Some(id.to_string()), serde_json::to_string(msg).unwrap())
         }
         fn ephemeral_event(msg: &Message) -> Self::SseEvent {
             (None, serde_json::to_string(msg).unwrap())
@@ -2309,6 +2359,186 @@ mod tests {
                 );
             }
             StreamResponse::Complete(_) => panic!("expected Stream, got Status"),
+        }
+    }
+
+    /// A `GET` the way a client sends one: the session it belongs to, and
+    /// optionally the cursor it is resuming from.
+    fn sse_get(id: uuid::Uuid, last_event_id: Option<&str>) -> HttpRequest {
+        let mut req = http::Request::builder()
+            .method("GET")
+            .uri("/mcp")
+            .header(MCP_SESSION_ID, id.to_string());
+        if let Some(cursor) = last_event_id {
+            req = req.header("last-event-id", cursor);
+        }
+        req.body(Bytes::new()).unwrap()
+    }
+
+    /// One test SSE connection: the engine's events, boxed so the two streams
+    /// a test holds at once have one type between them.
+    type TestSse = Pin<Box<dyn Stream<Item = (Option<String>, String)> + Send>>;
+
+    async fn open_sse(ctx: &HttpContext, id: uuid::Uuid, last_event_id: Option<&str>) -> TestSse {
+        match handle_get_sse::<TestEngine>(sse_get(id, last_event_id), ctx).await {
+            StreamResponse::Stream { stream, .. } => Box::pin(stream),
+            StreamResponse::Complete(resp) => {
+                panic!("the GET was refused with {}", resp.status())
+            }
+        }
+    }
+
+    fn server_push(id: uuid::Uuid) -> Message {
+        Message::Notification(crate::types::notification::Notification::new(
+            "notifications/message",
+            None,
+        ))
+        .set_session_id(id)
+    }
+
+    /// One `next()`, or `None` if nothing arrives in time -- what "the server
+    /// put it on the other stream" looks like from here.
+    async fn next_event(stream: &mut TestSse) -> Option<(Option<String>, String)> {
+        tokio::time::timeout(std::time::Duration::from_millis(200), stream.next())
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// The spec lets a client hold several streams open at once, and neva used
+    /// to host one: the second `GET` overwrote the first one's sender, and the
+    /// displaced stream ended on a bare EOF that said nothing.
+    #[tokio::test]
+    async fn a_second_get_opens_a_stream_rather_than_displacing_the_first() {
+        let (ctx, _rx) = make_ctx();
+        let id = uuid::Uuid::new_v4();
+        ctx.sse_registry.pre_register(id);
+
+        let mut first = open_sse(&ctx, id, None).await;
+        let mut second = open_sse(&ctx, id, None).await;
+
+        ctx.sse_registry.send(server_push(id)).unwrap();
+
+        // "The server MUST send each of its JSON-RPC messages on only one of
+        // the connected streams" -- the newest standalone one, here.
+        let (event_id, _) = next_event(&mut second)
+            .await
+            .expect("the newest stream carries server-initiated traffic");
+        assert_eq!(event_id.as_deref(), Some("1:0"));
+        assert!(
+            next_event(&mut first).await.is_none(),
+            "a message must not be broadcast across both streams"
+        );
+    }
+
+    /// Event ids are per stream, so the id says which stream to resume.
+    #[tokio::test]
+    async fn event_ids_name_the_stream_that_carries_them() {
+        let (ctx, _rx) = make_ctx();
+        let id = uuid::Uuid::new_v4();
+        ctx.sse_registry.pre_register(id);
+
+        let mut stream = open_sse(&ctx, id, None).await;
+        ctx.sse_registry.send(server_push(id)).unwrap();
+        ctx.sse_registry.send(server_push(id)).unwrap();
+
+        let ids: Vec<Option<String>> = vec![
+            next_event(&mut stream).await.expect("first event").0,
+            next_event(&mut stream).await.expect("second event").0,
+        ];
+        assert_eq!(
+            ids,
+            vec![Some("0:0".to_string()), Some("0:1".to_string())],
+            "the cursor is qualified by the stream it counts within"
+        );
+    }
+
+    /// A resumption replays its own stream and is not handed another one's
+    /// backlog -- "The server MUST NOT replay messages that would have been
+    /// delivered on a different stream."
+    #[tokio::test]
+    async fn a_resumed_stream_replays_only_its_own_events() {
+        let (ctx, _rx) = make_ctx();
+        let id = uuid::Uuid::new_v4();
+        ctx.sse_registry.pre_register(id);
+
+        // Stream 0 collects two events, then a second GET moves the traffic to
+        // stream 1, which collects one.
+        let first = open_sse(&ctx, id, None).await;
+        ctx.sse_registry.send(server_push(id)).unwrap();
+        ctx.sse_registry.send(server_push(id)).unwrap();
+        let _second = open_sse(&ctx, id, None).await;
+        ctx.sse_registry.send(server_push(id)).unwrap();
+        drop(first);
+
+        let mut resumed = open_sse(&ctx, id, Some("0:0")).await;
+        let (event_id, _) = next_event(&mut resumed).await.expect("the replayed event");
+        assert_eq!(
+            event_id.as_deref(),
+            Some("0:1"),
+            "only what stream 0 missed, and none of stream 1"
+        );
+        assert!(
+            next_event(&mut resumed).await.is_none(),
+            "stream 1's event is not stream 0's to replay"
+        );
+    }
+
+    /// An id from before neva qualified them can only have come from the
+    /// standalone stream, and resumes it rather than being turned away.
+    #[tokio::test]
+    async fn a_cursor_naming_no_stream_resumes_the_standalone_one() {
+        let (ctx, _rx) = make_ctx();
+        let id = uuid::Uuid::new_v4();
+        ctx.sse_registry.pre_register(id);
+
+        let first = open_sse(&ctx, id, None).await;
+        ctx.sse_registry.send(server_push(id)).unwrap();
+        ctx.sse_registry.send(server_push(id)).unwrap();
+        drop(first);
+
+        let mut resumed = open_sse(&ctx, id, Some("0")).await;
+        let (event_id, _) = next_event(&mut resumed).await.expect("the replayed event");
+        assert_eq!(event_id.as_deref(), Some("0:1"));
+    }
+
+    /// A cursor pointing at a stream the session does not hold is answered,
+    /// not served: any stream that could be handed over would replay another
+    /// stream's messages, and an empty one would leave the caller waiting for
+    /// what it came back for.
+    #[tokio::test]
+    async fn a_cursor_naming_an_unknown_stream_is_refused() {
+        let (ctx, _rx) = make_ctx();
+        let id = uuid::Uuid::new_v4();
+        ctx.sse_registry.pre_register(id);
+
+        match handle_get_sse::<TestEngine>(sse_get(id, Some("9:3")), &ctx).await {
+            StreamResponse::Complete(resp) => {
+                assert_eq!(resp.status(), http::StatusCode::NOT_FOUND)
+            }
+            StreamResponse::Stream { .. } => panic!("an unknown cursor opened a stream"),
+        }
+    }
+
+    /// The cap is what keeps a session from accumulating streams without
+    /// bound; reaching it is answered with a status rather than with a stream
+    /// nothing will ever be written to.
+    #[tokio::test]
+    async fn a_session_past_its_stream_cap_is_refused() {
+        let (ctx, _rx) = make_ctx();
+        let id = uuid::Uuid::new_v4();
+        ctx.sse_registry.pre_register(id);
+
+        let mut open = Vec::new();
+        for _ in 0..crate::shared::MAX_STREAMS_PER_SESSION {
+            open.push(open_sse(&ctx, id, None).await);
+        }
+
+        match handle_get_sse::<TestEngine>(sse_get(id, None), &ctx).await {
+            StreamResponse::Complete(resp) => {
+                assert_eq!(resp.status(), http::StatusCode::TOO_MANY_REQUESTS)
+            }
+            StreamResponse::Stream { .. } => panic!("the cap did not hold"),
         }
     }
 

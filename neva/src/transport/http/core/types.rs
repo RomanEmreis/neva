@@ -168,3 +168,71 @@ impl Claims for DefaultClaims {
         self.permissions.as_deref()
     }
 }
+
+/// Identifier of one tracked SSE event: which stream carries it, and where in
+/// that stream it sits.
+///
+/// This is what an engine writes into the `id:` field of an SSE frame, and
+/// what a client hands back in `Last-Event-ID` to resume. It renders as
+/// `<stream>:<seq>`.
+///
+/// The stream is part of the id rather than implied by the session. The
+/// Streamable HTTP spec asks for cursors assigned "on a per-stream basis, to
+/// act as a cursor within that particular stream", and forbids replaying on
+/// one stream what was delivered on another -- neither is answerable unless
+/// the id names the stream it belongs to. A session may hold several streams
+/// at once, so a resumption has to say which one it is resuming.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use neva::transport::http::EventId;
+///
+/// fn tracked_event(id: EventId, msg: &Message) -> SseMessage {
+///     SseMessage::new().id(id.to_string()).json(msg)
+/// }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventId {
+    stream: u64,
+    seq: u64,
+}
+
+impl EventId {
+    /// Creates an id for event `seq` of `stream`.
+    #[inline]
+    pub(crate) fn new(stream: u64, seq: u64) -> Self {
+        Self { stream, seq }
+    }
+
+    /// The stream this event was delivered on.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(id.stream(), 0);
+    /// ```
+    #[inline]
+    pub fn stream(&self) -> u64 {
+        self.stream
+    }
+
+    /// The event's position within its stream -- the cursor a resumption of
+    /// that stream picks up from.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(id.seq(), 7);
+    /// ```
+    #[inline]
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+}
+
+impl std::fmt::Display for EventId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.stream, self.seq)
+    }
+}
