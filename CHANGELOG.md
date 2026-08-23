@@ -5,6 +5,82 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.5.5
+
+### Changed (breaking)
+
+#### Authorization
+* **`AuthorizationHandler` is written with plain `async fn`s.** Both of its
+  methods returned `neva::shared::BoxFuture`, so every implementation of the
+  interactive OAuth step opened with `Box::pin(async move { ... })` -- the
+  handler is stored behind `Arc<dyn ..>`, and a trait method returning
+  `impl Future` cannot be made into one. That is a fact about how the
+  configuration keeps the handler, not about the seam an embedder implements,
+  and it now lives on an internal `dyn` bridge instead, the way
+  `AssertionProvider` and `NotificationBus` already worked.
+
+  To migrate, drop the wrapper: `fn redirect_uri(&self) -> BoxFuture<'_,
+  Result<String, Error>>` becomes `async fn redirect_uri(&self) ->
+  Result<String, Error>`, and the same for `authorize`. The futures still have
+  to be `Send` -- the session drives them from a spawned task -- which an
+  `async fn` holding nothing thread-bound across an `.await` already satisfies.
+  Users of the default `LoopbackHandler` have nothing to change.
+
+#### MRTR
+* **`RequestStateStore` is written with plain `async fn`s**, for the same
+  reason and in the same shape: `get`, `put` and the `reserve` that serialises
+  identical final-round retries all returned `BoxFuture` because the server
+  holds one store behind `Arc<dyn ..>`. The boxing moved to an internal
+  bridge, so `fn get<'a>(&'a self, tag: &'a str) -> BoxFuture<'a,
+  Option<Response>>` becomes `async fn get(&self, tag: &str) ->
+  Option<Response>`, and likewise for the other two; `reserve` keeps its
+  no-op default, so a store that never overrode it is unaffected beyond the
+  two signatures. Users of the default `InMemoryStateStore` have nothing to
+  change.
+
+  With both traits converted, `neva::shared::BoxFuture` is no longer part of
+  any trait neva asks you to implement. It stays public -- the middleware
+  pipeline's `Next` is a `dyn Fn` returning one -- and remains a plain alias
+  for `Pin<Box<dyn Future<Output = T> + Send + 'a>>`.
+
+### Fixed
+
+#### Shutdown
+* **`App::run` no longer returns while the transport writers are still
+  draining** (#116). The shutdown drain that landed in 0.5.4 gives a
+  subscription's graceful-close result room to be produced and queued; this is
+  the last leg, getting it written. Cancelling the transport token did two
+  things at once: the writers began draining what was queued, and `run`'s own
+  loop broke on that same signal and returned. Nothing joined the first to the
+  second, and the drain runs in detached tasks -- so under `App::run_blocking`,
+  which drops its runtime the moment `run` returns, a writer that had not
+  finished was aborted mid-drain and the client saw the abrupt close the drain
+  exists to prevent.
+
+  A transport now hands back a completion signal alongside its cancellation
+  token: everything that may still write holds it until it is done -- the stdio
+  writer, the HTTP dispatch pump, and the HTTP engine whose graceful shutdown
+  is what puts those bytes on the socket -- and `run` waits for it before
+  returning. `App::with_shutdown_drain(..)` bounds the whole teardown rather
+  than each half of it: the relay stamps a deadline when the shutdown request
+  arrives, the wait for the subscriptions to answer spends part of it, and the
+  writers get the remainder. What is still writing when that runs out is
+  stopped rather than left on a runtime that outlives the server, where it
+  would put the server's output on a stdout its host has taken back -- so
+  `Duration::ZERO` is the abrupt close it says it is. A server with nothing
+  queued pays nothing for any of it, and a transport that failed under the
+  server now has its writers stopped rather than left behind.
+
+* **The Volga engine stops on the transport's token** (#116). Its `run` took
+  the token and used it only to report its own failures, so the listener came
+  down on Volga's own signal handling and nothing else: a server stopped
+  through an `App::with_shutdown()` handle returned from `run` with the port
+  still bound and serving, until whatever owned the runtime dropped it. The
+  token now drives Volga's graceful shutdown, which is also what makes the
+  drain signal above mean anything for HTTP. `HttpEngine::run` always
+  documented this contract -- an engine that ignores the token now costs its
+  server the shutdown budget on every stop.
+
 ## 0.5.4
 
 ### Added

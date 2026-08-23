@@ -1379,36 +1379,27 @@ mod tests {
     struct EchoesState;
 
     #[cfg(feature = "client-oauth")]
-    impl crate::auth::oauth::AuthorizationHandler for EchoesState {
-        fn redirect_uri(
-            &self,
-        ) -> futures_util::future::BoxFuture<'_, Result<String, crate::error::Error>> {
-            Box::pin(async { Ok("http://127.0.0.1:8919/callback".to_string()) })
+    impl oauth::AuthorizationHandler for EchoesState {
+        async fn redirect_uri(&self) -> Result<String, Error> {
+            Ok("http://127.0.0.1:8919/callback".to_string())
         }
 
-        fn authorize(
-            &self,
-            url: String,
-        ) -> futures_util::future::BoxFuture<
-            '_,
-            Result<crate::auth::oauth::CallbackParams, crate::error::Error>,
-        > {
-            Box::pin(async move {
-                let state = url
-                    .split(['?', '&'])
-                    .find_map(|param| param.strip_prefix("state="))
-                    .ok_or_else(|| {
-                        Error::new(
-                            ErrorCode::InvalidRequest,
-                            "the authorization URL carried no `state`",
-                        )
-                    })?
-                    .to_owned();
-                Ok(crate::auth::oauth::CallbackParams {
-                    code: "the-code".into(),
-                    state,
-                    iss: None,
-                })
+        async fn authorize(&self, url: String) -> Result<oauth::CallbackParams, Error> {
+            let state = url
+                .split(['?', '&'])
+                .find_map(|param| param.strip_prefix("state="))
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::InvalidRequest,
+                        "the authorization URL carried no `state`",
+                    )
+                })?
+                .to_owned();
+
+            Ok(oauth::CallbackParams {
+                code: "the-code".into(),
+                state,
+                iss: None,
             })
         }
     }

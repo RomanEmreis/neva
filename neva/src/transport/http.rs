@@ -16,7 +16,10 @@ use tokio_util::sync::CancellationToken;
 #[cfg(feature = "http-server")]
 use std::time::Duration;
 
-use super::{Receiver as TransportReceiver, Sender as TransportSender, Transport};
+use super::{Receiver as TransportReceiver, Sender as TransportSender, Transport, TransportHandle};
+
+#[cfg(feature = "http-server")]
+use super::DrainSignal;
 
 #[cfg(all(feature = "http-client", feature = "client-tls"))]
 use crate::transport::http::client::tls_config::{
@@ -1012,7 +1015,7 @@ where
     type Sender = HttpSender;
     type Receiver = HttpReceiver;
 
-    fn start(&mut self) -> CancellationToken {
+    fn start(&mut self) -> TransportHandle {
         let token = CancellationToken::new();
         let (ctx, sender_rx) = match self.build_context_and_engine() {
             Ok(x) => x,
@@ -1021,9 +1024,10 @@ where
                 tracing::error!(logger = "neva", "Failed to start HTTP server: {}", _err);
                 // Hand back an already-cancelled token so `App::run`'s
                 // receive loop breaks immediately instead of waiting
-                // forever on a server that never bound.
+                // forever on a server that never bound. Nothing was started,
+                // so there is nothing to wait on draining either.
                 token.cancel();
-                return token;
+                return TransportHandle::detached(token);
             }
         };
 
@@ -1042,10 +1046,19 @@ where
         let cleanup_interval = self.sse_cleanup_interval;
         let session_ttl = self.sse_session_ttl;
         let engine_token = token.clone();
+        // Everything this transport runs sits behind one drain signal, held
+        // until the last of it is done: the pump, which carries an outbound
+        // message from the App's channel to the SSE session or the pending
+        // request waiting for it and keeps draining after cancellation, and
+        // the engine, which is what writes those bytes onto the socket. A
+        // signal raised on the pump alone would say "queued" and mean
+        // "written".
+        let (guard, mut drained) = DrainSignal::new();
 
-        tokio::spawn(async move {
+        let transport = tokio::spawn(async move {
+            let _drained = guard;
             tokio::join!(
-                core::dispatch::dispatch(pending, sse_registry, sender_rx, engine_token.clone(),),
+                core::dispatch::dispatch(pending, sse_registry, sender_rx, engine_token.clone()),
                 core::cleanup::cleanup_stale_sessions(
                     cleanup_registry,
                     cleanup_interval,
@@ -1070,8 +1083,11 @@ where
                 }
             );
         });
+        // One task holds all of it, so one abort ends all of it if the
+        // shutdown budget runs out.
+        drained.abort_on_timeout(transport.abort_handle());
 
-        token
+        TransportHandle::new(token, drained)
     }
 
     #[inline]
@@ -1086,7 +1102,7 @@ where
     C: Send + 'static,
     E: HttpEngine,
 {
-    fn start(&mut self) -> CancellationToken {
+    fn start(&mut self) -> TransportHandle {
         <Self as Transport>::start(self)
     }
 
@@ -1105,19 +1121,22 @@ impl Transport for HttpClient {
     type Sender = HttpSender;
     type Receiver = HttpReceiver;
 
-    fn start(&mut self) -> CancellationToken {
+    fn start(&mut self) -> TransportHandle {
         let token = CancellationToken::new();
         let runtime = match self.runtime() {
             Ok(runtime) => runtime,
             Err(_err) => {
                 #[cfg(feature = "tracing")]
                 tracing::error!(logger = "neva", "Failed to start HTTP client: {}", _err);
-                return token;
+                return TransportHandle::detached(token);
             }
         };
         tokio::spawn(client::connect(runtime, token.clone()));
 
-        token
+        // A client's outbound messages are written by the connection task,
+        // which owns its own teardown; there is no shutdown drain on this side
+        // to join.
+        TransportHandle::detached(token)
     }
 
     fn split(self) -> (Self::Sender, Self::Receiver) {
@@ -1189,16 +1208,252 @@ mod engine_smoke_tests {
             exited: exited.clone(),
         };
         let mut server = HttpServer::from_engine("127.0.0.1:0", engine);
-        let token = <HttpServer<_, _> as Transport>::start(&mut server);
+        let handle = <HttpServer<_, _> as Transport>::start(&mut server);
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(started.load(Ordering::SeqCst), "engine.run was not invoked");
 
-        token.cancel();
+        handle.token.cancel();
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
             exited.load(Ordering::SeqCst),
             "engine did not exit on cancellation"
+        );
+    }
+
+    /// A mock engine that hands the test the context it was started with.
+    /// The pending map in it is where the pump routes an outbound response, so
+    /// it is how a test sees the pump do its work.
+    struct CapturingEngine {
+        ctx: Arc<std::sync::Mutex<Option<HttpContext>>>,
+    }
+
+    impl HttpEngine for CapturingEngine {
+        type Request = HttpRequest;
+        type Response = HttpResponse;
+        type SseEvent = ();
+
+        async fn adapt_request(req: Self::Request) -> Result<HttpRequest, Error> {
+            Ok(req)
+        }
+
+        fn adapt_response(resp: HttpResponse) -> Self::Response {
+            resp
+        }
+
+        fn tracked_event(_seq: u64, _msg: &Message) -> Self::SseEvent {}
+        fn ephemeral_event(_msg: &Message) -> Self::SseEvent {}
+
+        async fn run(self, ctx: HttpContext, token: CancellationToken) -> Result<(), Error> {
+            if let Ok(mut slot) = self.ctx.lock() {
+                *slot = Some(ctx);
+            }
+            token.cancelled().await;
+            Ok(())
+        }
+    }
+
+    /// Waits for the engine to have been handed its context.
+    async fn captured(slot: &Arc<std::sync::Mutex<Option<HttpContext>>>) -> HttpContext {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(ctx) = slot.lock().ok().and_then(|slot| slot.clone()) {
+                    return ctx;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the engine must have been started")
+    }
+
+    /// One response, queued and waiting for the pump.
+    fn queued_response(
+        pending: &crate::transport::http::core::context::RequestMap,
+    ) -> (Message, tokio::sync::oneshot::Receiver<Message>) {
+        let id = crate::types::RequestId::Number(1);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        pending.insert(id.clone(), tx);
+        (
+            Message::Response(crate::types::Response::success(id, serde_json::json!({}))),
+            rx,
+        )
+    }
+
+    /// The pump routes what is already queued before it raises its drain
+    /// signal. That ordering is the whole contract `App::run` joins on: the
+    /// signal has to mean "written", not "told to stop".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_pump_routes_what_was_queued_before_it_signals_drained() {
+        let slot = Arc::new(std::sync::Mutex::new(None));
+        let mut server =
+            HttpServer::from_engine("127.0.0.1:0", CapturingEngine { ctx: slot.clone() });
+        let mut sender = server.sender.clone();
+
+        let handle = <HttpServer<_, _> as Transport>::start(&mut server);
+        let ctx = captured(&slot).await;
+
+        let (response, mut rx) = queued_response(&ctx.pending);
+        sender
+            .send(response)
+            .await
+            .expect("the outbound channel takes it");
+
+        // Shutdown reaching the transport: stop taking new work, drain the
+        // rest.
+        handle.token.cancel();
+
+        assert!(
+            handle.drained.wait_or_abort(Duration::from_secs(5)).await,
+            "the pump must raise its drain signal once it has run dry"
+        );
+        assert!(
+            rx.try_recv().is_ok(),
+            "a message queued before shutdown must have been routed by the \
+             time the pump reports itself drained"
+        );
+    }
+
+    /// The engine is inside the transport's drain signal, so it has to answer
+    /// the token the `HttpEngine::run` contract hands it. A Volga server that
+    /// ignored it would leave `App::run` sitting out the whole shutdown
+    /// budget -- and the listener bound and serving behind it.
+    #[cfg(feature = "http-server-volga")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_volga_engine_stops_on_the_transport_token() {
+        let mut server = HttpServer::new("127.0.0.1:0");
+        let handle = <HttpServer<_, _> as Transport>::start(&mut server);
+
+        // Bound and serving before it is asked to stop, so this is a running
+        // server going down rather than one that never came up.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        handle.token.cancel();
+
+        assert!(
+            handle.drained.wait_or_abort(Duration::from_secs(5)).await,
+            "a cancelled transport must take its engine down with it"
+        );
+    }
+
+    /// An engine that does not answer its token -- the contract `HttpEngine`
+    /// states and the Volga engine now keeps -- must not be able to outlive
+    /// the server that started it. The budget ends the wait, and the abort
+    /// registered with the drain signal ends the task.
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_transport_that_will_not_stop_is_stopped_on_the_budget() {
+        /// Flips its flag when the future holding it is dropped -- which, for
+        /// a task nothing else can end, only happens on an abort.
+        struct RunningFlag(Arc<AtomicBool>);
+
+        impl Drop for RunningFlag {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+
+        struct StuckEngine {
+            running: Arc<AtomicBool>,
+        }
+
+        impl HttpEngine for StuckEngine {
+            type Request = HttpRequest;
+            type Response = HttpResponse;
+            type SseEvent = ();
+
+            async fn adapt_request(req: Self::Request) -> Result<HttpRequest, Error> {
+                Ok(req)
+            }
+
+            fn adapt_response(resp: HttpResponse) -> Self::Response {
+                resp
+            }
+
+            fn tracked_event(_seq: u64, _msg: &Message) -> Self::SseEvent {}
+            fn ephemeral_event(_msg: &Message) -> Self::SseEvent {}
+
+            async fn run(self, _ctx: HttpContext, _token: CancellationToken) -> Result<(), Error> {
+                self.running.store(true, Ordering::SeqCst);
+                let _flag = RunningFlag(self.running.clone());
+                std::future::pending::<()>().await;
+                Ok(())
+            }
+        }
+
+        let running = Arc::new(AtomicBool::new(false));
+        let server = HttpServer::from_engine(
+            "127.0.0.1:0",
+            StuckEngine {
+                running: running.clone(),
+            },
+        );
+
+        let (app, shutdown) = crate::App::new()
+            .without_greeting()
+            .with_shutdown_drain(Duration::from_millis(100))
+            .with_options(|opts| opts.set_http(server))
+            .with_shutdown();
+        let server_task = tokio::spawn(app.run());
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !running.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the engine must have been started");
+
+        shutdown.shutdown();
+
+        tokio::time::timeout(Duration::from_secs(2), server_task)
+            .await
+            .expect("run must return once the budget is spent")
+            .expect("the server task panicked");
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while running.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a transport the budget ran out on must be stopped, not left running");
+    }
+
+    /// `App::run` returns only once the transport has finished with what it
+    /// was holding -- and, for a server with nothing queued, without paying
+    /// any part of the drain budget for the privilege.
+    #[cfg(feature = "server")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_returns_once_the_transport_has_written_what_was_queued() {
+        let slot = Arc::new(std::sync::Mutex::new(None));
+        let server = HttpServer::from_engine("127.0.0.1:0", CapturingEngine { ctx: slot.clone() });
+        let mut sender = server.sender.clone();
+
+        let (app, shutdown) = crate::App::new()
+            .without_greeting()
+            .with_options(|opts| opts.set_http(server))
+            .with_shutdown();
+        let server_task = tokio::spawn(app.run());
+        let ctx = captured(&slot).await;
+
+        // Queued the way a handler's result is: into the transport's outbound
+        // channel, with nothing having pumped it yet.
+        let (response, mut rx) = queued_response(&ctx.pending);
+        sender
+            .send(response)
+            .await
+            .expect("the outbound channel takes it");
+
+        shutdown.shutdown();
+
+        tokio::time::timeout(Duration::from_secs(1), server_task)
+            .await
+            .expect("run must return promptly, not sit out the drain budget")
+            .expect("the server task panicked");
+
+        assert!(
+            rx.try_recv().is_ok(),
+            "run returned before the transport wrote what was queued"
         );
     }
 
@@ -1272,11 +1527,11 @@ mod engine_smoke_tests {
         let mut server = HttpServer::from_engine("127.0.0.1:3000", MockEngine::default())
             .with_oauth_metadata(|oauth| oauth.with_resource("not a uri"));
 
-        let token = <HttpServer<_, _> as Transport>::start(&mut server);
+        let handle = <HttpServer<_, _> as Transport>::start(&mut server);
 
         // A cancelled token breaks App::run's receive loop immediately;
         // an uncancelled one would leave the app waiting forever on a
         // server that never bound.
-        assert!(token.is_cancelled());
+        assert!(handle.token.is_cancelled());
     }
 }

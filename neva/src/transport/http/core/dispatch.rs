@@ -9,6 +9,12 @@ use tokio_util::sync::CancellationToken;
 
 use super::context::RequestMap;
 
+/// Pumps the App's outbound queue until `token` fires, then empties what is
+/// still in it before returning.
+///
+/// Returning is half of what the transport's drain signal waits for (the
+/// engine writing those bytes out is the other half), so the trailing drain
+/// below is not an optimisation -- it is what the signal promises.
 pub(crate) async fn dispatch(
     pending: RequestMap,
     sse_registry: Arc<SseSessionRegistry>,

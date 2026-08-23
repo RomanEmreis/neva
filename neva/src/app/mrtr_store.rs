@@ -34,6 +34,7 @@
 use crate::shared::BoxFuture;
 use crate::types::Response;
 use crate::types::mrtr::state::now_secs;
+use std::future::Future;
 use std::sync::Arc;
 
 /// A store that remembers the final response of a committed MRTR `requestState`
@@ -45,16 +46,40 @@ use std::sync::Arc;
 /// (the base64 ciphertext after the `.`) combined with a digest of the round's
 /// answers, unique per minted state and round.
 ///
+/// Implement it with plain `async fn`s. The `+ Send` the trait puts on the
+/// returned futures is what lets the dispatcher drive them from a spawned
+/// task; an `async fn` whose body holds nothing thread-bound across an
+/// `.await` satisfies that without having to say so.
+///
 /// See the [module docs](self) for the full rationale.
+///
+/// # Examples
+/// ```no_run
+/// # #[cfg(not(feature = "legacy-spec"))] {
+/// use neva::app::mrtr_store::RequestStateStore;
+/// use neva::types::Response;
+///
+/// /// A store that remembers nothing -- every retry re-runs the round.
+/// struct NoCache;
+///
+/// impl RequestStateStore for NoCache {
+///     async fn get(&self, _tag: &str) -> Option<Response> {
+///         None
+///     }
+///
+///     async fn put(&self, _tag: &str, _response: Response, _exp: u64) {}
+/// }
+/// # }
+/// ```
 pub trait RequestStateStore: Send + Sync {
     /// Returns the cached final response previously recorded for `tag`, or
     /// `None` if that state has not committed yet (or its entry has expired).
-    fn get<'a>(&'a self, tag: &'a str) -> BoxFuture<'a, Option<Response>>;
+    fn get(&self, tag: &str) -> impl Future<Output = Option<Response>> + Send;
 
     /// Records `response` as the committed result for `tag`, retained at least
     /// until the unix-seconds `exp` (the originating state's own expiry, after
     /// which a retry is rejected as expired before reaching the store).
-    fn put<'a>(&'a self, tag: &'a str, response: Response, exp: u64) -> BoxFuture<'a, ()>;
+    fn put(&self, tag: &str, response: Response, exp: u64) -> impl Future<Output = ()> + Send;
 
     /// Atomically claims `tag` for an in-flight final round, returning a guard
     /// the caller holds across the [`get`](Self::get) check, handler execution
@@ -80,8 +105,48 @@ pub trait RequestStateStore: Send + Sync {
     /// for the same reason it must share the MRTR secret: a retry routed to a
     /// different instance must serialise against the round still committing
     /// elsewhere.
-    fn reserve<'a>(&'a self, _tag: &'a str) -> BoxFuture<'a, Box<dyn Send>> {
-        Box::pin(async { Box::new(()) as Box<dyn Send> })
+    fn reserve(&self, _tag: &str) -> impl Future<Output = Box<dyn Send>> + Send {
+        async { Box::new(()) as Box<dyn Send> }
+    }
+}
+
+/// The dyn-compatible half of [`RequestStateStore`].
+///
+/// One server holds one store whose type it does not know, so the dispatcher
+/// reaches it through `Arc<dyn ..>` -- and a trait method returning
+/// `impl Future` cannot be made into one. The boxing that bridges the two
+/// lives here rather than in the signature an implementor writes: three
+/// allocations on the final round of an MRTR chain, which is the round that
+/// runs a handler and commits its effects.
+///
+/// Nothing implements this by hand. The blanket impl below covers every
+/// [`RequestStateStore`], so it is a detail of the storage rather than a
+/// second thing to write.
+pub(crate) trait DynRequestStateStore: Send + Sync {
+    /// [`RequestStateStore::get`] with its future boxed.
+    fn boxed_get<'a>(&'a self, tag: &'a str) -> BoxFuture<'a, Option<Response>>;
+
+    /// [`RequestStateStore::put`] with its future boxed.
+    fn boxed_put<'a>(&'a self, tag: &'a str, response: Response, exp: u64) -> BoxFuture<'a, ()>;
+
+    /// [`RequestStateStore::reserve`] with its future boxed.
+    fn boxed_reserve<'a>(&'a self, tag: &'a str) -> BoxFuture<'a, Box<dyn Send>>;
+}
+
+impl<T: RequestStateStore> DynRequestStateStore for T {
+    #[inline]
+    fn boxed_get<'a>(&'a self, tag: &'a str) -> BoxFuture<'a, Option<Response>> {
+        Box::pin(self.get(tag))
+    }
+
+    #[inline]
+    fn boxed_put<'a>(&'a self, tag: &'a str, response: Response, exp: u64) -> BoxFuture<'a, ()> {
+        Box::pin(self.put(tag, response, exp))
+    }
+
+    #[inline]
+    fn boxed_reserve<'a>(&'a self, tag: &'a str) -> BoxFuture<'a, Box<dyn Send>> {
+        Box::pin(self.reserve(tag))
     }
 }
 
@@ -112,51 +177,48 @@ impl InMemoryStateStore {
 }
 
 impl RequestStateStore for InMemoryStateStore {
-    fn get<'a>(&'a self, tag: &'a str) -> BoxFuture<'a, Option<Response>> {
-        Box::pin(async move {
-            let now = now_secs();
-            // Read first; the `Ref` guard is dropped at the end of the `match`,
-            // before any `remove`, so there is no self-deadlock on the shard.
-            let hit = match self.entries.get(tag) {
-                Some(entry) if entry.1 > now => Some(entry.0.clone()),
-                Some(_) => None, // present but expired
-                None => return None,
-            };
-            if hit.is_none() {
-                self.entries.remove(tag);
-            }
-            hit
-        })
+    async fn get(&self, tag: &str) -> Option<Response> {
+        let now = now_secs();
+        // Read first; the `Ref` guard is dropped at the end of the `match`,
+        // before any `remove`, so there is no self-deadlock on the shard.
+        let hit = match self.entries.get(tag) {
+            Some(entry) if entry.1 > now => Some(entry.0.clone()),
+            Some(_) => None, // present but expired
+            None => return None,
+        };
+
+        if hit.is_none() {
+            self.entries.remove(tag);
+        }
+
+        hit
     }
 
-    fn put<'a>(&'a self, tag: &'a str, response: Response, exp: u64) -> BoxFuture<'a, ()> {
-        Box::pin(async move {
-            let now = now_secs();
-            // Opportunistically drop expired entries so the map stays bounded.
-            self.entries.retain(|_, (_, e)| *e > now);
-            // Drop reservation locks no task holds or awaits -- only the map's
-            // own reference remains (`strong_count == 1`). The tag committing
-            // here is still held by the live guard (`>= 2`), so it survives.
-            self.locks.retain(|_, m| Arc::strong_count(m) > 1);
-            self.entries.insert(tag.to_owned(), (response, exp));
-        })
+    async fn put(&self, tag: &str, response: Response, exp: u64) {
+        let now = now_secs();
+        // Opportunistically drop expired entries so the map stays bounded.
+        self.entries.retain(|_, (_, e)| *e > now);
+        // Drop reservation locks no task holds or awaits -- only the map's
+        // own reference remains (`strong_count == 1`). The tag committing
+        // here is still held by the live guard (`>= 2`), so it survives.
+        self.locks.retain(|_, m| Arc::strong_count(m) > 1);
+        self.entries.insert(tag.to_owned(), (response, exp));
     }
 
-    fn reserve<'a>(&'a self, tag: &'a str) -> BoxFuture<'a, Box<dyn Send>> {
-        Box::pin(async move {
-            // Get-or-create the per-tag mutex, then take it. `lock_owned`
-            // consumes a clone of the `Arc` and the returned guard keeps it, so
-            // the guard is `'static`. While any task holds or awaits the lock
-            // the `Arc`'s strong count stays above 1, keeping it out of `put`'s
-            // sweep until the last user is gone.
-            let mutex = self
-                .locks
-                .entry(tag.to_owned())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone();
-            let guard = mutex.lock_owned().await;
-            Box::new(guard) as Box<dyn Send>
-        })
+    async fn reserve(&self, tag: &str) -> Box<dyn Send> {
+        // Get-or-create the per-tag mutex, then take it. `lock_owned`
+        // consumes a clone of the `Arc` and the returned guard keeps it, so
+        // the guard is `'static`. While any task holds or awaits the lock
+        // the `Arc`'s strong count stays above 1, keeping it out of `put`'s
+        // sweep until the last user is gone.
+        let mutex = self
+            .locks
+            .entry(tag.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+
+        let guard = mutex.lock_owned().await;
+        Box::new(guard) as Box<dyn Send>
     }
 }
 
@@ -232,6 +294,38 @@ mod tests {
             "the final-round handler must run exactly once across identical retries"
         );
         assert!(store.get("tag").await.is_some());
+    }
+
+    /// The trait is written with plain `async fn`s and the server holds one
+    /// store behind `Arc<dyn ..>`. The bridge is what makes those two facts
+    /// compatible, and it is the only thing in between.
+    #[tokio::test]
+    async fn a_plain_async_impl_is_usable_through_the_dyn_bridge() {
+        struct LastOne(std::sync::Mutex<Option<Response>>);
+
+        impl RequestStateStore for LastOne {
+            async fn get(&self, _tag: &str) -> Option<Response> {
+                self.0.lock().ok().and_then(|slot| slot.clone())
+            }
+
+            async fn put(&self, _tag: &str, response: Response, _exp: u64) {
+                if let Ok(mut slot) = self.0.lock() {
+                    *slot = Some(response);
+                }
+            }
+        }
+
+        let store: Arc<dyn DynRequestStateStore> = Arc::new(LastOne(std::sync::Mutex::new(None)));
+
+        assert!(store.boxed_get("tag").await.is_none());
+        // The inherited no-op `reserve` crosses the bridge as well -- a store
+        // that never overrode it is still callable through the `dyn`.
+        let guard = store.boxed_reserve("tag").await;
+        store.boxed_put("tag", resp(7), now_secs() + 300).await;
+        drop(guard);
+
+        let cached = store.boxed_get("tag").await.expect("cached response");
+        assert_eq!(*cached.id(), RequestId::Number(7));
     }
 
     #[tokio::test]

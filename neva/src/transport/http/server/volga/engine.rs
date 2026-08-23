@@ -124,10 +124,19 @@ impl HttpEngine for VolgaEngine {
         #[cfg(feature = "server-oauth")]
         let oauth_metadata_url = ctx.oauth_metadata_url().map(str::to_owned);
 
+        // The transport's token is what stops this server, as the
+        // `HttpEngine::run` contract asks: it composes with Volga's own signal
+        // handling rather than replacing it, so Ctrl+C still works, and a
+        // programmatic `ShutdownHandle` now takes the listener down with it
+        // instead of leaving it bound and serving. Volga's graceful shutdown
+        // keeps in-flight connections -- the response body a subscription is
+        // written onto among them -- open while it drains.
+        let shutdown = token.clone();
         let mut server = App::new()
             .bind(addr.as_str())
             .with_no_delay()
-            .without_greeter();
+            .without_greeter()
+            .shutdown_on(async move { shutdown.cancelled().await });
 
         let rules = match self.auth {
             Some(auth) => {

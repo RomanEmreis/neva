@@ -87,30 +87,27 @@ impl CallbackParams {
 /// headless embedder implements this trait to route the URL through its
 /// own UI and deliver the callback parameters however they arrive.
 ///
-/// Both methods return a [`BoxFuture`] rather than being `async fn`: the
-/// handler is stored behind `Arc<dyn AuthorizationHandler>`, and `async fn`
-/// in a trait is not dyn-compatible. `Box::pin(async move { ... })` is all an
-/// implementation needs -- and the alias is neva's own, so implementing this
-/// trait pulls in no `futures` dependency.
+/// Implement it with plain `async fn`s. The `+ Send` the trait puts on the
+/// returned futures is what lets the session drive them from a spawned task;
+/// an `async fn` whose body holds nothing thread-bound across an `.await`
+/// satisfies that without having to say so.
 ///
 /// # Example
 /// ```no_run
 /// use neva::auth::oauth::{AuthorizationHandler, CallbackParams};
 /// use neva::error::Error;
-/// use neva::shared::BoxFuture;
 ///
 /// struct MyUi;
 ///
 /// impl AuthorizationHandler for MyUi {
-///     fn redirect_uri(&self) -> BoxFuture<'_, Result<String, Error>> {
-///         Box::pin(async { Ok("https://my.app/oauth/callback".into()) })
+///     async fn redirect_uri(&self) -> Result<String, Error> {
+///         Ok("https://my.app/oauth/callback".into())
 ///     }
-///     fn authorize(&self, url: String) -> BoxFuture<'_, Result<CallbackParams, Error>> {
-///         Box::pin(async move {
-///             // show `url` to the user, await the callback...
-///             # let _ = url;
-///             todo!()
-///         })
+///
+///     async fn authorize(&self, url: String) -> Result<CallbackParams, Error> {
+///         // show `url` to the user, await the callback...
+///         # let _ = url;
+///         todo!()
 ///     }
 /// }
 /// ```
@@ -119,11 +116,50 @@ pub trait AuthorizationHandler: Send + Sync + 'static {
     ///
     /// Called once per flow, before dynamic client registration -- the
     /// URI is registered and sent with the authorization request.
-    fn redirect_uri(&self) -> BoxFuture<'_, Result<String, Error>>;
+    fn redirect_uri(&self) -> impl Future<Output = Result<String, Error>> + Send;
 
     /// Presents `authorization_url` to the user and returns the callback
     /// parameters once the authorization server redirects back.
-    fn authorize(&self, authorization_url: String) -> BoxFuture<'_, Result<CallbackParams, Error>>;
+    fn authorize(
+        &self,
+        authorization_url: String,
+    ) -> impl Future<Output = Result<CallbackParams, Error>> + Send;
+}
+
+/// The dyn-compatible half of [`AuthorizationHandler`].
+///
+/// One configuration holds one handler whose type it does not know, so the
+/// session reaches it through `Arc<dyn ..>` -- and a trait method returning
+/// `impl Future` cannot be made into one. The boxing that bridges the two
+/// lives here rather than in the signature an implementor writes: it costs one
+/// allocation per authorization flow, which is the flow that opens a browser
+/// and waits for a human.
+///
+/// Nothing implements this by hand. The blanket impl below covers every
+/// [`AuthorizationHandler`], so it is a detail of the storage rather than a
+/// second thing to write.
+pub(crate) trait DynAuthorizationHandler: Send + Sync + 'static {
+    /// [`AuthorizationHandler::redirect_uri`] with its future boxed.
+    fn boxed_redirect_uri(&self) -> BoxFuture<'_, Result<String, Error>>;
+
+    /// [`AuthorizationHandler::authorize`] with its future boxed.
+    fn boxed_authorize(
+        &self,
+        authorization_url: String,
+    ) -> BoxFuture<'_, Result<CallbackParams, Error>>;
+}
+
+impl<T: AuthorizationHandler> DynAuthorizationHandler for T {
+    fn boxed_redirect_uri(&self) -> BoxFuture<'_, Result<String, Error>> {
+        Box::pin(self.redirect_uri())
+    }
+
+    fn boxed_authorize(
+        &self,
+        authorization_url: String,
+    ) -> BoxFuture<'_, Result<CallbackParams, Error>> {
+        Box::pin(self.authorize(authorization_url))
+    }
 }
 
 /// Default [`AuthorizationHandler`] for desktop/CLI clients: binds a
@@ -257,41 +293,42 @@ fn parse_callback_request(raw: &[u8]) -> Result<CallbackParams, Error> {
         .split(|&b| b == b'\r' || b == b'\n')
         .next()
         .unwrap_or_default();
+
     let line = std::str::from_utf8(line)
         .map_err(|_| Error::new(ErrorCode::InvalidRequest, "malformed callback request"))?;
+
     let target = line
         .split(' ')
         .nth(1)
         .ok_or_else(|| Error::new(ErrorCode::InvalidRequest, "malformed callback request"))?;
+
     let query = target.split_once('?').map(|(_, q)| q).unwrap_or_default();
     CallbackParams::from_query(query)
 }
 
 impl AuthorizationHandler for LoopbackHandler {
-    fn redirect_uri(&self) -> BoxFuture<'_, Result<String, Error>> {
-        Box::pin(async move {
-            let listener = TcpListener::bind(("127.0.0.1", self.port))
-                .await
-                .map_err(Error::from)?;
-            let port = listener.local_addr().map_err(Error::from)?.port();
-            *self.listener.lock().await = Some(listener);
-            Ok(format!("http://127.0.0.1:{port}/callback"))
-        })
+    async fn redirect_uri(&self) -> Result<String, Error> {
+        let listener = TcpListener::bind(("127.0.0.1", self.port))
+            .await
+            .map_err(Error::from)?;
+
+        let port = listener.local_addr().map_err(Error::from)?.port();
+        *self.listener.lock().await = Some(listener);
+
+        Ok(format!("http://127.0.0.1:{port}/callback"))
     }
 
-    fn authorize(&self, authorization_url: String) -> BoxFuture<'_, Result<CallbackParams, Error>> {
-        Box::pin(async move {
-            #[cfg(feature = "tracing")]
-            tracing::info!(logger = "neva", "authorize at: {authorization_url}");
+    async fn authorize(&self, authorization_url: String) -> Result<CallbackParams, Error> {
+        #[cfg(feature = "tracing")]
+        tracing::info!(logger = "neva", "authorize at: {authorization_url}");
 
-            if self.open_browser {
-                open_in_browser(&authorization_url);
-            }
+        if self.open_browser {
+            open_in_browser(&authorization_url);
+        }
 
-            tokio::time::timeout(self.timeout, self.accept_callback())
-                .await
-                .map_err(|_| Error::new(ErrorCode::InternalError, "authorization timed out"))?
-        })
+        tokio::time::timeout(self.timeout, self.accept_callback())
+            .await
+            .map_err(|_| Error::new(ErrorCode::InternalError, "authorization timed out"))?
     }
 }
 

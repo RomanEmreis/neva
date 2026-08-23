@@ -998,7 +998,7 @@ impl OAuthSession {
             ));
         }
 
-        let redirect_uri = self.config.handler.redirect_uri().await?;
+        let redirect_uri = self.config.handler.boxed_redirect_uri().await?;
         let client = self
             .build_client(source, &server_metadata, Some(&redirect_uri))
             .await?;
@@ -1061,7 +1061,11 @@ impl OAuthSession {
             .build()
             .map_err(flow_error)?;
 
-        let params = self.config.handler.authorize(request.url.clone()).await?;
+        let params = self
+            .config
+            .handler
+            .boxed_authorize(request.url.clone())
+            .await?;
 
         if !request.matches_state(&params.state) {
             return Err(Error::new(

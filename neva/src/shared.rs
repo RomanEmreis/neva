@@ -56,19 +56,24 @@ mod task_api;
 #[cfg(all(feature = "tasks", any(feature = "server", feature = "legacy-spec")))]
 mod task_tracker;
 
-/// The future returned by neva's object-safe async traits -- a boxed,
-/// `Send` future borrowing for `'a`.
+/// The future neva's `dyn` boundaries speak -- a boxed, `Send` future
+/// borrowing for `'a`.
 ///
-/// Traits like `AuthorizationHandler` (client OAuth) and `RequestStateStore`
-/// (MRTR idempotency) are stored behind
-/// `Arc<dyn ...>`, which rules out `async fn` in the trait (not dyn-compatible),
-/// so their methods return this instead. Owning the alias here means
-/// implementing such a trait needs no `futures` dependency of your own -- and
-/// no version of it kept in lockstep with neva's.
+/// A trait method returning `impl Future` cannot be made into a trait object,
+/// and neva holds several caller-supplied traits behind `Arc<dyn ..>`: the
+/// MRTR `RequestStateStore`, the client's `AuthorizationHandler` and
+/// `AssertionProvider`, the server's `NotificationBus`. Each is written with
+/// plain `async fn`s and boxed onto an internal bridge, so this alias is where
+/// that boxing lands rather than something an implementation ever writes.
+///
+/// What does name it is the middleware pipeline, whose `Next` is a `dyn Fn`
+/// returning one. Owning the alias here means naming it needs no `futures`
+/// dependency of your own -- and no version of it kept in lockstep with
+/// neva's.
 ///
 /// It is a plain alias for `Pin<Box<dyn Future<Output = T> + Send + 'a>>`
 /// (identical to `futures_util::future::BoxFuture`), so `Box::pin(async { ... })`
-/// is all an implementation has to write.
+/// is all it takes to produce one.
 ///
 /// # Example
 /// ```
@@ -86,7 +91,7 @@ mod task_tracker;
 ///     }
 /// }
 /// ```
-pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// The boxed counterpart of [`BoxFuture`] for a sequence of values, used
 /// internally where a stream has to cross a `dyn` boundary.

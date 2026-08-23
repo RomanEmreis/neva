@@ -180,7 +180,7 @@ pub struct McpOptions {
     /// in-memory cache; multi-instance deployments should set a shared store
     /// via [`crate::App::with_request_state_store`].
     #[cfg(not(feature = "legacy-spec"))]
-    request_state_store: Arc<dyn crate::app::mrtr_store::RequestStateStore>,
+    request_state_store: Arc<dyn crate::app::mrtr_store::DynRequestStateStore>,
 
     /// Carries subscribable notifications between instances of one logical
     /// server, set via [`crate::App::with_notification_bus`].
@@ -940,14 +940,14 @@ impl McpOptions {
     #[cfg(not(feature = "legacy-spec"))]
     pub(crate) fn set_request_state_store(
         &mut self,
-        store: Arc<dyn crate::app::mrtr_store::RequestStateStore>,
+        store: Arc<dyn crate::app::mrtr_store::DynRequestStateStore>,
     ) {
         self.request_state_store = store;
     }
 
     /// Returns the MRTR final-round idempotency store.
     #[cfg(not(feature = "legacy-spec"))]
-    pub(crate) fn request_state_store(&self) -> &dyn crate::app::mrtr_store::RequestStateStore {
+    pub(crate) fn request_state_store(&self) -> &dyn crate::app::mrtr_store::DynRequestStateStore {
         self.request_state_store.as_ref()
     }
 

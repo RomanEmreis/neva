@@ -146,7 +146,9 @@ impl Client {
         self.register_methods();
 
         let mut transport = self.options.transport();
-        let token = transport.start();
+        // A client has no shutdown drain of its own to join -- see
+        // `TransportHandle::detached` -- so only the cancellation half is kept.
+        let token = transport.start().token;
 
         #[cfg(feature = "tracing")]
         self.register_tracing_notification_handlers();

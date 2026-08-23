@@ -10,7 +10,7 @@ use crate::app::handler::{
 };
 use crate::error::{Error, ErrorCode};
 use crate::middleware::{MwContext, Next, make_fn::make_mw};
-use crate::transport::{Receiver, Sender, Transport};
+use crate::transport::{Receiver, Sender, Transport, TransportHandle};
 use crate::types::{
     CallToolRequestParams, CallToolResponse, CompleteResult, FromHandlerArgs,
     GetPromptRequestParams, GetPromptResult, IntoResponse, ListPromptsRequestParams,
@@ -35,7 +35,6 @@ use crate::types::{SubscribeRequestParams, UnsubscribeRequestParams};
 #[cfg(not(feature = "legacy-spec"))]
 use tokio_util::sync::CancellationToken;
 
-#[cfg(not(feature = "legacy-spec"))]
 use self::shutdown::DEFAULT_SHUTDOWN_DRAIN;
 
 #[cfg(not(feature = "legacy-spec"))]
@@ -319,12 +318,17 @@ answered, bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
     }
 
     /// Caps how long shutdown waits for live `subscriptions/listen` streams to
-    /// answer before the transport is torn down anyway.
+    /// answer, and then for the transport writers to put those answers on the
+    /// wire, before the server goes down anyway.
     ///
-    /// This is a ceiling, not a delay: the wait ends the moment the last
-    /// result is queued, and is skipped outright when no subscription is open.
-    /// Raise it for a server whose subscriptions have deep buffers to flush;
-    /// `Duration::ZERO` opts out and restores an abrupt close.
+    /// This is a ceiling, not a delay: the first wait ends the moment the last
+    /// result is queued and is skipped outright when no subscription is open,
+    /// and the second ends as soon as the writers run dry. One budget covers
+    /// both -- it starts when the shutdown request arrives -- and what is
+    /// still writing when it runs out is stopped rather than left running on
+    /// whatever runtime outlives the server. Raise it for a server whose
+    /// subscriptions have deep buffers to flush; `Duration::ZERO` opts out and
+    /// restores an abrupt close.
     ///
     /// Default: 2 seconds.
     ///
@@ -345,6 +349,19 @@ answered, bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
     }
 
     /// Run the MCP server
+    ///
+    /// Returns once the server has stopped -- on an OS signal, on a
+    /// [`ShutdownHandle`], or on a transport that failed under it. Stopping
+    /// includes the transport finishing what was already queued, so a caller
+    /// that drops its runtime the moment this returns does not abandon a write
+    /// half-done, and whatever has not finished by the end of the budget is
+    /// stopped, so nothing writes on afterwards either.
+    #[cfg_attr(
+        not(feature = "legacy-spec"),
+        doc = "
+Both that wait and the one for live `subscriptions/listen` streams to answer
+are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
+    )]
     ///
     /// # Example
     /// ```no_run
@@ -430,8 +447,27 @@ answered, bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
         // Read before `self.options` moves into the runtime below.
         let greeted = self.greeting;
 
+        // How long the teardown gets, in total: the subscriptions answering
+        // and then the writers putting those answers on the wire. Read here
+        // because `self.options` moves into the runtime below.
+        #[cfg(not(feature = "legacy-spec"))]
+        let drain_budget = self.shutdown_drain;
+        #[cfg(feature = "legacy-spec")]
+        let drain_budget = DEFAULT_SHUTDOWN_DRAIN;
+
+        // Stamped by the relay when a shutdown request arrives, so the wait at
+        // the end of this function spends what is left of the budget rather
+        // than starting it over.
+        let drain_deadline = shutdown::DrainDeadline::default();
+
         let mut transport = self.options.transport();
-        let cancellation_token = transport.start();
+        // Two halves: the token that stops the transport, and the signal its
+        // writers raise once they have drained. This loop breaks on the first;
+        // returning waits on the second.
+        let TransportHandle {
+            token: cancellation_token,
+            drained,
+        } = transport.start();
 
         // Shutdown arrives here -- from an OS signal, or from a
         // `ShutdownHandle` the caller kept -- and is relayed to the transport
@@ -457,10 +493,16 @@ answered, bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
             cancellation_token.clone(),
             self.options.subscriptions().clone(),
             self.options.in_flight(),
-            self.shutdown_drain,
+            drain_budget,
+            drain_deadline.clone(),
         );
         #[cfg(feature = "legacy-spec")]
-        Self::relay_shutdown(shutdown, cancellation_token.clone());
+        Self::relay_shutdown(
+            shutdown,
+            cancellation_token.clone(),
+            drain_budget,
+            drain_deadline.clone(),
+        );
 
         // With a notification bus installed, every subscribable notification --
         // this instance's own included -- comes back through the bus, and this
@@ -554,6 +596,35 @@ answered, bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
                     }
                 }
             }
+        }
+
+        // Breaking out of the loop ends this server either way: a shutdown
+        // that reached its last phase already cancelled this, and a transport
+        // that failed under us needs it cancelled now so its writers stop
+        // rather than linger on a server that is gone.
+        cancellation_token.cancel();
+
+        // The writers observe that same token and drain what is already queued
+        // before they exit -- the graceful-close result of a
+        // `subscriptions/listen` stream is written into exactly that window.
+        // Awaiting them here is what keeps `run_blocking` from dropping its
+        // runtime, and with it the writers, mid-drain.
+        //
+        // What is left of the budget, not a second helping of it: the relay
+        // stamped the deadline when the shutdown request arrived, and the wait
+        // for the subscriptions to answer has already spent part of it. An
+        // unstamped deadline means no request came -- the transport failed
+        // under us -- and nothing has been spent.
+        let remaining = shutdown::remaining_drain(&drain_deadline, drain_budget);
+        let _drained_in_time = drained.wait_or_abort(remaining).await;
+        #[cfg(feature = "tracing")]
+        if !_drained_in_time {
+            tracing::warn!(
+                logger = "neva",
+                "the transport writers did not finish within {remaining:?} and \
+                 were stopped: messages queued at shutdown may not have \
+                 reached the wire"
+            );
         }
 
         // Closes what the banner opened. Only for a greeted server: one that

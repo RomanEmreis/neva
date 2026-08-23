@@ -16,7 +16,6 @@ use neva::auth::oauth::{
     PrivateKeyJwt,
 };
 use neva::prelude::*;
-use neva::shared::BoxFuture;
 use std::time::Duration;
 
 /// Splits the URL the suite hands us into the `host:port` and path halves the
@@ -278,47 +277,45 @@ impl RedirectReader {
 }
 
 impl AuthorizationHandler for RedirectReader {
-    fn redirect_uri(&self) -> BoxFuture<'_, Result<String, Error>> {
-        Box::pin(async move { Ok(self.redirect_uri.clone()) })
+    async fn redirect_uri(&self) -> Result<String, Error> {
+        Ok(self.redirect_uri.clone())
     }
 
-    fn authorize(&self, authorization_url: String) -> BoxFuture<'_, Result<CallbackParams, Error>> {
-        Box::pin(async move {
-            let http = reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .no_proxy()
-                .build()
-                .map_err(|err| Error::new(ErrorCode::InternalError, err.to_string()))?;
+    async fn authorize(&self, authorization_url: String) -> Result<CallbackParams, Error> {
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .map_err(|err| Error::new(ErrorCode::InternalError, err.to_string()))?;
 
-            let resp = http
-                .get(&authorization_url)
-                .send()
-                .await
-                .map_err(|err| Error::new(ErrorCode::InternalError, err.to_string()))?;
+        let resp = http
+            .get(&authorization_url)
+            .send()
+            .await
+            .map_err(|err| Error::new(ErrorCode::InternalError, err.to_string()))?;
 
-            let location = resp
-                .headers()
-                .get(reqwest::header::LOCATION)
-                .and_then(|v| v.to_str().ok())
-                .ok_or_else(|| {
-                    Error::new(
-                        ErrorCode::InternalError,
-                        format!(
-                            "the authorization endpoint answered {} without a redirect",
-                            resp.status()
-                        ),
-                    )
-                })?;
-
-            let query = location.split_once('?').map(|(_, q)| q).ok_or_else(|| {
+        let location = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| {
                 Error::new(
                     ErrorCode::InternalError,
-                    "the authorization redirect carried no query",
+                    format!(
+                        "the authorization endpoint answered {} without a redirect",
+                        resp.status()
+                    ),
                 )
             })?;
 
-            CallbackParams::from_query(query)
-        })
+        let query = location.split_once('?').map(|(_, q)| q).ok_or_else(|| {
+            Error::new(
+                ErrorCode::InternalError,
+                "the authorization redirect carried no query",
+            )
+        })?;
+
+        CallbackParams::from_query(query)
     }
 }
 

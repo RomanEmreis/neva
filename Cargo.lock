@@ -1639,9 +1639,9 @@ dependencies = [
 
 [[package]]
 name = "jsonschema"
-version = "0.50.0"
+version = "0.50.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bd2225bc56c338f18465ce618e5e56fff1295fcb0a0cb338b28010193f26949"
+checksum = "29b6bb4e22283b09119c671e57ac6a185e9a0c70c31585e56b729b626d877753"
 dependencies = [
  "ahash",
  "bytecount",
@@ -1670,18 +1670,18 @@ dependencies = [
 
 [[package]]
 name = "jsonschema-regex"
-version = "0.50.0"
+version = "0.50.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b11520e5257651f31068fa2c959ce28b09d8a217ffe42338bc27d690f06c0f8c"
+checksum = "497fbf3b1ca53b1e23a253f636e88e7a2031387388b8140199a0f240fcadf647"
 dependencies = [
  "regex-syntax",
 ]
 
 [[package]]
 name = "jsonschema-value"
-version = "0.50.0"
+version = "0.50.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ccefde026ba6e6e23002c4e1e087b5f411ef5bc90f3e7febb7cf3c498ca8b169"
+checksum = "b84ca3f39446973a810fc90fc2645ada8c24284f6deb009c78b776813973887d"
 dependencies = [
  "ahash",
  "bytecount",
@@ -1876,7 +1876,7 @@ dependencies = [
 
 [[package]]
 name = "neva"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -1926,7 +1926,7 @@ dependencies = [
 
 [[package]]
 name = "neva_macros"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2358,9 +2358,9 @@ dependencies = [
 
 [[package]]
 name = "referencing"
-version = "0.50.0"
+version = "0.50.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b228fc6035ae00a9008ba156c0dfc98f0b6ebc5f3c8db7ac7006dcf8e56f15a"
+checksum = "7a0a32a2a2c2d7dd0ee54705b5fd641be73037271928f68e9b0e7205b71c9d30"
 dependencies = [
  "ahash",
  "fluent-uri",
@@ -3347,9 +3347,9 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "uuid"
-version = "1.24.1"
+version = "1.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cefc03fd367c0c6d4305de1b312cf00248c4114f4a0418ce6a6af769e3b0bd9"
+checksum = "f053576934f05a761a402421fbbe3d425d9366f75f978806a037b3ca481abecc"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
