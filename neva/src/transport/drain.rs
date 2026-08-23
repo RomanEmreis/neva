@@ -27,6 +27,17 @@
 use std::time::Duration;
 use tokio::{sync::mpsc, task::AbortHandle};
 
+/// How long an abort is given to land before shutdown stops caring.
+///
+/// [`AbortHandle::abort`] is a request, not a stop: the task ends at its next
+/// yield point, and only then is its future -- and the [`DrainGuard`] inside it
+/// -- dropped. Waiting for that is what makes "stopped" true rather than
+/// "asked to stop", so that a writer mid-poll cannot finish its write after
+/// `run` has returned. Not a knob: what it covers is one poll of an
+/// already-cancelled task, and a task that never yields at all must not be
+/// able to hold open a shutdown that has already spent its budget.
+const ABORT_GRACE: Duration = Duration::from_millis(100);
+
 /// Held by a transport writer for as long as it may still write.
 ///
 /// Cloneable, so a transport with several writers hands one to each: the
@@ -110,6 +121,9 @@ impl DrainSignal {
             task.abort();
         }
 
+        // The guards go down with the futures the abort drops, so the signal
+        // that said "still writing" is also the one that says "gone".
+        let _ = tokio::time::timeout(ABORT_GRACE, self.rx.recv()).await;
         false
     }
 }
@@ -144,18 +158,46 @@ mod tests {
     }
 
     /// And giving up on the wait ends the writer rather than leaving it on the
-    /// runtime, where it would write on after the server said it had stopped.
+    /// runtime, where it would write on after the server said it had stopped
+    /// -- ended by the time the wait returns, too, since an abort is a request
+    /// and a writer still being polled when it is made would otherwise finish
+    /// the write it was in the middle of afterwards.
     #[tokio::test]
     async fn it_stops_the_writer_the_budget_ran_out_on() {
-        let (guard, mut drained) = DrainSignal::new();
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
-        let writer = tokio::spawn(async move {
-            let _guard = guard;
-            std::future::pending::<()>().await;
+        /// Set when the task's future is dropped -- the abort actually
+        /// landing, rather than merely having been asked for.
+        struct Stopped(Arc<AtomicBool>);
+
+        impl Drop for Stopped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let (guard, mut drained) = DrainSignal::new();
+        let stopped = Arc::new(AtomicBool::new(false));
+
+        let writer = tokio::spawn({
+            let stopped = stopped.clone();
+            async move {
+                // Declared before the marker, so it is dropped after it: by
+                // the time the guard's drop completes the wait below, the
+                // marker has already been set.
+                let _guard = guard;
+                let _stopped = Stopped(stopped);
+                std::future::pending::<()>().await;
+            }
         });
         drained.abort_on_timeout(writer.abort_handle());
 
         assert!(!drained.wait_or_abort(Duration::from_millis(20)).await);
+        assert!(
+            stopped.load(Ordering::SeqCst),
+            "the abort must have landed before the wait reported the writer stopped"
+        );
         assert!(
             writer.await.is_err_and(|err| err.is_cancelled()),
             "a writer past the budget must be stopped, not abandoned"
