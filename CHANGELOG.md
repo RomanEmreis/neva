@@ -64,9 +64,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   returning. `App::with_shutdown_drain(..)` bounds the whole teardown rather
   than each half of it: the relay stamps a deadline when the shutdown request
   arrives, the wait for the subscriptions to answer spends part of it, and the
-  writers get the remainder. A server with nothing queued pays nothing for it,
-  and a transport that failed under the server now has its writers stopped
-  rather than left behind.
+  writers get the remainder. What is still writing when that runs out is
+  stopped rather than left on a runtime that outlives the server, where it
+  would put the server's output on a stdout its host has taken back -- so
+  `Duration::ZERO` is the abrupt close it says it is. A server with nothing
+  queued pays nothing for any of it, and a transport that failed under the
+  server now has its writers stopped rather than left behind.
 
 * **The Volga engine stops on the transport's token** (#116). Its `run` took
   the token and used it only to report its own failures, so the listener came

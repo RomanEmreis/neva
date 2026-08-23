@@ -323,9 +323,12 @@ answered, bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
     ///
     /// This is a ceiling, not a delay: the first wait ends the moment the last
     /// result is queued and is skipped outright when no subscription is open,
-    /// and the second ends as soon as the writers run dry. Raise it for a
-    /// server whose subscriptions have deep buffers to flush; `Duration::ZERO`
-    /// opts out and restores an abrupt close.
+    /// and the second ends as soon as the writers run dry. One budget covers
+    /// both -- it starts when the shutdown request arrives -- and what is
+    /// still writing when it runs out is stopped rather than left running on
+    /// whatever runtime outlives the server. Raise it for a server whose
+    /// subscriptions have deep buffers to flush; `Duration::ZERO` opts out and
+    /// restores an abrupt close.
     ///
     /// Default: 2 seconds.
     ///
@@ -349,9 +352,10 @@ answered, bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
     ///
     /// Returns once the server has stopped -- on an OS signal, on a
     /// [`ShutdownHandle`], or on a transport that failed under it. Stopping
-    /// includes the transport writers finishing what was already queued, so a
-    /// caller that drops its runtime the moment this returns does not abandon
-    /// a write half-done.
+    /// includes the transport finishing what was already queued, so a caller
+    /// that drops its runtime the moment this returns does not abandon a write
+    /// half-done, and whatever has not finished by the end of the budget is
+    /// stopped, so nothing writes on afterwards either.
     #[cfg_attr(
         not(feature = "legacy-spec"),
         doc = "
@@ -612,13 +616,14 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
         // unstamped deadline means no request came -- the transport failed
         // under us -- and nothing has been spent.
         let remaining = shutdown::remaining_drain(&drain_deadline, drain_budget);
-        let _drained_in_time = drained.wait(remaining).await;
+        let _drained_in_time = drained.wait_or_abort(remaining).await;
         #[cfg(feature = "tracing")]
         if !_drained_in_time {
             tracing::warn!(
                 logger = "neva",
-                "the transport writers did not finish within {remaining:?}: \
-                 messages queued at shutdown may not have reached the wire"
+                "the transport writers did not finish within {remaining:?} and \
+                 were stopped: messages queued at shutdown may not have \
+                 reached the wire"
             );
         }
 

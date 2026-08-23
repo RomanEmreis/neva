@@ -1053,9 +1053,9 @@ where
         // the engine, which is what writes those bytes onto the socket. A
         // signal raised on the pump alone would say "queued" and mean
         // "written".
-        let (guard, drained) = DrainSignal::new();
+        let (guard, mut drained) = DrainSignal::new();
 
-        tokio::spawn(async move {
+        let transport = tokio::spawn(async move {
             let _drained = guard;
             tokio::join!(
                 core::dispatch::dispatch(pending, sse_registry, sender_rx, engine_token.clone()),
@@ -1083,6 +1083,9 @@ where
                 }
             );
         });
+        // One task holds all of it, so one abort ends all of it if the
+        // shutdown budget runs out.
+        drained.abort_on_timeout(transport.abort_handle());
 
         TransportHandle::new(token, drained)
     }
@@ -1301,7 +1304,7 @@ mod engine_smoke_tests {
         handle.token.cancel();
 
         assert!(
-            handle.drained.wait(Duration::from_secs(5)).await,
+            handle.drained.wait_or_abort(Duration::from_secs(5)).await,
             "the pump must raise its drain signal once it has run dry"
         );
         assert!(
@@ -1327,9 +1330,93 @@ mod engine_smoke_tests {
         handle.token.cancel();
 
         assert!(
-            handle.drained.wait(Duration::from_secs(5)).await,
+            handle.drained.wait_or_abort(Duration::from_secs(5)).await,
             "a cancelled transport must take its engine down with it"
         );
+    }
+
+    /// An engine that does not answer its token -- the contract `HttpEngine`
+    /// states and the Volga engine now keeps -- must not be able to outlive
+    /// the server that started it. The budget ends the wait, and the abort
+    /// registered with the drain signal ends the task.
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_transport_that_will_not_stop_is_stopped_on_the_budget() {
+        /// Flips its flag when the future holding it is dropped -- which, for
+        /// a task nothing else can end, only happens on an abort.
+        struct RunningFlag(Arc<AtomicBool>);
+
+        impl Drop for RunningFlag {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+
+        struct StuckEngine {
+            running: Arc<AtomicBool>,
+        }
+
+        impl HttpEngine for StuckEngine {
+            type Request = HttpRequest;
+            type Response = HttpResponse;
+            type SseEvent = ();
+
+            async fn adapt_request(req: Self::Request) -> Result<HttpRequest, Error> {
+                Ok(req)
+            }
+
+            fn adapt_response(resp: HttpResponse) -> Self::Response {
+                resp
+            }
+
+            fn tracked_event(_seq: u64, _msg: &Message) -> Self::SseEvent {}
+            fn ephemeral_event(_msg: &Message) -> Self::SseEvent {}
+
+            async fn run(self, _ctx: HttpContext, _token: CancellationToken) -> Result<(), Error> {
+                self.running.store(true, Ordering::SeqCst);
+                let _flag = RunningFlag(self.running.clone());
+                std::future::pending::<()>().await;
+                Ok(())
+            }
+        }
+
+        let running = Arc::new(AtomicBool::new(false));
+        let server = HttpServer::from_engine(
+            "127.0.0.1:0",
+            StuckEngine {
+                running: running.clone(),
+            },
+        );
+
+        let (app, shutdown) = crate::App::new()
+            .without_greeting()
+            .with_shutdown_drain(Duration::from_millis(100))
+            .with_options(|opts| opts.set_http(server))
+            .with_shutdown();
+        let server_task = tokio::spawn(app.run());
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !running.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the engine must have been started");
+
+        shutdown.shutdown();
+
+        tokio::time::timeout(Duration::from_secs(2), server_task)
+            .await
+            .expect("run must return once the budget is spent")
+            .expect("the server task panicked");
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while running.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a transport the budget ran out on must be stopped, not left running");
     }
 
     /// `App::run` returns only once the transport has finished with what it

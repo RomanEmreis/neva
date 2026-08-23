@@ -83,20 +83,21 @@ impl StdIoSender {
     ///
     /// `drained` is held for as long as this writer may still write, so a
     /// caller awaiting the transport's drain signal knows the queue reached
-    /// stdout rather than merely reaching the channel.
+    /// stdout rather than merely reaching the channel. The task is handed back
+    /// so that caller can also end it when the shutdown budget runs out.
     pub(crate) fn start<T: AsyncWrite + Unpin + Send + 'static>(
         &mut self,
         mut writer: BufWriter<T>,
         token: CancellationToken,
         drained: DrainGuard,
-    ) {
+    ) -> Option<tokio::task::JoinHandle<()>> {
         let Some(mut receiver) = self.rx.take() else {
             #[cfg(feature = "tracing")]
             tracing::error!(logger = "neva", "The stdout writer already in use");
-            return;
+            return None;
         };
 
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             loop {
                 tokio::select! {
                     biased;
@@ -125,7 +126,7 @@ impl StdIoSender {
             // waiting. Explicit rather than left to the end of the scope --
             // the drop is the signal.
             drop(drained);
-        });
+        }))
     }
 }
 
@@ -530,11 +531,14 @@ impl Transport for StdIoClient {
     fn start(&mut self) -> TransportHandle {
         let token = CancellationToken::new();
         let (reader, writer) = self.handshake(token.clone());
-        let (guard, drained) = DrainSignal::new();
+        let (guard, mut drained) = DrainSignal::new();
 
         self.receiver
             .start(reader, self.sender.tx.clone(), token.clone());
-        self.sender.start(writer, token.clone(), guard);
+
+        if let Some(task) = self.sender.start(writer, token.clone(), guard) {
+            drained.abort_on_timeout(task.abort_handle());
+        }
 
         #[cfg(feature = "tracing")]
         tracing::info!(logger = "neva", "Connected: stdio");
@@ -557,12 +561,16 @@ impl Transport for StdIoServer {
         let (reader, writer) = StdIoServer::init();
         // Only the writer takes a guard: the reader is a thread of neva's own
         // (see `start_blocking`), parked in a read nothing can interrupt, and
-        // shutdown was never allowed to wait for it.
-        let (guard, drained) = DrainSignal::new();
+        // shutdown was never allowed to wait for it -- nor can it be aborted,
+        // being nothing the runtime owns.
+        let (guard, mut drained) = DrainSignal::new();
 
         self.receiver
             .start_blocking(reader, self.sender.tx.clone(), token.clone());
-        self.sender.start(writer, token.clone(), guard);
+
+        if let Some(task) = self.sender.start(writer, token.clone(), guard) {
+            drained.abort_on_timeout(task.abort_handle());
+        }
 
         #[cfg(feature = "tracing")]
         tracing::info!(logger = "neva", "Listening: stdio");
@@ -953,7 +961,9 @@ mod tests {
 
             if join {
                 assert!(
-                    drained.wait(std::time::Duration::from_secs(5)).await,
+                    drained
+                        .wait_or_abort(std::time::Duration::from_secs(5))
+                        .await,
                     "the writer must raise its drain signal well inside the budget"
                 );
             }
