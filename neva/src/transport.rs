@@ -55,6 +55,12 @@ pub(crate) struct TransportHandle {
     /// Cancelling this asks the transport to stop.
     pub(crate) token: CancellationToken,
     /// Completes once every writer has drained what was queued and exited.
+    ///
+    /// Joined by the server, in `App::run`. A client transport carries the
+    /// signal all the same -- the stdio writer is one piece of code for both
+    /// roles -- but nothing on that side waits on it yet, so the field is
+    /// write-only in a client-only build.
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub(crate) drained: DrainSignal,
 }
 

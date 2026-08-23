@@ -37,8 +37,14 @@ pub(crate) struct DrainGuard {
 
 /// The waiting half of the drain signal: completes once every [`DrainGuard`]
 /// taken from it has been dropped.
+///
+/// Only the server waits -- [`App::run`](crate::App::run) is the one caller of
+/// [`wait`](Self::wait) -- while a client transport produces the signal and
+/// drops it, the writer being one piece of code serving both roles. Hence the
+/// dead-code exemption on the waiting side in a client-only build.
 #[derive(Debug)]
 pub(crate) struct DrainSignal {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     rx: mpsc::Receiver<()>,
 }
 
@@ -62,6 +68,7 @@ impl DrainSignal {
     /// Returns whether the writers finished inside the budget. A budget of
     /// [`Duration::ZERO`] gives them one poll and no more, which is what
     /// opting out of the drain asks for.
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub(crate) async fn wait(mut self, budget: Duration) -> bool {
         // Nothing is ever sent on this channel, so the only way `recv`
         // resolves is the last guard dropping and closing it.
