@@ -452,13 +452,13 @@ impl App {
         // the explicit, self-describing name guards against that refactor.
         #[cfg(not(feature = "legacy-spec"))]
         let _reservation_guard_held_through_commit = match state_tag.as_deref() {
-            Some(tag) => Some(options.request_state_store().reserve(tag).await),
+            Some(tag) => Some(options.request_state_store().boxed_reserve(tag).await),
             None => None,
         };
 
         #[cfg(not(feature = "legacy-spec"))]
         if let Some(tag) = state_tag.as_deref()
-            && let Some(cached) = options.request_state_store().get(tag).await
+            && let Some(cached) = options.request_state_store().boxed_get(tag).await
         {
             options.complete_request(&full_id);
             let mut resp = cached.set_id(req_id.clone());
@@ -595,7 +595,7 @@ impl App {
             let exp = crate::types::mrtr::state::now_secs() + options.request_state_ttl_secs();
             options
                 .request_state_store()
-                .put(tag, resp.clone(), exp)
+                .boxed_put(tag, resp.clone(), exp)
                 .await;
         }
         resp

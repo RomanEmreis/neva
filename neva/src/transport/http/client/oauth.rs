@@ -62,6 +62,7 @@ pub use assertion::{AssertionProvider, AssertionRequest, IdentityAssertion};
 #[cfg(feature = "client-oauth-dpop")]
 use config::DpopPolicy;
 pub use config::OAuthClientConfig;
+pub(super) use handler::DynAuthorizationHandler;
 pub use handler::{AuthorizationHandler, CallbackParams, LoopbackHandler};
 #[cfg(test)]
 use session::FlowState;
@@ -3136,27 +3137,26 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
     struct EchoesState;
 
     impl AuthorizationHandler for EchoesState {
-        fn redirect_uri(&self) -> BoxFuture<'_, Result<String, Error>> {
-            Box::pin(async { Ok("http://127.0.0.1:8919/callback".to_string()) })
+        async fn redirect_uri(&self) -> Result<String, Error> {
+            Ok("http://127.0.0.1:8919/callback".to_string())
         }
 
-        fn authorize(&self, url: String) -> BoxFuture<'_, Result<CallbackParams, Error>> {
-            Box::pin(async move {
-                let state = url
-                    .split(['?', '&'])
-                    .find_map(|param| param.strip_prefix("state="))
-                    .ok_or_else(|| {
-                        Error::new(
-                            ErrorCode::InvalidRequest,
-                            "the authorization URL carried no `state`",
-                        )
-                    })?
-                    .to_owned();
-                Ok(CallbackParams {
-                    code: "the-code".into(),
-                    state,
-                    iss: None,
-                })
+        async fn authorize(&self, url: String) -> Result<CallbackParams, Error> {
+            let state = url
+                .split(['?', '&'])
+                .find_map(|param| param.strip_prefix("state="))
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::InvalidRequest,
+                        "the authorization URL carried no `state`",
+                    )
+                })?
+                .to_owned();
+
+            Ok(CallbackParams {
+                code: "the-code".into(),
+                state,
+                iss: None,
             })
         }
     }
@@ -3297,15 +3297,15 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
     struct RecordsTheUrl(std::sync::Mutex<Option<String>>);
 
     impl AuthorizationHandler for Arc<RecordsTheUrl> {
-        fn redirect_uri(&self) -> BoxFuture<'_, Result<String, Error>> {
-            Box::pin(async { Ok("http://127.0.0.1:8919/callback".to_string()) })
+        async fn redirect_uri(&self) -> Result<String, Error> {
+            Ok("http://127.0.0.1:8919/callback".to_string())
         }
 
-        fn authorize(&self, url: String) -> BoxFuture<'_, Result<CallbackParams, Error>> {
+        async fn authorize(&self, url: String) -> Result<CallbackParams, Error> {
             if let Ok(mut seen) = self.0.lock() {
                 *seen = Some(url.clone());
             }
-            EchoesState.authorize(url)
+            EchoesState.authorize(url).await
         }
     }
 
@@ -3535,17 +3535,15 @@ xqw+7NCeBr9artJ5WuBVd2xqwhicZbKBGzC7AoF8hBaxK6M3tNKxkVXY
     struct NoInteraction;
 
     impl AuthorizationHandler for NoInteraction {
-        fn redirect_uri(&self) -> BoxFuture<'_, Result<String, Error>> {
-            Box::pin(async { Ok("http://127.0.0.1:8919/callback".to_string()) })
+        async fn redirect_uri(&self) -> Result<String, Error> {
+            Ok("http://127.0.0.1:8919/callback".to_string())
         }
 
-        fn authorize(&self, _url: String) -> BoxFuture<'_, Result<CallbackParams, Error>> {
-            Box::pin(async {
-                Err(Error::new(
-                    ErrorCode::InvalidRequest,
-                    "the stored refresh token should have been used instead",
-                ))
-            })
+        async fn authorize(&self, _url: String) -> Result<CallbackParams, Error> {
+            Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "the stored refresh token should have been used instead",
+            ))
         }
     }
 

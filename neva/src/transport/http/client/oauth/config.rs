@@ -63,7 +63,7 @@ pub struct OAuthClientConfig {
     #[cfg(feature = "client-oauth-dpop")]
     pub(super) dpop: DpopPolicy,
     pub(super) store: Arc<dyn TokenStore>,
-    pub(super) handler: Arc<dyn AuthorizationHandler>,
+    pub(super) handler: Arc<dyn DynAuthorizationHandler>,
 }
 
 /// Whether this client binds the tokens it obtains to a key it holds
