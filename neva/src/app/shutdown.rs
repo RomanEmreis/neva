@@ -12,9 +12,35 @@
 
 use super::App;
 use crate::shared;
-#[cfg(not(feature = "legacy-spec"))]
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 use tokio_util::sync::CancellationToken;
+
+/// Where the shutdown budget starts running out.
+///
+/// Stamped by the relay the moment a shutdown request arrives and read by
+/// [`App::run`] when it comes to wait for the transport writers, so the two
+/// halves of the teardown share one deadline instead of each taking the budget
+/// afresh. Unset means no request ever reached the relay -- the transport went
+/// down on its own -- and the writers are given the whole budget.
+pub(super) type DrainDeadline = Arc<OnceLock<Instant>>;
+
+/// What is left of the shutdown budget for the transport writers.
+///
+/// An unstamped deadline means no shutdown request reached the relay -- the
+/// transport went down on its own -- so nothing has been spent and the writers
+/// get the whole budget. A deadline already past yields
+/// [`Duration::ZERO`](std::time::Duration::ZERO), which is one poll and no
+/// waiting, the same thing opting out of the drain asks for.
+#[inline]
+pub(super) fn remaining_drain(
+    deadline: &DrainDeadline,
+    budget: std::time::Duration,
+) -> std::time::Duration {
+    deadline.get().map_or(budget, |deadline| {
+        deadline.saturating_duration_since(Instant::now())
+    })
+}
 
 /// How long shutdown waits for live `subscriptions/listen` streams to answer,
 /// and then for the transport writers to put those answers on the wire, before
@@ -188,6 +214,7 @@ impl App {
         subscriptions: crate::app::subscriptions::SubscriptionRegistry,
         in_flight: Arc<std::sync::atomic::AtomicUsize>,
         drain: std::time::Duration,
+        deadline: DrainDeadline,
     ) {
         tokio::spawn(async move {
             tokio::select! {
@@ -197,6 +224,13 @@ impl App {
                 _ = transport_token.cancelled() => return,
                 _ = shutdown.cancelled() => {}
             }
+
+            // The budget starts here, and it is the same budget the writer
+            // wait in `run` spends the remainder of. Two phases, one deadline:
+            // `with_shutdown_drain` says how long a client's last answer is
+            // worth waiting for, not how long each half of the teardown may
+            // take.
+            let _ = deadline.set(Instant::now() + drain);
 
             // Phase 1: end the subscriptions. Each listen handler wakes,
             // deregisters, drains what its stream still owes and answers.
@@ -231,12 +265,21 @@ impl App {
     /// The legacy profile has no `subscriptions/listen` and so nothing to
     /// drain: shutdown reaches the transport directly.
     #[cfg(feature = "legacy-spec")]
-    pub(super) fn relay_shutdown(shutdown: CancellationToken, transport_token: CancellationToken) {
+    pub(super) fn relay_shutdown(
+        shutdown: CancellationToken,
+        transport_token: CancellationToken,
+        drain: std::time::Duration,
+        deadline: DrainDeadline,
+    ) {
         tokio::spawn(async move {
             tokio::select! {
                 _ = transport_token.cancelled() => return,
                 _ = shutdown.cancelled() => {}
             }
+            // Nothing to drain ahead of the transport here, so the whole
+            // budget is the writers' -- stamped all the same, so `run` reads
+            // one deadline in both profiles.
+            let _ = deadline.set(Instant::now() + drain);
             transport_token.cancel();
         });
     }
@@ -250,6 +293,50 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    /// No shutdown request ever arrived -- the transport failed under the
+    /// server -- so nothing has been spent and the writers get all of it.
+    #[test]
+    fn an_unstamped_deadline_leaves_the_whole_budget() {
+        let deadline = DrainDeadline::default();
+
+        assert_eq!(
+            remaining_drain(&deadline, Duration::from_secs(2)),
+            Duration::from_secs(2)
+        );
+    }
+
+    /// The two halves of the teardown share one budget: what the wait for the
+    /// subscriptions spent is not offered to the writers a second time.
+    #[test]
+    fn a_stamped_deadline_is_what_is_left_of_it() {
+        let deadline = DrainDeadline::default();
+        let _ = deadline.set(Instant::now() + Duration::from_secs(2));
+
+        let remaining = remaining_drain(&deadline, Duration::from_secs(2));
+
+        assert!(
+            remaining <= Duration::from_secs(2),
+            "the remainder cannot exceed the budget it came from"
+        );
+        assert!(
+            remaining > Duration::from_millis(1500),
+            "and a deadline just stamped has almost all of it left"
+        );
+    }
+
+    /// A budget already spent is not a fresh one: the writers get one poll.
+    #[test]
+    fn a_deadline_already_past_leaves_nothing() {
+        let deadline = DrainDeadline::default();
+        let _ = deadline.set(Instant::now() - Duration::from_secs(1));
+
+        assert_eq!(
+            remaining_drain(&deadline, Duration::from_secs(2)),
+            Duration::ZERO
+        );
+    }
 
     #[test]
     fn a_fresh_handle_has_not_been_fired() {

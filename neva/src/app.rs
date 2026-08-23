@@ -443,12 +443,18 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
         // Read before `self.options` moves into the runtime below.
         let greeted = self.greeting;
 
-        // How long the writers get to finish once the transport is told to
-        // stop. Read here because `self.options` moves into the runtime below.
+        // How long the teardown gets, in total: the subscriptions answering
+        // and then the writers putting those answers on the wire. Read here
+        // because `self.options` moves into the runtime below.
         #[cfg(not(feature = "legacy-spec"))]
         let drain_budget = self.shutdown_drain;
         #[cfg(feature = "legacy-spec")]
         let drain_budget = DEFAULT_SHUTDOWN_DRAIN;
+
+        // Stamped by the relay when a shutdown request arrives, so the wait at
+        // the end of this function spends what is left of the budget rather
+        // than starting it over.
+        let drain_deadline = shutdown::DrainDeadline::default();
 
         let mut transport = self.options.transport();
         // Two halves: the token that stops the transport, and the signal its
@@ -483,10 +489,16 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
             cancellation_token.clone(),
             self.options.subscriptions().clone(),
             self.options.in_flight(),
-            self.shutdown_drain,
+            drain_budget,
+            drain_deadline.clone(),
         );
         #[cfg(feature = "legacy-spec")]
-        Self::relay_shutdown(shutdown, cancellation_token.clone());
+        Self::relay_shutdown(
+            shutdown,
+            cancellation_token.clone(),
+            drain_budget,
+            drain_deadline.clone(),
+        );
 
         // With a notification bus installed, every subscribable notification --
         // this instance's own included -- comes back through the bus, and this
@@ -593,12 +605,19 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
         // `subscriptions/listen` stream is written into exactly that window.
         // Awaiting them here is what keeps `run_blocking` from dropping its
         // runtime, and with it the writers, mid-drain.
-        let _drained_in_time = drained.wait(drain_budget).await;
+        //
+        // What is left of the budget, not a second helping of it: the relay
+        // stamped the deadline when the shutdown request arrived, and the wait
+        // for the subscriptions to answer has already spent part of it. An
+        // unstamped deadline means no request came -- the transport failed
+        // under us -- and nothing has been spent.
+        let remaining = shutdown::remaining_drain(&drain_deadline, drain_budget);
+        let _drained_in_time = drained.wait(remaining).await;
         #[cfg(feature = "tracing")]
         if !_drained_in_time {
             tracing::warn!(
                 logger = "neva",
-                "the transport writers did not finish within {drain_budget:?}: \
+                "the transport writers did not finish within {remaining:?}: \
                  messages queued at shutdown may not have reached the wire"
             );
         }

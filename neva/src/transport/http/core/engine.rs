@@ -137,6 +137,19 @@ pub trait HttpEngine: Send + Sync + 'static {
     fn ephemeral_event(msg: &Message) -> Self::SseEvent;
 
     /// Run the HTTP server until `token` fires.
+    ///
+    /// Returning is what the transport waits for at shutdown: `App::run` holds
+    /// off until this future has resolved, so that a response still being
+    /// written -- the graceful close of a `subscriptions/listen` stream, say --
+    /// reaches the socket before the runtime under it can go away. That wait is
+    /// bounded by
+    #[cfg_attr(
+        not(feature = "legacy-spec"),
+        doc = "[`App::with_shutdown_drain`](crate::App::with_shutdown_drain),"
+    )]
+    #[cfg_attr(feature = "legacy-spec", doc = "the shutdown drain budget,")]
+    /// so an engine that ignores the token costs a server that budget on every
+    /// shutdown rather than hanging it -- but it costs it every time.
     fn run(
         self,
         ctx: HttpContext,

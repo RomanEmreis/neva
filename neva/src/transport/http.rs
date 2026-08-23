@@ -1046,22 +1046,19 @@ where
         let cleanup_interval = self.sse_cleanup_interval;
         let session_ttl = self.sse_session_ttl;
         let engine_token = token.clone();
-        // The dispatch pump is this transport's writer: it is what carries an
-        // outbound message from the App's channel to the SSE session or the
-        // pending request waiting for it, and it keeps draining after
-        // cancellation. The engine is not part of the signal -- its own
-        // graceful shutdown answers to the token directly.
+        // Everything this transport runs sits behind one drain signal, held
+        // until the last of it is done: the pump, which carries an outbound
+        // message from the App's channel to the SSE session or the pending
+        // request waiting for it and keeps draining after cancellation, and
+        // the engine, which is what writes those bytes onto the socket. A
+        // signal raised on the pump alone would say "queued" and mean
+        // "written".
         let (guard, drained) = DrainSignal::new();
 
         tokio::spawn(async move {
+            let _drained = guard;
             tokio::join!(
-                core::dispatch::dispatch(
-                    pending,
-                    sse_registry,
-                    sender_rx,
-                    engine_token.clone(),
-                    guard,
-                ),
+                core::dispatch::dispatch(pending, sse_registry, sender_rx, engine_token.clone()),
                 core::cleanup::cleanup_stale_sessions(
                     cleanup_registry,
                     cleanup_interval,
@@ -1311,6 +1308,27 @@ mod engine_smoke_tests {
             rx.try_recv().is_ok(),
             "a message queued before shutdown must have been routed by the \
              time the pump reports itself drained"
+        );
+    }
+
+    /// The engine is inside the transport's drain signal, so it has to answer
+    /// the token the `HttpEngine::run` contract hands it. A Volga server that
+    /// ignored it would leave `App::run` sitting out the whole shutdown
+    /// budget -- and the listener bound and serving behind it.
+    #[cfg(feature = "http-server-volga")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_volga_engine_stops_on_the_transport_token() {
+        let mut server = HttpServer::new("127.0.0.1:0");
+        let handle = <HttpServer<_, _> as Transport>::start(&mut server);
+
+        // Bound and serving before it is asked to stop, so this is a running
+        // server going down rather than one that never came up.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        handle.token.cancel();
+
+        assert!(
+            handle.drained.wait(Duration::from_secs(5)).await,
+            "a cancelled transport must take its engine down with it"
         );
     }
 

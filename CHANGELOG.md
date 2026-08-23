@@ -58,11 +58,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   exists to prevent.
 
   A transport now hands back a completion signal alongside its cancellation
-  token: the stdio writer and the HTTP dispatch pump hold it for as long as
-  they may still write, and `run` waits for it before returning. The same
-  `App::with_shutdown_drain(..)` budget bounds that wait, so it stays one knob;
-  a server with nothing queued pays nothing for it, and a transport that failed
-  under the server now has its writers stopped rather than left behind.
+  token: everything that may still write holds it until it is done -- the stdio
+  writer, the HTTP dispatch pump, and the HTTP engine whose graceful shutdown
+  is what puts those bytes on the socket -- and `run` waits for it before
+  returning. `App::with_shutdown_drain(..)` bounds the whole teardown rather
+  than each half of it: the relay stamps a deadline when the shutdown request
+  arrives, the wait for the subscriptions to answer spends part of it, and the
+  writers get the remainder. A server with nothing queued pays nothing for it,
+  and a transport that failed under the server now has its writers stopped
+  rather than left behind.
+
+* **The Volga engine stops on the transport's token** (#116). Its `run` took
+  the token and used it only to report its own failures, so the listener came
+  down on Volga's own signal handling and nothing else: a server stopped
+  through an `App::with_shutdown()` handle returned from `run` with the port
+  still bound and serving, until whatever owned the runtime dropped it. The
+  token now drives Volga's graceful shutdown, which is also what makes the
+  drain signal above mean anything for HTTP. `HttpEngine::run` always
+  documented this contract -- an engine that ignores the token now costs its
+  server the shutdown budget on every stop.
 
 ## 0.5.4
 

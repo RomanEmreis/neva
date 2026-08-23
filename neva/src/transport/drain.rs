@@ -1,11 +1,12 @@
 //! The completion half of a transport shutdown.
 //!
-//! Cancelling a transport's [`CancellationToken`] tells its writers to stop
-//! taking new work. It says nothing about the work they already had: both the
-//! stdio writer and the HTTP dispatch pump keep going after cancellation until
-//! the queue behind them is empty, because a result a handler produced during
-//! the shutdown drain -- the graceful close of a `subscriptions/listen` stream
-//! -- is written in exactly that window.
+//! Cancelling a transport's [`CancellationToken`] tells it to stop taking new
+//! work. It says nothing about the work it already had: the stdio writer and
+//! the HTTP dispatch pump both keep going after cancellation until the queue
+//! behind them is empty, and the HTTP engine has its own graceful shutdown to
+//! run before the bytes that pump routed are on the socket. A result a handler
+//! produced during the shutdown drain -- the graceful close of a
+//! `subscriptions/listen` stream -- is written in exactly that window.
 //!
 //! That second half of the teardown happens in detached tasks, so nothing
 //! joined it to [`App::run`](crate::App::run) returning. Under
@@ -14,9 +15,9 @@
 //! not finished -- cutting off the very drain that exists to get those results
 //! onto the wire.
 //!
-//! [`DrainSignal`] closes that gap: every writer holds a [`DrainGuard`] for as
-//! long as it may still write, and [`DrainSignal::wait`] resolves once the last
-//! one is gone.
+//! [`DrainSignal`] closes that gap: everything that may still write holds a
+//! [`DrainGuard`] until it is done, and [`DrainSignal::wait`] resolves once the
+//! last one is gone.
 //!
 //! [`CancellationToken`]: tokio_util::sync::CancellationToken
 
