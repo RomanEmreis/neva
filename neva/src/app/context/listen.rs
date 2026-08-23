@@ -22,12 +22,14 @@ impl Context {
     /// On the shutdown path the answer is delivered, not merely attempted: the
     /// signal ends subscriptions one phase ahead of the transport, waits for
     /// the results they produce to reach the outbound channel, and only then
-    /// tears the writers down -- and the writers drain what is queued before
-    /// they exit. See [`App::run`](crate::App::run) and
-    /// [`App::with_shutdown_drain`](crate::App::with_shutdown_drain), which
-    /// caps that wait; a server whose subscriptions cannot flush inside it
-    /// still closes abruptly, which is what the spec tells a client to treat
-    /// as a reason to reconnect.
+    /// tears the writers down -- the writers drain what is queued before they
+    /// exit, and [`App::run`](crate::App::run) waits for that drain rather
+    /// than returning into it, so a host that drops its runtime the moment
+    /// `run` returns cannot cut the write short.
+    /// [`App::with_shutdown_drain`](crate::App::with_shutdown_drain) caps both
+    /// waits together; a server whose subscriptions cannot flush inside that
+    /// budget still closes abruptly, which is what the spec tells a client to
+    /// treat as a reason to reconnect.
     pub(crate) async fn listen(
         &self,
         id: RequestId,

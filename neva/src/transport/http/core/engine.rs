@@ -149,9 +149,9 @@ pub trait HttpEngine: Send + Sync + 'static {
 /// becoming generic itself. Engines never see this trait -- it lives at
 /// the `HttpServer` ⇄ `TransportProto` seam.
 pub(crate) trait HttpTransport: Send + Sync + 'static {
-    /// Starts the engine and returns a token that, when cancelled, shuts
-    /// it down.
-    fn start(&mut self) -> CancellationToken;
+    /// Starts the engine and returns the token that, when cancelled, shuts
+    /// it down, together with the signal its writers raise once drained.
+    fn start(&mut self) -> crate::transport::TransportHandle;
     /// Consumes the transport into its split (sender, receiver) halves
     /// for use by the App's main loop.
     fn split_into_proto(

@@ -16,16 +16,20 @@ use crate::shared;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-/// How long shutdown waits for live `subscriptions/listen` streams to answer
-/// before the transport goes down regardless.
+/// How long shutdown waits for live `subscriptions/listen` streams to answer,
+/// and then for the transport writers to put those answers on the wire, before
+/// the server goes down regardless.
 ///
-/// Only ever paid by a server that has a subscription open. It is a ceiling,
-/// not a delay: the wait ends as soon as the last result is queued, which is
-/// immediate in the ordinary case. Two seconds sits well inside the ten Volga
-/// gives an in-flight connection during its own graceful shutdown, so the
-/// response body a subscription is written onto is still open when the result
-/// arrives.
-#[cfg(not(feature = "legacy-spec"))]
+/// One budget covering both halves of the teardown, since both are the same
+/// question -- how long a client's last answer is worth waiting for. It is a
+/// ceiling, not a delay: the first half is skipped outright when no
+/// subscription is open, and the second ends the moment the writers run dry.
+/// Two seconds sits well inside the ten Volga gives an in-flight connection
+/// during its own graceful shutdown, so the response body a subscription is
+/// written onto is still open when the result arrives.
+///
+/// Under the legacy profile there are no subscriptions to answer, so only the
+/// writer half is ever paid.
 pub(super) const DEFAULT_SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// How often the drain re-checks whether the subscriptions have finished.
@@ -217,7 +221,9 @@ impl App {
 
             // Phase 3: stop the transport. Its writers drain what is queued
             // before they exit, which is what carries the results written in
-            // phase 2 onto the wire.
+            // phase 2 onto the wire -- and `App::run` waits for that drain to
+            // finish rather than returning into it, so the runtime a caller
+            // drops next cannot abort it half-written.
             transport_token.cancel();
         });
     }

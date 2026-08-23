@@ -1,7 +1,10 @@
 //! stdio transport implementation
 
 use crate::error::{Error, ErrorCode};
-use crate::transport::{Receiver as TransportReceiver, Sender as TransportSender, Transport};
+use crate::transport::{
+    DrainGuard, DrainSignal, Receiver as TransportReceiver, Sender as TransportSender, Transport,
+    TransportHandle,
+};
 use crate::types::Message;
 use futures_util::TryFutureExt;
 use tokio::{
@@ -77,10 +80,15 @@ impl StdIoSender {
     }
 
     /// Starts a new thread that writes to stdout asynchronously
+    ///
+    /// `drained` is held for as long as this writer may still write, so a
+    /// caller awaiting the transport's drain signal knows the queue reached
+    /// stdout rather than merely reaching the channel.
     pub(crate) fn start<T: AsyncWrite + Unpin + Send + 'static>(
         &mut self,
         mut writer: BufWriter<T>,
         token: CancellationToken,
+        drained: DrainGuard,
     ) {
         let Some(mut receiver) = self.rx.take() else {
             #[cfg(feature = "tracing")]
@@ -111,6 +119,12 @@ impl StdIoSender {
             while let Ok(resp) = receiver.try_recv() {
                 write_message(&mut writer, resp).await;
             }
+
+            // Last thing the writer does: everything queued is now on the
+            // wire, so whoever is waiting on the transport to finish may stop
+            // waiting. Explicit rather than left to the end of the scope --
+            // the drop is the signal.
+            drop(drained);
         });
     }
 }
@@ -513,17 +527,18 @@ impl Transport for StdIoClient {
     type Sender = StdIoSender;
     type Receiver = StdIoReceiver;
 
-    fn start(&mut self) -> CancellationToken {
+    fn start(&mut self) -> TransportHandle {
         let token = CancellationToken::new();
         let (reader, writer) = self.handshake(token.clone());
+        let (guard, drained) = DrainSignal::new();
 
         self.receiver
             .start(reader, self.sender.tx.clone(), token.clone());
-        self.sender.start(writer, token.clone());
+        self.sender.start(writer, token.clone(), guard);
 
         #[cfg(feature = "tracing")]
         tracing::info!(logger = "neva", "Connected: stdio");
-        token
+        TransportHandle::new(token, drained)
     }
 
     #[inline]
@@ -537,17 +552,21 @@ impl Transport for StdIoServer {
     type Sender = StdIoSender;
     type Receiver = StdIoReceiver;
 
-    fn start(&mut self) -> CancellationToken {
+    fn start(&mut self) -> TransportHandle {
         let token = CancellationToken::new();
         let (reader, writer) = StdIoServer::init();
+        // Only the writer takes a guard: the reader is a thread of neva's own
+        // (see `start_blocking`), parked in a read nothing can interrupt, and
+        // shutdown was never allowed to wait for it.
+        let (guard, drained) = DrainSignal::new();
 
         self.receiver
             .start_blocking(reader, self.sender.tx.clone(), token.clone());
-        self.sender.start(writer, token.clone());
+        self.sender.start(writer, token.clone(), guard);
 
         #[cfg(feature = "tracing")]
         tracing::info!(logger = "neva", "Listening: stdio");
-        token
+        TransportHandle::new(token, drained)
     }
 
     #[inline]
@@ -793,6 +812,7 @@ mod tests {
     #[tokio::test]
     async fn a_cancelled_writer_still_flushes_what_was_queued() {
         use super::StdIoSender;
+        use crate::transport::DrainSignal;
         use crate::types::{Message, notification::Notification};
         use tokio::io::BufWriter;
         use tokio_util::sync::CancellationToken;
@@ -819,7 +839,8 @@ mod tests {
         token.cancel();
 
         let sink = SharedSink::default();
-        sender.start(BufWriter::new(sink.clone()), token);
+        let (guard, _drained) = DrainSignal::new();
+        sender.start(BufWriter::new(sink.clone()), token, guard);
 
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while sink.lines() < QUEUED {
@@ -834,6 +855,136 @@ mod tests {
                 sink.lines()
             )
         });
+    }
+
+    /// A sink that takes its time, the way stdout with a slow reader behind
+    /// it does. Without it the whole question is invisible: an instant write
+    /// finishes inside the moment between the shutdown signal and the runtime
+    /// going away, and the drain nobody waited for looks like a drain that
+    /// worked.
+    struct SlowSink {
+        sink: SharedSink,
+        delay: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+    }
+
+    impl SlowSink {
+        /// Long enough that no write completes by accident, short enough that
+        /// the whole queue still clears well inside a test's patience.
+        const WRITE_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+
+        fn new(sink: SharedSink) -> Self {
+            Self { sink, delay: None }
+        }
+    }
+
+    impl tokio::io::AsyncWrite for SlowSink {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            let this = self.get_mut();
+            let delay = this
+                .delay
+                .get_or_insert_with(|| Box::pin(tokio::time::sleep(Self::WRITE_DELAY)));
+            if std::future::Future::poll(delay.as_mut(), cx).is_pending() {
+                return std::task::Poll::Pending;
+            }
+            this.delay = None;
+            std::pin::Pin::new(&mut this.sink).poll_write(cx, buf)
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// One shutdown on a runtime of its own -- what `App::run_blocking` does --
+    /// returning how much of the queue reached the sink after the runtime was
+    /// dropped. `join` is the fix under test: whether the shutdown waits for
+    /// the writer's drain signal before letting the runtime go.
+    fn shutdown_on_an_owned_runtime(queued: usize, join: bool) -> usize {
+        use super::StdIoSender;
+        use crate::transport::DrainSignal;
+        use crate::types::{Message, notification::Notification};
+        use tokio::io::BufWriter;
+        use tokio_util::sync::CancellationToken;
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime for the server");
+        let sink = SharedSink::default();
+
+        runtime.block_on(async {
+            let mut sender = StdIoSender::new();
+            for i in 0..queued {
+                sender
+                    .tx
+                    .send(Message::Notification(Notification::new(
+                        "notifications/message",
+                        Some(serde_json::json!({ "seq": i })),
+                    )))
+                    .await
+                    .expect("the channel has room");
+            }
+
+            let token = CancellationToken::new();
+            let (guard, drained) = DrainSignal::new();
+            sender.start(
+                BufWriter::new(SlowSink::new(sink.clone())),
+                token.clone(),
+                guard,
+            );
+
+            // Shutdown reaching the transport: the writer starts draining what
+            // is queued, and the server's loop is over.
+            token.cancel();
+
+            if join {
+                assert!(
+                    drained.wait(std::time::Duration::from_secs(5)).await,
+                    "the writer must raise its drain signal well inside the budget"
+                );
+            }
+        });
+
+        // `run_blocking` drops its runtime here, and a dropped runtime aborts
+        // whatever has not finished.
+        drop(runtime);
+        sink.lines()
+    }
+
+    /// The drain the writer performs on cancellation is worth nothing on its
+    /// own: `App::run_blocking` drops its runtime as soon as `run` returns,
+    /// and that abandons a writer still mid-drain. Waiting for the writer's
+    /// signal first is what gets the queue -- the graceful-close result of a
+    /// `subscriptions/listen` stream among it -- onto the wire.
+    #[test]
+    fn waiting_for_the_writer_is_what_survives_the_runtime_being_dropped() {
+        const QUEUED: usize = 3;
+
+        let joined = shutdown_on_an_owned_runtime(QUEUED, true);
+        let abandoned = shutdown_on_an_owned_runtime(QUEUED, false);
+
+        assert_eq!(
+            joined, QUEUED,
+            "a shutdown that waits for the writer must have written all {QUEUED} messages"
+        );
+        assert_eq!(
+            abandoned, 0,
+            "and one that does not is the hazard: the runtime goes away mid-drain"
+        );
     }
 
     #[tokio::test]

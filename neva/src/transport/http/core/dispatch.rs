@@ -2,18 +2,25 @@
 //! either to a pending oneshot (request reply) or to the SSE registry
 //! (server-initiated request / notification).
 
-use crate::{shared::SseSessionRegistry, types::Message};
+use crate::{shared::SseSessionRegistry, transport::DrainGuard, types::Message};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::context::RequestMap;
 
+/// Pumps the App's outbound queue until `token` fires, then empties what is
+/// still in it before returning.
+///
+/// `drained` is held for the whole life of the pump, that trailing drain
+/// included, so a caller waiting on the transport to finish is waiting for
+/// exactly this loop to have run dry.
 pub(crate) async fn dispatch(
     pending: RequestMap,
     sse_registry: Arc<SseSessionRegistry>,
     mut sender_rx: mpsc::Receiver<Message>,
     token: CancellationToken,
+    drained: DrainGuard,
 ) {
     loop {
         tokio::select! {
@@ -32,6 +39,11 @@ pub(crate) async fn dispatch(
     while let Ok(msg) = sender_rx.try_recv() {
         route(&pending, &sse_registry, msg, &token);
     }
+
+    // Nothing left to route: whoever is waiting for this transport to finish
+    // may stop waiting. Explicit rather than left to the end of the scope --
+    // the drop is the signal.
+    drop(drained);
 }
 
 /// Routes one outbound message: to the oneshot of the request that is waiting

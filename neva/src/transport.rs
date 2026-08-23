@@ -22,9 +22,12 @@ pub(crate) use http::HttpClient;
 #[cfg(feature = "client")]
 pub(crate) use stdio::StdIoClient;
 
+pub(crate) mod drain;
 #[cfg(any(feature = "http-server", feature = "http-client"))]
 pub mod http;
 pub(crate) mod stdio;
+
+pub(crate) use drain::{DrainGuard, DrainSignal};
 
 /// Describes a sender that can send messages to a client
 pub(crate) trait Sender {
@@ -38,13 +41,46 @@ pub(crate) trait Receiver {
     fn recv(&mut self) -> impl Future<Output = Result<Message, Error>>;
 }
 
+/// What a transport hands back when it starts: the signal that stops it, and
+/// the signal that says it has stopped.
+///
+/// The two are deliberately separate. Cancelling the token is a request the
+/// writers observe; they answer it by draining whatever is already queued and
+/// only then dropping their [`DrainGuard`], which is what completes
+/// [`drained`](Self::drained). Joining the second to `App::run` returning is
+/// what keeps a runtime dropped right after it from aborting the drain -- see
+/// [`drain`] for the whole story.
+#[derive(Debug)]
+pub(crate) struct TransportHandle {
+    /// Cancelling this asks the transport to stop.
+    pub(crate) token: CancellationToken,
+    /// Completes once every writer has drained what was queued and exited.
+    pub(crate) drained: DrainSignal,
+}
+
+impl TransportHandle {
+    /// Pairs a transport's cancellation token with the drain signal its
+    /// writers raise.
+    #[inline]
+    pub(crate) fn new(token: CancellationToken, drained: DrainSignal) -> Self {
+        Self { token, drained }
+    }
+
+    /// A handle for a transport with no writers of its own to wait for: the
+    /// drain signal is complete from the start, so awaiting it costs nothing.
+    #[inline]
+    pub(crate) fn detached(token: CancellationToken) -> Self {
+        Self::new(token, DrainSignal::ready())
+    }
+}
+
 /// Describes a transport protocol for communicating between server and client
 pub(crate) trait Transport {
     type Sender: Sender;
     type Receiver: Receiver;
 
     /// Starts the server with the current transport protocol
-    fn start(&mut self) -> CancellationToken;
+    fn start(&mut self) -> TransportHandle;
 
     /// Splits transport into [`Sender`] and [`Receiver`] that can be used in a different threads
     fn split(self) -> (Self::Sender, Self::Receiver);
@@ -156,7 +192,7 @@ impl Transport for TransportProto {
     type Receiver = TransportProtoReceiver;
 
     #[inline]
-    fn start(&mut self) -> CancellationToken {
+    fn start(&mut self) -> TransportHandle {
         match self {
             #[cfg(feature = "server")]
             TransportProto::StdIoServer(stdio) => stdio.start(),
@@ -166,7 +202,7 @@ impl Transport for TransportProto {
             TransportProto::HttpServer(http) => http.start(),
             #[cfg(feature = "http-client")]
             TransportProto::HttpClient(http) => http.start(),
-            TransportProto::None => CancellationToken::new(),
+            TransportProto::None => TransportHandle::detached(CancellationToken::new()),
         }
     }
 

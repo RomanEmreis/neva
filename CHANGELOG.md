@@ -118,6 +118,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and it is skipped outright when no subscription is open, so a server that
   never uses them shuts down exactly as fast as it did before.
 
+* **`App::run` no longer returns while the transport writers are still
+  draining** (#116). Cancelling the transport token did two things at once: the
+  writers began draining what was queued, and `run`'s own loop broke on that
+  same signal and returned. Nothing joined the first to the second, and the
+  drain runs in detached tasks -- so under `App::run_blocking`, which drops its
+  runtime the moment `run` returns, a writer that had not finished was aborted
+  mid-drain and the client saw the abrupt close the drain exists to prevent.
+
+  A transport now hands back a completion signal alongside its cancellation
+  token: the stdio writer and the HTTP dispatch pump hold it for as long as
+  they may still write, and `run` waits for it before returning. The same
+  `App::with_shutdown_drain(..)` budget bounds that wait, so it stays one knob;
+  a server with nothing queued pays nothing for it.
+
 ## 0.5.3
 
 ### Added
