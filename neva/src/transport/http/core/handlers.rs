@@ -1376,7 +1376,7 @@ pub async fn handle_get_sse<E: HttpEngine>(
                 async move { keep }
             })
             .map(|(seq, arc)| SseItem::Tracked(seq, arc));
-        
+
         Either::Right(replay_stream.chain(live))
     };
 
