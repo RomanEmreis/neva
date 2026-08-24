@@ -373,7 +373,6 @@ impl SseSessionRegistry {
             }
         };
 
-        let standalone = target == session.standalone;
         // `target` was either checked above or is the standalone stream, which
         // a session always holds -- the arm is what the lookup returns rather
         // than a case that arises.
@@ -387,10 +386,18 @@ impl SseSessionRegistry {
             None => stream.replay_all(target),
         };
 
+        // A resumption is a connection again, and the role may be sitting on a
+        // stream nobody is reading -- both went away, and this is the one that
+        // came back. Moving it here rather than leaving `send` to discover it
+        // matters: `send` only promotes *after* a failed delivery, so the first
+        // message would have been numbered against the dead stream and left in
+        // its buffer, or dropped outright with buffering off.
+        session.promote_standalone();
+
         StreamSlot::Open(OpenStream {
             stream: target,
             generation,
-            standalone,
+            standalone: target == session.standalone,
             replay,
         })
     }
@@ -937,6 +944,43 @@ mod tests {
             "the surviving connection carries the session's traffic"
         );
         assert_eq!(registry.standalone(&id), Some(first.stream));
+    }
+
+    #[test]
+    fn it_moves_server_traffic_to_a_resumed_stream_when_the_standalone_one_is_dead() {
+        let registry = SseSessionRegistry::new(8);
+        let id = Uuid::new_v4();
+
+        let (first, rx1) = open(&registry, id, None, 8);
+        let (second, rx2) = open(&registry, id, None, 8);
+
+        // Both connections go away: there is nothing live to hand the role to,
+        // so it stays on the newer stream, waiting for a reconnect.
+        drop(rx1);
+        registry.unregister(&id, first.stream, first.generation);
+        drop(rx2);
+        registry.unregister(&id, second.stream, second.generation);
+        assert_eq!(registry.standalone(&id), Some(second.stream));
+
+        // The client comes back for the older stream, by its id.
+        let resume = EventId::new(first.stream, 0).to_string();
+        let (resumed, mut rx) = open(&registry, id, Some(&resume), 8);
+        assert_eq!(resumed.stream, first.stream);
+        assert!(
+            resumed.standalone,
+            "the one live stream is the one the traffic goes on"
+        );
+
+        registry.send(make_msg(id)).unwrap();
+        assert_eq!(
+            ids(&mut rx),
+            vec![EventId::new(first.stream, 0)],
+            "the first message after the resume reaches the connection"
+        );
+        assert!(
+            registry.buffered(&id, second.stream).is_empty(),
+            "and is not numbered against the stream nobody is on"
+        );
     }
 
     #[test]

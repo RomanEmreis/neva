@@ -123,9 +123,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   that `GET` gets served rather than refused for a stream nobody is reading.
   When the stream holding that role goes away -- its connection ends, or it
   falls far enough behind to be dropped -- the role moves to another connection
-  the client still has open, so the session goes on being served instead of
-  piling events against a stream nobody is on. With nothing else live it stays
-  put, which is what lets the ordinary reconnect take that stream back and be
+  the client still has open, and a stream that is resumed while the role sits
+  on a dead one takes it, so the session goes on being served instead of piling
+  events against a stream nobody is on. With nothing live at all it stays put,
+  which is what lets the ordinary reconnect take that stream back and be
   replayed what it missed. A session is capped at eight streams, spending the
   cap on live ones (a disconnected stream is dropped to make room before a
   `GET` is refused with `429`).
