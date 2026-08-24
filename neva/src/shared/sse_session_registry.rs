@@ -148,6 +148,22 @@ impl SseStream {
         }
     }
 
+    /// Lets go of both of this stream's channels.
+    ///
+    /// Both, because the SSE response is the two of them merged and ends only
+    /// when each has: a stream dropped for lagging has to reach the client as
+    /// an EOF it can reconnect from, and holding on to the log sender -- which
+    /// this registry does, so the standalone role can hand it over -- would
+    /// leave that response open forever, carrying nothing. Only this stream's;
+    /// the senders of the streams that may inherit the role are untouched.
+    fn disconnect(&mut self) {
+        self.sender = SseSessionRegistry::disconnected_sender();
+        #[cfg(feature = "tracing")]
+        {
+            self.log = SseSessionRegistry::disconnected_log_sender();
+        }
+    }
+
     /// Buffered events with `seq > last_seq`, for a resumption of this stream.
     ///
     /// If `last_seq` was evicted (oldest buffered seq > `last_seq`), the full
@@ -345,7 +361,11 @@ impl SseSessionRegistry {
     ///   was handed it, so this is that stream coming back -- a client whose
     ///   TCP died before the server noticed, most often -- and not a second
     ///   stream. An id naming a stream the session does not hold is
-    ///   [`StreamSlot::UnknownStream`]; nothing else may answer for it.
+    ///   [`StreamSlot::UnknownStream`]; nothing else may answer for it, and no
+    ///   session is created to say so. An id in the pre-per-stream shape
+    ///   (`<seq>`, naming no stream) resumes the standalone stream, but only
+    ///   while the session has just the one -- which is the only way such an
+    ///   id can have been issued.
     /// * **Without one**, the `GET` wants the standalone stream. It takes that
     ///   stream over when nothing is connected to it, which is what makes a
     ///   plain reconnect resume the buffer (and what carries the events emitted
@@ -373,6 +393,25 @@ impl SseSessionRegistry {
             None => None,
         };
 
+        // A cursor naming a stream is judged against the session that would
+        // hold it, and judged before `entry` below can create one: a `GET`
+        // about to be refused must leave nothing behind, or every refusal
+        // costs a session entry until the sweep gets to it.
+        if let Some(Resume {
+            stream: Some(target),
+            ..
+        }) = &resume
+        {
+            let known = self
+                .sessions
+                .get(&id)
+                .is_some_and(|session| session.streams.contains_key(target));
+
+            if !known {
+                return StreamSlot::UnknownStream;
+            }
+        }
+
         let generation = self.next_gen.fetch_add(1, Ordering::Relaxed) + 1;
         let mut session = self.sessions.entry(id).or_insert_with(SseSession::new);
         session.touch();
@@ -387,10 +426,19 @@ impl SseSessionRegistry {
                 }
                 *stream
             }
-            // A bare `<seq>` is an id from before they named a stream, when a
-            // session had one stream to be numbering. That is the standalone
-            // one.
-            Some(Resume { stream: None, .. }) => session.standalone,
+            // A bare `<seq>` is an id from before they named a stream, issued
+            // by a server that had one stream per session to be counting. Read
+            // against a session that has since opened more, it would replay one
+            // stream's backlog under a count that was never its own -- so it is
+            // honoured only where it could have been issued, and refused
+            // otherwise rather than answered with the wrong stream.
+            Some(Resume { stream: None, .. }) => {
+                if session.streams.len() != 1 {
+                    return StreamSlot::UnknownStream;
+                }
+
+                session.standalone
+            }
             None if !session.is_stream_live(session.standalone) => session.standalone,
             // Standalone taken, and this `GET` is not resuming: a new stream,
             // and the one server traffic moves onto.
@@ -472,7 +520,7 @@ impl SseSessionRegistry {
 
         let disconnected = match session.streams.get_mut(&stream) {
             Some(stream) if stream.generation == generation => {
-                stream.sender = Self::disconnected_sender();
+                stream.disconnect();
                 true
             }
             _ => false,
@@ -553,7 +601,7 @@ impl SseSessionRegistry {
         match stream.sender.try_send((event, arc)) {
             Ok(()) => {}
             Err(TrySendError::Full((_event, _arc))) => {
-                stream.sender = Self::disconnected_sender();
+                stream.disconnect();
                 dropped = true;
                 #[cfg(feature = "tracing")]
                 {
@@ -571,7 +619,7 @@ impl SseSessionRegistry {
                 }
             }
             Err(TrySendError::Closed((_event, _arc))) => {
-                stream.sender = Self::disconnected_sender();
+                stream.disconnect();
                 dropped = true;
                 #[cfg(feature = "tracing")]
                 {
@@ -921,6 +969,52 @@ mod tests {
             1,
             "a refusal must not leave a stream behind"
         );
+    }
+
+    #[test]
+    fn it_does_not_create_a_session_to_refuse_a_cursor() {
+        // A refusal that left a session behind would cost one per `GET` that
+        // got this far, held until the stale sweep.
+        let registry = SseSessionRegistry::new(8);
+        let id = Uuid::new_v4();
+
+        let (tx, _rx) = mpsc::channel(8);
+        assert!(matches!(
+            registry.open(
+                id,
+                tx,
+                #[cfg(feature = "tracing")]
+                log_sender(),
+                Some("3:1")
+            ),
+            StreamSlot::UnknownStream
+        ));
+        assert!(!registry.sessions.contains_key(&id));
+    }
+
+    #[test]
+    fn it_refuses_a_bare_cursor_once_the_session_holds_more_than_one_stream() {
+        // The shape can only have come from a server that numbered a session's
+        // one stream, so against several it names nothing -- and answering it
+        // from the standalone stream would replay a backlog under a count that
+        // was never that stream's.
+        let registry = SseSessionRegistry::new(8);
+        let id = Uuid::new_v4();
+
+        let (_first, _rx1) = open(&registry, id, None, 8);
+        let (_second, _rx2) = open(&registry, id, None, 8);
+
+        let (tx, _rx) = mpsc::channel(8);
+        assert!(matches!(
+            registry.open(
+                id,
+                tx,
+                #[cfg(feature = "tracing")]
+                log_sender(),
+                Some("1")
+            ),
+            StreamSlot::UnknownStream
+        ));
     }
 
     #[test]

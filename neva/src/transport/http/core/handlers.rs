@@ -2517,6 +2517,35 @@ mod tests {
         }
     }
 
+    /// A stream the server gives up on has to reach the client as an EOF it
+    /// can reconnect from. The SSE body is the tracked and the log channel
+    /// merged, and ends only when both do -- so a channel the registry holds on
+    /// to (it keeps each stream's log sender, to hand the standalone role over)
+    /// would leave the response open forever, carrying nothing.
+    #[tokio::test]
+    async fn a_stream_dropped_for_lagging_ends_rather_than_hanging() {
+        let (mut ctx, _rx) = make_ctx();
+        ctx.sse_live_queue_capacity = 1;
+        let id = uuid::Uuid::new_v4();
+        ctx.sse_registry.pre_register(id);
+
+        let mut stream = open_sse(&ctx, id, None).await;
+
+        ctx.sse_registry.send(server_push(id)).unwrap(); // fills the live queue
+        ctx.sse_registry.send(server_push(id)).unwrap(); // declares it lagging
+
+        assert!(
+            next_event(&mut stream).await.is_some(),
+            "what was queued before the drop still goes out"
+        );
+        let ended =
+            tokio::time::timeout(std::time::Duration::from_millis(200), stream.next()).await;
+        assert!(
+            matches!(ended, Ok(None)),
+            "the response must end, not hang with nothing left to carry"
+        );
+    }
+
     /// The cap is what keeps a session from accumulating streams without
     /// bound; reaching it is answered with a status rather than with a stream
     /// nothing will ever be written to.
