@@ -7,7 +7,8 @@ use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "http-server")]
 pub use http::{
-    HttpContext, HttpEngine, HttpRequest, HttpResponse, HttpServer, StreamResponse, handlers,
+    EventId, HttpContext, HttpEngine, HttpRequest, HttpResponse, HttpServer, StreamResponse,
+    handlers,
 };
 
 #[cfg(feature = "http-server")]

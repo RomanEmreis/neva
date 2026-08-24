@@ -10,7 +10,10 @@ pub(crate) use requests_queue::PendingResponse;
 #[cfg(any(feature = "server", feature = "client"))]
 pub(crate) use requests_queue::RequestQueue;
 #[cfg(feature = "http-server")]
-pub(crate) use sse_session_registry::SseSessionRegistry;
+pub(crate) use sse_session_registry::{SseSessionRegistry, StreamSlot};
+// Only the tests that pin the cap's behavior name it outside its module.
+#[cfg(all(test, feature = "http-server"))]
+pub(crate) use sse_session_registry::MAX_STREAMS_PER_SESSION;
 #[cfg(all(feature = "tasks", feature = "server"))]
 pub(crate) use task_tracker::TaskHandle;
 // The tracker backs the server's task substrate; a client only holds one to

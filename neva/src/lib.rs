@@ -488,7 +488,8 @@ pub mod prelude {
     pub use crate::transport::http::{DevCertMode, TlsConfig};
     #[cfg(feature = "http-server")]
     pub use crate::transport::{
-        HttpContext, HttpEngine, HttpRequest, HttpResponse, HttpServer, StreamResponse, handlers,
+        EventId, HttpContext, HttpEngine, HttpRequest, HttpResponse, HttpServer, StreamResponse,
+        handlers,
     };
 
     #[cfg(all(feature = "server", not(feature = "legacy-spec")))]

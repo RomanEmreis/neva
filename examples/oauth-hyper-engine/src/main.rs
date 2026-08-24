@@ -72,9 +72,9 @@ impl HttpEngine for HyperEngine {
         resp.map(|body| Full::new(body).boxed())
     }
 
-    fn tracked_event(seq: u64, msg: &Message) -> Self::SseEvent {
+    fn tracked_event(id: EventId, msg: &Message) -> Self::SseEvent {
         let json = serde_json::to_string(msg).unwrap_or_default();
-        Bytes::from(format!("id: {seq}\ndata: {json}\n\n"))
+        Bytes::from(format!("id: {id}\ndata: {json}\n\n"))
     }
 
     fn ephemeral_event(msg: &Message) -> Self::SseEvent {

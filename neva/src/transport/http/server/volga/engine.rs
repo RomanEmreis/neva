@@ -10,7 +10,9 @@ use crate::error::{Error, ErrorCode};
 use crate::transport::http::core::{
     context::HttpContext,
     engine::HttpEngine,
-    types::{DefaultClaims, HttpRequest as NeutralRequest, HttpResponse as NeutralResponse},
+    types::{
+        DefaultClaims, EventId, HttpRequest as NeutralRequest, HttpResponse as NeutralResponse,
+    },
 };
 use crate::types::Message;
 #[cfg(feature = "server-tls")]
@@ -108,8 +110,8 @@ impl HttpEngine for VolgaEngine {
         builder.body(http_body)
     }
 
-    fn tracked_event(seq: u64, msg: &Message) -> Self::SseEvent {
-        SseMessage::new().id(seq.to_string()).json(msg)
+    fn tracked_event(id: EventId, msg: &Message) -> Self::SseEvent {
+        SseMessage::new().id(id.to_string()).json(msg)
     }
 
     fn ephemeral_event(msg: &Message) -> Self::SseEvent {

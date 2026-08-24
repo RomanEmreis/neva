@@ -73,9 +73,9 @@ impl HttpEngine for AxumEngine {
         builder.body(Body::from(body)).expect("valid response")
     }
 
-    fn tracked_event(seq: u64, msg: &Message) -> Self::SseEvent {
+    fn tracked_event(id: EventId, msg: &Message) -> Self::SseEvent {
         Ok(Event::default()
-            .id(seq.to_string())
+            .id(id.to_string())
             .json_data(msg)
             .unwrap_or_default())
     }

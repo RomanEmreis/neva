@@ -84,9 +84,9 @@ impl HttpEngine for ActixEngine {
         builder.body(body)
     }
 
-    fn tracked_event(seq: u64, msg: &Message) -> Self::SseEvent {
+    fn tracked_event(id: EventId, msg: &Message) -> Self::SseEvent {
         let payload = serde_json::to_string(msg).unwrap_or_default();
-        Ok(Bytes::from(format!("id: {seq}\ndata: {payload}\n\n")))
+        Ok(Bytes::from(format!("id: {id}\ndata: {payload}\n\n")))
     }
 
     fn ephemeral_event(msg: &Message) -> Self::SseEvent {

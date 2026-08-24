@@ -67,10 +67,10 @@ impl HttpEngine for HyperEngine {
         http::Response::from_parts(parts, boxed)
     }
 
-    fn tracked_event(seq: u64, msg: &Message) -> Self::SseEvent {
+    fn tracked_event(id: EventId, msg: &Message) -> Self::SseEvent {
         let payload = serde_json::to_string(msg).unwrap_or_default();
         Ok(Frame::data(Bytes::from(format!(
-            "id: {seq}\ndata: {payload}\n\n"
+            "id: {id}\ndata: {payload}\n\n"
         ))))
     }
 

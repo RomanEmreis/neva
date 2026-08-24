@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     context::HttpContext,
-    types::{HttpRequest, HttpResponse},
+    types::{EventId, HttpRequest, HttpResponse},
 };
 
 /// Contract for an HTTP framework adapter.
@@ -74,7 +74,7 @@ use super::{
 ///     async fn adapt_request(req: Self::Request) -> Result<HttpRequest, Error> { ... }
 ///     fn adapt_response(resp: HttpResponse) -> Self::Response { ... }
 ///
-///     fn tracked_event(seq: u64, msg: &Message) -> Self::SseEvent { ... }
+///     fn tracked_event(id: EventId, msg: &Message) -> Self::SseEvent { ... }
 ///     fn ephemeral_event(msg: &Message) -> Self::SseEvent { ... }
 ///
 ///     async fn run(self, ctx: HttpContext, token: CancellationToken)
@@ -130,7 +130,12 @@ pub trait HttpEngine: Send + Sync + 'static {
 
     /// Build an SSE event WITH an `id:` field (advances the client's
     /// `Last-Event-ID`, eligible for replay on reconnect).
-    fn tracked_event(seq: u64, msg: &Message) -> Self::SseEvent;
+    ///
+    /// Write `id` out as it renders -- `<stream>:<seq>`. The stream half is
+    /// what lets a `Last-Event-ID` name which of a session's streams it is
+    /// resuming, so an id trimmed down to its sequence number resumes the
+    /// wrong one.
+    fn tracked_event(id: EventId, msg: &Message) -> Self::SseEvent;
 
     /// Build an SSE event WITHOUT an `id:` field (ephemeral
     /// log / notification).

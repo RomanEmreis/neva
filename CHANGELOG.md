@@ -12,36 +12,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 #### Authorization
 * **`AuthorizationHandler` is written with plain `async fn`s.** Both of its
   methods returned `neva::shared::BoxFuture`, so every implementation of the
-  interactive OAuth step opened with `Box::pin(async move { ... })` -- the
-  handler is stored behind `Arc<dyn ..>`, and a trait method returning
-  `impl Future` cannot be made into one. That is a fact about how the
-  configuration keeps the handler, not about the seam an embedder implements,
-  and it now lives on an internal `dyn` bridge instead, the way
+  interactive OAuth step opened with `Box::pin(async move { ... })` -- a fact
+  about how the configuration keeps the handler (behind `Arc<dyn ..>`, which a
+  method returning `impl Future` cannot be made into), not about the seam an
+  embedder implements. The boxing moved to an internal `dyn` bridge, the way
   `AssertionProvider` and `NotificationBus` already worked.
 
   To migrate, drop the wrapper: `fn redirect_uri(&self) -> BoxFuture<'_,
   Result<String, Error>>` becomes `async fn redirect_uri(&self) ->
-  Result<String, Error>`, and the same for `authorize`. The futures still have
-  to be `Send` -- the session drives them from a spawned task -- which an
-  `async fn` holding nothing thread-bound across an `.await` already satisfies.
-  Users of the default `LoopbackHandler` have nothing to change.
+  Result<String, Error>`, and the same for `authorize`; the futures still have
+  to be `Send`, which an `async fn` holding nothing thread-bound across an
+  `.await` already satisfies. Users of the default `LoopbackHandler` have
+  nothing to change.
 
 #### MRTR
-* **`RequestStateStore` is written with plain `async fn`s**, for the same
-  reason and in the same shape: `get`, `put` and the `reserve` that serialises
-  identical final-round retries all returned `BoxFuture` because the server
-  holds one store behind `Arc<dyn ..>`. The boxing moved to an internal
-  bridge, so `fn get<'a>(&'a self, tag: &'a str) -> BoxFuture<'a,
-  Option<Response>>` becomes `async fn get(&self, tag: &str) ->
-  Option<Response>`, and likewise for the other two; `reserve` keeps its
-  no-op default, so a store that never overrode it is unaffected beyond the
-  two signatures. Users of the default `InMemoryStateStore` have nothing to
-  change.
+* **`RequestStateStore` is written with plain `async fn`s**, the same change on
+  the same reasoning: `get`, `put` and the `reserve` that serialises identical
+  final-round retries all returned `BoxFuture`. So `fn get<'a>(&'a self, tag:
+  &'a str) -> BoxFuture<'a, Option<Response>>` becomes `async fn get(&self,
+  tag: &str) -> Option<Response>`, and likewise for the other two; `reserve`
+  keeps its no-op default. Users of the default `InMemoryStateStore` have
+  nothing to change.
 
   With both traits converted, `neva::shared::BoxFuture` is no longer part of
   any trait neva asks you to implement. It stays public -- the middleware
   pipeline's `Next` is a `dyn Fn` returning one -- and remains a plain alias
   for `Pin<Box<dyn Future<Output = T> + Send + 'a>>`.
+
+#### Streamable HTTP
+* **`HttpEngine::tracked_event` takes an `EventId` instead of a `u64`** (#108).
+  An SSE event id is now a cursor within one stream rather than within a
+  session, so it names the stream as well as the position -- see the fix below
+  for why. Engines write it out as they wrote the sequence number:
+  `id.to_string()` renders `<stream>:<seq>`. `EventId` is re-exported from
+  `neva::prelude`, with `stream()` / `seq()` for an engine that wants the
+  halves; the migration is the signature and nothing else.
 
 ### Fixed
 
@@ -58,18 +63,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   exists to prevent.
 
   A transport now hands back a completion signal alongside its cancellation
-  token: everything that may still write holds it until it is done -- the stdio
-  writer, the HTTP dispatch pump, and the HTTP engine whose graceful shutdown
-  is what puts those bytes on the socket -- and `run` waits for it before
-  returning. `App::with_shutdown_drain(..)` bounds the whole teardown rather
-  than each half of it: the relay stamps a deadline when the shutdown request
-  arrives, the wait for the subscriptions to answer spends part of it, and the
-  writers get the remainder. What is still writing when that runs out is
-  stopped rather than left on a runtime that outlives the server, where it
-  would put the server's output on a stdout its host has taken back -- so
-  `Duration::ZERO` is the abrupt close it says it is. A server with nothing
-  queued pays nothing for any of it, and a transport that failed under the
-  server now has its writers stopped rather than left behind.
+  token: everything that may still write holds it until it is done, and `run`
+  waits for that before returning. `App::with_shutdown_drain(..)` bounds the
+  whole teardown rather than each phase of it -- the wait for the subscriptions
+  to answer and the wait for the writers share one budget. What is still
+  writing when it runs out is stopped rather than left on a runtime that
+  outlives the server, so `Duration::ZERO` is the abrupt close it says it is. A
+  server with nothing queued pays nothing for any of it, and a transport that
+  failed under the server has its writers stopped rather than left behind.
 
 * **The Volga engine stops on the transport's token** (#116). Its `run` took
   the token and used it only to report its own failures, so the listener came
@@ -80,6 +81,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   drain signal above mean anything for HTTP. `HttpEngine::run` always
   documented this contract -- an engine that ignores the token now costs its
   server the shutdown budget on every stop.
+
+#### Streamable HTTP
+* **A session hosts as many SSE streams as the client opens** (#108, legacy
+  profile: MCP 2026-07-28 has neither sessions nor the standalone `GET`
+  stream). The spec lets a client "remain connected to multiple SSE streams
+  simultaneously"; neva held one sender per session, so a second `GET`
+  overwrote the first, and the displaced stream ended on a bare EOF with
+  nothing to tell it apart from the server closing it on purpose.
+
+  A session now holds a map of streams, each with its own sender, cursor and
+  replay buffer, and every event id names the stream it belongs to
+  (`<stream>:<seq>`) -- ids "assigned by servers on a per-stream basis", as the
+  spec asks. That is what makes the rest enforceable: a `Last-Event-ID` `GET`
+  resumes the stream that id names and is replayed that stream's backlog alone,
+  never "messages that would have been delivered on a different stream"; an id
+  naming a stream the session does not hold is answered `404` rather than
+  served from whatever stream is at hand.
+
+  A second concurrent `GET` is accepted as a second stream and the first is
+  left open. Server-initiated traffic (log notifications included) rides one
+  stream -- the spec's MUST NOT -- and follows the newest live one, which is
+  also what keeps a plain reconnect working when the client's connection died
+  before the server noticed. With nothing live the role stays put, so the
+  ordinary reconnect takes that stream back and is replayed what it missed. A
+  session is capped at eight streams, spending the cap on live ones (a
+  disconnected stream is dropped to make room before a `GET` is refused
+  with `429`).
+
+  An id in the old per-session shape (`<seq>`, no stream) is still read as the
+  standalone stream's cursor while the session has only that one, so a client
+  reconnecting across a server upgrade resumes rather than starts over. neva's
+  own client is unaffected either way: it echoes back whatever id it was handed.
 
 ## 0.5.4
 
