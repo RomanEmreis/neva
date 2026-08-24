@@ -121,9 +121,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   makes a MUST NOT. Picking the newest is also what keeps a plain reconnect
   working when the client's connection died without the server noticing yet:
   that `GET` gets served rather than refused for a stream nobody is reading.
-  A session is capped at eight streams, spending the cap on live ones (a
-  disconnected stream is dropped to make room before a `GET` is refused with
-  `429`).
+  When the stream holding that role goes away -- its connection ends, or it
+  falls far enough behind to be dropped -- the role moves to another connection
+  the client still has open, so the session goes on being served instead of
+  piling events against a stream nobody is on. With nothing else live it stays
+  put, which is what lets the ordinary reconnect take that stream back and be
+  replayed what it missed. A session is capped at eight streams, spending the
+  cap on live ones (a disconnected stream is dropped to make room before a
+  `GET` is refused with `429`).
 
   An id in the old per-session shape (`<seq>`, no stream) is still read, as
   the standalone stream's cursor -- a client reconnecting across a server

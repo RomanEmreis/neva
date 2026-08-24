@@ -201,6 +201,44 @@ impl SseSession {
         self.streams.values().any(|s| !s.sender.is_closed())
     }
 
+    /// Moves the standalone role onto a live stream when the one holding it
+    /// has gone away.
+    ///
+    /// Server-initiated traffic follows the role, so a session that still has a
+    /// connection reading it goes on being served instead of piling events
+    /// against a stream nobody is on. Newest first, for the reason a fresh
+    /// `GET` takes the role in [`SseSessionRegistry::open`]: it is the
+    /// connection the client is most certainly still reading.
+    ///
+    /// When nothing else is live the role stays where it is. That is the
+    /// ordinary single-stream drop, and leaving it there is what lets the
+    /// client's reconnect take that stream back and be replayed what it missed.
+    ///
+    /// Every stream a session holds today comes from a `GET` and is one the
+    /// client is reading, so any of them may carry this. A request-scoped
+    /// `POST` stream would not be, and would have to be kept out of here.
+    ///
+    /// Ephemeral log events do not follow: their channel is registered once,
+    /// per session, by the `GET` that held the role when it opened, and the
+    /// stream promoted here no longer has one to hand over. They resume with
+    /// the next `GET`, which is what best-effort already meant for them.
+    fn promote_standalone(&mut self) {
+        if self.is_stream_live(self.standalone) {
+            return;
+        }
+
+        let live = self
+            .streams
+            .iter()
+            .filter(|(_, stream)| !stream.sender.is_closed())
+            .map(|(id, _)| *id)
+            .max();
+
+        if let Some(id) = live {
+            self.standalone = id;
+        }
+    }
+
     /// Frees a slot when the session is at [`MAX_STREAMS_PER_SESSION`], by
     /// dropping the oldest stream nothing is connected to.
     ///
@@ -378,6 +416,9 @@ impl SseSessionRegistry {
 
         if disconnected {
             session.touch();
+            // The connection that just ended may have been the one carrying
+            // server-initiated traffic; another may still be open to carry it.
+            session.promote_standalone();
         }
     }
 
@@ -438,10 +479,12 @@ impl SseSessionRegistry {
 
         let event = EventId::new(stream_id, seq);
         let _generation = stream.generation;
+        let mut dropped = false;
         match stream.sender.try_send((event, arc)) {
             Ok(()) => {}
             Err(TrySendError::Full((_event, _arc))) => {
                 stream.sender = Self::disconnected_sender();
+                dropped = true;
                 #[cfg(feature = "tracing")]
                 {
                     // Only this stream's log channel: a newer standalone stream
@@ -459,6 +502,7 @@ impl SseSessionRegistry {
             }
             Err(TrySendError::Closed((_event, _arc))) => {
                 stream.sender = Self::disconnected_sender();
+                dropped = true;
                 #[cfg(feature = "tracing")]
                 {
                     crate::types::notification::fmt::LOG_REGISTRY
@@ -471,6 +515,13 @@ impl SseSessionRegistry {
                     );
                 }
             }
+        }
+
+        // This event keeps the id it was given -- it is in that stream's buffer
+        // under it, waiting for a resumption. What comes next goes wherever the
+        // role has moved to.
+        if dropped {
+            session.promote_standalone();
         }
 
         Ok(())
@@ -863,6 +914,68 @@ mod tests {
         registry.send(make_msg(id)).unwrap();
         assert_eq!(ids(&mut rx2), vec![EventId::new(first.stream, 1)]);
         assert!(rx1.try_recv().is_err(), "the dead connection gets nothing");
+    }
+
+    #[test]
+    fn it_moves_server_traffic_to_a_live_stream_when_the_standalone_one_drops() {
+        let registry = SseSessionRegistry::new(8);
+        let id = Uuid::new_v4();
+
+        // Two connections; the newer one carries the traffic.
+        let (first, mut rx1) = open(&registry, id, None, 8);
+        let (second, rx2) = open(&registry, id, None, 8);
+        assert_eq!(registry.standalone(&id), Some(second.stream));
+
+        // The newer connection ends while the older one is still reading.
+        drop(rx2);
+        registry.unregister(&id, second.stream, second.generation);
+
+        registry.send(make_msg(id)).unwrap();
+        assert_eq!(
+            ids(&mut rx1),
+            vec![EventId::new(first.stream, 0)],
+            "the surviving connection carries the session's traffic"
+        );
+        assert_eq!(registry.standalone(&id), Some(first.stream));
+    }
+
+    #[test]
+    fn it_leaves_the_standalone_slot_alone_when_nothing_else_is_live() {
+        // The ordinary single-stream drop: events pile up against the stream
+        // the client is coming back to, which is what makes the replay work.
+        let registry = SseSessionRegistry::new(8);
+        let id = Uuid::new_v4();
+
+        let (only, rx) = open(&registry, id, None, 8);
+        drop(rx);
+        registry.unregister(&id, only.stream, only.generation);
+
+        registry.send(make_msg(id)).unwrap();
+        assert_eq!(registry.standalone(&id), Some(only.stream));
+        assert_eq!(registry.buffered(&id, only.stream), vec![0]);
+
+        let (resumed, _rx) = open(&registry, id, None, 8);
+        assert_eq!(resumed.stream, only.stream);
+        assert_eq!(resumed.replay.len(), 1, "the reconnect is replayed it");
+    }
+
+    #[test]
+    fn it_moves_server_traffic_off_a_lagging_standalone_stream() {
+        let registry = SseSessionRegistry::new(8);
+        let id = Uuid::new_v4();
+
+        let (first, mut rx1) = open(&registry, id, None, 8);
+        // The newer connection's queue holds one event and is never drained.
+        let (second, _rx2) = open(&registry, id, None, 1);
+
+        registry.send(make_msg(id)).unwrap(); // fills the live queue
+        registry.send(make_msg(id)).unwrap(); // declares it lagging
+
+        // The event that found the queue full stays where it was numbered,
+        // for a resumption of that stream; the next one goes to the survivor.
+        assert_eq!(registry.buffered(&id, second.stream), vec![0, 1]);
+        registry.send(make_msg(id)).unwrap();
+        assert_eq!(ids(&mut rx1), vec![EventId::new(first.stream, 0)]);
     }
 
     #[test]
