@@ -1326,7 +1326,13 @@ pub async fn handle_get_sse<E: HttpEngine>(
         .get("last-event-id")
         .and_then(|v| v.to_str().ok());
 
-    let opened = match ctx.sse_registry.open(id, msg_tx, last_event_id) {
+    let opened = match ctx.sse_registry.open(
+        id,
+        msg_tx,
+        #[cfg(feature = "tracing")]
+        _log_tx,
+        last_event_id,
+    ) {
         StreamSlot::Open(opened) => opened,
         // The cursor names a stream this session does not hold. Answering with
         // any other stream would replay what was delivered elsewhere -- which
@@ -1353,15 +1359,6 @@ pub async fn handle_get_sse<E: HttpEngine>(
             );
         }
     };
-
-    // Log notifications are ephemeral -- they carry no id and are not replayed
-    // -- so they ride the stream server-initiated traffic is on, and only that
-    // one. Registering from a stream that is not the standalone one would take
-    // the logs off the stream the client is actually being served on.
-    #[cfg(feature = "tracing")]
-    if opened.standalone {
-        crate::types::notification::fmt::LOG_REGISTRY.register(id, opened.generation, _log_tx);
-    }
 
     let msg_stream = if opened.replay.is_empty() {
         Either::Left(ReceiverStream::new(msg_rx).map(|(seq, arc)| SseItem::Tracked(seq, arc)))

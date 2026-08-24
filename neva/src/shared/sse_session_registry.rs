@@ -34,6 +34,11 @@ use uuid::Uuid;
 /// Live channel of one SSE stream: the event's id and the message it carries.
 pub(crate) type SseSender = Sender<(EventId, Arc<Message>)>;
 
+/// Ephemeral channel of one SSE stream, for events that carry no id and are
+/// never replayed -- `notifications/message`, written by the tracing layer.
+#[cfg(feature = "tracing")]
+pub(crate) type LogSender = Sender<Message>;
+
 /// Most streams one session may hold at once.
 ///
 /// Streams outlive the connection that opened them -- a disconnected one keeps
@@ -67,6 +72,11 @@ struct SseSession {
 /// One SSE stream: its live channel, its cursor, and its replay buffer.
 struct SseStream {
     sender: SseSender,
+    /// Kept whether or not this stream currently carries the log channel: the
+    /// standalone role moves between streams, and the one it moves to has to
+    /// have a sender left to hand over.
+    #[cfg(feature = "tracing")]
+    log: LogSender,
     buffer: VecDeque<(u64, Arc<Message>)>,
     /// Cursor within this stream, and this stream alone.
     next_seq: u64,
@@ -105,12 +115,6 @@ pub(crate) struct OpenStream {
     /// Pass back to [`SseSessionRegistry::unregister`] when the connection
     /// ends.
     pub(crate) generation: u64,
-    /// Whether this is the session's standalone stream, the one carrying
-    /// server-initiated traffic.
-    // Read to decide where log notifications ride, which is a `tracing`-only
-    // question -- a build without it has nothing that asks.
-    #[cfg_attr(not(feature = "tracing"), allow(dead_code))]
-    pub(crate) standalone: bool,
     /// Buffered events this connection is owed before live ones.
     pub(crate) replay: Vec<(EventId, Arc<Message>)>,
 }
@@ -133,9 +137,11 @@ impl Resume {
 }
 
 impl SseStream {
-    fn new(sender: SseSender, generation: u64) -> Self {
+    fn new(sender: SseSender, #[cfg(feature = "tracing")] log: LogSender, generation: u64) -> Self {
         Self {
             sender,
+            #[cfg(feature = "tracing")]
+            log,
             buffer: VecDeque::new(),
             next_seq: 0,
             generation,
@@ -170,7 +176,12 @@ impl SseSession {
         let mut streams = HashMap::with_capacity(1);
         streams.insert(
             0,
-            SseStream::new(SseSessionRegistry::disconnected_sender(), 0),
+            SseStream::new(
+                SseSessionRegistry::disconnected_sender(),
+                #[cfg(feature = "tracing")]
+                SseSessionRegistry::disconnected_log_sender(),
+                0,
+            ),
         );
 
         Self {
@@ -218,13 +229,12 @@ impl SseSession {
     /// client is reading, so any of them may carry this. A request-scoped
     /// `POST` stream would not be, and would have to be kept out of here.
     ///
-    /// Ephemeral log events do not follow: their channel is registered once,
-    /// per session, by the `GET` that held the role when it opened, and the
-    /// stream promoted here no longer has one to hand over. They resume with
-    /// the next `GET`, which is what best-effort already meant for them.
-    fn promote_standalone(&mut self) {
+    /// Returns whether the role moved, which is the caller's cue to point the
+    /// session's log channel at the stream it moved to
+    /// ([`SseSessionRegistry::rebind_log`]).
+    fn promote_standalone(&mut self) -> bool {
         if self.is_stream_live(self.standalone) {
-            return;
+            return false;
         }
 
         let live = self
@@ -234,8 +244,12 @@ impl SseSession {
             .map(|(id, _)| *id)
             .max();
 
-        if let Some(id) = live {
-            self.standalone = id;
+        match live {
+            Some(id) => {
+                self.standalone = id;
+                true
+            }
+            None => false,
         }
     }
 
@@ -275,6 +289,31 @@ impl SseSessionRegistry {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         drop(rx);
         tx
+    }
+
+    #[cfg(feature = "tracing")]
+    fn disconnected_log_sender() -> LogSender {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+        tx
+    }
+
+    /// Points the session's log channel at whichever stream holds the
+    /// standalone role.
+    ///
+    /// Log events are ephemeral -- no id, never replayed -- so they ride the
+    /// stream server-initiated traffic is on, and the role moves. `register`
+    /// replaces whatever entry was there, and stamps the promoted stream's own
+    /// generation, so that connection's cleanup still takes the right one down.
+    #[cfg(feature = "tracing")]
+    fn rebind_log(session_id: Uuid, session: &SseSession) {
+        if let Some(stream) = session.streams.get(&session.standalone) {
+            crate::types::notification::fmt::LOG_REGISTRY.register(
+                session_id,
+                stream.generation,
+                stream.log.clone(),
+            );
+        }
     }
 
     /// Creates a new [`SseSessionRegistry`].
@@ -321,6 +360,7 @@ impl SseSessionRegistry {
         &self,
         id: Uuid,
         sender: SseSender,
+        #[cfg(feature = "tracing")] log: LogSender,
         last_event_id: Option<&str>,
     ) -> StreamSlot {
         let resume = match last_event_id {
@@ -360,14 +400,23 @@ impl SseSessionRegistry {
                 }
                 let stream = session.next_stream;
                 session.next_stream += 1;
-                session
-                    .streams
-                    .insert(stream, SseStream::new(sender, generation));
+                session.streams.insert(
+                    stream,
+                    SseStream::new(
+                        sender,
+                        #[cfg(feature = "tracing")]
+                        log,
+                        generation,
+                    ),
+                );
+
                 session.standalone = stream;
+                #[cfg(feature = "tracing")]
+                Self::rebind_log(id, &session);
+
                 return StreamSlot::Open(OpenStream {
                     stream,
                     generation,
-                    standalone: true,
                     replay: Vec::new(),
                 });
             }
@@ -379,7 +428,12 @@ impl SseSessionRegistry {
         let Some(stream) = session.streams.get_mut(&target) else {
             return StreamSlot::UnknownStream;
         };
+
         stream.sender = sender;
+        #[cfg(feature = "tracing")]
+        {
+            stream.log = log;
+        }
         stream.generation = generation;
         let replay = match &resume {
             Some(resume) => stream.replay_since(target, resume.seq),
@@ -393,11 +447,14 @@ impl SseSessionRegistry {
         // message would have been numbered against the dead stream and left in
         // its buffer, or dropped outright with buffering off.
         session.promote_standalone();
+        // Unconditional, not only on a promotion: the role may have been on
+        // this stream all along, and this is a new connection to it.
+        #[cfg(feature = "tracing")]
+        Self::rebind_log(id, &session);
 
         StreamSlot::Open(OpenStream {
             stream: target,
             generation,
-            standalone: target == session.standalone,
             replay,
         })
     }
@@ -425,7 +482,13 @@ impl SseSessionRegistry {
             session.touch();
             // The connection that just ended may have been the one carrying
             // server-initiated traffic; another may still be open to carry it.
-            session.promote_standalone();
+            // The log channel goes with it -- this stream's entry was removed
+            // by the same cleanup that called here.
+            let _promoted = session.promote_standalone();
+            #[cfg(feature = "tracing")]
+            if _promoted {
+                Self::rebind_log(*id, &session);
+            }
         }
     }
 
@@ -528,7 +591,11 @@ impl SseSessionRegistry {
         // under it, waiting for a resumption. What comes next goes wherever the
         // role has moved to.
         if dropped {
-            session.promote_standalone();
+            let _promoted = session.promote_standalone();
+            #[cfg(feature = "tracing")]
+            if _promoted {
+                Self::rebind_log(session_id, &session);
+            }
         }
 
         Ok(())
@@ -650,11 +717,30 @@ mod tests {
         queue: usize,
     ) -> (OpenStream, Receiver<(EventId, Arc<Message>)>) {
         let (tx, rx) = mpsc::channel(queue);
-        match registry.open(id, tx, last_event_id) {
+        // The log half is only interesting to the tests that follow it; the
+        // rest let the receiver go, which is what a stream carrying no logs
+        // looks like anyway.
+        #[cfg(feature = "tracing")]
+        let (log_tx, _log_rx) = mpsc::channel(queue);
+        match registry.open(
+            id,
+            tx,
+            #[cfg(feature = "tracing")]
+            log_tx,
+            last_event_id,
+        ) {
             StreamSlot::Open(open) => (open, rx),
             StreamSlot::UnknownStream => panic!("the registry refused a known stream"),
             StreamSlot::AtCapacity => panic!("the registry refused a stream it had room for"),
         }
+    }
+
+    /// A log channel nothing reads -- the refusal tests never get far enough
+    /// for one to matter.
+    #[cfg(feature = "tracing")]
+    fn log_sender() -> LogSender {
+        let (tx, _rx) = mpsc::channel(1);
+        tx
     }
 
     fn ids(rx: &mut Receiver<(EventId, Arc<Message>)>) -> Vec<EventId> {
@@ -805,7 +891,7 @@ mod tests {
 
         let (second, _rx2) = open(&registry, id, Some("1"), 8);
         assert_eq!(second.stream, first.stream);
-        assert!(second.standalone);
+        assert_eq!(registry.standalone(&id), Some(second.stream));
         assert_eq!(
             second.replay.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
             vec![EventId::new(first.stream, 2)],
@@ -821,7 +907,13 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel(8);
         assert!(matches!(
-            registry.open(id, tx, Some("7:1")),
+            registry.open(
+                id,
+                tx,
+                #[cfg(feature = "tracing")]
+                log_sender(),
+                Some("7:1")
+            ),
             StreamSlot::UnknownStream
         ));
         assert_eq!(
@@ -839,7 +931,13 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel(8);
         assert!(matches!(
-            registry.open(id, tx, Some("not-an-id")),
+            registry.open(
+                id,
+                tx,
+                #[cfg(feature = "tracing")]
+                log_sender(),
+                Some("not-an-id")
+            ),
             StreamSlot::UnknownStream
         ));
     }
@@ -888,7 +986,6 @@ mod tests {
         let resume = EventId::new(a.stream, 0).to_string();
         let (resumed, _rx) = open(&registry, id, Some(&resume), 8);
         assert_eq!(resumed.stream, a.stream);
-        assert!(!resumed.standalone, "the route stayed on the newer stream");
         assert_eq!(
             resumed.replay.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
             vec![EventId::new(a.stream, 1)],
@@ -966,8 +1063,9 @@ mod tests {
         let resume = EventId::new(first.stream, 0).to_string();
         let (resumed, mut rx) = open(&registry, id, Some(&resume), 8);
         assert_eq!(resumed.stream, first.stream);
-        assert!(
-            resumed.standalone,
+        assert_eq!(
+            registry.standalone(&id),
+            Some(first.stream),
             "the one live stream is the one the traffic goes on"
         );
 
@@ -980,6 +1078,52 @@ mod tests {
         assert!(
             registry.buffered(&id, second.stream).is_empty(),
             "and is not numbered against the stream nobody is on"
+        );
+    }
+
+    /// Ephemeral log events ride the stream server-initiated traffic is on, so
+    /// they have to move with it -- otherwise a session with a surviving
+    /// connection keeps getting tracked events on it and drops every
+    /// `notifications/message` until some later `GET`.
+    #[cfg(feature = "tracing")]
+    #[test]
+    fn it_moves_the_log_channel_with_the_standalone_role() {
+        use crate::types::notification::fmt::LOG_REGISTRY;
+
+        let registry = SseSessionRegistry::new(8);
+        let id = Uuid::new_v4();
+
+        let (tx1, _rx1) = mpsc::channel(8);
+        let (log_tx1, mut log_rx1) = mpsc::channel(8);
+        let StreamSlot::Open(first) = registry.open(id, tx1, log_tx1, None) else {
+            panic!("the first GET was refused")
+        };
+
+        let (tx2, rx2) = mpsc::channel(8);
+        let (log_tx2, mut log_rx2) = mpsc::channel(8);
+        let StreamSlot::Open(second) = registry.open(id, tx2, log_tx2, None) else {
+            panic!("the second GET was refused")
+        };
+
+        // The newest stream holds the role, so it holds the log channel.
+        LOG_REGISTRY.send(make_msg(id)).unwrap();
+        assert!(log_rx2.try_recv().is_ok());
+        assert!(
+            log_rx1.try_recv().is_err(),
+            "a log event goes to one stream, like any other"
+        );
+
+        // That connection ends, the way the SSE cleanup guard ends one: the
+        // log entry is taken down first, then the stream is disconnected.
+        drop(rx2);
+        LOG_REGISTRY.unregister_if_generation(&id, second.generation);
+        registry.unregister(&id, second.stream, second.generation);
+
+        assert_eq!(registry.standalone(&id), Some(first.stream));
+        LOG_REGISTRY.send(make_msg(id)).unwrap();
+        assert!(
+            log_rx1.try_recv().is_ok(),
+            "the promoted stream carries the logs too"
         );
     }
 
@@ -1059,7 +1203,13 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel(8);
         assert!(matches!(
-            registry.open(id, tx, None),
+            registry.open(
+                id,
+                tx,
+                #[cfg(feature = "tracing")]
+                log_sender(),
+                None
+            ),
             StreamSlot::AtCapacity
         ));
     }

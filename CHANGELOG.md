@@ -127,9 +127,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   on a dead one takes it, so the session goes on being served instead of piling
   events against a stream nobody is on. With nothing live at all it stays put,
   which is what lets the ordinary reconnect take that stream back and be
-  replayed what it missed. A session is capped at eight streams, spending the
-  cap on live ones (a disconnected stream is dropped to make room before a
-  `GET` is refused with `429`).
+  replayed what it missed. Ephemeral log events (`notifications/message`, which
+  carry no id and are never replayed) move with the role rather than staying
+  with the connection that first held it. A session is capped at eight streams,
+  spending the cap on live ones (a disconnected stream is dropped to make room
+  before a `GET` is refused with `429`).
 
   An id in the old per-session shape (`<seq>`, no stream) is still read, as
   the standalone stream's cursor -- a client reconnecting across a server
