@@ -67,10 +67,13 @@ full = ["server-full", "client-full"]
 di = ["dep:volga-di"]
 macros = ["dep:neva_macros", "dep:inventory"]
 tasks = []
+# MCP Apps (SEP-1865): `ui://` resources and the `_meta.ui` blocks that bind a
+# tool to one. Additive, no new dependencies.
+apps = []
 tracing = ["dep:tracing", "dep:tracing-subscriber", "dep:once_cell", "volga?/tracing"]
 
 # server
-server-full = ["server-macros", "tracing", "http-server-volga", "server-tls", "server-oauth", "di", "tasks"]
+server-full = ["server-macros", "tracing", "http-server-volga", "server-tls", "server-oauth", "di", "tasks", "apps"]
 server-macros = ["server", "macros", "neva_macros?/server"]
 server-tls = ["http-server-volga", "volga?/tls", "volga?/dev-cert"]
 server-oauth = ["http-server", "dep:volga-oauth-core", "volga?/oauth-client"]
@@ -86,7 +89,7 @@ http-server-volga = ["http-server", "dep:volga"]
 server = ["tokio/signal", "tokio/rt-multi-thread", "dep:chacha20poly1305", "dep:sha2"]
 
 # client
-client-full = ["client-macros", "tracing", "http-client", "client-tls", "client-oauth", "client-oauth-jwt", "client-oauth-dpop", "tasks"]
+client-full = ["client-macros", "tracing", "http-client", "client-tls", "client-oauth", "client-oauth-jwt", "client-oauth-dpop", "tasks", "apps"]
 client-macros = ["client", "macros", "neva_macros?/client"]
 # `url` is free here: it, `form_urlencoded` and `percent-encoding` are already
 # in the tree of every `http-client` build via reqwest, so gating it on this

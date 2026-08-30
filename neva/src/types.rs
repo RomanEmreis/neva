@@ -175,6 +175,14 @@ pub use root::Root;
 #[cfg(not(feature = "legacy-spec"))]
 pub use cache::CacheScope;
 
+#[cfg(feature = "apps")]
+pub use apps::{
+    APP_MIME_TYPE, APPS_EXTENSION_ID, AppsCapability, UI_SCHEME, UiCsp, UiPermissions,
+    UiResourceMeta, UiToolMeta, UiVisibility, is_ui_uri,
+};
+
+#[cfg(feature = "apps")]
+pub mod apps;
 #[cfg(not(feature = "legacy-spec"))]
 pub mod cache;
 mod capabilities;
