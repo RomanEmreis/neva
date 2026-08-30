@@ -167,7 +167,7 @@ fn validate_ui_meta(json: &str, spanned: &Expr) -> syn::Result<()> {
     if let Some(serde_json::Value::Object(csp)) = map.get("csp") {
         check_keys(csp, &CSP_KEYS, "ui_meta.csp", spanned)?;
     }
-    
+
     if let Some(serde_json::Value::Object(permissions)) = map.get("permissions") {
         check_keys(
             permissions,

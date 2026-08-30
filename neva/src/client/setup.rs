@@ -288,8 +288,7 @@ impl Client {
                 elicitation: self.options.elicitation_capability(),
                 #[cfg(feature = "tasks")]
                 tasks: self.options.tasks_capability(),
-                #[cfg(not(feature = "legacy-spec"))]
-                extensions: None,
+                extensions: self.options.extensions(),
                 experimental: None,
             }),
         };

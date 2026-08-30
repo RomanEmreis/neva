@@ -52,7 +52,7 @@ fn now() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or_default();
-    
+
     format!(
         "{:02}:{:02}:{:02} UTC",
         secs / 3600 % 24,

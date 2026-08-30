@@ -77,6 +77,10 @@ pub struct McpOptions {
     #[cfg(feature = "tasks")]
     pub(super) tasks_capability: Option<ClientTasksCapability>,
 
+    /// MCP Apps capability options: which content types this client can render.
+    #[cfg(feature = "apps")]
+    pub(super) apps_capability: Option<crate::types::AppsCapability>,
+
     /// Represents a handler function that runs when received a "sampling/createMessage" request
     pub(super) sampling_handler: Option<SamplingHandler>,
 
@@ -157,6 +161,8 @@ impl Default for McpOptions {
             elicitation_capability: None,
             #[cfg(feature = "tasks")]
             tasks_capability: None,
+            #[cfg(feature = "apps")]
+            apps_capability: None,
             proto: None,
             protocol_ver: None,
             sampling_handler: None,
@@ -295,6 +301,73 @@ impl McpOptions {
     #[cfg(not(feature = "legacy-spec"))]
     pub fn with_tasks(mut self) -> Self {
         self.tasks_capability = Some(ClientTasksCapability::default());
+        self
+    }
+
+    /// Declares support for MCP Apps.
+    ///
+    /// Advertises `io.modelcontextprotocol/ui` with the one content type the
+    /// specification defines,
+    /// [`APP_MIME_TYPE`](crate::types::APP_MIME_TYPE), so a server can offer
+    /// UI-bound tools instead of a text-only fallback. `mimeTypes` is required
+    /// by the specification: a client that names none has not declared support.
+    ///
+    /// Declaring it is a promise about *rendering*, so make it only if
+    /// something on this side actually shows the HTML. A neva client is not a
+    /// browser -- the `ui/*` traffic runs between a host and its iframe -- so
+    /// this is for a client embedding a webview, and for reading the tool
+    /// metadata with [`Tool::ui`](crate::types::Tool::ui).
+    ///
+    /// # Where it is sent
+    ///
+    /// On the `initialize` handshake, under `capabilities.extensions`. That is
+    /// every connection in a `legacy-spec` build, and the dual-mode fallback in
+    /// a 2026-07-28 one. MCP 2026-07-28 has no handshake -- capabilities ride
+    /// each request's `_meta` -- and that channel is not wired yet; see the
+    /// [tracking issue](https://github.com/RomanEmreis/neva/issues/122).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "apps")] {
+    /// use neva::Client;
+    ///
+    /// let client = Client::new().with_options(|opt| opt.with_apps());
+    /// # let _ = client;
+    /// # }
+    /// ```
+    #[cfg(feature = "apps")]
+    pub fn with_apps(mut self) -> Self {
+        self.apps_capability = Some(crate::types::AppsCapability::new());
+        self
+    }
+
+    /// Declares support for MCP Apps, naming the content types this client can
+    /// render.
+    ///
+    /// The general form of [`Self::with_apps`], for a client that renders
+    /// something beyond -- or instead of --
+    /// [`APP_MIME_TYPE`](crate::types::APP_MIME_TYPE). The initial
+    /// specification defines only that one; the rest are reserved.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "apps")] {
+    /// use neva::{Client, types::APP_MIME_TYPE};
+    ///
+    /// let client = Client::new()
+    ///     .with_options(|opt| opt.with_app_mime_types([APP_MIME_TYPE]));
+    /// # let _ = client;
+    /// # }
+    /// ```
+    #[cfg(feature = "apps")]
+    pub fn with_app_mime_types<T, I>(mut self, mime_types: T) -> Self
+    where
+        T: IntoIterator<Item = I>,
+        I: Into<String>,
+    {
+        self.apps_capability = Some(crate::types::AppsCapability::with_mime_types(mime_types));
         self
     }
 
@@ -487,6 +560,28 @@ impl McpOptions {
     pub(crate) fn tasks_capability(&self) -> Option<ClientTasksCapability> {
         self.tasks_capability.clone()
     }
+
+    /// The `capabilities.extensions` map this client advertises, or `None` when
+    /// it declared no extension so the field is omitted on the wire.
+    pub(crate) fn extensions(
+        &self,
+    ) -> Option<std::collections::HashMap<String, serde_json::Value>> {
+        #[cfg_attr(not(feature = "apps"), allow(unused_mut))]
+        let mut extensions = std::collections::HashMap::new();
+
+        #[cfg(feature = "apps")]
+        if let Some(capability) = self.apps_capability.as_ref()
+            && let Ok(value) = serde_json::to_value(capability)
+        {
+            extensions.insert(crate::types::APPS_EXTENSION_ID.to_string(), value);
+        }
+
+        if extensions.is_empty() {
+            None
+        } else {
+            Some(extensions)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -558,5 +653,100 @@ mod tests {
         let tc = (opts.trace_context_provider.as_ref().unwrap())().unwrap();
         assert_eq!(tc.traceparent, "tp");
         assert_eq!(tc.tracestate.as_deref(), Some("ts"));
+    }
+
+    /// MCP Apps: the client half of the negotiation is one entry in
+    /// `capabilities.extensions`, and the specification makes `mimeTypes`
+    /// required -- a peer that names none has not declared support.
+    #[cfg(feature = "apps")]
+    mod apps {
+        use super::*;
+        use crate::types::{APP_MIME_TYPE, APPS_EXTENSION_ID, AppsCapability};
+
+        #[test]
+        fn nothing_is_advertised_until_it_is_asked_for() {
+            assert!(
+                McpOptions::default().extensions().is_none(),
+                "an empty map must be omitted from the wire, not sent as {{}}"
+            );
+        }
+
+        #[test]
+        fn with_apps_declares_the_one_content_type_the_spec_defines() {
+            let extensions = McpOptions::default()
+                .with_apps()
+                .extensions()
+                .expect("the extension is declared");
+
+            assert_eq!(
+                extensions.get(APPS_EXTENSION_ID),
+                Some(&serde_json::json!({ "mimeTypes": [APP_MIME_TYPE] }))
+            );
+        }
+
+        #[test]
+        fn mime_types_may_be_named_explicitly() {
+            let extensions = McpOptions::default()
+                .with_app_mime_types(["text/uri-list"])
+                .extensions()
+                .expect("the extension is declared");
+
+            assert_eq!(
+                extensions.get(APPS_EXTENSION_ID),
+                Some(&serde_json::json!({ "mimeTypes": ["text/uri-list"] }))
+            );
+        }
+
+        #[test]
+        fn what_the_client_writes_is_what_a_server_reads_back() {
+            // The round trip a server's `supports_apps` check will make.
+            let extensions = McpOptions::default().with_apps().extensions().unwrap();
+            let settings = extensions.get(APPS_EXTENSION_ID).unwrap().clone();
+
+            let capability: AppsCapability = serde_json::from_value(settings).unwrap();
+
+            assert!(capability.supports_html());
+        }
+
+        #[test]
+        fn a_client_naming_no_types_does_not_declare_support() {
+            let extensions = McpOptions::default()
+                .with_app_mime_types(Vec::<String>::new())
+                .extensions()
+                .unwrap();
+            let settings = extensions.get(APPS_EXTENSION_ID).unwrap().clone();
+
+            let capability: AppsCapability = serde_json::from_value(settings).unwrap();
+
+            assert!(
+                !capability.supports_html(),
+                "`mimeTypes` is required, so an empty list is not a declaration"
+            );
+        }
+
+        #[test]
+        fn the_handshake_carries_the_map() {
+            use crate::types::ClientCapabilities;
+
+            let options = McpOptions::default().with_apps();
+            let capabilities = ClientCapabilities {
+                #[cfg(any(feature = "legacy-spec", feature = "client"))]
+                roots: None,
+                #[cfg(any(feature = "legacy-spec", feature = "client"))]
+                sampling: None,
+                elicitation: None,
+                #[cfg(all(feature = "tasks", any(feature = "legacy-spec", feature = "client")))]
+                tasks: None,
+                extensions: options.extensions(),
+                experimental: None,
+            };
+
+            let json = serde_json::to_value(&capabilities).unwrap();
+
+            assert_eq!(
+                json["extensions"][APPS_EXTENSION_ID]["mimeTypes"][0],
+                APP_MIME_TYPE
+            );
+        }
     }
 }

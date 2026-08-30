@@ -39,12 +39,17 @@ pub struct ClientCapabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tasks: Option<ClientTasksCapability>,
 
-    /// Protocol extensions the client supports (MCP 2026-07-28).
+    /// Protocol extensions the client supports.
     ///
     /// Keyed by reverse-DNS extension id (e.g. `io.modelcontextprotocol/tasks`)
     /// mapping to that extension's capability value. Replaces the former
     /// top-level `tasks` capability under MCP 2026-07-28.
-    #[cfg(not(feature = "legacy-spec"))]
+    ///
+    /// Unconditional, unlike its counterpart on
+    /// [`ServerCapabilities`]: a legacy `initialize` handshake has nowhere to
+    /// put a *server's* capability map, but it carries the client's fine, and
+    /// that is the channel MCP Apps negotiates over against every host shipping
+    /// today. Older peers ignore what they do not know.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<HashMap<String, serde_json::Value>>,
 
