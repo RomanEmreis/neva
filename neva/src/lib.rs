@@ -496,6 +496,8 @@ pub mod prelude {
     pub use crate::app::extension::Extension;
     #[cfg(all(feature = "server", not(feature = "legacy-spec"), feature = "tasks"))]
     pub use crate::app::extension::TasksExtension;
+    #[cfg(all(feature = "server", not(feature = "legacy-spec"), feature = "apps"))]
+    pub use crate::app::extension::{AppsExtension, UiResource};
     #[cfg(feature = "server")]
     pub use crate::app::{App, context::Context, options};
     #[cfg(feature = "server")]

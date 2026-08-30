@@ -9,9 +9,13 @@
 
 use super::App;
 
+#[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
+mod apps;
 #[cfg(feature = "tasks")]
 mod tasks;
 
+#[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
+pub use apps::{AppsExtension, UiResource};
 #[cfg(feature = "tasks")]
 pub use tasks::TasksExtension;
 

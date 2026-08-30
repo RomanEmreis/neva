@@ -316,6 +316,59 @@ impl ResourceTemplate {
         self.icons = Some(icons.into_iter().collect());
         self
     }
+
+    /// Sets the MCP Apps metadata carried on this template's
+    /// `resources/templates/list` entry.
+    ///
+    /// Applies to every resource the template generates. Per-response overrides
+    /// belong on the content item the handler returns -- see
+    /// [`ResourceContents::with_ui`](crate::types::ResourceContents::with_ui).
+    ///
+    /// Merges into `_meta` rather than replacing it.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// use neva::{App, types::{APP_MIME_TYPE, TextResourceContents, UiResourceMeta}};
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let mut app = App::new();
+    ///
+    /// app.map_resource("ui://report/{id}", "report", |id: String| async move {
+    ///     TextResourceContents::new(format!("ui://report/{id}"), "<!doctype html>...")
+    ///         .with_mime(APP_MIME_TYPE)
+    /// })
+    /// .with_mime(APP_MIME_TYPE)
+    /// .with_ui(UiResourceMeta::new().with_prefers_border(true));
+    ///
+    /// # app.run().await;
+    /// # }
+    /// ```
+    #[cfg(feature = "apps")]
+    pub fn with_ui(&mut self, ui: crate::types::UiResourceMeta) -> &mut Self {
+        crate::types::apps::set_ui_meta(&mut self.meta, &ui);
+        self
+    }
+}
+
+/// MCP Apps: reading the `_meta.ui` block off a resource template.
+#[cfg(feature = "apps")]
+impl ResourceTemplate {
+    /// The template's MCP Apps metadata, or `None` when it has none or when the
+    /// block does not parse.
+    ///
+    /// # Examples
+    /// ```
+    /// # #[cfg(feature = "server")] {
+    /// use neva::types::ResourceTemplate;
+    ///
+    /// assert!(ResourceTemplate::new("res://{id}", "plain").ui().is_none());
+    /// # }
+    /// ```
+    #[inline]
+    pub fn ui(&self) -> Option<crate::types::UiResourceMeta> {
+        crate::types::apps::get_ui_meta(self.meta.as_ref())
+    }
 }
 
 #[cfg(test)]

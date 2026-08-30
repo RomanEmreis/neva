@@ -113,6 +113,22 @@ pub struct McpOptions {
     #[cfg(feature = "tasks")]
     tasks_capability: Option<ServerTasksCapability>,
 
+    /// `ui://` MCP Apps resources, keyed by URI.
+    ///
+    /// Held rather than registered on the spot: `add_ui_resource` hands back a
+    /// `&mut` that the caller keeps configuring, so both the read handler and
+    /// the listing entry are materialized in [`McpOptions::into_runtime`],
+    /// once nothing can change any more.
+    #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
+    ui_resources: std::collections::BTreeMap<String, crate::app::extension::UiResource>,
+
+    /// Whether `ui://` resources also appear in `resources/list`.
+    ///
+    /// Off by default; see
+    /// [`AppsExtension::with_listed_resources`](crate::app::extension::AppsExtension::with_listed_resources).
+    #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
+    list_ui_resources: bool,
+
     /// Registered protocol extensions (MCP 2026-07-28), keyed by reverse-DNS
     /// id mapping to the extension's advertised capability value. Surfaced in
     /// `DiscoverResult` under `capabilities.extensions`.
@@ -231,6 +247,10 @@ impl Default for McpOptions {
             prompts_capability: Default::default(),
             #[cfg(feature = "tasks")]
             tasks_capability: Default::default(),
+            #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
+            ui_resources: Default::default(),
+            #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
+            list_ui_resources: false,
             #[cfg(not(feature = "legacy-spec"))]
             extensions: Default::default(),
             resource_routes: Default::default(),
@@ -417,6 +437,36 @@ impl McpOptions {
         self
     }
 
+    /// Enables the MCP Apps extension.
+    ///
+    /// Advertises `io.modelcontextprotocol/ui` and takes the defaults: `ui://`
+    /// resources answer `resources/read` and stay out of `resources/list`. To
+    /// change that, register
+    /// [`AppsExtension`](crate::app::extension::AppsExtension) directly through
+    /// [`App::with_extension`](crate::App::with_extension).
+    ///
+    /// MCP Apps contributes no methods of its own -- a UI is metadata on
+    /// ordinary tools and resources, and the `ui/*` traffic runs between the
+    /// host and the iframe, never reaching a server.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[cfg(all(not(feature = "legacy-spec"), feature = "apps"))] {
+    /// use neva::App;
+    ///
+    /// let app = App::new().with_options(|opt| opt.with_apps());
+    /// # let _ = app;
+    /// # }
+    /// ```
+    #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
+    pub fn with_apps(mut self) -> Self {
+        use crate::app::extension::{AppsExtension, Extension};
+        let ext = AppsExtension::new();
+        self.register_extension(ext.id(), ext.capability());
+        self
+    }
+
     /// Records an extension's advertised capability under its reverse-DNS id
     /// (MCP 2026-07-28). Used by [`crate::App::with_extension`] and by the
     /// `with_tasks` thin wrapper.
@@ -580,6 +630,69 @@ impl McpOptions {
             .as_mut()
             .entry(name)
             .or_insert(template)
+    }
+
+    /// Adds a `ui://` MCP Apps resource, returning it for further configuration.
+    ///
+    /// Only recorded here: the read handler and the optional listing entry are
+    /// materialized in [`Self::into_runtime`], so the returned `&mut` stays
+    /// live for the rest of the builder chain.
+    #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
+    pub(crate) fn add_ui_resource(
+        &mut self,
+        resource: crate::app::extension::UiResource,
+    ) -> &mut crate::app::extension::UiResource {
+        self.resources_capability.get_or_insert_default();
+
+        self.ui_resources
+            .entry(resource.uri().to_string())
+            .or_insert(resource)
+    }
+
+    /// Whether a `ui://` URI a tool points at is something this server can
+    /// actually serve -- either a recorded [`add_ui_resource`](Self::add_ui_resource)
+    /// or a route that matches it (a `ui://` template, or a hand-rolled
+    /// `map_resource`).
+    #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
+    pub(crate) fn serves_ui_resource(&self, uri: &Uri) -> bool {
+        self.ui_resources.contains_key(&**uri) || self.read_resource(uri).is_some()
+    }
+
+    /// Sets whether `ui://` resources also appear in `resources/list`. Called by
+    /// the MCP Apps extension when it registers.
+    #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
+    pub(crate) fn set_ui_resource_listing(&mut self, list: bool) {
+        self.list_ui_resources = list;
+    }
+
+    /// Turns the recorded `ui://` resources into a read route each, plus a
+    /// `resources/list` entry when listing is on.
+    ///
+    /// Deliberately not a resource *template*: a `ui://` URI is a literal, and a
+    /// literal has no business in `resources/templates/list` -- listing it there
+    /// would surface exactly what [`Self::set_ui_resource_listing`] was asked to
+    /// keep out of the catalogue.
+    #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
+    fn register_ui_resources(&mut self) {
+        use crate::types::resource::template::ResourceFunc;
+
+        for resource in std::mem::take(&mut self.ui_resources).into_values() {
+            let uri = resource.uri().clone();
+            let contents = resource.contents();
+            let handler = ResourceFunc::new(move || {
+                let contents = contents.clone();
+                async move { contents }
+            });
+
+            self.resource_routes.insert(&uri, uri.to_string(), handler);
+
+            if self.list_ui_resources {
+                self.resources
+                    .as_mut()
+                    .entry(uri.to_string())
+                    .or_insert_with(|| resource.listing());
+            }
+        }
     }
 
     /// Adds a prompt
@@ -971,6 +1084,9 @@ impl McpOptions {
 
     /// Turns [`McpOptions`] into [`RuntimeMcpOptions`]
     pub(crate) fn into_runtime(mut self) -> RuntimeMcpOptions {
+        // Before the collections freeze: this still inserts into them.
+        #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
+        self.register_ui_resources();
         self.tools = self.tools.into_runtime();
         self.prompts = self.prompts.into_runtime();
         self.resources = self.resources.into_runtime();
@@ -1346,5 +1462,176 @@ mod tests {
         let options = McpOptions::default().with_default_http();
         // Default HTTP: 127.0.0.1:3000/mcp
         assert_eq!(options.transport_label(), "http://127.0.0.1:3000/mcp");
+    }
+
+    /// MCP Apps: `ui://` resources are registered lazily, so these all turn on
+    /// whether `into_runtime` sees the *final* state of the builder chain.
+    #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
+    mod apps {
+        use super::*;
+        use crate::app::extension::UiResource;
+        use crate::types::{APP_MIME_TYPE, UiCsp};
+
+        fn read_params(uri: &str) -> ReadResourceRequestParams {
+            ReadResourceRequestParams {
+                uri: uri.into(),
+                meta: None,
+                args: None,
+            }
+        }
+
+        #[tokio::test]
+        async fn a_ui_resource_answers_resources_read_as_an_app() {
+            let mut options = McpOptions::default();
+            options.add_ui_resource(UiResource::new(
+                "ui://clock/app.html",
+                "clock",
+                "<!doctype html><title>Clock</title>",
+            ));
+
+            let options = options.into_runtime();
+            let params = read_params("ui://clock/app.html");
+            let (handler, _) = options
+                .read_resource(&params.uri)
+                .expect("the read route is registered");
+            let result = handler.call(params.into()).await.unwrap();
+
+            let contents = &result.contents[0];
+            assert_eq!(contents.mime(), Some(APP_MIME_TYPE));
+            assert_eq!(contents.text(), Some("<!doctype html><title>Clock</title>"));
+        }
+
+        #[tokio::test]
+        async fn the_content_item_carries_the_security_block() {
+            let mut options = McpOptions::default();
+            options
+                .add_ui_resource(UiResource::new(
+                    "ui://weather/app.html",
+                    "weather",
+                    "<html>",
+                ))
+                .with_csp(UiCsp::new().with_connect_domains(["https://api.example.com"]))
+                .with_prefers_border(true);
+
+            let options = options.into_runtime();
+            let params = read_params("ui://weather/app.html");
+            let (handler, _) = options.read_resource(&params.uri).unwrap();
+            let result = handler.call(params.into()).await.unwrap();
+
+            let ui = result.contents[0].ui().expect("a ui block");
+            assert_eq!(
+                ui.csp.and_then(|csp| csp.connect_domains),
+                Some(vec!["https://api.example.com".to_string()])
+            );
+            assert_eq!(ui.prefers_border, Some(true));
+        }
+
+        #[tokio::test]
+        async fn configuration_after_registration_still_reaches_the_wire() {
+            // The whole reason registration is deferred: `add_ui_resource`
+            // returns a `&mut` the caller keeps building on.
+            let mut options = McpOptions::default();
+            options.add_ui_resource(UiResource::new("ui://late/app.html", "late", "<html>"));
+            options
+                .ui_resources
+                .get_mut("ui://late/app.html")
+                .expect("recorded")
+                .with_domain("late.example.com");
+
+            let options = options.into_runtime();
+            let params = read_params("ui://late/app.html");
+            let (handler, _) = options.read_resource(&params.uri).unwrap();
+            let result = handler.call(params.into()).await.unwrap();
+
+            assert_eq!(
+                result.contents[0].ui().and_then(|ui| ui.domain).as_deref(),
+                Some("late.example.com")
+            );
+        }
+
+        #[tokio::test]
+        async fn ui_resources_stay_out_of_the_catalogue_by_default() {
+            let mut options = McpOptions::default();
+            options.add_ui_resource(UiResource::new("ui://clock/app.html", "clock", "<html>"));
+
+            let options = options.into_runtime();
+
+            let (resources, _) = options.list_resources_page(None, 10).await;
+            assert!(
+                resources.is_empty(),
+                "the spec lets a server omit UI resources, and a template is not \
+                 something a user browses"
+            );
+            let (templates, _) = options.list_resource_templates_page(None, 10).await;
+            assert!(
+                templates.is_empty(),
+                "a literal ui:// URI is not a template either"
+            );
+        }
+
+        #[tokio::test]
+        async fn the_listing_switch_is_independent_of_builder_order() {
+            let mut options = McpOptions::default();
+            // Resource first, switch afterwards -- the reverse of the documented
+            // chain, and it has to come out the same.
+            options
+                .add_ui_resource(UiResource::new("ui://clock/app.html", "clock", "<html>"))
+                .with_title("Clock")
+                .with_prefers_border(false);
+            options.set_ui_resource_listing(true);
+
+            let options = options.into_runtime();
+
+            let (resources, _) = options.list_resources_page(None, 10).await;
+            assert_eq!(resources.len(), 1);
+            assert_eq!(resources[0].uri.to_string(), "ui://clock/app.html");
+            assert_eq!(resources[0].title.as_deref(), Some("Clock"));
+            assert_eq!(resources[0].mime.as_deref(), Some(APP_MIME_TYPE));
+            assert_eq!(
+                resources[0].ui().and_then(|ui| ui.prefers_border),
+                Some(false)
+            );
+        }
+
+        #[test]
+        fn a_ui_resource_enables_the_resources_capability() {
+            let mut options = McpOptions::default();
+            assert!(options.resources_capability().is_none());
+
+            options.add_ui_resource(UiResource::new("ui://clock/app.html", "clock", "<html>"));
+
+            assert!(options.resources_capability().is_some());
+        }
+
+        #[test]
+        fn serves_ui_resource_sees_both_registration_paths() {
+            let mut options = McpOptions::default();
+            options.add_ui_resource(UiResource::new("ui://clock/app.html", "clock", "<html>"));
+            options.add_resource_template(
+                ResourceTemplate::new("ui://report/{id}", "report"),
+                ResourceFunc::new(|_: Uri| async move {
+                    ResourceContents::new("ui://report/1").with_text("<html>")
+                }),
+            );
+
+            assert!(options.serves_ui_resource(&"ui://clock/app.html".into()));
+            assert!(options.serves_ui_resource(&"ui://report/7".into()));
+            assert!(
+                !options.serves_ui_resource(&"ui://missing/app.html".into()),
+                "a tool pointing here would 404 on the host's resources/read"
+            );
+        }
+
+        #[test]
+        fn with_apps_advertises_the_extension_without_settings() {
+            let options = McpOptions::default().with_apps();
+
+            let extensions = options.extensions().expect("the extension is registered");
+
+            assert_eq!(
+                extensions.get("io.modelcontextprotocol/ui"),
+                Some(&serde_json::json!({}))
+            );
+        }
     }
 }

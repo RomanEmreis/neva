@@ -454,6 +454,53 @@ impl Resource {
         self.icons = Some(icons.into_iter().collect());
         self
     }
+
+    /// Sets the MCP Apps metadata carried on this resource's `resources/list`
+    /// entry.
+    ///
+    /// The listing-level block is a static default a host can review at
+    /// connection time. When the `resources/read` content item carries one too,
+    /// the content item wins -- see
+    /// [`ResourceContents::with_ui`](crate::types::ResourceContents::with_ui).
+    ///
+    /// Merges into `_meta` rather than replacing it.
+    ///
+    /// # Examples
+    /// ```
+    /// use neva::types::{Resource, UiCsp, UiResourceMeta};
+    ///
+    /// let resource = Resource::new("ui://weather/dashboard", "dashboard")
+    ///     .with_mime(neva::types::APP_MIME_TYPE)
+    ///     .with_ui(UiResourceMeta::new()
+    ///         .with_csp(UiCsp::new().with_connect_domains(["https://api.example.com"])));
+    ///
+    /// assert!(resource.ui().is_some());
+    /// ```
+    #[cfg(feature = "apps")]
+    pub fn with_ui(mut self, ui: crate::types::UiResourceMeta) -> Self {
+        crate::types::apps::set_ui_meta(&mut self.meta, &ui);
+        self
+    }
+}
+
+/// MCP Apps: reading the `_meta.ui` block off a `resources/list` entry.
+#[cfg(feature = "apps")]
+impl Resource {
+    /// The resource's MCP Apps metadata, or `None` when it has none or when the
+    /// block does not parse.
+    ///
+    /// # Examples
+    /// ```
+    /// # #[cfg(feature = "server")] {
+    /// use neva::types::Resource;
+    ///
+    /// assert!(Resource::new("res://plain", "plain").ui().is_none());
+    /// # }
+    /// ```
+    #[inline]
+    pub fn ui(&self) -> Option<crate::types::UiResourceMeta> {
+        crate::types::apps::get_ui_meta(self.meta.as_ref())
+    }
 }
 
 #[cfg(test)]
