@@ -853,6 +853,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-apps"
+version = "0.1.0"
+dependencies = [
+ "neva",
+ "tokio",
+]
+
+[[package]]
 name = "example-axum"
 version = "0.1.0"
 dependencies = [

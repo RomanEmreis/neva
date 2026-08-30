@@ -17,6 +17,8 @@ pub(crate) fn expand_resource(
     let mut annotations = None;
     let mut roles = None;
     let mut permissions = None;
+    let mut mime_expr = None;
+    let mut ui_meta_expr = None;
 
     for meta in attr {
         match &meta {
@@ -36,6 +38,7 @@ pub(crate) fn expand_resource(
                         }
                         "mime" => {
                             mime = get_str_param(&nv.value);
+                            mime_expr = Some(nv.value.clone());
                         }
                         "annotations" => {
                             annotations = get_str_param(&nv.value);
@@ -46,6 +49,9 @@ pub(crate) fn expand_resource(
                         "permissions" => {
                             permissions = get_params_arr(&nv.value);
                         }
+                        "ui_meta" => {
+                            ui_meta_expr = Some(nv.value.clone());
+                        }
                         _ => {}
                     }
                 }
@@ -54,6 +60,13 @@ pub(crate) fn expand_resource(
     }
 
     let uri_code = uri.expect("uri parameter must be specified");
+
+    // A `ui://` URI is what marks a resource as an MCP App, so it -- not a
+    // separate flag -- decides the MIME type and gates the app-only attributes.
+    let mime = super::apps::resolve_mime(Some(&uri_code), mime.zip(mime_expr))?;
+    let ui_meta_code = ui_meta_expr
+        .map(|expr| super::apps::resource_ui_meta_code(&expr, Some(&uri_code)))
+        .transpose()?;
 
     // Generate the function registration and metadata setup
     let description_code = description.map(|desc| {
@@ -100,7 +113,8 @@ pub(crate) fn expand_resource(
                 #mime_code
                 #annotations_code
                 #roles_code
-                #permission_code;
+                #permission_code
+                #ui_meta_code;
         }
         neva::macros::inventory::submit! {
             neva::macros::server::ItemRegistrar(#module_name)

@@ -30,6 +30,12 @@ default = []
 server = []
 client = []
 
+# Forwarded from neva. Enables the MCP Apps attributes -- `ui` / `visibility`
+# on `#[tool]`, `ui_meta` on `#[resource]` -- which expand to builders that
+# only exist in an `apps` build. Without it those attributes are a clear
+# compile error instead of a missing method on generated code.
+apps = []
+
 # Forwarded from neva. Switches the `#[tool]` macro back to emitting legacy
 # `ToolSchema` registration code instead of JSON Schema 2020-12
 # (`InputSchema`), which is what the default (MCP 2026-07-28) build emits.

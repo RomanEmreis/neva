@@ -649,6 +649,28 @@ impl UiResourceMeta {
         Default::default()
     }
 
+    /// Deserializes a block from a JSON string.
+    ///
+    /// The `#[resource(ui_meta = "...")]` attribute expands to this; the macro
+    /// has already checked at compile time that the literal is well-formed and
+    /// names only keys the specification defines.
+    ///
+    /// # Examples
+    /// ```
+    /// use neva::types::UiResourceMeta;
+    ///
+    /// let meta = UiResourceMeta::from_json_str(
+    ///     r#"{ "csp": { "connectDomains": ["https://api.example.com"] } }"#,
+    /// )?;
+    ///
+    /// assert!(meta.csp.is_some());
+    /// # Ok::<(), neva::error::Error>(())
+    /// ```
+    #[inline]
+    pub fn from_json_str(json: &str) -> Result<Self, crate::error::Error> {
+        serde_json::from_str(json).map_err(Into::into)
+    }
+
     /// Sets the origins the app needs.
     ///
     /// # Examples

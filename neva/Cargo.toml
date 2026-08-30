@@ -69,7 +69,7 @@ macros = ["dep:neva_macros", "dep:inventory"]
 tasks = []
 # MCP Apps (SEP-1865): `ui://` resources and the `_meta.ui` blocks that bind a
 # tool to one. Additive, no new dependencies.
-apps = []
+apps = ["neva_macros?/apps"]
 tracing = ["dep:tracing", "dep:tracing-subscriber", "dep:once_cell", "volga?/tracing"]
 
 # server

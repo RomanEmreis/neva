@@ -43,6 +43,8 @@ pub(crate) fn expand(
     let mut middleware = None;
     let mut task_support = None;
     let mut no_schema = false;
+    let mut ui_code = None;
+    let mut visibility_code = None;
 
     for meta in attr {
         match &meta {
@@ -86,6 +88,12 @@ pub(crate) fn expand(
                         }
                         "task_support" => {
                             task_support = get_str_param(&nv.value);
+                        }
+                        "ui" => {
+                            ui_code = Some(super::apps::tool_ui_code(&nv.value)?);
+                        }
+                        "visibility" => {
+                            visibility_code = Some(super::apps::tool_visibility_code(&nv.value)?);
                         }
                         "no_schema" => {
                             no_schema = get_bool_param(&nv.value);
@@ -343,7 +351,9 @@ pub(crate) fn expand(
                 #annotations_code
                 #roles_code
                 #permission_code
-                #task_support_code;
+                #task_support_code
+                #ui_code
+                #visibility_code;
         }
         neva::macros::inventory::submit! {
             neva::macros::server::ItemRegistrar(#module_name)

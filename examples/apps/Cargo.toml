@@ -1,0 +1,9 @@
+[package]
+name = "example-apps"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+neva = { path = "../../neva", features = ["server-macros", "apps"] }
+tokio = { version = "1.47.1", features = ["full"] }

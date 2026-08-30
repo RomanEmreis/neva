@@ -5,6 +5,7 @@ use quote::quote;
 use syn::{Expr, Lit, Type};
 use syn::{ItemFn, Meta, punctuated::Punctuated, token::Comma};
 
+pub(crate) mod apps;
 pub(super) mod prompt;
 pub(crate) mod resource;
 pub(crate) mod tool;
