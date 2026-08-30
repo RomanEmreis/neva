@@ -34,7 +34,10 @@ use crate::types::TaskMetadata;
 use jsonschema::validator_for;
 
 #[cfg(feature = "apps")]
-use crate::types::{Uri, apps};
+use crate::types::apps;
+// Only `Tool::with_ui` names it, and that is a server-side builder.
+#[cfg(all(feature = "server", feature = "apps"))]
+use crate::types::Uri;
 
 pub use call_tool_response::CallToolResponse;
 
