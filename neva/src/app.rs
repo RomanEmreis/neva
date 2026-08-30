@@ -1089,6 +1089,18 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
     /// The returned `&mut` stays live for the rest of the builder chain -- the
     /// resource is materialized when the server starts, not when this returns.
     ///
+    /// # Authorization
+    ///
+    /// A resource registered this way carries **no role or permission
+    /// requirement**: on an OAuth-protected server anyone who can reach it can
+    /// read it. That is usually right -- the document is a template a host is
+    /// expected to prefetch and review at connection time, while the data it
+    /// displays comes from a tool, which does carry
+    /// [`Tool::with_roles`](crate::types::Tool::with_roles). When the markup
+    /// itself must be restricted, register it with [`Self::map_ui_resource`]
+    /// instead and put the requirement on the returned
+    /// [`ResourceTemplate`].
+    ///
     /// # Examples
     /// ```no_run
     /// use neva::{App, types::UiCsp};

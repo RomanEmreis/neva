@@ -5,6 +5,100 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.5.6
+
+### Added
+
+#### MCP Apps
+* **The MCP Apps extension (`io.modelcontextprotocol/ui`), behind the new
+  **`apps`** feature (#87).** [SEP-1865](https://github.com/modelcontextprotocol/ext-apps)
+  is stable as of 2026-01-26 and is the first official MCP extension: a server
+  points a tool at an HTML document, and the host renders it in a sandboxed
+  iframe beside the tool's ordinary answer.
+
+  The specification has two halves and only one of them is wire traffic an MCP
+  peer sees. Everything named `ui/*` -- `ui/initialize`, the sandbox proxy, host
+  context, theming, display modes -- is JSON-RPC over `postMessage` between a
+  host and an iframe inside a browser; a server never sends or receives any of
+  it, and neva models none of it. What neva implements is the data plane: a
+  `_meta.ui` block on a tool naming the `ui://` resource that renders it, and a
+  `_meta.ui` block on that resource carrying its CSP, requested iframe
+  permissions, sandbox origin and border preference.
+
+  On the server, the capability is one call, and everything else is authored
+  where the primitive is declared:
+
+  ```rust
+  let mut app = App::new().with_options(|opt| opt.with_stdio().with_apps());
+
+  app.add_ui_resource("ui://weather/dashboard", "dashboard", DASHBOARD_HTML)
+      .with_csp(UiCsp::new().with_connect_domains(["https://api.openweathermap.org"]))
+      .with_prefers_border(true);
+
+  app.map_tool("get_weather", get_weather).with_ui("ui://weather/dashboard");
+  ```
+
+  or through the macros, where the `ui://` scheme is what marks a resource as an
+  app and supplies its `text/html;profile=mcp-app` MIME type:
+
+  ```rust
+  #[tool(descr = "The current time.", ui = "ui://clock/app.html")]
+  async fn get_time() -> String { /* ... */ }
+
+  #[tool(descr = "Re-read the clock.", ui = "ui://clock/app.html", visibility = ["app"])]
+  async fn refresh_clock() -> String { /* ... */ }
+  ```
+
+  `visibility` is declared, not enforced: hiding an app-only tool from the agent
+  is the host's job, and the server lists it in `tools/list` like any other. What
+  a UI-bound tool must still do is return a meaningful `content` array -- the
+  model reads `content`, and not every client has an iframe.
+
+  `ui://` resources answer `resources/read` but stay out of `resources/list` by
+  default; the specification permits omitting them, and a UI template is not
+  something a user browses. `AppsExtension::with_listed_resources()` turns the
+  listing on for hosts that want to review each app's security block at
+  connection time. The switch is read when the server starts, so it applies
+  whatever order the builder ran in.
+
+  On the client, `with_apps()` advertises the extension with the one content type
+  the specification defines (`with_app_mime_types(..)` for anything else), and
+  `Tool::ui()` / `Tool::is_model_visible()` / `ResourceContents::ui()` read the
+  metadata back. `Tool::ui()` accepts the deprecated flat
+  `_meta["ui/resourceUri"]` as well as the nested block, which is what the
+  specification asks of a reader; nothing neva writes carries the flat key.
+
+  The macros check what they can see. A `ui` that is not a `ui://` URI, a
+  visibility scope that is not `model` or `app`, a `ui://` resource under another
+  MIME type, `ui_meta` on a resource that is not an app, and an unknown key in
+  `ui_meta` / `ui_meta.csp` / `ui_meta.permissions` are all `compile_error!`s.
+  The key check is the one that earns its keep: `_meta` is an open map, so a
+  `prefers_border` written in snake case would serialize happily and be ignored
+  by every host -- a security block that silently does nothing. At startup the
+  server also warns about a tool pointing at a `ui://` resource nothing serves.
+
+  Two known limits, both tracked. Under MCP 2026-07-28 there is no handshake, so
+  a client advertises MCP Apps on `initialize` only -- every connection in a
+  `legacy-spec` build, and the dual-mode fallback in a 2026-07-28 one; the
+  per-request channel, and with it a server-side `supports_apps()` check, is #122.
+  A `ui://` resource registered with `add_ui_resource` carries no role or
+  permission requirement -- use `map_ui_resource` when the markup itself must be
+  restricted -- which is #123.
+
+  See `examples/apps` for a server and a client, and the `ui/*` half is
+  deliberately out of scope: it is the part of the specification still in motion,
+  nothing in neva would exercise it, and a Rust host embedding a webview runs the
+  browser SDK on the JS side anyway.
+
+### Changed
+
+* **`ClientCapabilities::extensions` is no longer gated on the protocol
+  generation.** A legacy `initialize` handshake has nowhere to put a *server's*
+  capability map -- which is why its counterpart on `ServerCapabilities` stays
+  2026-07-28-only -- but it carries the client's fine, and that is the channel
+  every host shipping MCP Apps today negotiates over. Additive: the field is
+  omitted from the wire when unset, and older peers ignore what they do not know.
+
 ## 0.5.5
 
 ### Changed (breaking)

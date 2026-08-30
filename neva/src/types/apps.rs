@@ -84,6 +84,13 @@ pub const UI_SCHEME: &str = "ui://";
 /// The `_meta` key both halves of the extension nest their metadata under.
 pub(crate) const UI_META_KEY: &str = "ui";
 
+/// The deprecated flat spelling of `_meta.ui.resourceUri`.
+///
+/// Read-only. The specification deprecates it in favour of the nested block but
+/// still tells the reading side to accept both, so a tool from a server on an
+/// older SDK is understood; nothing neva writes carries it.
+pub(crate) const LEGACY_RESOURCE_URI_KEY: &str = "ui/resourceUri";
+
 /// Whether `uri` addresses an MCP Apps resource.
 ///
 /// The scheme *is* the declaration: a `ui://` URI is an app resource, and
@@ -851,6 +858,30 @@ pub fn get_ui_meta<T: DeserializeOwned>(meta: Option<&Value>) -> Option<T> {
         .and_then(|ui| serde_json::from_value(ui.clone()).ok())
 }
 
+/// Reads a tool's `_meta.ui`, accepting the deprecated flat spelling.
+///
+/// The specification's host-side guidance is to check both formats, and this is
+/// the reading side: the nested block wins, and `_meta["ui/resourceUri"]` fills
+/// in the URI when the nested one does not carry it. A tool whose only MCP Apps
+/// metadata is the flat key still comes back as a [`UiToolMeta`] -- otherwise a
+/// client would conclude it has no UI at all.
+pub(crate) fn get_tool_ui_meta(meta: Option<&Value>) -> Option<UiToolMeta> {
+    let nested: Option<UiToolMeta> = get_ui_meta(meta);
+    let legacy = meta
+        .and_then(|meta| meta.get(LEGACY_RESOURCE_URI_KEY))
+        .and_then(Value::as_str);
+
+    match (nested, legacy) {
+        (Some(mut ui), Some(legacy)) => {
+            ui.resource_uri.get_or_insert_with(|| legacy.into());
+            Some(ui)
+        }
+        (Some(ui), None) => Some(ui),
+        (None, Some(legacy)) => Some(UiToolMeta::new(legacy)),
+        (None, None) => None,
+    }
+}
+
 /// Writes `ui` into a `_meta` object, **merging** rather than replacing.
 ///
 /// `_meta` legitimately carries other keys --
@@ -1198,5 +1229,71 @@ mod tests {
         let meta = json!({ "ui": { "visibility": "model" } });
 
         assert_eq!(get_ui_meta::<UiToolMeta>(Some(&meta)), None);
+    }
+
+    #[test]
+    fn the_deprecated_flat_key_is_still_understood() {
+        // A server on an older SDK writes only this. Reading it as "no UI"
+        // would silently drop the tool's whole presentation half.
+        let meta = json!({ "ui/resourceUri": "ui://weather/dashboard" });
+
+        let ui = get_tool_ui_meta(Some(&meta)).expect("the flat spelling counts");
+
+        assert_eq!(ui.resource_uri.as_deref(), Some("ui://weather/dashboard"));
+        assert!(
+            ui.is_model_visible(),
+            "the flat key says nothing about scope"
+        );
+    }
+
+    #[test]
+    fn the_nested_block_wins_over_the_flat_key() {
+        // What the TS SDK writes: both, in agreement. If they ever disagree the
+        // spec shape is the one to believe.
+        let meta = json!({
+            "ui": { "resourceUri": "ui://new", "visibility": ["app"] },
+            "ui/resourceUri": "ui://old"
+        });
+
+        let ui = get_tool_ui_meta(Some(&meta)).expect("a ui block");
+
+        assert_eq!(ui.resource_uri.as_deref(), Some("ui://new"));
+        assert!(!ui.is_model_visible());
+    }
+
+    #[test]
+    fn the_flat_key_fills_a_nested_block_that_names_no_uri() {
+        let meta = json!({
+            "ui": { "visibility": ["app"] },
+            "ui/resourceUri": "ui://shop/cart"
+        });
+
+        let ui = get_tool_ui_meta(Some(&meta)).expect("a ui block");
+
+        assert_eq!(ui.resource_uri.as_deref(), Some("ui://shop/cart"));
+        assert!(!ui.is_model_visible(), "the nested visibility survives");
+    }
+
+    #[test]
+    fn a_tool_with_neither_spelling_has_no_ui() {
+        assert_eq!(get_tool_ui_meta(None), None);
+        assert_eq!(get_tool_ui_meta(Some(&json!({ "vendor/custom": 1 }))), None);
+        assert_eq!(
+            get_tool_ui_meta(Some(&json!({ "ui/resourceUri": 42 }))),
+            None,
+            "a non-string flat key is not a URI"
+        );
+    }
+
+    #[test]
+    fn nothing_neva_writes_carries_the_flat_key() {
+        let mut meta = None;
+        set_ui_meta(&mut meta, &UiToolMeta::new("ui://clock/app.html"));
+
+        assert_eq!(
+            meta,
+            Some(json!({ "ui": { "resourceUri": "ui://clock/app.html" } })),
+            "the flat key is read-only; it is removed before GA"
+        );
     }
 }

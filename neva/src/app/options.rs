@@ -1622,6 +1622,45 @@ mod tests {
             );
         }
 
+        #[tokio::test]
+        #[cfg(feature = "http-server")]
+        async fn a_ui_route_never_inherits_a_same_named_template() {
+            // `read_resource` reads roles and permissions off the resource
+            // template a route names. A `ui://` resource has no template entry
+            // on purpose, so the key it stores must be one an ordinary resource
+            // cannot collide with -- its URI, not its name. Keyed by name, the
+            // route below would silently pick up `restricted`'s claims.
+            let mut options = McpOptions::default();
+            options.add_resource_template(
+                ResourceTemplate::new("res://restricted/{id}", "clock"),
+                ResourceFunc::new(|_: Uri| async move {
+                    ResourceContents::new("res://restricted/1").with_text("secret")
+                }),
+            );
+            options
+                .resources_templates
+                .as_mut()
+                .get_mut("clock")
+                .expect("registered")
+                .with_roles(["admin"]);
+            options.add_ui_resource(UiResource::new("ui://clock/app.html", "clock", "<html>"));
+
+            let options = options.into_runtime();
+            let (handler, _) = options
+                .read_resource(&"ui://clock/app.html".into())
+                .expect("the read route is registered");
+
+            assert_eq!(handler.template, "ui://clock/app.html");
+            assert!(
+                options
+                    .resources_templates
+                    .get(&handler.template)
+                    .await
+                    .is_none(),
+                "no template backs a ui:// route, so no claims are inherited"
+            );
+        }
+
         #[test]
         fn with_apps_advertises_the_extension_without_settings() {
             let options = McpOptions::default().with_apps();

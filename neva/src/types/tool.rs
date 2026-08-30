@@ -1054,8 +1054,10 @@ impl Tool {
     /// The tool's MCP Apps metadata, or `None` when it has none or when the
     /// block does not parse.
     ///
-    /// A malformed extension block reads as absent rather than failing the
-    /// surrounding `tools/list`.
+    /// Accepts the deprecated flat `_meta["ui/resourceUri"]` as well as the
+    /// nested block, which is what the specification asks of a reader; the
+    /// nested one wins where both are present. A malformed extension block reads
+    /// as absent rather than failing the surrounding `tools/list`.
     ///
     /// # Examples
     /// ```
@@ -1072,7 +1074,7 @@ impl Tool {
     /// ```
     #[inline]
     pub fn ui(&self) -> Option<crate::types::UiToolMeta> {
-        apps::get_ui_meta(self.meta.as_ref())
+        apps::get_tool_ui_meta(self.meta.as_ref())
     }
 
     /// Whether the agent may see and call this tool.
