@@ -385,7 +385,7 @@ impl Context {
                     .await?;
 
                 #[cfg(feature = "apps")]
-                opt.apply_template_ui(&handler.template, &mut result).await;
+                opt.apply_app_defaults(&handler.template, &mut result).await;
 
                 Ok(result)
             }

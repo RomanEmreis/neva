@@ -28,11 +28,16 @@ use neva::prelude::*;
     }"#
 )]
 async fn report_view() -> TextResourceContents {
-    // No `_meta.ui` here: the server falls the attribute's block back onto the
-    // content item, which is the only place the tool-driven flow looks. Return a
-    // block of your own -- `TextResourceContents::with_ui(..)` -- when it varies
-    // per response; that replaces the attribute's *whole* block rather than
-    // merging into it, which is the precedence the specification gives a host.
+    // Neither `_meta.ui` nor a MIME type here. The server supplies both for a
+    // `ui://` read: the attribute's block falls back onto the content item --
+    // the only place the tool-driven flow looks -- and the app MIME type is
+    // stamped on, since the spec allows a `ui://` resource no other one and
+    // `TextResourceContents::new` would otherwise ship `text/plain`.
+    //
+    // Return a block of your own -- `TextResourceContents::with_ui(..)` -- when
+    // it varies per response; that replaces the attribute's *whole* block rather
+    // than merging into it, which is the precedence the specification gives a
+    // host.
     TextResourceContents::new(
         "ui://report/view",
         view::document(
@@ -41,7 +46,6 @@ async fn report_view() -> TextResourceContents {
   <output id="out">Waiting for data...</output>"#,
         ),
     )
-    .with_mime(APP_MIME_TYPE)
 }
 
 /// The data half. The id travels in the result, not in the resource URI.

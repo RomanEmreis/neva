@@ -578,6 +578,22 @@ impl ResourceContents {
         crate::types::apps::get_ui_meta(self.meta_ref())
     }
 
+    /// Sets the MIME type in place.
+    ///
+    /// The fluent [`Self::with_mime`] consumes `self`; the server's MCP Apps
+    /// path needs to correct a content item it already holds.
+    #[cfg(all(feature = "apps", feature = "server"))]
+    #[inline]
+    pub(crate) fn set_mime(&mut self, mime: impl Into<String>) {
+        let mime = mime.into();
+        match self {
+            Self::Text(text) => text.mime = Some(mime),
+            Self::Json(json) => json.mime = Some(mime),
+            Self::Blob(blob) => blob.mime = Some(mime),
+            Self::Empty(empty) => empty.mime = Some(mime),
+        }
+    }
+
     /// Sets the MCP Apps metadata in place.
     ///
     /// The server's fallback path: a `#[resource(ui_meta = ..)]` block lives on

@@ -695,31 +695,41 @@ impl McpOptions {
         }
     }
 
-    /// Falls a resource template's `_meta.ui` block back onto the content items
-    /// a `resources/read` produced, for those that brought none.
+    /// Brings a `resources/read` result up to what an MCP App must look like on
+    /// the wire.
     ///
-    /// A `#[resource(ui_meta = ..)]` block lands on the template, and the
-    /// tool-driven flow never looks there: a host takes the tool's
-    /// `_meta.ui.resourceUri` straight to `resources/read`. Without this the
-    /// declared CSP would reach nobody.
+    /// Two things the tool-driven flow would otherwise miss. A host takes the
+    /// tool's `_meta.ui.resourceUri` straight to `resources/read`; it never sees
+    /// `resources/templates/list`, where a `#[resource(ui_meta = ..)]` block and
+    /// a `ui://` URI's MIME default both land.
     ///
-    /// Block-level, not field-level. The spec has a host "preferring the content
-    /// item and falling back to the listing entry", so a handler that returns
-    /// its own block replaces this one whole rather than being merged into it.
+    /// * **MIME type.** The spec makes it a MUST: a `ui://` resource is served
+    ///   as [`APP_MIME_TYPE`](crate::types::APP_MIME_TYPE) and there is no other
+    ///   legal value, so this is enforcement rather than an override. It matters
+    ///   because the natural handler --
+    ///   `TextResourceContents::new(uri, html)` -- defaults to `text/plain`, and
+    ///   a host would refuse to render that.
+    /// * **`_meta.ui`.** Block-level, not field-level: the spec has a host
+    ///   "preferring the content item and falling back to the listing entry", so
+    ///   a handler that returns its own block replaces the template's whole
+    ///   rather than being merged into it.
     #[cfg(feature = "apps")]
-    pub(crate) async fn apply_template_ui(&self, template: &str, result: &mut ReadResourceResult) {
-        let Some(ui) = self
+    pub(crate) async fn apply_app_defaults(&self, template: &str, result: &mut ReadResourceResult) {
+        let ui = self
             .resources_templates
             .get(template)
             .await
-            .and_then(|template| template.ui())
-        else {
-            return;
-        };
+            .and_then(|template| template.ui());
 
         for contents in result.contents.iter_mut() {
-            if contents.ui().is_none() {
-                contents.set_ui(&ui);
+            if crate::types::apps::is_ui_uri(contents.uri()) {
+                contents.set_mime(crate::types::APP_MIME_TYPE);
+            }
+            
+            if let Some(ui) = ui.as_ref()
+                && contents.ui().is_none()
+            {
+                contents.set_ui(ui);
             }
         }
     }
@@ -1499,7 +1509,7 @@ mod tests {
     mod apps {
         use super::*;
         use crate::app::extension::UiResource;
-        use crate::types::{APP_MIME_TYPE, UiCsp, UiResourceMeta};
+        use crate::types::{APP_MIME_TYPE, TextResourceContents, UiCsp, UiResourceMeta};
 
         fn read_params(uri: &str) -> ReadResourceRequestParams {
             ReadResourceRequestParams {
@@ -1630,9 +1640,43 @@ mod tests {
             let (handler, _) = options.read_resource(&params.uri).expect("a route");
             let mut result = handler.call(params.into()).await.expect("a result");
             options
-                .apply_template_ui(&handler.template, &mut result)
+                .apply_app_defaults(&handler.template, &mut result)
                 .await;
             result
+        }
+
+        #[tokio::test]
+        async fn a_ui_read_is_served_as_an_app_whatever_the_handler_said() {
+            // `TextResourceContents::new` defaults to `text/plain`, so the
+            // natural handler ships a MIME type no host will render. The spec
+            // makes the app type a MUST for a `ui://` resource, so this is
+            // enforcement, not an override of anything legal.
+            let mut options = McpOptions::default();
+            options.add_resource_template(
+                ResourceTemplate::new("ui://report/view", "report"),
+                ResourceFunc::new(|_: Uri| async move {
+                    TextResourceContents::new("ui://report/view", "<html>")
+                }),
+            );
+
+            let result = read(options, "ui://report/view").await;
+
+            assert_eq!(result.contents[0].mime(), Some(APP_MIME_TYPE));
+        }
+
+        #[tokio::test]
+        async fn a_plain_resource_keeps_the_mime_its_handler_chose() {
+            let mut options = McpOptions::default();
+            options.add_resource_template(
+                ResourceTemplate::new("res://notes/{id}", "notes"),
+                ResourceFunc::new(|_: Uri| async move {
+                    TextResourceContents::new("res://notes/1", "hi")
+                }),
+            );
+
+            let result = read(options, "res://notes/1").await;
+
+            assert_eq!(result.contents[0].mime(), Some("text/plain"));
         }
 
         #[tokio::test]
