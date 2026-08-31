@@ -1,10 +1,10 @@
 //! The other half of the negotiation: a client that declares MCP Apps and reads
 //! back what the server offers.
 //!
-//! Run with (build the server first, or point `with_stdio` at a running one):
+//! Run with:
 //!
 //! ```no_rust
-//! cargo build -p example-apps && cargo run -p example-apps --bin client
+//! cargo run --manifest-path examples/apps/client/Cargo.toml
 //! ```
 //!
 //! A neva client is not a browser, so it does not render anything -- the `ui/*`
@@ -13,13 +13,18 @@
 //! face, fetch the HTML, and know which tools the model may see.
 
 use neva::prelude::*;
-use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let mut client = Client::new().with_options(|opt| {
-        opt.with_stdio("./target/debug/example-apps", [])
-            .with_timeout(Duration::from_secs(5))
+        // Spawns the server the way the other paired examples do. The parent
+        // `cargo run` has already built the shared dependency tree into this
+        // workspace's target directory, so the child only compiles the server
+        // itself and finishes well inside the request timeout.
+        opt.with_stdio(
+            "cargo",
+            ["run", "--manifest-path", "examples/apps/server/Cargo.toml"],
+        )
             // The client half: advertises `io.modelcontextprotocol/ui` with
             // `mimeTypes: ["text/html;profile=mcp-app"]`. A server checks this
             // before offering a UI-bound tool instead of a text-only one.

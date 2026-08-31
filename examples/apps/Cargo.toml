@@ -1,9 +1,6 @@
-[package]
-name = "example-apps"
-version = "0.1.0"
-edition = "2024"
-publish = false
+[workspace]
+members = ["client", "server"]
+resolver = "2"
 
-[dependencies]
-neva = { path = "../../neva", features = ["server-macros", "client", "apps"] }
-tokio = { version = "1.47.1", features = ["full"] }
+[workspace.package]
+rust-version = "1.90.0"

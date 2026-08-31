@@ -108,6 +108,7 @@ jobs:
       - name: Check the standalone example workspaces
         run: |
           for dir in \
+            examples/apps \
             examples/batch \
             examples/roots examples/roots/legacy \
             examples/sampling examples/sampling/legacy \

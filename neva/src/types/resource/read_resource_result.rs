@@ -7,12 +7,12 @@ use crate::types::helpers::{
 use crate::types::{Annotations, Uri};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+// `ResourceContents::json` is a reader, so both roles need these.
 #[cfg(feature = "server")]
+use crate::types::{IntoResponse, RequestId, Response};
+#[cfg(any(feature = "server", feature = "client"))]
 use {
-    crate::{
-        error::{Error, ErrorCode},
-        types::{IntoResponse, RequestId, Response},
-    },
+    crate::error::{Error, ErrorCode},
     serde::de::DeserializeOwned,
 };
 
@@ -403,7 +403,10 @@ impl ReadResourceResult {
     }
 }
 
-#[cfg(feature = "server")]
+// Reading a `resources/read` result is what a *client* does, and the
+// accessors below are the ergonomic way to do it -- gating them on `server`
+// left a client-only build matching on variants and touching fields by hand.
+#[cfg(any(feature = "server", feature = "client"))]
 impl ResourceContents {
     /// Creates a new resource content
     #[inline]
@@ -553,7 +556,7 @@ impl ResourceContents {
     ///
     /// assert!(contents.ui().is_some());
     /// ```
-    #[cfg(feature = "apps")]
+    #[cfg(all(feature = "apps", feature = "server"))]
     #[inline]
     pub fn with_ui(mut self, ui: crate::types::UiResourceMeta) -> Self {
         crate::types::apps::set_ui_meta(self.meta_mut(), &ui);
@@ -580,7 +583,7 @@ impl ResourceContents {
     /// The server's fallback path: a `#[resource(ui_meta = ..)]` block lives on
     /// the resource *template*, and a handler returning plain contents would
     /// otherwise answer `resources/read` without it.
-    #[cfg(feature = "apps")]
+    #[cfg(all(feature = "apps", feature = "server"))]
     #[inline]
     pub(crate) fn set_ui(&mut self, ui: &crate::types::UiResourceMeta) {
         crate::types::apps::set_ui_meta(self.meta_mut(), ui);
@@ -599,7 +602,7 @@ impl ResourceContents {
     }
 
     /// The `_meta` of whichever variant this is, mutably.
-    #[cfg(feature = "apps")]
+    #[cfg(all(feature = "apps", feature = "server"))]
     #[inline]
     fn meta_mut(&mut self) -> &mut Option<serde_json::Value> {
         match self {

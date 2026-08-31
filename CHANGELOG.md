@@ -46,6 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   publishing to the agent a tool meant for the app only. Fix the spelling or drop
   the attribute.
 
+* **`ResourceContents`'s accessors are available to a client build.** `uri`,
+  `text`, `blob`, `json`, `mime`, `title` and `annotations` were gated on
+  `server`, which left a client-only build reading a `resources/read` result by
+  matching on variants and touching fields. The builders stay server-side.
+
 * **`ClientCapabilities::extensions` is no longer gated on the protocol
   generation**, so a legacy `initialize` can carry it. Its counterpart on
   `ServerCapabilities` stays 2026-07-28-only. Additive: omitted from the wire

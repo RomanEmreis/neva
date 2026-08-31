@@ -3,6 +3,7 @@ resolver = "2"
 members = ["neva", "neva_macros", "conformance", "examples/*"]
 default-members = ["neva", "neva_macros"]
 exclude = [
+    "examples/apps",
     "examples/batch",
     "examples/roots", 
     "examples/sampling", 

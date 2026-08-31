@@ -3,7 +3,8 @@
 //! Run with:
 //!
 //! ```no_rust
-//! npx @modelcontextprotocol/inspector cargo run -p example-apps
+//! npx @modelcontextprotocol/inspector \
+//!   cargo run --manifest-path examples/apps/server/Cargo.toml
 //! ```
 //!
 //! Two halves, always two halves:
