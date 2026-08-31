@@ -1015,7 +1015,7 @@ where
     type Sender = HttpSender;
     type Receiver = HttpReceiver;
 
-    fn start(&mut self) -> TransportHandle {
+    fn start(&mut self) -> Result<TransportHandle, Error> {
         let token = CancellationToken::new();
         let (ctx, sender_rx) = match self.build_context_and_engine() {
             Ok(x) => x,
@@ -1025,9 +1025,14 @@ where
                 // Hand back an already-cancelled token so `App::run`'s
                 // receive loop breaks immediately instead of waiting
                 // forever on a server that never bound. Nothing was started,
-                // so there is nothing to wait on draining either.
+                // so there is nothing to wait on draining either. This is
+                // deliberately still `Ok`, not `Err` -- unlike the stdio
+                // client's spawn failure (see issue #125), there is no
+                // caller here with a `Result` to hand this to; `App::run`
+                // returns `()`, so the graceful-degrade path already in
+                // place is preserved rather than reworked into this change.
                 token.cancel();
-                return TransportHandle::detached(token);
+                return Ok(TransportHandle::detached(token));
             }
         };
 
@@ -1087,7 +1092,7 @@ where
         // shutdown budget runs out.
         drained.abort_on_timeout(transport.abort_handle());
 
-        TransportHandle::new(token, drained)
+        Ok(TransportHandle::new(token, drained))
     }
 
     #[inline]
@@ -1103,7 +1108,20 @@ where
     E: HttpEngine,
 {
     fn start(&mut self) -> TransportHandle {
-        <Self as Transport>::start(self)
+        // `HttpTransport` (this trait) is a `pub(crate)` dyn-compatible
+        // bridge with no `Result` of its own to hand a failure to, so it
+        // stays infallible -- see the matching comment on `Transport::start`
+        // for `HttpServer` above, whose own body never actually constructs
+        // an `Err` today. Degrade the same way that body already does
+        // internally (an already-cancelled, detached handle) if that ever
+        // changes, rather than unwrap and panic.
+        <Self as Transport>::start(self).unwrap_or_else(|_err| {
+            #[cfg(feature = "tracing")]
+            tracing::error!(logger = "neva", "Failed to start HTTP server: {}", _err);
+            let token = CancellationToken::new();
+            token.cancel();
+            TransportHandle::detached(token)
+        })
     }
 
     fn split_into_proto(self: Box<Self>) -> (HttpSender, HttpReceiver) {
@@ -1121,14 +1139,19 @@ impl Transport for HttpClient {
     type Sender = HttpSender;
     type Receiver = HttpReceiver;
 
-    fn start(&mut self) -> TransportHandle {
+    fn start(&mut self) -> Result<TransportHandle, Error> {
         let token = CancellationToken::new();
         let runtime = match self.runtime() {
             Ok(runtime) => runtime,
             Err(_err) => {
                 #[cfg(feature = "tracing")]
                 tracing::error!(logger = "neva", "Failed to start HTTP client: {}", _err);
-                return TransportHandle::detached(token);
+                // Scope kept to what issue #125 asked for: the stdio client's
+                // spawn failure. `self.runtime()` failing here is a distinct,
+                // pre-existing case this fix does not change the reporting of
+                // -- still a graceful detached handle, not a new `Err`, so
+                // this stays behaviorally identical to before.
+                return Ok(TransportHandle::detached(token));
             }
         };
         tokio::spawn(client::connect(runtime, token.clone()));
@@ -1136,7 +1159,7 @@ impl Transport for HttpClient {
         // A client's outbound messages are written by the connection task,
         // which owns its own teardown; there is no shutdown drain on this side
         // to join.
-        TransportHandle::detached(token)
+        Ok(TransportHandle::detached(token))
     }
 
     fn split(self) -> (Self::Sender, Self::Receiver) {
@@ -1208,7 +1231,7 @@ mod engine_smoke_tests {
             exited: exited.clone(),
         };
         let mut server = HttpServer::from_engine("127.0.0.1:0", engine);
-        let handle = <HttpServer<_, _> as Transport>::start(&mut server);
+        let handle = <HttpServer<_, _> as Transport>::start(&mut server).unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(started.load(Ordering::SeqCst), "engine.run was not invoked");
@@ -1290,7 +1313,7 @@ mod engine_smoke_tests {
             HttpServer::from_engine("127.0.0.1:0", CapturingEngine { ctx: slot.clone() });
         let mut sender = server.sender.clone();
 
-        let handle = <HttpServer<_, _> as Transport>::start(&mut server);
+        let handle = <HttpServer<_, _> as Transport>::start(&mut server).unwrap();
         let ctx = captured(&slot).await;
 
         let (response, mut rx) = queued_response(&ctx.pending);
@@ -1322,7 +1345,7 @@ mod engine_smoke_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn the_volga_engine_stops_on_the_transport_token() {
         let mut server = HttpServer::new("127.0.0.1:0");
-        let handle = <HttpServer<_, _> as Transport>::start(&mut server);
+        let handle = <HttpServer<_, _> as Transport>::start(&mut server).unwrap();
 
         // Bound and serving before it is asked to stop, so this is a running
         // server going down rather than one that never came up.
@@ -1527,7 +1550,7 @@ mod engine_smoke_tests {
         let mut server = HttpServer::from_engine("127.0.0.1:3000", MockEngine::default())
             .with_oauth_metadata(|oauth| oauth.with_resource("not a uri"));
 
-        let handle = <HttpServer<_, _> as Transport>::start(&mut server);
+        let handle = <HttpServer<_, _> as Transport>::start(&mut server).unwrap();
 
         // A cancelled token breaks App::run's receive loop immediately;
         // an uncancelled one would leave the app waiting forever on a

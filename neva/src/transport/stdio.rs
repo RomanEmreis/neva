@@ -418,33 +418,35 @@ impl StdIoClient {
     }
 
     /// Handshakes stdio between client and server apps
+    ///
+    /// Fails when the configured command cannot be spawned (a typo, a
+    /// binary that was never built, a server removed from `PATH`) --
+    /// ordinary user input, not a bug, so this returns an [`Error`] rather
+    /// than panicking. See https://github.com/RomanEmreis/neva/issues/125.
     fn handshake(
         &self,
         token: CancellationToken,
-    ) -> (BufReader<ChildStdout>, BufWriter<ChildStdin>) {
+    ) -> Result<(BufReader<ChildStdout>, BufWriter<ChildStdin>), Error> {
         let options = &self.options;
         #[cfg(target_os = "linux")]
-        let (job, mut child) =
-            linux::Job::new(options.command, &options.args).expect("Failed to handshake");
+        let (job, mut child) = linux::Job::new(options.command, &options.args)?;
         #[cfg(target_os = "windows")]
-        let (job, mut child) =
-            windows::Job::new(options.command, &options.args).expect("Failed to handshake");
+        let (job, mut child) = windows::Job::new(options.command, &options.args)?;
         #[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
         let mut child = tokio::process::Command::new(options.command)
             .args(&options.args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .spawn()
-            .expect("Failed to handshake");
+            .spawn()?;
 
         let stdin = child
             .stdin
             .take()
-            .expect("Failed to handshake: Inaccessible stdin");
+            .ok_or_else(|| Error::from(std::io::Error::other("Inaccessible stdin")))?;
         let stdout = child
             .stdout
             .take()
-            .expect("Failed to handshake: Inaccessible stdout");
+            .ok_or_else(|| Error::from(std::io::Error::other("Inaccessible stdout")))?;
 
         #[cfg(feature = "tracing")]
         let child_id = child.id();
@@ -474,7 +476,7 @@ impl StdIoClient {
             }
         });
 
-        (BufReader::new(stdout), BufWriter::new(stdin))
+        Ok((BufReader::new(stdout), BufWriter::new(stdin)))
     }
 }
 
@@ -528,9 +530,9 @@ impl Transport for StdIoClient {
     type Sender = StdIoSender;
     type Receiver = StdIoReceiver;
 
-    fn start(&mut self) -> TransportHandle {
+    fn start(&mut self) -> Result<TransportHandle, Error> {
         let token = CancellationToken::new();
-        let (reader, writer) = self.handshake(token.clone());
+        let (reader, writer) = self.handshake(token.clone())?;
         let (guard, mut drained) = DrainSignal::new();
 
         self.receiver
@@ -542,7 +544,7 @@ impl Transport for StdIoClient {
 
         #[cfg(feature = "tracing")]
         tracing::info!(logger = "neva", "Connected: stdio");
-        TransportHandle::new(token, drained)
+        Ok(TransportHandle::new(token, drained))
     }
 
     #[inline]
@@ -556,7 +558,7 @@ impl Transport for StdIoServer {
     type Sender = StdIoSender;
     type Receiver = StdIoReceiver;
 
-    fn start(&mut self) -> TransportHandle {
+    fn start(&mut self) -> Result<TransportHandle, Error> {
         let token = CancellationToken::new();
         let (reader, writer) = StdIoServer::init();
         // Only the writer takes a guard: the reader is a thread of neva's own
@@ -574,7 +576,7 @@ impl Transport for StdIoServer {
 
         #[cfg(feature = "tracing")]
         tracing::info!(logger = "neva", "Listening: stdio");
-        TransportHandle::new(token, drained)
+        Ok(TransportHandle::new(token, drained))
     }
 
     #[inline]
@@ -1009,7 +1011,7 @@ mod tests {
             ["/c", "ping", "127.0.0.1", "-t"],
         ));
         let token = CancellationToken::new();
-        let (_, _) = client.handshake(token.clone());
+        let (_, _) = client.handshake(token.clone()).unwrap();
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
@@ -1037,7 +1039,7 @@ mod tests {
 
         let client = StdIoClient::new(StdIoOptions::new("sh", ["-c", "sleep 300"]));
         let token = CancellationToken::new();
-        let (_, _) = client.handshake(token.clone());
+        let (_, _) = client.handshake(token.clone()).unwrap();
 
         token.cancel();
 
@@ -1051,6 +1053,31 @@ mod tests {
             .unwrap();
 
         assert!(output.stdout.is_empty(), "Process still running");
+    }
+
+    /// Regression test for
+    /// <https://github.com/RomanEmreis/neva/issues/125>: a command that
+    /// cannot be spawned -- a typo, a binary that was never built, a server
+    /// removed from `PATH` -- used to panic `handshake` via `.expect(..)`
+    /// instead of returning an [`Error`] a caller could match on.
+    #[tokio::test]
+    #[cfg(feature = "client")]
+    async fn it_returns_an_error_instead_of_panicking_when_the_command_cannot_be_spawned() {
+        use super::options::StdIoOptions;
+        use crate::transport::StdIoClient;
+        use tokio_util::sync::CancellationToken;
+
+        let client = StdIoClient::new(StdIoOptions::new(
+            "neva-nonexistent-command-for-issue-125-repro",
+            [],
+        ));
+        let token = CancellationToken::new();
+
+        let result = client.handshake(token);
+        assert!(
+            result.is_err(),
+            "spawning a nonexistent command should return an Err, not panic or succeed"
+        );
     }
 }
 

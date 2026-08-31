@@ -466,10 +466,24 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
         // Two halves: the token that stops the transport, and the signal its
         // writers raise once they have drained. This loop breaks on the first;
         // returning waits on the second.
+        //
+        // A server binds its own stdio/HTTP listener and cannot hit a client's
+        // spawn-failure arms (see `Transport::start`, issue #125) -- this
+        // stays fatal the same way a runtime that fails to build already is
+        // in `run_blocking` above, just said rather than unwound.
         let TransportHandle {
             token: cancellation_token,
             drained,
-        } = transport.start();
+        } = match transport.start() {
+            Ok(handle) => handle,
+            Err(_err) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(logger = "neva", "failed to start the transport: {_err:#}");
+                #[cfg(not(feature = "tracing"))]
+                eprintln!("failed to start the transport: {_err:#}");
+                return;
+            }
+        };
 
         // Shutdown arrives here -- from an OS signal, or from a
         // `ShutdownHandle` the caller kept -- and is relayed to the transport
