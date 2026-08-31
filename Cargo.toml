@@ -3,6 +3,7 @@ resolver = "2"
 members = ["neva", "neva_macros", "conformance", "examples/*"]
 default-members = ["neva", "neva_macros"]
 exclude = [
+    "examples/apps",
     "examples/batch",
     "examples/roots", 
     "examples/sampling", 
@@ -13,7 +14,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.5.5"
+version = "0.5.6"
 license = "MIT"
 edition = "2024"
 rust-version = "1.90.0"
@@ -30,7 +31,7 @@ categories = [
 ]
 
 [workspace.dependencies]
-neva_macros = { path = "neva_macros", version = "0.5.5" }
+neva_macros = { path = "neva_macros", version = "0.5.6" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

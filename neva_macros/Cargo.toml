@@ -21,7 +21,7 @@ workspace = true
 
 [dependencies]
 quote = "1.0.47"
-syn = { version = "3.0.3", features = ["full"] }
+syn = { version = "3.0.4", features = ["full"] }
 proc-macro2 = "1.0.107"
 serde_json = "1.0.151"
 
@@ -29,6 +29,12 @@ serde_json = "1.0.151"
 default = []
 server = []
 client = []
+
+# Forwarded from neva. Enables the MCP Apps attributes -- `ui` / `visibility`
+# on `#[tool]`, `ui_meta` on `#[resource]` -- which expand to builders that
+# only exist in an `apps` build. Without it those attributes are a clear
+# compile error instead of a missing method on generated code.
+apps = []
 
 # Forwarded from neva. Switches the `#[tool]` macro back to emitting legacy
 # `ToolSchema` registration code instead of JSON Schema 2020-12

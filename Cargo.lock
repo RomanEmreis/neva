@@ -1091,9 +1091,9 @@ dependencies = [
 
 [[package]]
 name = "fraction"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33fee0259ffdc3d7bd64438b6b08437884d4df5700f9cb8a23b079c3958ae578"
+checksum = "e246562084dde8ebbcc943b261c406ce4f68e5032ec28029a251a47d6a295500"
 dependencies = [
  "num",
  "num-bigint",
@@ -1135,7 +1135,7 @@ checksum = "9fb9654ba8355388abeb8dcb4fc62f511300867002afc858860463bdd9fe0c44"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -1325,9 +1325,9 @@ dependencies = [
 
 [[package]]
 name = "hyper"
-version = "1.11.0"
+version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d22053281f852e11534f5198498373cbb59295120a20771d90f7ed1897490a72"
+checksum = "27b501faa50e7a26c3d3560ca625132f4078a17771f4810baf70475ae48cbe43"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -1639,9 +1639,9 @@ dependencies = [
 
 [[package]]
 name = "jsonschema"
-version = "0.50.1"
+version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29b6bb4e22283b09119c671e57ac6a185e9a0c70c31585e56b729b626d877753"
+checksum = "0ee5867390f14ee43278d8d05d3af5f5314eeccb4684e6049033f2ba4ae3d4ae"
 dependencies = [
  "ahash",
  "bytecount",
@@ -1670,18 +1670,18 @@ dependencies = [
 
 [[package]]
 name = "jsonschema-regex"
-version = "0.50.1"
+version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "497fbf3b1ca53b1e23a253f636e88e7a2031387388b8140199a0f240fcadf647"
+checksum = "1a7bbc0f53dcb425cf3bae539be26b406b7053e6995e34e4b04477091e600044"
 dependencies = [
  "regex-syntax",
 ]
 
 [[package]]
 name = "jsonschema-value"
-version = "0.50.1"
+version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b84ca3f39446973a810fc90fc2645ada8c24284f6deb009c78b776813973887d"
+checksum = "0d3e24abcd5f7eff512eb6bb915ac67772f2e7142ae5b5ac67b4ac75bd417d46"
 dependencies = [
  "ahash",
  "bytecount",
@@ -1701,7 +1701,7 @@ dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
  "js-sys",
- "pem",
+ "pem 3.0.6",
  "serde",
  "serde_json",
  "signature",
@@ -1719,7 +1719,7 @@ dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
  "js-sys",
- "pem",
+ "pem 3.0.6",
  "serde",
  "serde_json",
  "signature",
@@ -1876,7 +1876,7 @@ dependencies = [
 
 [[package]]
 name = "neva"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -1926,12 +1926,12 @@ dependencies = [
 
 [[package]]
 name = "neva_macros"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "proc-macro2",
  "quote",
  "serde_json",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -2107,6 +2107,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
 dependencies = [
  "base64 0.22.1",
+ "serde_core",
+]
+
+[[package]]
+name = "pem"
+version = "4.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d354a98a3d1251555de99e8fdd8afda05573c31b82f59063a7b0a29b5527f120"
+dependencies = [
+ "base64 0.23.1",
  "serde_core",
 ]
 
@@ -2315,11 +2325,11 @@ checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
 name = "rcgen"
-version = "0.14.9"
+version = "0.14.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "091e7a8e7d86e6feb87a27ce8e2cba29d49eff9507afeebefab7eeb2ca667fb4"
+checksum = "8774e05a7d0de114588e6a28fe7e71694b82614ed569d86d8b389dfbc98b8ad8"
 dependencies = [
- "pem",
+ "pem 4.0.0",
  "ring",
  "rustls-pki-types",
  "time",
@@ -2358,9 +2368,9 @@ dependencies = [
 
 [[package]]
 name = "referencing"
-version = "0.50.1"
+version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a0a32a2a2c2d7dd0ee54705b5fd641be73037271928f68e9b0e7205b71c9d30"
+checksum = "b6326ce79629af4702ac033666390011ccc70fe82ffedd62824d061f133bd10b"
 dependencies = [
  "ahash",
  "fluent-uri",
@@ -2649,7 +2659,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "serde_derive_internals",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -2714,7 +2724,7 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -2725,7 +2735,7 @@ checksum = "f852137cce035d6a4df67ccce505ff6b3e9fd3a10e3e52b24dc71e650bb1a9bd"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -2945,9 +2955,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "3.0.3"
+version = "3.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
+checksum = "e6275cddf4610d1775e6d1fe9469b2e77d0f39fd98fb7450901b821e0c53649f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3347,9 +3357,9 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "uuid"
-version = "1.25.0"
+version = "1.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f053576934f05a761a402421fbbe3d425d9366f75f978806a037b3ca481abecc"
+checksum = "b5772d71c9be8a8a6ac2117d949c5b224c1b72241bb611d9a3012edcf8af7812"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
@@ -3381,9 +3391,9 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "volga"
-version = "0.9.8"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d50f9e43f806316e348ac7a575d7a7f9369a3c52f3d004b9a8bdf003c7b484c5"
+checksum = "02f4b67d48b7d36ef1667a4494c949a6ca332b14a17fa6ec0203671ccbc40ec4"
 dependencies = [
  "async-stream",
  "bytes",
@@ -3415,38 +3425,38 @@ dependencies = [
 
 [[package]]
 name = "volga-dev-cert"
-version = "0.9.8"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45f2d0b6fa1041d067267b85a6737638a75365495a1e815b01ff607a59036b78"
+checksum = "a3c80ef1d5b815c65f6d63ae3c8d7f3221d15eb2ea432925aa33259a2ea6f8aa"
 dependencies = [
  "rcgen",
 ]
 
 [[package]]
 name = "volga-di"
-version = "0.9.8"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "946b268bdd50e8c713cd2d55822298349d26e2a9b0e6da029e43f11fe76351eb"
+checksum = "88296ac2a6540943105057c38589c9697074c6a567a27912efd520eb27ad85fc"
 dependencies = [
  "http 1.5.0",
 ]
 
 [[package]]
 name = "volga-macros"
-version = "0.9.8"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc694bd8d72b14cea244a2c0c232698da6e5b3ce8d523c798d6fbb9c2a8d2b0f"
+checksum = "2644239b201f4ad598012b1f5ffd2160bdcafa39378b092ca9ceb9265a598014"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.4",
 ]
 
 [[package]]
 name = "volga-oauth-client"
-version = "0.9.8"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae20571a06e573b43011866b074527a7db857cc8559107fe96a8e000eb695f6f"
+checksum = "1337e3e2c48bcd975d5e2083939f59168dba7dc7b32460fd1e250c0197acb130"
 dependencies = [
  "aws-lc-rs",
  "base64 0.23.1",
@@ -3466,9 +3476,9 @@ dependencies = [
 
 [[package]]
 name = "volga-oauth-core"
-version = "0.9.8"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e462d2cdbe52d70c480201b79164c1d553a2ee32e87ec832bc7f5499272e780"
+checksum = "7d54413e9456972750fb86f845e898b126c28378544caec770d1b02de43437ac"
 dependencies = [
  "http 1.5.0",
  "serde",

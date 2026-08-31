@@ -383,6 +383,8 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
         // Must follow register_methods() for the same reason the greeting does:
         // macro-registered tools are not in the collection before it.
         self.validate_arg_names();
+        #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
+        self.validate_ui_resources();
 
         // ORDERING CONSTRAINT: must execute after register_methods() so macro-registered
         // tools/prompts are present; must execute before self.options.transport() consumes
@@ -987,6 +989,68 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
         }
     }
 
+    /// Warns when a UI-bound tool names a `ui://` resource the host will not be
+    /// able to fetch.
+    ///
+    /// A host reads `_meta.ui.resourceUri` and passes it to `resources/read`
+    /// **verbatim**, so two registration mistakes only surface there: a URI
+    /// nothing on this server answers, and a URI carrying a template segment,
+    /// which is read as the literal `{name}` rather than substituted from the
+    /// tool call. Neither is fatal -- the tool still returns its `content`,
+    /// which is the text-only path every MCP Apps tool has to work on anyway --
+    /// so both warn rather than failing startup.
+    #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
+    fn validate_ui_resources(&self) {
+        for (tool, uri, complaint) in self.ui_resource_problems() {
+            // stderr, not stdout: the stdio transport owns stdout. Same shape as
+            // the runtime-start failure above -- a diagnostic a minimal build
+            // still gets, since `tracing` is optional and this one is a promise.
+            #[cfg(feature = "tracing")]
+            tracing::warn!(
+                logger = "neva",
+                "Tool `{tool}` advertises the MCP Apps resource `{uri}`, which {complaint}."
+            );
+            #[cfg(not(feature = "tracing"))]
+            eprintln!(
+                "neva: tool `{tool}` advertises the MCP Apps resource `{uri}`, which {complaint}."
+            );
+        }
+    }
+
+    /// The UI-bound tools whose `resourceUri` a host will not be able to fetch,
+    /// each with what is wrong with it. Split out of
+    /// [`Self::validate_ui_resources`] so the classification is testable without
+    /// capturing log output.
+    #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
+    fn ui_resource_problems(&self) -> Vec<(String, Uri, &'static str)> {
+        self.options
+            .tools
+            .as_ref()
+            .values()
+            .filter_map(|tool| {
+                let uri = tool.ui()?.resource_uri?;
+                let complaint = if !crate::types::apps::is_ui_uri(&uri) {
+                    "does not use the reserved `ui://` scheme, which is what marks a \
+                     resource as an MCP App. A host will not render this binding even \
+                     when the resource itself is served. (The `#[tool]` macro refuses \
+                     this at compile time; `Tool::with_ui` cannot.)"
+                } else if uri.contains('{') {
+                    "carries a template segment, and a host fetches the URI verbatim \
+                     rather than substituting the tool's arguments into it. Name a \
+                     concrete resource: the document is the static half of an MCP App \
+                     and the data belongs in the tool's result"
+                } else if !self.options.serves_ui_resource(&uri) {
+                    "is not served by anything here, so the host's `resources/read` \
+                     will fail and the tool will render without a UI. Register it with \
+                     App::add_ui_resource or App::map_ui_resource"
+                } else {
+                    return None;
+                };
+                Some((tool.name.clone(), uri, complaint))
+            })
+            .collect()
+    }
+
     /// Maps an MCP tool call request to a specific function and returns a mutable reference to the
     /// [`Tool`] for further configuration
     ///
@@ -1038,6 +1102,67 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
         self.options.add_resource(resource)
     }
 
+    /// Adds a `ui://` MCP Apps resource serving `html`, returning it for further
+    /// configuration.
+    ///
+    /// This is the whole server side of an MCP App's presentation half: the HTML
+    /// answers `resources/read` on `uri` as
+    /// [`APP_MIME_TYPE`](crate::types::APP_MIME_TYPE), a tool points at it with
+    /// [`Tool::with_ui`], and the host does the rest. Whether it also appears in
+    /// `resources/list` is
+    /// [`AppsExtension::with_listed_resources`](crate::app::extension::AppsExtension::with_listed_resources);
+    /// off by default.
+    ///
+    /// The returned `&mut` stays live for the rest of the builder chain -- the
+    /// resource is materialized when the server starts, not when this returns.
+    ///
+    /// # Authorization
+    ///
+    /// A resource registered this way carries **no role or permission
+    /// requirement**: on an OAuth-protected server anyone who can reach it can
+    /// read it. That is usually right -- the document is a template a host is
+    /// expected to prefetch and review at connection time, while the data it
+    /// displays comes from a tool, which does carry
+    /// [`Tool::with_roles`](crate::types::Tool::with_roles). When the markup
+    /// itself must be restricted, register it with [`Self::map_ui_resource`]
+    /// instead and put the requirement on the returned
+    /// [`ResourceTemplate`].
+    ///
+    /// # Examples
+    /// ```no_run
+    /// use neva::{App, types::UiCsp};
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let mut app = App::new().with_options(|opt| opt.with_apps());
+    ///
+    /// app.add_ui_resource("ui://weather/dashboard", "dashboard", "<!doctype html>...")
+    ///     .with_title("Weather dashboard")
+    ///     .with_csp(UiCsp::new().with_connect_domains(["https://api.openweathermap.org"]));
+    ///
+    /// app.map_tool("get_weather", |city: String| async move { format!("Sunny in {city}") })
+    ///     .with_arg_names(["city"])
+    ///     .with_ui("ui://weather/dashboard");
+    ///
+    /// # app.run().await;
+    /// # }
+    /// ```
+    #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
+    pub fn add_ui_resource<U, S, H>(
+        &mut self,
+        uri: U,
+        name: S,
+        html: H,
+    ) -> &mut crate::app::extension::UiResource
+    where
+        U: Into<Uri>,
+        S: Into<String>,
+        H: Into<String>,
+    {
+        let resource = crate::app::extension::UiResource::new(uri, name, html);
+        self.options.add_ui_resource(resource)
+    }
+
     /// Maps an MCP resource read request to a specific function
     ///
     /// # Example
@@ -1071,6 +1196,55 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
         let template = ResourceTemplate::new(uri, name);
 
         self.options.add_resource_template(template, handler)
+    }
+
+    /// Maps a `ui://` MCP Apps resource to a function that generates its HTML.
+    ///
+    /// The templated counterpart of [`Self::add_ui_resource`], for HTML that is
+    /// computed rather than fixed. Defaults the template's MIME type to
+    /// [`APP_MIME_TYPE`](crate::types::APP_MIME_TYPE); the handler still owns
+    /// what it returns, so set the content item's own MIME type and `_meta.ui`
+    /// on the [`TextResourceContents`](crate::types::TextResourceContents) it
+    /// hands back.
+    ///
+    /// Unlike [`Self::add_ui_resource`], this registers a genuine template, so
+    /// it appears in `resources/templates/list`.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// use neva::{App, types::{APP_MIME_TYPE, TextResourceContents}};
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let mut app = App::new().with_options(|opt| opt.with_apps());
+    ///
+    /// app.map_ui_resource("ui://report/{id}", "report", |id: String| async move {
+    ///     TextResourceContents::new(
+    ///         format!("ui://report/{id}"),
+    ///         format!("<!doctype html><title>Report {id}</title>"),
+    ///     )
+    ///     .with_mime(APP_MIME_TYPE)
+    /// });
+    ///
+    /// # app.run().await;
+    /// # }
+    /// ```
+    #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
+    pub fn map_ui_resource<F, R, Args>(
+        &mut self,
+        uri: impl Into<Uri>,
+        name: impl Into<String>,
+        handler: F,
+    ) -> &mut ResourceTemplate
+    where
+        F: GenericHandler<Args, Output = R>,
+        R: TryInto<ReadResourceResult> + Send + 'static,
+        R::Error: Into<Error>,
+        Args: TryFrom<ReadResourceRequestParams, Error = Error> + Send + Sync + 'static,
+    {
+        let template = self.map_resource(uri, name, handler);
+        template.with_mime(crate::types::APP_MIME_TYPE);
+        template
     }
 
     /// Maps an MCP get a prompt request to a specific function
@@ -1696,5 +1870,176 @@ mod tests {
             2,
             "two requests must produce two response slots"
         );
+    }
+
+    /// MCP Apps: the listing switch lives on the extension while the resources
+    /// are added through `App`, so the two must not care which comes first.
+    #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
+    mod apps {
+        use super::*;
+        use crate::app::extension::AppsExtension;
+
+        async fn listed_uris(app: App) -> Vec<String> {
+            let (resources, _) = app
+                .options
+                .into_runtime()
+                .list_resources_page(None, 10)
+                .await;
+            resources.into_iter().map(|r| r.uri.to_string()).collect()
+        }
+
+        #[tokio::test]
+        async fn the_extension_may_be_registered_before_the_resources() {
+            let mut app = App::new().with_extension(AppsExtension::new().with_listed_resources());
+            app.add_ui_resource("ui://clock/app.html", "clock", "<html>");
+
+            assert_eq!(listed_uris(app).await, ["ui://clock/app.html"]);
+        }
+
+        #[tokio::test]
+        async fn the_extension_may_be_registered_after_the_resources() {
+            let mut app = App::new();
+            app.add_ui_resource("ui://clock/app.html", "clock", "<html>");
+            let app = app.with_extension(AppsExtension::new().with_listed_resources());
+
+            assert_eq!(listed_uris(app).await, ["ui://clock/app.html"]);
+        }
+
+        #[tokio::test]
+        async fn with_apps_takes_the_unlisted_default() {
+            let mut app = App::new().with_options(|opt| opt.with_apps());
+            app.add_ui_resource("ui://clock/app.html", "clock", "<html>");
+
+            assert!(listed_uris(app).await.is_empty());
+        }
+
+        #[test]
+        fn a_ui_bound_tool_carries_the_resource_uri_and_stays_model_visible() {
+            let mut app = App::new();
+            app.map_tool("get_time", || async { "12:00" })
+                .with_ui("ui://clock/app.html");
+
+            let tool = app.options.tools.as_ref().get("get_time").unwrap();
+
+            assert_eq!(
+                tool.ui().and_then(|ui| ui.resource_uri).as_deref(),
+                Some("ui://clock/app.html")
+            );
+            assert!(
+                tool.is_model_visible(),
+                "an omitted visibility means both scopes"
+            );
+        }
+
+        #[test]
+        fn an_app_only_tool_is_still_registered_normally() {
+            // Hiding it from the agent is the host's job, not ours: the tool is
+            // in the registry like any other and `tools/list` will carry it.
+            let mut app = App::new();
+            app.map_tool("refresh", || async { "ok" })
+                .with_ui("ui://clock/app.html")
+                .with_visibility([crate::types::UiVisibility::App]);
+
+            let tool = app.options.tools.as_ref().get("refresh").unwrap();
+
+            assert!(!tool.is_model_visible());
+            assert!(tool.is_app_visible());
+        }
+
+        #[test]
+        fn a_templated_resource_uri_is_reported() {
+            // A host passes `resourceUri` to `resources/read` verbatim. Route
+            // matching resolves `{id}` against the template, so the read
+            // *succeeds* -- and returns a report for the literal `{id}`. Nothing
+            // downstream can notice, which is why this is caught at startup.
+            let mut app = App::new();
+            app.map_ui_resource("ui://report/{id}", "report", |id: String| async move {
+                crate::types::TextResourceContents::new(format!("ui://report/{id}"), "<html>")
+            });
+            app.map_tool("show_report", |_id: String| async { "ok" })
+                .with_ui("ui://report/{id}");
+
+            let problems = app.ui_resource_problems();
+
+            assert_eq!(problems.len(), 1);
+            assert_eq!(problems[0].0, "show_report");
+            assert!(
+                problems[0].2.contains("template segment"),
+                "{}",
+                problems[0].2
+            );
+        }
+
+        #[test]
+        fn a_resource_uri_on_the_wrong_scheme_is_reported() {
+            // The macro refuses this at compile time; the fluent builder cannot,
+            // and the resource being served is not enough -- `ui://` is what
+            // declares an MCP App, and a host renders nothing else.
+            let mut app = App::new();
+            app.map_resource("res://dashboard", "dashboard", || async {
+                crate::types::TextResourceContents::new("res://dashboard", "<html>")
+            });
+            app.map_tool("show", || async { "ok" })
+                .with_ui("res://dashboard");
+
+            let problems = app.ui_resource_problems();
+
+            assert_eq!(problems.len(), 1);
+            assert!(
+                problems[0].2.contains("reserved `ui://` scheme"),
+                "{}",
+                problems[0].2
+            );
+        }
+
+        #[test]
+        fn a_resource_uri_nothing_serves_is_reported() {
+            let mut app = App::new();
+            app.map_tool("get_time", || async { "12:00" })
+                .with_ui("ui://clock/app.html");
+
+            let problems = app.ui_resource_problems();
+
+            assert_eq!(problems.len(), 1);
+            assert!(problems[0].2.contains("not served"), "{}", problems[0].2);
+        }
+
+        #[test]
+        fn a_concrete_uri_that_is_served_is_not_reported() {
+            let mut app = App::new();
+            app.add_ui_resource("ui://clock/app.html", "clock", "<html>");
+            app.map_tool("get_time", || async { "12:00" })
+                .with_ui("ui://clock/app.html");
+
+            assert!(app.ui_resource_problems().is_empty());
+        }
+
+        #[test]
+        fn a_tool_without_a_ui_is_never_reported() {
+            let mut app = App::new();
+            app.map_tool("plain", || async { "ok" });
+
+            assert!(app.ui_resource_problems().is_empty());
+        }
+
+        #[tokio::test]
+        async fn map_ui_resource_defaults_the_template_mime_type() {
+            let mut app = App::new();
+            app.map_ui_resource("ui://report/{id}", "report", |id: String| async move {
+                crate::types::TextResourceContents::new(format!("ui://report/{id}"), "<html>")
+            });
+
+            let (templates, _) = app
+                .options
+                .into_runtime()
+                .list_resource_templates_page(None, 10)
+                .await;
+
+            assert_eq!(templates.len(), 1);
+            assert_eq!(
+                templates[0].mime.as_deref(),
+                Some(crate::types::APP_MIME_TYPE)
+            );
+        }
     }
 }

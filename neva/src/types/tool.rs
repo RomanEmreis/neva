@@ -33,6 +33,12 @@ use crate::types::TaskMetadata;
 #[cfg(feature = "client")]
 use jsonschema::validator_for;
 
+#[cfg(feature = "apps")]
+use crate::types::apps;
+// Only `Tool::with_ui` names it, and that is a server-side builder.
+#[cfg(all(feature = "server", feature = "apps"))]
+use crate::types::Uri;
+
 pub use call_tool_response::CallToolResponse;
 
 mod call_tool_response;
@@ -1041,6 +1047,170 @@ fn rename_args(schema: &mut crate::types::ToolInputSchema, from: &ArgNames, to: 
     }
 }
 
+#[cfg(all(test, feature = "apps", feature = "server"))]
+mod apps_visibility_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn tool_with_meta(meta: serde_json::Value) -> Tool {
+        let mut tool = Tool::new("t", || async { "ok" });
+        tool.meta = Some(meta);
+        tool
+    }
+
+    #[test]
+    fn an_app_only_restriction_survives_a_malformed_neighbour() {
+        // `resourceUri` of the wrong type sinks the whole `UiToolMeta`, and the
+        // audience restriction sits in the same object. Reading the two together
+        // would publish to the agent a tool meant for the app.
+        let tool = tool_with_meta(json!({
+            "ui": { "resourceUri": 1, "visibility": ["app"] }
+        }));
+
+        assert!(tool.ui().is_none(), "the block itself does not decode");
+        assert!(!tool.is_model_visible(), "but the restriction still holds");
+        assert!(tool.is_app_visible());
+    }
+
+    #[test]
+    fn an_unreadable_visibility_denies_rather_than_defaults() {
+        // The author was narrowing the audience. Guessing "everyone" resolves the
+        // ambiguity in the one direction that cannot be taken back.
+        let tool = tool_with_meta(json!({ "ui": { "visibility": "app" } }));
+
+        assert!(!tool.is_model_visible());
+        assert!(!tool.is_app_visible());
+    }
+
+    #[test]
+    fn an_unknown_scope_denies_too() {
+        let tool = tool_with_meta(json!({ "ui": { "visibility": ["agent"] } }));
+
+        assert!(!tool.is_model_visible());
+    }
+
+    #[test]
+    fn a_malformed_block_that_states_no_audience_keeps_the_default() {
+        // Nothing was restricted here, so the spec's `["model", "app"]` stands.
+        let tool = tool_with_meta(json!({ "ui": { "resourceUri": 1 } }));
+
+        assert!(tool.is_model_visible());
+        assert!(tool.is_app_visible());
+    }
+
+    #[test]
+    fn an_explicit_null_visibility_is_not_a_restriction() {
+        // How serde spells an absent optional.
+        let tool = tool_with_meta(json!({
+            "ui": { "resourceUri": "ui://x/app.html", "visibility": null }
+        }));
+
+        assert!(tool.is_model_visible());
+    }
+
+    #[test]
+    fn a_tool_with_no_meta_at_all_is_visible() {
+        let tool = Tool::new("plain", || async { "ok" });
+
+        assert!(tool.is_model_visible());
+        assert!(tool.is_app_visible());
+    }
+}
+
+/// MCP Apps: reading the `_meta.ui` block off a tool.
+///
+/// Available to both roles -- a server checks its own registrations at startup,
+/// and a client acting as a host has to know what renders a tool and whether the
+/// agent may see it at all.
+#[cfg(feature = "apps")]
+impl Tool {
+    /// The tool's MCP Apps metadata, or `None` when it has none or when the
+    /// block does not parse.
+    ///
+    /// Accepts the deprecated flat `_meta["ui/resourceUri"]` as well as the
+    /// nested block, which is what the specification asks of a reader; the
+    /// nested one wins where both are present. A malformed extension block reads
+    /// as absent rather than failing the surrounding `tools/list`.
+    ///
+    /// # Examples
+    /// ```
+    /// # #[cfg(feature = "server")] {
+    /// use neva::types::Tool;
+    ///
+    /// let mut tool = Tool::new("get_weather", || async { "sunny" });
+    /// assert!(tool.ui().is_none());
+    ///
+    /// tool.with_ui("ui://weather/dashboard");
+    /// let ui = tool.ui().expect("just set");
+    /// assert_eq!(ui.resource_uri.as_deref(), Some("ui://weather/dashboard"));
+    /// # }
+    /// ```
+    #[inline]
+    pub fn ui(&self) -> Option<crate::types::UiToolMeta> {
+        apps::get_tool_ui_meta(self.meta.as_ref())
+    }
+
+    /// Whether the agent may see and call this tool.
+    ///
+    /// True for every tool that is not explicitly hidden: a tool with no MCP
+    /// Apps metadata is an ordinary tool, and one whose `visibility` is omitted
+    /// takes the specification's `["model", "app"]` default. A host **MUST NOT**
+    /// put a tool this returns `false` for into the agent's tool list.
+    ///
+    /// # Examples
+    /// ```
+    /// # #[cfg(feature = "server")] {
+    /// use neva::types::{Tool, UiVisibility};
+    ///
+    /// let mut plain = Tool::new("search", || async { "" });
+    /// assert!(plain.is_model_visible());
+    ///
+    /// plain.with_ui("ui://shop/cart").with_visibility([UiVisibility::App]);
+    /// assert!(!plain.is_model_visible());
+    /// # }
+    /// ```
+    #[inline]
+    pub fn is_model_visible(&self) -> bool {
+        self.allows(crate::types::UiVisibility::Model)
+    }
+
+    /// Whether the app may call this tool.
+    ///
+    /// Same defaults as [`Self::is_model_visible`]: only an explicit
+    /// `visibility` that leaves `app` out makes this `false`.
+    ///
+    /// # Examples
+    /// ```
+    /// # #[cfg(feature = "server")] {
+    /// use neva::types::{Tool, UiVisibility};
+    ///
+    /// let mut tool = Tool::new("show_cart", || async { "" });
+    /// tool.with_ui("ui://shop/cart").with_visibility([UiVisibility::Model]);
+    ///
+    /// assert!(!tool.is_app_visible());
+    /// # }
+    /// ```
+    #[inline]
+    pub fn is_app_visible(&self) -> bool {
+        self.allows(crate::types::UiVisibility::App)
+    }
+
+    /// Whether `scope` may call this tool.
+    ///
+    /// Reads `visibility` on its own rather than through [`Self::ui`]: that one
+    /// is lenient by design, and a block it drops for an unrelated malformed
+    /// field would take an app-only restriction down with it. An explicit
+    /// `visibility` that cannot be decoded denies rather than defaults.
+    #[inline]
+    fn allows(&self, scope: crate::types::UiVisibility) -> bool {
+        match apps::get_tool_visibility(self.meta.as_ref()) {
+            apps::DeclaredVisibility::Unset => true,
+            apps::DeclaredVisibility::Scopes(scopes) => scopes.contains(&scope),
+            apps::DeclaredVisibility::Unreadable => false,
+        }
+    }
+}
+
 #[cfg(feature = "server")]
 impl Tool {
     /// Initializes a new [`Tool`]
@@ -1214,6 +1384,72 @@ impl Tool {
     /// Sets the [`Tool`] icons
     pub fn with_icons(&mut self, icons: impl IntoIterator<Item = Icon>) -> &mut Self {
         self.icons = Some(icons.into_iter().collect());
+        self
+    }
+
+    /// Binds this tool to the MCP Apps UI resource at `resource_uri`.
+    ///
+    /// Stamps `_meta.ui.resourceUri`: a host that supports MCP Apps renders the
+    /// tool's results with that `ui://` resource, and one that does not treats
+    /// the tool as an ordinary tool. Either way the tool must still return a
+    /// meaningful `content` array -- see [`crate::types::apps`].
+    ///
+    /// Merges into `_meta` rather than replacing it, so any other metadata on
+    /// the tool survives.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// use neva::App;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let mut app = App::new();
+    ///
+    /// app.map_tool("get_weather", |city: String| async move { format!("Sunny in {city}") })
+    ///     .with_arg_names(["city"])
+    ///     .with_ui("ui://weather/dashboard");
+    ///
+    /// # app.run().await;
+    /// # }
+    /// ```
+    #[cfg(feature = "apps")]
+    pub fn with_ui(&mut self, resource_uri: impl Into<Uri>) -> &mut Self {
+        let mut ui = self.ui().unwrap_or_default();
+        ui.resource_uri = Some(resource_uri.into());
+        apps::set_ui_meta(&mut self.meta, &ui);
+        self
+    }
+
+    /// Sets who may call this tool: the model, the app, or both.
+    ///
+    /// Stamps `_meta.ui.visibility`. Enforcement is the **host's** job -- an
+    /// app-only tool is still listed in `tools/list` like any other, and the
+    /// host is what keeps it out of the agent's tool list.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// use neva::{App, types::UiVisibility};
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let mut app = App::new();
+    ///
+    /// // A refresh button for the iframe, invisible to the model.
+    /// app.map_tool("refresh_dashboard", || async { "refreshed" })
+    ///     .with_ui("ui://weather/dashboard")
+    ///     .with_visibility([UiVisibility::App]);
+    ///
+    /// # app.run().await;
+    /// # }
+    /// ```
+    #[cfg(feature = "apps")]
+    pub fn with_visibility<T>(&mut self, visibility: T) -> &mut Self
+    where
+        T: IntoIterator<Item = crate::types::UiVisibility>,
+    {
+        let mut ui = self.ui().unwrap_or_default();
+        ui.visibility = Some(visibility.into_iter().collect());
+        apps::set_ui_meta(&mut self.meta, &ui);
         self
     }
 

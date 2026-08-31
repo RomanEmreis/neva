@@ -30,12 +30,12 @@ serde_json = "1.0.151"
 schemars = { version = "1.2.2" }
 tokio = { version = "1.53.1", features = ["sync", "io-std", "io-util", "rt", "time", "macros"] }
 tokio-util = "0.7.19"
-uuid = { version = "1.25.0", features = ["v4", "serde"] }
+uuid = { version = "1.26.0", features = ["v4", "serde"] }
 
 # optional
 chacha20poly1305 = { version = "0.11.0", optional = true }
 inventory = { version = "0.3.24", optional = true }
-jsonschema = { version = "0.50.1", optional = true }
+jsonschema = { version = "0.52.0", optional = true }
 once_cell = { version = "1.21.4", features = ["std"], optional = true }
 reqwest = { version = "0.13.4", features = ["stream", "json"], optional = true }
 sse-stream = { version = "0.2.5", optional = true }
@@ -43,10 +43,10 @@ tokio-stream = { version = "0.1.19", optional = true }
 tracing = { version = "0.1.44", optional = true }
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "json"], optional = true }
 url = { version = "2.5.8", optional = true }
-volga = { version = "0.9.8", features = ["di", "jwt-auth-full"], optional = true }
-volga-di = { version = "0.9.8", optional = true }
-volga-oauth-core = { version = "0.9.8", optional = true }
-volga-oauth-client = { version = "0.9.8", optional = true }
+volga = { version = "0.9.9", features = ["di", "jwt-auth-full"], optional = true }
+volga-di = { version = "0.9.9", optional = true }
+volga-oauth-core = { version = "0.9.9", optional = true }
+volga-oauth-client = { version = "0.9.9", optional = true }
 
 # neva
 neva_macros = { workspace = true, optional = true }
@@ -67,10 +67,13 @@ full = ["server-full", "client-full"]
 di = ["dep:volga-di"]
 macros = ["dep:neva_macros", "dep:inventory"]
 tasks = []
+# MCP Apps (SEP-1865): `ui://` resources and the `_meta.ui` blocks that bind a
+# tool to one. Additive, no new dependencies.
+apps = ["neva_macros?/apps"]
 tracing = ["dep:tracing", "dep:tracing-subscriber", "dep:once_cell", "volga?/tracing"]
 
 # server
-server-full = ["server-macros", "tracing", "http-server-volga", "server-tls", "server-oauth", "di", "tasks"]
+server-full = ["server-macros", "tracing", "http-server-volga", "server-tls", "server-oauth", "di", "tasks", "apps"]
 server-macros = ["server", "macros", "neva_macros?/server"]
 server-tls = ["http-server-volga", "volga?/tls", "volga?/dev-cert"]
 server-oauth = ["http-server", "dep:volga-oauth-core", "volga?/oauth-client"]
@@ -86,7 +89,7 @@ http-server-volga = ["http-server", "dep:volga"]
 server = ["tokio/signal", "tokio/rt-multi-thread", "dep:chacha20poly1305", "dep:sha2"]
 
 # client
-client-full = ["client-macros", "tracing", "http-client", "client-tls", "client-oauth", "client-oauth-jwt", "client-oauth-dpop", "tasks"]
+client-full = ["client-macros", "tracing", "http-client", "client-tls", "client-oauth", "client-oauth-jwt", "client-oauth-dpop", "tasks", "apps"]
 client-macros = ["client", "macros", "neva_macros?/client"]
 # `url` is free here: it, `form_urlencoded` and `percent-encoding` are already
 # in the tree of every `http-client` build via reqwest, so gating it on this

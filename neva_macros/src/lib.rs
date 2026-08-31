@@ -21,6 +21,28 @@ mod shared;
 /// * `middleware` - Middleware list to apply to the tool.
 /// * `task_support` - Specifies task augmentation support for this tool.
 /// * `no_schema` - Explicitly disables input schema generation if it's not set in `input_schema`.
+/// * `ui` - MCP Apps: the `ui://` resource that renders this tool's results.
+///   Needs neva's `apps` feature; the URI must use the reserved `ui://` scheme.
+/// * `visibility` - MCP Apps: who may call the tool, `["model"]`, `["app"]` or
+///   both (the default when omitted). Enforcement is the host's job.
+///
+/// # MCP Apps Example
+/// ```ignore
+/// use neva::prelude::*;
+///
+/// #[tool(descr = "The current time.", ui = "ui://clock/app.html")]
+/// async fn get_time() -> String {
+///     // A UI-bound tool MUST still return meaningful `content`: the model
+///     // reads it, and not every client has an iframe.
+///     "The time is 12:00 UTC.".into()
+/// }
+///
+/// // Callable by the app, invisible to the model.
+/// #[tool(descr = "Re-read the clock.", ui = "ui://clock/app.html", visibility = ["app"])]
+/// async fn refresh_clock() -> String {
+///     "The time is 12:01 UTC.".into()
+/// }
+/// ```
 ///
 /// # Simple Example
 /// ```ignore
@@ -105,6 +127,35 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// * `mime` - Resource MIME type.
 /// * `annotations` - Resource content arbitrary [metadata](https://docs.rs/neva/latest/neva/types/struct.Annotations.html).
 /// * `roles` & `permissions` - Define which users can read the resource when using Streamable HTTP transport with OAuth.
+/// * `ui_meta` - MCP Apps: the resource's `_meta.ui` block as JSON (`csp`,
+///   `permissions`, `domain`, `prefersBorder`). Needs neva's `apps` feature and
+///   a `ui://` URI. Keys are checked at compile time -- `_meta` is an open map,
+///   so a snake_case typo would otherwise serialize fine and be ignored by every
+///   host.
+///
+/// A `uri` on the `ui://` scheme also defaults `mime` to
+/// `text/html;profile=mcp-app`; naming a different one is an error, since no
+/// host renders an MCP App under another type.
+///
+/// # MCP Apps Example
+/// ```ignore
+/// use neva::prelude::*;
+///
+/// #[resource(
+///     uri = "ui://report/{id}",
+///     title = "Report",
+///     ui_meta = r#"{
+///         "csp": { "resourceDomains": ["https://cdn.jsdelivr.net"] },
+///         "prefersBorder": false
+///     }"#
+/// )]
+/// async fn report(id: String) -> TextResourceContents {
+///     TextResourceContents::new(
+///         format!("ui://report/{id}"),
+///         format!("<!doctype html><title>Report {id}</title>"))
+///         .with_mime(APP_MIME_TYPE)
+/// }
+/// ```
 ///
 /// # Simple Example
 /// ```ignore

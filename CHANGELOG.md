@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.5.6
+
+### Added
+
+#### MCP Apps
+* **The MCP Apps extension (`io.modelcontextprotocol/ui`), behind the new
+  `apps` feature** (#87). A tool points at a `ui://` HTML resource the host
+  renders in a sandboxed iframe
+  ([SEP-1865](https://github.com/modelcontextprotocol/ext-apps)). neva
+  implements the data plane -- the `_meta.ui` blocks on tools and resources; the
+  `ui/*` host-to-iframe messages are out of scope.
+
+  Server: `McpOptions::with_apps()`, `App::add_ui_resource` and
+  `App::map_ui_resource`, `Tool::with_ui` / `with_visibility`, `AppsExtension`.
+  A `ui://` read is always served as `text/html;profile=mcp-app` and carries its
+  template's `_meta.ui`; it stays out of `resources/list` unless
+  `AppsExtension::with_listed_resources()`. Startup warns about a tool naming a
+  `ui://` resource nothing serves.
+
+  Macros: `#[tool(ui = "ui://...", visibility = ["app"])]` and
+  `#[resource(ui_meta = "...")]`. Bad scheme, unknown visibility scope, wrong
+  MIME type and misspelled `ui_meta` keys are compile errors.
+
+  Client: `McpOptions::with_apps()` / `with_app_mime_types(..)` advertise the
+  extension on `initialize`; `Tool::ui()` (which also reads the deprecated flat
+  `_meta["ui/resourceUri"]`), `Tool::is_model_visible()` and
+  `ResourceContents::ui()` read it back.
+
+  Not advertised to a server speaking MCP 2026-07-28, which has no handshake
+  (#122); `add_ui_resource` carries no role or permission requirement (#123).
+  See `examples/apps`.
+
+### Changed
+
+* **`#[tool]`, `#[resource]`, `#[resources]`, `#[prompt]` and `#[handler]`
+  reject an unknown attribute** instead of ignoring it -- a misspelled
+  `visibility` published an app-only tool to the agent.
+
+* **`ResourceContents`'s accessors are available to a client build**: `uri`,
+  `text`, `blob`, `json`, `mime`, `title`, `annotations`. The builders stay
+  server-side.
+
+* **`ClientCapabilities::extensions` is no longer gated on the protocol
+  generation**, so a legacy `initialize` can carry it. Additive; its counterpart
+  on `ServerCapabilities` stays 2026-07-28-only.
+
 ## 0.5.5
 
 ### Changed (breaking)

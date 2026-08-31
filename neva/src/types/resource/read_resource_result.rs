@@ -7,12 +7,12 @@ use crate::types::helpers::{
 use crate::types::{Annotations, Uri};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+// `ResourceContents::json` is a reader, so both roles need these.
 #[cfg(feature = "server")]
+use crate::types::{IntoResponse, RequestId, Response};
+#[cfg(any(feature = "server", feature = "client"))]
 use {
-    crate::{
-        error::{Error, ErrorCode},
-        types::{IntoResponse, RequestId, Response},
-    },
+    crate::error::{Error, ErrorCode},
     serde::de::DeserializeOwned,
 };
 
@@ -403,7 +403,10 @@ impl ReadResourceResult {
     }
 }
 
-#[cfg(feature = "server")]
+// Reading a `resources/read` result is what a *client* does, and the
+// accessors below are the ergonomic way to do it -- gating them on `server`
+// left a client-only build matching on variants and touching fields by hand.
+#[cfg(any(feature = "server", feature = "client"))]
 impl ResourceContents {
     /// Creates a new resource content
     #[inline]
@@ -532,6 +535,100 @@ impl ResourceContents {
         }
     }
 
+    /// Sets the MCP Apps metadata on this content item.
+    ///
+    /// This is the authoritative place for a `ui://` resource's security
+    /// configuration: when the `resources/list` entry carries a block too, the
+    /// **content item wins**. Prefer it whenever the metadata is dynamic or
+    /// varies per response.
+    ///
+    /// Merges into `_meta` rather than replacing it.
+    ///
+    /// # Examples
+    /// ```
+    /// use neva::types::{APP_MIME_TYPE, ResourceContents, UiCsp, UiResourceMeta};
+    ///
+    /// let contents = ResourceContents::new("ui://weather/dashboard")
+    ///     .with_text("<!doctype html><title>Weather</title>")
+    ///     .with_mime(APP_MIME_TYPE)
+    ///     .with_ui(UiResourceMeta::new()
+    ///         .with_csp(UiCsp::new().with_connect_domains(["https://api.example.com"])));
+    ///
+    /// assert!(contents.ui().is_some());
+    /// ```
+    #[cfg(all(feature = "apps", feature = "server"))]
+    #[inline]
+    pub fn with_ui(mut self, ui: crate::types::UiResourceMeta) -> Self {
+        crate::types::apps::set_ui_meta(self.meta_mut(), &ui);
+        self
+    }
+
+    /// The content item's MCP Apps metadata, or `None` when it has none or when
+    /// the block does not parse.
+    ///
+    /// # Examples
+    /// ```
+    /// use neva::types::ResourceContents;
+    ///
+    /// assert!(ResourceContents::new("res://plain").ui().is_none());
+    /// ```
+    #[cfg(feature = "apps")]
+    #[inline]
+    pub fn ui(&self) -> Option<crate::types::UiResourceMeta> {
+        crate::types::apps::get_ui_meta(self.meta_ref())
+    }
+
+    /// Sets the MIME type in place.
+    ///
+    /// The fluent [`Self::with_mime`] consumes `self`; the server's MCP Apps
+    /// path needs to correct a content item it already holds.
+    #[cfg(all(feature = "apps", feature = "server"))]
+    #[inline]
+    pub(crate) fn set_mime(&mut self, mime: impl Into<String>) {
+        let mime = mime.into();
+        match self {
+            Self::Text(text) => text.mime = Some(mime),
+            Self::Json(json) => json.mime = Some(mime),
+            Self::Blob(blob) => blob.mime = Some(mime),
+            Self::Empty(empty) => empty.mime = Some(mime),
+        }
+    }
+
+    /// Sets the MCP Apps metadata in place.
+    ///
+    /// The server's fallback path: a `#[resource(ui_meta = ..)]` block lives on
+    /// the resource *template*, and a handler returning plain contents would
+    /// otherwise answer `resources/read` without it.
+    #[cfg(all(feature = "apps", feature = "server"))]
+    #[inline]
+    pub(crate) fn set_ui(&mut self, ui: &crate::types::UiResourceMeta) {
+        crate::types::apps::set_ui_meta(self.meta_mut(), ui);
+    }
+
+    /// The `_meta` of whichever variant this is.
+    #[cfg(feature = "apps")]
+    #[inline]
+    fn meta_ref(&self) -> Option<&serde_json::Value> {
+        match self {
+            Self::Text(text) => text.meta.as_ref(),
+            Self::Json(json) => json.meta.as_ref(),
+            Self::Blob(blob) => blob.meta.as_ref(),
+            Self::Empty(empty) => empty.meta.as_ref(),
+        }
+    }
+
+    /// The `_meta` of whichever variant this is, mutably.
+    #[cfg(all(feature = "apps", feature = "server"))]
+    #[inline]
+    fn meta_mut(&mut self) -> &mut Option<serde_json::Value> {
+        match self {
+            Self::Text(text) => &mut text.meta,
+            Self::Json(json) => &mut json.meta,
+            Self::Blob(blob) => &mut blob.meta,
+            Self::Empty(empty) => &mut empty.meta,
+        }
+    }
+
     /// Sets the text of the resource content and make it [`TextResourceContents`]
     #[inline]
     pub fn with_text(self, text: impl Into<String>) -> Self {
@@ -566,7 +663,7 @@ impl ResourceContents {
                 mime: content.mime.or_else(|| Some("text/plain".into())),
                 title: content.title,
                 annotations: content.annotations,
-                meta: None,
+                meta: content.meta,
                 text,
             }),
         }
@@ -606,7 +703,7 @@ impl ResourceContents {
                 mime: None,
                 title: content.title,
                 annotations: content.annotations,
-                meta: None,
+                meta: content.meta,
                 blob,
             }),
         }
@@ -646,7 +743,7 @@ impl ResourceContents {
                 mime: content.mime.or_else(|| Some("application/json".into())),
                 title: content.title,
                 annotations: content.annotations,
-                meta: None,
+                meta: content.meta,
                 value,
             }),
         }
@@ -688,6 +785,45 @@ impl TextResourceContents {
     {
         self.annotations = Some(config(Default::default()));
         self
+    }
+
+    /// Sets the MCP Apps metadata on this content item.
+    ///
+    /// The HTML variant is what a `ui://` resource is served as, so this is the
+    /// usual place a security block lands. Merges into `_meta` rather than
+    /// replacing it.
+    ///
+    /// # Examples
+    /// ```
+    /// use neva::types::{APP_MIME_TYPE, TextResourceContents, UiResourceMeta};
+    ///
+    /// let contents = TextResourceContents::new("ui://clock/app.html", "<!doctype html>")
+    ///     .with_mime(APP_MIME_TYPE)
+    ///     .with_ui(UiResourceMeta::new().with_prefers_border(true));
+    ///
+    /// assert!(contents.meta.is_some());
+    /// ```
+    #[cfg(feature = "apps")]
+    pub fn with_ui(mut self, ui: crate::types::UiResourceMeta) -> Self {
+        crate::types::apps::set_ui_meta(&mut self.meta, &ui);
+        self
+    }
+
+    /// The content item's MCP Apps metadata, or `None` when it has none or when
+    /// the block does not parse.
+    ///
+    /// # Examples
+    /// ```
+    /// use neva::types::{TextResourceContents, UiResourceMeta};
+    ///
+    /// let contents = TextResourceContents::new("ui://clock/app.html", "<!doctype html>")
+    ///     .with_ui(UiResourceMeta::new().with_prefers_border(true));
+    ///
+    /// assert_eq!(contents.ui().and_then(|ui| ui.prefers_border), Some(true));
+    /// ```
+    #[cfg(feature = "apps")]
+    pub fn ui(&self) -> Option<crate::types::UiResourceMeta> {
+        crate::types::apps::get_ui_meta(self.meta.as_ref())
     }
 }
 
@@ -1060,5 +1196,66 @@ mod tests {
             chunk_count, 1,
             "Exactly CHUNK_SIZE data should produce one chunk"
         );
+    }
+
+    /// `_meta` survives the `Empty -> concrete` conversions.
+    ///
+    /// `ResourceContents::new` starts out `Empty`, and every arm of `with_text`
+    /// / `with_blob` / `with_json` carries `uri`, `mime`, `title` and
+    /// `annotations` across -- but the `Empty` ones used to drop `meta`. The
+    /// fluent order that reads most naturally for an MCP App,
+    /// `.with_ui(..).with_text(html)`, therefore threw the app's CSP away.
+    #[cfg(feature = "apps")]
+    mod meta_survives_conversion {
+        use super::*;
+        use crate::types::UiResourceMeta;
+
+        fn ui() -> UiResourceMeta {
+            UiResourceMeta::new().with_prefers_border(true)
+        }
+
+        #[test]
+        fn into_text() {
+            let contents = ResourceContents::new("ui://clock/app.html")
+                .with_ui(ui())
+                .with_text("<!doctype html>");
+
+            assert_eq!(contents.ui(), Some(ui()));
+            assert_eq!(contents.text(), Some("<!doctype html>"));
+        }
+
+        #[test]
+        fn into_blob() {
+            let contents = ResourceContents::new("ui://clock/app.html")
+                .with_ui(ui())
+                .with_blob(vec![1u8, 2, 3]);
+
+            assert_eq!(contents.ui(), Some(ui()));
+            assert_eq!(contents.blob(), Some([1u8, 2, 3].as_slice()));
+        }
+
+        #[test]
+        fn into_json() {
+            let contents = ResourceContents::new("res://data")
+                .with_ui(ui())
+                .with_json(serde_json::json!({ "a": 1 }));
+
+            assert_eq!(contents.ui(), Some(ui()));
+        }
+
+        #[test]
+        fn either_order_gives_the_same_result() {
+            let ui_first = ResourceContents::new("ui://clock/app.html")
+                .with_ui(ui())
+                .with_text("<!doctype html>");
+            let text_first = ResourceContents::new("ui://clock/app.html")
+                .with_text("<!doctype html>")
+                .with_ui(ui());
+
+            assert_eq!(
+                serde_json::to_value(&ui_first).unwrap(),
+                serde_json::to_value(&text_first).unwrap()
+            );
+        }
     }
 }
