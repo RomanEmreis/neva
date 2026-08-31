@@ -14,24 +14,8 @@
 //! document is the static, cacheable, reviewable half, and the data arrives in
 //! the iframe as the tool's result. One document, every report.
 
+use crate::view;
 use neva::prelude::*;
-
-/// The report app's document.
-const REPORT_HTML: &str = r#"<!doctype html>
-<html lang="en">
-<head><meta charset="utf-8"><title>Report</title></head>
-<body style="font: 1rem/1.5 var(--font-sans, system-ui)">
-  <h1>Report</h1>
-  <output id="body">Waiting for data...</output>
-  <script>
-    window.addEventListener("message", (event) => {
-      const text = event.data?.params?.content?.[0]?.text;
-      if (text) document.getElementById("body").textContent = text;
-    });
-  </script>
-</body>
-</html>
-"#;
 
 /// One document for every report.
 #[resource(
@@ -49,7 +33,15 @@ async fn report_view() -> TextResourceContents {
     // block of your own -- `TextResourceContents::with_ui(..)` -- when it varies
     // per response; that replaces the attribute's *whole* block rather than
     // merging into it, which is the precedence the specification gives a host.
-    TextResourceContents::new("ui://report/view", REPORT_HTML).with_mime(APP_MIME_TYPE)
+    TextResourceContents::new(
+        "ui://report/view",
+        view::document(
+            "Report",
+            r#"  <h1>Report</h1>
+  <output id="out">Waiting for data...</output>"#,
+        ),
+    )
+    .with_mime(APP_MIME_TYPE)
 }
 
 /// The data half. The id travels in the result, not in the resource URI.

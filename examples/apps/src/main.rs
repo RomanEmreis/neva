@@ -20,6 +20,7 @@ use neva::prelude::*;
 
 mod clock;
 mod report;
+mod view;
 
 /// The current time, and the tool the clock app renders.
 ///
@@ -75,7 +76,7 @@ async fn main() {
     // The static-HTML path: one call registers the `ui://` read handler and
     // fills in the MIME type. The returned `&mut` stays live for the whole
     // chain -- the resource is materialized when the server starts.
-    app.add_ui_resource("ui://clock/app.html", "clock", clock::CLOCK_HTML)
+    app.add_ui_resource("ui://clock/app.html", "clock", clock::document())
         .with_title("Clock")
         .with_descr("A ticking clock")
         // The app loads nothing from anywhere, so it declares nothing: an empty
