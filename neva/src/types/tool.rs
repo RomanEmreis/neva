@@ -1047,6 +1047,76 @@ fn rename_args(schema: &mut crate::types::ToolInputSchema, from: &ArgNames, to: 
     }
 }
 
+#[cfg(all(test, feature = "apps", feature = "server"))]
+mod apps_visibility_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn tool_with_meta(meta: serde_json::Value) -> Tool {
+        let mut tool = Tool::new("t", || async { "ok" });
+        tool.meta = Some(meta);
+        tool
+    }
+
+    #[test]
+    fn an_app_only_restriction_survives_a_malformed_neighbour() {
+        // `resourceUri` of the wrong type sinks the whole `UiToolMeta`, and the
+        // audience restriction sits in the same object. Reading the two together
+        // would publish to the agent a tool meant for the app.
+        let tool = tool_with_meta(json!({
+            "ui": { "resourceUri": 1, "visibility": ["app"] }
+        }));
+
+        assert!(tool.ui().is_none(), "the block itself does not decode");
+        assert!(!tool.is_model_visible(), "but the restriction still holds");
+        assert!(tool.is_app_visible());
+    }
+
+    #[test]
+    fn an_unreadable_visibility_denies_rather_than_defaults() {
+        // The author was narrowing the audience. Guessing "everyone" resolves the
+        // ambiguity in the one direction that cannot be taken back.
+        let tool = tool_with_meta(json!({ "ui": { "visibility": "app" } }));
+
+        assert!(!tool.is_model_visible());
+        assert!(!tool.is_app_visible());
+    }
+
+    #[test]
+    fn an_unknown_scope_denies_too() {
+        let tool = tool_with_meta(json!({ "ui": { "visibility": ["agent"] } }));
+
+        assert!(!tool.is_model_visible());
+    }
+
+    #[test]
+    fn a_malformed_block_that_states_no_audience_keeps_the_default() {
+        // Nothing was restricted here, so the spec's `["model", "app"]` stands.
+        let tool = tool_with_meta(json!({ "ui": { "resourceUri": 1 } }));
+
+        assert!(tool.is_model_visible());
+        assert!(tool.is_app_visible());
+    }
+
+    #[test]
+    fn an_explicit_null_visibility_is_not_a_restriction() {
+        // How serde spells an absent optional.
+        let tool = tool_with_meta(json!({
+            "ui": { "resourceUri": "ui://x/app.html", "visibility": null }
+        }));
+
+        assert!(tool.is_model_visible());
+    }
+
+    #[test]
+    fn a_tool_with_no_meta_at_all_is_visible() {
+        let tool = Tool::new("plain", || async { "ok" });
+
+        assert!(tool.is_model_visible());
+        assert!(tool.is_app_visible());
+    }
+}
+
 /// MCP Apps: reading the `_meta.ui` block off a tool.
 ///
 /// Available to both roles -- a server checks its own registrations at startup,
@@ -1101,7 +1171,7 @@ impl Tool {
     /// ```
     #[inline]
     pub fn is_model_visible(&self) -> bool {
-        self.ui().is_none_or(|ui| ui.is_model_visible())
+        self.allows(crate::types::UiVisibility::Model)
     }
 
     /// Whether the app may call this tool.
@@ -1122,7 +1192,22 @@ impl Tool {
     /// ```
     #[inline]
     pub fn is_app_visible(&self) -> bool {
-        self.ui().is_none_or(|ui| ui.is_app_visible())
+        self.allows(crate::types::UiVisibility::App)
+    }
+
+    /// Whether `scope` may call this tool.
+    ///
+    /// Reads `visibility` on its own rather than through [`Self::ui`]: that one
+    /// is lenient by design, and a block it drops for an unrelated malformed
+    /// field would take an app-only restriction down with it. An explicit
+    /// `visibility` that cannot be decoded denies rather than defaults.
+    #[inline]
+    fn allows(&self, scope: crate::types::UiVisibility) -> bool {
+        match apps::get_tool_visibility(self.meta.as_ref()) {
+            apps::DeclaredVisibility::Unset => true,
+            apps::DeclaredVisibility::Scopes(scopes) => scopes.contains(&scope),
+            apps::DeclaredVisibility::Unreadable => false,
+        }
     }
 }
 

@@ -1001,12 +1001,18 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
     /// so both warn rather than failing startup.
     #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
     fn validate_ui_resources(&self) {
-        #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
         for (tool, uri, complaint) in self.ui_resource_problems() {
+            // stderr, not stdout: the stdio transport owns stdout. Same shape as
+            // the runtime-start failure above -- a diagnostic a minimal build
+            // still gets, since `tracing` is optional and this one is a promise.
             #[cfg(feature = "tracing")]
             tracing::warn!(
                 logger = "neva",
                 "Tool `{tool}` advertises the MCP Apps resource `{uri}`, which {complaint}."
+            );
+            #[cfg(not(feature = "tracing"))]
+            eprintln!(
+                "neva: tool `{tool}` advertises the MCP Apps resource `{uri}`, which {complaint}."
             );
         }
     }

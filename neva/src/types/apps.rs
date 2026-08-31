@@ -882,6 +882,47 @@ pub(crate) fn get_tool_ui_meta(meta: Option<&Value>) -> Option<UiToolMeta> {
     }
 }
 
+/// What a tool's `_meta.ui` says about who may call it.
+///
+/// Read on its own rather than off a decoded [`UiToolMeta`], because the two
+/// want opposite things from a malformed block. [`get_tool_ui_meta`] is lenient
+/// -- a block it cannot parse reads as absent, so one bad tool does not fail an
+/// otherwise valid `tools/list`. An audience restriction cannot afford that: a
+/// `resourceUri` of the wrong type sits in the same object as
+/// `"visibility": ["app"]`, and dropping the pair together would publish to the
+/// agent a tool the author meant to keep for the app.
+pub(crate) enum DeclaredVisibility {
+    /// No `visibility` key. The spec's `["model", "app"]` default.
+    Unset,
+    /// The scopes it named.
+    Scopes(Vec<UiVisibility>),
+    /// A `visibility` that does not decode. Read as a restriction, not as the
+    /// default: the author was narrowing the audience, and guessing "everyone"
+    /// resolves the ambiguity in the one direction that cannot be taken back.
+    Unreadable,
+}
+
+/// Reads `_meta.ui.visibility` without decoding the rest of the block.
+pub(crate) fn get_tool_visibility(meta: Option<&Value>) -> DeclaredVisibility {
+    let Some(visibility) = meta
+        .and_then(|meta| meta.get(UI_META_KEY))
+        .and_then(|ui| ui.get("visibility"))
+    else {
+        return DeclaredVisibility::Unset;
+    };
+
+    // `null` is how serde spells an absent optional, so it is "not stated"
+    // rather than "unreadable".
+    if visibility.is_null() {
+        return DeclaredVisibility::Unset;
+    }
+
+    match serde_json::from_value::<Vec<UiVisibility>>(visibility.clone()) {
+        Ok(scopes) => DeclaredVisibility::Scopes(scopes),
+        Err(_) => DeclaredVisibility::Unreadable,
+    }
+}
+
 /// Writes `ui` into a `_meta` object, **merging** rather than replacing.
 ///
 /// `_meta` legitimately carries other keys --
