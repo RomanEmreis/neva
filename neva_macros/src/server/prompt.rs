@@ -5,6 +5,17 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{ItemFn, Meta, punctuated::Punctuated, token::Comma};
 
+/// Every attribute `#[prompt]` accepts.
+const PROMPT_ATTRS: [&str; 7] = [
+    "title",
+    "descr",
+    "args",
+    "no_args",
+    "roles",
+    "permissions",
+    "middleware",
+];
+
 pub(crate) fn expand(
     attr: &Punctuated<Meta, Comma>,
     function: &ItemFn,
@@ -23,10 +34,25 @@ pub(crate) fn expand(
             Meta::Path(path) => {
                 if path.is_ident("no_args") {
                     no_args = true;
+                } else {
+                    return Err(super::unknown_attr(
+                        path,
+                        &super::path_name(path),
+                        "prompt",
+                        &PROMPT_ATTRS,
+                    ));
                 }
             }
             Meta::NameValue(nv) => {
-                if let Some(ident) = nv.path.get_ident() {
+                let Some(ident) = nv.path.get_ident() else {
+                    return Err(super::unknown_attr(
+                        &nv.path,
+                        &super::path_name(&nv.path),
+                        "prompt",
+                        &PROMPT_ATTRS,
+                    ));
+                };
+                {
                     match ident.to_string().as_str() {
                         "title" => {
                             title = get_str_param(&nv.value);
@@ -49,11 +75,25 @@ pub(crate) fn expand(
                         "middleware" => {
                             middleware = get_exprs_arr(&nv.value);
                         }
-                        _ => {}
+                        other => {
+                            return Err(super::unknown_attr(
+                                &nv.path,
+                                other,
+                                "prompt",
+                                &PROMPT_ATTRS,
+                            ));
+                        }
                     }
                 }
             }
-            Meta::List(_) => {}
+            Meta::List(list) => {
+                return Err(super::unknown_attr(
+                    list,
+                    &super::path_name(&list.path),
+                    "prompt",
+                    &PROMPT_ATTRS,
+                ));
+            }
         }
     }
 

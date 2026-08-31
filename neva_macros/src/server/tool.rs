@@ -28,6 +28,23 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{FnArg, ItemFn, Meta, Pat, ReturnType, punctuated::Punctuated, token::Comma};
 
+/// Every attribute `#[tool]` accepts. Anything else is a compile error --
+/// see [`super::unknown_attr`].
+const TOOL_ATTRS: [&str; 12] = [
+    "title",
+    "descr",
+    "input_schema",
+    "output_schema",
+    "annotations",
+    "roles",
+    "permissions",
+    "middleware",
+    "task_support",
+    "ui",
+    "visibility",
+    "no_schema",
+];
+
 pub(crate) fn expand(
     attr: &Punctuated<Meta, Comma>,
     function: &ItemFn,
@@ -51,10 +68,25 @@ pub(crate) fn expand(
             Meta::Path(path) => {
                 if path.is_ident("no_schema") {
                     no_schema = true;
+                } else {
+                    return Err(super::unknown_attr(
+                        path,
+                        &super::path_name(path),
+                        "tool",
+                        &TOOL_ATTRS,
+                    ));
                 }
             }
             Meta::NameValue(nv) => {
-                if let Some(ident) = nv.path.get_ident() {
+                let Some(ident) = nv.path.get_ident() else {
+                    return Err(super::unknown_attr(
+                        &nv.path,
+                        &super::path_name(&nv.path),
+                        "tool",
+                        &TOOL_ATTRS,
+                    ));
+                };
+                {
                     match ident.to_string().as_str() {
                         "title" => {
                             title = get_str_param(&nv.value);
@@ -98,11 +130,20 @@ pub(crate) fn expand(
                         "no_schema" => {
                             no_schema = get_bool_param(&nv.value);
                         }
-                        _ => {}
+                        other => {
+                            return Err(super::unknown_attr(&nv.path, other, "tool", &TOOL_ATTRS));
+                        }
                     }
                 }
             }
-            Meta::List(_) => {}
+            Meta::List(list) => {
+                return Err(super::unknown_attr(
+                    list,
+                    &super::path_name(&list.path),
+                    "tool",
+                    &TOOL_ATTRS,
+                ));
+            }
         }
     }
 

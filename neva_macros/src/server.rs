@@ -10,6 +10,9 @@ pub(super) mod prompt;
 pub(crate) mod resource;
 pub(crate) mod tool;
 
+/// Every attribute `#[handler]` accepts.
+const HANDLER_ATTRS: [&str; 2] = ["command", "middleware"];
+
 pub(super) fn expand_handler(
     attr: &Punctuated<Meta, Comma>,
     function: &ItemFn,
@@ -20,18 +23,40 @@ pub(super) fn expand_handler(
 
     for meta in attr {
         match &meta {
-            Meta::Path(_) => {}
-            Meta::List(_) => {}
+            Meta::Path(path) => {
+                return Err(unknown_attr(
+                    path,
+                    &path_name(path),
+                    "handler",
+                    &HANDLER_ATTRS,
+                ));
+            }
+            Meta::List(list) => {
+                return Err(unknown_attr(
+                    list,
+                    &path_name(&list.path),
+                    "handler",
+                    &HANDLER_ATTRS,
+                ));
+            }
             Meta::NameValue(nv) => {
-                if let Some(ident) = nv.path.get_ident() {
-                    match ident.to_string().as_str() {
-                        "command" => {
-                            command = get_str_param(&nv.value);
-                        }
-                        "middleware" => {
-                            middleware = get_exprs_arr(&nv.value);
-                        }
-                        _ => {}
+                let Some(ident) = nv.path.get_ident() else {
+                    return Err(unknown_attr(
+                        &nv.path,
+                        &path_name(&nv.path),
+                        "handler",
+                        &HANDLER_ATTRS,
+                    ));
+                };
+                match ident.to_string().as_str() {
+                    "command" => {
+                        command = get_str_param(&nv.value);
+                    }
+                    "middleware" => {
+                        middleware = get_exprs_arr(&nv.value);
+                    }
+                    other => {
+                        return Err(unknown_attr(&nv.path, other, "handler", &HANDLER_ATTRS));
                     }
                 }
             }
@@ -231,6 +256,36 @@ pub(super) fn check_json(json: &str) -> Result<(), String> {
 pub(super) fn validate_schema_json(json: &str, spanned: &Expr, field: &str) -> syn::Result<()> {
     check_json(json)
         .map_err(|e| syn::Error::new_spanned(spanned, format!("invalid JSON in `{field}`: {e}")))
+}
+
+/// Refuses an attribute the macro does not know.
+///
+/// Every one of these loops used to end in `_ => {}`, so a misspelled attribute
+/// compiled and did nothing. That is quietly wrong for `descr` and dangerous for
+/// `visibility`: `#[tool(visiblity = ["app"])]` would take the model-visible
+/// default, publishing to the agent a tool the author meant to keep for the app.
+pub(super) fn unknown_attr<T: quote::ToTokens>(
+    spanned: &T,
+    name: &str,
+    macro_name: &str,
+    known: &[&str],
+) -> syn::Error {
+    syn::Error::new_spanned(
+        spanned,
+        format!(
+            "unknown attribute `{name}` on `#[{macro_name}]`, expected one of: {}",
+            known.join(", ")
+        ),
+    )
+}
+
+/// How to name a path in a diagnostic: its ident, or the whole path when it has
+/// no single one.
+pub(super) fn path_name(path: &syn::Path) -> String {
+    path.get_ident().map_or_else(
+        || quote!(#path).to_string().replace(' ', ""),
+        |ident| ident.to_string(),
+    )
 }
 
 #[inline]

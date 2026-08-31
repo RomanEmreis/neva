@@ -5,6 +5,21 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{ItemFn, Meta, punctuated::Punctuated, token::Comma};
 
+/// Every attribute `#[resource]` accepts.
+const RESOURCE_ATTRS: [&str; 8] = [
+    "uri",
+    "title",
+    "descr",
+    "mime",
+    "annotations",
+    "roles",
+    "permissions",
+    "ui_meta",
+];
+
+/// Every attribute `#[resources]` accepts.
+const RESOURCES_ATTRS: [&str; 1] = ["middleware"];
+
 pub(crate) fn expand_resource(
     attr: &Punctuated<Meta, Comma>,
     function: &ItemFn,
@@ -22,10 +37,32 @@ pub(crate) fn expand_resource(
 
     for meta in attr {
         match &meta {
-            Meta::Path(_) => {}
-            Meta::List(_) => {}
+            Meta::Path(path) => {
+                return Err(super::unknown_attr(
+                    path,
+                    &super::path_name(path),
+                    "resource",
+                    &RESOURCE_ATTRS,
+                ));
+            }
+            Meta::List(list) => {
+                return Err(super::unknown_attr(
+                    list,
+                    &super::path_name(&list.path),
+                    "resource",
+                    &RESOURCE_ATTRS,
+                ));
+            }
             Meta::NameValue(nv) => {
-                if let Some(ident) = nv.path.get_ident() {
+                let Some(ident) = nv.path.get_ident() else {
+                    return Err(super::unknown_attr(
+                        &nv.path,
+                        &super::path_name(&nv.path),
+                        "resource",
+                        &RESOURCE_ATTRS,
+                    ));
+                };
+                {
                     match ident.to_string().as_str() {
                         "uri" => {
                             uri = get_str_param(&nv.value);
@@ -52,7 +89,14 @@ pub(crate) fn expand_resource(
                         "ui_meta" => {
                             ui_meta_expr = Some(nv.value.clone());
                         }
-                        _ => {}
+                        other => {
+                            return Err(super::unknown_attr(
+                                &nv.path,
+                                other,
+                                "resource",
+                                &RESOURCE_ATTRS,
+                            ));
+                        }
                     }
                 }
             }
@@ -133,15 +177,33 @@ pub(crate) fn expand_resources(
 
     for meta in attr {
         match &meta {
-            Meta::Path(_) => {}
-            Meta::List(_) => {}
-            Meta::NameValue(nv) => {
-                if let Some(ident) = nv.path.get_ident()
-                    && let "middleware" = ident.to_string().as_str()
-                {
-                    middleware = get_exprs_arr(&nv.value);
-                }
+            Meta::Path(path) => {
+                return Err(super::unknown_attr(
+                    path,
+                    &super::path_name(path),
+                    "resources",
+                    &RESOURCES_ATTRS,
+                ));
             }
+            Meta::List(list) => {
+                return Err(super::unknown_attr(
+                    list,
+                    &super::path_name(&list.path),
+                    "resources",
+                    &RESOURCES_ATTRS,
+                ));
+            }
+            Meta::NameValue(nv) => match nv.path.get_ident().map(ToString::to_string).as_deref() {
+                Some("middleware") => middleware = get_exprs_arr(&nv.value),
+                _ => {
+                    return Err(super::unknown_attr(
+                        &nv.path,
+                        &super::path_name(&nv.path),
+                        "resources",
+                        &RESOURCES_ATTRS,
+                    ));
+                }
+            },
         }
     }
 

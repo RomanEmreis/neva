@@ -1023,7 +1023,12 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
             .values()
             .filter_map(|tool| {
                 let uri = tool.ui()?.resource_uri?;
-                let complaint = if uri.contains('{') {
+                let complaint = if !crate::types::apps::is_ui_uri(&uri) {
+                    "does not use the reserved `ui://` scheme, which is what marks a \
+                     resource as an MCP App. A host will not render this binding even \
+                     when the resource itself is served. (The `#[tool]` macro refuses \
+                     this at compile time; `Tool::with_ui` cannot.)"
+                } else if uri.contains('{') {
                     "carries a template segment, and a host fetches the URI verbatim \
                      rather than substituting the tool's arguments into it. Name a \
                      concrete resource: the document is the static half of an MCP App \
@@ -1954,6 +1959,28 @@ mod tests {
             assert_eq!(problems[0].0, "show_report");
             assert!(
                 problems[0].2.contains("template segment"),
+                "{}",
+                problems[0].2
+            );
+        }
+
+        #[test]
+        fn a_resource_uri_on_the_wrong_scheme_is_reported() {
+            // The macro refuses this at compile time; the fluent builder cannot,
+            // and the resource being served is not enough -- `ui://` is what
+            // declares an MCP App, and a host renders nothing else.
+            let mut app = App::new();
+            app.map_resource("res://dashboard", "dashboard", || async {
+                crate::types::TextResourceContents::new("res://dashboard", "<html>")
+            });
+            app.map_tool("show", || async { "ok" })
+                .with_ui("res://dashboard");
+
+            let problems = app.ui_resource_problems();
+
+            assert_eq!(problems.len(), 1);
+            assert!(
+                problems[0].2.contains("reserved `ui://` scheme"),
                 "{}",
                 problems[0].2
             );
