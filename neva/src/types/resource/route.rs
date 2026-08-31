@@ -23,7 +23,11 @@ pub(crate) struct Route {
 
 /// A handler function for a resource route
 pub(crate) struct ResourceHandler {
-    #[cfg(feature = "http-server")]
+    /// The resource template this route was registered from, by name.
+    ///
+    /// `http-server` reads roles and permissions off it; `apps` reads the
+    /// `_meta.ui` block a `#[resource(ui_meta = ..)]` put there.
+    #[cfg(any(feature = "http-server", feature = "apps"))]
     pub(crate) template: String,
     handler: RequestHandler<ReadResourceResult>,
 }
@@ -91,7 +95,7 @@ impl Route {
         }
 
         current.handler = Some(ResourceHandler {
-            #[cfg(feature = "http-server")]
+            #[cfg(any(feature = "http-server", feature = "apps"))]
             template: _template.clone(),
             handler: handler.clone(),
         });

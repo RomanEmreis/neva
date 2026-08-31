@@ -695,6 +695,35 @@ impl McpOptions {
         }
     }
 
+    /// Falls a resource template's `_meta.ui` block back onto the content items
+    /// a `resources/read` produced, for those that brought none.
+    ///
+    /// A `#[resource(ui_meta = ..)]` block lands on the template, and the
+    /// tool-driven flow never looks there: a host takes the tool's
+    /// `_meta.ui.resourceUri` straight to `resources/read`. Without this the
+    /// declared CSP would reach nobody.
+    ///
+    /// Block-level, not field-level. The spec has a host "preferring the content
+    /// item and falling back to the listing entry", so a handler that returns
+    /// its own block replaces this one whole rather than being merged into it.
+    #[cfg(feature = "apps")]
+    pub(crate) async fn apply_template_ui(&self, template: &str, result: &mut ReadResourceResult) {
+        let Some(ui) = self
+            .resources_templates
+            .get(template)
+            .await
+            .and_then(|template| template.ui())
+        else {
+            return;
+        };
+
+        for contents in result.contents.iter_mut() {
+            if contents.ui().is_none() {
+                contents.set_ui(&ui);
+            }
+        }
+    }
+
     /// Adds a prompt
     pub(crate) fn add_prompt(&mut self, prompt: Prompt) -> &mut Prompt {
         self.prompts_capability.get_or_insert_default();
@@ -1470,7 +1499,7 @@ mod tests {
     mod apps {
         use super::*;
         use crate::app::extension::UiResource;
-        use crate::types::{APP_MIME_TYPE, UiCsp};
+        use crate::types::{APP_MIME_TYPE, UiCsp, UiResourceMeta};
 
         fn read_params(uri: &str) -> ReadResourceRequestParams {
             ReadResourceRequestParams {
@@ -1591,6 +1620,91 @@ mod tests {
                 resources[0].ui().and_then(|ui| ui.prefers_border),
                 Some(false)
             );
+        }
+
+        /// Reads `uri` the way `Context::read_resource` does: call the route's
+        /// handler, then let the template's block fall back onto the contents.
+        async fn read(options: McpOptions, uri: &str) -> ReadResourceResult {
+            let options = options.into_runtime();
+            let params = read_params(uri);
+            let (handler, _) = options.read_resource(&params.uri).expect("a route");
+            let mut result = handler.call(params.into()).await.expect("a result");
+            options
+                .apply_template_ui(&handler.template, &mut result)
+                .await;
+            result
+        }
+
+        #[tokio::test]
+        async fn a_template_block_reaches_the_resources_read_content() {
+            // What a host actually does: take the tool's `_meta.ui.resourceUri`
+            // to `resources/read`. It never looks at `resources/templates/list`,
+            // so a block that only lived there would be a CSP nobody enforces.
+            let mut options = McpOptions::default();
+            options
+                .add_resource_template(
+                    ResourceTemplate::new("ui://report/view", "report"),
+                    ResourceFunc::new(|_: Uri| async move {
+                        ResourceContents::new("ui://report/view").with_text("<html>")
+                    }),
+                )
+                .with_ui(
+                    UiResourceMeta::new()
+                        .with_csp(UiCsp::new().with_resource_domains(["https://cdn.example.com"]))
+                        .with_prefers_border(false),
+                );
+
+            let result = read(options, "ui://report/view").await;
+
+            let ui = result.contents[0].ui().expect("the template's block");
+            assert_eq!(
+                ui.csp.and_then(|csp| csp.resource_domains),
+                Some(vec!["https://cdn.example.com".to_string()])
+            );
+            assert_eq!(ui.prefers_border, Some(false));
+        }
+
+        #[tokio::test]
+        async fn a_content_item_block_wins_whole() {
+            // The spec has a host "preferring the content item and falling back
+            // to the listing entry" -- precedence, not a per-field merge. A
+            // handler that names its own block replaces the template's entirely,
+            // `csp` included.
+            let mut options = McpOptions::default();
+            options
+                .add_resource_template(
+                    ResourceTemplate::new("ui://report/view", "report"),
+                    ResourceFunc::new(|_: Uri| async move {
+                        ResourceContents::new("ui://report/view")
+                            .with_text("<html>")
+                            .with_ui(UiResourceMeta::new().with_domain("report.example.com"))
+                    }),
+                )
+                .with_ui(
+                    UiResourceMeta::new()
+                        .with_csp(UiCsp::new().with_resource_domains(["https://cdn.example.com"])),
+                );
+
+            let result = read(options, "ui://report/view").await;
+
+            let ui = result.contents[0].ui().expect("the handler's block");
+            assert_eq!(ui.domain.as_deref(), Some("report.example.com"));
+            assert!(ui.csp.is_none(), "not merged field by field");
+        }
+
+        #[tokio::test]
+        async fn a_template_without_a_block_stamps_nothing() {
+            let mut options = McpOptions::default();
+            options.add_resource_template(
+                ResourceTemplate::new("res://plain/{id}", "plain"),
+                ResourceFunc::new(|_: Uri| async move {
+                    ResourceContents::new("res://plain/1").with_text("hi")
+                }),
+            );
+
+            let result = read(options, "res://plain/1").await;
+
+            assert!(result.contents[0].ui().is_none());
         }
 
         #[test]

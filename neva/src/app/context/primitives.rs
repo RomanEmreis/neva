@@ -379,9 +379,15 @@ impl Context {
                         template.as_ref().and_then(|t| t.permissions.as_deref()),
                     )
                 }?;
-                handler
+                #[cfg_attr(not(feature = "apps"), allow(unused_mut))]
+                let mut result = handler
                     .call(params.with_args(args).with_context(self).into())
-                    .await
+                    .await?;
+
+                #[cfg(feature = "apps")]
+                opt.apply_template_ui(&handler.template, &mut result).await;
+
+                Ok(result)
             }
             // The spec's SHOULD: name the URI that was not found in
             // `error.data.uri`. A caller that fanned several reads onto one

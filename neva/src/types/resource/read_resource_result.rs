@@ -575,6 +575,17 @@ impl ResourceContents {
         crate::types::apps::get_ui_meta(self.meta_ref())
     }
 
+    /// Sets the MCP Apps metadata in place.
+    ///
+    /// The server's fallback path: a `#[resource(ui_meta = ..)]` block lives on
+    /// the resource *template*, and a handler returning plain contents would
+    /// otherwise answer `resources/read` without it.
+    #[cfg(feature = "apps")]
+    #[inline]
+    pub(crate) fn set_ui(&mut self, ui: &crate::types::UiResourceMeta) {
+        crate::types::apps::set_ui_meta(self.meta_mut(), ui);
+    }
+
     /// The `_meta` of whichever variant this is.
     #[cfg(feature = "apps")]
     #[inline]

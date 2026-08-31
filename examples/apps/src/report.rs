@@ -44,12 +44,12 @@ const REPORT_HTML: &str = r#"<!doctype html>
     }"#
 )]
 async fn report_view() -> TextResourceContents {
-    TextResourceContents::new("ui://report/view", REPORT_HTML)
-        .with_mime(APP_MIME_TYPE)
-        // `ui_meta` above rides the `resources/list` entry as a static default a
-        // host can review at connection time. A block on the content item takes
-        // precedence, which is where per-response metadata belongs.
-        .with_ui(UiResourceMeta::new().with_prefers_border(false))
+    // No `_meta.ui` here: the server falls the attribute's block back onto the
+    // content item, which is the only place the tool-driven flow looks. Return a
+    // block of your own -- `TextResourceContents::with_ui(..)` -- when it varies
+    // per response; that replaces the attribute's *whole* block rather than
+    // merging into it, which is the precedence the specification gives a host.
+    TextResourceContents::new("ui://report/view", REPORT_HTML).with_mime(APP_MIME_TYPE)
 }
 
 /// The data half. The id travels in the result, not in the resource URI.
