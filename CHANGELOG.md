@@ -11,50 +11,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 #### MCP Apps
 * **The MCP Apps extension (`io.modelcontextprotocol/ui`), behind the new
-  `apps` feature** (#87). [SEP-1865](https://github.com/modelcontextprotocol/ext-apps),
-  stable since 2026-01-26: a tool points at a `ui://` HTML resource that the host
-  renders in a sandboxed iframe. neva implements the data plane -- the `_meta.ui`
-  blocks on tools and resources; the `ui/*` messages are host-to-iframe
-  `postMessage` traffic and are out of scope.
+  `apps` feature** (#87). A tool points at a `ui://` HTML resource the host
+  renders in a sandboxed iframe
+  ([SEP-1865](https://github.com/modelcontextprotocol/ext-apps)). neva
+  implements the data plane -- the `_meta.ui` blocks on tools and resources; the
+  `ui/*` host-to-iframe messages are out of scope.
 
-  Server: `McpOptions::with_apps()`, `App::add_ui_resource` for a fixed document
-  and `App::map_ui_resource` for a generated one, `Tool::with_ui` /
-  `with_visibility`, and `AppsExtension` for direct registration. `ui://`
-  resources answer `resources/read` but stay out of `resources/list` unless
-  `AppsExtension::with_listed_resources()` says otherwise. Startup warns about a
-  tool pointing at a `ui://` resource nothing serves.
+  Server: `McpOptions::with_apps()`, `App::add_ui_resource` and
+  `App::map_ui_resource`, `Tool::with_ui` / `with_visibility`, `AppsExtension`.
+  A `ui://` read is always served as `text/html;profile=mcp-app` and carries its
+  template's `_meta.ui`; it stays out of `resources/list` unless
+  `AppsExtension::with_listed_resources()`. Startup warns about a tool naming a
+  `ui://` resource nothing serves.
 
   Macros: `#[tool(ui = "ui://...", visibility = ["app"])]` and
-  `#[resource(ui_meta = "...")]`, which also defaults a `ui://` resource's MIME
-  type. Bad scheme, unknown visibility scope, wrong MIME type and misspelled
-  `ui_meta` keys are compile errors.
+  `#[resource(ui_meta = "...")]`. Bad scheme, unknown visibility scope, wrong
+  MIME type and misspelled `ui_meta` keys are compile errors.
 
   Client: `McpOptions::with_apps()` / `with_app_mime_types(..)` advertise the
-  extension on `initialize`; `Tool::ui()`, `Tool::is_model_visible()` and
-  `ResourceContents::ui()` read the metadata back. `Tool::ui()` also accepts the
-  deprecated flat `_meta["ui/resourceUri"]`, which neva never writes.
+  extension on `initialize`; `Tool::ui()` (which also reads the deprecated flat
+  `_meta["ui/resourceUri"]`), `Tool::is_model_visible()` and
+  `ResourceContents::ui()` read it back.
 
-  Two limits: MCP 2026-07-28 has no handshake, so nothing is advertised to a
-  server speaking it (#122), and a resource registered with `add_ui_resource`
-  carries no role or permission requirement (#123). See `examples/apps`.
+  Not advertised to a server speaking MCP 2026-07-28, which has no handshake
+  (#122); `add_ui_resource` carries no role or permission requirement (#123).
+  See `examples/apps`.
 
 ### Changed
 
 * **`#[tool]`, `#[resource]`, `#[resources]`, `#[prompt]` and `#[handler]`
-  reject an attribute they do not know**, where they used to ignore it. A
-  misspelled attribute did nothing quietly; for `visibility` that meant
-  publishing to the agent a tool meant for the app only. Fix the spelling or drop
-  the attribute.
+  reject an unknown attribute** instead of ignoring it -- a misspelled
+  `visibility` published an app-only tool to the agent.
 
-* **`ResourceContents`'s accessors are available to a client build.** `uri`,
-  `text`, `blob`, `json`, `mime`, `title` and `annotations` were gated on
-  `server`, which left a client-only build reading a `resources/read` result by
-  matching on variants and touching fields. The builders stay server-side.
+* **`ResourceContents`'s accessors are available to a client build**: `uri`,
+  `text`, `blob`, `json`, `mime`, `title`, `annotations`. The builders stay
+  server-side.
 
 * **`ClientCapabilities::extensions` is no longer gated on the protocol
-  generation**, so a legacy `initialize` can carry it. Its counterpart on
-  `ServerCapabilities` stays 2026-07-28-only. Additive: omitted from the wire
-  when unset.
+  generation**, so a legacy `initialize` can carry it. Additive; its counterpart
+  on `ServerCapabilities` stays 2026-07-28-only.
 
 ## 0.5.5
 
