@@ -428,16 +428,28 @@ impl StdIoClient {
         token: CancellationToken,
     ) -> Result<(BufReader<ChildStdout>, BufWriter<ChildStdin>), Error> {
         let options = &self.options;
+        // Name the command: a bare "No such file or directory (os error 2)"
+        // does not say *which* server failed to start, which is the whole
+        // point of the report.
+        let spawn_failed = |err: std::io::Error| {
+            Error::new(
+                ErrorCode::InternalError,
+                format!("failed to start MCP server `{}`: {err}", options.command),
+            )
+        };
         #[cfg(target_os = "linux")]
-        let (job, mut child) = linux::Job::new(options.command, &options.args)?;
+        let (job, mut child) =
+            linux::Job::new(options.command, &options.args).map_err(spawn_failed)?;
         #[cfg(target_os = "windows")]
-        let (job, mut child) = windows::Job::new(options.command, &options.args)?;
+        let (job, mut child) =
+            windows::Job::new(options.command, &options.args).map_err(spawn_failed)?;
         #[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
         let mut child = tokio::process::Command::new(options.command)
             .args(&options.args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .spawn()?;
+            .spawn()
+            .map_err(spawn_failed)?;
 
         let stdin = child
             .stdin
@@ -1067,16 +1079,22 @@ mod tests {
         use crate::transport::StdIoClient;
         use tokio_util::sync::CancellationToken;
 
-        let client = StdIoClient::new(StdIoOptions::new(
-            "neva-nonexistent-command-for-issue-125-repro",
-            [],
-        ));
+        const COMMAND: &str = "neva-nonexistent-command-for-issue-125-repro";
+
+        let client = StdIoClient::new(StdIoOptions::new(COMMAND, []));
         let token = CancellationToken::new();
 
         let result = client.handshake(token);
+        let err = match result {
+            Err(err) => err,
+            Ok(_) => panic!("spawning a nonexistent command should return an Err, not succeed"),
+        };
+        // The command has to be named: the bare io error is just
+        // "No such file or directory (os error 2)", which does not say
+        // *which* server failed to start.
         assert!(
-            result.is_err(),
-            "spawning a nonexistent command should return an Err, not panic or succeed"
+            err.to_string().contains(COMMAND),
+            "the error should name the command that failed to spawn, got: {err}"
         );
     }
 }
