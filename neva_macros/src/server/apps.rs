@@ -144,40 +144,99 @@ pub(super) fn resolve_mime(
     }
 }
 
-/// Checks an `ui_meta` blob at expansion time: well-formed JSON, an object, and
-/// only keys the specification defines.
+/// Checks a `ui_meta` blob at expansion time: well-formed JSON, an object, only
+/// keys the specification defines, and the right type under each of them.
 ///
 /// The key check is the part that earns its keep. `_meta` is an open map, so a
 /// `prefers_border` written in snake case, or a `connect_domains` inside `csp`,
 /// serializes happily and is then ignored by every host -- a security block that
 /// silently does nothing. Here it is a compile error.
+///
+/// The type check exists for the same reason one step later. The generated code
+/// calls `UiResourceMeta::from_json_str(..).unwrap_or_default()`, so a blob that
+/// parses as JSON but not as the type -- `"csp": []`, say -- would fall back to
+/// an empty block and take every valid neighbouring setting with it. Validating
+/// the shape here makes that fallback unreachable.
 fn validate_ui_meta(json: &str, spanned: &Expr) -> syn::Result<()> {
     let value: serde_json::Value = serde_json::from_str(json)
         .map_err(|e| syn::Error::new_spanned(spanned, format!("invalid JSON in `ui_meta`: {e}")))?;
 
-    let serde_json::Value::Object(map) = &value else {
-        return Err(syn::Error::new_spanned(
-            spanned,
-            "`ui_meta` must be a JSON object, e.g. `{ \"prefersBorder\": true }`",
-        ));
-    };
-
+    let map = expect_object(&value, "ui_meta", spanned)?;
     check_keys(map, &UI_META_KEYS, "ui_meta", spanned)?;
 
-    if let Some(serde_json::Value::Object(csp)) = map.get("csp") {
-        check_keys(csp, &CSP_KEYS, "ui_meta.csp", spanned)?;
-    }
-
-    if let Some(serde_json::Value::Object(permissions)) = map.get("permissions") {
-        check_keys(
-            permissions,
-            &PERMISSION_KEYS,
-            "ui_meta.permissions",
-            spanned,
-        )?;
+    for (key, value) in map {
+        match key.as_str() {
+            "csp" => {
+                let csp = expect_object(value, "ui_meta.csp", spanned)?;
+                check_keys(csp, &CSP_KEYS, "ui_meta.csp", spanned)?;
+                for (key, value) in csp {
+                    expect_string_array(value, &format!("ui_meta.csp.{key}"), spanned)?;
+                }
+            }
+            "permissions" => {
+                let permissions = expect_object(value, "ui_meta.permissions", spanned)?;
+                check_keys(
+                    permissions,
+                    &PERMISSION_KEYS,
+                    "ui_meta.permissions",
+                    spanned,
+                )?;
+                for (key, value) in permissions {
+                    // Presence is the declaration; the object itself is empty.
+                    expect_object(value, &format!("ui_meta.permissions.{key}"), spanned)?;
+                }
+            }
+            "domain" if !value.is_string() => {
+                return Err(type_error("ui_meta.domain", "a string", value, spanned));
+            }
+            "prefersBorder" if !value.is_boolean() => {
+                return Err(type_error(
+                    "ui_meta.prefersBorder",
+                    "a boolean",
+                    value,
+                    spanned,
+                ));
+            }
+            _ => {}
+        }
     }
 
     Ok(())
+}
+
+/// The object at `path`, or an error naming what was found instead.
+fn expect_object<'a>(
+    value: &'a serde_json::Value,
+    path: &str,
+    spanned: &Expr,
+) -> syn::Result<&'a serde_json::Map<String, serde_json::Value>> {
+    value
+        .as_object()
+        .ok_or_else(|| type_error(path, "an object", value, spanned))
+}
+
+/// Checks that `value` is an array of strings, as every `csp` field is.
+fn expect_string_array(value: &serde_json::Value, path: &str, spanned: &Expr) -> syn::Result<()> {
+    let Some(items) = value.as_array() else {
+        return Err(type_error(path, "an array of strings", value, spanned));
+    };
+    match items.iter().find(|item| !item.is_string()) {
+        None => Ok(()),
+        Some(item) => Err(type_error(path, "an array of strings", item, spanned)),
+    }
+}
+
+/// Names what was found where something else was expected.
+fn type_error(path: &str, expected: &str, found: &serde_json::Value, spanned: &Expr) -> syn::Error {
+    let found = match found {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    };
+    syn::Error::new_spanned(spanned, format!("`{path}` must be {expected}, got {found}"))
 }
 
 /// Errors on the first key of `map` that is not in `known`.
@@ -314,7 +373,12 @@ mod tests {
                 resource_ui_meta_code(&expr(quote! { "[1, 2]" }), Some("ui://clock/app.html"))
                     .expect_err("must be an object");
 
-            assert!(err.to_string().contains("JSON object"));
+            // Same wording as every other shape error, top level included.
+            assert!(
+                err.to_string().contains("`ui_meta` must be an object"),
+                "{err}"
+            );
+            assert!(err.to_string().contains("got an array"), "{err}");
         }
 
         #[test]
@@ -346,6 +410,55 @@ mod tests {
             )
             .expect_err("same for permissions");
             assert!(err.to_string().contains("ui_meta.permissions"));
+        }
+
+        #[test]
+        fn ui_meta_rejects_a_field_of_the_wrong_type() {
+            // The generated code ends in `.unwrap_or_default()`, so a blob that
+            // is valid JSON but not a valid `UiResourceMeta` would fall back to
+            // an empty block -- throwing away `prefersBorder` here along with
+            // the malformed `csp`. Caught at compile time instead.
+            let cases = [
+                (r#"{"csp": [], "prefersBorder": true}"#, "ui_meta.csp"),
+                (r#"{"permissions": "camera"}"#, "ui_meta.permissions"),
+                (
+                    r#"{"permissions": {"camera": true}}"#,
+                    "ui_meta.permissions.camera",
+                ),
+                (
+                    r#"{"csp": {"connectDomains": "https://a"}}"#,
+                    "ui_meta.csp.connectDomains",
+                ),
+                (
+                    r#"{"csp": {"connectDomains": [1]}}"#,
+                    "ui_meta.csp.connectDomains",
+                ),
+                (r#"{"domain": 1}"#, "ui_meta.domain"),
+                (r#"{"prefersBorder": "true"}"#, "ui_meta.prefersBorder"),
+            ];
+
+            for (json, path) in cases {
+                let err = resource_ui_meta_code(&expr(quote! { #json }), Some("ui://x/app.html"))
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    err.contains(path),
+                    "{json} should be refused at {path}, got: {err}"
+                );
+            }
+        }
+
+        #[test]
+        fn ui_meta_names_what_it_found() {
+            let err = resource_ui_meta_code(
+                &expr(quote! { r#"{"prefersBorder": "true"}"# }),
+                Some("ui://x/app.html"),
+            )
+            .unwrap_err()
+            .to_string();
+
+            assert!(err.contains("must be a boolean"), "{err}");
+            assert!(err.contains("got a string"), "{err}");
         }
 
         #[test]

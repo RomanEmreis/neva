@@ -989,39 +989,55 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
         }
     }
 
-    /// Warns when a UI-bound tool points at a `ui://` resource this server
-    /// cannot serve.
+    /// Warns when a UI-bound tool names a `ui://` resource the host will not be
+    /// able to fetch.
     ///
-    /// The host reads `_meta.ui.resourceUri` and fetches it with
-    /// `resources/read`; a URI nothing answers is a registration mistake the
-    /// host only discovers as a 404. Unlike a mismatched argument list this is
-    /// not fatal -- the tool still returns its `content`, which is the
-    /// text-only path every MCP Apps tool has to work on anyway -- so it warns
-    /// rather than failing startup.
+    /// A host reads `_meta.ui.resourceUri` and passes it to `resources/read`
+    /// **verbatim**, so two registration mistakes only surface there: a URI
+    /// nothing on this server answers, and a URI carrying a template segment,
+    /// which is read as the literal `{name}` rather than substituted from the
+    /// tool call. Neither is fatal -- the tool still returns its `content`,
+    /// which is the text-only path every MCP Apps tool has to work on anyway --
+    /// so both warn rather than failing startup.
     #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
-    #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
     fn validate_ui_resources(&self) {
-        let dangling = self
-            .options
+        #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
+        for (tool, uri, complaint) in self.ui_resource_problems() {
+            #[cfg(feature = "tracing")]
+            tracing::warn!(
+                logger = "neva",
+                "Tool `{tool}` advertises the MCP Apps resource `{uri}`, which {complaint}."
+            );
+        }
+    }
+
+    /// The UI-bound tools whose `resourceUri` a host will not be able to fetch,
+    /// each with what is wrong with it. Split out of
+    /// [`Self::validate_ui_resources`] so the classification is testable without
+    /// capturing log output.
+    #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
+    fn ui_resource_problems(&self) -> Vec<(String, Uri, &'static str)> {
+        self.options
             .tools
             .as_ref()
             .values()
             .filter_map(|tool| {
                 let uri = tool.ui()?.resource_uri?;
-                (!self.options.serves_ui_resource(&uri)).then(|| (tool.name.clone(), uri))
+                let complaint = if uri.contains('{') {
+                    "carries a template segment, and a host fetches the URI verbatim \
+                     rather than substituting the tool's arguments into it. Name a \
+                     concrete resource: the document is the static half of an MCP App \
+                     and the data belongs in the tool's result"
+                } else if !self.options.serves_ui_resource(&uri) {
+                    "is not served by anything here, so the host's `resources/read` \
+                     will fail and the tool will render without a UI. Register it with \
+                     App::add_ui_resource or App::map_ui_resource"
+                } else {
+                    return None;
+                };
+                Some((tool.name.clone(), uri, complaint))
             })
-            .collect::<Vec<_>>();
-
-        #[cfg(feature = "tracing")]
-        for (tool, uri) in dangling {
-            tracing::warn!(
-                logger = "neva",
-                "Tool `{tool}` advertises the MCP Apps resource `{uri}`, but nothing \
-                 serves it: the host's `resources/read` will fail and the tool will \
-                 render without a UI. Register it with App::add_ui_resource or \
-                 App::map_ui_resource."
-            );
-        }
+            .collect()
     }
 
     /// Maps an MCP tool call request to a specific function and returns a mutable reference to the
@@ -1917,6 +1933,60 @@ mod tests {
 
             assert!(!tool.is_model_visible());
             assert!(tool.is_app_visible());
+        }
+
+        #[test]
+        fn a_templated_resource_uri_is_reported() {
+            // A host passes `resourceUri` to `resources/read` verbatim. Route
+            // matching resolves `{id}` against the template, so the read
+            // *succeeds* -- and returns a report for the literal `{id}`. Nothing
+            // downstream can notice, which is why this is caught at startup.
+            let mut app = App::new();
+            app.map_ui_resource("ui://report/{id}", "report", |id: String| async move {
+                crate::types::TextResourceContents::new(format!("ui://report/{id}"), "<html>")
+            });
+            app.map_tool("show_report", |_id: String| async { "ok" })
+                .with_ui("ui://report/{id}");
+
+            let problems = app.ui_resource_problems();
+
+            assert_eq!(problems.len(), 1);
+            assert_eq!(problems[0].0, "show_report");
+            assert!(
+                problems[0].2.contains("template segment"),
+                "{}",
+                problems[0].2
+            );
+        }
+
+        #[test]
+        fn a_resource_uri_nothing_serves_is_reported() {
+            let mut app = App::new();
+            app.map_tool("get_time", || async { "12:00" })
+                .with_ui("ui://clock/app.html");
+
+            let problems = app.ui_resource_problems();
+
+            assert_eq!(problems.len(), 1);
+            assert!(problems[0].2.contains("not served"), "{}", problems[0].2);
+        }
+
+        #[test]
+        fn a_concrete_uri_that_is_served_is_not_reported() {
+            let mut app = App::new();
+            app.add_ui_resource("ui://clock/app.html", "clock", "<html>");
+            app.map_tool("get_time", || async { "12:00" })
+                .with_ui("ui://clock/app.html");
+
+            assert!(app.ui_resource_problems().is_empty());
+        }
+
+        #[test]
+        fn a_tool_without_a_ui_is_never_reported() {
+            let mut app = App::new();
+            app.map_tool("plain", || async { "ok" });
+
+            assert!(app.ui_resource_problems().is_empty());
         }
 
         #[tokio::test]

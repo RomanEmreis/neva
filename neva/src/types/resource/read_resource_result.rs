@@ -633,7 +633,7 @@ impl ResourceContents {
                 mime: content.mime.or_else(|| Some("text/plain".into())),
                 title: content.title,
                 annotations: content.annotations,
-                meta: None,
+                meta: content.meta,
                 text,
             }),
         }
@@ -673,7 +673,7 @@ impl ResourceContents {
                 mime: None,
                 title: content.title,
                 annotations: content.annotations,
-                meta: None,
+                meta: content.meta,
                 blob,
             }),
         }
@@ -713,7 +713,7 @@ impl ResourceContents {
                 mime: content.mime.or_else(|| Some("application/json".into())),
                 title: content.title,
                 annotations: content.annotations,
-                meta: None,
+                meta: content.meta,
                 value,
             }),
         }
@@ -1166,5 +1166,66 @@ mod tests {
             chunk_count, 1,
             "Exactly CHUNK_SIZE data should produce one chunk"
         );
+    }
+
+    /// `_meta` survives the `Empty -> concrete` conversions.
+    ///
+    /// `ResourceContents::new` starts out `Empty`, and every arm of `with_text`
+    /// / `with_blob` / `with_json` carries `uri`, `mime`, `title` and
+    /// `annotations` across -- but the `Empty` ones used to drop `meta`. The
+    /// fluent order that reads most naturally for an MCP App,
+    /// `.with_ui(..).with_text(html)`, therefore threw the app's CSP away.
+    #[cfg(feature = "apps")]
+    mod meta_survives_conversion {
+        use super::*;
+        use crate::types::UiResourceMeta;
+
+        fn ui() -> UiResourceMeta {
+            UiResourceMeta::new().with_prefers_border(true)
+        }
+
+        #[test]
+        fn into_text() {
+            let contents = ResourceContents::new("ui://clock/app.html")
+                .with_ui(ui())
+                .with_text("<!doctype html>");
+
+            assert_eq!(contents.ui(), Some(ui()));
+            assert_eq!(contents.text(), Some("<!doctype html>"));
+        }
+
+        #[test]
+        fn into_blob() {
+            let contents = ResourceContents::new("ui://clock/app.html")
+                .with_ui(ui())
+                .with_blob(vec![1u8, 2, 3]);
+
+            assert_eq!(contents.ui(), Some(ui()));
+            assert_eq!(contents.blob(), Some([1u8, 2, 3].as_slice()));
+        }
+
+        #[test]
+        fn into_json() {
+            let contents = ResourceContents::new("res://data")
+                .with_ui(ui())
+                .with_json(serde_json::json!({ "a": 1 }));
+
+            assert_eq!(contents.ui(), Some(ui()));
+        }
+
+        #[test]
+        fn either_order_gives_the_same_result() {
+            let ui_first = ResourceContents::new("ui://clock/app.html")
+                .with_ui(ui())
+                .with_text("<!doctype html>");
+            let text_first = ResourceContents::new("ui://clock/app.html")
+                .with_text("<!doctype html>")
+                .with_ui(ui());
+
+            assert_eq!(
+                serde_json::to_value(&ui_first).unwrap(),
+                serde_json::to_value(&text_first).unwrap()
+            );
+        }
     }
 }
