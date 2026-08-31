@@ -725,7 +725,7 @@ impl McpOptions {
             if crate::types::apps::is_ui_uri(contents.uri()) {
                 contents.set_mime(crate::types::APP_MIME_TYPE);
             }
-            
+
             if let Some(ui) = ui.as_ref()
                 && contents.ui().is_none()
             {
