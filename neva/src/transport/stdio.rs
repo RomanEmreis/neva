@@ -431,7 +431,12 @@ impl StdIoClient {
         // Name the command: a bare "No such file or directory (os error 2)"
         // does not say *which* server failed to start, which is the whole
         // point of the report.
-        let spawn_failed = |err: std::io::Error| {
+        // `&dyn Display` rather than `std::io::Error`: the three arms below do
+        // not agree on an error type. Linux gets `std::io::Result`, Windows
+        // gets `windows::core::Result`, and the fallback gets whatever
+        // `Command::spawn` returns, so pinning this to one of them breaks the
+        // other. The old `.expect(..)` took any `Debug` and never had to.
+        let spawn_failed = |err: &dyn std::fmt::Display| {
             Error::new(
                 ErrorCode::InternalError,
                 format!("failed to start MCP server `{}`: {err}", options.command),
@@ -439,17 +444,17 @@ impl StdIoClient {
         };
         #[cfg(target_os = "linux")]
         let (job, mut child) =
-            linux::Job::new(options.command, &options.args).map_err(spawn_failed)?;
+            linux::Job::new(options.command, &options.args).map_err(|e| spawn_failed(&e))?;
         #[cfg(target_os = "windows")]
         let (job, mut child) =
-            windows::Job::new(options.command, &options.args).map_err(spawn_failed)?;
+            windows::Job::new(options.command, &options.args).map_err(|e| spawn_failed(&e))?;
         #[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
         let mut child = tokio::process::Command::new(options.command)
             .args(&options.args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
-            .map_err(spawn_failed)?;
+            .map_err(|e| spawn_failed(&e))?;
 
         let stdin = child
             .stdin
@@ -1072,8 +1077,14 @@ mod tests {
     /// cannot be spawned -- a typo, a binary that was never built, a server
     /// removed from `PATH` -- used to panic `handshake` via `.expect(..)`
     /// instead of returning an [`Error`] a caller could match on.
+    ///
+    /// Not run on Windows: `windows::Job::new` rewrites the command to
+    /// `cmd /c <command>` unless it already contains `"cmd"`, so the process
+    /// actually spawned is `cmd.exe` and the spawn itself always succeeds. A
+    /// missing binary surfaces there as a non-zero child exit long after
+    /// `handshake` has returned, which is not what this test is asserting.
     #[tokio::test]
-    #[cfg(feature = "client")]
+    #[cfg(all(feature = "client", not(target_os = "windows")))]
     async fn it_returns_an_error_instead_of_panicking_when_the_command_cannot_be_spawned() {
         use super::options::StdIoOptions;
         use crate::transport::StdIoClient;
