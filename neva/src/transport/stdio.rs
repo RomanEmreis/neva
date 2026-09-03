@@ -419,23 +419,18 @@ impl StdIoClient {
 
     /// Handshakes stdio between client and server apps
     ///
-    /// Fails when the configured command cannot be spawned (a typo, a
-    /// binary that was never built, a server removed from `PATH`) --
-    /// ordinary user input, not a bug, so this returns an [`Error`] rather
-    /// than panicking. See https://github.com/RomanEmreis/neva/issues/125.
+    /// Returns an [`Error`] when the configured command cannot be spawned:
+    /// a typo, a binary that was never built, a server removed from `PATH`.
+    /// See <https://github.com/RomanEmreis/neva/issues/125>.
     fn handshake(
         &self,
         token: CancellationToken,
     ) -> Result<(BufReader<ChildStdout>, BufWriter<ChildStdin>), Error> {
         let options = &self.options;
-        // Name the command: a bare "No such file or directory (os error 2)"
-        // does not say *which* server failed to start, which is the whole
-        // point of the report.
-        // `&dyn Display` rather than `std::io::Error`: the three arms below do
-        // not agree on an error type. Linux gets `std::io::Result`, Windows
-        // gets `windows::core::Result`, and the fallback gets whatever
-        // `Command::spawn` returns, so pinning this to one of them breaks the
-        // other. The old `.expect(..)` took any `Debug` and never had to.
+        // `&dyn Display` rather than a concrete error type: the arms below do
+        // not agree on one -- Linux yields `std::io::Result`, Windows
+        // `windows::core::Result`, and the fallback whatever `Command::spawn`
+        // returns.
         let spawn_failed = |err: &dyn std::fmt::Display| {
             Error::new(
                 ErrorCode::InternalError,
@@ -459,11 +454,11 @@ impl StdIoClient {
         let stdin = child
             .stdin
             .take()
-            .ok_or_else(|| Error::from(std::io::Error::other("Inaccessible stdin")))?;
+            .ok_or_else(|| spawn_failed(&"inaccessible stdin"))?;
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| Error::from(std::io::Error::other("Inaccessible stdout")))?;
+            .ok_or_else(|| spawn_failed(&"inaccessible stdout"))?;
 
         #[cfg(feature = "tracing")]
         let child_id = child.id();
@@ -1072,17 +1067,12 @@ mod tests {
         assert!(output.stdout.is_empty(), "Process still running");
     }
 
-    /// Regression test for
-    /// <https://github.com/RomanEmreis/neva/issues/125>: a command that
-    /// cannot be spawned -- a typo, a binary that was never built, a server
-    /// removed from `PATH` -- used to panic `handshake` via `.expect(..)`
-    /// instead of returning an [`Error`] a caller could match on.
+    /// Regression test for <https://github.com/RomanEmreis/neva/issues/125>.
     ///
     /// Not run on Windows: `windows::Job::new` rewrites the command to
-    /// `cmd /c <command>` unless it already contains `"cmd"`, so the process
-    /// actually spawned is `cmd.exe` and the spawn itself always succeeds. A
-    /// missing binary surfaces there as a non-zero child exit long after
-    /// `handshake` has returned, which is not what this test is asserting.
+    /// `cmd /c <command>` unless it already contains `"cmd"`, so the spawn
+    /// always succeeds and a missing binary surfaces instead as a non-zero
+    /// child exit long after `handshake` has returned.
     #[tokio::test]
     #[cfg(all(feature = "client", not(target_os = "windows")))]
     async fn it_returns_an_error_instead_of_panicking_when_the_command_cannot_be_spawned() {
@@ -1100,9 +1090,6 @@ mod tests {
             Err(err) => err,
             Ok(_) => panic!("spawning a nonexistent command should return an Err, not succeed"),
         };
-        // The command has to be named: the bare io error is just
-        // "No such file or directory (os error 2)", which does not say
-        // *which* server failed to start.
         assert!(
             err.to_string().contains(COMMAND),
             "the error should name the command that failed to spawn, got: {err}"

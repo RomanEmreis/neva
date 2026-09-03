@@ -205,15 +205,8 @@ impl Transport for TransportProto {
             TransportProto::StdIoServer(stdio) => stdio.start(),
             #[cfg(feature = "client")]
             TransportProto::StdioClient(stdio) => stdio.start(),
-            // The `HttpTransport` bridge trait (a separate, dyn-compatible
-            // seam for storing any `HttpServer<C, E>` without `TransportProto`
-            // itself becoming generic) is unrelated to this stdio spawn
-            // failure and already handles its own start failures internally
-            // by handing back an already-cancelled handle -- see
-            // `HttpServer::start`. It stays infallible; only wrapped here so
-            // every match arm agrees on a type.
             #[cfg(feature = "http-server")]
-            TransportProto::HttpServer(http) => Ok(http.start()),
+            TransportProto::HttpServer(http) => http.start(),
             #[cfg(feature = "http-client")]
             TransportProto::HttpClient(http) => http.start(),
             TransportProto::None => Ok(TransportHandle::detached(CancellationToken::new())),

@@ -169,7 +169,7 @@ pub trait HttpEngine: Send + Sync + 'static {
 pub(crate) trait HttpTransport: Send + Sync + 'static {
     /// Starts the engine and returns the token that, when cancelled, shuts
     /// it down, together with the signal its writers raise once drained.
-    fn start(&mut self) -> crate::transport::TransportHandle;
+    fn start(&mut self) -> Result<crate::transport::TransportHandle, Error>;
     /// Consumes the transport into its split (sender, receiver) halves
     /// for use by the App's main loop.
     fn split_into_proto(

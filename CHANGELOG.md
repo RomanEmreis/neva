@@ -23,8 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `cmd /c <command>` unless it already contains `"cmd"`, so the spawn itself
   always succeeds there and a missing binary instead surfaces as a non-zero
   child exit after the handshake has already returned. The regression test is
-  gated off Windows for that reason, and every job in `rust.yml` runs on
-  `ubuntu-latest`, so the Windows path is not exercised by CI either.
+  gated off Windows for that reason.
 
 ## 0.5.6
 

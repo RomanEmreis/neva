@@ -1025,12 +1025,7 @@ where
                 // Hand back an already-cancelled token so `App::run`'s
                 // receive loop breaks immediately instead of waiting
                 // forever on a server that never bound. Nothing was started,
-                // so there is nothing to wait on draining either. This is
-                // deliberately still `Ok`, not `Err` -- unlike the stdio
-                // client's spawn failure (see issue #125), there is no
-                // caller here with a `Result` to hand this to; `App::run`
-                // returns `()`, so the graceful-degrade path already in
-                // place is preserved rather than reworked into this change.
+                // so there is nothing to wait on draining either.
                 token.cancel();
                 return Ok(TransportHandle::detached(token));
             }
@@ -1107,21 +1102,8 @@ where
     C: Send + 'static,
     E: HttpEngine,
 {
-    fn start(&mut self) -> TransportHandle {
-        // `HttpTransport` (this trait) is a `pub(crate)` dyn-compatible
-        // bridge with no `Result` of its own to hand a failure to, so it
-        // stays infallible -- see the matching comment on `Transport::start`
-        // for `HttpServer` above, whose own body never actually constructs
-        // an `Err` today. Degrade the same way that body already does
-        // internally (an already-cancelled, detached handle) if that ever
-        // changes, rather than unwrap and panic.
-        <Self as Transport>::start(self).unwrap_or_else(|_err| {
-            #[cfg(feature = "tracing")]
-            tracing::error!(logger = "neva", "Failed to start HTTP server: {}", _err);
-            let token = CancellationToken::new();
-            token.cancel();
-            TransportHandle::detached(token)
-        })
+    fn start(&mut self) -> Result<TransportHandle, Error> {
+        <Self as Transport>::start(self)
     }
 
     fn split_into_proto(self: Box<Self>) -> (HttpSender, HttpReceiver) {
@@ -1146,11 +1128,6 @@ impl Transport for HttpClient {
             Err(_err) => {
                 #[cfg(feature = "tracing")]
                 tracing::error!(logger = "neva", "Failed to start HTTP client: {}", _err);
-                // Scope kept to what issue #125 asked for: the stdio client's
-                // spawn failure. `self.runtime()` failing here is a distinct,
-                // pre-existing case this fix does not change the reporting of
-                // -- still a graceful detached handle, not a new `Err`, so
-                // this stays behaviorally identical to before.
                 return Ok(TransportHandle::detached(token));
             }
         };
