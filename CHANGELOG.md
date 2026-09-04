@@ -22,8 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   The lint is now `deny` workspace-wide, with a module-scoped `expect` on the
   one module that needs it. `get_main_thread_id` also gained the explicit
   `unsafe` block that edition 2024 wants inside an `unsafe fn`, which would
-  otherwise have failed the `-D warnings` gate. CI gained a `windows-latest`
-  job: no job compiled that module before, which is why none of this surfaced.
+  otherwise have failed the `-D warnings` gate.
+
+  CI gained a build matrix over Linux, macOS and Windows. `handshake` picks its
+  spawn backend by target, and only the Linux one was ever compiled: the Win32
+  backend not at all, and the plain `Command::spawn` fallback that every other
+  target uses only by whoever happened to build locally.
 
 #### Transport
 * **A stdio client returns an error instead of panicking when the MCP server

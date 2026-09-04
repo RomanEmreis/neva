@@ -52,23 +52,53 @@ jobs:
       - name: Run slim server with legacy-spec
         run: cargo clippy --all-targets --features "server legacy-spec" -- -D warnings
 
-  windows_check:
-    runs-on: windows-latest
+  os_check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+
+    runs-on: ${{ matrix.os }}
     needs: check_format
 
-    # Every other job runs on ubuntu, and `transport/stdio/windows.rs` is behind
-    # `#[cfg(target_os = "windows")]`, so without this row nothing in CI ever
-    # compiles the Win32 backend -- which is how the crate came to be unbuildable
-    # on Windows for nine releases (#127). The feature sets are the ones that
-    # pull in `client`, since that is what gates the module.
+    # Every other job is ubuntu-only, and `handshake` picks its spawn backend by
+    # target: `linux::Job` on Linux, `windows::Job` on Windows, plain
+    # `Command::spawn` everywhere else. Two of those three arms were therefore
+    # never compiled anywhere in CI -- which is how the Win32 backend came to be
+    # unbuildable for nine releases (#127). The feature sets are the ones that
+    # enable `client`, since that is what gates the backends.
+    #
+    # `-D warnings` rather than a bare build: the second half of #127 was
+    # `unsafe_op_in_unsafe_fn`, which is warn-by-default in edition 2024 and
+    # would have sailed through `cargo build`. Registry dependencies are capped
+    # at `allow` by cargo, so this only applies to the workspace.
+    env:
+      RUSTFLAGS: "-D warnings"
+
     steps:
       - uses: actions/checkout@v4
-      - name: Clippy on the default profile
-        run: cargo clippy --all-targets --features "server-full client-full" -- -D warnings
-      - name: Clippy with legacy-spec
-        run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: Run the tests
-        run: cargo test --features "server-full client-full"
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+      - name: Build the default profile
+        run: cargo build --locked --all-targets --features "server-full client-full"
+      - name: Build with legacy-spec
+        run: cargo build --locked --all-targets --all-features
+
+  # One stable context for the ruleset to require. Matrix legs register as
+  # `os_check (windows-latest)` and friends, so requiring them by name breaks
+  # silently the moment the matrix changes -- a required check that no longer
+  # exists stops blocking rather than failing.
+  os_gate:
+    runs-on: ubuntu-latest
+    needs: os_check
+    if: always()
+
+    steps:
+      - name: Fail if any OS leg did not succeed
+        run: '[ "${{ needs.os_check.result }}" = "success" ]'
 
   msrv_check:
     runs-on: ubuntu-latest
