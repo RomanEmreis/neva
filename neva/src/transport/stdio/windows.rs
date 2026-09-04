@@ -333,12 +333,25 @@ mod tests {
     }
 
     /// The same name spelled with its extension resolves to the same file.
+    ///
+    /// Compared case-insensitively on purpose: `PATHEXT` is spelled in upper
+    /// case, and the extension is appended exactly as it is written there, so
+    /// a bare name resolves to `cmd.EXE` while a spelled one keeps the
+    /// caller's `cmd.exe`. Windows paths are case-insensitive, so that is the
+    /// same file -- and `std`'s own batch-file detection matches `.bat` and
+    /// `.cmd` in either case, which is what keeps an `npx.CMD` spelling
+    /// working.
     #[test]
     fn it_honors_an_extension_the_caller_wrote() {
         let bare = resolve_command("cmd").expect("`cmd` must resolve");
         let spelled = resolve_command("cmd.exe").expect("`cmd.exe` must resolve");
 
-        assert_eq!(bare, spelled);
+        assert!(
+            bare.as_os_str().eq_ignore_ascii_case(spelled.as_os_str()),
+            "{} and {} must name the same file",
+            bare.display(),
+            spelled.display()
+        );
     }
 
     /// The case #128 is about: nothing to resolve, reported as such rather than
