@@ -27,7 +27,7 @@ use windows::{
             },
         },
     },
-    core::Error,
+    core::{Error, Owned},
 };
 
 use std::path::{Path, PathBuf};
@@ -64,9 +64,7 @@ impl Job {
             )
         })?;
 
-        let (job_handle, child) = create_job_object_with_kill_on_close(&program, args)?;
-        let job = Self(job_handle);
-        Ok((job, child))
+        create_job_object_with_kill_on_close(&program, args)
     }
 }
 
@@ -113,8 +111,22 @@ fn resolve_command(command: &str) -> Option<PathBuf> {
         return first_existing(candidate, &extensions);
     }
 
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .find_map(|dir| first_existing(&dir.join(command), &extensions))
+    resolve_on_path(&std::env::var_os("PATH")?, command, &extensions)
+}
+
+/// The `PATH` half of [`resolve_command`], taking the variable rather than
+/// reading it so it can be exercised without touching the environment.
+fn resolve_on_path(
+    paths: &std::ffi::OsStr,
+    command: &str,
+    extensions: &[String],
+) -> Option<PathBuf> {
+    std::env::split_paths(paths)
+        // An empty entry -- a stray or trailing separator, common enough in a
+        // real `PATH` -- joins to a relative candidate, and probing that reads
+        // the working directory. Which is the one place this must not look.
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .find_map(|dir| first_existing(&dir.join(command), extensions))
 }
 
 /// The extensions to try, from the environment when it offers any.
@@ -157,7 +169,7 @@ fn first_existing(candidate: &Path, extensions: &[String]) -> Option<PathBuf> {
 fn create_job_object_with_kill_on_close(
     program: &Path,
     args: &Vec<&str>,
-) -> std::io::Result<(HANDLE, Child)> {
+) -> std::io::Result<(Job, Child)> {
     // SAFETY:
     // This block performs a sequence of Windows API calls that require unsafe operations.
     //
@@ -169,18 +181,23 @@ fn create_job_object_with_kill_on_close(
     //   We assume these functions return valid IDs for the current child process.
     // - `AssignProcessToJobObject`: The job and process handles are valid and open at this point.
     // - `ResumeThread`: Called only after the thread handle is successfully opened.
-    // - `CloseHandle`: Closes valid handles after they are no longer needed.
     //
-    // Invariant: The caller must ensure that `job` is eventually closed (e.g., with `CloseHandle` or wrapped in a RAII type),
-    // and the returned `Child` is managed (e.g., `wait` or `kill`) to avoid leaking resources.
+    // Every handle is owned from the moment it exists -- the job by `Job`, the thread and process
+    // handles by `Owned` -- so each is closed exactly once however this returns, including on the
+    // early exits below. The caller is left to manage the returned `Child` (`wait` or `kill`).
     unsafe {
-        let job = CreateJobObjectW(None, None)?;
+        // Owned before anything below can fail: every `?` past this point used
+        // to return without closing the handle. Spawning the resolved program
+        // directly made the first of those reachable -- `cmd.exe` always
+        // existed, whereas a server binary can be present and still refuse to
+        // start.
+        let job = Job(CreateJobObjectW(None, None)?);
         // Configure Job Object
         let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
 
         let result = SetInformationJobObject(
-            job,
+            job.0,
             JobObjectExtendedLimitInformation,
             &info as *const _ as *const _,
             size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
@@ -201,17 +218,17 @@ fn create_job_object_with_kill_on_close(
         let tid =
             get_main_thread_id(pid).ok_or_else(|| std::io::Error::other("Thread not found"))?;
 
-        let thread_handle = OpenThread(THREAD_SUSPEND_RESUME, false, tid)?;
-        let process_handle = OpenProcess(PROCESS_ALL_ACCESS, false, pid)?;
+        // Same reasoning as the job handle above, and these two leaked on the
+        // paths below them before: `Owned` closes each on the way out however
+        // this returns.
+        let thread_handle = Owned::new(OpenThread(THREAD_SUSPEND_RESUME, false, tid)?);
+        let process_handle = Owned::new(OpenProcess(PROCESS_ALL_ACCESS, false, pid)?);
 
-        AssignProcessToJobObject(job, process_handle)?;
+        AssignProcessToJobObject(job.0, *process_handle)?;
 
-        if ResumeThread(thread_handle) == u32::MAX {
+        if ResumeThread(*thread_handle) == u32::MAX {
             return Err(Error::from_thread().into());
         }
-
-        CloseHandle(thread_handle)?;
-        CloseHandle(process_handle)?;
 
         match result {
             Ok(_) => Ok((job, child)),
@@ -265,6 +282,7 @@ unsafe fn get_main_thread_id(process_id: u32) -> Option<u32> {
 mod tests {
     use crate::transport::stdio::windows::{
         Job, create_job_object_with_kill_on_close, get_main_thread_id, resolve_command,
+        resolve_on_path,
     };
     use std::path::Path;
     use std::time::Duration;
@@ -351,6 +369,26 @@ mod tests {
             "{} and {} must name the same file",
             bare.display(),
             spelled.display()
+        );
+    }
+
+    /// An empty `PATH` entry must not be probed: joined to a command it yields
+    /// a relative candidate, and probing that reads the working directory.
+    ///
+    /// `cargo test` runs with the package root as the working directory, so
+    /// `Cargo.toml` is the file to plant nothing for -- with the filter this
+    /// resolves to nothing, without it the empty entry finds it.
+    #[test]
+    fn it_does_not_probe_empty_path_entries() {
+        let extensions = vec![".toml".to_owned()];
+
+        assert!(
+            std::path::Path::new("Cargo.toml").is_file(),
+            "the test's own premise: `Cargo.toml` is reachable from the working directory"
+        );
+        assert!(
+            resolve_on_path(std::ffi::OsStr::new(";;"), "Cargo", &extensions).is_none(),
+            "an empty PATH entry was probed against the working directory"
         );
     }
 
