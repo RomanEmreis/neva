@@ -34,7 +34,7 @@ categories = [
 neva_macros = { path = "neva_macros", version = "0.5.7" }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 unreachable_pub = "warn"
 missing_docs = "warn"
 missing_debug_implementations = "warn"
