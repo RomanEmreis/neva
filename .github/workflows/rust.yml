@@ -71,10 +71,15 @@ jobs:
     # unbuildable for nine releases (#127). The feature sets are the ones that
     # enable `client`, since that is what gates the backends.
     #
-    # `-D warnings` rather than a bare build: the second half of #127 was
-    # `unsafe_op_in_unsafe_fn`, which is warn-by-default in edition 2024 and
-    # would have sailed through `cargo build`. Registry dependencies are capped
-    # at `allow` by cargo, so this only applies to the workspace.
+    # `clippy_check` is ubuntu-only, so nothing lints the per-target backends;
+    # `-D warnings` on top because the second half of #127 was
+    # `unsafe_op_in_unsafe_fn`, warn-by-default in edition 2024, which would
+    # have sailed through a plain build. Registry dependencies are capped at
+    # `allow` by cargo, so this only applies to the workspace.
+    #
+    # The suite is run and not only compiled (#128): the spawn backends differ
+    # per target in behaviour, not just in whether they build, and compiling
+    # says nothing about which of them reports a server that was never there.
     env:
       RUSTFLAGS: "-D warnings"
 
@@ -82,10 +87,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
-      - name: Build the default profile
-        run: cargo build --locked --all-targets --features "server-full client-full"
-      - name: Build with legacy-spec
-        run: cargo build --locked --all-targets --all-features
+      - name: Clippy on the default profile
+        run: cargo clippy --locked --all-targets --features "server-full client-full" -- -D warnings
+      - name: Clippy with legacy-spec
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Test the default profile
+        run: cargo test --locked --features "server-full client-full"
+      - name: Test with legacy-spec
+        run: cargo test --locked --all-features
 
   # One stable context for the ruleset to require. Matrix legs register as
   # `os_check (windows-latest)` and friends, so requiring them by name breaks

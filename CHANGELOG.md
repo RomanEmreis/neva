@@ -24,10 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `unsafe` block that edition 2024 wants inside an `unsafe fn`, which would
   otherwise have failed the `-D warnings` gate.
 
-  CI gained a build matrix over Linux, macOS and Windows. `handshake` picks its
-  spawn backend by target, and only the Linux one was ever compiled: the Win32
-  backend not at all, and the plain `Command::spawn` fallback that every other
-  target uses only by whoever happened to build locally.
+  CI gained a matrix over Linux, macOS and Windows, running clippy and the test
+  suite on each. `handshake` picks its spawn backend by target, and only the
+  Linux one was ever compiled: the Win32 backend not at all, and the plain
+  `Command::spawn` fallback that every other target uses only by whoever
+  happened to build locally.
 
 #### Transport
 * **A stdio client returns an error instead of panicking when the MCP server
@@ -39,11 +40,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   reporting a bare `No such file or directory (os error 2)` that does not say
   which server it was.
 
-  Not covered on Windows. `windows::Job::new` rewrites the command to
-  `cmd /c <command>` unless it already contains `"cmd"`, so the spawn itself
-  always succeeds there and a missing binary instead surfaces as a non-zero
-  child exit after the handshake has already returned. The regression test is
-  gated off Windows for that reason.
+* **Windows resolves the command itself rather than routing it through
+  `cmd.exe`** (#128). `windows::Job::new` rewrote the command to
+  `cmd /c <command>` unless it already contained the substring `"cmd"`, so the
+  process actually spawned was `cmd.exe`: the spawn always succeeded, and a
+  mistyped command or an unbuilt binary surfaced as a non-zero child exit long
+  after the handshake had returned -- the one target where the error above could
+  not be reported at all.
+
+  The command is now resolved before spawning, the way `cmd.exe` resolves it and
+  `std` deliberately does not: `CreateProcessW` only ever appends `.exe`, so a
+  bare `npx` -- which ships as the `npx.cmd` shim, and is how most MCP servers
+  are launched -- never resolved on its own, which is what the wrapper was
+  working around. `PATH` is searched with each `PATHEXT` extension; the working
+  directory is not, unlike `cmd.exe`, since resolving a server out of the
+  current directory is a plant vector and a caller who means a local binary can
+  pass a path.
+
+  Arguments are no longer concatenated into a `cmd /c` line. A command that
+  resolves to a `.cmd` or `.bat` is handed to `Command` as that path, which
+  routes it through the batch-file argument escaping in `std` rather than
+  through escaping this module would have had to do itself.
+
+  Also on that path: `create_job_object_with_kill_on_close` panicked through
+  `.expect(..)` if the child had exited before its process id could be read, and
+  returns the error instead.
 
 ## 0.5.6
 
