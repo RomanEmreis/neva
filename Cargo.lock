@@ -1639,9 +1639,9 @@ dependencies = [
 
 [[package]]
 name = "jsonschema"
-version = "0.52.0"
+version = "0.53.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ee5867390f14ee43278d8d05d3af5f5314eeccb4684e6049033f2ba4ae3d4ae"
+checksum = "ca2ea2207f8ccb34b6d4d041fe9deb08fff3cbc43750012caa2c3d1e860188e4"
 dependencies = [
  "ahash",
  "bytecount",
@@ -1670,25 +1670,27 @@ dependencies = [
 
 [[package]]
 name = "jsonschema-regex"
-version = "0.52.0"
+version = "0.53.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a7bbc0f53dcb425cf3bae539be26b406b7053e6995e34e4b04477091e600044"
+checksum = "5426a01d944d044c9c5e459f603419d1b539358f5496b1041df45a7a86d2d38f"
 dependencies = [
  "regex-syntax",
 ]
 
 [[package]]
 name = "jsonschema-value"
-version = "0.52.0"
+version = "0.53.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d3e24abcd5f7eff512eb6bb915ac67772f2e7142ae5b5ac67b4ac75bd417d46"
+checksum = "65b6ec7deaeaab6320efc3084d8a9e91d5b4985ee36ffffef45dbff9516ff7a8"
 dependencies = [
  "ahash",
  "bytecount",
  "fraction",
+ "getrandom 0.3.4",
  "num-cmp",
  "num-traits",
  "serde_json",
+ "zmij",
 ]
 
 [[package]]
@@ -1876,7 +1878,7 @@ dependencies = [
 
 [[package]]
 name = "neva"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -1926,7 +1928,7 @@ dependencies = [
 
 [[package]]
 name = "neva_macros"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2368,9 +2370,9 @@ dependencies = [
 
 [[package]]
 name = "referencing"
-version = "0.52.0"
+version = "0.53.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6326ce79629af4702ac033666390011ccc70fe82ffedd62824d061f133bd10b"
+checksum = "fb406ba984c08d1b91781d7507d103296cf6dec3256c33c388b468957f4b43bb"
 dependencies = [
  "ahash",
  "fluent-uri",
@@ -2898,9 +2900,9 @@ dependencies = [
 
 [[package]]
 name = "sse-stream"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c123f296ade4ec4b8b0f6162116e6629f5146922ca5ab40ca9d3c2e73ab4761e"
+checksum = "c25ac7aff0abd1dbc474536e40416e1102c7dd9bfba0b9861c6d357f835dcfb4"
 dependencies = [
  "bytes",
  "futures-util",
@@ -3391,9 +3393,9 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "volga"
-version = "0.9.9"
+version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02f4b67d48b7d36ef1667a4494c949a6ca332b14a17fa6ec0203671ccbc40ec4"
+checksum = "2560851fb077c4c94b76f524eb9f7fccf3738dd65c44c230df57b8f1f28ab674"
 dependencies = [
  "async-stream",
  "bytes",
@@ -3425,27 +3427,27 @@ dependencies = [
 
 [[package]]
 name = "volga-dev-cert"
-version = "0.9.9"
+version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3c80ef1d5b815c65f6d63ae3c8d7f3221d15eb2ea432925aa33259a2ea6f8aa"
+checksum = "0f0da2fb2512207f45f1a3d632385ec4ec3b75f01829eb050efe2ab979123be9"
 dependencies = [
  "rcgen",
 ]
 
 [[package]]
 name = "volga-di"
-version = "0.9.9"
+version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88296ac2a6540943105057c38589c9697074c6a567a27912efd520eb27ad85fc"
+checksum = "8350199ab0f6b04576b74611e85af4adc80ac991a975e89dc093778a3bc76292"
 dependencies = [
  "http 1.5.0",
 ]
 
 [[package]]
 name = "volga-macros"
-version = "0.9.9"
+version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2644239b201f4ad598012b1f5ffd2160bdcafa39378b092ca9ceb9265a598014"
+checksum = "d6354b05c22cba15ad1114398bd919ebb45c2826895f7e1414cb62b92ae16e4b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3454,9 +3456,9 @@ dependencies = [
 
 [[package]]
 name = "volga-oauth-client"
-version = "0.9.9"
+version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1337e3e2c48bcd975d5e2083939f59168dba7dc7b32460fd1e250c0197acb130"
+checksum = "b5f963bcaf7163a15c07a344d10384ecfaddbbacc15fccab6efca7a26363a65b"
 dependencies = [
  "aws-lc-rs",
  "base64 0.23.1",
@@ -3476,9 +3478,9 @@ dependencies = [
 
 [[package]]
 name = "volga-oauth-core"
-version = "0.9.9"
+version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d54413e9456972750fb86f845e898b126c28378544caec770d1b02de43437ac"
+checksum = "fd9e2a2dc8690be21b4e168bb4021ffee0de59b5573db1e8aac474a3b04e505b"
 dependencies = [
  "http 1.5.0",
  "serde",
@@ -4207,9 +4209,9 @@ dependencies = [
 
 [[package]]
 name = "zmij"
-version = "1.0.21"
+version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zstd"

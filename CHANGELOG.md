@@ -5,9 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.5.7
 
 ### Fixed
+
+#### Build
+* **The crate compiles on Windows again** (#127). `unsafe_code` is forbidden
+  workspace-wide, and `transport/stdio/windows.rs` -- the Win32 job-object
+  backend behind the stdio client -- is built entirely out of raw API calls.
+  The two met when 0.2.1 added `[lints] workspace = true` to `neva/Cargo.toml`:
+  before that the crate did not inherit the workspace lint table, so the
+  `forbid` was declared but never applied. Every release since has failed to
+  build on Windows under any feature set that enables `client`, with
+  `implementation of an unsafe trait` and `usage of an unsafe block`.
+
+  The lint is now `deny` workspace-wide, with a module-scoped `expect` on the
+  one module that needs it. `get_main_thread_id` also gained the explicit
+  `unsafe` block that edition 2024 wants inside an `unsafe fn`, which would
+  otherwise have failed the `-D warnings` gate.
+
+  CI gained a build matrix over Linux, macOS and Windows. `handshake` picks its
+  spawn backend by target, and only the Linux one was ever compiled: the Win32
+  backend not at all, and the plain `Command::spawn` fallback that every other
+  target uses only by whoever happened to build locally.
 
 #### Transport
 * **A stdio client returns an error instead of panicking when the MCP server

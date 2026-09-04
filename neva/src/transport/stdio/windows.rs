@@ -1,4 +1,11 @@
 //! Windows-specific implementation details
+#![expect(
+    unsafe_code,
+    reason = "Win32 FFI: job objects, process and thread handles. Every site \
+              below carries a SAFETY comment. This is the only module in the \
+              crate that needs it, which is why the suppression is scoped here \
+              rather than relaxed workspace-wide."
+)]
 
 use tokio::process::{Child, Command};
 use windows::{
@@ -152,23 +159,25 @@ unsafe fn get_main_thread_id(process_id: u32) -> Option<u32> {
     //   and works in most real-world scenarios.
     //
     // - The snapshot handle is closed automatically by `CloseHandle` via the RAII wrapper in `Ok(Handle)`.
-    let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0).ok()?;
-    let mut thread_entry = THREADENTRY32 {
-        dwSize: size_of::<THREADENTRY32>() as u32,
-        ..Default::default()
-    };
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0).ok()?;
+        let mut thread_entry = THREADENTRY32 {
+            dwSize: size_of::<THREADENTRY32>() as u32,
+            ..Default::default()
+        };
 
-    if Thread32First(snapshot, &mut thread_entry).is_ok() {
-        loop {
-            if thread_entry.th32OwnerProcessID == process_id {
-                return Some(thread_entry.th32ThreadID);
-            }
-            if Thread32Next(snapshot, &mut thread_entry).is_err() {
-                break;
+        if Thread32First(snapshot, &mut thread_entry).is_ok() {
+            loop {
+                if thread_entry.th32OwnerProcessID == process_id {
+                    return Some(thread_entry.th32ThreadID);
+                }
+                if Thread32Next(snapshot, &mut thread_entry).is_err() {
+                    break;
+                }
             }
         }
+        None
     }
-    None
 }
 
 #[cfg(test)]
