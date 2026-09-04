@@ -27,10 +27,16 @@ use windows::{
             },
         },
     },
-    core::{Error, Result},
+    core::Error,
 };
 
-const CMD: &str = "cmd";
+use std::path::{Path, PathBuf};
+
+/// Extensions tried when the configured command carries none of its own, used
+/// only when the environment does not say otherwise. Mirrors the `PATHEXT`
+/// default that Windows itself ships with, minus the script hosts: a stdio
+/// server is an executable or a launcher shim, not a `.vbs`.
+const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
 
 /// Job Object wrapper for automatic handle closing
 pub(super) struct Job(HANDLE);
@@ -46,16 +52,19 @@ unsafe impl Send for Job {}
 
 impl Job {
     /// Creates and returns a new child process ['Child'] and ['Job'] - job object wrapper
-    pub(super) fn new(command: &str, args: &Vec<&str>) -> Result<(Job, Child)> {
-        let (command, args) = if !command.contains(CMD) {
-            let mut win_args = vec!["/c", command];
-            win_args.extend_from_slice(args);
-            (CMD, win_args)
-        } else {
-            (command, args.clone())
-        };
+    ///
+    /// Fails with [`std::io::ErrorKind::NotFound`] when the command resolves to
+    /// nothing, which is what lets a caller tell a mistyped or unbuilt server
+    /// from one that started and then died.
+    pub(super) fn new(command: &str, args: &Vec<&str>) -> std::io::Result<(Job, Child)> {
+        let program = resolve_command(command).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "not found on PATH (the working directory is not searched)",
+            )
+        })?;
 
-        let (job_handle, child) = create_job_object_with_kill_on_close(command, args)?;
+        let (job_handle, child) = create_job_object_with_kill_on_close(&program, args)?;
         let job = Self(job_handle);
         Ok((job, child))
     }
@@ -75,10 +84,80 @@ impl Drop for Job {
     }
 }
 
+/// Resolves `command` to a concrete executable the way `cmd.exe` would.
+///
+/// `std` deliberately does not do this: `CreateProcessW` only ever appends
+/// `.exe`, so a bare `npx` -- which ships as the `npx.cmd` shim, and is how
+/// most MCP servers are launched -- resolves to nothing. Routing everything
+/// through `cmd /c` was the older way around that, at the cost of spawning
+/// `cmd.exe` itself: the spawn then always succeeded and a missing server
+/// surfaced as a child exit long after the handshake had returned.
+///
+/// Resolving here instead keeps the shim working and makes the failure
+/// reportable. It also hands `Command` a path ending in `.cmd` or `.bat` when
+/// that is what the command is, which routes it through `std`'s own batch-file
+/// handling and its argument escaping, rather than concatenating caller
+/// arguments into a `cmd /c` line this module would have to escape itself.
+///
+/// `PATH` is searched, with each `PATHEXT` extension appended when the command
+/// carries no extension of its own. The working directory is deliberately not
+/// searched, unlike `cmd.exe`: resolving a server out of the current directory
+/// is a plant vector, and a caller who means a local binary can pass a path.
+fn resolve_command(command: &str) -> Option<PathBuf> {
+    let extensions = pathext();
+    let candidate = Path::new(command);
+
+    // Anything carrying a separator is a path the caller chose, not a name to
+    // look up.
+    if candidate.components().count() > 1 {
+        return first_existing(candidate, &extensions);
+    }
+
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .find_map(|dir| first_existing(&dir.join(command), &extensions))
+}
+
+/// The extensions to try, from the environment when it offers any.
+fn pathext() -> Vec<String> {
+    let configured = std::env::var("PATHEXT")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+
+    configured
+        .as_deref()
+        .unwrap_or(DEFAULT_PATHEXT)
+        .split(';')
+        .map(str::trim)
+        .filter(|extension| !extension.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The first of `candidate` and its `PATHEXT` spellings that names a file.
+fn first_existing(candidate: &Path, extensions: &[String]) -> Option<PathBuf> {
+    // An extension the caller wrote is honored as-is first; `cmd.exe` still
+    // goes on to try the `PATHEXT` spellings after it, so a `server.v2` next
+    // to a `server.v2.exe` resolves the same way here as it would there.
+    if candidate.extension().is_some() && candidate.is_file() {
+        return Some(candidate.to_path_buf());
+    }
+
+    extensions.iter().find_map(|extension| {
+        let mut spelling = candidate.as_os_str().to_owned();
+        spelling.push(extension);
+
+        let spelling = PathBuf::from(spelling);
+        spelling.is_file().then_some(spelling)
+    })
+}
+
 /// Creates a process in the Job Object with the `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` policy.
 /// All processes within will be terminated when the job is dropped.
 #[inline]
-fn create_job_object_with_kill_on_close(command: &str, args: Vec<&str>) -> Result<(HANDLE, Child)> {
+fn create_job_object_with_kill_on_close(
+    program: &Path,
+    args: &Vec<&str>,
+) -> std::io::Result<(HANDLE, Child)> {
     // SAFETY:
     // This block performs a sequence of Windows API calls that require unsafe operations.
     //
@@ -108,7 +187,7 @@ fn create_job_object_with_kill_on_close(command: &str, args: Vec<&str>) -> Resul
         );
 
         // Run a suspended child process
-        let child = Command::new(command)
+        let child = Command::new(program)
             .creation_flags(CREATE_SUSPENDED.0)
             .args(args)
             .stdin(std::process::Stdio::piped())
@@ -116,9 +195,11 @@ fn create_job_object_with_kill_on_close(command: &str, args: Vec<&str>) -> Resul
             .spawn()?;
 
         // Find and resume the process main thread
-        let pid = child.id().expect("Failed to get process id");
-        let tid = get_main_thread_id(pid)
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Thread not found"))?;
+        let pid = child
+            .id()
+            .ok_or_else(|| std::io::Error::other("the child exited before it could be resumed"))?;
+        let tid =
+            get_main_thread_id(pid).ok_or_else(|| std::io::Error::other("Thread not found"))?;
 
         let thread_handle = OpenThread(THREAD_SUSPEND_RESUME, false, tid)?;
         let process_handle = OpenProcess(PROCESS_ALL_ACCESS, false, pid)?;
@@ -126,7 +207,7 @@ fn create_job_object_with_kill_on_close(command: &str, args: Vec<&str>) -> Resul
         AssignProcessToJobObject(job, process_handle)?;
 
         if ResumeThread(thread_handle) == u32::MAX {
-            return Err(Error::from_thread());
+            return Err(Error::from_thread().into());
         }
 
         CloseHandle(thread_handle)?;
@@ -134,7 +215,7 @@ fn create_job_object_with_kill_on_close(command: &str, args: Vec<&str>) -> Resul
 
         match result {
             Ok(_) => Ok((job, child)),
-            Err(_) => Err(Error::from_thread()),
+            Err(_) => Err(Error::from_thread().into()),
         }
     }
 }
@@ -183,8 +264,9 @@ unsafe fn get_main_thread_id(process_id: u32) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use crate::transport::stdio::windows::{
-        create_job_object_with_kill_on_close, get_main_thread_id,
+        Job, create_job_object_with_kill_on_close, get_main_thread_id, resolve_command,
     };
+    use std::path::Path;
     use std::time::Duration;
     use tokio::process::Command;
     use windows::Win32::System::Threading::CREATE_SUSPENDED;
@@ -192,8 +274,8 @@ mod tests {
     #[tokio::test]
     async fn it_tests_job_object_kills_children() -> Result<(), Box<dyn std::error::Error>> {
         let (_job, mut child) = create_job_object_with_kill_on_close(
-            "cmd.exe",
-            vec!["/c", "ping", "127.0.0.1", "-n", "5", "-w", "1000"],
+            Path::new("cmd.exe"),
+            &vec!["/c", "ping", "127.0.0.1", "-n", "5", "-w", "1000"],
         )?;
 
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -231,5 +313,58 @@ mod tests {
         assert!(tid > 0, "Valid thread ID");
 
         child.kill().await.unwrap();
+    }
+
+    /// `cmd.exe` lives in `System32`, which is on `PATH` on any Windows that
+    /// can run this, and is named without an extension here on purpose: the
+    /// point is that `PATHEXT` is what finds it, which is exactly what `std`
+    /// does not do.
+    #[test]
+    fn it_resolves_a_bare_name_through_pathext() {
+        let resolved = resolve_command("cmd").expect("`cmd` must resolve on any Windows");
+
+        assert_eq!(
+            resolved.extension().map(|e| e.to_ascii_lowercase()),
+            Some("exe".into()),
+            "resolution must land on a real executable, got {}",
+            resolved.display()
+        );
+        assert!(resolved.is_file(), "{} is not a file", resolved.display());
+    }
+
+    /// The same name spelled with its extension resolves to the same file.
+    #[test]
+    fn it_honors_an_extension_the_caller_wrote() {
+        let bare = resolve_command("cmd").expect("`cmd` must resolve");
+        let spelled = resolve_command("cmd.exe").expect("`cmd.exe` must resolve");
+
+        assert_eq!(bare, spelled);
+    }
+
+    /// The case #128 is about: nothing to resolve, reported as such rather than
+    /// spawning `cmd.exe` and letting the child die out of band.
+    #[test]
+    fn it_resolves_nothing_for_a_command_that_does_not_exist() {
+        assert!(resolve_command("neva-nonexistent-command-for-issue-128").is_none());
+    }
+
+    /// A path is taken as written rather than looked up, and a path to nothing
+    /// stays nothing.
+    #[test]
+    fn it_does_not_search_path_for_a_command_carrying_a_separator() {
+        assert!(resolve_command(r".\neva-nonexistent-command-for-issue-128").is_none());
+    }
+
+    /// End to end through `Job::new`: the error a caller can match on, rather
+    /// than a successfully spawned `cmd.exe` wrapping a command that is not
+    /// there.
+    #[test]
+    fn job_new_reports_a_command_that_cannot_be_resolved() {
+        // `Job` is not `Debug`, so this cannot go through `expect_err`.
+        let Err(err) = Job::new("neva-nonexistent-command-for-issue-128", &vec![]) else {
+            panic!("a command that resolves to nothing must not spawn");
+        };
+
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
 }

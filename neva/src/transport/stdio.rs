@@ -427,10 +427,9 @@ impl StdIoClient {
         token: CancellationToken,
     ) -> Result<(BufReader<ChildStdout>, BufWriter<ChildStdin>), Error> {
         let options = &self.options;
-        // `&dyn Display` rather than a concrete error type: the arms below do
-        // not agree on one -- Linux yields `std::io::Result`, Windows
-        // `windows::core::Result`, and the fallback whatever `Command::spawn`
-        // returns.
+        // `&dyn Display` rather than a concrete error type: each backend below
+        // chooses its own, and this closure should not have to be touched when
+        // one of them changes it.
         let spawn_failed = |err: &dyn std::fmt::Display| {
             Error::new(
                 ErrorCode::InternalError,
@@ -1067,14 +1066,13 @@ mod tests {
         assert!(output.stdout.is_empty(), "Process still running");
     }
 
-    /// Regression test for <https://github.com/RomanEmreis/neva/issues/125>.
-    ///
-    /// Not run on Windows: `windows::Job::new` rewrites the command to
-    /// `cmd /c <command>` unless it already contains `"cmd"`, so the spawn
-    /// always succeeds and a missing binary surfaces instead as a non-zero
-    /// child exit long after `handshake` has returned.
+    /// Regression test for <https://github.com/RomanEmreis/neva/issues/125>,
+    /// on every target since <https://github.com/RomanEmreis/neva/issues/128>:
+    /// Windows used to route the command through `cmd /c`, so the spawn always
+    /// succeeded there and a missing binary surfaced as a child exit long
+    /// after `handshake` had returned.
     #[tokio::test]
-    #[cfg(all(feature = "client", not(target_os = "windows")))]
+    #[cfg(feature = "client")]
     async fn it_returns_an_error_instead_of_panicking_when_the_command_cannot_be_spawned() {
         use super::options::StdIoOptions;
         use crate::transport::StdIoClient;
