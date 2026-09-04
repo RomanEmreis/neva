@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Fixed
+
+#### Transport
+* **A stdio client returns an error instead of panicking when the MCP server
+  cannot be spawned** (#125). `StdIoClient::handshake` unwrapped the spawn with
+  `.expect(..)`, so a typo in the command, a binary that was never built, or a
+  server removed from `PATH` -- ordinary user input, not a bug -- took the
+  process down inside the library. `Transport::start` is now fallible, `connect`
+  propagates with `?`, and the error names the command that failed rather than
+  reporting a bare `No such file or directory (os error 2)` that does not say
+  which server it was.
+
+  Not covered on Windows. `windows::Job::new` rewrites the command to
+  `cmd /c <command>` unless it already contains `"cmd"`, so the spawn itself
+  always succeeds there and a missing binary instead surfaces as a non-zero
+  child exit after the handshake has already returned. The regression test is
+  gated off Windows for that reason.
+
 ## 0.5.6
 
 ### Added

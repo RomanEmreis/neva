@@ -469,7 +469,16 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
         let TransportHandle {
             token: cancellation_token,
             drained,
-        } = transport.start();
+        } = match transport.start() {
+            Ok(handle) => handle,
+            Err(_err) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(logger = "neva", "failed to start the transport: {_err:#}");
+                #[cfg(not(feature = "tracing"))]
+                eprintln!("failed to start the transport: {_err:#}");
+                return;
+            }
+        };
 
         // Shutdown arrives here -- from an OS signal, or from a
         // `ShutdownHandle` the caller kept -- and is relayed to the transport

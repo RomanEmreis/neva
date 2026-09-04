@@ -87,7 +87,7 @@ pub(crate) trait Transport {
     type Receiver: Receiver;
 
     /// Starts the server with the current transport protocol
-    fn start(&mut self) -> TransportHandle;
+    fn start(&mut self) -> Result<TransportHandle, Error>;
 
     /// Splits transport into [`Sender`] and [`Receiver`] that can be used in a different threads
     fn split(self) -> (Self::Sender, Self::Receiver);
@@ -199,7 +199,7 @@ impl Transport for TransportProto {
     type Receiver = TransportProtoReceiver;
 
     #[inline]
-    fn start(&mut self) -> TransportHandle {
+    fn start(&mut self) -> Result<TransportHandle, Error> {
         match self {
             #[cfg(feature = "server")]
             TransportProto::StdIoServer(stdio) => stdio.start(),
@@ -209,7 +209,7 @@ impl Transport for TransportProto {
             TransportProto::HttpServer(http) => http.start(),
             #[cfg(feature = "http-client")]
             TransportProto::HttpClient(http) => http.start(),
-            TransportProto::None => TransportHandle::detached(CancellationToken::new()),
+            TransportProto::None => Ok(TransportHandle::detached(CancellationToken::new())),
         }
     }
 

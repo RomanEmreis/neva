@@ -418,33 +418,47 @@ impl StdIoClient {
     }
 
     /// Handshakes stdio between client and server apps
+    ///
+    /// Returns an [`Error`] when the configured command cannot be spawned:
+    /// a typo, a binary that was never built, a server removed from `PATH`.
+    /// See <https://github.com/RomanEmreis/neva/issues/125>.
     fn handshake(
         &self,
         token: CancellationToken,
-    ) -> (BufReader<ChildStdout>, BufWriter<ChildStdin>) {
+    ) -> Result<(BufReader<ChildStdout>, BufWriter<ChildStdin>), Error> {
         let options = &self.options;
+        // `&dyn Display` rather than a concrete error type: the arms below do
+        // not agree on one -- Linux yields `std::io::Result`, Windows
+        // `windows::core::Result`, and the fallback whatever `Command::spawn`
+        // returns.
+        let spawn_failed = |err: &dyn std::fmt::Display| {
+            Error::new(
+                ErrorCode::InternalError,
+                format!("failed to start MCP server `{}`: {err}", options.command),
+            )
+        };
         #[cfg(target_os = "linux")]
         let (job, mut child) =
-            linux::Job::new(options.command, &options.args).expect("Failed to handshake");
+            linux::Job::new(options.command, &options.args).map_err(|e| spawn_failed(&e))?;
         #[cfg(target_os = "windows")]
         let (job, mut child) =
-            windows::Job::new(options.command, &options.args).expect("Failed to handshake");
+            windows::Job::new(options.command, &options.args).map_err(|e| spawn_failed(&e))?;
         #[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
         let mut child = tokio::process::Command::new(options.command)
             .args(&options.args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
-            .expect("Failed to handshake");
+            .map_err(|e| spawn_failed(&e))?;
 
         let stdin = child
             .stdin
             .take()
-            .expect("Failed to handshake: Inaccessible stdin");
+            .ok_or_else(|| spawn_failed(&"inaccessible stdin"))?;
         let stdout = child
             .stdout
             .take()
-            .expect("Failed to handshake: Inaccessible stdout");
+            .ok_or_else(|| spawn_failed(&"inaccessible stdout"))?;
 
         #[cfg(feature = "tracing")]
         let child_id = child.id();
@@ -474,7 +488,7 @@ impl StdIoClient {
             }
         });
 
-        (BufReader::new(stdout), BufWriter::new(stdin))
+        Ok((BufReader::new(stdout), BufWriter::new(stdin)))
     }
 }
 
@@ -528,9 +542,9 @@ impl Transport for StdIoClient {
     type Sender = StdIoSender;
     type Receiver = StdIoReceiver;
 
-    fn start(&mut self) -> TransportHandle {
+    fn start(&mut self) -> Result<TransportHandle, Error> {
         let token = CancellationToken::new();
-        let (reader, writer) = self.handshake(token.clone());
+        let (reader, writer) = self.handshake(token.clone())?;
         let (guard, mut drained) = DrainSignal::new();
 
         self.receiver
@@ -542,7 +556,7 @@ impl Transport for StdIoClient {
 
         #[cfg(feature = "tracing")]
         tracing::info!(logger = "neva", "Connected: stdio");
-        TransportHandle::new(token, drained)
+        Ok(TransportHandle::new(token, drained))
     }
 
     #[inline]
@@ -556,7 +570,7 @@ impl Transport for StdIoServer {
     type Sender = StdIoSender;
     type Receiver = StdIoReceiver;
 
-    fn start(&mut self) -> TransportHandle {
+    fn start(&mut self) -> Result<TransportHandle, Error> {
         let token = CancellationToken::new();
         let (reader, writer) = StdIoServer::init();
         // Only the writer takes a guard: the reader is a thread of neva's own
@@ -574,7 +588,7 @@ impl Transport for StdIoServer {
 
         #[cfg(feature = "tracing")]
         tracing::info!(logger = "neva", "Listening: stdio");
-        TransportHandle::new(token, drained)
+        Ok(TransportHandle::new(token, drained))
     }
 
     #[inline]
@@ -1009,7 +1023,7 @@ mod tests {
             ["/c", "ping", "127.0.0.1", "-t"],
         ));
         let token = CancellationToken::new();
-        let (_, _) = client.handshake(token.clone());
+        let (_, _) = client.handshake(token.clone()).unwrap();
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
@@ -1037,7 +1051,7 @@ mod tests {
 
         let client = StdIoClient::new(StdIoOptions::new("sh", ["-c", "sleep 300"]));
         let token = CancellationToken::new();
-        let (_, _) = client.handshake(token.clone());
+        let (_, _) = client.handshake(token.clone()).unwrap();
 
         token.cancel();
 
@@ -1051,6 +1065,35 @@ mod tests {
             .unwrap();
 
         assert!(output.stdout.is_empty(), "Process still running");
+    }
+
+    /// Regression test for <https://github.com/RomanEmreis/neva/issues/125>.
+    ///
+    /// Not run on Windows: `windows::Job::new` rewrites the command to
+    /// `cmd /c <command>` unless it already contains `"cmd"`, so the spawn
+    /// always succeeds and a missing binary surfaces instead as a non-zero
+    /// child exit long after `handshake` has returned.
+    #[tokio::test]
+    #[cfg(all(feature = "client", not(target_os = "windows")))]
+    async fn it_returns_an_error_instead_of_panicking_when_the_command_cannot_be_spawned() {
+        use super::options::StdIoOptions;
+        use crate::transport::StdIoClient;
+        use tokio_util::sync::CancellationToken;
+
+        const COMMAND: &str = "neva-nonexistent-command-for-issue-125-repro";
+
+        let client = StdIoClient::new(StdIoOptions::new(COMMAND, []));
+        let token = CancellationToken::new();
+
+        let result = client.handshake(token);
+        let err = match result {
+            Err(err) => err,
+            Ok(_) => panic!("spawning a nonexistent command should return an Err, not succeed"),
+        };
+        assert!(
+            err.to_string().contains(COMMAND),
+            "the error should name the command that failed to spawn, got: {err}"
+        );
     }
 }
 
