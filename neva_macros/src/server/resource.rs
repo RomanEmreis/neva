@@ -1,12 +1,12 @@
 //! Macros for MCP server resources
 
-use super::{get_exprs_arr, get_params_arr, get_str_param};
+use super::{get_bool_param, get_exprs_arr, get_params_arr, get_str_param};
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{ItemFn, Meta, punctuated::Punctuated, token::Comma};
 
 /// Every attribute `#[resource]` accepts.
-const RESOURCE_ATTRS: [&str; 8] = [
+const RESOURCE_ATTRS: [&str; 9] = [
     "uri",
     "title",
     "descr",
@@ -15,10 +15,11 @@ const RESOURCE_ATTRS: [&str; 8] = [
     "roles",
     "permissions",
     "ui_meta",
+    "blocking",
 ];
 
 /// Every attribute `#[resources]` accepts.
-const RESOURCES_ATTRS: [&str; 1] = ["middleware"];
+const RESOURCES_ATTRS: [&str; 2] = ["middleware", "blocking"];
 
 pub(crate) fn expand_resource(
     attr: &Punctuated<Meta, Comma>,
@@ -34,16 +35,21 @@ pub(crate) fn expand_resource(
     let mut permissions = None;
     let mut mime_expr = None;
     let mut ui_meta_expr = None;
+    let mut blocking = false;
 
     for meta in attr {
         match &meta {
             Meta::Path(path) => {
-                return Err(super::unknown_attr(
-                    path,
-                    &super::path_name(path),
-                    "resource",
-                    &RESOURCE_ATTRS,
-                ));
+                if path.is_ident("blocking") {
+                    blocking = true;
+                } else {
+                    return Err(super::unknown_attr(
+                        path,
+                        &super::path_name(path),
+                        "resource",
+                        &RESOURCE_ATTRS,
+                    ));
+                }
             }
             Meta::List(list) => {
                 return Err(super::unknown_attr(
@@ -88,6 +94,9 @@ pub(crate) fn expand_resource(
                         }
                         "ui_meta" => {
                             ui_meta_expr = Some(nv.value.clone());
+                        }
+                        "blocking" => {
+                            blocking = get_bool_param(&nv.value);
                         }
                         other => {
                             return Err(super::unknown_attr(
@@ -144,6 +153,7 @@ pub(crate) fn expand_resource(
     });
 
     let module_name = syn::Ident::new(&format!("map_{func_name}"), func_name.span());
+    let handler_code = super::handler_code(function, blocking, "resource")?;
 
     // Expand the function and apply the tool functionality
     let expanded = quote! {
@@ -151,7 +161,7 @@ pub(crate) fn expand_resource(
         #function
         // Register a resource function
         fn #module_name(app: &mut neva::App) {
-            app.map_resource(#uri_code, stringify!(#func_name), #func_name)
+            app.map_resource(#uri_code, stringify!(#func_name), #handler_code)
                 #title_code
                 #description_code
                 #mime_code
@@ -174,16 +184,21 @@ pub(crate) fn expand_resources(
 ) -> syn::Result<TokenStream> {
     let func_name = &function.sig.ident;
     let mut middleware = None;
+    let mut blocking = false;
 
     for meta in attr {
         match &meta {
             Meta::Path(path) => {
-                return Err(super::unknown_attr(
-                    path,
-                    &super::path_name(path),
-                    "resources",
-                    &RESOURCES_ATTRS,
-                ));
+                if path.is_ident("blocking") {
+                    blocking = true;
+                } else {
+                    return Err(super::unknown_attr(
+                        path,
+                        &super::path_name(path),
+                        "resources",
+                        &RESOURCES_ATTRS,
+                    ));
+                }
             }
             Meta::List(list) => {
                 return Err(super::unknown_attr(
@@ -195,6 +210,7 @@ pub(crate) fn expand_resources(
             }
             Meta::NameValue(nv) => match nv.path.get_ident().map(ToString::to_string).as_deref() {
                 Some("middleware") => middleware = get_exprs_arr(&nv.value),
+                Some("blocking") => blocking = get_bool_param(&nv.value),
                 _ => {
                     return Err(super::unknown_attr(
                         &nv.path,
@@ -208,6 +224,7 @@ pub(crate) fn expand_resources(
     }
 
     let module_name = syn::Ident::new(&format!("map_{func_name}"), func_name.span());
+    let handler_code = super::handler_code(function, blocking, "resources")?;
     let middleware_code = middleware.map(|mws| {
         let mw_calls = mws.iter().map(|mw| {
             quote! { .wrap_list_resources(#mw) }
@@ -223,7 +240,7 @@ pub(crate) fn expand_resources(
         fn #module_name(app: &mut neva::App) {
             app
                 #middleware_code
-                .map_resources(#func_name);
+                .map_resources(#handler_code);
         }
         neva::macros::inventory::submit! {
             neva::macros::server::ItemRegistrar(#module_name)

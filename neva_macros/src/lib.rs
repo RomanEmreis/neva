@@ -25,6 +25,16 @@ mod shared;
 /// }
 /// ```
 ///
+/// # Blocking Example
+/// ```ignore
+/// use neva::prelude::*;
+///
+/// #[tool(descr = "Reads a text file", blocking)]
+/// fn read_file(path: String) -> Result<String, Error> {
+///     std::fs::read_to_string(path).map_err(|err| Error::new(ErrorCode::InternalError, err))
+/// }
+/// ```
+///
 /// # Parameters
 /// * `title` - Tool title.
 /// * `descr` - Tool description.
@@ -35,6 +45,21 @@ mod shared;
 /// * `middleware` - Middleware list to apply to the tool.
 /// * `task_support` - Specifies task augmentation support for this tool.
 /// * `no_schema` - Explicitly disables input schema generation if it's not set in `input_schema`.
+/// * `blocking` - Runs the handler on Tokio's blocking pool instead of the runtime thread that
+///   dispatched the call. Applies to a synchronous function; on an `async fn` it is a compile
+///   error.
+///
+/// # Which shape to write
+///
+/// * The body awaits something -> `async fn`.
+/// * The body is computation on data already in hand -> plain `fn`. It runs inline, with no task
+///   spawn and no yield point.
+/// * The body blocks -- `std::fs`, a synchronous driver, `Command::output`, a long computation ->
+///   plain `fn` plus `blocking`. Left inline it would hold a runtime worker for its whole
+///   duration.
+///
+/// `blocking` on a short body is a pessimization: the hand-off to another thread costs more than
+/// the body does.
 /// * `ui` - MCP Apps: the `ui://` resource that renders this tool's results.
 ///   Needs neva's `apps` feature; the URI must use the reserved `ui://` scheme.
 /// * `visibility` - MCP Apps: who may call the tool, `["model"]`, `["app"]` or
@@ -135,7 +160,9 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Maps the function to a resource template
 ///
 /// The function may be `async` or synchronous. A synchronous one returns its
-/// value directly and runs on the runtime thread that dispatched the request.
+/// value directly and runs on the runtime thread that dispatched the request;
+/// add the `blocking` attribute when the body really blocks, and it runs on
+/// Tokio's blocking pool instead. See [`macro@tool`] for the full rule.
 ///
 /// # Parameters
 /// * `uri` - Resource URI.
@@ -149,6 +176,7 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///   a `ui://` URI. Keys are checked at compile time -- `_meta` is an open map,
 ///   so a snake_case typo would otherwise serialize fine and be ignored by every
 ///   host.
+/// * `blocking` - Runs the handler on Tokio's blocking pool. See [`macro@tool`].
 ///
 /// A `uri` on the `ui://` scheme also defaults `mime` to
 /// `text/html;profile=mcp-app`; naming a different one is an error, since no
@@ -223,7 +251,9 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Maps the list of resources function
 ///
 /// The function may be `async` or synchronous. A synchronous one returns its
-/// value directly and runs on the runtime thread that dispatched the request.
+/// value directly and runs on the runtime thread that dispatched the request;
+/// add the `blocking` attribute when the body really blocks, and it runs on
+/// Tokio's blocking pool instead. See [`macro@tool`] for the full rule.
 #[proc_macro_attribute]
 #[cfg(feature = "server")]
 pub fn resources(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -239,7 +269,9 @@ pub fn resources(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Maps the function to a prompt
 ///
 /// The function may be `async` or synchronous. A synchronous one returns its
-/// value directly and runs on the runtime thread that dispatched the request.
+/// value directly and runs on the runtime thread that dispatched the request;
+/// add the `blocking` attribute when the body really blocks, and it runs on
+/// Tokio's blocking pool instead. See [`macro@tool`] for the full rule.
 ///
 /// # Parameters
 /// * `title` - Prompt title.
@@ -247,6 +279,7 @@ pub fn resources(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// * `args` - Prompt arguments.
 /// * `no_args` - Explicitly disables argument generation if it's not set in `args`.
 /// * `middleware` - Middleware list to apply to the prompt.
+/// * `blocking` - Runs the handler on Tokio's blocking pool. See [`macro@tool`].
 /// * `roles` & `permissions` - Define which users can read the resource when using Streamable HTTP transport with OAuth.
 ///
 /// # Simple Example
@@ -297,11 +330,14 @@ pub fn prompt(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Maps the function to a command handler
 ///
 /// The function may be `async` or synchronous. A synchronous one returns its
-/// value directly and runs on the runtime thread that dispatched the request.
+/// value directly and runs on the runtime thread that dispatched the request;
+/// add the `blocking` attribute when the body really blocks, and it runs on
+/// Tokio's blocking pool instead. See [`macro@tool`] for the full rule.
 ///
 /// # Parameters
 /// * `command` - Command name.
 /// * `middleware` - Middleware list to apply to the command.
+/// * `blocking` - Runs the handler on Tokio's blocking pool. See [`macro@tool`].
 ///
 /// # Example
 /// ```ignore
@@ -327,7 +363,9 @@ pub fn handler(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Maps the completion function
 ///
 /// The function may be `async` or synchronous. A synchronous one returns its
-/// value directly and runs on the runtime thread that dispatched the request.
+/// value directly and runs on the runtime thread that dispatched the request;
+/// add the `blocking` attribute when the body really blocks, and it runs on
+/// Tokio's blocking pool instead. See [`macro@tool`] for the full rule.
 #[proc_macro_attribute]
 #[cfg(feature = "server")]
 pub fn completion(attr: TokenStream, item: TokenStream) -> TokenStream {

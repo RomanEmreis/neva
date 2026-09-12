@@ -37,6 +37,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   written as `ToolHandler<Args>` keep their meaning. Resource reads got a
   handler trait of their own, `types::ReadResourceHandler`.
 
+* **`neva::blocking` and `#[tool(blocking)]`**, for a synchronous handler that
+  really does block -- file I/O, a synchronous driver, a long computation.
+  Both run the handler on Tokio's blocking pool instead of the runtime thread
+  that dispatched the request, which would otherwise stall every other request
+  that worker was going to poll:
+
+  ```rust
+  #[tool(descr = "Reads a text file", blocking)]
+  fn read_file(path: String) -> Result<String, Error> {
+      std::fs::read_to_string(path).map_err(|err| Error::new(ErrorCode::InternalError, err))
+  }
+
+  app.map_tool("read_file", neva::blocking(|path: String| { /* ... */ }));
+  ```
+
+  `neva::blocking` is accepted at every registration point, and `blocking` is
+  an attribute on all six macros -- `#[tool]`, `#[prompt]`, `#[resource]`,
+  `#[resources]`, `#[completion]` and `#[handler]`. On an `async fn` it is a
+  compile error.
+
+  A panic inside the handler is propagated to the awaiting task, as it would be
+  had the handler run inline. The offloaded task is not cancelled when the
+  request is: it runs to completion and its result is discarded.
+
+  Reach for it only when the body really blocks -- the hand-off to another
+  thread costs more than a short body does. The rule of thumb is in the
+  `#[tool]` and `app::marker` docs: await something -> `async fn`; compute on
+  data in hand -> plain `fn`; block -> plain `fn` plus `blocking`.
+
 ## 0.5.7
 
 ### Fixed

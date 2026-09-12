@@ -30,7 +30,7 @@ use syn::{FnArg, ItemFn, Meta, Pat, ReturnType, punctuated::Punctuated, token::C
 
 /// Every attribute `#[tool]` accepts. Anything else is a compile error --
 /// see [`super::unknown_attr`].
-const TOOL_ATTRS: [&str; 12] = [
+const TOOL_ATTRS: [&str; 13] = [
     "title",
     "descr",
     "input_schema",
@@ -43,6 +43,7 @@ const TOOL_ATTRS: [&str; 12] = [
     "ui",
     "visibility",
     "no_schema",
+    "blocking",
 ];
 
 pub(crate) fn expand(
@@ -60,6 +61,7 @@ pub(crate) fn expand(
     let mut middleware = None;
     let mut task_support = None;
     let mut no_schema = false;
+    let mut blocking = false;
     let mut ui_code = None;
     let mut visibility_code = None;
 
@@ -68,6 +70,8 @@ pub(crate) fn expand(
             Meta::Path(path) => {
                 if path.is_ident("no_schema") {
                     no_schema = true;
+                } else if path.is_ident("blocking") {
+                    blocking = true;
                 } else {
                     return Err(super::unknown_attr(
                         path,
@@ -130,6 +134,9 @@ pub(crate) fn expand(
                         "no_schema" => {
                             no_schema = get_bool_param(&nv.value);
                         }
+                        "blocking" => {
+                            blocking = get_bool_param(&nv.value);
+                        }
                         other => {
                             return Err(super::unknown_attr(&nv.path, other, "tool", &TOOL_ATTRS));
                         }
@@ -146,6 +153,8 @@ pub(crate) fn expand(
             }
         }
     }
+
+    let handler_code = super::handler_code(function, blocking, "tool")?;
 
     // Generate the function registration and metadata setup
     let description_code = description.map(|desc| {
@@ -383,7 +392,7 @@ pub(crate) fn expand(
         fn #module_name(app: &mut neva::App) {
             app
                 #middleware_code
-                .map_tool(stringify!(#func_name), #func_name)
+                .map_tool(stringify!(#func_name), #handler_code)
                 #arg_names_code
                 #title_code
                 #description_code

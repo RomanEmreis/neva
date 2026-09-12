@@ -11,7 +11,7 @@ pub(crate) mod resource;
 pub(crate) mod tool;
 
 /// Every attribute `#[handler]` accepts.
-const HANDLER_ATTRS: [&str; 2] = ["command", "middleware"];
+const HANDLER_ATTRS: [&str; 3] = ["command", "middleware", "blocking"];
 
 pub(super) fn expand_handler(
     attr: &Punctuated<Meta, Comma>,
@@ -20,16 +20,21 @@ pub(super) fn expand_handler(
     let func_name = &function.sig.ident;
     let mut command = None;
     let mut middleware = None;
+    let mut blocking = false;
 
     for meta in attr {
         match &meta {
             Meta::Path(path) => {
-                return Err(unknown_attr(
-                    path,
-                    &path_name(path),
-                    "handler",
-                    &HANDLER_ATTRS,
-                ));
+                if path.is_ident("blocking") {
+                    blocking = true;
+                } else {
+                    return Err(unknown_attr(
+                        path,
+                        &path_name(path),
+                        "handler",
+                        &HANDLER_ATTRS,
+                    ));
+                }
             }
             Meta::List(list) => {
                 return Err(unknown_attr(
@@ -55,6 +60,9 @@ pub(super) fn expand_handler(
                     "middleware" => {
                         middleware = get_exprs_arr(&nv.value);
                     }
+                    "blocking" => {
+                        blocking = get_bool_param(&nv.value);
+                    }
                     other => {
                         return Err(unknown_attr(&nv.path, other, "handler", &HANDLER_ATTRS));
                     }
@@ -65,6 +73,7 @@ pub(super) fn expand_handler(
 
     let command = command.expect("command parameter must be specified");
     let module_name = syn::Ident::new(&format!("map_{func_name}"), func_name.span());
+    let handler_code = handler_code(function, blocking, "handler")?;
     let middleware_code = middleware.map(|mws| {
         let mw_calls = mws.iter().map(|mw| {
             quote! { .wrap_command(#command, #mw) }
@@ -80,7 +89,7 @@ pub(super) fn expand_handler(
         fn #module_name(app: &mut neva::App) {
             app
                 #middleware_code
-                .map_handler(#command, #func_name);
+                .map_handler(#command, #handler_code);
         }
         neva::macros::inventory::submit! {
             neva::macros::server::ItemRegistrar(#module_name)
@@ -96,22 +105,30 @@ pub(super) fn expand_completion(
 ) -> syn::Result<TokenStream> {
     let func_name = &function.sig.ident;
     let mut middleware = None;
+    let mut blocking = false;
 
     for meta in attr {
         match &meta {
-            Meta::Path(_) => {}
+            Meta::Path(path) => {
+                if path.is_ident("blocking") {
+                    blocking = true;
+                }
+            }
             Meta::List(_) => {}
             Meta::NameValue(nv) => {
-                if let Some(ident) = nv.path.get_ident()
-                    && let "middleware" = ident.to_string().as_str()
-                {
-                    middleware = get_exprs_arr(&nv.value);
+                if let Some(ident) = nv.path.get_ident() {
+                    match ident.to_string().as_str() {
+                        "middleware" => middleware = get_exprs_arr(&nv.value),
+                        "blocking" => blocking = get_bool_param(&nv.value),
+                        _ => {}
+                    }
                 }
             }
         }
     }
 
     let module_name = syn::Ident::new(&format!("map_{func_name}"), func_name.span());
+    let handler_code = handler_code(function, blocking, "completion")?;
     let middleware_code = middleware.map(|mws| {
         let mw_calls = mws.iter().map(|mw| {
             quote! { .wrap_command(neva::types::completion::commands::COMPLETE, #mw) }
@@ -127,7 +144,7 @@ pub(super) fn expand_completion(
         fn #module_name(app: &mut neva::App) {
             app
                 #middleware_code
-                .map_completion(#func_name);
+                .map_completion(#handler_code);
         }
         neva::macros::inventory::submit! {
             neva::macros::server::ItemRegistrar(#module_name)
@@ -135,6 +152,34 @@ pub(super) fn expand_completion(
     };
 
     Ok(expanded)
+}
+
+/// The handler as it is registered: `blocking` wraps it in `neva::blocking`,
+/// everything else passes the function through untouched.
+///
+/// `blocking` moves the body onto Tokio's blocking pool, which only a
+/// synchronous function has any reason to do: an `async fn` already yields, and
+/// `neva::blocking` would reject it anyway -- with a far less obvious message
+/// than the one raised here.
+pub(super) fn handler_code(
+    function: &ItemFn,
+    blocking: bool,
+    kind: &str,
+) -> syn::Result<TokenStream> {
+    let func_name = &function.sig.ident;
+    if !blocking {
+        return Ok(quote! { #func_name });
+    }
+    if let Some(asyncness) = function.sig.asyncness {
+        return Err(syn::Error::new_spanned(
+            asyncness,
+            format!(
+                "`#[{kind}(blocking)]` applies to a synchronous fn; this one is `async fn`. \
+                 Drop `blocking`, or drop `async` and return the value directly."
+            ),
+        ));
+    }
+    Ok(quote! { neva::blocking(#func_name) })
 }
 
 #[inline]

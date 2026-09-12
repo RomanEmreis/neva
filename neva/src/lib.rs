@@ -76,6 +76,8 @@
 pub use app::extension::Extension;
 #[cfg(all(feature = "server", not(feature = "legacy-spec"), feature = "tasks"))]
 pub use app::extension::TasksExtension;
+#[cfg(feature = "server")]
+pub use app::handler::{BlockingCall, BlockingFn, blocking};
 #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
 pub use app::mrtr_store::{InMemoryStateStore, RequestStateStore};
 #[cfg(all(feature = "server", not(feature = "legacy-spec")))]

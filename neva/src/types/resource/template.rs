@@ -1,7 +1,9 @@
 //! Utilities for Resource templates
 
 #[cfg(feature = "server")]
-use crate::app::handler::{FromHandlerParams, Handler, HandlerFn, HandlerParams, marker};
+use crate::app::handler::{
+    BlockingFn, FromHandlerParams, Handler, HandlerFn, HandlerParams, marker,
+};
 #[cfg(feature = "server")]
 use crate::error::Error;
 #[cfg(feature = "server")]
@@ -186,7 +188,7 @@ impl ListResourceTemplatesResult {
 /// [`ReadResourceResult`], in both shapes a handler can take: an
 /// **asynchronous** one returning a future of such a value
 /// ([`marker::Async`], the default) and a **synchronous** one returning the
-/// value itself ([`marker::Blocking`]).
+/// value itself ([`marker::Immediate`]).
 ///
 /// `M` records which of the two a given function is and is inferred at the
 /// registration site. See [`crate::types::ToolHandler`] for the same
@@ -214,7 +216,14 @@ macro_rules! impl_generic_resource_handler ({ $($param:ident)* } => {
     // `HandlerFn` -- so it must stay here rather than move to the
     // registration methods.
     #[cfg(feature = "server")]
-    impl<Func, R, $($param,)*> ReadResourceHandler<($($param,)*), marker::Blocking> for Func
+    impl<Func, R, $($param,)*> ReadResourceHandler<($($param,)*), marker::Immediate> for Func
+    where
+        Func: Fn($($param),*) -> R + Send + Sync + Clone + 'static,
+        R: TryInto<ReadResourceResult> + Send + 'static,
+    {}
+    // The same handler moved onto the blocking pool by `neva::blocking`.
+    #[cfg(feature = "server")]
+    impl<Func, R, $($param: Send + 'static,)*> ReadResourceHandler<($($param,)*), marker::Immediate> for BlockingFn<Func>
     where
         Func: Fn($($param),*) -> R + Send + Sync + Clone + 'static,
         R: TryInto<ReadResourceResult> + Send + 'static,

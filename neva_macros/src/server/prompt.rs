@@ -6,7 +6,7 @@ use quote::quote;
 use syn::{ItemFn, Meta, punctuated::Punctuated, token::Comma};
 
 /// Every attribute `#[prompt]` accepts.
-const PROMPT_ATTRS: [&str; 7] = [
+const PROMPT_ATTRS: [&str; 8] = [
     "title",
     "descr",
     "args",
@@ -14,6 +14,7 @@ const PROMPT_ATTRS: [&str; 7] = [
     "roles",
     "permissions",
     "middleware",
+    "blocking",
 ];
 
 pub(crate) fn expand(
@@ -28,12 +29,15 @@ pub(crate) fn expand(
     let mut permissions = None;
     let mut middleware = None;
     let mut no_args = false;
+    let mut blocking = false;
 
     for meta in attr {
         match &meta {
             Meta::Path(path) => {
                 if path.is_ident("no_args") {
                     no_args = true;
+                } else if path.is_ident("blocking") {
+                    blocking = true;
                 } else {
                     return Err(super::unknown_attr(
                         path,
@@ -75,6 +79,9 @@ pub(crate) fn expand(
                         "middleware" => {
                             middleware = get_exprs_arr(&nv.value);
                         }
+                        "blocking" => {
+                            blocking = get_bool_param(&nv.value);
+                        }
                         other => {
                             return Err(super::unknown_attr(
                                 &nv.path,
@@ -96,6 +103,8 @@ pub(crate) fn expand(
             }
         }
     }
+
+    let handler_code = super::handler_code(function, blocking, "prompt")?;
 
     // Generate the function registration and metadata setup
     let description_code = description.map(|desc| {
@@ -154,7 +163,7 @@ pub(crate) fn expand(
         fn #module_name(app: &mut App) {
             app
                 #middleware_code
-                .map_prompt(stringify!(#func_name), #func_name)
+                .map_prompt(stringify!(#func_name), #handler_code)
                 #title_code
                 #description_code
                 #args_code

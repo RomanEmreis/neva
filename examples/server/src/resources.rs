@@ -39,6 +39,14 @@ fn get_text(name: String) -> TextResourceContents {
     TextResourceContents::new(format!("txt://{name}"), format!("Text for: {name}"))
 }
 
+// A blocking resource read: `std::fs` blocks, so it does not belong on a
+// runtime worker.
+#[resource(uri = "file://{name}", mime = "text/plain", blocking)]
+fn read_file_resource(name: String) -> TextResourceContents {
+    let text = std::fs::read_to_string(&name).unwrap_or_default();
+    TextResourceContents::new(format!("file://{name}"), text)
+}
+
 #[resource(uri = "res://err/{uri}")]
 async fn err_resource(_uri: Uri) -> Result<ResourceContents, Error> {
     #[allow(deprecated)]

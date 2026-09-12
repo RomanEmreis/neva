@@ -949,7 +949,7 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
     /// Maps an MCP client request to a specific function
     ///
     /// The handler may return its value directly instead of a future -- any
-    /// [`IntoResponse`] will do; see [`marker::Blocking`].
+    /// [`IntoResponse`] will do; see [`marker::Immediate`].
     ///
     /// # Example
     /// ```no_run
@@ -1090,7 +1090,21 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
     /// way and need no separate method. A synchronous handler runs on the
     /// runtime thread that dispatched the call: keep it to computation and
     /// lookups, and leave blocking I/O to an asynchronous handler. See
-    /// [`ToolHandler`] and [`marker::Blocking`].
+    /// [`ToolHandler`] and [`marker::Immediate`].
+    ///
+    /// A synchronous handler that really does block -- file I/O, a synchronous
+    /// driver, a long computation -- goes through [`blocking`](crate::blocking)
+    /// (or `#[tool(blocking)]`), which runs it on Tokio's blocking pool
+    /// instead:
+    ///
+    /// ```no_run
+    /// # use neva::{App, blocking};
+    /// # let mut app = App::new();
+    /// app.map_tool("read_file", blocking(|path: String| {
+    ///     std::fs::read_to_string(path).unwrap_or_default()
+    /// }))
+    /// .with_arg_names(["path"]);
+    /// ```
     ///
     /// # Example
     /// ```no_run
@@ -1632,6 +1646,45 @@ mod tests {
 
         assert!(app.handlers.contains_key("ping"));
         assert!(app.handlers.contains_key("ping_later"));
+    }
+
+    #[test]
+    fn blocking_wraps_a_handler_for_every_primitive() {
+        use crate::blocking;
+        use crate::types::{
+            CompleteRequestParams, ListResourcesRequestParams, Resource, ResourceContents, Role,
+        };
+
+        let mut app = App::new();
+
+        // One adapter, every registration point.
+        app.map_tool("sum", blocking(|a: i32, b: i32| a + b));
+        app.map_prompt(
+            "analyze",
+            blocking(|lang: String| (format!("Analyze {lang}"), Role::User)),
+        );
+        app.map_resource(
+            "res://{name}",
+            "read",
+            blocking(|name: String| ResourceContents::new(format!("res://{name}"))),
+        );
+        app.map_handler("ping", blocking(|| "pong"));
+        app.map_resources(blocking(|_params: ListResourcesRequestParams| {
+            [Resource::new("res://one", "one")]
+        }));
+        app.map_completion(blocking(|params: CompleteRequestParams| [params.arg.value]));
+
+        assert!(app.options.tools.as_ref().get("sum").is_some());
+        assert!(app.options.prompts.as_ref().get("analyze").is_some());
+        assert!(app.handlers.contains_key("ping"));
+        assert!(
+            app.handlers
+                .contains_key(crate::types::resource::commands::LIST)
+        );
+        assert!(
+            app.handlers
+                .contains_key(crate::types::completion::commands::COMPLETE)
+        );
     }
 
     #[test]

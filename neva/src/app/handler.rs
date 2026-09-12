@@ -10,7 +10,9 @@ use crate::types::{
     Request, RequestId, Response,
 };
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll};
 
 /// Represents a specific registered handler
 pub(crate) type RequestHandler<T> = Arc<dyn Handler<T> + Send + Sync>;
@@ -54,7 +56,7 @@ pub trait FromHandlerParams: Sized {
 /// return type is an [`IntoResponse`], in both shapes a handler can take: an
 /// **asynchronous** one returning a future of such a value ([`marker::Async`],
 /// the default) and a **synchronous** one returning the value itself
-/// ([`marker::Blocking`]).
+/// ([`marker::Immediate`]).
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a valid request handler",
     label = "not a request handler",
@@ -72,6 +74,24 @@ pub trait GenericHandler<Args, M = marker::Async>: HandlerFn<Args, M> {}
 /// the marker is inferred at the registration site, so it does not appear in
 /// handler code.
 ///
+/// # Which shape to write
+///
+/// - The body **awaits** something -- an HTTP call, an async database driver,
+///   another MCP peer through [`Context`] -- write an `async fn` or a closure
+///   returning an `async` block. ([`marker::Async`])
+/// - The body is **computation on data already in hand** -- arithmetic,
+///   formatting, a lookup in a map, filtering a `Vec` -- write a plain `fn`.
+///   It runs inline, with no task spawn and no yield point, and that is the
+///   cheapest thing the server can do. ([`marker::Immediate`])
+/// - The body **blocks** -- `std::fs`, a synchronous database or HTTP client,
+///   `Command::output`, a long computation -- write a plain `fn` and register
+///   it through [`blocking`](crate::blocking) or the `blocking` attribute.
+///   Left inline, it would hold a runtime worker for its whole duration, and
+///   that worker polls nothing else meanwhile.
+///
+/// Reaching for `blocking` on a body of the second kind is a pessimization:
+/// handing `a + b` to another thread costs far more than the addition.
+///
 /// # Examples
 /// ```no_run
 /// use neva::App;
@@ -83,7 +103,7 @@ pub trait GenericHandler<Args, M = marker::Async>: HandlerFn<Args, M> {}
 /// // `marker::Async`: the handler returns a future, which the server awaits.
 /// app.map_tool("greet_later", |name: String| async move { format!("Hello, {name}") });
 ///
-/// // `marker::Blocking`: the handler returns the value itself.
+/// // `marker::Immediate`: the handler returns the value itself.
 /// app.map_tool("greet", |name: String| format!("Hello, {name}"));
 ///
 /// # app.run().await;
@@ -116,8 +136,10 @@ pub mod marker {
     /// Marks a handler that returns its value directly, with nothing to await.
     ///
     /// Such a handler runs to completion on the runtime thread that dispatched
-    /// the request, so it must not block: reach for an async handler for I/O,
-    /// and move CPU-bound work onto [`tokio::task::spawn_blocking`] yourself.
+    /// the request. That is right for computation and lookups; a handler that
+    /// genuinely blocks -- file or socket I/O, a synchronous database driver,
+    /// a long computation -- should either be asynchronous or be wrapped in
+    /// [`blocking`](crate::blocking), which moves it off that thread.
     ///
     /// # Examples
     /// ```no_run
@@ -133,7 +155,92 @@ pub mod marker {
     /// # }
     /// ```
     #[derive(Debug)]
-    pub struct Blocking;
+    pub struct Immediate;
+}
+
+/// Runs a synchronous handler on Tokio's blocking pool instead of the runtime
+/// thread that dispatched the request.
+///
+/// A [`marker::Immediate`] handler runs inline, which is right for computation
+/// and lookups and wrong for anything that actually blocks -- file or socket
+/// I/O, a synchronous database driver, a long computation. Blocking a runtime
+/// worker stalls every other request it was going to poll. Wrapping the
+/// handler here moves the body to [`tokio::task::spawn_blocking`] and awaits
+/// it, so the worker stays free.
+///
+/// The trade is a hand-off to another thread, which costs far more than a
+/// short body does: reach for this only when the body really blocks. See
+/// [`marker`] for the three cases side by side.
+///
+/// The offloaded task is **not cancelled** if the request is: once started it
+/// runs to completion, and its result is discarded.
+///
+/// The wrapper is accepted at every registration point -- tools, prompts,
+/// resource reads, resource listings, completions and plain request handlers --
+/// so one adapter covers them all. The `#[tool(blocking)]` attribute applies it
+/// for you.
+///
+/// It takes a *synchronous* handler: an asynchronous one has nothing to
+/// offload -- it already yields -- and is rejected at compile time.
+///
+/// # Panics
+///
+/// A panic inside the handler is propagated to the awaiting task, exactly as
+/// it would be if the handler had run inline.
+///
+/// # Examples
+/// ```no_run
+/// use neva::{App, blocking};
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// let mut app = App::new();
+///
+/// app.map_tool("read_file", blocking(|path: String| {
+///     std::fs::read_to_string(path).unwrap_or_default()
+/// }))
+/// .with_arg_names(["path"]);
+///
+/// # app.run().await;
+/// # }
+/// ```
+#[inline]
+pub fn blocking<F>(handler: F) -> BlockingFn<F> {
+    BlockingFn(handler)
+}
+
+/// A handler moved onto Tokio's blocking pool. Created by [`blocking`].
+#[derive(Debug, Clone)]
+pub struct BlockingFn<F>(F);
+
+/// The future of a handler running on Tokio's blocking pool.
+///
+/// Resolves to whatever the handler returned. It is the future type every
+/// [`BlockingFn`] handler produces, which is why it is nameable at all; there
+/// is nothing to construct here directly.
+#[derive(Debug)]
+pub struct BlockingCall<R> {
+    handle: tokio::task::JoinHandle<R>,
+}
+
+impl<R> Future for BlockingCall<R> {
+    type Output = R;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+        // `JoinHandle` is `Unpin`, so this projection needs no pinning dance.
+        match Pin::new(&mut self.get_mut().handle).poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(value)) => Poll::Ready(value),
+            // The handler panicked. Resuming here puts the panic on the task
+            // that awaited it, which is where it would have landed had the
+            // handler run inline -- the offload is not supposed to change what
+            // a panicking handler does.
+            Poll::Ready(Err(err)) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
+            // Not reachable through `spawn_blocking` on a live runtime: the
+            // task is never cancelled, and a handle is never detached here.
+            Poll::Ready(Err(err)) => panic!("neva: blocking handler did not run: {err}"),
+        }
+    }
 }
 
 /// The call mechanics every handler trait shares: what a handler returns and
@@ -142,7 +249,7 @@ pub mod marker {
 /// `M` is one of the [`marker`] types and records which shape the implementing
 /// function has. Both markers are implemented for every supported arity, so
 /// this trait says nothing about whether a function is a *valid* handler: the
-/// [`marker::Blocking`] impl accepts any return type at all.
+/// [`marker::Immediate`] impl accepts any return type at all.
 ///
 /// That is deliberate, and it is also why **no public method may be bound on
 /// this trait directly**. With both markers implemented, `M` would be left
@@ -167,7 +274,7 @@ pub trait HandlerFn<Args, M>: Clone + Send + Sync + 'static {
 /// [`App::map_resources`](crate::App::map_resources).
 ///
 /// Like every handler trait it comes in both shapes -- [`marker::Async`] (the
-/// default) and [`marker::Blocking`] -- and `M` is inferred from the
+/// default) and [`marker::Immediate`] -- and `M` is inferred from the
 /// handler's signature. It carries its own call mechanics rather than
 /// borrowing [`HandlerFn`]'s: a list handler is passed the request parameters
 /// alongside its extracted arguments.
@@ -339,7 +446,7 @@ macro_rules! impl_generic_handler ({ $($param:ident)* } => {
             (self)($($param,)*)
         }
     }
-    impl<Func, R: Send + 'static, $($param,)*> HandlerFn<($($param,)*), marker::Blocking> for Func
+    impl<Func, R: Send + 'static, $($param,)*> HandlerFn<($($param,)*), marker::Immediate> for Func
     where
         Func: Fn($($param),*) -> R + Send + Sync + Clone + 'static,
     {
@@ -352,6 +459,25 @@ macro_rules! impl_generic_handler ({ $($param:ident)* } => {
             std::future::ready((self)($($param,)*))
         }
     }
+    // The offloaded shape. It needs no marker of its own: `BlockingFn` is a
+    // distinct type and implements no other, so nothing can overlap here.
+    impl<Func, R: Send + 'static, $($param,)*> HandlerFn<($($param,)*), marker::Immediate> for BlockingFn<Func>
+    where
+        Func: Fn($($param),*) -> R + Send + Sync + Clone + 'static,
+        $($param: Send + 'static,)*
+    {
+        type Output = R;
+        type Future = BlockingCall<R>;
+
+        #[inline]
+        #[allow(non_snake_case)]
+        fn call(&self, ($($param,)*): ($($param,)*)) -> Self::Future {
+            let func = self.0.clone();
+            BlockingCall {
+                handle: tokio::task::spawn_blocking(move || (func)($($param,)*)),
+            }
+        }
+    }
     impl<Func, Fut: Send, $($param,)*> GenericHandler<($($param,)*), marker::Async> for Func
     where
         Func: Fn($($param),*) -> Fut + Send + Sync + Clone + 'static,
@@ -360,10 +486,16 @@ macro_rules! impl_generic_handler ({ $($param:ident)* } => {
     // The synchronous shape. `R: IntoResponse` is what keeps this impl and the
     // asynchronous one apart during selection -- see `HandlerFn` -- so it must
     // stay here rather than move to `App::map_handler`.
-    impl<Func, R, $($param,)*> GenericHandler<($($param,)*), marker::Blocking> for Func
+    impl<Func, R, $($param,)*> GenericHandler<($($param,)*), marker::Immediate> for Func
     where
         Func: Fn($($param),*) -> R + Send + Sync + Clone + 'static,
         R: IntoResponse + Send + 'static,
+    {}
+    impl<Func, R, $($param,)*> GenericHandler<($($param,)*), marker::Immediate> for BlockingFn<Func>
+    where
+        Func: Fn($($param),*) -> R + Send + Sync + Clone + 'static,
+        R: IntoResponse + Send + 'static,
+        $($param: Send + 'static,)*
     {}
     impl<Func, Fut: Send, $($param,)*> ListResourcesHandler<($($param,)*), marker::Async> for Func
     where
@@ -382,7 +514,7 @@ macro_rules! impl_generic_handler ({ $($param:ident)* } => {
     // The synchronous shape. `R: Into<ListResourcesResult>` is what keeps this
     // impl and the asynchronous one apart during selection -- see `HandlerFn`
     // -- so it must stay here rather than move to `App::map_resources`.
-    impl<Func, R, $($param,)*> ListResourcesHandler<($($param,)*), marker::Blocking> for Func
+    impl<Func, R, $($param,)*> ListResourcesHandler<($($param,)*), marker::Immediate> for Func
     where
         Func: Fn(ListResourcesRequestParams, $($param),*) -> R + Send + Sync + Clone + 'static,
         R: Into<ListResourcesResult> + Send + 'static,
@@ -394,6 +526,24 @@ macro_rules! impl_generic_handler ({ $($param:ident)* } => {
         #[allow(non_snake_case)]
         fn call(&self, params: ListResourcesRequestParams, ($($param,)*): ($($param,)*)) -> Self::Future {
             std::future::ready((self)(params, $($param,)*))
+        }
+    }
+    impl<Func, R, $($param,)*> ListResourcesHandler<($($param,)*), marker::Immediate> for BlockingFn<Func>
+    where
+        Func: Fn(ListResourcesRequestParams, $($param),*) -> R + Send + Sync + Clone + 'static,
+        R: Into<ListResourcesResult> + Send + 'static,
+        $($param: Send + 'static,)*
+    {
+        type Output = R;
+        type Future = BlockingCall<R>;
+
+        #[inline]
+        #[allow(non_snake_case)]
+        fn call(&self, params: ListResourcesRequestParams, ($($param,)*): ($($param,)*)) -> Self::Future {
+            let func = self.0.clone();
+            BlockingCall {
+                handle: tokio::task::spawn_blocking(move || (func)(params, $($param,)*)),
+            }
         }
     }
     impl<Func, Fut: Send, $($param,)*> CompletionHandler<($($param,)*), marker::Async> for Func
@@ -411,7 +561,7 @@ macro_rules! impl_generic_handler ({ $($param:ident)* } => {
         }
     }
     // As above, with `R: Into<CompleteResult>` doing the separating.
-    impl<Func, R, $($param,)*> CompletionHandler<($($param,)*), marker::Blocking> for Func
+    impl<Func, R, $($param,)*> CompletionHandler<($($param,)*), marker::Immediate> for Func
     where
         Func: Fn(CompleteRequestParams, $($param),*) -> R + Send + Sync + Clone + 'static,
         R: Into<CompleteResult> + Send + 'static,
@@ -423,6 +573,24 @@ macro_rules! impl_generic_handler ({ $($param:ident)* } => {
         #[allow(non_snake_case)]
         fn call(&self, params: CompleteRequestParams, ($($param,)*): ($($param,)*)) -> Self::Future {
             std::future::ready((self)(params, $($param,)*))
+        }
+    }
+    impl<Func, R, $($param,)*> CompletionHandler<($($param,)*), marker::Immediate> for BlockingFn<Func>
+    where
+        Func: Fn(CompleteRequestParams, $($param),*) -> R + Send + Sync + Clone + 'static,
+        R: Into<CompleteResult> + Send + 'static,
+        $($param: Send + 'static,)*
+    {
+        type Output = R;
+        type Future = BlockingCall<R>;
+
+        #[inline]
+        #[allow(non_snake_case)]
+        fn call(&self, params: CompleteRequestParams, ($($param,)*): ($($param,)*)) -> Self::Future {
+            let func = self.0.clone();
+            BlockingCall {
+                handle: tokio::task::spawn_blocking(move || (func)(params, $($param,)*)),
+            }
         }
     }
 });

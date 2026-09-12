@@ -19,12 +19,18 @@ async fn say_hello() -> &'static str {
 }
 
 // A synchronous handler: no `async`, the value is returned directly. The body
-// runs on the runtime thread that dispatched the call, so this shape suits
-// pure computation and lookups -- anything that blocks belongs in an async
-// tool, or in `tokio::task::spawn_blocking`.
+// runs on the runtime thread that dispatched the call, which is right for pure
+// computation -- see `read_file` below for what to do when the body blocks.
 #[tool(descr = "Sums two numbers")]
 fn sum(a: i32, b: i32) -> i32 {
     a + b
+}
+
+// A blocking handler: `blocking` moves the body onto Tokio's blocking pool, so
+// the file read does not stall the runtime worker that dispatched the call.
+#[tool(descr = "Reads a text file", blocking)]
+fn read_file(path: String) -> Result<String, Error> {
+    std::fs::read_to_string(path).map_err(|err| Error::new(ErrorCode::InternalError, err))
 }
 
 #[tool(

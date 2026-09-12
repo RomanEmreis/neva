@@ -25,7 +25,9 @@ use std::sync::Arc;
 #[cfg(feature = "server")]
 use crate::app::{
     context::Context,
-    handler::{FromHandlerParams, Handler, HandlerFn, HandlerParams, RequestHandler, marker},
+    handler::{
+        BlockingFn, FromHandlerParams, Handler, HandlerFn, HandlerParams, RequestHandler, marker,
+    },
 };
 
 pub use get_prompt_result::{GetPromptResult, PromptMessage};
@@ -329,7 +331,7 @@ impl<T: Into<String>> From<(T, T, bool)> for PromptArgument {
 /// return type converts into a [`GetPromptResult`], in both shapes a handler
 /// can take: an **asynchronous** one returning a future of such a value
 /// ([`marker::Async`], the default) and a **synchronous** one returning the
-/// value itself ([`marker::Blocking`]).
+/// value itself ([`marker::Immediate`]).
 ///
 /// `M` records which of the two a given function is and is inferred at the
 /// registration site, so bounds written against this trait normally leave it
@@ -742,7 +744,22 @@ macro_rules! impl_generic_prompt_handler ({ $($param:ident)* } => {
     // impl and the asynchronous one apart during selection -- see `HandlerFn`
     // -- so it must stay here rather than move to the registration methods.
     #[cfg(feature = "server")]
-    impl<Func, R, $($param: TypeCategory,)*> PromptHandler<($($param,)*), marker::Blocking> for Func
+    impl<Func, R, $($param: TypeCategory,)*> PromptHandler<($($param,)*), marker::Immediate> for Func
+    where
+        Func: Fn($($param),*) -> R + Send + Sync + Clone + 'static,
+        R: TryInto<GetPromptResult> + Send + 'static,
+    {
+        #[inline]
+        #[allow(unused_mut)]
+        fn args() -> Option<Vec<PromptArgument>> {
+            let mut args: Vec<PromptArgument> = Vec::new();
+            $( push_prompt_arg::<$param>(&mut args); )*
+            if args.is_empty() { None } else { Some(args) }
+        }
+    }
+    // The same handler moved onto the blocking pool by `neva::blocking`.
+    #[cfg(feature = "server")]
+    impl<Func, R, $($param: TypeCategory + Send + 'static,)*> PromptHandler<($($param,)*), marker::Immediate> for BlockingFn<Func>
     where
         Func: Fn($($param),*) -> R + Send + Sync + Clone + 'static,
         R: TryInto<GetPromptResult> + Send + 'static,

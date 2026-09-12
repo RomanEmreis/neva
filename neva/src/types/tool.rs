@@ -18,7 +18,8 @@ use {
     crate::{
         Context,
         app::handler::{
-            FromHandlerParams, Handler, HandlerFn, HandlerParams, RequestHandler, marker,
+            BlockingFn, FromHandlerParams, Handler, HandlerFn, HandlerParams, RequestHandler,
+            marker,
         },
     },
     std::{future::Future, sync::Arc},
@@ -759,7 +760,7 @@ impl FromHandlerParams for ListToolsRequestParams {
 ///
 /// - an **asynchronous** one returning a future of such a value
 ///   ([`marker::Async`], the default), and
-/// - a **synchronous** one returning the value itself ([`marker::Blocking`]).
+/// - a **synchronous** one returning the value itself ([`marker::Immediate`]).
 ///
 /// `M` records which of the two a given function is and is inferred at the
 /// registration site, so handlers and the bounds written against them normally
@@ -770,7 +771,7 @@ impl FromHandlerParams for ListToolsRequestParams {
 ///
 /// A synchronous handler runs on the runtime thread that dispatched the
 /// request. That is the right shape for pure computation and lookups, and the
-/// wrong one for blocking I/O -- see [`marker::Blocking`].
+/// wrong one for blocking I/O -- see [`marker::Immediate`].
 ///
 /// # Examples
 /// ```no_run
@@ -1784,7 +1785,24 @@ macro_rules! impl_generic_tool_handler ({ $($param:ident)* } => {
     // impl and the asynchronous one apart during selection -- see `HandlerFn`
     // -- so it must stay here rather than move to the registration methods.
     #[cfg(feature = "server")]
-    impl<Func, R, $($param: TypeCategory,)*> ToolHandler<($($param,)*), marker::Blocking> for Func
+    impl<Func, R, $($param: TypeCategory,)*> ToolHandler<($($param,)*), marker::Immediate> for Func
+    where
+        Func: Fn($($param),*) -> R + Send + Sync + Clone + 'static,
+        R: Into<CallToolResponse> + Send + 'static,
+    {
+        #[inline]
+        #[allow(unused_mut)]
+        fn args() -> Vec<ToolArg> {
+            let mut args = Vec::new();
+            $( push_tool_arg::<$param>(&mut args); )*
+            args
+        }
+    }
+    // The same handler moved onto the blocking pool by `neva::blocking`. It
+    // describes the same arguments: the wrapper changes where the body runs,
+    // not what the tool publishes or reads.
+    #[cfg(feature = "server")]
+    impl<Func, R, $($param: TypeCategory + Send + 'static,)*> ToolHandler<($($param,)*), marker::Immediate> for BlockingFn<Func>
     where
         Func: Fn($($param),*) -> R + Send + Sync + Clone + 'static,
         R: Into<CallToolResponse> + Send + 'static,
@@ -1871,6 +1889,54 @@ mod tests {
             json,
             r#"{"content":[{"type":"text","text":"7"}],"isError":false}"#
         );
+    }
+
+    #[tokio::test]
+    async fn it_calls_a_blocking_tool() {
+        // `blocking` moves the body onto the blocking pool; everything the tool
+        // publishes and reads is unchanged.
+        let tool = Tool::new("sum", crate::blocking(|a: i32, b: i32| a + b));
+
+        assert_eq!(schema_props(&tool), ["arg0", "arg1"]);
+
+        let params = call_params([("arg0", json!(5)), ("arg1", json!(2))]);
+        let resp = tool.call(params).await.unwrap();
+
+        assert_eq!(
+            serde_json::to_string(&resp).unwrap(),
+            r#"{"content":[{"type":"text","text":"7"}],"isError":false}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blocking_tool_runs_off_the_runtime_thread() {
+        let tool = Tool::new(
+            "thread",
+            crate::blocking(|_: i32| format!("{:?}", std::thread::current().id())),
+        );
+
+        let resp = tool
+            .call(call_params([("arg0", json!(1)), ("unused", json!(0))]))
+            .await
+            .unwrap();
+
+        let here = format!("{:?}", std::thread::current().id());
+        assert!(!serde_json::to_string(&resp).unwrap().contains(&here));
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "handler panicked")]
+    async fn a_panicking_blocking_tool_propagates_the_panic() {
+        // A panic on the blocking pool lands on the awaiting task, exactly as
+        // it would have had the handler run inline.
+        let tool = Tool::new(
+            "boom",
+            crate::blocking(|_: i32| -> String { panic!("handler panicked") }),
+        );
+
+        let _ = tool
+            .call(call_params([("arg0", json!(1)), ("unused", json!(0))]))
+            .await;
     }
 
     #[tokio::test]
