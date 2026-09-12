@@ -401,6 +401,9 @@ macro_rules! map_tool {
 /// [`crate::types::prompt::Prompt::with_args`], which is both what
 /// `prompts/list` publishes and what extraction reads by.
 ///
+/// The closure body may be asynchronous or synchronous -- it is passed through
+/// as written and the shape is settled by [`App::map_prompt`] itself.
+///
 /// # Example
 /// ```no_run
 /// use neva::{App, map_prompt, types::Role};
@@ -413,6 +416,9 @@ macro_rules! map_tool {
 ///     (format!("Analyze this {lang} code: {code}"), Role::User)
 /// })
 /// .with_description("Analyzes a code snippet");
+///
+/// map_prompt!(app, "review", |lang: String| (format!("Review this {lang}"), Role::User))
+///     .with_description("Reviews a code snippet");
 ///
 /// # app.run().await;
 /// # }

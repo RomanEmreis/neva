@@ -46,15 +46,21 @@ pub trait FromHandlerParams: Sized {
     fn from_params(params: &HandlerParams) -> Result<Self, Error>;
 }
 
-/// Represents a generic handler
-pub trait GenericHandler<Args>: Clone + Send + Sync + 'static {
-    /// Output type
-    type Output;
-    /// Output future
-    type Future: Future<Output = Self::Output> + Send;
-
-    fn call(&self, args: Args) -> Self::Future;
-}
+/// Represents a generic request handler, as registered by
+/// [`App::map_handler`](crate::App::map_handler).
+///
+/// Implemented for every function whose parameters are extractable and whose
+/// return type is an [`IntoResponse`], in both shapes a handler can take: an
+/// **asynchronous** one returning a future of such a value ([`marker::Async`],
+/// the default) and a **synchronous** one returning the value itself
+/// ([`marker::Blocking`]).
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a valid request handler",
+    label = "not a request handler",
+    note = "a request handler is a function of extractable arguments returning either a value \
+            that implements `IntoResponse` or a future of one"
+)]
+pub trait GenericHandler<Args, M = marker::Async>: HandlerFn<Args, M> {}
 
 /// Type-level markers telling the two shapes of handler apart.
 ///
@@ -178,19 +184,21 @@ pub trait CompletionHandler<Args>: Clone + Send + Sync + 'static {
     fn call(&self, params: CompleteRequestParams, args: Args) -> Self::Future;
 }
 
-pub(crate) struct RequestFunc<F, R, Args>
+pub(crate) struct RequestFunc<F, R, Args, M>
 where
-    F: GenericHandler<Args, Output = R>,
+    F: GenericHandler<Args, M, Output = R>,
     R: IntoResponse,
     Args: FromHandlerParams,
 {
     func: F,
-    _marker: std::marker::PhantomData<Args>,
+    // See `ToolFunc`: a function pointer keeps the phantom marker from
+    // dragging auto traits onto the `Arc`-ed handler.
+    _marker: std::marker::PhantomData<fn() -> (Args, M)>,
 }
 
-impl<F, R, Args> RequestFunc<F, R, Args>
+impl<F, R, Args, M> RequestFunc<F, R, Args, M>
 where
-    F: GenericHandler<Args, Output = R>,
+    F: GenericHandler<Args, M, Output = R>,
     R: IntoResponse,
     Args: FromHandlerParams,
 {
@@ -203,9 +211,9 @@ where
     }
 }
 
-impl<F, R, Args> Handler<Response> for RequestFunc<F, R, Args>
+impl<F, R, Args, M> Handler<Response> for RequestFunc<F, R, Args, M>
 where
-    F: GenericHandler<Args, Output = R>,
+    F: GenericHandler<Args, M, Output = R>,
     R: IntoResponse,
     Args: FromHandlerParams + Send + Sync,
 {
@@ -319,20 +327,19 @@ macro_rules! impl_generic_handler ({ $($param:ident)* } => {
             std::future::ready((self)($($param,)*))
         }
     }
-    impl<Func, Fut: Send, $($param,)*> GenericHandler<($($param,)*)> for Func
+    impl<Func, Fut: Send, $($param,)*> GenericHandler<($($param,)*), marker::Async> for Func
     where
         Func: Fn($($param),*) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future + 'static,
-    {
-        type Output = Fut::Output;
-        type Future = Fut;
-
-        #[inline]
-        #[allow(non_snake_case)]
-        fn call(&self, ($($param,)*): ($($param,)*)) -> Self::Future {
-            (self)($($param,)*)
-        }
-    }
+    {}
+    // The synchronous shape. `R: IntoResponse` is what keeps this impl and the
+    // asynchronous one apart during selection -- see `HandlerFn` -- so it must
+    // stay here rather than move to `App::map_handler`.
+    impl<Func, R, $($param,)*> GenericHandler<($($param,)*), marker::Blocking> for Func
+    where
+        Func: Fn($($param),*) -> R + Send + Sync + Clone + 'static,
+        R: IntoResponse + Send + 'static,
+    {}
     impl<Func, Fut: Send, $($param,)*> ListResourcesHandler<($($param,)*)> for Func
     where
         Func: Fn(ListResourcesRequestParams, $($param),*) -> Fut + Send + Sync + Clone + 'static,

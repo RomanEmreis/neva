@@ -134,6 +134,9 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Maps the function to a resource template
 ///
+/// The function may be `async` or synchronous. A synchronous one returns its
+/// value directly and runs on the runtime thread that dispatched the request.
+///
 /// # Parameters
 /// * `uri` - Resource URI.
 /// * `title` - Resource title.
@@ -232,6 +235,9 @@ pub fn resources(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Maps the function to a prompt
 ///
+/// The function may be `async` or synchronous. A synchronous one returns its
+/// value directly and runs on the runtime thread that dispatched the request.
+///
 /// # Parameters
 /// * `title` - Prompt title.
 /// * `descr` - Prompt description.
@@ -286,6 +292,9 @@ pub fn prompt(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// Maps the function to a command handler
+///
+/// The function may be `async` or synchronous. A synchronous one returns its
+/// value directly and runs on the runtime thread that dispatched the request.
 ///
 /// # Parameters
 /// * `command` - Command name.

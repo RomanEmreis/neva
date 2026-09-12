@@ -31,6 +31,13 @@ async fn get_res(name: String) -> TextResourceContents {
     )
 }
 
+// A synchronous resource handler: no `async`, the contents are returned
+// directly.
+#[resource(uri = "txt://{name}", mime = "text/plain")]
+fn get_text(name: String) -> TextResourceContents {
+    TextResourceContents::new(format!("txt://{name}"), format!("Text for: {name}"))
+}
+
 #[resource(uri = "res://err/{uri}")]
 async fn err_resource(_uri: Uri) -> Result<ResourceContents, Error> {
     #[allow(deprecated)]

@@ -9,10 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-* **Synchronous tool handlers.** A tool handler may now return its value
-  directly instead of a future, in every form of registration --
-  `App::map_tool`, `Tool::new`, the `map_tool!` macro and `#[tool]` on a
-  non-`async fn`:
+* **Synchronous handlers for tools, prompts, resources and requests.** A
+  handler may now return its value directly instead of a future, in every form
+  of registration -- `App::map_tool` / `map_prompt` / `map_resource` /
+  `map_handler`, `Tool::new` and `Prompt::new`, the `map_tool!` and
+  `map_prompt!` macros, and `#[tool]`, `#[prompt]`, `#[resource]` and
+  `#[handler]` on a non-`async fn`:
 
   ```rust
   #[tool(descr = "Sums two numbers")]
@@ -26,13 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Which shape a handler has is read off its signature, so nothing else changes:
   the published schema, the argument slots and the response are the same as for
   the asynchronous form, and existing handlers are untouched. A synchronous
-  handler runs on the runtime thread that dispatched the call, so blocking I/O
-  still belongs in an asynchronous one.
+  handler runs on the runtime thread that dispatched the request, so blocking
+  I/O still belongs in an asynchronous one.
 
-  `ToolHandler` gained a second, defaulted type parameter carrying that
-  distinction (`ToolHandler<Args, M = marker::Async>`); bounds written as
-  `ToolHandler<Args>` keep their meaning. Prompt, resource and request handlers
-  remain asynchronous for now.
+  `ToolHandler` and `PromptHandler` gained a second, defaulted type parameter
+  carrying that distinction (`ToolHandler<Args, M = marker::Async>`); bounds
+  written as `ToolHandler<Args>` keep their meaning. Resource reads got a
+  handler trait of their own, `types::ReadResourceHandler`.
+
+  `App::map_resources` and `App::map_completion` -- and so `#[resources]` and
+  `#[completion]` -- remain asynchronous for now.
 
 ## 0.5.7
 

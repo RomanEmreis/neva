@@ -19,7 +19,7 @@ use crate::types::{
     Message, MessageBatch, MessageEnvelope, Prompt, PromptHandler, ReadResourceRequestParams,
     ReadResourceResult, Request, Resource, ResourceTemplate, Response, Tool, ToolHandler, Uri,
     notification::{CancelledNotificationParams, Notification},
-    resource::template::ResourceFunc,
+    resource::template::{ReadResourceHandler, ResourceFunc},
 };
 #[cfg(feature = "legacy-spec")]
 use crate::types::{InitializeRequestParams, InitializeResult};
@@ -948,6 +948,9 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
 
     /// Maps an MCP client request to a specific function
     ///
+    /// The handler may return its value directly instead of a future -- any
+    /// [`IntoResponse`] will do; see [`marker::Blocking`].
+    ///
     /// # Example
     /// ```no_run
     /// use neva::App;
@@ -963,11 +966,12 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
     /// # app.run().await;
     /// # }
     /// ```
-    pub fn map_handler<F, R, Args>(&mut self, name: impl Into<String>, handler: F) -> &mut Self
+    pub fn map_handler<F, R, Args, M>(&mut self, name: impl Into<String>, handler: F) -> &mut Self
     where
-        F: GenericHandler<Args, Output = R>,
+        F: GenericHandler<Args, M, Output = R>,
         R: IntoResponse + Send + 'static,
         Args: FromHandlerParams + Send + Sync + 'static,
+        M: 'static,
     {
         let handler = RequestFunc::new(handler);
         self.handlers.insert(name.into(), handler);
@@ -1191,6 +1195,9 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
 
     /// Maps an MCP resource read request to a specific function
     ///
+    /// The handler may be asynchronous or synchronous, exactly as for
+    /// [`Self::map_tool`]; see [`ReadResourceHandler`].
+    ///
     /// # Example
     /// ```no_run
     /// use neva::App;
@@ -1203,20 +1210,26 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
     ///     (format!("res://{name}"), format!("Resource: {name} content"))
     /// });
     ///
+    /// // The same resource, synchronously.
+    /// app.map_resource("txt://{name}", "read_text", |name: String| {
+    ///     (format!("txt://{name}"), format!("Resource: {name} content"))
+    /// });
+    ///
     /// # app.run().await;
     /// # }
     /// ```
-    pub fn map_resource<F, R, Args>(
+    pub fn map_resource<F, R, Args, M>(
         &mut self,
         uri: impl Into<Uri>,
         name: impl Into<String>,
         handler: F,
     ) -> &mut ResourceTemplate
     where
-        F: GenericHandler<Args, Output = R>,
+        F: ReadResourceHandler<Args, M, Output = R>,
         R: TryInto<ReadResourceResult> + Send + 'static,
         R::Error: Into<Error>,
         Args: TryFrom<ReadResourceRequestParams, Error = Error> + Send + Sync + 'static,
+        M: 'static,
     {
         let handler = ResourceFunc::new(handler);
         let template = ResourceTemplate::new(uri, name);
@@ -1256,17 +1269,18 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
     /// # }
     /// ```
     #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
-    pub fn map_ui_resource<F, R, Args>(
+    pub fn map_ui_resource<F, R, Args, M>(
         &mut self,
         uri: impl Into<Uri>,
         name: impl Into<String>,
         handler: F,
     ) -> &mut ResourceTemplate
     where
-        F: GenericHandler<Args, Output = R>,
+        F: ReadResourceHandler<Args, M, Output = R>,
         R: TryInto<ReadResourceResult> + Send + 'static,
         R::Error: Into<Error>,
         Args: TryFrom<ReadResourceRequestParams, Error = Error> + Send + Sync + 'static,
+        M: 'static,
     {
         let template = self.map_resource(uri, name, handler);
         template.with_mime(crate::types::APP_MIME_TYPE);
@@ -1282,6 +1296,9 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
     /// reads the positional `arg0`, `arg1`, ... names until
     /// [`Prompt::with_args`] gives them yours. [`crate::map_prompt`] and the
     /// `#[prompt]` attribute do that for you.
+    ///
+    /// The handler may be asynchronous or synchronous, exactly as for
+    /// [`Self::map_tool`]; see [`PromptHandler`].
     ///
     /// # Example
     /// ```no_run
@@ -1299,12 +1316,13 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
     /// # app.run().await;
     /// # }
     /// ```
-    pub fn map_prompt<F, R, Args>(&mut self, name: impl Into<String>, handler: F) -> &mut Prompt
+    pub fn map_prompt<F, R, Args, M>(&mut self, name: impl Into<String>, handler: F) -> &mut Prompt
     where
-        F: PromptHandler<Args, Output = R>,
+        F: PromptHandler<Args, M, Output = R>,
         R: TryInto<GetPromptResult> + Send + 'static,
         R::Error: Into<Error>,
         Args: FromHandlerArgs<GetPromptRequestParams> + Send + Sync + 'static,
+        M: 'static,
     {
         self.options.add_prompt(Prompt::new(name, handler))
     }
@@ -1524,6 +1542,86 @@ mod tests {
         assert_eq!(args[1].required, Some(false));
         assert_eq!(prompt.arg_names.get(0), "lang");
         assert_eq!(prompt.arg_names.get(1), "tone");
+    }
+
+    #[tokio::test]
+    async fn map_prompt_macro_accepts_a_sync_closure() {
+        use crate::types::{GetPromptRequestParams, Role};
+        use std::collections::HashMap;
+
+        let mut app = App::new();
+        crate::map_prompt!(app, "analyze", |lang: String| (
+            format!("Analyze {lang}"),
+            Role::User
+        ));
+
+        let prompt = app.options.prompts.as_ref().get("analyze").expect("prompt");
+        let args = prompt.args.as_ref().unwrap();
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].name, "lang");
+
+        let result = prompt
+            .call(GetPromptRequestParams {
+                name: "analyze".into(),
+                args: Some(HashMap::from([(
+                    "lang".to_owned(),
+                    serde_json::json!("rust"),
+                )])),
+                meta: None,
+            })
+            .await
+            .unwrap();
+
+        let msg = result.messages.first().unwrap();
+        assert_eq!(msg.role, Role::User);
+        assert!(serde_json::to_string(msg).unwrap().contains("Analyze rust"));
+    }
+
+    #[tokio::test]
+    async fn map_resource_accepts_a_sync_handler() {
+        use crate::types::{ReadResourceRequestParams, ResourceContents, Uri};
+
+        let mut app = App::new();
+        app.map_resource("res://{name}", "read", |name: String| {
+            ResourceContents::new(format!("res://{name}"))
+                .with_mime("text/plain")
+                .with_text(name)
+        });
+
+        let uri: Uri = "res://report".into();
+        let (handler, args) = app.options.read_resource(&uri).expect("route");
+        let result = handler
+            .call(
+                ReadResourceRequestParams {
+                    uri,
+                    meta: None,
+                    args: None,
+                }
+                .with_args(args)
+                .into(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.contents.len(), 1);
+        assert!(
+            serde_json::to_string(&result)
+                .unwrap()
+                .contains("res://report")
+        );
+    }
+
+    #[test]
+    fn map_handler_accepts_a_sync_handler() {
+        let mut app = App::new();
+
+        // Both shapes register through the same method; that this compiles is
+        // the assertion -- the marker is inferred from each signature.
+        app.map_handler("ping", || "pong");
+        app.map_handler("ping_later", || async { "pong" });
+
+        assert!(app.handlers.contains_key("ping"));
+        assert!(app.handlers.contains_key("ping_later"));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Utilities for Resource templates
 
 #[cfg(feature = "server")]
-use crate::app::handler::{FromHandlerParams, GenericHandler, Handler, HandlerParams};
+use crate::app::handler::{FromHandlerParams, Handler, HandlerFn, HandlerParams, marker};
 #[cfg(feature = "server")]
 use crate::error::Error;
 #[cfg(feature = "server")]
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt::Debug;
 #[cfg(feature = "server")]
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 use crate::types::{
     Annotations, Cursor, Icon, IntoResponse, Page, RequestId, Response, resource::Uri,
@@ -176,22 +176,76 @@ impl ListResourceTemplatesResult {
     }
 }
 
+/// Describes a generic resource read handler.
+///
+/// Named for the request it answers (`resources/read`), which also keeps it
+/// apart from the crate-internal `route::ResourceHandler` that stores one.
+///
+/// Implemented for every function whose parameters are extractable from a
+/// [`ReadResourceRequestParams`] and whose return type converts into a
+/// [`ReadResourceResult`], in both shapes a handler can take: an
+/// **asynchronous** one returning a future of such a value
+/// ([`marker::Async`], the default) and a **synchronous** one returning the
+/// value itself ([`marker::Blocking`]).
+///
+/// `M` records which of the two a given function is and is inferred at the
+/// registration site. See [`crate::types::ToolHandler`] for the same
+/// distinction on tools.
+#[cfg(feature = "server")]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a valid resource handler",
+    label = "not a resource handler",
+    note = "a resource handler is a function of extractable arguments returning either a value \
+            that converts into `ReadResourceResult` or a future of one",
+    note = "check that every parameter can be extracted from the read request and that the \
+            return type implements `TryInto<ReadResourceResult>`"
+)]
+pub trait ReadResourceHandler<Args, M = marker::Async>: HandlerFn<Args, M> {}
+
+macro_rules! impl_generic_resource_handler ({ $($param:ident)* } => {
+    #[cfg(feature = "server")]
+    impl<Func, Fut: Send, $($param,)*> ReadResourceHandler<($($param,)*), marker::Async> for Func
+    where
+        Func: Fn($($param),*) -> Fut + Send + Sync + Clone + 'static,
+        Fut: Future + 'static,
+    {}
+    // The synchronous shape. `R: TryInto<ReadResourceResult>` is what keeps
+    // this impl and the asynchronous one apart during selection -- see
+    // `HandlerFn` -- so it must stay here rather than move to the
+    // registration methods.
+    #[cfg(feature = "server")]
+    impl<Func, R, $($param,)*> ReadResourceHandler<($($param,)*), marker::Blocking> for Func
+    where
+        Func: Fn($($param),*) -> R + Send + Sync + Clone + 'static,
+        R: TryInto<ReadResourceResult> + Send + 'static,
+    {}
+});
+
+impl_generic_resource_handler! {}
+impl_generic_resource_handler! { T1 }
+impl_generic_resource_handler! { T1 T2 }
+impl_generic_resource_handler! { T1 T2 T3 }
+impl_generic_resource_handler! { T1 T2 T3 T4 }
+impl_generic_resource_handler! { T1 T2 T3 T4 T5 }
+
 /// Represents a function that reads a resource
 #[cfg(feature = "server")]
-pub(crate) struct ResourceFunc<F, R, Args>
+pub(crate) struct ResourceFunc<F, R, Args, M>
 where
-    F: GenericHandler<Args, Output = R>,
+    F: ReadResourceHandler<Args, M, Output = R>,
     R: TryInto<ReadResourceResult>,
     Args: TryFrom<ReadResourceRequestParams, Error = Error>,
 {
     func: F,
-    _marker: std::marker::PhantomData<Args>,
+    // See `ToolFunc`: a function pointer keeps the phantom marker from
+    // dragging auto traits onto the `Arc`-ed handler.
+    _marker: std::marker::PhantomData<fn() -> (Args, M)>,
 }
 
 #[cfg(feature = "server")]
-impl<F, R, Args> ResourceFunc<F, R, Args>
+impl<F, R, Args, M> ResourceFunc<F, R, Args, M>
 where
-    F: GenericHandler<Args, Output = R>,
+    F: ReadResourceHandler<Args, M, Output = R>,
     R: TryInto<ReadResourceResult>,
     Args: TryFrom<ReadResourceRequestParams, Error = Error>,
 {
@@ -206,9 +260,9 @@ where
 }
 
 #[cfg(feature = "server")]
-impl<F, R, Args> Handler<ReadResourceResult> for ResourceFunc<F, R, Args>
+impl<F, R, Args, M> Handler<ReadResourceResult> for ResourceFunc<F, R, Args, M>
 where
-    F: GenericHandler<Args, Output = R>,
+    F: ReadResourceHandler<Args, M, Output = R>,
     R: TryInto<ReadResourceResult>,
     R::Error: Into<Error>,
     Args: TryFrom<ReadResourceRequestParams, Error = Error> + Send + Sync,
