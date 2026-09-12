@@ -1,13 +1,13 @@
 //! Utilities for Resource templates
 
 #[cfg(feature = "server")]
-use crate::app::handler::{
-    BlockingFn, FromHandlerParams, Handler, HandlerFn, HandlerParams, marker,
-};
+use crate::app::handler::{FromHandlerParams, Handler, HandlerFn, HandlerParams};
 #[cfg(feature = "server")]
 use crate::error::Error;
 #[cfg(feature = "server")]
 use crate::shared::BoxFuture;
+#[cfg(feature = "server")]
+use crate::shared::{BlockingFn, marker};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt::Debug;

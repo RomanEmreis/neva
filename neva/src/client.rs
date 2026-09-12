@@ -2,6 +2,7 @@
 
 use crate::error::{Error, ErrorCode};
 use crate::shared;
+use crate::shared::{BlockingCall, BlockingFn, BoxFuture, marker};
 use crate::transport::Transport;
 use crate::types::Root;
 use crate::types::sampling::{CreateMessageRequestParams, CreateMessageResult, SamplingHandler};
@@ -404,19 +405,104 @@ async fn collect_batch_responses(
     join_all(futures).await
 }
 
-#[inline]
-fn make_handler<F, R, P, O>(handler: F) -> Handler<P, O>
+/// Describes a handler a client answers a server-initiated request with --
+/// [`Client::map_sampling`] and [`Client::map_elicitation`].
+///
+/// Implemented for every function taking the request's `P` and returning
+/// something that converts into the result `O`, in both shapes a handler can
+/// take: an **asynchronous** one returning a future of such a value
+/// ([`marker::Async`], the default) and a **synchronous** one returning the
+/// value itself ([`marker::Immediate`]), plus the same handler moved onto the
+/// blocking pool by [`blocking`](crate::blocking).
+///
+/// `M` records which shape a given function is and is inferred at the
+/// registration site. See [`crate::marker`] for which shape to write.
+///
+/// # Examples
+/// ```no_run
+/// use neva::{Client, types::elicitation::{ElicitRequestParams, ElicitResult}};
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// let mut client = Client::new();
+///
+/// // asynchronous
+/// client.map_elicitation(|_params: ElicitRequestParams| async { ElicitResult::accept() });
+///
+/// // synchronous
+/// client.map_elicitation(|_params: ElicitRequestParams| ElicitResult::accept());
+/// # }
+/// ```
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a valid handler for `{P}`",
+    label = "not a client handler",
+    note = "a handler takes `{P}` and returns either a value that converts into `{O}` or a \
+            future of one"
+)]
+pub trait ClientHandler<P, O, M = marker::Async>: Clone + Send + Sync + 'static {
+    /// Calls the handler, boxing whatever it returns into the shape the client
+    /// stores.
+    fn call(&self, params: P) -> BoxFuture<'static, O>;
+}
+
+impl<F, Fut, P, O> ClientHandler<P, O, marker::Async> for F
+where
+    F: Fn(P) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future + Send + 'static,
+    Fut::Output: Into<O>,
+    P: Send + 'static,
+{
+    #[inline]
+    fn call(&self, params: P) -> BoxFuture<'static, O> {
+        let handler = self.clone();
+        Box::pin(async move { handler(params).await.into() })
+    }
+}
+
+// The synchronous shape. `R: Into<O>` is what keeps this impl and the
+// asynchronous one apart during selection -- a future does not convert into a
+// sampling or elicitation result, and neither result is a future.
+impl<F, R, P, O> ClientHandler<P, O, marker::Immediate> for F
 where
     F: Fn(P) -> R + Clone + Send + Sync + 'static,
-    R: Future + Send,
-    R::Output: Into<O>,
+    R: Into<O> + Send + 'static,
+    O: Send + 'static,
+{
+    #[inline]
+    fn call(&self, params: P) -> BoxFuture<'static, O> {
+        Box::pin(std::future::ready((self)(params).into()))
+    }
+}
+
+// The same handler moved onto Tokio's blocking pool by `neva::blocking`.
+impl<F, R, P, O> ClientHandler<P, O, marker::Immediate> for BlockingFn<F>
+where
+    F: Fn(P) -> R + Clone + Send + Sync + 'static,
+    R: Into<O> + Send + 'static,
     P: Send + 'static,
     O: Send + 'static,
 {
-    Arc::new(move |params: P| {
-        let handler = handler.clone();
-        Box::pin(async move { handler(params).await.into() })
-    })
+    #[inline]
+    fn call(&self, params: P) -> BoxFuture<'static, O> {
+        let handler = self.0.clone();
+        Box::pin(async move {
+            BlockingCall {
+                handle: tokio::task::spawn_blocking(move || handler(params)),
+            }
+            .await
+            .into()
+        })
+    }
+}
+
+#[inline]
+fn make_handler<F, P, O, M>(handler: F) -> Handler<P, O>
+where
+    F: ClientHandler<P, O, M>,
+    P: Send + 'static,
+    O: Send + 'static,
+{
+    Arc::new(move |params: P| handler.call(params))
 }
 
 type Handler<P, O> =
@@ -434,6 +520,30 @@ mod tests {
             result.is_err(),
             "disconnected client should return an error"
         );
+    }
+
+    #[tokio::test]
+    async fn map_elicitation_accepts_every_handler_shape() {
+        let mut client = Client::new();
+
+        // Asynchronous, synchronous and offloaded register through the same
+        // method; the marker is inferred from each signature.
+        client.map_elicitation(|_params: ElicitRequestParams| async { ElicitResult::accept() });
+        client.map_elicitation(|_params: ElicitRequestParams| ElicitResult::accept());
+        client.map_elicitation(crate::blocking(|_params: ElicitRequestParams| {
+            ElicitResult::accept()
+        }));
+
+        // The last one registered is the one that answers, and it answers
+        // through the blocking pool.
+        let handler = client
+            .options
+            .elicitation_handler
+            .clone()
+            .expect("a registered handler");
+        let result = handler(ElicitRequestParams::form("Proceed?").into()).await;
+
+        assert!(result.is_accepted());
     }
 
     #[cfg(not(feature = "legacy-spec"))]

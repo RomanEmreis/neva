@@ -86,9 +86,6 @@ pub mod shutdown;
 #[cfg(not(feature = "legacy-spec"))]
 pub(crate) mod subscriptions;
 
-/// Type-level markers that record whether a handler is asynchronous or
-/// synchronous. See [`handler::marker`].
-pub use handler::marker;
 pub use shutdown::ShutdownHandle;
 
 const DEFAULT_PAGE_SIZE: usize = 10;
@@ -949,7 +946,7 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
     /// Maps an MCP client request to a specific function
     ///
     /// The handler may return its value directly instead of a future -- any
-    /// [`IntoResponse`] will do; see [`marker::Immediate`].
+    /// [`IntoResponse`] will do; see [`crate::marker::Immediate`].
     ///
     /// # Example
     /// ```no_run
@@ -1090,7 +1087,7 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
     /// way and need no separate method. A synchronous handler runs on the
     /// runtime thread that dispatched the call: keep it to computation and
     /// lookups, and leave blocking I/O to an asynchronous handler. See
-    /// [`ToolHandler`] and [`marker::Immediate`].
+    /// [`ToolHandler`] and [`crate::marker::Immediate`].
     ///
     /// A synchronous handler that really does block -- file I/O, a synchronous
     /// driver, a long computation -- goes through [`blocking`](crate::blocking)

@@ -4,7 +4,7 @@ Blazingly fast and easily configurable [Model Context Protocol (MCP)](https://mo
 With simple configuration and ergonomic APIs, it provides everything you need to quickly build MCP clients and servers, 
 fully aligned with the latest MCP specification.
 
-[![latest](https://img.shields.io/badge/latest-0.5.7-d8eb34)](https://crates.io/crates/neva)
+[![latest](https://img.shields.io/badge/latest-0.5.8-d8eb34)](https://crates.io/crates/neva)
 [![latest](https://img.shields.io/badge/rustc-1.90+-964B00)](https://releases.rs/docs/1.90.0/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-624bd1.svg)](https://github.com/RomanEmreis/neva/blob/main/LICENSE)
 [![CI](https://github.com/RomanEmreis/neva/actions/workflows/rust.yml/badge.svg)](https://github.com/RomanEmreis/neva/actions/workflows/rust.yml)
@@ -19,10 +19,11 @@ fully aligned with the latest MCP specification.
 - **Performance** - asynchronous and Tokio-powered.
 - **Transports** - **stdio** for local integrations and **Streamable HTTP** for remote, bidirectional communication.
 - **Tools**, **Resources** & **Prompts** - full-house support for defining and consuming the main MCP entities.
+- **Async or sync handlers** - write `async fn` when you await something, a plain `fn` when you don't. Add `blocking` when the body blocks, and it runs on Tokio's blocking pool instead of a runtime worker.
 - **Authentication & Authorization** - bearer token authentication, role-based access control, and more to fit high security standards.
 - **Structured Data** - output validation, embedded resources, and resource links out of the box.
-- **Safe Multi Round-Trip Requests** - a handler that asks the client for input mid-call re-runs from the top on every round, so neva owns the idempotency: `ctx.memo` computes once, `ctx.once` runs an effect once, `ctx.on_commit` defers it to the final result, and a built-in store makes a lost-response retry replay the committed answer instead of charging the card twice. The protocol leaves this to the implementation; you don't hand-roll it per tool.
-- **Confidential request state** - the `requestState` blob that carries progress between rounds is sealed with ChaCha20-Poly1305, not merely signed, so the server-computed values `ctx.memo` caches stay unreadable to the client that echoes them back.
+- **Safe Multi Round-Trip Requests** - a handler that asks the client for input mid-call re-runs from the top on every round, so neva owns the idempotency: `ctx.memo` computes once, `ctx.once` runs an effect once, `ctx.on_commit` defers it to the final result, and a lost response replays the committed answer instead of charging the card twice.
+- **Confidential request state** - the `requestState` blob that carries progress between rounds is sealed with ChaCha20-Poly1305, not merely signed, so what `ctx.memo` caches stays unreadable to the client that echoes it back.
 - **Spec Alignment** - designed to track the latest MCP specification and cover its core functionality.
 
 ## Quick Start
@@ -30,7 +31,7 @@ fully aligned with the latest MCP specification.
 #### Dependencies
 ```toml
 [dependencies]
-neva = { version = "0.5.7", features = ["client-full"] }
+neva = { version = "0.5.8", features = ["client-full"] }
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -68,7 +69,7 @@ async fn main() -> Result<(), Error> {
 #### Dependencies
 ```toml
 [dependencies]
-neva = { version = "0.5.7", features = ["server-full"] }
+neva = { version = "0.5.8", features = ["server-full"] }
 tokio = { version = "1", features = ["full"] }
 ```
 #### Code
@@ -87,8 +88,9 @@ async fn get_res(name: String) -> ResourceContents {
         .with_text(format!("Some details about resource: {name}"))
 }
 
+// Nothing to await here, so a plain `fn` will do.
 #[prompt(descr = "Analyze code for potential improvements")]
-async fn analyze_code(lang: String) -> PromptMessage {
+fn analyze_code(lang: String) -> PromptMessage {
     PromptMessage::user()
         .with(format!("Language: {lang}"))
 }

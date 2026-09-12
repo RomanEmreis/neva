@@ -162,7 +162,7 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// The function may be `async` or synchronous. A synchronous one returns its
 /// value directly and runs on the runtime thread that dispatched the request;
 /// add the `blocking` attribute when the body really blocks, and it runs on
-/// Tokio's blocking pool instead. See [`macro@tool`] for the full rule.
+/// Tokio's blocking pool instead. See `neva::marker` for which shape to write.
 ///
 /// # Parameters
 /// * `uri` - Resource URI.
@@ -253,7 +253,7 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// The function may be `async` or synchronous. A synchronous one returns its
 /// value directly and runs on the runtime thread that dispatched the request;
 /// add the `blocking` attribute when the body really blocks, and it runs on
-/// Tokio's blocking pool instead. See [`macro@tool`] for the full rule.
+/// Tokio's blocking pool instead. See `neva::marker` for which shape to write.
 #[proc_macro_attribute]
 #[cfg(feature = "server")]
 pub fn resources(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -271,7 +271,7 @@ pub fn resources(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// The function may be `async` or synchronous. A synchronous one returns its
 /// value directly and runs on the runtime thread that dispatched the request;
 /// add the `blocking` attribute when the body really blocks, and it runs on
-/// Tokio's blocking pool instead. See [`macro@tool`] for the full rule.
+/// Tokio's blocking pool instead. See `neva::marker` for which shape to write.
 ///
 /// # Parameters
 /// * `title` - Prompt title.
@@ -332,7 +332,7 @@ pub fn prompt(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// The function may be `async` or synchronous. A synchronous one returns its
 /// value directly and runs on the runtime thread that dispatched the request;
 /// add the `blocking` attribute when the body really blocks, and it runs on
-/// Tokio's blocking pool instead. See [`macro@tool`] for the full rule.
+/// Tokio's blocking pool instead. See `neva::marker` for which shape to write.
 ///
 /// # Parameters
 /// * `command` - Command name.
@@ -365,7 +365,7 @@ pub fn handler(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// The function may be `async` or synchronous. A synchronous one returns its
 /// value directly and runs on the runtime thread that dispatched the request;
 /// add the `blocking` attribute when the body really blocks, and it runs on
-/// Tokio's blocking pool instead. See [`macro@tool`] for the full rule.
+/// Tokio's blocking pool instead. See `neva::marker` for which shape to write.
 #[proc_macro_attribute]
 #[cfg(feature = "server")]
 pub fn completion(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -379,6 +379,11 @@ pub fn completion(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// Maps the elicitation handler function
+///
+/// The function may be `async` or synchronous. A synchronous one returns its
+/// value directly and runs on the runtime thread that dispatched the request;
+/// add the `blocking` attribute when the body really blocks, and it runs on
+/// Tokio's blocking pool instead. See `neva::marker` for which shape to write.
 ///
 /// # Example
 /// ```ignore
@@ -404,14 +409,22 @@ pub fn completion(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```
 #[proc_macro_attribute]
 #[cfg(feature = "client")]
-pub fn elicitation(_: TokenStream, item: TokenStream) -> TokenStream {
+pub fn elicitation(attr: TokenStream, item: TokenStream) -> TokenStream {
     let function = parse_macro_input!(item as syn::ItemFn);
-    client::expand_elicitation(&function)
+    let attr = parse_macro_input!(
+        attr with Punctuated::<syn::Meta, Token![,]>::parse_terminated
+    );
+    client::expand_elicitation(&attr, &function)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }
 
 /// Maps the sampling handler function
+///
+/// The function may be `async` or synchronous. A synchronous one returns its
+/// value directly and runs on the runtime thread that dispatched the request;
+/// add the `blocking` attribute when the body really blocks, and it runs on
+/// Tokio's blocking pool instead. See `neva::marker` for which shape to write.
 ///
 /// # Example
 /// ```ignore
@@ -426,9 +439,12 @@ pub fn elicitation(_: TokenStream, item: TokenStream) -> TokenStream {
 /// ```
 #[proc_macro_attribute]
 #[cfg(feature = "client")]
-pub fn sampling(_: TokenStream, item: TokenStream) -> TokenStream {
+pub fn sampling(attr: TokenStream, item: TokenStream) -> TokenStream {
     let function = parse_macro_input!(item as syn::ItemFn);
-    client::expand_sampling(&function)
+    let attr = parse_macro_input!(
+        attr with Punctuated::<syn::Meta, Token![,]>::parse_terminated
+    );
+    client::expand_sampling(&attr, &function)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

@@ -9,62 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-* **Synchronous handlers, everywhere a handler is registered.** A handler may
-  now return its value directly instead of a future: `App::map_tool` /
-  `map_prompt` / `map_resource` / `map_ui_resource` / `map_handler` /
-  `map_resources` / `map_completion`, `Tool::new` and `Prompt::new`, the
-  `map_tool!` and `map_prompt!` macros, and `#[tool]`, `#[prompt]`,
-  `#[resource]`, `#[resources]`, `#[completion]` and `#[handler]` on a
-  non-`async fn`:
-
-  ```rust
-  #[tool(descr = "Sums two numbers")]
-  fn sum(a: i32, b: i32) -> i32 {
-      a + b
-  }
-
-  app.map_tool("sum", |a: i32, b: i32| a + b);
-  ```
+* **Synchronous handlers**, at every registration point on both sides: a
+  handler may return its value directly instead of a future. Server:
+  `App::map_tool`, `map_prompt`, `map_resource`, `map_ui_resource`,
+  `map_handler`, `map_resources`, `map_completion`, `Tool::new`, `Prompt::new`
+  and the `map_tool!` / `map_prompt!` macros. Client: `Client::map_sampling`
+  and `Client::map_elicitation`. Every attribute macro accepts a non-`async fn`.
 
   Which shape a handler has is read off its signature, so nothing else changes:
   the published schema, the argument slots and the response are the same as for
   the asynchronous form, and existing handlers are untouched. A synchronous
-  handler runs on the runtime thread that dispatched the request, so blocking
-  I/O still belongs in an asynchronous one.
+  handler runs on the runtime thread that dispatched the request.
 
-  `ToolHandler` and `PromptHandler` gained a second, defaulted type parameter
-  carrying that distinction (`ToolHandler<Args, M = marker::Async>`); bounds
-  written as `ToolHandler<Args>` keep their meaning. Resource reads got a
-  handler trait of their own, `types::ReadResourceHandler`.
-
-* **`neva::blocking` and `#[tool(blocking)]`**, for a synchronous handler that
-  really does block -- file I/O, a synchronous driver, a long computation.
-  Both run the handler on Tokio's blocking pool instead of the runtime thread
-  that dispatched the request, which would otherwise stall every other request
-  that worker was going to poll:
-
-  ```rust
-  #[tool(descr = "Reads a text file", blocking)]
-  fn read_file(path: String) -> Result<String, Error> {
-      std::fs::read_to_string(path).map_err(|err| Error::new(ErrorCode::InternalError, err))
-  }
-
-  app.map_tool("read_file", neva::blocking(|path: String| { /* ... */ }));
-  ```
-
-  `neva::blocking` is accepted at every registration point, and `blocking` is
-  an attribute on all six macros -- `#[tool]`, `#[prompt]`, `#[resource]`,
-  `#[resources]`, `#[completion]` and `#[handler]`. On an `async fn` it is a
-  compile error.
+* **`neva::blocking`**, which runs a synchronous handler on Tokio's blocking
+  pool instead of that thread, and `blocking` as an attribute on all eight
+  macros -- `#[tool]`, `#[prompt]`, `#[resource]`, `#[resources]`,
+  `#[completion]`, `#[handler]`, `#[sampling]` and `#[elicitation]`. On an
+  `async fn` it is a compile error.
 
   A panic inside the handler is propagated to the awaiting task, as it would be
   had the handler run inline. The offloaded task is not cancelled when the
   request is: it runs to completion and its result is discarded.
 
-  Reach for it only when the body really blocks -- the hand-off to another
-  thread costs more than a short body does. The rule of thumb is in the
-  `#[tool]` and `app::marker` docs: await something -> `async fn`; compute on
-  data in hand -> plain `fn`; block -> plain `fn` plus `blocking`.
+### Changed
+
+* `ToolHandler` and `PromptHandler` carry a second, defaulted type parameter for
+  the handler's shape (`ToolHandler<Args, M = marker::Async>`). Bounds written
+  as `ToolHandler<Args>` keep their meaning.
+
+* Resource reads, and the client's two handlers, got handler traits of their
+  own: `types::ReadResourceHandler` and `client::ClientHandler`. The shape
+  markers live at `neva::marker`.
 
 ## 0.5.7
 

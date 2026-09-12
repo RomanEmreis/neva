@@ -26,6 +26,8 @@ pub(crate) use arc_str::ArcStr;
 pub(crate) use memchr::MemChr;
 
 pub use either::Either;
+#[cfg(any(feature = "server", feature = "client"))]
+pub use handler::{BlockingCall, BlockingFn, blocking, marker};
 pub use into_args::IntoArgs;
 pub use one_or_many::OneOrMany;
 #[cfg(feature = "tasks")]
@@ -34,6 +36,8 @@ pub use task_api::{TaskApi, wait_to_completion};
 mod arc_slice;
 mod arc_str;
 mod either;
+#[cfg(any(feature = "server", feature = "client"))]
+mod handler;
 mod into_args;
 mod memchr;
 #[cfg(feature = "tracing")]

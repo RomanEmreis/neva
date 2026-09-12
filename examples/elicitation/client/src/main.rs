@@ -8,8 +8,10 @@ struct Contact {
     age: u32,
 }
 
+// A synchronous handler: validating the form awaits nothing, so there is no
+// reason to make this an `async fn`.
 #[elicitation]
-async fn elicitation_handler(params: ElicitRequestParams) -> ElicitResult {
+fn elicitation_handler(params: ElicitRequestParams) -> ElicitResult {
     match params {
         ElicitRequestParams::Url(_url) => ElicitResult::accept(),
         ElicitRequestParams::Form(form) => {

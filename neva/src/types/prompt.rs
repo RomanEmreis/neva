@@ -25,10 +25,10 @@ use std::sync::Arc;
 #[cfg(feature = "server")]
 use crate::app::{
     context::Context,
-    handler::{
-        BlockingFn, FromHandlerParams, Handler, HandlerFn, HandlerParams, RequestHandler, marker,
-    },
+    handler::{FromHandlerParams, Handler, HandlerFn, HandlerParams, RequestHandler},
 };
+#[cfg(feature = "server")]
+use crate::shared::{BlockingFn, marker};
 
 pub use get_prompt_result::{GetPromptResult, PromptMessage};
 

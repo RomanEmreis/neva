@@ -17,10 +17,8 @@ use {
     },
     crate::{
         Context,
-        app::handler::{
-            BlockingFn, FromHandlerParams, Handler, HandlerFn, HandlerParams, RequestHandler,
-            marker,
-        },
+        app::handler::{FromHandlerParams, Handler, HandlerFn, HandlerParams, RequestHandler},
+        shared::{BlockingFn, marker},
     },
     std::{future::Future, sync::Arc},
 };
