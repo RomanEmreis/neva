@@ -56,6 +56,106 @@ pub trait GenericHandler<Args>: Clone + Send + Sync + 'static {
     fn call(&self, args: Args) -> Self::Future;
 }
 
+/// Type-level markers telling the two shapes of handler apart.
+///
+/// A handler is recognized by its signature alone, and the two shapes -- one
+/// returning a future, one returning its value directly -- cannot be separated
+/// by a `where` clause: an impl for each would overlap and coherence rejects
+/// that. Carrying the shape as a type parameter keeps the impls distinct, and
+/// the marker is inferred at the registration site, so it does not appear in
+/// handler code.
+///
+/// # Examples
+/// ```no_run
+/// use neva::App;
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// let mut app = App::new();
+///
+/// // `marker::Async`: the handler returns a future, which the server awaits.
+/// app.map_tool("greet_later", |name: String| async move { format!("Hello, {name}") });
+///
+/// // `marker::Blocking`: the handler returns the value itself.
+/// app.map_tool("greet", |name: String| format!("Hello, {name}"));
+///
+/// # app.run().await;
+/// # }
+/// ```
+pub mod marker {
+    /// Marks a handler that returns a [`Future`](std::future::Future) for the
+    /// server to await.
+    ///
+    /// This is the default marker of every handler trait, so a bound written
+    /// without one -- `F: ToolHandler<Args>` -- means exactly what it meant
+    /// before synchronous handlers existed.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// use neva::App;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let mut app = App::new();
+    ///
+    /// app.map_tool("greet", |name: String| async move { format!("Hello, {name}") });
+    ///
+    /// # app.run().await;
+    /// # }
+    /// ```
+    #[derive(Debug)]
+    pub struct Async;
+
+    /// Marks a handler that returns its value directly, with nothing to await.
+    ///
+    /// Such a handler runs to completion on the runtime thread that dispatched
+    /// the request, so it must not block: reach for an async handler for I/O,
+    /// and move CPU-bound work onto [`tokio::task::spawn_blocking`] yourself.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// use neva::App;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let mut app = App::new();
+    ///
+    /// app.map_tool("greet", |name: String| format!("Hello, {name}"));
+    ///
+    /// # app.run().await;
+    /// # }
+    /// ```
+    #[derive(Debug)]
+    pub struct Blocking;
+}
+
+/// The call mechanics every handler trait shares: what a handler returns and
+/// how it is invoked.
+///
+/// `M` is one of the [`marker`] types and records which shape the implementing
+/// function has. Both markers are implemented for every supported arity, so
+/// this trait says nothing about whether a function is a *valid* handler: the
+/// [`marker::Blocking`] impl accepts any return type at all.
+///
+/// That is deliberate, and it is also why **no public method may be bound on
+/// this trait directly**. With both markers implemented, `M` would be left
+/// unconstrained and inference fails with E0283 ("multiple `impl`s
+/// satisfying ..."). Bound on a per-primitive trait instead --
+/// [`ToolHandler`](crate::types::ToolHandler) and its siblings. Each of those
+/// carries the conversion its registration point requires
+/// (`Into<CallToolResponse>` and so on) *on the impl*, which is what prunes the
+/// candidate set and pins `M`: a future does not convert into a tool response,
+/// and a tool response is not a future.
+pub trait HandlerFn<Args, M>: Clone + Send + Sync + 'static {
+    /// Output type
+    type Output;
+    /// Output future
+    type Future: Future<Output = Self::Output> + Send;
+
+    /// Calls the handler
+    fn call(&self, args: Args) -> Self::Future;
+}
+
 /// Represents a generic handler for list resources
 pub trait ListResourcesHandler<Args>: Clone + Send + Sync + 'static {
     /// Output type
@@ -192,6 +292,33 @@ impl_from_handler_params! { T1, T2, T3, T4 }
 impl_from_handler_params! { T1, T2, T3, T4, T5 }
 
 macro_rules! impl_generic_handler ({ $($param:ident)* } => {
+    impl<Func, Fut: Send, $($param,)*> HandlerFn<($($param,)*), marker::Async> for Func
+    where
+        Func: Fn($($param),*) -> Fut + Send + Sync + Clone + 'static,
+        Fut: Future + 'static,
+    {
+        type Output = Fut::Output;
+        type Future = Fut;
+
+        #[inline]
+        #[allow(non_snake_case)]
+        fn call(&self, ($($param,)*): ($($param,)*)) -> Self::Future {
+            (self)($($param,)*)
+        }
+    }
+    impl<Func, R: Send + 'static, $($param,)*> HandlerFn<($($param,)*), marker::Blocking> for Func
+    where
+        Func: Fn($($param),*) -> R + Send + Sync + Clone + 'static,
+    {
+        type Output = R;
+        type Future = std::future::Ready<R>;
+
+        #[inline]
+        #[allow(non_snake_case)]
+        fn call(&self, ($($param,)*): ($($param,)*)) -> Self::Future {
+            std::future::ready((self)($($param,)*))
+        }
+    }
     impl<Func, Fut: Send, $($param,)*> GenericHandler<($($param,)*)> for Func
     where
         Func: Fn($($param),*) -> Fut + Send + Sync + Clone + 'static,

@@ -11,6 +11,20 @@ mod shared;
 
 /// Maps the function to a tool
 ///
+/// The function may be `async` or synchronous. A synchronous one returns its
+/// value directly and runs on the runtime thread that dispatched the call, so
+/// it suits computation and lookups; blocking I/O belongs in an `async fn`.
+///
+/// # Synchronous Example
+/// ```ignore
+/// use neva::prelude::*;
+///
+/// #[tool(descr = "Sums two numbers")]
+/// fn sum(a: i32, b: i32) -> i32 {
+///     a + b
+/// }
+/// ```
+///
 /// # Parameters
 /// * `title` - Tool title.
 /// * `descr` - Tool description.

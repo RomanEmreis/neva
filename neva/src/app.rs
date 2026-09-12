@@ -86,6 +86,9 @@ pub mod shutdown;
 #[cfg(not(feature = "legacy-spec"))]
 pub(crate) mod subscriptions;
 
+/// Type-level markers that record whether a handler is asynchronous or
+/// synchronous. See [`handler::marker`].
+pub use handler::marker;
 pub use shutdown::ShutdownHandle;
 
 const DEFAULT_PAGE_SIZE: usize = 10;
@@ -1076,6 +1079,15 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
     /// itself change what the handler reads; a tool left in that state fails
     /// [`App::run`] at startup rather than on a peer's first call.
     ///
+    /// # Synchronous handlers
+    ///
+    /// The handler may return its value directly instead of a future. Which
+    /// shape it is is read off the signature, so both forms register the same
+    /// way and need no separate method. A synchronous handler runs on the
+    /// runtime thread that dispatched the call: keep it to computation and
+    /// lookups, and leave blocking I/O to an asynchronous handler. See
+    /// [`ToolHandler`] and [`marker::Blocking`].
+    ///
     /// # Example
     /// ```no_run
     /// use neva::App;
@@ -1089,14 +1101,19 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
     /// })
     /// .with_arg_names(["name"]);
     ///
+    /// // The same tool, synchronously.
+    /// app.map_tool("hello_sync", |name: String| format!("Hello, {name}"))
+    ///     .with_arg_names(["name"]);
+    ///
     /// # app.run().await;
     /// # }
     /// ```
-    pub fn map_tool<F, R, Args>(&mut self, name: impl Into<String>, handler: F) -> &mut Tool
+    pub fn map_tool<F, R, Args, M>(&mut self, name: impl Into<String>, handler: F) -> &mut Tool
     where
-        F: ToolHandler<Args, Output = R>,
+        F: ToolHandler<Args, M, Output = R>,
         R: Into<CallToolResponse> + Send + 'static,
         Args: FromHandlerArgs<CallToolRequestParams> + Send + Sync + 'static,
+        M: 'static,
     {
         self.options.add_tool(Tool::new(name, handler))
     }
@@ -1162,13 +1179,13 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
         uri: U,
         name: S,
         html: H,
-    ) -> &mut crate::app::extension::UiResource
+    ) -> &mut extension::UiResource
     where
         U: Into<Uri>,
         S: Into<String>,
         H: Into<String>,
     {
-        let resource = crate::app::extension::UiResource::new(uri, name, html);
+        let resource = extension::UiResource::new(uri, name, html);
         self.options.add_ui_resource(resource)
     }
 
@@ -1397,6 +1414,43 @@ mod tests {
         assert!(names.is_declared());
         assert_eq!(names.get(0), "name");
         assert_eq!(names.get(1), "age");
+    }
+
+    #[test]
+    fn map_tool_macro_accepts_a_sync_closure() {
+        let mut app = App::new();
+        crate::map_tool!(app, "greet", |name: String, age: i32| format!(
+            "{name} is {age}"
+        ));
+
+        // The macro needs no rule of its own for the synchronous shape: it
+        // passes the closure through as written and trait selection settles
+        // which `ToolHandler` impl applies.
+        assert_eq!(schema_props(&app, "greet"), ["age", "name"]);
+
+        let names = &app.options.tools.as_ref().get("greet").unwrap().arg_names;
+        assert!(names.is_declared());
+        assert_eq!(names.get(0), "name");
+        assert_eq!(names.get(1), "age");
+    }
+
+    #[tokio::test]
+    async fn map_tool_accepts_a_sync_handler() {
+        let mut app = App::new();
+        app.map_tool("greet", |name: String| format!("Hello, {name}"))
+            .with_arg_names(["name"]);
+
+        let tool = app.options.tools.as_ref().get("greet").unwrap().clone();
+        let resp = tool
+            .call(crate::types::CallToolRequestParams::new("greet").with_args([("name", "John")]))
+            .await
+            .unwrap();
+
+        assert!(
+            serde_json::to_string(&resp)
+                .unwrap()
+                .contains("Hello, John")
+        );
     }
 
     #[test]

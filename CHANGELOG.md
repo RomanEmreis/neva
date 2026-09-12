@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.5.8
+
+### Added
+
+* **Synchronous tool handlers.** A tool handler may now return its value
+  directly instead of a future, in every form of registration --
+  `App::map_tool`, `Tool::new`, the `map_tool!` macro and `#[tool]` on a
+  non-`async fn`:
+
+  ```rust
+  #[tool(descr = "Sums two numbers")]
+  fn sum(a: i32, b: i32) -> i32 {
+      a + b
+  }
+
+  app.map_tool("sum", |a: i32, b: i32| a + b);
+  ```
+
+  Which shape a handler has is read off its signature, so nothing else changes:
+  the published schema, the argument slots and the response are the same as for
+  the asynchronous form, and existing handlers are untouched. A synchronous
+  handler runs on the runtime thread that dispatched the call, so blocking I/O
+  still belongs in an asynchronous one.
+
+  `ToolHandler` gained a second, defaulted type parameter carrying that
+  distinction (`ToolHandler<Args, M = marker::Async>`); bounds written as
+  `ToolHandler<Args>` keep their meaning. Prompt, resource and request handlers
+  remain asynchronous for now.
+
 ## 0.5.7
 
 ### Fixed

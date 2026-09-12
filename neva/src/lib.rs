@@ -363,7 +363,9 @@ pub mod __macro_support {
 /// generated schema.
 ///
 /// Expands to the [`App::map_tool`] call itself, so the returned
-/// `&mut Tool` can be configured further as usual.
+/// `&mut Tool` can be configured further as usual. The closure body may be
+/// asynchronous or synchronous -- it is passed through as written and the
+/// shape is settled by [`App::map_tool`] itself.
 ///
 /// # Example
 /// ```no_run
@@ -377,6 +379,9 @@ pub mod __macro_support {
 ///     format!("Hello, {name}! You are {age}.")
 /// })
 /// .with_description("Greets a person");
+///
+/// map_tool!(app, "sum", |a: i32, b: i32| a + b)
+///     .with_description("Sums two numbers");
 ///
 /// # app.run().await;
 /// # }

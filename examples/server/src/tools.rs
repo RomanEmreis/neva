@@ -18,6 +18,15 @@ async fn say_hello() -> &'static str {
     "Hello, world!"
 }
 
+// A synchronous handler: no `async`, the value is returned directly. The body
+// runs on the runtime thread that dispatched the call, so this shape suits
+// pure computation and lookups -- anything that blocks belongs in an async
+// tool, or in `tokio::task::spawn_blocking`.
+#[tool(descr = "Sums two numbers")]
+fn sum(a: i32, b: i32) -> i32 {
+    a + b
+}
+
 #[tool(
     descr = "Hello to name tool",
     input_schema = r#"{
