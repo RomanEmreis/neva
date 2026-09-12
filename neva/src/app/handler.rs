@@ -5,8 +5,9 @@ use crate::app::options::RuntimeMcpOptions;
 use crate::error::{Error, ErrorCode};
 use crate::shared::BoxFuture;
 use crate::types::{
-    ArgNames, CallToolRequestParams, CompleteRequestParams, GetPromptRequestParams, IntoResponse,
-    ListResourcesRequestParams, ReadResourceRequestParams, Request, RequestId, Response,
+    ArgNames, CallToolRequestParams, CompleteRequestParams, CompleteResult, GetPromptRequestParams,
+    IntoResponse, ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams,
+    Request, RequestId, Response,
 };
 use std::future::Future;
 use std::sync::Arc;
@@ -162,8 +163,22 @@ pub trait HandlerFn<Args, M>: Clone + Send + Sync + 'static {
     fn call(&self, args: Args) -> Self::Future;
 }
 
-/// Represents a generic handler for list resources
-pub trait ListResourcesHandler<Args>: Clone + Send + Sync + 'static {
+/// Represents a generic handler for list resources, as registered by
+/// [`App::map_resources`](crate::App::map_resources).
+///
+/// Like every handler trait it comes in both shapes -- [`marker::Async`] (the
+/// default) and [`marker::Blocking`] -- and `M` is inferred from the
+/// handler's signature. It carries its own call mechanics rather than
+/// borrowing [`HandlerFn`]'s: a list handler is passed the request parameters
+/// alongside its extracted arguments.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a valid list resources handler",
+    label = "not a list resources handler",
+    note = "a list resources handler takes `ListResourcesRequestParams` followed by extractable \
+            arguments and returns either a value that converts into `ListResourcesResult` or a \
+            future of one"
+)]
+pub trait ListResourcesHandler<Args, M = marker::Async>: Clone + Send + Sync + 'static {
     /// Output type
     type Output;
     /// Output future
@@ -173,8 +188,18 @@ pub trait ListResourcesHandler<Args>: Clone + Send + Sync + 'static {
     fn call(&self, params: ListResourcesRequestParams, args: Args) -> Self::Future;
 }
 
-/// Represents a generic completion handler.
-pub trait CompletionHandler<Args>: Clone + Send + Sync + 'static {
+/// Represents a generic completion handler, as registered by
+/// [`App::map_completion`](crate::App::map_completion).
+///
+/// The completion counterpart of [`ListResourcesHandler`], with the same two
+/// shapes.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a valid completion handler",
+    label = "not a completion handler",
+    note = "a completion handler takes `CompleteRequestParams` followed by extractable arguments \
+            and returns either a value that converts into `CompleteResult` or a future of one"
+)]
+pub trait CompletionHandler<Args, M = marker::Async>: Clone + Send + Sync + 'static {
     /// Output type
     type Output;
     /// Output future
@@ -340,7 +365,7 @@ macro_rules! impl_generic_handler ({ $($param:ident)* } => {
         Func: Fn($($param),*) -> R + Send + Sync + Clone + 'static,
         R: IntoResponse + Send + 'static,
     {}
-    impl<Func, Fut: Send, $($param,)*> ListResourcesHandler<($($param,)*)> for Func
+    impl<Func, Fut: Send, $($param,)*> ListResourcesHandler<($($param,)*), marker::Async> for Func
     where
         Func: Fn(ListResourcesRequestParams, $($param),*) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future + 'static,
@@ -354,7 +379,24 @@ macro_rules! impl_generic_handler ({ $($param:ident)* } => {
             (self)(params, $($param,)*)
         }
     }
-    impl<Func, Fut: Send, $($param,)*> CompletionHandler<($($param,)*)> for Func
+    // The synchronous shape. `R: Into<ListResourcesResult>` is what keeps this
+    // impl and the asynchronous one apart during selection -- see `HandlerFn`
+    // -- so it must stay here rather than move to `App::map_resources`.
+    impl<Func, R, $($param,)*> ListResourcesHandler<($($param,)*), marker::Blocking> for Func
+    where
+        Func: Fn(ListResourcesRequestParams, $($param),*) -> R + Send + Sync + Clone + 'static,
+        R: Into<ListResourcesResult> + Send + 'static,
+    {
+        type Output = R;
+        type Future = std::future::Ready<R>;
+
+        #[inline]
+        #[allow(non_snake_case)]
+        fn call(&self, params: ListResourcesRequestParams, ($($param,)*): ($($param,)*)) -> Self::Future {
+            std::future::ready((self)(params, $($param,)*))
+        }
+    }
+    impl<Func, Fut: Send, $($param,)*> CompletionHandler<($($param,)*), marker::Async> for Func
     where
         Func: Fn(CompleteRequestParams, $($param),*) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future + 'static,
@@ -366,6 +408,21 @@ macro_rules! impl_generic_handler ({ $($param:ident)* } => {
         #[allow(non_snake_case)]
         fn call(&self, params: CompleteRequestParams, ($($param,)*): ($($param,)*)) -> Self::Future {
             (self)(params, $($param,)*)
+        }
+    }
+    // As above, with `R: Into<CompleteResult>` doing the separating.
+    impl<Func, R, $($param,)*> CompletionHandler<($($param,)*), marker::Blocking> for Func
+    where
+        Func: Fn(CompleteRequestParams, $($param),*) -> R + Send + Sync + Clone + 'static,
+        R: Into<CompleteResult> + Send + 'static,
+    {
+        type Output = R;
+        type Future = std::future::Ready<R>;
+
+        #[inline]
+        #[allow(non_snake_case)]
+        fn call(&self, params: CompleteRequestParams, ($($param,)*): ($($param,)*)) -> Self::Future {
+            std::future::ready((self)(params, $($param,)*))
         }
     }
 });

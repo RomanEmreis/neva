@@ -221,6 +221,9 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// Maps the list of resources function
+///
+/// The function may be `async` or synchronous. A synchronous one returns its
+/// value directly and runs on the runtime thread that dispatched the request.
 #[proc_macro_attribute]
 #[cfg(feature = "server")]
 pub fn resources(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -322,6 +325,9 @@ pub fn handler(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// Maps the completion function
+///
+/// The function may be `async` or synchronous. A synchronous one returns its
+/// value directly and runs on the runtime thread that dispatched the request.
 #[proc_macro_attribute]
 #[cfg(feature = "server")]
 pub fn completion(attr: TokenStream, item: TokenStream) -> TokenStream {

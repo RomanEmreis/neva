@@ -9,12 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-* **Synchronous handlers for tools, prompts, resources and requests.** A
-  handler may now return its value directly instead of a future, in every form
-  of registration -- `App::map_tool` / `map_prompt` / `map_resource` /
-  `map_handler`, `Tool::new` and `Prompt::new`, the `map_tool!` and
-  `map_prompt!` macros, and `#[tool]`, `#[prompt]`, `#[resource]` and
-  `#[handler]` on a non-`async fn`:
+* **Synchronous handlers, everywhere a handler is registered.** A handler may
+  now return its value directly instead of a future: `App::map_tool` /
+  `map_prompt` / `map_resource` / `map_ui_resource` / `map_handler` /
+  `map_resources` / `map_completion`, `Tool::new` and `Prompt::new`, the
+  `map_tool!` and `map_prompt!` macros, and `#[tool]`, `#[prompt]`,
+  `#[resource]`, `#[resources]`, `#[completion]` and `#[handler]` on a
+  non-`async fn`:
 
   ```rust
   #[tool(descr = "Sums two numbers")]
@@ -35,9 +36,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   carrying that distinction (`ToolHandler<Args, M = marker::Async>`); bounds
   written as `ToolHandler<Args>` keep their meaning. Resource reads got a
   handler trait of their own, `types::ReadResourceHandler`.
-
-  `App::map_resources` and `App::map_completion` -- and so `#[resources]` and
-  `#[completion]` -- remain asynchronous for now.
 
 ## 0.5.7
 

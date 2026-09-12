@@ -1344,14 +1344,20 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
     ///     ]
     /// });
     ///
+    /// // A fixed catalogue has nothing to await:
+    /// app.map_resources(|_params: ListResourcesRequestParams| {
+    ///     [Resource::new("res://res1", "res1")]
+    /// });
+    ///
     /// # app.run().await;
     /// # }
     /// ```
-    pub fn map_resources<F, Args, R>(&mut self, handler: F) -> &mut Self
+    pub fn map_resources<F, Args, R, M>(&mut self, handler: F) -> &mut Self
     where
-        F: ListResourcesHandler<Args, Output = R> + Clone + Send + Sync + 'static,
+        F: ListResourcesHandler<Args, M, Output = R> + Clone + Send + Sync + 'static,
         Args: FromHandlerParams + Send + Sync + 'static,
         R: Into<ListResourcesResult>,
+        M: 'static,
     {
         let handler = move |params, args| {
             let handler = handler.clone();
@@ -1375,14 +1381,18 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
     ///     ["Item 1", "Item 2", "Item 3"]
     /// });
     ///
+    /// // A fixed list has nothing to await:
+    /// app.map_completion(|_params: CompleteRequestParams| ["Item 1", "Item 2"]);
+    ///
     /// # app.run().await;
     /// # }
     /// ```
-    pub fn map_completion<F, Args, R>(&mut self, handler: F) -> &mut Self
+    pub fn map_completion<F, Args, R, M>(&mut self, handler: F) -> &mut Self
     where
-        F: CompletionHandler<Args, Output = R> + Clone + Send + Sync + 'static,
+        F: CompletionHandler<Args, M, Output = R> + Clone + Send + Sync + 'static,
         Args: FromHandlerParams + Send + Sync + 'static,
         R: Into<CompleteResult>,
+        M: 'static,
     {
         let handler = move |params, args| {
             let handler = handler.clone();
@@ -1622,6 +1632,29 @@ mod tests {
 
         assert!(app.handlers.contains_key("ping"));
         assert!(app.handlers.contains_key("ping_later"));
+    }
+
+    #[test]
+    fn map_resources_and_map_completion_accept_sync_handlers() {
+        use crate::types::{CompleteRequestParams, ListResourcesRequestParams, Resource};
+
+        let mut app = App::new();
+
+        // Both shapes register through the same method; that this compiles is
+        // the assertion -- the marker is inferred from each signature.
+        app.map_resources(|_params: ListResourcesRequestParams| {
+            [Resource::new("res://one", "one")]
+        });
+        app.map_completion(|params: CompleteRequestParams| [params.arg.value]);
+
+        assert!(
+            app.handlers
+                .contains_key(crate::types::resource::commands::LIST)
+        );
+        assert!(
+            app.handlers
+                .contains_key(crate::types::completion::commands::COMPLETE)
+        );
     }
 
     #[test]
