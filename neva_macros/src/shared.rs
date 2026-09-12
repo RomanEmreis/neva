@@ -2,7 +2,11 @@
 
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{Expr, ItemFn, Lit, Path, punctuated::Punctuated, token::Comma};
+use syn::{Path, punctuated::Punctuated, token::Comma};
+// Named only by the helpers below, which the `server` and `client` macros share
+// and a build with neither compiles out.
+#[cfg(any(feature = "server", feature = "client"))]
+use syn::{Expr, ItemFn, Lit};
 
 pub(super) fn expand_json_schema(
     attr: &Punctuated<Path, Comma>,
@@ -56,6 +60,7 @@ pub(super) fn expand_json_schema(
 /// synchronous function has any reason to do: an `async fn` already yields, and
 /// `neva::blocking` would reject it anyway -- with a far less obvious message
 /// than the one raised here.
+#[cfg(any(feature = "server", feature = "client"))]
 pub(crate) fn handler_code(
     function: &ItemFn,
     blocking: bool,
@@ -83,6 +88,7 @@ pub(crate) fn handler_code(
 /// compiled and did nothing. That is quietly wrong for `descr` and dangerous for
 /// `visibility`: `#[tool(visiblity = ["app"])]` would take the model-visible
 /// default, publishing to the agent a tool the author meant to keep for the app.
+#[cfg(any(feature = "server", feature = "client"))]
 pub(crate) fn unknown_attr<T: quote::ToTokens>(
     spanned: &T,
     name: &str,
@@ -100,6 +106,7 @@ pub(crate) fn unknown_attr<T: quote::ToTokens>(
 
 /// How to name a path in a diagnostic: its ident, or the whole path when it has
 /// no single one.
+#[cfg(any(feature = "server", feature = "client"))]
 pub(crate) fn path_name(path: &syn::Path) -> String {
     path.get_ident().map_or_else(
         || quote!(#path).to_string().replace(' ', ""),
@@ -107,6 +114,7 @@ pub(crate) fn path_name(path: &syn::Path) -> String {
     )
 }
 
+#[cfg(any(feature = "server", feature = "client"))]
 #[inline]
 pub(crate) fn get_bool_param(value: &Expr) -> bool {
     if let Expr::Lit(syn::ExprLit {
