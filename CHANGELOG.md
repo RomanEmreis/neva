@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## 0.5.8
+## 0.6.0
 
 ### Added
 
@@ -40,6 +40,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * Resource reads, and the client's two handlers, got handler traits of their
   own: `types::ReadResourceHandler` and `client::ClientHandler`. The shape
   markers live at `neva::marker`.
+
+### Changed (breaking)
+
+* **The registration methods take one more generic parameter**, the handler's
+  shape marker. It is always inferred from the handler, so this is invisible
+  unless a call site spells its generics out: `app.map_tool::<_, _, (String,)>(..)`
+  now needs a fourth argument (`app.map_tool::<_, _, (String,), _>(..)`) and
+  fails with E0107 until it gets one. Affected: `App::map_tool`, `map_prompt`,
+  `map_resource`, `map_ui_resource`, `map_handler`, `map_resources`,
+  `map_completion`, `Tool::new` and `Prompt::new`. `Client::map_sampling` and
+  `Client::map_elicitation` keep their arity, but their second parameter is now
+  the marker rather than the handler's future type.
+
+  Bounds are unaffected: the marker is defaulted on the traits, so
+  `where F: ToolHandler<Args, Output = R>` keeps its meaning. So is every call
+  site that leaves inference to do its job, which is all of them in this
+  repository and its examples.
+
+  The marker cannot be hidden behind an associated type or a defaulted method
+  parameter: two impls differing only in an associated type overlap, and Rust
+  has no defaults for generic parameters on functions. Distinguishing the two
+  shapes at all requires the parameter.
 
 ## 0.5.7
 
