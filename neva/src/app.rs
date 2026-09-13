@@ -1163,7 +1163,7 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
     /// anyone who can reach the resource can read it. That is usually right --
     /// the document is a template a host is expected to prefetch and review at
     /// connection time, while the data it displays comes from a tool, which
-    /// carries its own [`Tool::with_roles`](crate::types::Tool::with_roles).
+    /// carries its own `Tool::with_roles`.
     /// When the markup itself is sensitive, restrict it on the returned
     /// resource with `with_roles` and `with_permissions`, exactly as on a
     /// resource template.

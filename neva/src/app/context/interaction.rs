@@ -251,7 +251,8 @@ impl Context {
     /// Like [`Self::client_capabilities`], this describes the caller of *this*
     /// call. Presence is the declaration; what the settings must contain for
     /// the caller to count as supporting the extension is up to the extension.
-    /// For MCP Apps, use [`Self::supports_apps`], which applies that rule.
+    /// For MCP Apps, use `supports_apps` (under the `apps` feature), which
+    /// applies that rule.
     ///
     /// # Example
     /// ```no_run
