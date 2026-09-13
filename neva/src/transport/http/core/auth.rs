@@ -13,6 +13,47 @@ use crate::error::{Error, ErrorCode};
 const ERR_NO_CLAIMS: &str = "Claims are not provided";
 const ERR_UNAUTHORIZED: &str = "Subject is not authorized to invoke this";
 
+/// What a caller's [`Claims`] must hold to use a tool, a prompt or a resource.
+///
+/// One value per item, filled by that item's `with_roles` / `with_permissions`
+/// and checked by [`Self::validate`]. Empty means unrestricted.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RequiredClaims {
+    /// Roles allowed in; the caller must hold at least one.
+    roles: Option<Vec<String>>,
+    /// Permissions allowed in; the caller must hold at least one.
+    permissions: Option<Vec<String>>,
+}
+
+impl RequiredClaims {
+    /// Replaces the roles allowed in.
+    #[inline]
+    pub(crate) fn set_roles<T, I>(&mut self, roles: T)
+    where
+        T: IntoIterator<Item = I>,
+        I: Into<String>,
+    {
+        self.roles = Some(roles.into_iter().map(Into::into).collect());
+    }
+
+    /// Replaces the permissions allowed in.
+    #[inline]
+    pub(crate) fn set_permissions<T, I>(&mut self, permissions: T)
+    where
+        T: IntoIterator<Item = I>,
+        I: Into<String>,
+    {
+        self.permissions = Some(permissions.into_iter().map(Into::into).collect());
+    }
+
+    /// Whether `claims` satisfy both the roles and the permissions.
+    #[inline]
+    pub(crate) fn validate(&self, claims: Option<&dyn Claims>) -> Result<(), Error> {
+        validate_roles(claims, self.roles.as_deref())?;
+        validate_permissions(claims, self.permissions.as_deref())
+    }
+}
+
 /// Validates JWT claims against required permissions.
 ///
 /// Returns `Ok(())` if `required` is `None` or empty, if any of the
@@ -79,6 +120,41 @@ fn claims_missing() -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod required_claims {
+        use super::*;
+
+        #[test]
+        fn nothing_required_lets_anyone_in() {
+            assert!(RequiredClaims::default().validate(None).is_ok());
+        }
+
+        #[test]
+        fn roles_and_permissions_must_both_hold() {
+            let mut required = RequiredClaims::default();
+            required.set_roles(["admin"]);
+            required.set_permissions(["read"]);
+
+            let admin = TestClaims {
+                role: Some("admin".into()),
+                ..Default::default()
+            };
+            let reader = TestClaims {
+                permissions: Some(vec!["read".into()]),
+                ..Default::default()
+            };
+            let both = TestClaims {
+                role: Some("admin".into()),
+                permissions: Some(vec!["read".into()]),
+                ..Default::default()
+            };
+
+            assert!(required.validate(None).is_err());
+            assert!(required.validate(Some(&admin)).is_err());
+            assert!(required.validate(Some(&reader)).is_err());
+            assert!(required.validate(Some(&both)).is_ok());
+        }
+    }
 
     #[derive(Default, Debug)]
     struct TestClaims {

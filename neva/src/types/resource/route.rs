@@ -23,12 +23,23 @@ pub(crate) struct Route {
 
 /// A handler function for a resource route
 pub(crate) struct ResourceHandler {
-    /// The resource template this route was registered from, by name.
+    /// The resource template this route was registered from, by name -- or,
+    /// for a `ui://` resource, which no template backs, its URI.
     ///
-    /// `http-server` reads roles and permissions off it; `apps` reads the
-    /// `_meta.ui` block a `#[resource(ui_meta = ..)]` put there.
+    /// `http-server` copies the template's requirement onto
+    /// [`Self::required`] when the server starts; `apps` reads the `_meta.ui`
+    /// block a `#[resource(ui_meta = ..)]` put there.
     #[cfg(any(feature = "http-server", feature = "apps"))]
     pub(crate) template: String,
+
+    /// What a caller must hold to read this route.
+    ///
+    /// The one place `resources/read` looks, whatever registered the route: a
+    /// template's `with_roles` / `with_permissions` land here when the server
+    /// starts, a UI resource's when it is materialized.
+    #[cfg(feature = "http-server")]
+    pub(crate) required: crate::transport::http::core::auth::RequiredClaims,
+
     handler: RequestHandler<ReadResourceResult>,
 }
 
@@ -76,13 +87,14 @@ impl Route {
         }
     }
 
-    /// Inserts a route handler
+    /// Inserts a route handler, returning it so a caller can state the route's
+    /// own requirements.
     pub(crate) fn insert(
         &mut self,
         path: &Uri,
         _template: String,
         handler: RequestHandler<ReadResourceResult>,
-    ) {
+    ) -> &mut ResourceHandler {
         let mut current = self;
         let path_segments = path.parts().expect("URI parts should be present");
 
@@ -94,11 +106,25 @@ impl Route {
             }
         }
 
-        current.handler = Some(ResourceHandler {
+        current.handler.insert(ResourceHandler {
             #[cfg(any(feature = "http-server", feature = "apps"))]
-            template: _template.clone(),
-            handler: handler.clone(),
-        });
+            template: _template,
+            #[cfg(feature = "http-server")]
+            required: Default::default(),
+            handler,
+        })
+    }
+
+    /// Visits every route handler, for a pass over the whole table.
+    #[cfg(feature = "http-server")]
+    pub(crate) fn for_each_handler_mut(&mut self, f: &mut impl FnMut(&mut ResourceHandler)) {
+        if let Some(handler) = self.handler.as_mut() {
+            f(handler);
+        }
+        self.static_routes
+            .iter_mut()
+            .chain(self.dynamic_route.as_mut())
+            .for_each(|next| next.node.for_each_handler_mut(f));
     }
 
     /// Searches for a route handler
@@ -181,5 +207,28 @@ mod tests {
 
         assert!(route.find(&uri1).is_some());
         assert!(route.find(&uri2).is_some());
+    }
+
+    #[cfg(feature = "http-server")]
+    #[test]
+    fn a_pass_over_the_table_visits_every_handler() {
+        let handler = || ResourceFunc::new(|uri: Uri| async move { ResourceContents::new(uri) });
+
+        let mut route = Route::default();
+        for (uri, template) in [
+            ("res://a", "a"),
+            ("res://a/b", "ab"),
+            ("res://a/{id}", "a_id"),
+            ("res://a/{id}/c", "a_id_c"),
+            ("ui://z/app.html", "ui"),
+        ] {
+            route.insert(&uri.into(), template.into(), handler());
+        }
+
+        let mut seen = Vec::new();
+        route.for_each_handler_mut(&mut |h| seen.push(h.template.clone()));
+        seen.sort();
+
+        assert_eq!(seen, ["a", "a_id", "a_id_c", "ab", "ui"]);
     }
 }

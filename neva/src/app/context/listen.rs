@@ -178,6 +178,7 @@ mod subscription_sink_tests {
             timeout: Duration::from_secs(5),
             exec: ExecMode::None,
             client_capabilities: Default::default(),
+            client_extensions: None,
             #[cfg(feature = "di")]
             scope: None,
         }

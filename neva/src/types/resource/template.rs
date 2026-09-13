@@ -68,15 +68,10 @@ pub struct ResourceTemplate {
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<Value>,
 
-    /// A list of roles that are allowed to read the resource
+    /// What a caller must hold to read the resource.
     #[serde(skip)]
     #[cfg(feature = "http-server")]
-    pub(crate) roles: Option<Vec<String>>,
-
-    /// A list of permissions that are allowed to read the resource
-    #[serde(skip)]
-    #[cfg(feature = "http-server")]
-    pub(crate) permissions: Option<Vec<String>>,
+    pub(crate) required: crate::transport::http::core::auth::RequiredClaims,
 }
 
 /// Sent from the client to request a list of resource templates the server has.
@@ -319,9 +314,7 @@ impl ResourceTemplate {
             meta: None,
             icons: None,
             #[cfg(feature = "http-server")]
-            roles: None,
-            #[cfg(feature = "http-server")]
-            permissions: None,
+            required: Default::default(),
         }
     }
 
@@ -359,7 +352,7 @@ impl ResourceTemplate {
         T: IntoIterator<Item = I>,
         I: Into<String>,
     {
-        self.roles = Some(roles.into_iter().map(Into::into).collect());
+        self.required.set_roles(roles);
         self
     }
 
@@ -370,7 +363,7 @@ impl ResourceTemplate {
         T: IntoIterator<Item = I>,
         I: Into<String>,
     {
-        self.permissions = Some(permissions.into_iter().map(Into::into).collect());
+        self.required.set_permissions(permissions);
         self
     }
 

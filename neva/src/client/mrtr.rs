@@ -122,7 +122,7 @@ impl Client {
         // deliberately stays true for an empty list: an empty
         // `ListRootsResult` is a valid answer, so a client that opted in must
         // not be gated out of being asked.
-        meta.client_capabilities = Some(crate::types::mrtr::ClientMrtrCapabilities {
+        let mrtr = crate::types::mrtr::ClientMrtrCapabilities {
             // Declared without naming modes, which is the honest answer: the
             // handler is handed the whole `ElicitRequestParams` union, so what
             // it does with a `url` request is the caller's business and not
@@ -135,6 +135,12 @@ impl Client {
                 .then(crate::types::mrtr::ElicitationModes::default),
             sampling: self.options.sampling_handler.is_some(),
             roots: self.options.roots_capability().is_some(),
+        };
+        // The same map `initialize` carries: with no handshake, a request's
+        // `_meta` is the only place a server can see an extension declared.
+        meta.client_capabilities = Some(crate::types::RequestClientCapabilities {
+            mrtr,
+            extensions: self.options.extensions(),
         });
 
         if let Some(provider) = self.options.trace_context_provider.as_ref()

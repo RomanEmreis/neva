@@ -632,6 +632,25 @@ impl McpOptions {
             .or_insert(template)
     }
 
+    /// Copies each resource template's roles and permissions onto the routes it
+    /// registered.
+    ///
+    /// The route is the one place `resources/read` checks, so an ordinary
+    /// template and a `ui://` resource -- which has no template -- are judged
+    /// the same way, and a read never clones a template just to find its
+    /// requirement. It runs at startup because the requirement is set on the
+    /// `&mut ResourceTemplate` a registration hands back, after the route
+    /// already exists.
+    #[cfg(feature = "http-server")]
+    fn require_template_claims(&mut self) {
+        let templates = self.resources_templates.as_ref();
+        self.resource_routes.for_each_handler_mut(&mut |route| {
+            if let Some(template) = templates.get(&route.template) {
+                route.required = template.required.clone();
+            }
+        });
+    }
+
     /// Adds a `ui://` MCP Apps resource, returning it for further configuration.
     ///
     /// Only recorded here: the read handler and the optional listing entry are
@@ -673,10 +692,14 @@ impl McpOptions {
     /// would surface exactly what [`Self::set_ui_resource_listing`] was asked to
     /// keep out of the catalogue.
     #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
+    #[cfg_attr(
+        not(feature = "http-server"),
+        allow(unused_mut, unused_variables, reason = "the requirement is HTTP-only")
+    )]
     fn register_ui_resources(&mut self) {
         use crate::types::resource::template::ResourceFunc;
 
-        for resource in std::mem::take(&mut self.ui_resources).into_values() {
+        for mut resource in std::mem::take(&mut self.ui_resources).into_values() {
             let uri = resource.uri().clone();
             let contents = resource.contents();
             let handler = ResourceFunc::new(move || {
@@ -684,7 +707,13 @@ impl McpOptions {
                 async move { contents }
             });
 
-            self.resource_routes.insert(&uri, uri.to_string(), handler);
+            // The requirement goes on the route, where `resources/read` looks
+            // for every resource -- see `require_template_claims`.
+            let route = self.resource_routes.insert(&uri, uri.to_string(), handler);
+            #[cfg(feature = "http-server")]
+            {
+                route.required = std::mem::take(&mut resource.required);
+            }
 
             if self.list_ui_resources {
                 self.resources
@@ -1123,7 +1152,10 @@ impl McpOptions {
 
     /// Turns [`McpOptions`] into [`RuntimeMcpOptions`]
     pub(crate) fn into_runtime(mut self) -> RuntimeMcpOptions {
-        // Before the collections freeze: this still inserts into them.
+        // Before the collections freeze: both still read or insert into them.
+        // Templates first, so the pass only sees the routes they registered.
+        #[cfg(feature = "http-server")]
+        self.require_template_claims();
         #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
         self.register_ui_resources();
         self.tools = self.tools.into_runtime();
@@ -1835,11 +1867,12 @@ mod tests {
         #[tokio::test]
         #[cfg(feature = "http-server")]
         async fn a_ui_route_never_inherits_a_same_named_template() {
-            // `read_resource` reads roles and permissions off the resource
-            // template a route names. A `ui://` resource has no template entry
-            // on purpose, so the key it stores must be one an ordinary resource
-            // cannot collide with -- its URI, not its name. Keyed by name, the
-            // route below would silently pick up `restricted`'s claims.
+            // A route is keyed to the template it was registered from, and that
+            // key is how startup copies a template's roles onto its routes and
+            // how `apply_app_defaults` finds a `_meta.ui` block. A `ui://`
+            // resource has no template entry on purpose, so its key must be one
+            // an ordinary template cannot collide with -- its URI, not its name.
+            // Keyed by name, the route below would pick up `restricted`'s claims.
             let mut options = McpOptions::default();
             options.add_resource_template(
                 ResourceTemplate::new("res://restricted/{id}", "clock"),
@@ -1868,6 +1901,10 @@ mod tests {
                     .await
                     .is_none(),
                 "no template backs a ui:// route, so no claims are inherited"
+            );
+            assert!(
+                handler.required.validate(None).is_ok(),
+                "the route states no requirement of its own either"
             );
         }
 

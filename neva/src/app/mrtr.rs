@@ -44,10 +44,10 @@ pub(super) fn seed_mrtr_ctx(
 ) -> Result<std::sync::Arc<crate::app::context::MrtrCtx>, Error> {
     use crate::types::mrtr::state::{StateCodec, now_secs, request_binding};
 
-    let meta = req.meta();
-    let client_capabilities = meta
-        .as_ref()
+    let client_capabilities = req
+        .meta()
         .and_then(|m| m.client_capabilities)
+        .map(|caps| caps.mrtr)
         .unwrap_or_default();
 
     let mut answers = std::collections::HashMap::new();

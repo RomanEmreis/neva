@@ -1165,7 +1165,7 @@ mod tests {
     #[test]
     fn a_capability_naming_no_types_does_not_declare_support() {
         // The spec makes `mimeTypes` required, so an empty settings object is
-        // not a declaration -- this is exactly what `supports_apps` will gate on.
+        // not a declaration -- this is exactly what `Context::supports_apps` gates on.
         let cap: AppsCapability = serde_json::from_value(json!({})).unwrap();
 
         assert!(!cap.supports_html());

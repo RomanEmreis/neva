@@ -26,8 +26,9 @@ async fn main() -> Result<(), Error> {
             ["run", "--manifest-path", "examples/apps/server/Cargo.toml"],
         )
             // The client half: advertises `io.modelcontextprotocol/ui` with
-            // `mimeTypes: ["text/html;profile=mcp-app"]`. A server checks this
-            // before offering a UI-bound tool instead of a text-only one.
+            // `mimeTypes: ["text/html;profile=mcp-app"]` on every request's
+            // `_meta`. A server reads it to shape a UI-bound tool's answer for
+            // a caller that will render it.
             .with_apps()
     });
 
@@ -72,6 +73,13 @@ async fn main() -> Result<(), Error> {
             // access of any kind.
             println!("  _meta.ui: {:?}", contents.ui());
         }
+    }
+
+    // This client declared MCP Apps, so the server answers with the bare time
+    // for the clock face. Drop `.with_apps()` above and it answers in a sentence.
+    let result = client.call_tool("get_time", ()).await?;
+    if let Some(text) = result.content.first().and_then(|c| c.as_text()) {
+        println!("\nget_time: {}", text.text);
     }
 
     client.disconnect().await

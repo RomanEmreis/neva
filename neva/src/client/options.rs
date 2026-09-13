@@ -320,11 +320,12 @@ impl McpOptions {
     ///
     /// # Where it is sent
     ///
-    /// On the `initialize` handshake, under `capabilities.extensions`. That is
-    /// every connection in a `legacy-spec` build, and the dual-mode fallback in
-    /// a 2026-07-28 one. MCP 2026-07-28 has no handshake -- capabilities ride
-    /// each request's `_meta` -- and that channel is not wired yet; see the
-    /// [tracking issue](https://github.com/RomanEmreis/neva/issues/122).
+    /// Under `capabilities.extensions`, wherever the connection declares its
+    /// capabilities. MCP 2026-07-28 has no handshake, so that is every
+    /// request's `_meta` (`io.modelcontextprotocol/clientCapabilities`), which
+    /// a neva server reads with `Context::supports_apps`. The `initialize`
+    /// handshake carries it too: every connection in a `legacy-spec` build, and
+    /// the dual-mode fallback in a 2026-07-28 one.
     ///
     /// # Examples
     ///
@@ -699,7 +700,7 @@ mod tests {
 
         #[test]
         fn what_the_client_writes_is_what_a_server_reads_back() {
-            // The round trip a server's `supports_apps` check will make.
+            // The round trip a server's `supports_apps` check makes.
             let extensions = McpOptions::default().with_apps().extensions().unwrap();
             let settings = extensions.get(APPS_EXTENSION_ID).unwrap().clone();
 
