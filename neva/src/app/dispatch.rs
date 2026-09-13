@@ -365,7 +365,7 @@ impl App {
                 .meta()
                 .and_then(|m| m.client_capabilities)
                 .unwrap_or_default();
-            
+
             context.client_capabilities = caps.mrtr;
             context.client_extensions = caps.extensions.map(Arc::new);
         }

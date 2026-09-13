@@ -139,6 +139,10 @@ pub struct UiResource {
     descr: Option<String>,
     html: String,
     ui: UiResourceMeta,
+
+    /// What a caller must hold to read the resource.
+    #[cfg(feature = "http-server")]
+    pub(crate) required: crate::transport::http::core::auth::RequiredClaims,
 }
 
 impl UiResource {
@@ -166,6 +170,8 @@ impl UiResource {
             descr: None,
             html: html.into(),
             ui: UiResourceMeta::new(),
+            #[cfg(feature = "http-server")]
+            required: Default::default(),
         }
     }
 
@@ -240,10 +246,12 @@ impl UiResource {
         self
     }
 
-    /// Requests browser permissions for the app's iframe.
+    /// Requests browser permissions for the app's iframe: the `permissions`
+    /// field of `_meta.ui`.
     ///
     /// Requests, not grants: the host may ignore them, so feature-detect rather
-    /// than assume.
+    /// than assume. Not to be confused with who may *read* the resource, which
+    /// is `with_permissions`, as on any other resource.
     ///
     /// # Examples
     /// ```
@@ -251,11 +259,11 @@ impl UiResource {
     /// use neva::{app::extension::UiResource, types::UiPermissions};
     ///
     /// let mut res = UiResource::new("ui://scan/app.html", "scan", "");
-    /// res.with_permissions(UiPermissions::new().with_camera());
+    /// res.with_ui_permissions(UiPermissions::new().with_camera());
     /// # }
     /// ```
     #[inline]
-    pub fn with_permissions(&mut self, permissions: UiPermissions) -> &mut Self {
+    pub fn with_ui_permissions(&mut self, permissions: UiPermissions) -> &mut Self {
         self.ui.permissions = Some(permissions);
         self
     }
@@ -317,6 +325,62 @@ impl UiResource {
     #[inline]
     pub fn with_ui(&mut self, ui: UiResourceMeta) -> &mut Self {
         self.ui = ui;
+        self
+    }
+
+    /// Sets the roles allowed to read the resource.
+    ///
+    /// A caller holding none of them is refused on `resources/read`. The same
+    /// requirement
+    /// [`ResourceTemplate::with_roles`](crate::types::ResourceTemplate::with_roles)
+    /// and `#[resource(roles = [..])]` put on any other resource, checked in the
+    /// same place. Worth doing when the markup itself is sensitive; the data an
+    /// app displays usually comes from a tool, which carries its own
+    /// requirement.
+    ///
+    /// # Examples
+    /// ```
+    /// # #[cfg(all(feature = "apps", feature = "http-server"))] {
+    /// use neva::app::extension::UiResource;
+    ///
+    /// let mut res = UiResource::new("ui://admin/app.html", "admin", "");
+    /// res.with_roles(["admin"]);
+    /// # }
+    /// ```
+    #[cfg(feature = "http-server")]
+    pub fn with_roles<T, I>(&mut self, roles: T) -> &mut Self
+    where
+        T: IntoIterator<Item = I>,
+        I: Into<String>,
+    {
+        self.required.set_roles(roles);
+        self
+    }
+
+    /// Sets the permissions allowed to read the resource.
+    ///
+    /// What
+    /// [`ResourceTemplate::with_permissions`](crate::types::ResourceTemplate::with_permissions)
+    /// and `#[resource(permissions = [..])]` set on any other resource. Combined
+    /// with [`Self::with_roles`], a caller must satisfy both. The iframe's
+    /// browser permissions are [`Self::with_ui_permissions`].
+    ///
+    /// # Examples
+    /// ```
+    /// # #[cfg(all(feature = "apps", feature = "http-server"))] {
+    /// use neva::app::extension::UiResource;
+    ///
+    /// let mut res = UiResource::new("ui://admin/app.html", "admin", "");
+    /// res.with_permissions(["reports:read"]);
+    /// # }
+    /// ```
+    #[cfg(feature = "http-server")]
+    pub fn with_permissions<T, I>(&mut self, permissions: T) -> &mut Self
+    where
+        T: IntoIterator<Item = I>,
+        I: Into<String>,
+    {
+        self.required.set_permissions(permissions);
         self
     }
 

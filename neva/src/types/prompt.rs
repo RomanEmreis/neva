@@ -93,15 +93,10 @@ pub struct Prompt {
     #[cfg(feature = "server")]
     handler: Option<RequestHandler<GetPromptResult>>,
 
-    /// A list of roles that are allowed to get the prompt
+    /// What a caller must hold to get the prompt.
     #[serde(skip)]
     #[cfg(feature = "http-server")]
-    pub(crate) roles: Option<Vec<String>>,
-
-    /// A list of permissions that are allowed to get the prompt
-    #[serde(skip)]
-    #[cfg(feature = "http-server")]
-    pub(crate) permissions: Option<Vec<String>>,
+    pub(crate) required: crate::transport::http::core::auth::RequiredClaims,
 
     /// The names the handler's arguments are read from `arguments` by.
     ///
@@ -489,9 +484,7 @@ impl Prompt {
             args,
             handler: Some(handler),
             #[cfg(feature = "http-server")]
-            roles: None,
-            #[cfg(feature = "http-server")]
-            permissions: None,
+            required: Default::default(),
             icons: None,
         }
     }
@@ -602,7 +595,7 @@ impl Prompt {
         T: IntoIterator<Item = I>,
         I: Into<String>,
     {
-        self.roles = Some(roles.into_iter().map(Into::into).collect());
+        self.required.set_roles(roles);
         self
     }
 
@@ -613,7 +606,7 @@ impl Prompt {
         T: IntoIterator<Item = I>,
         I: Into<String>,
     {
-        self.permissions = Some(permissions.into_iter().map(Into::into).collect());
+        self.required.set_permissions(permissions);
         self
     }
 

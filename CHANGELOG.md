@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the MRTR flags beside `extensions`. A malformed `extensions` value reads as
   none declared. Not available under `legacy-spec`.
 
+* **Roles and permissions for `add_ui_resource`** (#123):
+  `UiResource::with_roles` and `UiResource::with_permissions`, as on a resource
+  template.
+
 * **Synchronous handlers**, at every registration point on both sides: a
   handler may return its value directly instead of a future. Server:
   `App::map_tool`, `map_prompt`, `map_resource`, `map_ui_resource`,
@@ -43,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+* `resources/read` checks roles and permissions on the matched route instead of
+  looking up and cloning its resource template on every read; a template's
+  requirement is copied onto its routes when the server starts.
+
 * `ToolHandler` and `PromptHandler` carry a second, defaulted type parameter for
   the handler's shape (`ToolHandler<Args, M = marker::Async>`). Bounds written
   as `ToolHandler<Args>` keep their meaning.
@@ -52,6 +60,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   markers live at `neva::marker`.
 
 ### Changed (breaking)
+
+* **`UiResource::with_permissions` is renamed `with_ui_permissions`** (#123).
+  `with_permissions` now sets who may read the resource, as on every other
+  resource; the iframe's browser permissions moved to the new name, so a 0.5.6
+  `with_permissions(UiPermissions::..)` call no longer compiles.
+  `UiResourceMeta::with_permissions` is unchanged.
 
 * **The registration methods take one more generic parameter**, the handler's
   shape marker. It is always inferred from the handler, so this is invisible
@@ -164,7 +178,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
   Not advertised to a server speaking MCP 2026-07-28, which has no handshake
   (#122, fixed in 0.6.0); `add_ui_resource` carries no role or permission
-  requirement (#123).
+  requirement (#123, fixed in 0.6.0).
   See `examples/apps`.
 
 ### Changed

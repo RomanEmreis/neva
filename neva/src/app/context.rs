@@ -45,7 +45,7 @@ use std::{
 use tokio::time::timeout;
 
 #[cfg(feature = "http-server")]
-use crate::transport::http::core::auth::{validate_permissions, validate_roles};
+use crate::transport::http::core::auth::RequiredClaims;
 #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 use crate::types::{
     CancelTaskRequestParams, Cursor, GetTaskPayloadRequestParams, GetTaskRequestParams,
@@ -459,15 +459,8 @@ impl Context {
 
     #[inline]
     #[cfg(feature = "http-server")]
-    fn validate_claims(
-        &self,
-        roles: Option<&[String]>,
-        permissions: Option<&[String]>,
-    ) -> Result<(), Error> {
-        let claims = self.claims.as_deref();
-        validate_roles(claims, roles)?;
-        validate_permissions(claims, permissions)?;
-        Ok(())
+    fn validate_claims(&self, required: &RequiredClaims) -> Result<(), Error> {
+        required.validate(self.claims.as_deref())
     }
 
     #[inline]

@@ -152,7 +152,7 @@ impl RequestClientCapabilities {
     /// let caps: RequestClientCapabilities = serde_json::from_value(serde_json::json!({
     ///     "extensions": { "com.example/search": { "fuzzy": true } }
     /// }))?;
-    /// 
+    ///
     /// assert_eq!(
     ///     caps.extension("com.example/search"),
     ///     Some(&serde_json::json!({ "fuzzy": true }))

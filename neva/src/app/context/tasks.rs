@@ -90,7 +90,7 @@ impl Context {
             None => Err(Error::new(ErrorCode::InvalidParams, "Tool not found")),
             Some(tool) => {
                 #[cfg(feature = "http-server")]
-                self.validate_claims(tool.roles.as_deref(), tool.permissions.as_deref())?;
+                self.validate_claims(&tool.required)?;
 
                 let task_support = tool.task_support();
                 if let Some(task_meta) = params.task {
