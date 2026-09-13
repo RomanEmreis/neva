@@ -25,8 +25,10 @@ use std::sync::Arc;
 #[cfg(feature = "server")]
 use crate::app::{
     context::Context,
-    handler::{FromHandlerParams, GenericHandler, Handler, HandlerParams, RequestHandler},
+    handler::{FromHandlerParams, Handler, HandlerFn, HandlerParams, RequestHandler},
 };
+#[cfg(feature = "server")]
+use crate::shared::{BlockingFn, marker};
 
 pub use get_prompt_result::{GetPromptResult, PromptMessage};
 
@@ -323,9 +325,44 @@ impl<T: Into<String>> From<(T, T, bool)> for PromptArgument {
     }
 }
 
-/// Describes a generic get prompt handler
+/// Describes a generic get prompt handler.
+///
+/// Implemented for every function whose parameters are extractable and whose
+/// return type converts into a [`GetPromptResult`], in both shapes a handler
+/// can take: an **asynchronous** one returning a future of such a value
+/// ([`marker::Async`], the default) and a **synchronous** one returning the
+/// value itself ([`marker::Immediate`]).
+///
+/// `M` records which of the two a given function is and is inferred at the
+/// registration site, so bounds written against this trait normally leave it
+/// out. See [`crate::types::ToolHandler`] for the same distinction on tools.
+///
+/// # Examples
+/// ```no_run
+/// use neva::{App, types::Role};
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// let mut app = App::new();
+///
+/// app.map_prompt("analyze", |lang: String| (format!("Analyze {lang}"), Role::User));
+/// app.map_prompt("analyze_later", |lang: String| async move {
+///     (format!("Analyze {lang}"), Role::User)
+/// });
+///
+/// # app.run().await;
+/// # }
+/// ```
 #[cfg(feature = "server")]
-pub trait PromptHandler<Args>: GenericHandler<Args> {
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a valid prompt handler",
+    label = "not a prompt handler",
+    note = "a prompt handler is a function of extractable arguments returning either a value \
+            that converts into `GetPromptResult` or a future of one",
+    note = "check that every parameter can be extracted and that the return type implements \
+            `TryInto<GetPromptResult>`"
+)]
+pub trait PromptHandler<Args, M = marker::Async>: HandlerFn<Args, M> {
     /// Returns the handler's value-carrying arguments, in declaration order.
     ///
     /// Parameters extracted from request metadata ([`crate::types::Meta`],
@@ -338,21 +375,23 @@ pub trait PromptHandler<Args>: GenericHandler<Args> {
 }
 
 #[cfg(feature = "server")]
-pub(crate) struct PromptFunc<F, R, Args>
+pub(crate) struct PromptFunc<F, R, Args, M>
 where
-    F: PromptHandler<Args, Output = R>,
+    F: PromptHandler<Args, M, Output = R>,
     R: TryInto<GetPromptResult>,
     R::Error: Into<Error>,
     Args: FromHandlerArgs<GetPromptRequestParams>,
 {
     func: F,
-    _marker: std::marker::PhantomData<Args>,
+    // See `ToolFunc`: a function pointer keeps the phantom marker from
+    // dragging auto traits onto the `Arc`-ed handler.
+    _marker: std::marker::PhantomData<fn() -> (Args, M)>,
 }
 
 #[cfg(feature = "server")]
-impl<F, R, Args> PromptFunc<F, R, Args>
+impl<F, R, Args, M> PromptFunc<F, R, Args, M>
 where
-    F: PromptHandler<Args, Output = R>,
+    F: PromptHandler<Args, M, Output = R>,
     R: TryInto<GetPromptResult>,
     R::Error: Into<Error>,
     Args: FromHandlerArgs<GetPromptRequestParams>,
@@ -368,9 +407,9 @@ where
 }
 
 #[cfg(feature = "server")]
-impl<F, R, Args> Handler<GetPromptResult> for PromptFunc<F, R, Args>
+impl<F, R, Args, M> Handler<GetPromptResult> for PromptFunc<F, R, Args, M>
 where
-    F: PromptHandler<Args, Output = R>,
+    F: PromptHandler<Args, M, Output = R>,
     R: TryInto<GetPromptResult>,
     R::Error: Into<Error>,
     Args: FromHandlerArgs<GetPromptRequestParams> + Send + Sync,
@@ -428,16 +467,19 @@ impl Debug for Prompt {
 #[cfg(feature = "server")]
 impl Prompt {
     /// Creates a new [`Prompt`]
+    ///
+    /// The handler may be asynchronous or synchronous; see [`PromptHandler`].
     #[inline]
-    pub fn new<F, R, Args>(name: impl Into<String>, handler: F) -> Self
+    pub fn new<F, R, Args, M>(name: impl Into<String>, handler: F) -> Self
     where
-        F: PromptHandler<Args, Output = R>,
+        F: PromptHandler<Args, M, Output = R>,
         R: TryInto<GetPromptResult> + Send + 'static,
         R::Error: Into<Error>,
         Args: FromHandlerArgs<GetPromptRequestParams> + Send + Sync + 'static,
+        M: 'static,
     {
         let handler = PromptFunc::new(handler);
-        let args = F::args();
+        let args = <F as PromptHandler<Args, M>>::args();
         Self {
             name: name.into(),
             title: None,
@@ -669,9 +711,23 @@ impl PromptArgument {
     }
 }
 
+/// Appends the argument slot `T` occupies, if it occupies one.
+///
+/// Metadata-served parameters ([`Context`], [`crate::types::Meta`], DI) are not
+/// arguments: they are neither published nor do they consume a slot. Shared by
+/// the two [`PromptHandler`] impls so the asynchronous and synchronous shapes
+/// of the same signature cannot describe different arguments.
+#[cfg(feature = "server")]
+#[inline]
+fn push_prompt_arg<T: TypeCategory>(args: &mut Vec<PromptArgument>) {
+    if T::category() != PropertyType::None {
+        args.push(PromptArgument::positional(args.len(), !T::is_optional()));
+    }
+}
+
 macro_rules! impl_generic_prompt_handler ({ $($param:ident)* } => {
     #[cfg(feature = "server")]
-    impl<Func, Fut: Send, $($param: TypeCategory,)*> PromptHandler<($($param,)*)> for Func
+    impl<Func, Fut: Send, $($param: TypeCategory,)*> PromptHandler<($($param,)*), marker::Async> for Func
     where
         Func: Fn($($param),*) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future + 'static,
@@ -680,23 +736,40 @@ macro_rules! impl_generic_prompt_handler ({ $($param:ident)* } => {
         #[allow(unused_mut)]
         fn args() -> Option<Vec<PromptArgument>> {
             let mut args: Vec<PromptArgument> = Vec::new();
-            $(
-            {
-                // Metadata-served parameters are not arguments: they are
-                // neither published nor do they consume an argument slot.
-                if $param::category() != PropertyType::None {
-                    args.push(PromptArgument::positional(
-                        args.len(),
-                        !$param::is_optional(),
-                    ));
-                }
-            }
-            )*
-            if args.is_empty() {
-                None
-            } else {
-                Some(args)
-            }
+            $( push_prompt_arg::<$param>(&mut args); )*
+            if args.is_empty() { None } else { Some(args) }
+        }
+    }
+    // The synchronous shape. `R: TryInto<GetPromptResult>` is what keeps this
+    // impl and the asynchronous one apart during selection -- see `HandlerFn`
+    // -- so it must stay here rather than move to the registration methods.
+    #[cfg(feature = "server")]
+    impl<Func, R, $($param: TypeCategory,)*> PromptHandler<($($param,)*), marker::Immediate> for Func
+    where
+        Func: Fn($($param),*) -> R + Send + Sync + Clone + 'static,
+        R: TryInto<GetPromptResult> + Send + 'static,
+    {
+        #[inline]
+        #[allow(unused_mut)]
+        fn args() -> Option<Vec<PromptArgument>> {
+            let mut args: Vec<PromptArgument> = Vec::new();
+            $( push_prompt_arg::<$param>(&mut args); )*
+            if args.is_empty() { None } else { Some(args) }
+        }
+    }
+    // The same handler moved onto the blocking pool by `neva::blocking`.
+    #[cfg(feature = "server")]
+    impl<Func, R, $($param: TypeCategory + Send + 'static,)*> PromptHandler<($($param,)*), marker::Immediate> for BlockingFn<Func>
+    where
+        Func: Fn($($param),*) -> R + Send + Sync + Clone + 'static,
+        R: TryInto<GetPromptResult> + Send + 'static,
+    {
+        #[inline]
+        #[allow(unused_mut)]
+        fn args() -> Option<Vec<PromptArgument>> {
+            let mut args: Vec<PromptArgument> = Vec::new();
+            $( push_prompt_arg::<$param>(&mut args); )*
+            if args.is_empty() { None } else { Some(args) }
         }
     }
 });

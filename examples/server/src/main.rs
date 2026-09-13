@@ -15,6 +15,13 @@ async fn ping_handler() {
     eprintln!("pong");
 }
 
+// A synchronous request handler: no `async`, the response value is returned
+// directly.
+#[handler(command = "echo")]
+fn echo_handler() -> &'static str {
+    "echo"
+}
+
 #[tokio::main]
 async fn main() {
     App::new()

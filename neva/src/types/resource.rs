@@ -19,6 +19,8 @@ pub use read_resource_result::{
     BlobResourceContents, EmptyResourceContents, JsonResourceContents, ReadResourceResult,
     ResourceContents, TextResourceContents,
 };
+#[cfg(feature = "server")]
+pub use template::ReadResourceHandler;
 pub use template::{
     ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ResourceTemplate,
 };

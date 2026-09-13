@@ -74,6 +74,9 @@ pub use tool::{
 pub use tool::ToolSchema;
 
 #[cfg(feature = "server")]
+pub use resource::ReadResourceHandler;
+
+#[cfg(feature = "server")]
 pub use tool::ToolHandler;
 
 /// The MCP schema type for tool input and output schemas.

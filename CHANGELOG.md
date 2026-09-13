@@ -5,6 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.6.0
+
+### Added
+
+* **Synchronous handlers**, at every registration point on both sides: a
+  handler may return its value directly instead of a future. Server:
+  `App::map_tool`, `map_prompt`, `map_resource`, `map_ui_resource`,
+  `map_handler`, `map_resources`, `map_completion`, `Tool::new`, `Prompt::new`
+  and the `map_tool!` / `map_prompt!` macros. Client: `Client::map_sampling`
+  and `Client::map_elicitation`. Every attribute macro accepts a non-`async fn`.
+
+  Which shape a handler has is read off its signature, so nothing else changes:
+  the published schema, the argument slots and the response are the same as for
+  the asynchronous form, and existing handlers are untouched. A synchronous
+  handler runs on the runtime thread that dispatched the request.
+
+* **`neva::blocking`**, which runs a synchronous handler on Tokio's blocking
+  pool instead of that thread, and `blocking` as an attribute on all eight
+  macros -- `#[tool]`, `#[prompt]`, `#[resource]`, `#[resources]`,
+  `#[completion]`, `#[handler]`, `#[sampling]` and `#[elicitation]`. On an
+  `async fn` it is a compile error.
+
+  A panic inside the handler is propagated to the awaiting task, as it would be
+  had the handler run inline. The offloaded task is not cancelled when the
+  request is: it runs to completion and its result is discarded.
+
+### Changed
+
+* `ToolHandler` and `PromptHandler` carry a second, defaulted type parameter for
+  the handler's shape (`ToolHandler<Args, M = marker::Async>`). Bounds written
+  as `ToolHandler<Args>` keep their meaning.
+
+* Resource reads, and the client's two handlers, got handler traits of their
+  own: `types::ReadResourceHandler` and `client::ClientHandler`. The shape
+  markers live at `neva::marker`.
+
+### Changed (breaking)
+
+* **The registration methods take one more generic parameter**, the handler's
+  shape marker. It is always inferred from the handler, so this is invisible
+  unless a call site spells its generics out: `app.map_tool::<_, _, (String,)>(..)`
+  now needs a fourth argument (`app.map_tool::<_, _, (String,), _>(..)`) and
+  fails with E0107 until it gets one. Affected: `App::map_tool`, `map_prompt`,
+  `map_resource`, `map_ui_resource`, `map_handler`, `map_resources`,
+  `map_completion`, `Tool::new` and `Prompt::new`. `Client::map_sampling` and
+  `Client::map_elicitation` keep their arity, but their second parameter is now
+  the marker rather than the handler's future type.
+
+  Bounds are unaffected: the marker is defaulted on the traits, so
+  `where F: ToolHandler<Args, Output = R>` keeps its meaning. So is every call
+  site that leaves inference to do its job, which is all of them in this
+  repository and its examples.
+
+  The marker cannot be hidden behind an associated type or a defaulted method
+  parameter: two impls differing only in an associated type overlap, and Rust
+  has no defaults for generic parameters on functions. Distinguishing the two
+  shapes at all requires the parameter.
+
 ## 0.5.7
 
 ### Fixed

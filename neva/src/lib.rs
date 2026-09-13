@@ -84,6 +84,8 @@ pub use app::notification_bus::{BusNotification, NotificationBus};
 pub use app::{App, ShutdownHandle, context::Context};
 #[cfg(feature = "client")]
 pub use client::Client;
+#[cfg(any(feature = "server", feature = "client"))]
+pub use shared::{BlockingCall, BlockingFn, blocking, marker};
 
 #[cfg(feature = "server")]
 pub mod app;
@@ -363,7 +365,9 @@ pub mod __macro_support {
 /// generated schema.
 ///
 /// Expands to the [`App::map_tool`] call itself, so the returned
-/// `&mut Tool` can be configured further as usual.
+/// `&mut Tool` can be configured further as usual. The closure body may be
+/// asynchronous or synchronous -- it is passed through as written and the
+/// shape is settled by [`App::map_tool`] itself.
 ///
 /// # Example
 /// ```no_run
@@ -377,6 +381,9 @@ pub mod __macro_support {
 ///     format!("Hello, {name}! You are {age}.")
 /// })
 /// .with_description("Greets a person");
+///
+/// map_tool!(app, "sum", |a: i32, b: i32| a + b)
+///     .with_description("Sums two numbers");
 ///
 /// # app.run().await;
 /// # }
@@ -396,6 +403,9 @@ macro_rules! map_tool {
 /// [`crate::types::prompt::Prompt::with_args`], which is both what
 /// `prompts/list` publishes and what extraction reads by.
 ///
+/// The closure body may be asynchronous or synchronous -- it is passed through
+/// as written and the shape is settled by [`App::map_prompt`] itself.
+///
 /// # Example
 /// ```no_run
 /// use neva::{App, map_prompt, types::Role};
@@ -408,6 +418,9 @@ macro_rules! map_tool {
 ///     (format!("Analyze this {lang} code: {code}"), Role::User)
 /// })
 /// .with_description("Analyzes a code snippet");
+///
+/// map_prompt!(app, "review", |lang: String| (format!("Review this {lang}"), Role::User))
+///     .with_description("Reviews a code snippet");
 ///
 /// # app.run().await;
 /// # }

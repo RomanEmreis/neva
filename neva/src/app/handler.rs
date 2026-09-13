@@ -4,9 +4,11 @@ use crate::Context;
 use crate::app::options::RuntimeMcpOptions;
 use crate::error::{Error, ErrorCode};
 use crate::shared::BoxFuture;
+use crate::shared::{BlockingCall, BlockingFn, marker};
 use crate::types::{
-    ArgNames, CallToolRequestParams, CompleteRequestParams, GetPromptRequestParams, IntoResponse,
-    ListResourcesRequestParams, ReadResourceRequestParams, Request, RequestId, Response,
+    ArgNames, CallToolRequestParams, CompleteRequestParams, CompleteResult, GetPromptRequestParams,
+    IntoResponse, ListResourcesRequestParams, ListResourcesResult, ReadResourceRequestParams,
+    Request, RequestId, Response,
 };
 use std::future::Future;
 use std::sync::Arc;
@@ -46,18 +48,65 @@ pub trait FromHandlerParams: Sized {
     fn from_params(params: &HandlerParams) -> Result<Self, Error>;
 }
 
-/// Represents a generic handler
-pub trait GenericHandler<Args>: Clone + Send + Sync + 'static {
+/// Represents a generic request handler, as registered by
+/// [`App::map_handler`](crate::App::map_handler).
+///
+/// Implemented for every function whose parameters are extractable and whose
+/// return type is an [`IntoResponse`], in both shapes a handler can take: an
+/// **asynchronous** one returning a future of such a value ([`marker::Async`],
+/// the default) and a **synchronous** one returning the value itself
+/// ([`marker::Immediate`]).
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a valid request handler",
+    label = "not a request handler",
+    note = "a request handler is a function of extractable arguments returning either a value \
+            that implements `IntoResponse` or a future of one"
+)]
+pub trait GenericHandler<Args, M = marker::Async>: HandlerFn<Args, M> {}
+
+/// The call mechanics every handler trait shares: what a handler returns and
+/// how it is invoked.
+///
+/// `M` is one of the [`marker`] types and records which shape the implementing
+/// function has. Both markers are implemented for every supported arity, so
+/// this trait says nothing about whether a function is a *valid* handler: the
+/// [`marker::Immediate`] impl accepts any return type at all.
+///
+/// That is deliberate, and it is also why **no public method may be bound on
+/// this trait directly**. With both markers implemented, `M` would be left
+/// unconstrained and inference fails with E0283 ("multiple `impl`s
+/// satisfying ..."). Bound on a per-primitive trait instead --
+/// [`ToolHandler`](crate::types::ToolHandler) and its siblings. Each of those
+/// carries the conversion its registration point requires
+/// (`Into<CallToolResponse>` and so on) *on the impl*, which is what prunes the
+/// candidate set and pins `M`: a future does not convert into a tool response,
+/// and a tool response is not a future.
+pub trait HandlerFn<Args, M>: Clone + Send + Sync + 'static {
     /// Output type
     type Output;
     /// Output future
     type Future: Future<Output = Self::Output> + Send;
 
+    /// Calls the handler
     fn call(&self, args: Args) -> Self::Future;
 }
 
-/// Represents a generic handler for list resources
-pub trait ListResourcesHandler<Args>: Clone + Send + Sync + 'static {
+/// Represents a generic handler for list resources, as registered by
+/// [`App::map_resources`](crate::App::map_resources).
+///
+/// Like every handler trait it comes in both shapes -- [`marker::Async`] (the
+/// default) and [`marker::Immediate`] -- and `M` is inferred from the
+/// handler's signature. It carries its own call mechanics rather than
+/// borrowing [`HandlerFn`]'s: a list handler is passed the request parameters
+/// alongside its extracted arguments.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a valid list resources handler",
+    label = "not a list resources handler",
+    note = "a list resources handler takes `ListResourcesRequestParams` followed by extractable \
+            arguments and returns either a value that converts into `ListResourcesResult` or a \
+            future of one"
+)]
+pub trait ListResourcesHandler<Args, M = marker::Async>: Clone + Send + Sync + 'static {
     /// Output type
     type Output;
     /// Output future
@@ -67,8 +116,18 @@ pub trait ListResourcesHandler<Args>: Clone + Send + Sync + 'static {
     fn call(&self, params: ListResourcesRequestParams, args: Args) -> Self::Future;
 }
 
-/// Represents a generic completion handler.
-pub trait CompletionHandler<Args>: Clone + Send + Sync + 'static {
+/// Represents a generic completion handler, as registered by
+/// [`App::map_completion`](crate::App::map_completion).
+///
+/// The completion counterpart of [`ListResourcesHandler`], with the same two
+/// shapes.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a valid completion handler",
+    label = "not a completion handler",
+    note = "a completion handler takes `CompleteRequestParams` followed by extractable arguments \
+            and returns either a value that converts into `CompleteResult` or a future of one"
+)]
+pub trait CompletionHandler<Args, M = marker::Async>: Clone + Send + Sync + 'static {
     /// Output type
     type Output;
     /// Output future
@@ -78,19 +137,21 @@ pub trait CompletionHandler<Args>: Clone + Send + Sync + 'static {
     fn call(&self, params: CompleteRequestParams, args: Args) -> Self::Future;
 }
 
-pub(crate) struct RequestFunc<F, R, Args>
+pub(crate) struct RequestFunc<F, R, Args, M>
 where
-    F: GenericHandler<Args, Output = R>,
+    F: GenericHandler<Args, M, Output = R>,
     R: IntoResponse,
     Args: FromHandlerParams,
 {
     func: F,
-    _marker: std::marker::PhantomData<Args>,
+    // See `ToolFunc`: a function pointer keeps the phantom marker from
+    // dragging auto traits onto the `Arc`-ed handler.
+    _marker: std::marker::PhantomData<fn() -> (Args, M)>,
 }
 
-impl<F, R, Args> RequestFunc<F, R, Args>
+impl<F, R, Args, M> RequestFunc<F, R, Args, M>
 where
-    F: GenericHandler<Args, Output = R>,
+    F: GenericHandler<Args, M, Output = R>,
     R: IntoResponse,
     Args: FromHandlerParams,
 {
@@ -103,9 +164,9 @@ where
     }
 }
 
-impl<F, R, Args> Handler<Response> for RequestFunc<F, R, Args>
+impl<F, R, Args, M> Handler<Response> for RequestFunc<F, R, Args, M>
 where
-    F: GenericHandler<Args, Output = R>,
+    F: GenericHandler<Args, M, Output = R>,
     R: IntoResponse,
     Args: FromHandlerParams + Send + Sync,
 {
@@ -192,7 +253,7 @@ impl_from_handler_params! { T1, T2, T3, T4 }
 impl_from_handler_params! { T1, T2, T3, T4, T5 }
 
 macro_rules! impl_generic_handler ({ $($param:ident)* } => {
-    impl<Func, Fut: Send, $($param,)*> GenericHandler<($($param,)*)> for Func
+    impl<Func, Fut: Send, $($param,)*> HandlerFn<($($param,)*), marker::Async> for Func
     where
         Func: Fn($($param),*) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future + 'static,
@@ -206,7 +267,58 @@ macro_rules! impl_generic_handler ({ $($param:ident)* } => {
             (self)($($param,)*)
         }
     }
-    impl<Func, Fut: Send, $($param,)*> ListResourcesHandler<($($param,)*)> for Func
+    impl<Func, R: Send + 'static, $($param,)*> HandlerFn<($($param,)*), marker::Immediate> for Func
+    where
+        Func: Fn($($param),*) -> R + Send + Sync + Clone + 'static,
+    {
+        type Output = R;
+        type Future = std::future::Ready<R>;
+
+        #[inline]
+        #[allow(non_snake_case)]
+        fn call(&self, ($($param,)*): ($($param,)*)) -> Self::Future {
+            std::future::ready((self)($($param,)*))
+        }
+    }
+    // The offloaded shape. It needs no marker of its own: `BlockingFn` is a
+    // distinct type and implements no other, so nothing can overlap here.
+    impl<Func, R: Send + 'static, $($param,)*> HandlerFn<($($param,)*), marker::Immediate> for BlockingFn<Func>
+    where
+        Func: Fn($($param),*) -> R + Send + Sync + Clone + 'static,
+        $($param: Send + 'static,)*
+    {
+        type Output = R;
+        type Future = BlockingCall<R>;
+
+        #[inline]
+        #[allow(non_snake_case)]
+        fn call(&self, ($($param,)*): ($($param,)*)) -> Self::Future {
+            let func = self.0.clone();
+            BlockingCall {
+                handle: tokio::task::spawn_blocking(move || (func)($($param,)*)),
+            }
+        }
+    }
+    impl<Func, Fut: Send, $($param,)*> GenericHandler<($($param,)*), marker::Async> for Func
+    where
+        Func: Fn($($param),*) -> Fut + Send + Sync + Clone + 'static,
+        Fut: Future + 'static,
+    {}
+    // The synchronous shape. `R: IntoResponse` is what keeps this impl and the
+    // asynchronous one apart during selection -- see `HandlerFn` -- so it must
+    // stay here rather than move to `App::map_handler`.
+    impl<Func, R, $($param,)*> GenericHandler<($($param,)*), marker::Immediate> for Func
+    where
+        Func: Fn($($param),*) -> R + Send + Sync + Clone + 'static,
+        R: IntoResponse + Send + 'static,
+    {}
+    impl<Func, R, $($param,)*> GenericHandler<($($param,)*), marker::Immediate> for BlockingFn<Func>
+    where
+        Func: Fn($($param),*) -> R + Send + Sync + Clone + 'static,
+        R: IntoResponse + Send + 'static,
+        $($param: Send + 'static,)*
+    {}
+    impl<Func, Fut: Send, $($param,)*> ListResourcesHandler<($($param,)*), marker::Async> for Func
     where
         Func: Fn(ListResourcesRequestParams, $($param),*) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future + 'static,
@@ -220,7 +332,42 @@ macro_rules! impl_generic_handler ({ $($param:ident)* } => {
             (self)(params, $($param,)*)
         }
     }
-    impl<Func, Fut: Send, $($param,)*> CompletionHandler<($($param,)*)> for Func
+    // The synchronous shape. `R: Into<ListResourcesResult>` is what keeps this
+    // impl and the asynchronous one apart during selection -- see `HandlerFn`
+    // -- so it must stay here rather than move to `App::map_resources`.
+    impl<Func, R, $($param,)*> ListResourcesHandler<($($param,)*), marker::Immediate> for Func
+    where
+        Func: Fn(ListResourcesRequestParams, $($param),*) -> R + Send + Sync + Clone + 'static,
+        R: Into<ListResourcesResult> + Send + 'static,
+    {
+        type Output = R;
+        type Future = std::future::Ready<R>;
+
+        #[inline]
+        #[allow(non_snake_case)]
+        fn call(&self, params: ListResourcesRequestParams, ($($param,)*): ($($param,)*)) -> Self::Future {
+            std::future::ready((self)(params, $($param,)*))
+        }
+    }
+    impl<Func, R, $($param,)*> ListResourcesHandler<($($param,)*), marker::Immediate> for BlockingFn<Func>
+    where
+        Func: Fn(ListResourcesRequestParams, $($param),*) -> R + Send + Sync + Clone + 'static,
+        R: Into<ListResourcesResult> + Send + 'static,
+        $($param: Send + 'static,)*
+    {
+        type Output = R;
+        type Future = BlockingCall<R>;
+
+        #[inline]
+        #[allow(non_snake_case)]
+        fn call(&self, params: ListResourcesRequestParams, ($($param,)*): ($($param,)*)) -> Self::Future {
+            let func = self.0.clone();
+            BlockingCall {
+                handle: tokio::task::spawn_blocking(move || (func)(params, $($param,)*)),
+            }
+        }
+    }
+    impl<Func, Fut: Send, $($param,)*> CompletionHandler<($($param,)*), marker::Async> for Func
     where
         Func: Fn(CompleteRequestParams, $($param),*) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future + 'static,
@@ -232,6 +379,39 @@ macro_rules! impl_generic_handler ({ $($param:ident)* } => {
         #[allow(non_snake_case)]
         fn call(&self, params: CompleteRequestParams, ($($param,)*): ($($param,)*)) -> Self::Future {
             (self)(params, $($param,)*)
+        }
+    }
+    // As above, with `R: Into<CompleteResult>` doing the separating.
+    impl<Func, R, $($param,)*> CompletionHandler<($($param,)*), marker::Immediate> for Func
+    where
+        Func: Fn(CompleteRequestParams, $($param),*) -> R + Send + Sync + Clone + 'static,
+        R: Into<CompleteResult> + Send + 'static,
+    {
+        type Output = R;
+        type Future = std::future::Ready<R>;
+
+        #[inline]
+        #[allow(non_snake_case)]
+        fn call(&self, params: CompleteRequestParams, ($($param,)*): ($($param,)*)) -> Self::Future {
+            std::future::ready((self)(params, $($param,)*))
+        }
+    }
+    impl<Func, R, $($param,)*> CompletionHandler<($($param,)*), marker::Immediate> for BlockingFn<Func>
+    where
+        Func: Fn(CompleteRequestParams, $($param),*) -> R + Send + Sync + Clone + 'static,
+        R: Into<CompleteResult> + Send + 'static,
+        $($param: Send + 'static,)*
+    {
+        type Output = R;
+        type Future = BlockingCall<R>;
+
+        #[inline]
+        #[allow(non_snake_case)]
+        fn call(&self, params: CompleteRequestParams, ($($param,)*): ($($param,)*)) -> Self::Future {
+            let func = self.0.clone();
+            BlockingCall {
+                handle: tokio::task::spawn_blocking(move || (func)(params, $($param,)*)),
+            }
         }
     }
 });

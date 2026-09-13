@@ -97,14 +97,15 @@ impl Client {
     }
 
     /// Registers a handler that will be running when a "sampling/createMessage" request is received
+    ///
+    /// The handler may be asynchronous or synchronous, and a blocking one goes
+    /// through [`blocking`](crate::blocking); see [`ClientHandler`].
     #[deprecated(
         note = "Sampling is deprecated in MCP 2026-07-28: the capability-driven `sampling/createMessage` request is gone and the ability is re-homed onto MRTR -- see `Context::sample`. Under MCP 2026-07-28 this handler fulfils MRTR `sampling/createMessage` input requests."
     )]
-    pub fn map_sampling<F, R>(&mut self, handler: F) -> &mut Self
+    pub fn map_sampling<F, M>(&mut self, handler: F) -> &mut Self
     where
-        F: Fn(CreateMessageRequestParams) -> R + Clone + Send + Sync + 'static,
-        R: Future + Send,
-        R::Output: Into<CreateMessageResult>,
+        F: ClientHandler<CreateMessageRequestParams, CreateMessageResult, M>,
     {
         let handler: SamplingHandler = make_handler(handler);
         self.options.add_sampling_handler(handler);
@@ -112,11 +113,35 @@ impl Client {
     }
 
     /// Registers a handler that will be running when an "elicitation/create" request is received
-    pub fn map_elicitation<F, R>(&mut self, handler: F) -> &mut Self
+    ///
+    /// The handler may be asynchronous or synchronous, and a blocking one goes
+    /// through [`blocking`](crate::blocking); see [`ClientHandler`].
+    ///
+    /// # Examples
+    /// ```no_run
+    /// use neva::{Client, blocking, types::elicitation::{ElicitRequestParams, ElicitResult}};
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let mut client = Client::new();
+    ///
+    /// // Asynchronous, as before.
+    /// client.map_elicitation(|_p: ElicitRequestParams| async { ElicitResult::accept() });
+    ///
+    /// // Synchronous: nothing to await.
+    /// client.map_elicitation(|_p: ElicitRequestParams| ElicitResult::accept());
+    ///
+    /// // Synchronous and blocking: asks a human through a synchronous prompt.
+    /// client.map_elicitation(blocking(|_p: ElicitRequestParams| {
+    ///     let mut answer = String::new();
+    ///     let _ = std::io::stdin().read_line(&mut answer);
+    ///     ElicitResult::accept()
+    /// }));
+    /// # }
+    /// ```
+    pub fn map_elicitation<F, M>(&mut self, handler: F) -> &mut Self
     where
-        F: Fn(ElicitRequestParams) -> R + Clone + Send + Sync + 'static,
-        R: Future + Send,
-        R::Output: Into<ElicitResult>,
+        F: ClientHandler<ElicitRequestParams, ElicitResult, M>,
     {
         let handler: ElicitationHandler = make_handler(handler);
         self.options.add_elicitation_handler(handler);

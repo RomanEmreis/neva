@@ -1144,6 +1144,8 @@ mod tests {
     use crate::types::{
         GetPromptRequestParams, PromptMessage, ReadResourceRequestParams, ResourceContents, Role,
     };
+    use serde_json::json;
+    use std::collections::HashMap;
 
     #[test]
     fn it_creates_default_options() {
@@ -1249,6 +1251,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn it_adds_and_reads_a_sync_resource_template() {
+        let mut options = McpOptions::default();
+
+        // The synchronous shape: the contents are returned directly.
+        let handler = |uri: Uri| {
+            ResourceContents::new(uri)
+                .with_mime("text/plain")
+                .with_text("some text")
+        };
+
+        options.add_resource_template(
+            ResourceTemplate::new("res://res", "test"),
+            ResourceFunc::new(handler),
+        );
+
+        let req = ReadResourceRequestParams {
+            uri: "res://res".into(),
+            meta: None,
+            args: None,
+        };
+
+        let res = options.read_resource(&req.uri).unwrap();
+        let res = res.0.call(req.into()).await.unwrap();
+        assert_eq!(res.contents.len(), 1);
+    }
+
+    #[tokio::test]
     async fn it_adds_and_reads_resource_template_with_err() {
         let mut options = McpOptions::default();
 
@@ -1312,6 +1341,29 @@ mod tests {
         let msg = result.messages.first().unwrap();
 
         assert_eq!(msg.role, Role::User)
+    }
+
+    #[tokio::test]
+    async fn it_adds_and_gets_a_sync_prompt() {
+        let mut options = McpOptions::default();
+
+        // The synchronous shape: the messages are returned directly.
+        options.add_prompt(Prompt::new("test", |topic: String| {
+            [(format!("Analyze {topic}"), Role::User)]
+        }));
+
+        let prompt = options.get_prompt("test").await.unwrap();
+        let req = GetPromptRequestParams {
+            name: "test".into(),
+            args: Some(HashMap::from([("arg0".to_owned(), json!("rust"))])),
+            meta: None,
+        };
+
+        let result = prompt.call(req).await.unwrap();
+        let msg = result.messages.first().unwrap();
+
+        assert_eq!(msg.role, Role::User);
+        assert!(serde_json::to_string(msg).unwrap().contains("Analyze rust"));
     }
 
     #[tokio::test]

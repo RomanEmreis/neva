@@ -17,7 +17,8 @@ use {
     },
     crate::{
         Context,
-        app::handler::{FromHandlerParams, GenericHandler, Handler, HandlerParams, RequestHandler},
+        app::handler::{FromHandlerParams, Handler, HandlerFn, HandlerParams, RequestHandler},
+        shared::{BlockingFn, marker},
     },
     std::{future::Future, sync::Arc},
 };
@@ -749,9 +750,51 @@ impl FromHandlerParams for ListToolsRequestParams {
     }
 }
 
-/// Describes a generic MCP Tool handler
+/// Describes a generic MCP Tool handler.
+///
+/// Implemented for every function whose parameters are extractable and whose
+/// return type converts into a [`CallToolResponse`], in both of the shapes a
+/// handler can take:
+///
+/// - an **asynchronous** one returning a future of such a value
+///   ([`marker::Async`], the default), and
+/// - a **synchronous** one returning the value itself ([`marker::Immediate`]).
+///
+/// `M` records which of the two a given function is and is inferred at the
+/// registration site, so handlers and the bounds written against them normally
+/// leave it out. It exists because the two impls would otherwise overlap: what
+/// tells them apart is that a future does not convert into a
+/// [`CallToolResponse`] and a [`CallToolResponse`] is not a future, and a
+/// distinction drawn by a bound has to sit on the impls themselves.
+///
+/// A synchronous handler runs on the runtime thread that dispatched the
+/// request. That is the right shape for pure computation and lookups, and the
+/// wrong one for blocking I/O -- see [`marker::Immediate`].
+///
+/// # Examples
+/// ```no_run
+/// use neva::App;
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// let mut app = App::new();
+///
+/// app.map_tool("sum", |a: i32, b: i32| a + b);
+/// app.map_tool("sum_later", |a: i32, b: i32| async move { a + b });
+///
+/// # app.run().await;
+/// # }
+/// ```
 #[cfg(feature = "server")]
-pub trait ToolHandler<Args>: GenericHandler<Args> {
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a valid tool handler",
+    label = "not a tool handler",
+    note = "a tool handler is a function of extractable arguments returning either a value \
+            that converts into `CallToolResponse` or a future of one",
+    note = "check that every parameter can be extracted and that the return type implements \
+            `Into<CallToolResponse>`"
+)]
+pub trait ToolHandler<Args, M = marker::Async>: HandlerFn<Args, M> {
     /// Returns the handler's value-carrying arguments, in declaration order.
     ///
     /// Parameters extracted from request metadata ([`crate::types::Meta`],
@@ -766,20 +809,23 @@ pub trait ToolHandler<Args>: GenericHandler<Args> {
 }
 
 #[cfg(feature = "server")]
-pub(crate) struct ToolFunc<F, R, Args>
+pub(crate) struct ToolFunc<F, R, Args, M>
 where
-    F: ToolHandler<Args, Output = R>,
+    F: ToolHandler<Args, M, Output = R>,
     R: Into<CallToolResponse>,
     Args: FromHandlerArgs<CallToolRequestParams>,
 {
     func: F,
-    _marker: std::marker::PhantomData<Args>,
+    // A function pointer rather than `(Args, M)` itself: the marker is a
+    // type-level tag with no value, and phantom data over it must not drag
+    // auto traits onto the `Arc`-ed handler.
+    _marker: std::marker::PhantomData<fn() -> (Args, M)>,
 }
 
 #[cfg(feature = "server")]
-impl<F, R, Args> ToolFunc<F, R, Args>
+impl<F, R, Args, M> ToolFunc<F, R, Args, M>
 where
-    F: ToolHandler<Args, Output = R>,
+    F: ToolHandler<Args, M, Output = R>,
     R: Into<CallToolResponse>,
     Args: FromHandlerArgs<CallToolRequestParams>,
 {
@@ -794,9 +840,9 @@ where
 }
 
 #[cfg(feature = "server")]
-impl<F, R, Args> Handler<CallToolResponse> for ToolFunc<F, R, Args>
+impl<F, R, Args, M> Handler<CallToolResponse> for ToolFunc<F, R, Args, M>
 where
-    F: ToolHandler<Args, Output = R>,
+    F: ToolHandler<Args, M, Output = R>,
     R: Into<CallToolResponse>,
     Args: FromHandlerArgs<CallToolRequestParams> + Send + Sync,
 {
@@ -1214,14 +1260,27 @@ impl Tool {
 #[cfg(feature = "server")]
 impl Tool {
     /// Initializes a new [`Tool`]
-    pub fn new<F, Args, R>(name: impl Into<String>, handler: F) -> Self
+    ///
+    /// The handler may be asynchronous or synchronous; see [`ToolHandler`].
+    ///
+    /// # Examples
+    /// ```
+    /// # #[cfg(feature = "server")] {
+    /// use neva::types::Tool;
+    ///
+    /// let async_tool = Tool::new("sum_later", |a: i32, b: i32| async move { a + b });
+    /// let sync_tool = Tool::new("sum", |a: i32, b: i32| a + b);
+    /// # }
+    /// ```
+    pub fn new<F, Args, R, M>(name: impl Into<String>, handler: F) -> Self
     where
-        F: ToolHandler<Args, Output = R>,
+        F: ToolHandler<Args, M, Output = R>,
         R: Into<CallToolResponse> + Send + 'static,
         Args: FromHandlerArgs<CallToolRequestParams> + Send + Sync + 'static,
+        M: 'static,
     {
         let handler = ToolFunc::new(handler);
-        let args = F::args();
+        let args = <F as ToolHandler<Args, M>>::args();
         let arg_names = ArgNames::positional(args.len());
         let input_schema = build_input_schema_from_args(&args, &arg_names);
         Self {
@@ -1687,9 +1746,27 @@ impl ToolExecution {
     }
 }
 
+/// Appends the argument slot `T` occupies, if it occupies one.
+///
+/// Metadata-served parameters ([`Context`], [`crate::types::Meta`], DI) are not
+/// arguments: they take no schema property and consume no slot. Shared by the
+/// two [`ToolHandler`] impls so the asynchronous and synchronous shapes of the
+/// same signature cannot describe different arguments.
+#[cfg(feature = "server")]
+#[inline]
+fn push_tool_arg<T: TypeCategory>(args: &mut Vec<ToolArg>) {
+    let property = SchemaProperty::new::<T>();
+    if property.r#type != PropertyType::None {
+        args.push(ToolArg {
+            property,
+            required: !<T as TypeCategory>::is_optional(),
+        });
+    }
+}
+
 macro_rules! impl_generic_tool_handler ({ $($param:ident)* } => {
     #[cfg(feature = "server")]
-    impl<Func, Fut: Send, $($param: TypeCategory,)*> ToolHandler<($($param,)*)> for Func
+    impl<Func, Fut: Send, $($param: TypeCategory,)*> ToolHandler<($($param,)*), marker::Async> for Func
     where
         Func: Fn($($param),*) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future + 'static,
@@ -1698,19 +1775,41 @@ macro_rules! impl_generic_tool_handler ({ $($param:ident)* } => {
         #[allow(unused_mut)]
         fn args() -> Vec<ToolArg> {
             let mut args = Vec::new();
-            $(
-            {
-                let property = SchemaProperty::new::<$param>();
-                // Metadata-served parameters are not arguments: they take no
-                // schema property and consume no argument slot.
-                if property.r#type != PropertyType::None {
-                    args.push(ToolArg {
-                        property,
-                        required: !<$param as TypeCategory>::is_optional(),
-                    });
-                }
-            };
-            )*
+            $( push_tool_arg::<$param>(&mut args); )*
+            args
+        }
+    }
+    // The synchronous shape. `R: Into<CallToolResponse>` is what keeps this
+    // impl and the asynchronous one apart during selection -- see `HandlerFn`
+    // -- so it must stay here rather than move to the registration methods.
+    #[cfg(feature = "server")]
+    impl<Func, R, $($param: TypeCategory,)*> ToolHandler<($($param,)*), marker::Immediate> for Func
+    where
+        Func: Fn($($param),*) -> R + Send + Sync + Clone + 'static,
+        R: Into<CallToolResponse> + Send + 'static,
+    {
+        #[inline]
+        #[allow(unused_mut)]
+        fn args() -> Vec<ToolArg> {
+            let mut args = Vec::new();
+            $( push_tool_arg::<$param>(&mut args); )*
+            args
+        }
+    }
+    // The same handler moved onto the blocking pool by `neva::blocking`. It
+    // describes the same arguments: the wrapper changes where the body runs,
+    // not what the tool publishes or reads.
+    #[cfg(feature = "server")]
+    impl<Func, R, $($param: TypeCategory + Send + 'static,)*> ToolHandler<($($param,)*), marker::Immediate> for BlockingFn<Func>
+    where
+        Func: Fn($($param),*) -> R + Send + Sync + Clone + 'static,
+        R: Into<CallToolResponse> + Send + 'static,
+    {
+        #[inline]
+        #[allow(unused_mut)]
+        fn args() -> Vec<ToolArg> {
+            let mut args = Vec::new();
+            $( push_tool_arg::<$param>(&mut args); )*
             args
         }
     }
@@ -1769,6 +1868,171 @@ mod tests {
             json,
             r#"{"content":[{"type":"text","text":"7"}],"isError":false}"#
         );
+    }
+
+    #[tokio::test]
+    async fn it_creates_and_calls_a_sync_tool() {
+        // The same handler in its synchronous shape: no `async move`, the
+        // value is returned directly. Everything downstream -- the published
+        // schema, the argument slots, the response -- is identical.
+        let tool = Tool::new("sum", |a: i32, b: i32| a + b);
+
+        assert_eq!(schema_props(&tool), ["arg0", "arg1"]);
+
+        let params = call_params([("arg0", json!(5)), ("arg1", json!(2))]);
+        let resp = tool.call(params).await.unwrap();
+        let json = serde_json::to_string(&resp).unwrap();
+
+        assert_eq!(
+            json,
+            r#"{"content":[{"type":"text","text":"7"}],"isError":false}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn it_calls_a_blocking_tool() {
+        // `blocking` moves the body onto the blocking pool; everything the tool
+        // publishes and reads is unchanged.
+        let tool = Tool::new("sum", crate::blocking(|a: i32, b: i32| a + b));
+
+        assert_eq!(schema_props(&tool), ["arg0", "arg1"]);
+
+        let params = call_params([("arg0", json!(5)), ("arg1", json!(2))]);
+        let resp = tool.call(params).await.unwrap();
+
+        assert_eq!(
+            serde_json::to_string(&resp).unwrap(),
+            r#"{"content":[{"type":"text","text":"7"}],"isError":false}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blocking_tool_runs_off_the_runtime_thread() {
+        let tool = Tool::new(
+            "thread",
+            crate::blocking(|_: i32| format!("{:?}", std::thread::current().id())),
+        );
+
+        let resp = tool
+            .call(call_params([("arg0", json!(1)), ("unused", json!(0))]))
+            .await
+            .unwrap();
+
+        let here = format!("{:?}", std::thread::current().id());
+        assert!(!serde_json::to_string(&resp).unwrap().contains(&here));
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "handler panicked")]
+    async fn a_panicking_blocking_tool_propagates_the_panic() {
+        // A panic on the blocking pool lands on the awaiting task, exactly as
+        // it would have had the handler run inline.
+        let tool = Tool::new(
+            "boom",
+            crate::blocking(|_: i32| -> String { panic!("handler panicked") }),
+        );
+
+        let _ = tool
+            .call(call_params([("arg0", json!(1)), ("unused", json!(0))]))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn it_calls_a_sync_fn_item_tool() {
+        // A plain `fn` item, which is what `#[tool]` on a non-async function
+        // hands to `map_tool`.
+        fn sum(a: i32, b: i32) -> i32 {
+            a + b
+        }
+
+        let mut tool = Tool::new("sum", sum);
+        tool.with_arg_names(["a", "b"]);
+
+        let params = call_params([("a", json!(5)), ("b", json!(2))]);
+        let resp = tool.call(params).await.unwrap();
+
+        assert!(
+            serde_json::to_string(&resp)
+                .unwrap()
+                .contains(r#""text":"7""#)
+        );
+    }
+
+    #[tokio::test]
+    async fn it_publishes_a_sync_tools_optional_arg_as_not_required() {
+        let mut tool = Tool::new("greet", |name: String, age: Option<i32>| match age {
+            Some(age) => format!("{name} is {age}"),
+            None => format!("{name} is ageless"),
+        });
+        tool.with_arg_names(["name", "age"]);
+
+        assert_eq!(schema_props(&tool), ["age", "name"]);
+        assert_eq!(schema_required(&tool), ["name"]);
+
+        let omitted = CallToolRequestParams {
+            name: "greet".into(),
+            meta: None,
+            #[cfg(feature = "tasks")]
+            task: None,
+            args: Some(HashMap::from([("name".to_owned(), json!("John"))])),
+        };
+        let resp = tool.call(omitted).await.unwrap();
+        assert!(
+            serde_json::to_string(&resp)
+                .unwrap()
+                .contains("John is ageless")
+        );
+    }
+
+    #[tokio::test]
+    async fn it_returns_an_error_from_a_sync_tool() {
+        let mut tool = Tool::new("check", |a: i32| -> Result<i32, Error> {
+            match a {
+                0 => Err(Error::new(ErrorCode::InvalidParams, "zero")),
+                a => Ok(a),
+            }
+        });
+        tool.with_arg_names(["a"]);
+
+        let resp = tool
+            .call(call_params([("a", json!(0)), ("unused", json!(0))]))
+            .await
+            .unwrap();
+        let json = serde_json::to_string(&resp).unwrap();
+
+        assert!(json.contains("zero"));
+        assert!(json.contains(r#""isError":true"#));
+    }
+
+    #[tokio::test]
+    async fn it_skips_metadata_parameters_of_a_sync_tool() {
+        use crate::types::{Meta, ProgressToken};
+
+        // Metadata-served parameters take no argument slot in either shape:
+        // both `ToolHandler` impls classify them through the same helper.
+        let mut tool = Tool::new("greet", |token: Meta<ProgressToken>, name: String| {
+            let _ = token;
+            name
+        });
+        tool.with_arg_names(["name"]);
+
+        assert_eq!(schema_props(&tool), ["name"]);
+
+        let resp = tool
+            .call(CallToolRequestParams {
+                name: "greet".into(),
+                meta: Some(RequestParamsMeta {
+                    progress_token: Some(ProgressToken::Number(1)),
+                    ..Default::default()
+                }),
+                #[cfg(feature = "tasks")]
+                task: None,
+                args: Some(HashMap::from([("name".to_owned(), json!("John"))])),
+            })
+            .await
+            .unwrap();
+
+        assert!(serde_json::to_string(&resp).unwrap().contains("John"));
     }
 
     #[tokio::test]

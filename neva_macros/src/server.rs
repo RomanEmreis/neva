@@ -1,5 +1,6 @@
 //! Macros for MCP servers
 
+use crate::shared::{get_bool_param, handler_code, path_name, unknown_attr};
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{Expr, Lit, Type};
@@ -11,7 +12,7 @@ pub(crate) mod resource;
 pub(crate) mod tool;
 
 /// Every attribute `#[handler]` accepts.
-const HANDLER_ATTRS: [&str; 2] = ["command", "middleware"];
+const HANDLER_ATTRS: [&str; 3] = ["command", "middleware", "blocking"];
 
 pub(super) fn expand_handler(
     attr: &Punctuated<Meta, Comma>,
@@ -20,16 +21,21 @@ pub(super) fn expand_handler(
     let func_name = &function.sig.ident;
     let mut command = None;
     let mut middleware = None;
+    let mut blocking = false;
 
     for meta in attr {
         match &meta {
             Meta::Path(path) => {
-                return Err(unknown_attr(
-                    path,
-                    &path_name(path),
-                    "handler",
-                    &HANDLER_ATTRS,
-                ));
+                if path.is_ident("blocking") {
+                    blocking = true;
+                } else {
+                    return Err(unknown_attr(
+                        path,
+                        &path_name(path),
+                        "handler",
+                        &HANDLER_ATTRS,
+                    ));
+                }
             }
             Meta::List(list) => {
                 return Err(unknown_attr(
@@ -55,6 +61,9 @@ pub(super) fn expand_handler(
                     "middleware" => {
                         middleware = get_exprs_arr(&nv.value);
                     }
+                    "blocking" => {
+                        blocking = get_bool_param(&nv.value);
+                    }
                     other => {
                         return Err(unknown_attr(&nv.path, other, "handler", &HANDLER_ATTRS));
                     }
@@ -65,6 +74,7 @@ pub(super) fn expand_handler(
 
     let command = command.expect("command parameter must be specified");
     let module_name = syn::Ident::new(&format!("map_{func_name}"), func_name.span());
+    let handler_code = handler_code(function, blocking, "handler")?;
     let middleware_code = middleware.map(|mws| {
         let mw_calls = mws.iter().map(|mw| {
             quote! { .wrap_command(#command, #mw) }
@@ -80,7 +90,7 @@ pub(super) fn expand_handler(
         fn #module_name(app: &mut neva::App) {
             app
                 #middleware_code
-                .map_handler(#command, #func_name);
+                .map_handler(#command, #handler_code);
         }
         neva::macros::inventory::submit! {
             neva::macros::server::ItemRegistrar(#module_name)
@@ -96,22 +106,30 @@ pub(super) fn expand_completion(
 ) -> syn::Result<TokenStream> {
     let func_name = &function.sig.ident;
     let mut middleware = None;
+    let mut blocking = false;
 
     for meta in attr {
         match &meta {
-            Meta::Path(_) => {}
+            Meta::Path(path) => {
+                if path.is_ident("blocking") {
+                    blocking = true;
+                }
+            }
             Meta::List(_) => {}
             Meta::NameValue(nv) => {
-                if let Some(ident) = nv.path.get_ident()
-                    && let "middleware" = ident.to_string().as_str()
-                {
-                    middleware = get_exprs_arr(&nv.value);
+                if let Some(ident) = nv.path.get_ident() {
+                    match ident.to_string().as_str() {
+                        "middleware" => middleware = get_exprs_arr(&nv.value),
+                        "blocking" => blocking = get_bool_param(&nv.value),
+                        _ => {}
+                    }
                 }
             }
         }
     }
 
     let module_name = syn::Ident::new(&format!("map_{func_name}"), func_name.span());
+    let handler_code = handler_code(function, blocking, "completion")?;
     let middleware_code = middleware.map(|mws| {
         let mw_calls = mws.iter().map(|mw| {
             quote! { .wrap_command(neva::types::completion::commands::COMPLETE, #mw) }
@@ -127,7 +145,7 @@ pub(super) fn expand_completion(
         fn #module_name(app: &mut neva::App) {
             app
                 #middleware_code
-                .map_completion(#func_name);
+                .map_completion(#handler_code);
         }
         neva::macros::inventory::submit! {
             neva::macros::server::ItemRegistrar(#module_name)
@@ -258,36 +276,6 @@ pub(super) fn validate_schema_json(json: &str, spanned: &Expr, field: &str) -> s
         .map_err(|e| syn::Error::new_spanned(spanned, format!("invalid JSON in `{field}`: {e}")))
 }
 
-/// Refuses an attribute the macro does not know.
-///
-/// Every one of these loops used to end in `_ => {}`, so a misspelled attribute
-/// compiled and did nothing. That is quietly wrong for `descr` and dangerous for
-/// `visibility`: `#[tool(visiblity = ["app"])]` would take the model-visible
-/// default, publishing to the agent a tool the author meant to keep for the app.
-pub(super) fn unknown_attr<T: quote::ToTokens>(
-    spanned: &T,
-    name: &str,
-    macro_name: &str,
-    known: &[&str],
-) -> syn::Error {
-    syn::Error::new_spanned(
-        spanned,
-        format!(
-            "unknown attribute `{name}` on `#[{macro_name}]`, expected one of: {}",
-            known.join(", ")
-        ),
-    )
-}
-
-/// How to name a path in a diagnostic: its ident, or the whole path when it has
-/// no single one.
-pub(super) fn path_name(path: &syn::Path) -> String {
-    path.get_ident().map_or_else(
-        || quote!(#path).to_string().replace(' ', ""),
-        |ident| ident.to_string(),
-    )
-}
-
 #[inline]
 pub(super) fn get_str_param(value: &Expr) -> Option<String> {
     if let Expr::Lit(syn::ExprLit {
@@ -298,19 +286,6 @@ pub(super) fn get_str_param(value: &Expr) -> Option<String> {
         Some(lit_str.value())
     } else {
         None
-    }
-}
-
-#[inline]
-pub(super) fn get_bool_param(value: &Expr) -> bool {
-    if let Expr::Lit(syn::ExprLit {
-        lit: Lit::Bool(lit),
-        ..
-    }) = value
-    {
-        lit.value
-    } else {
-        false
     }
 }
 
