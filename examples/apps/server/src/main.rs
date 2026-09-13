@@ -25,14 +25,22 @@ mod view;
 
 /// The current time, and the tool the clock app renders.
 ///
-/// Note what it returns: a sentence, not a bare timestamp. The specification is
-/// blunt about this -- a UI-bound tool **MUST** still return a meaningful
-/// `content` array, because the model reads `content` and not every client has
-/// an iframe. The app shows the same text; the model gets a usable answer either
-/// way.
+/// The specification is blunt about this: a UI-bound tool **MUST** still return
+/// a meaningful `content` array, because the model reads `content` and not every
+/// client has an iframe. So the answer is shaped for whoever asked. A caller
+/// that renders MCP Apps gets the bare time for the clock face to show; one that
+/// does not gets a sentence that stands on its own.
+///
+/// `supports_apps` reads what the caller declared on *this* request's `_meta` --
+/// MCP 2026-07-28 has no handshake to remember it from.
 #[tool(descr = "The current time.", ui = "ui://clock/app.html")]
-async fn get_time() -> String {
-    format!("The time is {}.", now())
+async fn get_time(ctx: Context) -> String {
+    let now = now();
+    if ctx.supports_apps() {
+        now
+    } else {
+        format!("The time is {now}.")
+    }
 }
 
 /// A tool the app calls and the model never sees.

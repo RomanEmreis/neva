@@ -361,11 +361,13 @@ impl App {
         // answer needs to know that on any substrate.
         #[cfg(not(feature = "legacy-spec"))]
         {
-            context.client_capabilities = req
+            let caps = req
                 .meta()
-                .as_ref()
                 .and_then(|m| m.client_capabilities)
                 .unwrap_or_default();
+            
+            context.client_capabilities = caps.mrtr;
+            context.client_extensions = caps.extensions.map(Arc::new);
         }
         #[cfg(not(feature = "legacy-spec"))]
         let (mrtr_arc, mrtr_principal) = if mrtr_method {

@@ -593,6 +593,42 @@ mod tests {
         assert!(notif.params.is_none());
     }
 
+    /// With no handshake under 2026-07-28, a request's `_meta` is the only
+    /// place a server can see an extension declared -- so the map `initialize`
+    /// carries rides every request too, beside the MRTR flags.
+    #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
+    #[test]
+    fn declared_extensions_ride_every_request() {
+        use crate::types::{APP_MIME_TYPE, APPS_EXTENSION_ID};
+        use serde_json::json;
+
+        const CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
+
+        let mut client = Client::new().with_options(|opt| opt.with_apps());
+        client.map_elicitation(|_params: ElicitRequestParams| ElicitResult::accept());
+
+        let mut req = Request::new(Some(RequestId::Number(1)), "tools/call", None::<()>);
+        client.apply_client_meta(&mut req, None, None);
+
+        let caps = &req.params.as_ref().expect("params present")["_meta"][CAPABILITIES];
+        assert_eq!(
+            caps["extensions"][APPS_EXTENSION_ID],
+            json!({ "mimeTypes": [APP_MIME_TYPE] })
+        );
+        assert_eq!(caps["elicitation"], json!({}), "the MRTR flags stay flat");
+
+        // And a client that declared none writes no map at all.
+        let mut req = Request::new(Some(RequestId::Number(2)), "tools/call", None::<()>);
+        Client::new().apply_client_meta(&mut req, None, None);
+
+        let caps = &req.params.as_ref().expect("params present")["_meta"][CAPABILITIES];
+        assert!(
+            caps.is_object(),
+            "the capabilities object is still required"
+        );
+        assert!(caps.get("extensions").is_none(), "got: {caps}");
+    }
+
     /// An MRTR retry states its answers where the spec puts them: on the
     /// params, beside `name` and `arguments`. They used to go into `_meta`,
     /// where no other implementation looks for them.

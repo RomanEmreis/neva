@@ -175,6 +175,13 @@ pub struct Context {
     #[cfg(not(feature = "legacy-spec"))]
     pub(crate) client_capabilities: crate::types::mrtr::ClientMrtrCapabilities,
 
+    /// The extensions the caller declared, read off this request's `_meta`.
+    ///
+    /// Shared rather than owned: a context is cloned into every task and
+    /// middleware that touches the request, and the map never changes.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(crate) client_extensions: Option<Arc<HashMap<String, serde_json::Value>>>,
+
     /// Represents a DI scope
     #[cfg(feature = "di")]
     pub(crate) scope: Option<Container>,
@@ -255,6 +262,8 @@ impl ServerRuntime {
             exec: ExecMode::None,
             #[cfg(not(feature = "legacy-spec"))]
             client_capabilities: Default::default(),
+            #[cfg(not(feature = "legacy-spec"))]
+            client_extensions: None,
             #[cfg(feature = "di")]
             scope: None,
         }
@@ -280,6 +289,8 @@ impl ServerRuntime {
             exec: ExecMode::None,
             #[cfg(not(feature = "legacy-spec"))]
             client_capabilities: Default::default(),
+            #[cfg(not(feature = "legacy-spec"))]
+            client_extensions: None,
             #[cfg(feature = "di")]
             scope: None,
         }

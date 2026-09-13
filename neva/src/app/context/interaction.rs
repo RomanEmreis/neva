@@ -244,6 +244,75 @@ impl Context {
         self.client_capabilities
     }
 
+    /// The settings the caller declared for extension `id` in this request's
+    /// `_meta`, or `None` when it did not declare that extension (MCP
+    /// 2026-07-28).
+    ///
+    /// Like [`Self::client_capabilities`], this describes the caller of *this*
+    /// call. Presence is the declaration; what the settings must contain for
+    /// the caller to count as supporting the extension is up to the extension.
+    /// For MCP Apps, use [`Self::supports_apps`], which applies that rule.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(all(feature = "server-macros", not(feature = "legacy-spec")))] {
+    /// use neva::{Context, tool};
+    ///
+    /// #[tool]
+    /// async fn search(ctx: Context, query: String) -> String {
+    ///     let fuzzy = ctx
+    ///         .client_extension("com.example/search")
+    ///         .and_then(|settings| settings["fuzzy"].as_bool())
+    ///         .unwrap_or(false);
+    ///
+    ///     format!("searching for {query} (fuzzy: {fuzzy})")
+    /// }
+    /// # }
+    /// ```
+    #[cfg(not(feature = "legacy-spec"))]
+    pub fn client_extension(&self, id: &str) -> Option<&serde_json::Value> {
+        self.client_extensions.as_deref()?.get(id)
+    }
+
+    /// Whether the caller of this request can render MCP Apps (MCP
+    /// 2026-07-28).
+    ///
+    /// True when the caller declared
+    /// [`APPS_EXTENSION_ID`](crate::types::APPS_EXTENSION_ID) **and** its
+    /// `mimeTypes` names [`APP_MIME_TYPE`](crate::types::APP_MIME_TYPE).
+    /// `mimeTypes` is required by the specification, so a declaration without
+    /// it does not count.
+    ///
+    /// A UI-bound tool must return meaningful `content` either way -- the model
+    /// reads `content`, and not every caller has an iframe. What this lets a
+    /// handler do is shape that content for the audience: terse data when a UI
+    /// will present it, a full sentence when the text is all there is.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # #[cfg(all(feature = "server-macros", feature = "apps", not(feature = "legacy-spec")))] {
+    /// use neva::{Context, tool};
+    ///
+    /// #[tool(ui = "ui://clock/app.html")]
+    /// async fn get_time(ctx: Context) -> String {
+    ///     let now = "12:00:00 UTC";
+    ///     if ctx.supports_apps() {
+    ///         now.to_string()
+    ///     } else {
+    ///         format!("The time is {now}.")
+    ///     }
+    /// }
+    /// # }
+    /// ```
+    #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
+    pub fn supports_apps(&self) -> bool {
+        use serde::Deserialize;
+
+        self.client_extension(crate::types::APPS_EXTENSION_ID)
+            .and_then(|settings| crate::types::AppsCapability::deserialize(settings).ok())
+            .is_some_and(|capability| capability.supports_html())
+    }
+
     /// Requests an LLM completion from the client (MRTR, MCP 2026-07-28).
     ///
     /// Same re-run/replay semantics as [`Self::elicit`]: on the first dispatch
@@ -357,6 +426,86 @@ impl Context {
                 ErrorCode::InvalidRequest,
                 format!("{kind} is not available for this request"),
             )),
+        }
+    }
+}
+
+/// What a handler sees of the extensions a caller declared on its request.
+#[cfg(all(test, not(feature = "legacy-spec")))]
+mod client_extension_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn ctx(extensions: Option<serde_json::Value>) -> Context {
+        Context {
+            session_id: None,
+            #[cfg(feature = "http-server")]
+            headers: HeaderMap::new(),
+            #[cfg(feature = "http-server")]
+            claims: None,
+            pending: RequestQueue::new(Duration::from_secs(5)),
+            sender: TransportProtoSender::None,
+            options: McpOptions::default().into_runtime(),
+            timeout: Duration::from_secs(5),
+            exec: ExecMode::None,
+            client_capabilities: Default::default(),
+            client_extensions: extensions
+                .map(|value| Arc::new(serde_json::from_value(value).expect("an extensions map"))),
+            #[cfg(feature = "di")]
+            scope: None,
+        }
+    }
+
+    #[test]
+    fn a_declared_extension_is_handed_back_as_declared() {
+        let ctx = ctx(Some(json!({ "com.example/search": { "fuzzy": true } })));
+
+        assert_eq!(
+            ctx.client_extension("com.example/search"),
+            Some(&json!({ "fuzzy": true }))
+        );
+        assert!(ctx.client_extension("com.example/other").is_none());
+    }
+
+    #[test]
+    fn a_caller_that_declared_nothing_has_no_extensions() {
+        assert!(ctx(None).client_extension("com.example/search").is_none());
+    }
+
+    #[cfg(feature = "apps")]
+    mod apps {
+        use super::*;
+        use crate::types::{APP_MIME_TYPE, APPS_EXTENSION_ID};
+
+        #[test]
+        fn naming_the_app_mime_type_is_what_counts() {
+            let ctx = ctx(Some(
+                json!({ APPS_EXTENSION_ID: { "mimeTypes": [APP_MIME_TYPE] } }),
+            ));
+
+            assert!(ctx.supports_apps());
+        }
+
+        #[test]
+        fn the_key_alone_is_not_a_declaration() {
+            // `mimeTypes` is required, so the key's mere presence says nothing.
+            for settings in [
+                json!({}),
+                json!({ "mimeTypes": [] }),
+                json!({ "mimeTypes": ["text/uri-list"] }),
+                json!({ "mimeTypes": APP_MIME_TYPE }),
+                json!(true),
+            ] {
+                let ctx = ctx(Some(json!({ APPS_EXTENSION_ID: settings.clone() })));
+
+                assert!(!ctx.supports_apps(), "{settings}");
+            }
+        }
+
+        #[test]
+        fn a_caller_that_declared_nothing_does_not_support_apps() {
+            assert!(!ctx(None).supports_apps());
+            assert!(!ctx(Some(json!({ "com.example/search": {} }))).supports_apps());
         }
     }
 }

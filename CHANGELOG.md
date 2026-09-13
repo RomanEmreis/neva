@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+* **Per-request client extensions** (MCP 2026-07-28, #122). A client writes its
+  `extensions` map into every request's
+  `_meta["io.modelcontextprotocol/clientCapabilities"]`, so
+  `McpOptions::with_apps()` now reaches a server with no handshake. A handler
+  reads it with `Context::client_extension(id)` and, under `apps`,
+  `Context::supports_apps()` -- true only when `mimeTypes` names
+  `text/html;profile=mcp-app`. Wire type: `types::RequestClientCapabilities`,
+  the MRTR flags beside `extensions`. A malformed `extensions` value reads as
+  none declared. Not available under `legacy-spec`.
+
 * **Synchronous handlers**, at every registration point on both sides: a
   handler may return its value directly instead of a future. Server:
   `App::map_tool`, `map_prompt`, `map_resource`, `map_ui_resource`,
@@ -153,7 +163,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `ResourceContents::ui()` read it back.
 
   Not advertised to a server speaking MCP 2026-07-28, which has no handshake
-  (#122); `add_ui_resource` carries no role or permission requirement (#123).
+  (#122, fixed in 0.6.0); `add_ui_resource` carries no role or permission
+  requirement (#123).
   See `examples/apps`.
 
 ### Changed

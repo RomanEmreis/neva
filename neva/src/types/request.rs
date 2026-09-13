@@ -160,15 +160,15 @@ pub struct RequestParamsMeta {
     )]
     pub(crate) protocol_version: Option<String>,
 
-    /// MRTR/stateless: client capabilities declared per-request (v1: a single
-    /// `elicitation` flag) so the server can honor "MUST NOT send an input
-    /// type the client didn't declare".
+    /// Client capabilities declared per request: the MRTR flags, so the server
+    /// can honor "MUST NOT send an input type the client didn't declare", and
+    /// the `extensions` map a handler varies its answer by.
     #[cfg(not(feature = "legacy-spec"))]
     #[serde(
         rename = "io.modelcontextprotocol/clientCapabilities",
         skip_serializing_if = "Option::is_none"
     )]
-    pub(crate) client_capabilities: Option<crate::types::mrtr::ClientMrtrCapabilities>,
+    pub(crate) client_capabilities: Option<crate::types::RequestClientCapabilities>,
 
     /// Represents metadata for associating messages with a task.
     ///

@@ -469,6 +469,8 @@ mod runtime_registration_tests {
             exec: ExecMode::None,
             #[cfg(not(feature = "legacy-spec"))]
             client_capabilities: Default::default(),
+            #[cfg(not(feature = "legacy-spec"))]
+            client_extensions: None,
             #[cfg(feature = "di")]
             scope: None,
         }

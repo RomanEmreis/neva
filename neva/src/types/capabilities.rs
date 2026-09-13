@@ -66,6 +66,105 @@ pub struct ClientCapabilities {
     pub experimental: Option<HashMap<String, serde_json::Value>>,
 }
 
+/// The capabilities a client declares on a single request (MCP 2026-07-28).
+///
+/// The `io.modelcontextprotocol/clientCapabilities` value of a request's
+/// `_meta`. There is no handshake under 2026-07-28, so this is where a server
+/// learns what the caller of *this* request can do: which input requests it can
+/// answer, and which extensions it supports.
+///
+/// A wrapper rather than more fields on
+/// [`ClientMrtrCapabilities`](crate::types::mrtr::ClientMrtrCapabilities), so
+/// that type stays `Copy`. The MRTR flags sit flat beside `extensions` on the
+/// wire, exactly as the spec's `ClientCapabilities` spells them.
+///
+/// # Examples
+/// ```
+/// use neva::types::RequestClientCapabilities;
+///
+/// let caps: RequestClientCapabilities = serde_json::from_value(serde_json::json!({
+///     "elicitation": {},
+///     "extensions": {
+///         "io.modelcontextprotocol/ui": { "mimeTypes": ["text/html;profile=mcp-app"] }
+///     }
+/// }))?;
+///
+/// assert!(caps.mrtr.elicitation.is_some());
+/// assert!(caps.extension("io.modelcontextprotocol/ui").is_some());
+/// assert!(caps.extension("com.example/other").is_none());
+/// # Ok::<(), serde_json::Error>(())
+/// ```
+#[cfg(not(feature = "legacy-spec"))]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RequestClientCapabilities {
+    /// The input-request kinds the client can answer.
+    #[serde(flatten)]
+    pub mrtr: crate::types::mrtr::ClientMrtrCapabilities,
+
+    /// Protocol extensions the client supports, keyed by reverse-DNS extension
+    /// id and mapping to that extension's settings.
+    ///
+    /// The same map as [`ClientCapabilities::extensions`], declared per request
+    /// instead of on `initialize`.
+    ///
+    /// A value that is not an object reads as no extensions declared.
+    #[serde(
+        default,
+        deserialize_with = "de_extensions",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub extensions: Option<HashMap<String, serde_json::Value>>,
+}
+
+/// Reads `extensions`, tolerating a malformed value as "none declared".
+///
+/// A request's `_meta` is parsed as one unit, so a hard error here would take
+/// the progress token, log level and every other key down with it -- for a map
+/// neva ignored outright before it read extensions at all.
+#[cfg(not(feature = "legacy-spec"))]
+fn de_extensions<'de, D>(
+    deserializer: D,
+) -> Result<Option<HashMap<String, serde_json::Value>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(
+        match Option::<serde_json::Value>::deserialize(deserializer)? {
+            Some(serde_json::Value::Object(map)) => Some(map.into_iter().collect()),
+            _ => None,
+        },
+    )
+}
+
+#[cfg(not(feature = "legacy-spec"))]
+impl RequestClientCapabilities {
+    /// The settings the client declared for extension `id`, or `None` when it
+    /// did not declare that extension.
+    ///
+    /// Presence is the declaration, but what counts as *supporting* an
+    /// extension is up to that extension: MCP Apps, for one, requires its
+    /// settings to name the content types the client renders.
+    ///
+    /// # Examples
+    /// ```
+    /// use neva::types::RequestClientCapabilities;
+    ///
+    /// let caps: RequestClientCapabilities = serde_json::from_value(serde_json::json!({
+    ///     "extensions": { "com.example/search": { "fuzzy": true } }
+    /// }))?;
+    /// 
+    /// assert_eq!(
+    ///     caps.extension("com.example/search"),
+    ///     Some(&serde_json::json!({ "fuzzy": true }))
+    /// );
+    /// # Ok::<(), serde_json::Error>(())
+    /// ```
+    #[inline]
+    pub fn extension(&self, id: &str) -> Option<&serde_json::Value> {
+        self.extensions.as_ref()?.get(id)
+    }
+}
+
 /// Represents a client capability that enables root resource discovery in the Model Context Protocol.
 ///
 /// > **Note:** When present in [`ClientCapabilities`], it indicates that the client supports listing
@@ -652,5 +751,88 @@ mod tests {
             serde_json::from_str(r#"{"subscribe": true}"#).unwrap();
         assert!(subscribing.subscribe);
         assert!(!subscribing.list_changed);
+    }
+
+    /// The per-request `clientCapabilities` of MCP 2026-07-28: the MRTR flags
+    /// and the `extensions` map, side by side in one object.
+    #[cfg(not(feature = "legacy-spec"))]
+    mod request_client_capabilities {
+        use super::*;
+        use serde_json::json;
+
+        #[test]
+        fn the_mrtr_flags_and_the_extensions_map_are_read_from_one_object() {
+            let caps: RequestClientCapabilities = serde_json::from_value(json!({
+                "elicitation": { "form": {} },
+                "roots": {},
+                "extensions": {
+                    "io.modelcontextprotocol/ui": { "mimeTypes": ["text/html;profile=mcp-app"] }
+                }
+            }))
+            .unwrap();
+
+            let modes = caps.mrtr.elicitation.expect("elicitation declared");
+            assert!(modes.form && !modes.url);
+            assert!(caps.mrtr.roots && !caps.mrtr.sampling);
+            assert_eq!(
+                caps.extension("io.modelcontextprotocol/ui"),
+                Some(&json!({ "mimeTypes": ["text/html;profile=mcp-app"] }))
+            );
+        }
+
+        #[test]
+        fn the_legacy_boolean_flags_still_parse_through_the_wrapper() {
+            // The flattened struct is decoded from a buffer rather than the
+            // JSON itself; the boolean tolerance must survive that.
+            let caps: RequestClientCapabilities =
+                serde_json::from_value(json!({ "elicitation": true, "sampling": false })).unwrap();
+
+            assert!(caps.mrtr.elicitation.is_some_and(|m| m.unconstrained()));
+            assert!(!caps.mrtr.sampling);
+            assert!(caps.extensions.is_none());
+        }
+
+        #[test]
+        fn it_is_written_flat_and_omits_an_absent_map() {
+            assert_eq!(
+                serde_json::to_value(RequestClientCapabilities::default()).unwrap(),
+                json!({})
+            );
+
+            let caps = RequestClientCapabilities {
+                mrtr: crate::types::mrtr::ClientMrtrCapabilities {
+                    elicitation: Some(Default::default()),
+                    ..Default::default()
+                },
+                extensions: Some(HashMap::from([(
+                    "com.example/search".to_string(),
+                    json!({}),
+                )])),
+            };
+            let json = serde_json::to_value(&caps).unwrap();
+
+            assert_eq!(
+                json,
+                json!({ "elicitation": {}, "extensions": { "com.example/search": {} } })
+            );
+
+            let back: RequestClientCapabilities = serde_json::from_value(json).unwrap();
+            assert!(back.mrtr.elicitation.is_some());
+            assert!(back.extension("com.example/search").is_some());
+        }
+
+        #[test]
+        fn a_malformed_map_declares_nothing_and_takes_nothing_else_down() {
+            for extensions in [json!([]), json!("io.modelcontextprotocol/ui"), json!(null)] {
+                let caps: RequestClientCapabilities = serde_json::from_value(json!({
+                    "elicitation": {},
+                    "extensions": extensions
+                }))
+                .unwrap_or_else(|err| panic!("{extensions} must not fail the parse: {err}"));
+
+                assert!(caps.extensions.is_none(), "{extensions}");
+                assert!(caps.mrtr.elicitation.is_some(), "{extensions}");
+            }
+        }
     }
 }

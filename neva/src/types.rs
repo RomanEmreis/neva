@@ -23,6 +23,8 @@ use {crate::auth::Claims, http::HeaderMap, std::sync::Arc};
 
 #[cfg(feature = "legacy-spec")]
 pub use capabilities::LoggingCapability;
+#[cfg(not(feature = "legacy-spec"))]
+pub use capabilities::RequestClientCapabilities;
 #[cfg(any(feature = "legacy-spec", feature = "client"))]
 pub use capabilities::RootsCapability;
 pub use capabilities::{
