@@ -258,8 +258,13 @@ pub struct ServerManifest {
     /// started, used for the package [`with_cargo`](Self::with_cargo) adds.
     /// Not part of the manifest: it is an answer about *this* server, and the
     /// JSON asks the question once per package.
-    #[serde(skip)]
-    transport: Transport,
+    ///
+    /// `None` says one thing only: an app was asked and had no transport. That
+    /// is not stdio -- such an app cannot start -- so the gap is kept rather
+    /// than filled, for [`validate`](Self::validate) to report. Where no app
+    /// was involved, here or in [`new`](Self::new), it is stdio.
+    #[serde(skip, default = "assumed_transport")]
+    transport: Option<Transport>,
 }
 
 impl ServerManifest {
@@ -287,7 +292,7 @@ impl ServerManifest {
             remotes: Vec::new(),
             icons: None,
             meta: None,
-            transport: Transport::Stdio,
+            transport: assumed_transport(),
         }
     }
 
@@ -354,8 +359,8 @@ impl ServerManifest {
             self.website_url = cargo.homepage.clone();
         }
 
-        let package =
-            Package::cargo(cargo.name, cargo.version).with_transport(self.transport.clone());
+        let package = Package::cargo(cargo.name, cargo.version)
+            .with_transport(self.transport.clone().unwrap_or_default());
         self.packages.push(config(package));
         self
     }
@@ -520,10 +525,10 @@ impl ServerManifest {
     }
 
     /// The transport a package added by [`with_cargo`](Self::with_cargo) is
-    /// given: what the app was configured with.
+    /// given: what the app was configured with, or `None` when it had none.
     #[inline]
-    pub fn transport(&self) -> &Transport {
-        &self.transport
+    pub fn transport(&self) -> Option<&Transport> {
+        self.transport.as_ref()
     }
 
     /// What the registry will refuse, asked here instead.
@@ -581,6 +586,18 @@ impl ServerManifest {
 
         for package in &self.packages {
             package.validate()?;
+        }
+
+        // A package says how to talk to what it installs, and an app with no
+        // transport has not answered that. Writing `stdio` anyway would
+        // publish an install that cannot work: the same app refuses to start,
+        // for the same reason.
+        if self.transport.is_none() && !self.packages.is_empty() {
+            return Err(invalid(
+                "this manifest came from an app with no transport, so there is nothing to \
+                 publish a package for: configure one with `with_stdio` or `with_http` before \
+                 `server_manifest`, or build the manifest with `ServerManifest::new`",
+            ));
         }
 
         // `remotes` is where a server that is already running is named, and a
@@ -661,6 +678,20 @@ impl Package {
             ));
         }
 
+        // Carrying one is half the requirement; the schema spells the other
+        // half `^[a-f0-9]{64}$`. An empty string satisfies "present" and
+        // nothing else, and a digest pasted in upper case is refused just the
+        // same -- by the registry, if not here.
+        if let Some(hash) = &self.file_sha256
+            && !is_sha256(hash)
+        {
+            return Err(invalid(format!(
+                "`fileSha256` is a SHA-256 digest written as 64 lowercase hex characters; \
+                 `{}` is not one",
+                elided(hash)
+            )));
+        }
+
         // Each named type has its own answer about `registryBaseUrl`, and two
         // of them are "not at all": an OCI or MCPB identifier carries its host
         // already, and the official registry refuses the field rather than
@@ -683,6 +714,33 @@ impl Package {
 /// The one Cargo registry the official registry accepts: it defaults an unset
 /// `registryBaseUrl` to this and refuses every other value.
 const CRATES_IO: &str = "https://crates.io";
+
+/// What a manifest that never met an app assumes: a package it derives is for
+/// a binary the client spawns. Read back from JSON it is the same answer --
+/// there is no app on that path either, and the packages already carry the
+/// transports they were published with.
+fn assumed_transport() -> Option<Transport> {
+    Some(Transport::Stdio)
+}
+
+/// The schema's `^[a-f0-9]{64}$`, checked by hand rather than by a regex
+/// engine this crate would otherwise not link.
+fn is_sha256(hash: &str) -> bool {
+    hash.len() == 64
+        && hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase() && b <= b'f')
+}
+
+/// Keeps a rejected value quotable: what an author pasted by mistake can be
+/// arbitrarily long, and an error message is not the place to repeat it.
+fn elided(value: &str) -> String {
+    const MAX: usize = 72;
+    match value.char_indices().nth(MAX) {
+        None => value.to_owned(),
+        Some((end, _)) => format!("{}...", &value[..end]),
+    }
+}
 
 /// The reverse-DNS shape the registry requires, checked by hand: one `/`, a
 /// namespace of letters, digits, dots and dashes, and a server name that also
@@ -926,11 +984,18 @@ impl crate::App {
     /// different string under different rules.
     ///
     /// The version comes from
-    /// [`with_version`](crate::app::options::McpOptions::with_version). An app
-    /// that never set one reports neva's own version, which is no server's
-    /// version, so it is left empty for
+    /// [`with_version`](crate::app::options::McpOptions::with_version), and
+    /// whether it was called is what decides -- not what it was called with.
+    /// An app that never set one reports neva's own version, which is no
+    /// server's version, so the field is left empty for
     /// [`with_cargo`](ServerManifest::with_cargo) to fill from the crate --
     /// and, failing that, refused by [`validate`](ServerManifest::validate).
+    /// A version set deliberately to whatever neva happens to be at is still
+    /// the author's, and is kept.
+    ///
+    /// The transport is the one the app is configured with. An app that has
+    /// none is not a stdio app -- it cannot start -- so nothing is invented
+    /// for it; `validate` refuses a package derived from such an app.
     ///
     /// # Examples
     /// ```rust
@@ -947,18 +1012,20 @@ impl crate::App {
     /// assert!(manifest.to_json().is_ok());
     /// ```
     pub fn server_manifest(&self, name: impl Into<String>) -> ServerManifest {
-        let implementation = &self.options.implementation;
-
-        // Neva's own version is what an app that never called `with_version`
-        // reports. Publishing it as the server's version would be wrong in a
-        // way nobody would notice, so it counts as unset here.
-        let version = match implementation.version.as_str() {
-            env!("CARGO_PKG_VERSION") => "",
-            version => version,
+        // An app that never called `with_version` reports neva's own version,
+        // and publishing that as the server's would be wrong in a way nobody
+        // would notice. The options record the call rather than this comparing
+        // strings: a version deliberately set to the one neva happens to be at
+        // is the author's, and a heuristic would take it away from them.
+        let version = match self.options.version_is_explicit {
+            true => self.options.implementation.version.as_str(),
+            false => "",
         };
 
         let mut manifest = ServerManifest::new(name, version);
-        manifest.transport = self.options.configured_transport().unwrap_or_default();
+        // `None` when the app has no transport at all, which is not a stdio
+        // server -- see `validate`.
+        manifest.transport = self.options.configured_transport();
         manifest
     }
 }
@@ -1171,6 +1238,73 @@ mod tests {
         assert!(err.to_string().contains("must not carry"), "got: {err}");
     }
 
+    /// Carrying a hash is half of what the schema asks; `^[a-f0-9]{64}$` is
+    /// the other half. An empty string and a typo both satisfy "present".
+    #[test]
+    fn a_malformed_mcpb_hash_is_refused() {
+        let mcpb = |hash: &str| {
+            ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
+                .with_description("Weather")
+                .with_package(
+                    Package::new(
+                        RegistryType::Mcpb,
+                        "https://github.com/example/weather/releases/download/v0.3.0/w.mcpb",
+                        "0.3.0",
+                        Transport::Stdio,
+                    )
+                    .with_file_sha256(hash),
+                )
+                .validate()
+        };
+        const DIGEST: &str = "fe333e598595000ae021bd27117db32ec69af6987f507ba7a63c90638ff633ce";
+
+        assert!(mcpb(DIGEST).is_ok(), "a real digest passes");
+        for bad in [
+            "",
+            "not-a-hash",
+            // Upper case is what `shasum` prints on some platforms, and the
+            // schema's character class does not admit it.
+            &DIGEST.to_uppercase(),
+            // One character short, which is the failure a truncated paste has.
+            &DIGEST[..63],
+            &format!("{DIGEST}0"),
+        ] {
+            let err = mcpb(bad).expect_err("`{bad}` is not a SHA-256 digest");
+            assert!(err.to_string().contains("64 lowercase hex"), "got: {err}");
+        }
+    }
+
+    /// A value that is not a digest can be arbitrarily long, and quoting it
+    /// back in full would make the error unreadable.
+    #[test]
+    fn a_rejected_value_is_quoted_back_in_brief() {
+        let err = ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
+            .with_description("Weather")
+            .with_package(Package::cargo("weather-mcp", "0.3.0").with_file_sha256("x".repeat(4096)))
+            .validate()
+            .expect_err("4096 `x`s are not a digest");
+
+        assert!(
+            err.to_string().len() < 200,
+            "got {} chars",
+            err.to_string().len()
+        );
+        assert!(err.to_string().contains("..."), "got: {err}");
+    }
+
+    /// The field is skipped by serde, so a manifest read back from JSON has no
+    /// app behind it -- the same position as one built by hand, and not the
+    /// one that gets refused.
+    #[test]
+    fn a_manifest_read_back_from_json_still_validates() {
+        let json = manifest().to_json().expect("a complete manifest");
+
+        let read: ServerManifest = serde_json::from_str(&json).expect("reads back");
+
+        assert_eq!(read.transport(), Some(&Transport::Stdio));
+        assert!(read.validate().is_ok(), "a published manifest stays valid");
+    }
+
     /// A remote is a server already running somewhere. Stdio names a process
     /// the client would spawn, which is the other kind of entry entirely.
     #[test]
@@ -1301,7 +1435,7 @@ mod app_tests {
         let manifest = app.server_manifest("io.github.romanemreis/weather");
 
         assert_eq!(manifest.version(), "0.3.0");
-        assert_eq!(manifest.transport(), &Transport::Stdio);
+        assert_eq!(manifest.transport(), Some(&Transport::Stdio));
     }
 
     /// An app that never set a version reports neva's own, which is nobody's
@@ -1347,6 +1481,55 @@ mod app_tests {
         assert_eq!(
             manifest.packages[0].transport(),
             &Transport::streamable_http("http://127.0.0.1:3000/mcp")
+        );
+    }
+
+    /// A version the author chose is theirs, even when it is the string neva
+    /// happens to be at. Comparing versions could not tell the two apart; the
+    /// options record the call instead.
+    #[test]
+    fn a_version_set_to_the_sdks_own_is_still_the_authors() {
+        let app =
+            App::new().with_options(|opt| opt.with_stdio().with_version(env!("CARGO_PKG_VERSION")));
+
+        let manifest = app
+            .server_manifest("io.github.romanemreis/weather")
+            .with_description("Weather")
+            // A crate at a different version from the one the server reports:
+            // the explicit answer wins, and the package keeps the crate's.
+            .with_cargo(CargoEnv::new("weather-mcp", "0.1.0"));
+
+        assert_eq!(manifest.version(), env!("CARGO_PKG_VERSION"));
+        assert_eq!(manifest.packages[0].version(), "0.1.0");
+    }
+
+    /// An app with no transport is not a stdio app: it cannot start at all, so
+    /// a package entry derived from it would describe an install that cannot
+    /// work.
+    #[test]
+    fn an_app_without_a_transport_does_not_publish_a_stdio_package() {
+        let app = App::new().with_options(|opt| opt.with_version("0.3.0"));
+
+        let manifest = app
+            .server_manifest("io.github.romanemreis/weather")
+            .with_description("Weather")
+            .with_cargo(CargoEnv::new("weather-mcp", "0.3.0"));
+
+        assert_eq!(manifest.transport(), None);
+        let err = manifest
+            .validate()
+            .expect_err("an app with no transport has no package to publish");
+        assert!(err.to_string().contains("with_stdio"), "got: {err}");
+
+        // A remote is the author's own answer, not a derived one, so it stands.
+        assert!(
+            app.server_manifest("io.github.romanemreis/weather")
+                .with_description("Weather")
+                .with_remote(Remote::new(Transport::streamable_http(
+                    "https://mcp.example.com/mcp"
+                )))
+                .validate()
+                .is_ok()
         );
     }
 
