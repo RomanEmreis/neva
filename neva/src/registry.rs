@@ -655,6 +655,12 @@ impl ServerManifest {
 
 impl Package {
     /// What the registry will refuse about this entry.
+    ///
+    /// Every rule below is keyed off the spelling that goes on the wire rather
+    /// than the Rust variant that produced it. The registry reads a string,
+    /// and [`Other`](RegistryType::Other) can hold one this SDK also has a
+    /// variant for -- so a rule that matched on the variant would let
+    /// `Other("mcpb")` walk past a requirement the upload applies anyway.
     pub(crate) fn validate(&self) -> Result<(), Error> {
         if self.identifier.is_empty() {
             return Err(invalid("a package needs an `identifier`"));
@@ -672,7 +678,7 @@ impl Package {
 
         validate_version(&self.version, "a package version")?;
 
-        if matches!(self.registry_type, RegistryType::Mcpb) && self.file_sha256.is_none() {
+        if self.registry_type.as_str() == "mcpb" && self.file_sha256.is_none() {
             return Err(invalid(
                 "an MCPB package must carry the file's SHA-256: set it with `with_file_sha256`",
             ));
@@ -692,19 +698,21 @@ impl Package {
             )));
         }
 
-        // Each named type has its own answer about `registryBaseUrl`, and two
-        // of them are "not at all": an OCI or MCPB identifier carries its host
-        // already, and the official registry refuses the field rather than
-        // ignoring it.
-        match (&self.registry_type, self.registry_base_url.as_deref()) {
-            (RegistryType::Cargo, Some(url)) if url != CRATES_IO => Err(invalid(format!(
+        // Each type the registry knows has its own answer about
+        // `registryBaseUrl`, and two of them are "not at all": an OCI or MCPB
+        // identifier carries its host already, and the official registry
+        // refuses the field rather than ignoring it.
+        match (
+            self.registry_type.as_str(),
+            self.registry_base_url.as_deref(),
+        ) {
+            ("cargo", Some(url)) if url != CRATES_IO => Err(invalid(format!(
                 "a Cargo package comes from `{CRATES_IO}` or from nowhere the registry accepts; \
                  `{url}` is refused. Leaving it unset is the same thing and says less"
             ))),
-            (RegistryType::Oci | RegistryType::Mcpb, Some(_)) => Err(invalid(format!(
-                "an `{}` package must not carry a `registryBaseUrl`: its identifier names the \
-                 host already",
-                self.registry_type.as_str()
+            (kind @ ("oci" | "mcpb"), Some(_)) => Err(invalid(format!(
+                "an `{kind}` package must not carry a `registryBaseUrl`: its identifier names \
+                 the host already"
             ))),
             _ => Ok(()),
         }
@@ -1303,6 +1311,70 @@ mod tests {
 
         assert_eq!(read.transport(), Some(&Transport::Stdio));
         assert!(read.validate().is_ok(), "a published manifest stays valid");
+    }
+
+    /// Two spellings of one wire value, and the rules follow the wire. Nothing
+    /// canonicalizes a hand-written `Other("mcpb")` -- `From<&str>` and
+    /// deserialization both return the variant -- so validation reads the
+    /// string rather than the shape that carries it.
+    #[test]
+    fn a_reserved_spelling_under_other_is_held_to_the_same_rules() {
+        let judge = |package: Package| {
+            ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
+                .with_description("Weather")
+                .with_package(package)
+                .validate()
+        };
+        let written_out = |name: &str| RegistryType::Other(name.to_owned());
+
+        // The MCPB hash, which the variant is refused for.
+        let err = judge(Package::new(
+            written_out("mcpb"),
+            "https://github.com/example/weather/releases/download/v0.3.0/w.mcpb",
+            "0.3.0",
+            Transport::Stdio,
+        ))
+        .expect_err("`mcpb` spelled by hand is still an MCPB package");
+        assert!(err.to_string().contains("SHA-256"), "got: {err}");
+
+        // ...and both `registryBaseUrl` rules.
+        let err = judge(
+            Package::new(
+                written_out("cargo"),
+                "weather-mcp",
+                "0.3.0",
+                Transport::Stdio,
+            )
+            .with_registry_base_url("https://crates.example.com"),
+        )
+        .expect_err("`cargo` spelled by hand keeps the crates.io rule");
+        assert!(err.to_string().contains("crates.io"), "got: {err}");
+
+        let err = judge(
+            Package::new(
+                written_out("oci"),
+                "docker.io/example/weather:1.0.0",
+                "1.0.0",
+                Transport::Stdio,
+            )
+            .with_registry_base_url("https://docker.io"),
+        )
+        .expect_err("`oci` spelled by hand still refuses the field");
+        assert!(err.to_string().contains("must not carry"), "got: {err}");
+
+        // A name the registry does not reserve carries no rules of ours.
+        assert!(
+            judge(
+                Package::new(
+                    written_out("npm"),
+                    "@example/weather",
+                    "1.0.0",
+                    Transport::Stdio
+                )
+                .with_registry_base_url("https://registry.npmjs.org")
+            )
+            .is_ok()
+        );
     }
 
     /// A remote is a server already running somewhere. Stdio names a process

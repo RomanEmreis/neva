@@ -37,6 +37,13 @@ pub enum RegistryType {
     /// [SHA-256](Package::with_file_sha256) of what is behind it.
     Mcpb,
     /// A registry type this SDK does not name.
+    ///
+    /// What reaches the registry is the string, so a spelling one of the
+    /// variants above also has is that type: `Other("mcpb".into())` is an
+    /// `mcpb` package, held to the same rules by
+    /// [`ServerManifest::validate`](super::ServerManifest::validate).
+    /// [`from`](Self::from) and deserialization return the variant instead, so
+    /// this is only reachable by writing it out.
     Other(String),
 }
 
