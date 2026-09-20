@@ -630,6 +630,26 @@ impl ServerManifest {
             package.validate()?;
         }
 
+        // Every field the schema types as a URI, and it types them as an
+        // assertion rather than an annotation: `$schema` says draft-07, and a
+        // draft-07 validator checks `format`. An empty string and a bare host
+        // are the two ways this goes wrong -- the second is what a `homepage`
+        // written as `example.com` in `Cargo.toml` becomes.
+        for (field, url) in [
+            ("$schema", Some(self.schema.as_str())),
+            ("websiteUrl", self.website_url.as_deref()),
+        ] {
+            if let Some(url) = url
+                && !is_http_url(url)
+            {
+                return Err(invalid(format!(
+                    "`{}` is not a `{field}`: the schema reads it as a URI, so it is `http://` \
+                     or `https://`",
+                    elided(url)
+                )));
+            }
+        }
+
         if let Some(repository) = &self.repository {
             let source = repository.source.as_str();
             if source.is_empty() {
@@ -798,6 +818,14 @@ impl Package {
             (kind @ ("oci" | "mcpb"), Some(_)) => Err(invalid(format!(
                 "an `{kind}` package must not carry a `registryBaseUrl`: its identifier names \
                  the host already"
+            ))),
+            // Which registry an unnamed type comes from is that type's
+            // business; that the field is a URL is the schema's, and it types
+            // this one as a URI.
+            (_, Some(url)) if !is_http_url(url) => Err(invalid(format!(
+                "`{}` is not a `registryBaseUrl`: the schema reads it as a URI, so it is \
+                 `http://` or `https://`",
+                elided(url)
             ))),
             _ => Ok(()),
         }
@@ -1527,6 +1555,61 @@ mod tests {
         );
         let err = with_base(oci, "https://docker.io").expect_err("OCI refuses the field");
         assert!(err.to_string().contains("must not carry"), "got: {err}");
+
+        // A registry this SDK does not name brings its own base URL, and what
+        // the schema asks of it is that it be a URI.
+        let other = || {
+            Package::new(
+                RegistryType::Other("npm".into()),
+                "@me/w",
+                "1.0.0",
+                Transport::Stdio,
+            )
+        };
+        assert!(with_base(other(), "https://registry.npmjs.org").is_ok());
+        for bad in ["", "registry.npmjs.org", "not a url"] {
+            let err = with_base(other(), bad).expect_err("a base URL is a URL");
+            assert!(
+                err.to_string().contains("registryBaseUrl"),
+                "`{bad}`: {err}"
+            );
+        }
+    }
+
+    /// `format: uri` in this schema is an assertion, not an annotation --
+    /// `$schema` names draft-07, where a validator checks it. So every field
+    /// typed that way is held to being a URL, and a `homepage` written as a
+    /// bare host in `Cargo.toml` is the one that arrives that way.
+    #[test]
+    fn a_uri_typed_field_has_to_be_a_url() {
+        let website = |url: &str| {
+            manifest()
+                .with_website_url(url)
+                .validate()
+                .map_err(|err| err.to_string())
+        };
+
+        assert!(website("https://example.com/weather").is_ok());
+        for bad in ["", "example.com", "www.example.com/weather"] {
+            let err = website(bad).expect_err("a website URL is a URL");
+            assert!(err.contains("websiteUrl"), "`{bad}`: {err}");
+        }
+
+        // The field is checked wherever it came from, and a `homepage` written
+        // without a scheme is how it most often arrives: `Cargo.toml` takes
+        // that string as readily as a URL.
+        let err = ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
+            .with_description("Weather")
+            .with_cargo(CargoEnv::new("weather-mcp", "0.3.0").with_homepage("example.com"))
+            .validate()
+            .expect_err("a homepage copied from Cargo is a websiteUrl like any other");
+        assert!(err.to_string().contains("websiteUrl"), "got: {err}");
+
+        let err = manifest()
+            .with_schema_url("2025-12-11/server.schema.json")
+            .validate()
+            .expect_err("the schema URL is a URL too");
+        assert!(err.to_string().contains("$schema"), "got: {err}");
     }
 
     /// Carrying a hash is half of what the schema asks; `^[a-f0-9]{64}$` is
