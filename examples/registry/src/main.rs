@@ -17,15 +17,18 @@
 //! cargo run -p example-registry -- --emit-manifest > server.json
 //! ```
 //!
-//! # Publishing
+//! # Publishing your own
 //!
-//! 1. Publish the crate, so there is something to install:
-//!    `cargo publish`.
-//! 2. Put the server name in the crate's README as **visible text**, which is
+//! Not this crate: it is `publish = false`, as every example here is, and a
+//! listing for `example-registry` would be nobody's server. What follows is the
+//! path for the crate you copy this into.
+//!
+//! 1. `cargo publish`, so there is something to install.
+//! 2. Put the server name in that crate's README as **visible text**, which is
 //!    how crates.io packages prove ownership:
 //!
 //!    ```no_rust
-//!    - MCP Registry name: `mcp-name: io.github.romanemreis/weather`
+//!    - MCP Registry name: `mcp-name: io.github.<your-user>/<your-server>`
 //!    ```
 //!
 //!    Not as an HTML comment: crates.io strips those when it renders markdown,
@@ -34,7 +37,7 @@
 //! 3. Write the manifest, prove the namespace is yours, and publish it:
 //!
 //!    ```no_rust
-//!    cargo run -p example-registry -- --emit-manifest > server.json
+//!    cargo run -p <your-server> -- --emit-manifest > server.json
 //!    mcp-publisher login github
 //!    mcp-publisher publish
 //!    ```
