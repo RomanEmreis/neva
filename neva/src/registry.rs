@@ -66,13 +66,45 @@ const MAX_TITLE: usize = 100;
 const MAX_VERSION: usize = 255;
 const MAX_PUBLISHER_METADATA: usize = 4096;
 
+/// The forges this SDK can name from a URL, and the hosts that name them.
+///
+/// Two, because those are the two whose repository URLs have a shape anyone
+/// but their own registry can check. A forge outside this list is named by its
+/// author with [`Repository::with_source`].
+const KNOWN_FORGES: [(&str, &str); 2] = [("github.com", "github"), ("gitlab.com", "gitlab")];
+
+/// The host a source is served from, for the sources this SDK names.
+fn known_forge_host(source: &str) -> Option<&'static str> {
+    KNOWN_FORGES
+        .iter()
+        .find(|(_, forge)| *forge == source)
+        .map(|(host, _)| *host)
+}
+
+/// The forge a URL is on, when it is one of the two this SDK can read off a
+/// host. `https://github.com.evil.example/me` is not github.com, so the host
+/// has to end where the path begins.
+fn forge_of(url: &str) -> Option<&'static str> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let rest = rest.strip_prefix("www.").unwrap_or(rest);
+    KNOWN_FORGES
+        .iter()
+        .find(|(host, _)| {
+            rest.strip_prefix(host)
+                .is_some_and(|rest| rest.starts_with('/'))
+        })
+        .map(|(_, forge)| *forge)
+}
+
 /// Where the server's source is, so users and reviewers can read it.
 ///
 /// # Examples
 /// ```rust
 /// use neva::registry::Repository;
 ///
-/// let repo = Repository::new("https://github.com/RomanEmreis/neva", "github")
+/// let repo = Repository::new("https://github.com/RomanEmreis/neva")
 ///     .with_subfolder("examples/registry");
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,8 +112,9 @@ pub struct Repository {
     /// Where the source can be browsed and cloned.
     url: String,
 
-    /// Which forge that is: `github`, `gitlab`. Registries pick their
-    /// verification method from it.
+    /// Which forge that is -- `github`, `gitlab`, whatever a registry knows
+    /// how to verify. Read off the URL when it names one this SDK can, and
+    /// otherwise the author's to give.
     source: String,
 
     /// Where in the repository this server lives, if it is not the root.
@@ -96,48 +129,53 @@ pub struct Repository {
 }
 
 impl Repository {
-    /// A repository at `url`, hosted on `source`.
+    /// A repository at `url`, with the forge read off the host.
+    ///
+    /// `github.com` and `gitlab.com` name themselves; anywhere else -- a
+    /// Codeberg, a Gitea, a forge inside a company -- the source is the
+    /// author's to give with [`with_source`](Self::with_source), because a
+    /// host does not say what verifies it.
+    ///
+    /// The URL is the repository's own -- `https://<forge>/<owner>/<repo>` and
+    /// nothing deeper. A path inside it goes to
+    /// [`with_subfolder`](Self::with_subfolder), which is what a registry reads
+    /// for a server in a monorepo;
+    /// [`validate`](ServerManifest::validate) holds the URL to that shape.
     ///
     /// # Examples
     /// ```rust
     /// use neva::registry::Repository;
     ///
-    /// let repo = Repository::new("https://github.com/RomanEmreis/neva", "github");
+    /// let repo = Repository::new("https://github.com/RomanEmreis/neva");
+    ///
+    /// let elsewhere =
+    ///     Repository::new("https://git.example.com/teams/platform/weather").with_source("gitea");
     /// ```
-    pub fn new(url: impl Into<String>, source: impl Into<String>) -> Self {
+    pub fn new(url: impl Into<String>) -> Self {
+        let url = url.into();
         Self {
-            url: url.into(),
-            source: source.into(),
+            source: forge_of(&url).unwrap_or_default().to_owned(),
+            url,
             subfolder: None,
             id: None,
         }
     }
 
-    /// The repository a URL points at, with the forge read off the host.
+    /// Names the forge, for one this SDK cannot read off a host.
     ///
-    /// Returns `None` for a URL that names no forge this knows, because
-    /// `source` is what tells a registry how to verify the repository and
-    /// guessing it wrong is worse than leaving it out.
+    /// The official registry verifies `github` and `gitlab` and refuses a
+    /// source it does not know, so another name here is for a registry that
+    /// takes one -- or for leaving `repository` out, which is optional.
     ///
     /// # Examples
     /// ```rust
     /// use neva::registry::Repository;
     ///
-    /// let repo = Repository::from_url("https://github.com/RomanEmreis/neva")
-    ///     .expect("github is a forge this knows");
-    ///
-    /// assert!(Repository::from_url("https://git.example.com/me/server").is_none());
+    /// let repo = Repository::new("https://codeberg.org/me/weather").with_source("codeberg");
     /// ```
-    pub fn from_url(url: impl AsRef<str>) -> Option<Self> {
-        let url = url.as_ref();
-        let source = [("github.com", "github"), ("gitlab.com", "gitlab")]
-            .into_iter()
-            .find(|(host, _)| {
-                url.starts_with(&format!("https://{host}/"))
-                    || url.starts_with(&format!("http://{host}/"))
-            })
-            .map(|(_, source)| source)?;
-        Some(Self::new(url, source))
+    pub fn with_source(mut self, source: impl Into<String>) -> Self {
+        self.source = source.into();
+        self
     }
 
     /// Points at the server's own directory inside the repository.
@@ -146,7 +184,7 @@ impl Repository {
     /// ```rust
     /// use neva::registry::Repository;
     ///
-    /// let repo = Repository::new("https://github.com/RomanEmreis/neva", "github")
+    /// let repo = Repository::new("https://github.com/RomanEmreis/neva")
     ///     .with_subfolder("examples/registry");
     /// ```
     pub fn with_subfolder(mut self, subfolder: impl Into<String>) -> Self {
@@ -160,7 +198,7 @@ impl Repository {
     /// ```rust
     /// use neva::registry::Repository;
     ///
-    /// let repo = Repository::new("https://github.com/RomanEmreis/neva", "github")
+    /// let repo = Repository::new("https://github.com/RomanEmreis/neva")
     ///     .with_id("123456789");
     /// ```
     pub fn with_id(mut self, id: impl Into<String>) -> Self {
@@ -350,10 +388,14 @@ impl ServerManifest {
         if self.version.is_empty() {
             self.version = cargo.version.clone();
         }
+        // Only when the URL names a forge this can read: a source is what a
+        // registry verifies against, and inventing one for an unknown host
+        // would be worse than leaving the repository out.
         if self.repository.is_none()
-            && let Some(repository) = cargo.repository.as_deref().and_then(Repository::from_url)
+            && let Some(url) = cargo.repository.as_deref()
+            && forge_of(url).is_some()
         {
-            self.repository = Some(repository);
+            self.repository = Some(Repository::new(url));
         }
         if self.website_url.is_none() {
             self.website_url = cargo.homepage.clone();
@@ -428,7 +470,7 @@ impl ServerManifest {
     /// use neva::registry::{Repository, ServerManifest};
     ///
     /// let manifest = ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
-    ///     .with_repository(Repository::new("https://github.com/RomanEmreis/neva", "github"));
+    ///     .with_repository(Repository::new("https://github.com/RomanEmreis/neva"));
     /// ```
     pub fn with_repository(mut self, repository: Repository) -> Self {
         self.repository = Some(repository);
@@ -588,6 +630,30 @@ impl ServerManifest {
             package.validate()?;
         }
 
+        if let Some(repository) = &self.repository {
+            let source = repository.source.as_str();
+            if source.is_empty() {
+                return Err(invalid(
+                    "a repository needs a `source`: this URL is on no forge that names itself \
+                     from its host, so say which one it is with `with_source`",
+                ));
+            }
+            if !is_forge_repository_url(source, &repository.url) {
+                return Err(invalid(match known_forge_host(source) {
+                    Some(host) => format!(
+                        "`{}` is not a {source} repository URL: a registry reads \
+                         `https://{host}/<owner>/<repo>` and nothing deeper -- a path inside the \
+                         repository goes to `with_subfolder`",
+                        elided(&repository.url)
+                    ),
+                    None => format!(
+                        "`{}` is not a URL a {source} repository could be read from",
+                        elided(&repository.url)
+                    ),
+                }));
+            }
+        }
+
         // A package says how to talk to what it installs, and an app with no
         // transport has not answered that. Writing `stdio` anyway would
         // publish an install that cannot work: the same app refuses to start,
@@ -608,6 +674,25 @@ impl ServerManifest {
                 "a remote is a server that is already running, so it cannot be reached over \
                  stdio: give it a URL with `Transport::streamable_http`",
             ));
+        }
+
+        // Wherever a transport carries a URL -- a package's or a remote's --
+        // the schema wants one it could dial.
+        for transport in self
+            .packages
+            .iter()
+            .map(Package::transport)
+            .chain(self.remotes.iter().map(Remote::transport))
+        {
+            if let Some(url) = transport.url()
+                && !is_http_url(url)
+            {
+                return Err(invalid(format!(
+                    "`{}` is not a URL a client could call: a `streamable-http` transport is \
+                     `http://` or `https://`, with no spaces",
+                    elided(url)
+                )));
+            }
         }
 
         if let Some(metadata) = self
@@ -729,6 +814,57 @@ const CRATES_IO: &str = "https://crates.io";
 /// transports they were published with.
 fn assumed_transport() -> Option<Transport> {
     Some(Transport::Stdio)
+}
+
+/// The schema's `^https?://[^\s]+$` for a transport URL.
+///
+/// The `draft` schema also admits a URL that *begins* with a `{variable}`, and
+/// the version pinned here does not -- so one written that way is refused,
+/// which is what the registry would do with the schema this writes.
+fn is_http_url(url: &str) -> bool {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"));
+    matches!(rest, Some(rest) if !rest.is_empty() && !rest.chars().any(char::is_whitespace))
+}
+
+/// The registry's own `^https?://(www\.)?<host>/[\w.-]+/[\w.-]+/?$`: a
+/// repository URL names the repository and stops there.
+///
+/// Keyed off the spelling, so `Other("github")` is checked as GitHub is. A
+/// forge this SDK does not name has no host and no shape to hold it to -- only
+/// whoever verifies that forge knows them -- so the URL is checked as a URL and
+/// no further.
+fn is_forge_repository_url(source: &str, url: &str) -> bool {
+    let Some(host) = known_forge_host(source) else {
+        return is_http_url(url);
+    };
+
+    let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    let rest = rest.strip_prefix("www.").unwrap_or(rest);
+    let Some(rest) = rest
+        .strip_prefix(host)
+        .and_then(|rest| rest.strip_prefix('/'))
+    else {
+        return false;
+    };
+
+    let mut segments = rest.strip_suffix('/').unwrap_or(rest).split('/');
+    let (Some(owner), Some(repo), None) = (segments.next(), segments.next(), segments.next())
+    else {
+        return false;
+    };
+    [owner, repo].iter().all(|segment| {
+        !segment.is_empty()
+            && segment
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+    })
 }
 
 /// The schema's `^[a-f0-9]{64}$`, checked by hand rather than by a regex
@@ -1409,10 +1545,7 @@ mod tests {
         );
         assert_eq!(
             derived.repository,
-            Some(Repository::new(
-                "https://github.com/RomanEmreis/neva",
-                "github"
-            ))
+            Some(Repository::new("https://github.com/RomanEmreis/neva"))
         );
         assert_eq!(derived.packages.len(), 1);
         assert_eq!(derived.packages[0].identifier(), "weather-mcp");
@@ -1443,23 +1576,190 @@ mod tests {
         assert!(manifest.website_url.is_none());
     }
 
-    /// `source` is how a registry decides which API to verify the repository
-    /// with, so a host this does not know is left for the author to name.
+    /// `source` is how a registry decides which API to verify a repository
+    /// with, and the URL is what says which forge that is -- for the two whose
+    /// URLs anyone but their own registry can read.
     #[test]
-    fn a_repository_url_names_its_forge_or_none() {
+    fn a_repository_url_names_its_forge_or_leaves_it_to_the_author() {
         assert_eq!(
-            Repository::from_url("https://github.com/RomanEmreis/neva"),
-            Some(Repository::new(
-                "https://github.com/RomanEmreis/neva",
-                "github"
-            ))
+            Repository::new("https://github.com/RomanEmreis/neva").source,
+            "github"
         );
         assert_eq!(
-            Repository::from_url("https://gitlab.com/me/server").map(|r| r.source),
-            Some("gitlab".to_owned())
+            Repository::new("http://www.gitlab.com/me/server").source,
+            "gitlab"
         );
-        assert!(Repository::from_url("https://git.example.com/me/server").is_none());
-        assert!(Repository::from_url("https://github.com.evil.example/me").is_none());
+
+        // A host this cannot read names no forge, and does not get one made up.
+        for url in [
+            "https://git.example.com/me/server",
+            "https://github.com.evil.example/me/server",
+            "git@github.com:me/server.git",
+        ] {
+            assert!(
+                Repository::new(url).source.is_empty(),
+                "`{url}` names no forge this SDK can read"
+            );
+        }
+
+        assert_eq!(
+            Repository::new("https://codeberg.org/me/weather")
+                .with_source("codeberg")
+                .source,
+            "codeberg"
+        );
+    }
+
+    /// A crate whose repository is somewhere this cannot name is published
+    /// without one rather than with a guess: the source is what a registry
+    /// verifies against.
+    #[test]
+    fn with_cargo_attaches_a_repository_only_when_it_can_name_the_forge() {
+        let derived = |url: &str| {
+            ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
+                .with_cargo(CargoEnv::new("weather-mcp", "0.3.0").with_repository(url))
+                .repository
+        };
+
+        assert_eq!(
+            derived("https://github.com/RomanEmreis/neva"),
+            Some(Repository::new("https://github.com/RomanEmreis/neva"))
+        );
+        assert!(derived("https://git.example.com/me/server").is_none());
+    }
+
+    /// The registry reads a repository URL as `<forge>/<owner>/<repo>` and
+    /// answers "invalid repository URL" for anything deeper -- including the
+    /// `/tree/<branch>/<path>` form a monorepo crate often puts in
+    /// `Cargo.toml`, whose registry spelling is `subfolder`.
+    #[test]
+    fn a_repository_url_must_name_the_repository_and_stop() {
+        let judge = |repository: Repository| {
+            ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
+                .with_description("Weather")
+                .with_package(Package::cargo("weather-mcp", "0.3.0"))
+                .with_repository(repository)
+                .validate()
+        };
+
+        for url in [
+            "https://github.com/RomanEmreis/neva",
+            "https://github.com/RomanEmreis/neva/",
+            "http://www.github.com/RomanEmreis/neva",
+            "https://github.com/RomanEmreis/neva.rs",
+            "https://gitlab.com/me/server",
+        ] {
+            assert!(
+                judge(Repository::new(url)).is_ok(),
+                "`{url}` names a repository"
+            );
+        }
+
+        let err = judge(Repository::new(
+            "https://github.com/RomanEmreis/neva/tree/main/neva",
+        ))
+        .expect_err("a path inside the repository is not the repository");
+        assert!(err.to_string().contains("with_subfolder"), "got: {err}");
+
+        for url in ["https://github.com/RomanEmreis", "https://github.com/"] {
+            assert!(
+                judge(Repository::new(url).with_source("github")).is_err(),
+                "`{url}` does not name a repository"
+            );
+        }
+
+        // The forge has to be the one the source names, however it got there.
+        assert!(
+            judge(Repository::new("https://github.com/RomanEmreis/neva").with_source("gitlab"))
+                .is_err(),
+            "a github.com URL is not a gitlab repository"
+        );
+    }
+
+    /// A forge this SDK does not name is a forge all the same: `server.json`
+    /// types the source as a string, and only the official registry narrows it
+    /// to two. What cannot be checked for one is its URL shape -- that belongs
+    /// to whoever verifies it -- so the URL is checked as a URL and no further.
+    #[test]
+    fn a_forge_this_sdk_does_not_name_is_still_a_forge() {
+        let judge = |repository: Repository| {
+            ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
+                .with_description("Weather")
+                .with_package(Package::cargo("weather-mcp", "0.3.0"))
+                .with_repository(repository)
+                .validate()
+        };
+
+        // Codeberg, a Gitea, a company's own host behind a deeper path: all
+        // spellings the format allows and this cannot second-guess.
+        for (url, source) in [
+            ("https://codeberg.org/me/weather", "codeberg"),
+            ("https://git.acme.corp/teams/platform/weather", "gitea"),
+            ("https://git.acme.corp:8443/weather", "acme"),
+        ] {
+            assert!(
+                judge(Repository::new(url).with_source(source)).is_ok(),
+                "`{source}` is a forge"
+            );
+        }
+
+        // What is checked for an unnamed forge is that the URL is one.
+        for url in ["", "git.acme.corp/me/weather", "ssh://git.acme.corp/me"] {
+            assert!(
+                judge(Repository::new(url).with_source("gitea")).is_err(),
+                "`{url}` is not a URL"
+            );
+        }
+
+        // A URL on no forge this SDK reads, left unnamed, has no source at all.
+        let err = judge(Repository::new("https://git.acme.corp/me/weather"))
+            .expect_err("a repository needs a source");
+        assert!(err.to_string().contains("with_source"), "got: {err}");
+    }
+
+    /// A `streamable-http` transport is a URL a client dials, and the schema
+    /// says so with a pattern. Both entries that carry one are held to it.
+    #[test]
+    fn a_transport_url_must_be_one_a_client_could_call() {
+        let package = |url: &str| {
+            ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
+                .with_description("Weather")
+                .with_package(
+                    Package::cargo("weather-mcp", "0.3.0")
+                        .with_transport(Transport::streamable_http(url)),
+                )
+                .validate()
+        };
+        let remote = |url: &str| {
+            ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
+                .with_description("Weather")
+                .with_remote(Remote::new(Transport::streamable_http(url)))
+                .validate()
+        };
+
+        for url in [
+            "http://127.0.0.1:3000/mcp",
+            "https://mcp.example.com/mcp",
+            // A template inside the authority still starts with a scheme.
+            "https://{tenant}.example.com/mcp",
+        ] {
+            assert!(package(url).is_ok(), "`{url}` is dialable");
+            assert!(remote(url).is_ok(), "`{url}` is dialable");
+        }
+
+        for url in [
+            "",
+            "localhost:3000/mcp",
+            "ftp://example.com/mcp",
+            "https://",
+            "https://example.com/m cp",
+            // The `draft` schema admits this; the one pinned here does not.
+            "{baseUrl}/mcp",
+        ] {
+            let err = package(url).expect_err("a package transport is checked");
+            assert!(err.to_string().contains("could call"), "`{url}`: {err}");
+            assert!(remote(url).is_err(), "`{url}` is not dialable");
+        }
     }
 
     /// Everything the manifest carries survives a round trip, including the
@@ -1469,10 +1769,7 @@ mod tests {
         let manifest = manifest()
             .with_title("Weather")
             .with_website_url("https://example.com")
-            .with_repository(Repository::new(
-                "https://github.com/RomanEmreis/neva",
-                "github",
-            ))
+            .with_repository(Repository::new("https://github.com/RomanEmreis/neva"))
             .with_publisher_metadata(serde_json::json!({ "tool": "neva" }));
 
         let json = manifest.to_json().expect("a complete manifest");

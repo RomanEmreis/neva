@@ -134,6 +134,15 @@ impl Transport {
         }
     }
 
+    /// The URL a client would dial, for the transport that has one.
+    #[inline]
+    pub(super) fn url(&self) -> Option<&str> {
+        match self {
+            Self::Stdio => None,
+            Self::StreamableHttp { url, .. } => Some(url),
+        }
+    }
+
     /// Adds a header every request to this transport carries.
     ///
     /// Ignored by [`Stdio`](Self::Stdio), which has no requests to put one on.
@@ -448,6 +457,12 @@ impl Remote {
             transport,
             variables: HashMap::new(),
         }
+    }
+
+    /// How to reach this remote.
+    #[inline]
+    pub(super) fn transport(&self) -> &Transport {
+        &self.transport
     }
 
     /// Gives a `{name}` in the URL something to stand for.
