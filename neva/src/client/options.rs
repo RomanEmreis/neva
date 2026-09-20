@@ -478,12 +478,12 @@ impl McpOptions {
     /// a later failure (a handshake that the server rejects) is not undone by
     /// putting it back, because a retry needs a fresh child process anyway.
     ///
-    /// What is retryable is therefore exactly what `start` refuses as a whole.
-    /// The stdio client qualifies -- its handshake fails before it touches its
-    /// own channels -- and the HTTP client does not have to, because its
-    /// `start` reports no failures at all. A transport that consumed part of
-    /// itself on the way to an error would be put back half-used, so one that
-    /// grows a fallible `start` has to be all-or-nothing about it.
+    /// What is retryable is therefore exactly what `start` refuses as a whole,
+    /// which both transports are built to do: the stdio handshake fails before
+    /// it touches its own channels, and the HTTP transport decides every
+    /// refusal before it takes anything. A transport that consumed part of
+    /// itself on the way to an error would be put back half-used, and the
+    /// retry would fail somewhere else with something else to say.
     pub(crate) fn start_transport(&mut self) -> Result<(TransportProto, TransportHandle), Error> {
         // Hand the dual-mode switch to the HTTP transport so request
         // headers follow the negotiated protocol generation. Only the

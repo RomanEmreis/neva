@@ -76,12 +76,13 @@ impl TransportHandle {
     /// A handle for a transport with no writers of its own to wait for: the
     /// drain signal is complete from the start, so awaiting it costs nothing.
     ///
-    /// Only the HTTP transports hand one back -- a client connection owns its
-    /// own teardown, and a server that failed to bind has nothing to drain.
-    /// `TransportProto::None` used to be the third caller, which is exactly
-    /// what let a transport-less client get as far as its first send; see
+    /// Only the HTTP client hands one back: its outbound messages are written
+    /// by the connection task, which owns its own teardown. The other two
+    /// callers were failures pretending to be starts -- a server that never
+    /// bound, and `TransportProto::None`, which is what let a transport-less
+    /// client get as far as its first send; see
     /// [`TransportProto::not_configured`].
-    #[cfg(any(feature = "http-server", feature = "http-client"))]
+    #[cfg(feature = "http-client")]
     #[inline]
     pub(crate) fn detached(token: CancellationToken) -> Self {
         Self::new(token, DrainSignal::ready())

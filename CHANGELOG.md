@@ -27,6 +27,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   send on, and a missing `with_stdio` / `with_http` surfaced as a send failure
   two steps later. It returns the configuration error instead.
 
+* **An HTTP transport that cannot start reports why.** Both `start`
+  implementations answered `Ok` after logging the failure: on the client a
+  rejected OAuth configuration or an unreadable TLS certificate reached the
+  caller as a request timeout once the handshake went unanswered, and on the
+  server a bind that never happened was signalled by an already-cancelled
+  token. Both propagate now, so `Client::connect` returns the error and
+  `App::run` reports it.
+
+  The client transport also stops consuming itself on the way to that error --
+  the OAuth configuration, the TLS configuration and the writer all outlive a
+  refused `start` -- which is what makes the retry above work over HTTP too.
+
 ## 0.6.0
 
 ### Added

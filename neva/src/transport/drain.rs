@@ -95,7 +95,7 @@ impl DrainSignal {
     /// its own to wait for.
     ///
     /// Gated with its one caller, [`TransportHandle::detached`](super::TransportHandle::detached).
-    #[cfg(any(feature = "http-server", feature = "http-client", test))]
+    #[cfg(any(feature = "http-client", test))]
     pub(crate) fn ready() -> Self {
         let (guard, drained) = Self::new();
         drop(guard);

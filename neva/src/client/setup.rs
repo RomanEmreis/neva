@@ -1092,6 +1092,35 @@ mod connect_retry_tests {
         }
     }
 
+    /// The HTTP transport keeps the same promise, and it is the one that used
+    /// to cost ten seconds: `HttpClient::start` logged a rejected
+    /// configuration and answered `Ok`, so `connect` went on to a handshake
+    /// nothing was carrying and reported a request timeout. It reports the
+    /// configuration now, on every attempt.
+    #[cfg(all(feature = "http-client", feature = "client-oauth"))]
+    #[tokio::test]
+    async fn a_refused_http_configuration_is_reported_by_connect() {
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| {
+                http.with_oauth(|oauth| {
+                    oauth
+                        .with_client_id("mcp-cli")
+                        .with_client_id_document("https://example.com/clients/mcp-cli")
+                })
+            })
+        });
+
+        for attempt in 1..=3 {
+            let Err(err) = client.connect().await else {
+                panic!("attempt {attempt}: a configuration that was refused cannot connect");
+            };
+            assert!(
+                err.to_string().contains("alternatives"),
+                "attempt {attempt}: the error names the configuration, got: {err}"
+            );
+        }
+    }
+
     /// And the case the old message was actually about is diagnosed where it
     /// happens -- by `connect`, not by the first send two steps later.
     #[tokio::test]

@@ -91,16 +91,42 @@ impl std::fmt::Debug for OAuthSession {
 }
 
 impl OAuthSession {
-    /// Builds a session for the MCP server at `server_url`.
-    pub(crate) fn new(config: OAuthClientConfig, server_url: &str) -> Result<Self, Error> {
+    /// Everything building a session can refuse, asked of a configuration
+    /// this does *not* take, and returning the canonicalized resource so that
+    /// [`from_resource`](Self::from_resource) has nothing left to fail at.
+    ///
+    /// Splitting the refusals out is what lets a caller ask before it commits
+    /// its configuration: the HTTP transport's `start` has to leave a
+    /// transport its caller can start again
+    /// (<https://github.com/RomanEmreis/neva/issues/131>), and a config moved
+    /// into a constructor that then refuses it is a config gone. [`new`](Self::new)
+    /// is this plus `from_resource`, for callers that have no such worry.
+    pub(crate) fn check(config: &OAuthClientConfig, server_url: &str) -> Result<String, Error> {
         // Before anything else, so a configuration that cannot produce a
         // working flow is reported where it was written rather than at the
         // first `401` -- which may be a long-running process away.
         config.validate()?;
 
-        let resource = canonicalize_resource_uri(server_url)
-            .map_err(|err| Error::new(ErrorCode::InternalError, err.to_string()))?;
+        canonicalize_resource_uri(server_url)
+            .map_err(|err| Error::new(ErrorCode::InternalError, err.to_string()))
+    }
 
+    /// Builds a session for the MCP server at `server_url`: [`check`](Self::check)
+    /// and then [`from_resource`](Self::from_resource).
+    ///
+    /// The one-step form, for a caller that has nothing to lose if the
+    /// configuration is refused. The transport is not such a caller -- it has
+    /// to hand the configuration back to whoever may start it again -- so what
+    /// is left here are the tests that are about the refusals themselves.
+    #[cfg(test)]
+    pub(crate) fn new(config: OAuthClientConfig, server_url: &str) -> Result<Self, Error> {
+        let resource = Self::check(&config, server_url)?;
+        Ok(Self::from_resource(config, resource))
+    }
+
+    /// The half that cannot be refused: `resource` is what [`check`](Self::check)
+    /// made of the server URL, and everything it validated has been validated.
+    pub(crate) fn from_resource(config: OAuthClientConfig, resource: String) -> Self {
         let store_key = Self::initial_store_key(&config, &resource);
 
         // A configured key is this session's from the start; `Auto` waits to
@@ -139,7 +165,7 @@ impl OAuthSession {
             session.set_credential(session.credential_for(tokens));
         }
 
-        Ok(session)
+        session
     }
 
     /// Whether this session may ever present a DPoP-bound token.
