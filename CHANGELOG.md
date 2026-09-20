@@ -10,78 +10,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 * **`server.json` for the [MCP Registry](https://registry.modelcontextprotocol.io)**
-  (#135), under the new `registry` feature (in `server-full`). `App::server_manifest(name)`
-  starts a manifest from what the server knows -- its version and the transport
-  it is configured with -- and `ServerManifest::with_cargo(neva::cargo_env!())`
-  adds what Cargo knows about the crate: description, repository, website, and a
-  `cargo` package entry. `neva::server_manifest!(app, name)` is the two together;
+  (#135), under the new `registry` feature (in `server-full`).
+  `App::server_manifest(name)` seeds a manifest from the app's version and
+  transport; `ServerManifest::with_cargo(neva::cargo_env!())` adds the crate's
+  description, repository, website and a `cargo` package;
+  `neva::server_manifest!(app, name)` is both at once, and
   `with_cargo_package(cargo, |package| ..)` shapes the package it adds.
 
-  `name` is always given explicitly. The registry's name is a namespaced
-  identifier the publisher proves they own, not the MCP server name that
-  `with_name` sets, and nothing substitutes one for the other.
+  `name` is required: it is the registry identifier, not the MCP server name
+  that `with_name` sets.
 
-  `ServerManifest::to_json` validates before it writes: the reverse-DNS name
-  shape, the 100-character description (shorter than crates.io allows), a
-  manifest with neither packages nor remotes, a remote over stdio, a version
-  range in any of the four shapes the registry detects, a transport URL that is
-  not `http(s)://`, a repository URL deeper than `<forge>/<owner>/<repo>` on a
-  forge it can check, a `fileSha256` that is not 64 lowercase hex characters
-  (and an MCPB package carrying none), a package derived from an app that has
-  no transport, and the 4KB publisher-metadata ceiling.
+  `to_json` validates first -- the reverse-DNS name, the 100-character
+  description, version ranges, transport and repository URLs, `fileSha256`,
+  `registryBaseUrl` per registry type, and the 4KB publisher-metadata ceiling --
+  and refuses a manifest with no packages or remotes, a remote over stdio, or a
+  package derived from an app that has no transport.
 
-  `Repository::new(url)` reads the forge off the host for github.com and
-  gitlab.com -- the two whose URL shape anyone but their own registry can
-  check -- and `with_source` names any other: Codeberg, a Gitea, a forge inside
-  a company.
-
-  What a neva server can honestly claim is what the types carry:
-  `RegistryType` names `cargo`, `oci` and `mcpb` -- the three ways a Rust
-  binary ships -- with `Other` for the rest, and `Transport` is stdio and
-  Streamable HTTP only, since neva serves no HTTP+SSE endpoint.
-  `registryBaseUrl` is checked per type: crates.io or unset for Cargo, unset
-  for OCI and MCPB, whose identifiers carry the host.
+  `RegistryType` names `cargo`, `oci` and `mcpb`, with `Other` for the rest.
+  `Transport` is stdio and Streamable HTTP: neva serves no HTTP+SSE endpoint.
+  `Repository::new(url)` reads the forge off a github.com or gitlab.com host,
+  and `with_source` names any other.
 
   Types: `ServerManifest`, `Package`, `RegistryType`, `Transport`, `Remote`,
   `Repository`, `KeyValueInput`, `Argument`, `Input`, `InputFormat`, `CargoEnv`,
-  and the pinned `registry::SCHEMA_URL`. `examples/registry` shows the path from
-  `cargo run -- --emit-manifest` to `mcp-publisher publish`.
+  and the pinned `registry::SCHEMA_URL`. `examples/registry` covers the path
+  from `--emit-manifest` to `mcp-publisher publish`.
 
 ### Fixed
 
 #### Client
-* **A failed `Client::connect` can be retried** (#131). The client options held
-  on to the configured transport until `Transport::start` succeeded, so a
-  second `connect` after a stdio server that could not be spawned (#125) starts
-  the same transport again and reports the same spawn failure. It used to
-  report `Transport protocol must be specified` from the second attempt on.
-
-  Retrying a `connect` that got past `start` is still not supported: the
-  transport belongs to the connection at that point, and a new connection means
-  a new `Client`.
+* **A failed `Client::connect` can be retried** (#131). The options keep the
+  configured transport until `Transport::start` succeeds, so a second `connect`
+  after a spawn failure (#125) starts the same transport again instead of
+  reporting `Transport protocol must be specified`. A `connect` that got past
+  `start` is still not retryable -- that needs a new `Client`.
 
 #### Transport
 * **A client or server with no transport is told so by `connect` / `run`**
-  rather than by the first send. `TransportProto::None::start` returned a
-  detached handle, so the handshake ran against a sender that had nothing to
-  send on, and a missing `with_stdio` / `with_http` surfaced as a send failure
-  two steps later. It returns the configuration error instead.
-
-* **An icon that names no theme leaves `theme` out** instead of writing
-  `"theme": null`. The field is an enum of `light` and `dark`, and a `null` is
-  neither -- the MCP Registry's schema rejects one.
+  rather than by the first send: `TransportProto::None::start` returns the
+  configuration error instead of a detached handle.
 
 * **An HTTP transport that cannot start reports why.** Both `start`
-  implementations answered `Ok` after logging the failure: on the client a
-  rejected OAuth configuration or an unreadable TLS certificate reached the
-  caller as a request timeout once the handshake went unanswered, and on the
-  server a bind that never happened was signalled by an already-cancelled
-  token. Both propagate now, so `Client::connect` returns the error and
-  `App::run` reports it.
+  implementations answered `Ok` after logging the failure, so a rejected OAuth
+  or TLS configuration surfaced as a request timeout and a failed bind as an
+  already-cancelled token. The client transport also keeps its OAuth
+  configuration, TLS configuration and writer across a refused `start`, which is
+  what makes the retry above work over HTTP.
 
-  The client transport also stops consuming itself on the way to that error --
-  the OAuth configuration, the TLS configuration and the writer all outlive a
-  refused `start` -- which is what makes the retry above work over HTTP too.
+* **An icon that names no theme leaves `theme` out** instead of writing
+  `"theme": null`, which is neither `light` nor `dark`.
 
 ## 0.6.0
 
