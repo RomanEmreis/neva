@@ -947,17 +947,101 @@ fn validate_version(version: &str, what: &str) -> Result<(), Error> {
         )));
     }
 
-    if version.starts_with(['^', '~', '>', '<', '='])
-        || version.contains('*')
-        || version.ends_with(".x")
-        || version.ends_with(".X")
-    {
+    if looks_like_version_range(version) {
         return Err(invalid(format!(
-            "{what} must name one version, not a range: `{version}`"
+            "{what} must name one version, not a range: `{}`",
+            elided(version)
         )));
     }
 
     Ok(())
+}
+
+/// The registry's own `looksLikeVersionRange`, mirrored by hand because this
+/// crate links no regex engine: a comparator in front of a version, two
+/// versions joined by ` - ` or `||`, or a dotted version with a wildcard in it.
+///
+/// No stricter than that, deliberately. The registry does not enforce semver
+/// ("we decided that we would not"), so a version that merely looks unusual --
+/// `1.2.3, <2.0.0`, say -- is published as written, and refusing it here would
+/// refuse a manifest that uploads fine.
+///
+/// One place this is narrower than the original: upstream asks whether the
+/// whole string contains an `x`, which also catches a prerelease like
+/// `1.2.3-exp`. Refusing a valid prerelease would be the worse mistake, so the
+/// wildcard is looked for in the version rather than in the text.
+fn looks_like_version_range(version: &str) -> bool {
+    let version = version.trim();
+
+    // `^1.2.3`, `>= 1.2.3`. The longer comparators come first, so that `>=` is
+    // not read as `>` in front of a version starting with `=`.
+    for comparator in [">=", "<=", "^", "~", ">", "<", "="] {
+        if let Some(rest) = version.strip_prefix(comparator) {
+            return is_version_atom(rest.trim_start());
+        }
+    }
+
+    // `1.2.3 - 2.0.0`, `1.2 || 1.3`. The hyphen needs the space in front of it;
+    // without one it is a prerelease.
+    for separator in [" -", "||"] {
+        if version.contains(separator) {
+            return version
+                .split(separator)
+                .all(|atom| is_version_atom(atom.trim()));
+        }
+    }
+
+    is_wildcard_version(version)
+}
+
+/// `v?\d+(\.\d+){0,3}(-[0-9A-Za-z.-]+)?` -- one version, as the range
+/// patterns spell the things they join.
+fn is_version_atom(value: &str) -> bool {
+    let (numbers, prerelease) = split_prerelease(value);
+    let numbers = numbers.split('.').collect::<Vec<_>>();
+
+    prerelease.is_none_or(is_prerelease)
+        && matches!(numbers.len(), 1..=4)
+        && numbers.iter().all(|number| is_number(number))
+}
+
+/// `(v?\d+|x|X|\*)(\.(\d+|x|X|\*)){1,2}` holding at least one wildcard:
+/// `1.x`, `1.2.*`, `x.2.3`.
+fn is_wildcard_version(value: &str) -> bool {
+    let (numbers, prerelease) = split_prerelease(value);
+    let segments = numbers.split('.').collect::<Vec<_>>();
+
+    prerelease.is_none_or(is_prerelease)
+        && matches!(segments.len(), 2..=3)
+        && segments
+            .iter()
+            .all(|segment| is_wildcard(segment) || is_number(segment))
+        && segments.iter().any(|segment| is_wildcard(segment))
+}
+
+/// Splits `1.2.3-beta.1` into its numbers and its prerelease, dropping the
+/// leading `v` the range patterns allow.
+fn split_prerelease(value: &str) -> (&str, Option<&str>) {
+    let value = value.strip_prefix('v').unwrap_or(value);
+    match value.split_once('-') {
+        Some((numbers, prerelease)) => (numbers, Some(prerelease)),
+        None => (value, None),
+    }
+}
+
+fn is_number(segment: &str) -> bool {
+    !segment.is_empty() && segment.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn is_wildcard(segment: &str) -> bool {
+    matches!(segment, "x" | "X" | "*")
+}
+
+fn is_prerelease(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
 }
 
 #[inline]
@@ -1267,15 +1351,64 @@ mod tests {
         assert!(err.to_string().contains("with_description"), "got: {err}");
     }
 
-    /// `CARGO_PKG_VERSION` is a version; a dependency requirement is not.
+    /// `CARGO_PKG_VERSION` is a version; a dependency requirement is not. The
+    /// four shapes are the registry's own: a comparator, a hyphen range, an
+    /// `||` range, and a wildcard anywhere in a dotted version.
     #[test]
     fn a_version_range_is_refused() {
-        for range in ["^1.2.3", "~1.2.3", ">=1.2.3", "1.*", "1.x"] {
+        for range in [
+            "^1.2.3",
+            "~1.2.3",
+            ">=1.2.3",
+            "> 1.2.3",
+            "=1.2.3",
+            "1.*",
+            "1.x",
+            "1.2.X",
+            // A wildcard away from the end counts too.
+            "x.2.3",
+            "1.x.3",
+            "1.2.3 - 2.0.0",
+            "1 - 2",
+            "1.2 || 1.3",
+            "1.0.0-alpha || 2.0.0",
+        ] {
             let err = manifest()
                 .with_version(range)
                 .validate()
                 .expect_err("a range is not a version");
             assert!(err.to_string().contains("not a range"), "{range}: {err}");
+
+            // A package version is held to the same rule.
+            assert!(
+                Package::cargo("weather-mcp", range).validate().is_err(),
+                "a package version is checked too: {range}"
+            );
+        }
+    }
+
+    /// And the versions that only resemble one are published as written: the
+    /// registry does not enforce semver, so neither does this.
+    #[test]
+    fn a_version_that_is_not_a_range_is_left_alone() {
+        for version in [
+            "1.0.2",
+            "0.3.0",
+            "v1.2.3",
+            "1.2.3-alpha.1",
+            // The hyphen of a prerelease is not the hyphen of a range...
+            "1.0.0-rc.1",
+            // ...and an `x` inside one is not a wildcard, though the registry's
+            // own check reads the whole string and would say otherwise.
+            "1.2.3-exp.sha.5114f85",
+            // Not a version anyone should publish, and not a range either --
+            // the registry takes it, so this does not refuse it.
+            "1.2.3, <2.0.0",
+        ] {
+            assert!(
+                manifest().with_version(version).validate().is_ok(),
+                "`{version}` names one version"
+            );
         }
     }
 

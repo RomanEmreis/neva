@@ -22,13 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `with_name` sets, and nothing substitutes one for the other.
 
   `ServerManifest::to_json` validates before it writes: the reverse-DNS name
-  shape, the 100-character description (shorter than crates.io allows), version
-  ranges where a version belongs, a manifest with neither packages nor remotes,
-  a remote over stdio, a transport URL that is not `http(s)://`, a repository
-  URL deeper than `<forge>/<owner>/<repo>` on a forge it can check, a
-  `fileSha256` that is not 64 lowercase hex characters (and an MCPB package
-  carrying none), a package derived from an app that has no transport, and the
-  4KB publisher-metadata ceiling.
+  shape, the 100-character description (shorter than crates.io allows), a
+  manifest with neither packages nor remotes, a remote over stdio, a version
+  range in any of the four shapes the registry detects, a transport URL that is
+  not `http(s)://`, a repository URL deeper than `<forge>/<owner>/<repo>` on a
+  forge it can check, a `fileSha256` that is not 64 lowercase hex characters
+  (and an MCPB package carrying none), a package derived from an app that has
+  no transport, and the 4KB publisher-metadata ceiling.
 
   `Repository::new(url)` reads the forge off the host for github.com and
   gitlab.com -- the two whose URL shape anyone but their own registry can
