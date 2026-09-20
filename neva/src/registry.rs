@@ -961,24 +961,30 @@ fn validate_version(version: &str, what: &str) -> Result<(), Error> {
 /// crate links no regex engine: a comparator in front of a version, two
 /// versions joined by ` - ` or `||`, or a dotted version with a wildcard in it.
 ///
-/// No stricter than that, deliberately. The registry does not enforce semver
-/// ("we decided that we would not"), so a version that merely looks unusual --
-/// `1.2.3, <2.0.0`, say -- is published as written, and refusing it here would
-/// refuse a manifest that uploads fine.
+/// Mirrored, not extended. The registry does not enforce semver ("we decided
+/// that we would not"), so a string that merely looks unusual -- `1.2.3,
+/// <2.0.0`, or the `1.2.3 <2.0.0` that upstream's patterns also let past -- is
+/// published as written, and refusing it here would refuse a manifest that
+/// uploads fine.
 ///
-/// One place this is narrower than the original: upstream asks whether the
-/// whole string contains an `x`, which also catches a prerelease like
-/// `1.2.3-exp`. Refusing a valid prerelease would be the worse mistake, so the
-/// wildcard is looked for in the version rather than in the text.
+/// Two deliberate departures, in opposite directions:
+///
+/// * **A leading comparator is a range, whatever follows it.** Upstream asks
+///   the whole string to be one comparator and one version, so `^1.2.3 ||
+///   2.0.0` and `>=1.2.3 <2.0.0` -- a dependency requirement pasted where a
+///   version goes -- match none of its four patterns. No version begins with a
+///   comparator, so nothing real is refused by saying so here.
+/// * **A wildcard is looked for in the version, not in the text.** Upstream
+///   asks whether the whole string contains an `x`, which also catches a
+///   prerelease like `1.2.3-exp`. Refusing a valid prerelease is the worse
+///   mistake.
 fn looks_like_version_range(version: &str) -> bool {
     let version = version.trim();
 
-    // `^1.2.3`, `>= 1.2.3`. The longer comparators come first, so that `>=` is
-    // not read as `>` in front of a version starting with `=`.
-    for comparator in [">=", "<=", "^", "~", ">", "<", "="] {
-        if let Some(rest) = version.strip_prefix(comparator) {
-            return is_version_atom(rest.trim_start());
-        }
+    // `^1.2.3`, `>= 1.2.3`, `>=1.2.3 <2.0.0`. Whatever comes after it, a
+    // comparator in front says this names a set of versions rather than one.
+    if version.starts_with(['^', '~', '>', '<', '=']) {
+        return true;
     }
 
     // `1.2.3 - 2.0.0`, `1.2 || 1.3`. The hyphen needs the space in front of it;
@@ -1362,6 +1368,12 @@ mod tests {
             ">=1.2.3",
             "> 1.2.3",
             "=1.2.3",
+            // Compound ranges: a comparator in front settles it, whatever
+            // follows. Upstream's patterns want the whole string to be one
+            // comparator and one version, so these match none of them.
+            "^1.2.3 || 2.0.0",
+            ">=1.2.3 <2.0.0",
+            "~1.2 || ^2.0",
             "1.*",
             "1.x",
             "1.2.X",
@@ -1401,9 +1413,11 @@ mod tests {
             // ...and an `x` inside one is not a wildcard, though the registry's
             // own check reads the whole string and would say otherwise.
             "1.2.3-exp.sha.5114f85",
-            // Not a version anyone should publish, and not a range either --
-            // the registry takes it, so this does not refuse it.
+            // Not versions anyone should publish, and not ranges any of the
+            // patterns name either -- the registry takes them, so this does
+            // not refuse them.
             "1.2.3, <2.0.0",
+            "1.2.3 <2.0.0",
         ] {
             assert!(
                 manifest().with_version(version).validate().is_ok(),
