@@ -24,6 +24,7 @@ fully aligned with the latest MCP specification.
 - **Structured Data** - output validation, embedded resources, and resource links out of the box.
 - **Safe Multi Round-Trip Requests** - a handler that asks the client for input mid-call re-runs from the top on every round, so neva owns the idempotency: `ctx.memo` computes once, `ctx.once` runs an effect once, `ctx.on_commit` defers it to the final result, and a lost response replays the committed answer instead of charging the card twice.
 - **Confidential request state** - the `requestState` blob that carries progress between rounds is sealed with ChaCha20-Poly1305, not merely signed, so what `ctx.memo` caches stays unreadable to the client that echoes it back.
+- **Registry publishing** - `server.json` for the [MCP Registry](https://registry.modelcontextprotocol.io) is generated from what the server already knows: its version, its transport and the crate Cargo is building. The registry's limits are checked before the upload rather than by it.
 - **Spec Alignment** - designed to track the latest MCP specification and cover its core functionality.
 
 ## Quick Start

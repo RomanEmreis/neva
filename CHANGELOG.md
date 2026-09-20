@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## 0.6.1
 
+### Added
+
+* **`server.json` for the [MCP Registry](https://registry.modelcontextprotocol.io)**
+  (#135), under the new `registry` feature (in `server-full`). `App::server_manifest(name)`
+  starts a manifest from what the server knows -- its version and the transport
+  it is configured with -- and `ServerManifest::with_cargo(neva::cargo_env!())`
+  adds what Cargo knows about the crate: description, repository, website, and a
+  `cargo` package entry. `neva::server_manifest!(app, name)` is the two together;
+  `with_cargo_package(cargo, |package| ..)` shapes the package it adds.
+
+  `name` is always given explicitly. The registry's name is a namespaced
+  identifier the publisher proves they own, not the MCP server name that
+  `with_name` sets, and nothing substitutes one for the other.
+
+  `ServerManifest::to_json` validates before it writes: the reverse-DNS name
+  shape, the 100-character description (shorter than crates.io allows), version
+  ranges where a version belongs, a manifest with neither packages nor remotes,
+  an MCPB package without its hash, and the 4KB publisher-metadata ceiling.
+
+  What a neva server can honestly claim is what the types carry:
+  `RegistryType` names `cargo`, `oci` and `mcpb` -- the three ways a Rust
+  binary ships -- with `Other` for the rest, and `Transport` is stdio and
+  Streamable HTTP only, since neva serves no HTTP+SSE endpoint.
+  `registryBaseUrl` is checked per type: crates.io or unset for Cargo, unset
+  for OCI and MCPB, whose identifiers carry the host.
+
+  Types: `ServerManifest`, `Package`, `RegistryType`, `Transport`, `Remote`,
+  `Repository`, `KeyValueInput`, `Argument`, `Input`, `InputFormat`, `CargoEnv`,
+  and the pinned `registry::SCHEMA_URL`. `examples/registry` shows the path from
+  `cargo run -- --emit-manifest` to `mcp-publisher publish`.
+
 ### Fixed
 
 #### Client
@@ -26,6 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   detached handle, so the handshake ran against a sender that had nothing to
   send on, and a missing `with_stdio` / `with_http` surfaced as a send failure
   two steps later. It returns the configuration error instead.
+
+* **An icon that names no theme leaves `theme` out** instead of writing
+  `"theme": null`. The field is an enum of `light` and `dark`, and a `null` is
+  neither -- the MCP Registry's schema rejects one.
 
 * **An HTTP transport that cannot start reports why.** Both `start`
   implementations answered `Ok` after logging the failure: on the client a

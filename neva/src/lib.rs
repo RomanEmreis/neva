@@ -99,6 +99,8 @@ pub mod error;
 pub mod macros;
 #[cfg(feature = "server")]
 pub mod middleware;
+#[cfg(feature = "registry")]
+pub mod registry;
 pub mod shared;
 #[cfg(any(feature = "server", feature = "client"))]
 pub mod transport;

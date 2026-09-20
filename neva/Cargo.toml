@@ -71,9 +71,12 @@ tasks = []
 # tool to one. Additive, no new dependencies.
 apps = ["neva_macros?/apps"]
 tracing = ["dep:tracing", "dep:tracing-subscriber", "dep:once_cell", "volga?/tracing"]
+# `server.json` manifests for the MCP Registry. Types and a validator, no new
+# dependencies -- opt-in so an embedded server does not carry them.
+registry = ["server"]
 
 # server
-server-full = ["server-macros", "tracing", "http-server-volga", "server-tls", "server-oauth", "di", "tasks", "apps"]
+server-full = ["server-macros", "tracing", "http-server-volga", "server-tls", "server-oauth", "di", "tasks", "apps", "registry"]
 server-macros = ["server", "macros", "neva_macros?/server"]
 server-tls = ["http-server-volga", "volga?/tls", "volga?/dev-cert"]
 server-oauth = ["http-server", "dep:volga-oauth-core", "volga?/oauth-client"]

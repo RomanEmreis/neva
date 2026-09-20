@@ -998,6 +998,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-registry"
+version = "0.1.0"
+dependencies = [
+ "neva",
+ "tokio",
+]
+
+[[package]]
 name = "example-server"
 version = "0.1.0"
 dependencies = [

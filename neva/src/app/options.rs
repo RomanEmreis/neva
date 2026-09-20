@@ -805,6 +805,23 @@ impl McpOptions {
         transport.unwrap_or_default()
     }
 
+    /// How a client would reach this server, as a `server.json` package entry
+    /// names it -- or `None` when no transport has been configured yet.
+    ///
+    /// The HTTP case carries the URL the server answers on, which is the one
+    /// thing a package entry cannot work out for itself.
+    #[cfg(feature = "registry")]
+    pub(crate) fn configured_transport(&self) -> Option<crate::registry::Transport> {
+        match &self.proto {
+            Some(TransportProto::StdIoServer(_)) => Some(crate::registry::Transport::Stdio),
+            #[cfg(feature = "http-server")]
+            Some(TransportProto::HttpServer(http)) => Some(
+                crate::registry::Transport::streamable_http(http.url_label()),
+            ),
+            _ => None,
+        }
+    }
+
     /// Returns a display label for the currently configured transport
     pub(super) fn transport_label(&self) -> String {
         match &self.proto {
