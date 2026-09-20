@@ -894,22 +894,27 @@ impl HttpClient {
 
     /// Hands the `x-mcp-header` registry to this transport, so a `tools/call`
     /// can mirror the designated arguments into `Mcp-Param-*` headers.
+    ///
+    /// Takes `&mut self` rather than building a new transport: the client
+    /// applies this to the transport it still owns, so that a `connect` whose
+    /// `start` failed leaves one behind to retry with -- see
+    /// `McpOptions::start_transport`. Plain assignment, so re-applying it on
+    /// the next attempt replaces the registry rather than layering one on
+    /// another.
     #[cfg(all(not(feature = "legacy-spec"), feature = "http-client"))]
-    pub(crate) fn with_param_headers(
-        mut self,
-        registry: crate::shared::param_headers::Registry,
-    ) -> Self {
+    pub(crate) fn set_param_headers(&mut self, registry: crate::shared::param_headers::Registry) {
         self.param_headers = registry;
-        self
     }
 
     /// Hands the dual-mode protocol switch to this transport (set by
-    /// `McpOptions::transport`) so per-request headers follow the
+    /// `McpOptions::start_transport`) so per-request headers follow the
     /// negotiated protocol generation.
+    ///
+    /// `&mut self` and plain assignment for the same reason as
+    /// [`set_param_headers`](Self::set_param_headers).
     #[cfg(not(feature = "legacy-spec"))]
-    pub(crate) fn with_peer_mode(mut self, peer_mode: crate::shared::PeerMode) -> Self {
+    pub(crate) fn set_peer_mode(&mut self, peer_mode: crate::shared::PeerMode) {
         self.peer_mode = peer_mode;
-        self
     }
 
     /// Set the bearer token for requests

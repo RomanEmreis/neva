@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.6.1
+
+### Fixed
+
+#### Client
+* **A failed `Client::connect` can be retried** (#131). The client options held
+  on to the configured transport until `Transport::start` succeeded, so a
+  second `connect` after a stdio server that could not be spawned (#125) starts
+  the same transport again and reports the same spawn failure. It used to
+  report `Transport protocol must be specified` from the second attempt on.
+
+  Retrying a `connect` that got past `start` is still not supported: the
+  transport belongs to the connection at that point, and a new connection means
+  a new `Client`.
+
+#### Transport
+* **A client or server with no transport is told so by `connect` / `run`**
+  rather than by the first send. `TransportProto::None::start` returned a
+  detached handle, so the handshake ran against a sender that had nothing to
+  send on, and a missing `with_stdio` / `with_http` surfaced as a send failure
+  two steps later. It returns the configuration error instead.
+
 ## 0.6.0
 
 ### Added

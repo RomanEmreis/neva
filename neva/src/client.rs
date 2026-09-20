@@ -3,7 +3,6 @@
 use crate::error::{Error, ErrorCode};
 use crate::shared;
 use crate::shared::{BlockingCall, BlockingFn, BoxFuture, marker};
-use crate::transport::Transport;
 use crate::types::Root;
 use crate::types::sampling::{CreateMessageRequestParams, CreateMessageResult, SamplingHandler};
 use crate::types::{

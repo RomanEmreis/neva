@@ -170,10 +170,13 @@ impl Client {
         #[cfg(feature = "macros")]
         self.register_methods();
 
-        let mut transport = self.options.transport();
+        // The transport is started by the options, which keep hold of it until
+        // it is running: a `connect` that fails here leaves the configuration
+        // intact and can be tried again (issue #131).
+        let (transport, handle) = self.options.start_transport()?;
         // A client has no shutdown drain of its own to join -- see
         // `TransportHandle::detached` -- so only the cancellation half is kept.
-        let token = transport.start()?.token;
+        let token = handle.token;
 
         #[cfg(feature = "tracing")]
         self.register_tracing_notification_handlers();
@@ -1056,6 +1059,52 @@ mod roundtrip_tests {
         assert!(
             client.server_info.is_some(),
             "the server identifies itself in every result's `_meta`"
+        );
+    }
+}
+
+/// The repro from <https://github.com/RomanEmreis/neva/issues/131>, which is
+/// about what a caller does with a `connect` that failed: retry it, or fall
+/// back to another command. Both need the second attempt to be a real attempt.
+#[cfg(test)]
+mod connect_retry_tests {
+    use super::*;
+
+    /// The command an embedder typoed, or a server binary that was never
+    /// built: `start` fails, and nothing has been moved into a task yet.
+    const COMMAND: &str = "neva-nonexistent-server-for-issue-131-repro";
+
+    /// Every attempt reports the spawn failure. The second one used to report
+    /// `Transport protocol must be specified` instead -- untrue, and about a
+    /// step the caller never took wrong.
+    #[tokio::test]
+    async fn a_failed_connect_can_be_retried() {
+        let mut client = Client::new().with_options(|opt| opt.with_stdio(COMMAND, []));
+
+        for attempt in 1..=3 {
+            let Err(err) = client.connect().await else {
+                panic!("attempt {attempt}: a server that cannot be spawned must not connect");
+            };
+            assert!(
+                err.to_string().contains(COMMAND),
+                "attempt {attempt}: the error names the server that would not start, got: {err}"
+            );
+        }
+    }
+
+    /// And the case the old message was actually about is diagnosed where it
+    /// happens -- by `connect`, not by the first send two steps later.
+    #[tokio::test]
+    async fn connecting_without_a_transport_names_the_missing_configuration() {
+        let mut client = Client::new();
+
+        let Err(err) = client.connect().await else {
+            panic!("a client with no transport has nothing to connect to");
+        };
+        assert!(
+            err.to_string()
+                .contains("Transport protocol must be specified"),
+            "got: {err}"
         );
     }
 }
