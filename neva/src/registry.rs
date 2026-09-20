@@ -65,6 +65,7 @@ const MAX_DESCRIPTION: usize = 100;
 const MAX_TITLE: usize = 100;
 const MAX_VERSION: usize = 255;
 const MAX_PUBLISHER_METADATA: usize = 4096;
+const MAX_ICON_SRC: usize = 255;
 
 /// The forges this SDK can name from a URL, and the hosts that name them.
 ///
@@ -640,12 +641,34 @@ impl ServerManifest {
             ("websiteUrl", self.website_url.as_deref()),
         ] {
             if let Some(url) = url
-                && !is_http_url(url)
+                && !is_http_uri(url)
             {
                 return Err(invalid(format!(
                     "`{}` is not a `{field}`: the schema reads it as a URI, so it is `http://` \
                      or `https://`",
                     elided(url)
+                )));
+            }
+        }
+
+        // An icon in a listing is one a client fetches: the schema types the
+        // source as a URI and its description asks for an HTTPS URL, with 255
+        // characters to say it in. An MCP `Icon` may instead carry the image
+        // itself in a `data:` URI -- that is a URI, and not a listing's icon.
+        for icon in self.icons.iter().flatten() {
+            let src = icon.src.as_ref();
+            if !is_http_uri(src) {
+                return Err(invalid(format!(
+                    "`{}` is not an icon source: the registry fetches one over `https://`, so \
+                     an image inlined in a `data:` URI has to be hosted instead",
+                    elided(src)
+                )));
+            }
+            if src.chars().count() > MAX_ICON_SRC {
+                return Err(invalid(format!(
+                    "an icon source is at most {MAX_ICON_SRC} characters; this one is {}. A \
+                     `data:` URI carrying the image itself rarely fits -- host it instead",
+                    src.chars().count()
                 )));
             }
         }
@@ -705,7 +728,7 @@ impl ServerManifest {
             .chain(self.remotes.iter().map(Remote::transport))
         {
             if let Some(url) = transport.url()
-                && !is_http_url(url)
+                && !is_transport_url(url)
             {
                 return Err(invalid(format!(
                     "`{}` is not a URL a client could call: a `streamable-http` transport is \
@@ -822,7 +845,7 @@ impl Package {
             // Which registry an unnamed type comes from is that type's
             // business; that the field is a URL is the schema's, and it types
             // this one as a URI.
-            (_, Some(url)) if !is_http_url(url) => Err(invalid(format!(
+            (_, Some(url)) if !is_http_uri(url) => Err(invalid(format!(
                 "`{}` is not a `registryBaseUrl`: the schema reads it as a URI, so it is \
                  `http://` or `https://`",
                 elided(url)
@@ -846,14 +869,34 @@ fn assumed_transport() -> Option<Transport> {
 
 /// The schema's `^https?://[^\s]+$` for a transport URL.
 ///
-/// The `draft` schema also admits a URL that *begins* with a `{variable}`, and
-/// the version pinned here does not -- so one written that way is refused,
-/// which is what the registry would do with the schema this writes.
-fn is_http_url(url: &str) -> bool {
+/// A pattern rather than `format: uri`, which is why this is looser than
+/// [`is_uri`] and has to stay so: a transport URL may hold a `{variable}` for a
+/// remote to fill in, and braces are not URI characters. The `draft` schema
+/// also admits a URL that *begins* with one, and the version pinned here does
+/// not -- so one written that way is refused, as the registry would refuse it.
+fn is_transport_url(url: &str) -> bool {
     let rest = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"));
     matches!(rest, Some(rest) if !rest.is_empty() && !rest.chars().any(char::is_whitespace))
+}
+
+/// The schema's `format: uri`, with an `http` or `https` scheme -- every URI
+/// field a manifest carries.
+///
+/// Answered by [`http::Uri`], which neva links unconditionally, rather than by
+/// a parser written here: URI syntax has more corners than it looks (an IPv6
+/// literal's brackets, a scheme's case, what may appear in an authority) and
+/// each one was a separate bug in the hand-rolled version this replaced.
+///
+/// The one thing that parser cannot answer alone is the scheme. `http::Uri`
+/// reads request targets as well as URLs, so `example.com` parses as an
+/// authority and `/mcp` as a path, both without one -- and `example.com` is
+/// exactly what a `homepage` in `Cargo.toml` is often written as.
+fn is_http_uri(value: &str) -> bool {
+    value
+        .parse::<http::Uri>()
+        .is_ok_and(|uri| matches!(uri.scheme_str(), Some("http" | "https")))
 }
 
 /// The registry's own `^https?://(www\.)?<host>/[\w.-]+/[\w.-]+/?$`: a
@@ -865,7 +908,7 @@ fn is_http_url(url: &str) -> bool {
 /// no further.
 fn is_forge_repository_url(source: &str, url: &str) -> bool {
     let Some(host) = known_forge_host(source) else {
-        return is_http_url(url);
+        return is_http_uri(url);
     };
 
     let Some(rest) = url
@@ -1741,6 +1784,64 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    /// An icon in a listing is one a client fetches over the network. An MCP
+    /// `Icon` may instead inline the image in a `data:` URI, which is a URI and
+    /// is not that -- nor would it fit the 255 characters the schema allows.
+    #[test]
+    fn an_icon_source_is_a_url_the_registry_can_fetch() {
+        let icons = |src: &str| {
+            manifest()
+                .with_icons([crate::types::Icon::new(src)])
+                .validate()
+                .map_err(|err| err.to_string())
+        };
+
+        assert!(icons("https://example.com/icon.png").is_ok());
+
+        for bad in [
+            "",
+            "not a URI",
+            "icon.png",
+            "https://[",
+            "https://exa mple.com/i.png",
+            // A URI, and not one a registry fetches.
+            "data:image/png;base64,iVBORw0KGgo=",
+        ] {
+            let err = icons(bad).expect_err("an icon source is a URL");
+            assert!(err.contains("icon source"), "`{bad}`: {err}");
+        }
+
+        let err = icons(&format!(
+            "https://example.com/{}.png",
+            "a".repeat(MAX_ICON_SRC)
+        ))
+        .expect_err("255 characters is the limit");
+        assert!(err.contains("255"), "got: {err}");
+    }
+
+    /// Two rules, because the schema uses two: a transport URL is a `pattern`
+    /// and may hold a `{variable}` a remote fills in, while every other URL is
+    /// `format: uri` and may not.
+    #[test]
+    fn a_uri_field_is_stricter_than_a_transport_url() {
+        // What a prefix check cannot see, and each of these was a bug in one:
+        // an unterminated authority, a scheme in capitals, a request target
+        // that names no host.
+        assert!(is_transport_url("http://["));
+        assert!(!is_http_uri("http://["));
+        assert!(is_http_uri("HTTPS://EXAMPLE.COM/x"));
+        assert!(!is_http_uri("example.com"));
+        assert!(!is_http_uri("/just/a/path"));
+        assert!(!is_http_uri("://example.com"));
+
+        // An IPv6 literal is bracketed, and that is not the same as broken.
+        assert!(is_http_uri("http://[::1]:3000/mcp"));
+
+        // ...and the braces a remote interpolates go the other way round.
+        assert!(is_transport_url("https://{tenant}.example.com/mcp"));
+        assert!(!is_http_uri("https://{tenant}.example.com/mcp"));
     }
 
     /// A remote is a server already running somewhere. Stdio names a process

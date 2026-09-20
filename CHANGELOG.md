@@ -21,9 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   that `with_name` sets.
 
   `to_json` validates first -- the reverse-DNS name, the 100-character
-  description, version ranges, every URL the schema types as a URI,
-  `fileSha256`, `registryBaseUrl` per registry type, and the 4KB
-  publisher-metadata ceiling --
+  description, version ranges, every URL the schema types as a URI (parsed with
+  `http::Uri`; an icon's is capped at 255 characters), `fileSha256`,
+  `registryBaseUrl` per registry type, and the 4KB publisher-metadata
+  ceiling --
   and refuses a manifest with no packages or remotes, a remote over stdio, or a
   package derived from an app that has no transport.
 
