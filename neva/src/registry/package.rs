@@ -459,12 +459,6 @@ impl Remote {
         }
     }
 
-    /// How to reach this remote.
-    #[inline]
-    pub(super) fn transport(&self) -> &Transport {
-        &self.transport
-    }
-
     /// Gives a `{name}` in the URL something to stand for.
     ///
     /// # Examples

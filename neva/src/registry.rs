@@ -730,23 +730,41 @@ impl ServerManifest {
             ));
         }
 
-        // Wherever a transport carries a URL -- a package's or a remote's --
-        // the schema wants one it could dial.
-        for transport in self
-            .packages
-            .iter()
-            .map(Package::transport)
-            .chain(self.remotes.iter().map(Remote::transport))
-        {
-            if let Some(url) = transport.url()
-                && !is_transport_url(url)
-            {
+        // A remote is reached over the public internet, and the registry says
+        // so twice: HTTPS only, and never a loopback host. A package's
+        // transport is the opposite case -- it names where the thing just
+        // installed will answer, which is routinely `http://127.0.0.1`.
+        for remote in &self.remotes {
+            let Some(url) = remote.transport.url() else {
+                continue;
+            };
+            if !is_transport_url(url) {
                 return Err(invalid(format!(
                     "`{}` is not a URL a client could call: a `streamable-http` transport is \
                      `http://` or `https://`, with no spaces",
                     elided(url)
                 )));
             }
+
+            // What is around a `{name}` still has to be a URL, so it is
+            // stood in for before the host is read -- as the registry does.
+            let dialable = without_templates(url);
+            if !is_https_uri(&dialable) {
+                return Err(invalid(format!(
+                    "`{}` is not a remote's URL: the registry reaches one over `https://` only",
+                    elided(url)
+                )));
+            }
+
+            if is_loopback(&dialable) {
+                return Err(invalid(format!(
+                    "`{}` is a remote on this machine: a remote is a server others can reach, \
+                     and a package is the entry for one they run themselves",
+                    elided(url)
+                )));
+            }
+
+            declared_templates(url, remote.variables.keys().map(String::as_str), "remote")?;
         }
 
         if let Some(metadata) = self
@@ -845,6 +863,29 @@ impl Package {
                  `{}` is not one",
                 elided(hash)
             )));
+        }
+
+        // What a client dials once this package is installed. It may be a
+        // template too, filled from what the package asks the user for.
+        if let Some(url) = self.transport.url() {
+            if !is_transport_url(url) {
+                return Err(invalid(format!(
+                    "`{}` is not a URL a client could call: a `streamable-http` transport is \
+                     `http://` or `https://`, with no spaces",
+                    elided(url)
+                )));
+            }
+            let declared = self
+                .environment_variables
+                .iter()
+                .map(|variable| variable.name.as_str())
+                .chain(
+                    self.runtime_arguments
+                        .iter()
+                        .chain(self.package_arguments.iter())
+                        .filter_map(Argument::template_name),
+                );
+            declared_templates(url, declared, "package")?;
         }
 
         // Each type the registry knows has its own answer about
@@ -1005,6 +1046,71 @@ fn is_http_uri(value: &str) -> bool {
     value
         .parse::<http::Uri>()
         .is_ok_and(|uri| matches!(uri.scheme_str(), Some("http" | "https")))
+}
+
+/// Every `{name}` in a URL has to be one the entry around it declares --
+/// otherwise a client is handed a URL with a hole in it and nothing to fill it
+/// from.
+///
+/// A remote declares them in its `variables`; a package in the environment
+/// variables and arguments it asks the user for, by flag name or value hint.
+fn declared_templates<'a>(
+    url: &str,
+    declared: impl Iterator<Item = &'a str>,
+    entry: &str,
+) -> Result<(), Error> {
+    let declared = declared.collect::<Vec<_>>();
+    match template_variables(url).find(|name| !declared.contains(name)) {
+        None => Ok(()),
+        Some(missing) => Err(invalid(format!(
+            "`{}` in `{}` is filled in by nothing this {entry} declares{}",
+            elided(missing),
+            elided(url),
+            match declared.is_empty() {
+                true => String::new(),
+                false => format!(" -- it has {}", declared.join(", ")),
+            }
+        ))),
+    }
+}
+
+/// A host on the machine the client runs on, which a remote may not be.
+fn is_loopback(url: &str) -> bool {
+    let host = url
+        .parse::<http::Uri>()
+        .ok()
+        .and_then(|uri| uri.host().map(str::to_ascii_lowercase))
+        .unwrap_or_default();
+
+    host == "localhost" || host == "127.0.0.1" || host.ends_with(".localhost")
+}
+
+/// The `{name}`s a URL asks to have filled in, as the registry's own
+/// `\{([^}]+)\}` finds them.
+fn template_variables(url: &str) -> impl Iterator<Item = &str> {
+    url.split('{')
+        .skip(1)
+        .filter_map(|rest| rest.split_once('}'))
+        .map(|(name, _)| name)
+}
+
+/// The URL with every `{name}` stood in for, so that what is around them can
+/// be parsed. The registry does the same before it looks at a remote's host.
+fn without_templates(url: &str) -> String {
+    let mut plain = String::with_capacity(url.len());
+    let mut rest = url;
+    while let Some((before, after)) = rest.split_once('{') {
+        match after.split_once('}') {
+            Some((_, after)) => {
+                plain.push_str(before);
+                plain.push('x');
+                rest = after;
+            }
+            None => break,
+        }
+    }
+    plain.push_str(rest);
+    plain
 }
 
 /// The same, for the two fields the registry refuses over plain HTTP: a
@@ -2286,8 +2392,10 @@ mod tests {
         assert!(err.to_string().contains("with_source"), "got: {err}");
     }
 
-    /// A `streamable-http` transport is a URL a client dials, and the schema
-    /// says so with a pattern. Both entries that carry one are held to it.
+    /// A `streamable-http` transport is a URL a client dials, and the two
+    /// entries that carry one are dialled from different places: a package's
+    /// names where the thing just installed answers, a remote's names a server
+    /// somebody else runs.
     #[test]
     fn a_transport_url_must_be_one_a_client_could_call() {
         let package = |url: &str| {
@@ -2298,37 +2406,98 @@ mod tests {
                         .with_transport(Transport::streamable_http(url)),
                 )
                 .validate()
+                .map_err(|err| err.to_string())
         };
         let remote = |url: &str| {
             ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
                 .with_description("Weather")
                 .with_remote(Remote::new(Transport::streamable_http(url)))
                 .validate()
+                .map_err(|err| err.to_string())
         };
-
-        for url in [
-            "http://127.0.0.1:3000/mcp",
-            "https://mcp.example.com/mcp",
-            // A template inside the authority still starts with a scheme.
-            "https://{tenant}.example.com/mcp",
-        ] {
-            assert!(package(url).is_ok(), "`{url}` is dialable");
-            assert!(remote(url).is_ok(), "`{url}` is dialable");
-        }
 
         for url in [
             "",
             "localhost:3000/mcp",
             "ftp://example.com/mcp",
             "https://",
-            "https://example.com/m cp",
-            // The `draft` schema admits this; the one pinned here does not.
-            "{baseUrl}/mcp",
         ] {
-            let err = package(url).expect_err("a package transport is checked");
-            assert!(err.to_string().contains("could call"), "`{url}`: {err}");
+            assert!(package(url).is_err(), "`{url}` is not dialable");
             assert!(remote(url).is_err(), "`{url}` is not dialable");
         }
+
+        // A package's transport is the server the user just installed, so it
+        // is routinely on their own machine, and routinely not HTTPS.
+        assert!(package("http://127.0.0.1:3000/mcp").is_ok());
+        assert!(package("https://mcp.example.com/mcp").is_ok());
+
+        // A remote is neither: the registry refuses both.
+        let err = remote("http://mcp.example.com/mcp").expect_err("a remote is reached over TLS");
+        assert!(err.contains("https://"), "got: {err}");
+        let err = remote("https://localhost:3000/mcp").expect_err("a remote is not this machine");
+        assert!(err.contains("on this machine"), "got: {err}");
+        assert!(remote("https://mcp.example.com/mcp").is_ok());
+    }
+
+    /// A `{name}` in a URL is filled in by something the entry around it
+    /// declares. Without one the client is handed a URL with a hole in it.
+    #[test]
+    fn a_url_template_needs_something_to_fill_it() {
+        let remote = |transport| {
+            ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
+                .with_description("Weather")
+                .with_remote(transport)
+                .validate()
+                .map_err(|err| err.to_string())
+        };
+        let templated = || Transport::streamable_http("https://{tenant}.example.com/mcp");
+
+        let err = remote(Remote::new(templated())).expect_err("`tenant` is filled by nothing");
+        assert!(err.contains("tenant"), "got: {err}");
+
+        assert!(
+            remote(Remote::new(templated()).with_variable("tenant", Input::new().required()))
+                .is_ok()
+        );
+
+        // A package fills one from what it asks the user for: an environment
+        // variable, a flag by name, or a positional by its value hint.
+        let package = |package: Package| {
+            ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
+                .with_description("Weather")
+                .with_package(package)
+                .validate()
+                .map_err(|err| err.to_string())
+        };
+        let with_url = |url: &str| {
+            Package::cargo("weather-mcp", "0.3.0").with_transport(Transport::streamable_http(url))
+        };
+
+        let err = package(with_url("http://localhost:{port}/mcp"))
+            .expect_err("`port` is filled by nothing");
+        assert!(err.contains("port"), "got: {err}");
+
+        assert!(
+            package(
+                with_url("http://localhost:{port}/mcp")
+                    .with_environment_variable(KeyValueInput::new("port"))
+            )
+            .is_ok()
+        );
+        assert!(
+            package(
+                with_url("http://localhost:{--port}/mcp")
+                    .with_package_argument(Argument::named("--port"))
+            )
+            .is_ok()
+        );
+        assert!(
+            package(
+                with_url("http://localhost:{port}/mcp")
+                    .with_package_argument(Argument::positional("port"))
+            )
+            .is_ok()
+        );
     }
 
     /// Everything the manifest carries survives a round trip, including the

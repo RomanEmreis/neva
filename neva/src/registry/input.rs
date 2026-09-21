@@ -343,6 +343,16 @@ impl Argument {
             Self::Positional { input, .. } | Self::Named { input, .. } => input,
         }
     }
+
+    /// What this argument can be referred to by in a transport URL's
+    /// `{curly_braces}`: a flag by its name, a positional by its value hint.
+    #[inline]
+    pub(super) fn template_name(&self) -> Option<&str> {
+        match self {
+            Self::Positional { value_hint, .. } => value_hint.as_deref(),
+            Self::Named { name, .. } => Some(name),
+        }
+    }
 }
 
 input_setters! {
