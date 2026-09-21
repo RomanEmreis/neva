@@ -27,8 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `registryBaseUrl` per registry type, an MCPB identifier that is not a GitHub
   or GitLab release asset, and the 4KB publisher-metadata ceiling --
   and refuses a manifest with no packages or remotes, a remote over stdio or on
-  localhost, a `{template}` nothing declares, a transport on port 0, or a
-  package derived from an app that has no transport.
+  a host no one else can reach, a `{template}` nothing declares, a transport on
+  port 0, or a package derived from an app that has no transport.
 
   `RegistryType` names `cargo`, `oci` and `mcpb`, with `Other` for the rest.
   `Transport` is stdio and Streamable HTTP: neva serves no HTTP+SSE endpoint.

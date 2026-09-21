@@ -756,10 +756,10 @@ impl ServerManifest {
                 )));
             }
 
-            if is_loopback(&dialable) {
+            if is_unreachable_host(&dialable) {
                 return Err(invalid(format!(
-                    "`{}` is a remote on this machine: a remote is a server others can reach, \
-                     and a package is the entry for one they run themselves",
+                    "`{}` is not a host anyone else can reach: a remote is a server others \
+                     call, and a package is the entry for one they run themselves",
                     elided(url)
                 )));
             }
@@ -1125,15 +1125,36 @@ fn declared_templates<'a>(
     }
 }
 
-/// A host on the machine the client runs on, which a remote may not be.
-fn is_loopback(url: &str) -> bool {
-    let host = url
+/// Whether a URL names a host nobody else can reach: this machine, or no
+/// machine at all.
+///
+/// Deliberately wider than the registry, which asks after three spellings --
+/// `localhost`, `127.0.0.1` and `*.localhost`. This asks the address instead,
+/// which is the same question without the gaps: `::1` and the rest of
+/// `127.0.0.0/8` are equally this machine, and `0.0.0.0` and `::` are a bind
+/// wildcard rather than a destination at all. Nothing is ever published at one
+/// of them, so the wider answer refuses nothing real -- and the classification
+/// is [`IpAddr`](std::net::IpAddr)'s rather than a list of strings to keep
+/// extending.
+fn is_unreachable_host(url: &str) -> bool {
+    let Some(host) = url
         .parse::<http::Uri>()
         .ok()
         .and_then(|uri| uri.host().map(str::to_ascii_lowercase))
-        .unwrap_or_default();
+    else {
+        return false;
+    };
 
-    host == "localhost" || host == "127.0.0.1" || host.ends_with(".localhost")
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+
+    // `Uri::host` keeps an IPv6 literal's brackets, and they are not part of
+    // the address.
+    host.trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback() || ip.is_unspecified())
 }
 
 /// The `{name}`s a URL asks to have filled in, as the registry's own
@@ -2485,9 +2506,29 @@ mod tests {
         // A remote is neither: the registry refuses both.
         let err = remote("http://mcp.example.com/mcp").expect_err("a remote is reached over TLS");
         assert!(err.contains("https://"), "got: {err}");
-        let err = remote("https://localhost:3000/mcp").expect_err("a remote is not this machine");
-        assert!(err.contains("on this machine"), "got: {err}");
+        // This machine, spelled every way it can be -- and the wildcards, which
+        // are not a machine at all. The registry asks after the first three;
+        // asking the address instead costs nothing and misses none.
+        for unreachable in [
+            "https://localhost:3000/mcp",
+            "https://tenant.localhost/mcp",
+            "https://127.0.0.1:3000/mcp",
+            "https://127.0.0.2/mcp",
+            "https://[::1]/mcp",
+            "https://0.0.0.0:3000/mcp",
+            "https://[::]:3000/mcp",
+        ] {
+            let err = remote(unreachable).expect_err("a remote is reachable by others");
+            assert!(
+                err.contains("anyone else can reach"),
+                "`{unreachable}`: {err}"
+            );
+        }
+
+        // A name that merely starts like one of them is a name like any other.
         assert!(remote("https://mcp.example.com/mcp").is_ok());
+        assert!(remote("https://127.example.com/mcp").is_ok());
+        assert!(remote("https://localhost.example.com/mcp").is_ok());
     }
 
     /// A `{name}` in a URL is filled in by something the entry around it
