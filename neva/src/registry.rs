@@ -610,12 +610,19 @@ impl ServerManifest {
             _ => {}
         }
 
-        if let Some(title) = &self.title
-            && title.chars().count() > MAX_TITLE
-        {
-            return Err(invalid(format!(
-                "`title` is longer than the {MAX_TITLE} characters the registry allows"
-            )));
+        if let Some(title) = &self.title {
+            // The schema gives it a `minLength` and the registry refuses one
+            // that is only whitespace: a title is either said or left out.
+            if title.trim().is_empty() {
+                return Err(invalid(
+                    "`title` is present but blank: say one, or leave it unset",
+                ));
+            }
+            if title.chars().count() > MAX_TITLE {
+                return Err(invalid(format!(
+                    "`title` is longer than the {MAX_TITLE} characters the registry allows"
+                )));
+            }
         }
 
         validate_version(&self.version, "`version`")?;
@@ -631,24 +638,28 @@ impl ServerManifest {
             package.validate()?;
         }
 
-        // Every field the schema types as a URI, and it types them as an
-        // assertion rather than an annotation: `$schema` says draft-07, and a
-        // draft-07 validator checks `format`. An empty string and a bare host
-        // are the two ways this goes wrong -- the second is what a `homepage`
-        // written as `example.com` in `Cargo.toml` becomes.
-        for (field, url) in [
-            ("$schema", Some(self.schema.as_str())),
-            ("websiteUrl", self.website_url.as_deref()),
-        ] {
-            if let Some(url) = url
-                && !is_http_uri(url)
-            {
-                return Err(invalid(format!(
-                    "`{}` is not a `{field}`: the schema reads it as a URI, so it is `http://` \
-                     or `https://`",
-                    elided(url)
-                )));
-            }
+        // The schema types these as URIs, and asserts it: `$schema` says
+        // draft-07, where a validator checks `format`. An empty string and a
+        // bare host are the two ways it goes wrong -- the second is what a
+        // `homepage` written as `example.com` in `Cargo.toml` becomes.
+        if !is_http_uri(&self.schema) {
+            return Err(invalid(format!(
+                "`{}` is not a `$schema`: the schema reads it as a URI",
+                elided(&self.schema)
+            )));
+        }
+
+        // A website is one the registry refuses over plain HTTP -- in code,
+        // for the reason its comment gives, security. The same goes for an
+        // icon below; a transport's URL is the one that may be `http`,
+        // because that is where a local server lives.
+        if let Some(url) = &self.website_url
+            && !is_https_uri(url)
+        {
+            return Err(invalid(format!(
+                "`{}` is not a `websiteUrl`: the registry takes one over `https://` only",
+                elided(url)
+            )));
         }
 
         // An icon in a listing is one a client fetches: the schema types the
@@ -657,10 +668,10 @@ impl ServerManifest {
         // itself in a `data:` URI -- that is a URI, and not a listing's icon.
         for icon in self.icons.iter().flatten() {
             let src = icon.src.as_ref();
-            if !is_http_uri(src) {
+            if !is_https_uri(src) {
                 return Err(invalid(format!(
-                    "`{}` is not an icon source: the registry fetches one over `https://`, so \
-                     an image inlined in a `data:` URI has to be hosted instead",
+                    "`{}` is not an icon source: the registry fetches one over `https://` only \
+                     -- no `http`, and no image inlined in a `data:` URI",
                     elided(src)
                 )));
             }
@@ -792,6 +803,13 @@ impl Package {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         if self.identifier.is_empty() {
             return Err(invalid("a package needs an `identifier`"));
+        }
+
+        if self.identifier.contains(' ') {
+            return Err(invalid(format!(
+                "a package identifier carries no spaces: `{}`",
+                elided(&self.identifier)
+            )));
         }
 
         if self.registry_type.as_str().is_empty() {
@@ -987,6 +1005,19 @@ fn is_http_uri(value: &str) -> bool {
     value
         .parse::<http::Uri>()
         .is_ok_and(|uri| matches!(uri.scheme_str(), Some("http" | "https")))
+}
+
+/// The same, for the two fields the registry refuses over plain HTTP: a
+/// `websiteUrl` and an icon's source, both checked in its code rather than
+/// merely described, and both for the reason it gives -- security.
+///
+/// A transport's URL is deliberately not one of them: `http://127.0.0.1:3000`
+/// is where a server under development answers, and that is what
+/// [`App::server_manifest`](crate::App::server_manifest) derives from one.
+fn is_https_uri(value: &str) -> bool {
+    value
+        .parse::<http::Uri>()
+        .is_ok_and(|uri| uri.scheme_str() == Some("https"))
 }
 
 /// The registry's own `^https?://(www\.)?<host>/[\w.-]+/[\w.-]+/?$`: a
@@ -1985,6 +2016,70 @@ mod tests {
         // ...and the braces a remote interpolates go the other way round.
         assert!(is_transport_url("https://{tenant}.example.com/mcp"));
         assert!(!is_http_uri("https://{tenant}.example.com/mcp"));
+    }
+
+    /// A title is optional, and an empty one is not the way to leave it out:
+    /// the schema gives it a `minLength`, and the registry refuses one that is
+    /// only whitespace.
+    #[test]
+    fn a_blank_title_is_refused_rather_than_published() {
+        for blank in ["", "   ", "\t"] {
+            let err = manifest()
+                .with_title(blank)
+                .validate()
+                .expect_err("a blank title is not a title");
+            assert!(err.to_string().contains("blank"), "{blank:?}: {err}");
+        }
+
+        // Leaving it unset is how a manifest has no title.
+        assert!(manifest().validate().is_ok());
+        assert!(manifest().with_title("Weather").validate().is_ok());
+    }
+
+    /// Two fields the registry refuses over plain HTTP, in its own code and
+    /// for the reason it gives -- and one it does not, because that is where a
+    /// server under development answers.
+    #[test]
+    fn https_is_required_where_the_registry_requires_it() {
+        let http = "http://example.com/x.png";
+
+        let err = manifest()
+            .with_icons([crate::types::Icon::new(http)])
+            .validate()
+            .expect_err("an icon is fetched over https");
+        assert!(err.to_string().contains("https://"), "got: {err}");
+
+        let err = manifest()
+            .with_website_url("http://example.com")
+            .validate()
+            .expect_err("a website is linked over https");
+        assert!(err.to_string().contains("https://"), "got: {err}");
+
+        // A transport keeps http: `App::server_manifest` derives exactly this
+        // from a local HTTP server.
+        assert!(
+            ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
+                .with_description("Weather")
+                .with_package(
+                    Package::cargo("weather-mcp", "0.3.0")
+                        .with_transport(Transport::streamable_http("http://127.0.0.1:3000/mcp"))
+                )
+                .validate()
+                .is_ok()
+        );
+    }
+
+    /// A package identifier names something in a registry, and the registry
+    /// refuses one with a space in it whatever the type.
+    #[test]
+    fn a_package_identifier_carries_no_spaces() {
+        let err = ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
+            .with_description("Weather")
+            .with_package(Package::cargo("weather mcp", "0.3.0"))
+            .validate()
+            .expect_err("an identifier with a space is refused");
+
+        assert!(err.to_string().contains("no spaces"), "got: {err}");
     }
 
     /// A remote is a server already running somewhere. Stdio names a process
