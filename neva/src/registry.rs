@@ -806,10 +806,13 @@ impl Package {
 
         validate_version(&self.version, "a package version")?;
 
-        if self.registry_type.as_str() == "mcpb" && self.file_sha256.is_none() {
-            return Err(invalid(
-                "an MCPB package must carry the file's SHA-256: set it with `with_file_sha256`",
-            ));
+        if self.registry_type.as_str() == "mcpb" {
+            if self.file_sha256.is_none() {
+                return Err(invalid(
+                    "an MCPB package must carry the file's SHA-256: set it with `with_file_sha256`",
+                ));
+            }
+            validate_mcpb_identifier(&self.identifier)?;
         }
 
         // Carrying one is half the requirement; the schema spells the other
@@ -879,6 +882,93 @@ fn is_transport_url(url: &str) -> bool {
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"));
     matches!(rest, Some(rest) if !rest.is_empty() && !rest.chars().any(char::is_whitespace))
+}
+
+/// An MCPB package has no registry to look it up in: its identifier is the
+/// URL the archive is downloaded from, and the registry holds that URL to more
+/// than being one.
+///
+/// Everything it asks that can be asked of a string is asked here -- HTTPS, a
+/// release asset on GitHub or GitLab, and the `mcp` it wants to see in the URL
+/// somewhere. What is left to the upload is the one thing this cannot do: a
+/// `HEAD` to see that the file is there.
+fn validate_mcpb_identifier(identifier: &str) -> Result<(), Error> {
+    let refused = |why: &str| {
+        Err(invalid(format!(
+            "`{}` is not an MCPB download URL: {why}",
+            elided(identifier)
+        )))
+    };
+
+    let not_a_url = "it is not a URL, and an MCPB identifier is the archive's own";
+    let Ok(uri) = identifier.parse::<http::Uri>() else {
+        return refused(not_a_url);
+    };
+
+    match uri.scheme_str() {
+        Some("https") => {}
+        // `http::Uri` reads request targets too, so a bare name parses with no
+        // scheme at all -- that is a different mistake from naming `http`.
+        None => return refused(not_a_url),
+        Some(_) => return refused("the registry downloads one over `https://` only"),
+    }
+
+    let host = uri.host().unwrap_or_default().to_ascii_lowercase();
+    let forge = match host.trim_start_matches("www.") {
+        "github.com" => "github",
+        "gitlab.com" => "gitlab",
+        _ => {
+            return refused(
+                "an MCPB archive is a release asset on github.com or gitlab.com, and nowhere else",
+            );
+        }
+    };
+
+    let segments = uri.path().split('/').skip(1).collect::<Vec<_>>();
+    let is_release_asset = match forge {
+        // `/owner/repo/releases/download/<tag>/<file>`
+        "github" => matches!(
+            segments.as_slice(),
+            [owner, repo, "releases", "download", tag, file]
+                if ![owner, repo, tag, file].iter().any(|s| s.is_empty())
+        ),
+        // `/<project>/-/releases/<tag>/downloads/<file>`, or
+        // `/<project>/-/package_files/<id>/download`. A project path may nest
+        // groups, so it is whatever precedes GitLab's `/-/` delimiter.
+        _ => match segments.iter().position(|segment| *segment == "-") {
+            Some(delimiter) if delimiter > 0 => {
+                matches!(
+                    &segments[delimiter + 1..],
+                    ["releases", tag, "downloads", file]
+                        if !tag.is_empty() && !file.is_empty()
+                ) || matches!(
+                    &segments[delimiter + 1..],
+                    ["package_files", id, "download"]
+                        if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())
+                )
+            }
+            _ => false,
+        },
+    };
+
+    if !is_release_asset {
+        return refused(match forge {
+            "github" => "a GitHub release asset is `/owner/repo/releases/download/<tag>/<file>`",
+            _ => {
+                "a GitLab release asset is `/<project>/-/releases/<tag>/downloads/<file>` or \
+                  `/<project>/-/package_files/<id>/download`"
+            }
+        });
+    }
+
+    // Odd, and enforced: the registry wants to see what the archive is for.
+    if !identifier.to_ascii_lowercase().contains("mcp") {
+        return refused(
+            "the registry asks the URL to say `mcp` somewhere -- name the asset for it",
+        );
+    }
+
+    Ok(())
 }
 
 /// The schema's `format: uri`, with an `http` or `https` scheme -- every URI
@@ -1539,32 +1629,85 @@ mod tests {
     }
 
     /// An MCPB package is downloaded from a release rather than from a
-    /// registry, so its hash is what says the file is the published one.
+    /// registry, so its hash is what says the file is the published one --
+    /// and its identifier is the URL that file is at, held to what the
+    /// registry asks of one.
     #[test]
-    fn an_mcpb_package_without_a_hash_is_refused() {
-        let package = Package::new(
-            RegistryType::Mcpb,
-            "https://github.com/example/weather/releases/download/v0.3.0/weather.mcpb",
-            "0.3.0",
-            Transport::Stdio,
-        );
+    fn an_mcpb_package_is_a_release_asset_with_a_hash() {
+        const DIGEST: &str = "fe333e598595000ae021bd27117db32ec69af6987f507ba7a63c90638ff633ce";
+        const ASSET: &str =
+            "https://github.com/example/weather/releases/download/v0.3.0/weather-mcp.mcpb";
 
-        let err = ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
-            .with_description("Weather")
-            .with_package(package.clone())
-            .validate()
-            .expect_err("an MCPB package carries its hash");
-        assert!(err.to_string().contains("SHA-256"), "got: {err}");
-
-        assert!(
+        let judge = |identifier: &str, hash: Option<&str>| {
+            let mut package =
+                Package::new(RegistryType::Mcpb, identifier, "0.3.0", Transport::Stdio);
+            if let Some(hash) = hash {
+                package = package.with_file_sha256(hash);
+            }
             ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
                 .with_description("Weather")
-                .with_package(package.with_file_sha256(
-                    "fe333e598595000ae021bd27117db32ec69af6987f507ba7a63c90638ff633ce"
-                ))
+                .with_package(package)
                 .validate()
-                .is_ok()
-        );
+                .map_err(|err| err.to_string())
+        };
+
+        assert!(judge(ASSET, Some(DIGEST)).is_ok());
+
+        let err = judge(ASSET, None).expect_err("an MCPB package carries its hash");
+        assert!(err.contains("SHA-256"), "got: {err}");
+
+        // Everything the registry asks of the URL that can be asked of a
+        // string. The `mcp` rule is its own, and surprising enough to be worth
+        // hearing about before the upload.
+        for (identifier, expected) in [
+            ("not-a-url", "not a URL"),
+            (
+                "http://github.com/example/weather/releases/download/v0.3.0/w-mcp.mcpb",
+                "https://",
+            ),
+            (
+                "https://cdn.example.com/releases/download/v0.3.0/weather-mcp.mcpb",
+                "nowhere else",
+            ),
+            ("https://github.com/example/weather-mcp", "release asset is"),
+            (
+                "https://gitlab.com/group/sub/weather/-/releases/v1/files/w-mcp.mcpb",
+                "release asset is",
+            ),
+            (
+                "https://github.com/example/weather/releases/download/v0.3.0/bundle.zip",
+                "say `mcp`",
+            ),
+        ] {
+            let err = judge(identifier, Some(DIGEST)).expect_err("the registry refuses this URL");
+            assert!(err.contains(expected), "`{identifier}`: {err}");
+        }
+
+        // GitLab says the same thing two ways, and a nested group is a project
+        // path like any other.
+        for ok in [
+            "https://gitlab.com/group/sub/weather/-/releases/v1/downloads/w-mcp.mcpb",
+            "https://gitlab.com/me/weather/-/package_files/123/download?mcp=1",
+        ] {
+            assert!(judge(ok, Some(DIGEST)).is_ok(), "`{ok}` is a release asset");
+        }
+
+        // And the spelling does not get a package out of the rule.
+        let err = judge("not-a-url", Some(DIGEST)).expect_err("refused as `Mcpb`");
+        let spelled = ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
+            .with_description("Weather")
+            .with_package(
+                Package::new(
+                    RegistryType::Other("mcpb".into()),
+                    "not-a-url",
+                    "0.3.0",
+                    Transport::Stdio,
+                )
+                .with_file_sha256(DIGEST),
+            )
+            .validate()
+            .expect_err("refused as `Other(\"mcpb\")` too");
+        assert_eq!(err, spelled.to_string());
     }
 
     /// The official registry defaults a Cargo package's registry to crates.io
