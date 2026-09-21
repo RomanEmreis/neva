@@ -1019,6 +1019,11 @@ fn validate_mcpb_identifier(identifier: &str) -> Result<(), Error> {
         None => return refused(not_a_url),
         Some(_) => return refused("the registry downloads one over `https://` only"),
     }
+    // Asked here too: the host allowlist below reads `github.com` out of
+    // `github.com:notaport` and would be satisfied by it.
+    if !port_is_a_port(&uri) {
+        return refused("what follows the host's colon is not a port");
+    }
 
     let host = uri.host().unwrap_or_default().to_ascii_lowercase();
     let forge = match host.trim_start_matches("www.") {
@@ -1917,6 +1922,12 @@ mod tests {
         // hearing about before the upload.
         for (identifier, expected) in [
             ("not-a-url", "not a URL"),
+            // The host allowlist reads `github.com` out of this and is
+            // satisfied; the port is what is wrong with it.
+            (
+                "https://github.com:notaport/example/weather/releases/download/v1/w-mcp.mcpb",
+                "not a port",
+            ),
             (
                 "http://github.com/example/weather/releases/download/v0.3.0/w-mcp.mcpb",
                 "https://",
