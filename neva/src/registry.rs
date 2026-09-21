@@ -875,6 +875,22 @@ impl Package {
                     elided(url)
                 )));
             }
+            // A port the OS assigns when the listener starts is not one a
+            // client can be told about in advance.
+            if without_templates(url)
+                .parse::<http::Uri>()
+                .ok()
+                .and_then(|uri| uri.port_u16())
+                == Some(0)
+            {
+                return Err(invalid(format!(
+                    "`{}` names port 0, which the OS replaces when the listener starts: a \
+                     manifest cannot say which port that will be, so name one with \
+                     `with_transport`",
+                    elided(url)
+                )));
+            }
+
             let declared = self
                 .environment_variables
                 .iter()
@@ -1046,6 +1062,41 @@ fn is_http_uri(value: &str) -> bool {
     value
         .parse::<http::Uri>()
         .is_ok_and(|uri| matches!(uri.scheme_str(), Some("http" | "https")))
+}
+
+/// What a client dials, given where a server listens.
+///
+/// The two are not the same string. `0.0.0.0` and `[::]` are bind wildcards --
+/// "every interface" -- and nothing connects to them; for a package entry,
+/// whose server the user runs on their own machine, that is the loopback. The
+/// rest of the URL is left alone.
+///
+/// A port of `0` has no such translation: the OS picks one when the listener
+/// starts, so it is not knowable here at all, and
+/// [`validate`](ServerManifest::validate) refuses it.
+///
+/// Gated with its one caller: only an HTTP server has an address to translate.
+#[cfg(feature = "http-server")]
+pub(crate) fn dial_url(url: String) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url;
+    };
+    let (authority, path) = match rest.find('/') {
+        Some(at) => rest.split_at(at),
+        None => (rest, ""),
+    };
+
+    match [("0.0.0.0", "127.0.0.1"), ("[::]", "[::1]")]
+        .into_iter()
+        .find_map(|(wildcard, loopback)| {
+            authority
+                .strip_prefix(wildcard)
+                .filter(|port| port.is_empty() || port.starts_with(':'))
+                .map(|port| format!("{loopback}{port}"))
+        }) {
+        Some(dialable) => format!("{scheme}://{dialable}{path}"),
+        None => url,
+    }
 }
 
 /// Every `{name}` in a URL has to be one the entry around it declares --
@@ -2638,6 +2689,54 @@ mod app_tests {
                 .validate()
                 .is_ok()
         );
+    }
+
+    /// A bind address is not a destination. `0.0.0.0` and `[::]` mean "every
+    /// interface" to a listener and nothing at all to a client, so what the
+    /// package entry names is the loopback the user's own client will dial.
+    #[cfg(feature = "http-server-volga")]
+    #[test]
+    fn a_wildcard_bind_becomes_an_address_a_client_can_dial() {
+        let manifest = |bind: &str| {
+            App::new()
+                .with_options(|opt| opt.with_http(|http| http.bind(bind)).with_version("0.3.0"))
+                .server_manifest("io.github.romanemreis/weather")
+                .with_description("Weather")
+                .with_cargo(CargoEnv::new("weather-mcp", "0.3.0"))
+        };
+
+        assert_eq!(
+            manifest("0.0.0.0:3000").packages[0].transport(),
+            &Transport::streamable_http("http://127.0.0.1:3000/mcp")
+        );
+        assert_eq!(
+            manifest("[::]:3000").packages[0].transport(),
+            &Transport::streamable_http("http://[::1]:3000/mcp")
+        );
+        // An address that is already one stays as it is.
+        assert_eq!(
+            manifest("192.168.1.10:3000").packages[0].transport(),
+            &Transport::streamable_http("http://192.168.1.10:3000/mcp")
+        );
+    }
+
+    /// A port of `0` is the one bind address with no translation: the OS picks
+    /// the real one when the listener starts, long after this is written.
+    #[cfg(feature = "http-server-volga")]
+    #[test]
+    fn an_ephemeral_port_cannot_be_published() {
+        let manifest = App::new()
+            .with_options(|opt| {
+                opt.with_http(|http| http.bind("127.0.0.1:0"))
+                    .with_version("0.3.0")
+            })
+            .server_manifest("io.github.romanemreis/weather")
+            .with_description("Weather")
+            .with_cargo(CargoEnv::new("weather-mcp", "0.3.0"));
+
+        let err = manifest.validate().expect_err("port 0 is not a port");
+        assert!(err.to_string().contains("port 0"), "got: {err}");
+        assert!(err.to_string().contains("with_transport"), "got: {err}");
     }
 
     /// The macro is the two calls above in one, for the common case.

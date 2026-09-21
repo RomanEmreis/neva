@@ -831,9 +831,13 @@ impl McpOptions {
         match &self.proto {
             Some(TransportProto::StdIoServer(_)) => Some(crate::registry::Transport::Stdio),
             #[cfg(feature = "http-server")]
-            Some(TransportProto::HttpServer(http)) => Some(
-                crate::registry::Transport::streamable_http(http.url_label()),
-            ),
+            // The label is the bind address; a manifest names where a client
+            // dials, which differs for a wildcard.
+            Some(TransportProto::HttpServer(http)) => {
+                Some(crate::registry::Transport::streamable_http(
+                    crate::registry::dial_url(http.url_label()),
+                ))
+            }
             _ => None,
         }
     }

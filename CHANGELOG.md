@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * **`server.json` for the [MCP Registry](https://registry.modelcontextprotocol.io)**
   (#135), under the new `registry` feature (in `server-full`).
   `App::server_manifest(name)` seeds a manifest from the app's version and
-  transport; `ServerManifest::with_cargo(neva::cargo_env!())` adds the crate's
+  transport (a `0.0.0.0` or `[::]` bind becomes the loopback a client dials); `ServerManifest::with_cargo(neva::cargo_env!())` adds the crate's
   description, repository, website and a `cargo` package;
   `neva::server_manifest!(app, name)` is both at once, and
   `with_cargo_package(cargo, |package| ..)` shapes the package it adds.
@@ -27,8 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `registryBaseUrl` per registry type, an MCPB identifier that is not a GitHub
   or GitLab release asset, and the 4KB publisher-metadata ceiling --
   and refuses a manifest with no packages or remotes, a remote over stdio or on
-  localhost, a `{template}` nothing declares, or a package derived from an app
-  that has no transport.
+  localhost, a `{template}` nothing declares, a transport on port 0, or a
+  package derived from an app that has no transport.
 
   `RegistryType` names `cargo`, `oci` and `mcpb`, with `Other` for the rest.
   `Transport` is stdio and Streamable HTTP: neva serves no HTTP+SSE endpoint.
