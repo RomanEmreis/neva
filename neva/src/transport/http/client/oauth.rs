@@ -205,6 +205,12 @@ fn validate_jwks_uri(url: &str, require_https: bool) -> Result<(), Error> {
 /// Returns the parsed, canonical form so a caller can add the checks that are
 /// its own. `what` names the value in the message, since all of these land in
 /// front of whoever wrote the configuration.
+///
+/// The `registry` feature holds the URLs in a `server.json` to the same rule
+/// and cannot call this: `url` and the canonicalizer arrive with
+/// `client-oauth`, and neither is in a server build. It parses with
+/// `http::Uri` instead and asks after the port separately, for the reason
+/// given below.
 fn validate_published_url(what: &str, url: &str, require_https: bool) -> Result<Url, Error> {
     let invalid = |reason: &str| {
         Err(Error::new(

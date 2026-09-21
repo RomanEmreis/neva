@@ -956,7 +956,39 @@ fn is_transport_url(url: &str) -> bool {
     let rest = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"));
+
     matches!(rest, Some(rest) if !rest.is_empty() && !rest.chars().any(char::is_whitespace))
+        // The pattern says nothing about the authority, but the registry parses
+        // one all the same -- with Go's `url.Parse`, which insists on a port.
+        && without_templates(url)
+            .parse::<http::Uri>()
+            .is_ok_and(|uri| port_is_a_port(&uri))
+}
+
+/// Whether the authority's port, if it has one, is a port.
+///
+/// Asked separately because `http::Uri` does not: it reads
+/// `example.com:notaport` as a host with something after it and answers `None`
+/// to `port_u16`, exactly as it does for a URL that names no port at all. RFC
+/// 3986 spells a port `*DIGIT`, and everything that reads these URLs agrees --
+/// the schema's `format: uri`, and the `url.Parse` the registry's own
+/// validators call, which refuses `:notaport`, `:`, `:-1` and a number past
+/// 65535 alike.
+fn port_is_a_port(uri: &http::Uri) -> bool {
+    let Some(authority) = uri.authority() else {
+        return true;
+    };
+    let host = authority
+        .as_str()
+        .rsplit_once('@')
+        .map_or(authority.as_str(), |(_, host)| host);
+
+    let port = match host.rsplit_once(']') {
+        // An IPv6 literal holds colons of its own; a port follows the bracket.
+        Some((_, after)) => after.strip_prefix(':'),
+        None => host.rsplit_once(':').map(|(_, port)| port),
+    };
+    port.is_none_or(|port| port.parse::<u16>().is_ok())
 }
 
 /// An MCPB package has no registry to look it up in: its identifier is the
@@ -1054,6 +1086,17 @@ fn validate_mcpb_identifier(identifier: &str) -> Result<(), Error> {
 /// literal's brackets, a scheme's case, what may appear in an authority) and
 /// each one was a separate bug in the hand-rolled version this replaced.
 ///
+/// The OAuth client reached the same conclusion for the URLs *it* publishes --
+/// see `validate_published_url` in `transport/http/client/oauth.rs`, whose own
+/// comment names `https://[::1/client.json` and `https://example.com:bad/...`
+/// as what a hand-written authority check lets through. The two cannot share a
+/// function: that one is built on `url::Url` and the OAuth resource
+/// canonicalizer, both of which arrive with `client-oauth`, and `url` is in no
+/// server build -- adding it would put 18 crates of IDNA and Unicode tables
+/// behind a feature whose point is to add none. What they share is the rule:
+/// parse, then ask after the port separately, because a parser holds a port to
+/// digits and not to a range.
+///
 /// The one thing that parser cannot answer alone is the scheme. `http::Uri`
 /// reads request targets as well as URLs, so `example.com` parses as an
 /// authority and `/mcp` as a path, both without one -- and `example.com` is
@@ -1061,7 +1104,7 @@ fn validate_mcpb_identifier(identifier: &str) -> Result<(), Error> {
 fn is_http_uri(value: &str) -> bool {
     value
         .parse::<http::Uri>()
-        .is_ok_and(|uri| matches!(uri.scheme_str(), Some("http" | "https")))
+        .is_ok_and(|uri| matches!(uri.scheme_str(), Some("http" | "https")) && port_is_a_port(&uri))
 }
 
 /// What a client dials, given where a server listens.
@@ -1168,6 +1211,10 @@ fn template_variables(url: &str) -> impl Iterator<Item = &str> {
 
 /// The URL with every `{name}` stood in for, so that what is around them can
 /// be parsed. The registry does the same before it looks at a remote's host.
+///
+/// A digit, because a template may stand where a port goes -- the registry
+/// substitutes `8080` for `{port}` for the same reason -- and a digit is also
+/// a host label, which a letter would be but a number-only port would not.
 fn without_templates(url: &str) -> String {
     let mut plain = String::with_capacity(url.len());
     let mut rest = url;
@@ -1175,7 +1222,7 @@ fn without_templates(url: &str) -> String {
         match after.split_once('}') {
             Some((_, after)) => {
                 plain.push_str(before);
-                plain.push('x');
+                plain.push('1');
                 rest = after;
             }
             None => break,
@@ -1195,7 +1242,7 @@ fn without_templates(url: &str) -> String {
 fn is_https_uri(value: &str) -> bool {
     value
         .parse::<http::Uri>()
-        .is_ok_and(|uri| uri.scheme_str() == Some("https"))
+        .is_ok_and(|uri| uri.scheme_str() == Some("https") && port_is_a_port(&uri))
 }
 
 /// The registry's own `^https?://(www\.)?<host>/[\w.-]+/[\w.-]+/?$`: a
@@ -2180,8 +2227,8 @@ mod tests {
     fn a_uri_field_is_stricter_than_a_transport_url() {
         // What a prefix check cannot see, and each of these was a bug in one:
         // an unterminated authority, a scheme in capitals, a request target
-        // that names no host.
-        assert!(is_transport_url("http://["));
+        // that names no host. Both checks parse now, so both refuse the first.
+        assert!(!is_transport_url("http://["));
         assert!(!is_http_uri("http://["));
         assert!(is_http_uri("HTTPS://EXAMPLE.COM/x"));
         assert!(!is_http_uri("example.com"));
@@ -2529,6 +2576,53 @@ mod tests {
         assert!(remote("https://mcp.example.com/mcp").is_ok());
         assert!(remote("https://127.example.com/mcp").is_ok());
         assert!(remote("https://localhost.example.com/mcp").is_ok());
+    }
+
+    /// A port is digits. `http::Uri` does not insist -- it reads anything after
+    /// the colon as part of the authority and answers `None` for the port, the
+    /// same answer it gives for a URL that names none -- so it is asked here,
+    /// for every field that carries a URL.
+    #[test]
+    fn a_port_that_is_not_a_port_is_refused() {
+        let website = |url: &str| manifest().with_website_url(url).validate();
+        let transport = |url: &str| {
+            ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
+                .with_description("Weather")
+                .with_package(
+                    Package::cargo("weather-mcp", "0.3.0")
+                        .with_transport(Transport::streamable_http(url)),
+                )
+                .validate()
+        };
+
+        for bad in [
+            "https://example.com:notaport",
+            "https://example.com:",
+            "https://example.com:-1",
+            // Past 65535, which `http::Uri` also answers `None` to.
+            "https://example.com:99999",
+            "https://example.com:80abc/x",
+            // The two the OAuth client's `validate_published_url` names as
+            // what a hand-written authority check lets through. Parsing here
+            // rather than scanning is what stops them.
+            "https://[::1/client.json",
+            "https://example.com:bad/client.json",
+        ] {
+            assert!(website(bad).is_err(), "`{bad}` has no port");
+            assert!(transport(bad).is_err(), "`{bad}` has no port");
+        }
+
+        // And the ones that are ports, including an IPv6 literal's own colons
+        // and a userinfo's.
+        for ok in [
+            "https://example.com",
+            "https://example.com:3000/mcp",
+            "https://[::1]:3000/mcp",
+            "https://[2001:db8::1]/mcp",
+            "https://user@example.com:3000/mcp",
+        ] {
+            assert!(transport(ok).is_ok(), "`{ok}` is dialable");
+        }
     }
 
     /// A `{name}` in a URL is filled in by something the entry around it
