@@ -182,11 +182,9 @@ pub struct Package {
 
     /// The registry's base URL, for a registry type that takes one.
     ///
-    /// None of the three named types does: the official registry defaults a
-    /// Cargo package's to `https://crates.io` and refuses any other, and
-    /// refuses the field outright on OCI and MCPB, whose identifiers carry the
-    /// host already. It is here for [`Other`](RegistryType::Other), and
-    /// [`validate`](Package::validate) holds the named ones to those rules.
+    /// Rarely set: a Cargo package comes from crates.io, and an OCI or MCPB
+    /// identifier carries its host already. It is here for
+    /// [`Other`](RegistryType::Other), and for a registry that reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) registry_base_url: Option<String>,
 
@@ -478,7 +476,7 @@ impl Remote {
 mod tests {
     use super::*;
 
-    /// The Cargo entry the registry's own documentation shows: no
+    /// The Cargo entry the registry documents: no
     /// `registryBaseUrl`, no `runtimeHint`, stdio.
     #[test]
     fn a_cargo_package_is_the_shape_the_registry_documents() {

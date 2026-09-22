@@ -117,10 +117,10 @@ fn emit_manifest(app: &App) {
     match manifest.to_json() {
         Ok(json) => print!("{json}"),
         Err(err) => {
-            // The limits are the registry's, and they are not Cargo's: a
+            // The limits are the schema's, and they are not Cargo's: a
             // description over 100 characters is the one that catches people,
             // because crates.io has no such ceiling.
-            eprintln!("this server.json would be refused: {err}");
+            eprintln!("this server.json is not the shape the schema asks for: {err}");
             std::process::exit(1);
         }
     }

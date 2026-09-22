@@ -57,30 +57,21 @@ mod package;
 pub const SCHEMA_URL: &str =
     "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json";
 
-/// Limits the registry enforces, checked here so they are reported against the
-/// call that set the value rather than against a failed upload.
+/// Lengths the schema gives these fields, checked here so they are reported
+/// against the call that set the value rather than against a failed upload.
 const MAX_NAME: usize = 200;
 const MIN_NAME: usize = 3;
 const MAX_DESCRIPTION: usize = 100;
 const MAX_TITLE: usize = 100;
 const MAX_VERSION: usize = 255;
-const MAX_PUBLISHER_METADATA: usize = 4096;
 const MAX_ICON_SRC: usize = 255;
 
 /// The forges this SDK can name from a URL, and the hosts that name them.
 ///
-/// Two, because those are the two whose repository URLs have a shape anyone
-/// but their own registry can check. A forge outside this list is named by its
+/// Two, because `source` is a free string and these are the two spellings a
+/// URL answers for on its own. A forge outside this list is named by its
 /// author with [`Repository::with_source`].
 const KNOWN_FORGES: [(&str, &str); 2] = [("github.com", "github"), ("gitlab.com", "gitlab")];
-
-/// The host a source is served from, for the sources this SDK names.
-fn known_forge_host(source: &str) -> Option<&'static str> {
-    KNOWN_FORGES
-        .iter()
-        .find(|(_, forge)| *forge == source)
-        .map(|(host, _)| *host)
-}
 
 /// The forge a URL is on, when it is one of the two this SDK can read off a
 /// host. `https://github.com.evil.example/me` is not github.com, so the host
@@ -164,9 +155,9 @@ impl Repository {
 
     /// Names the forge, for one this SDK cannot read off a host.
     ///
-    /// The official registry verifies `github` and `gitlab` and refuses a
-    /// source it does not know, so another name here is for a registry that
-    /// takes one -- or for leaving `repository` out, which is optional.
+    /// A registry reads this to decide how to verify the repository, so which
+    /// names it accepts is its own business; `repository` is optional, which is
+    /// the other way out.
     ///
     /// # Examples
     /// ```rust
@@ -574,12 +565,20 @@ impl ServerManifest {
         self.transport.as_ref()
     }
 
-    /// What the registry will refuse, asked here instead.
+    /// What the schema asks of a manifest, asked here instead of at the
+    /// upload.
     ///
     /// Covers the rules a manifest can break without looking wrong: a name
     /// outside the reverse-DNS shape, a description over its 100 characters, a
-    /// version range where a version belongs, nothing to install or call, and
-    /// publisher metadata over 4KB.
+    /// version range where a version belongs, a `{name}` with nothing to fill
+    /// it, nothing to install or call.
+    ///
+    /// It is deliberately not a registry's validator. A registry has rules of
+    /// its own -- which hosts it will fetch an archive from, which base URLs it
+    /// takes, what it makes of a loopback address -- and those are its to apply
+    /// and to change. An `Ok` here says the document is the shape the schema
+    /// describes, not that a given registry will accept it; when one refuses,
+    /// it says why, and that is the answer to act on.
     ///
     /// # Examples
     /// ```rust
@@ -611,8 +610,8 @@ impl ServerManifest {
         }
 
         if let Some(title) = &self.title {
-            // The schema gives it a `minLength` and the registry refuses one
-            // that is only whitespace: a title is either said or left out.
+            // The schema gives it a `minLength`: a title is either said or
+            // left out, and a blank one says nothing while looking set.
             if title.trim().is_empty() {
                 return Err(invalid(
                     "`title` is present but blank: say one, or leave it unset",
@@ -638,10 +637,10 @@ impl ServerManifest {
             package.validate()?;
         }
 
-        // The schema types these as URIs, and asserts it: `$schema` says
-        // draft-07, where a validator checks `format`. An empty string and a
-        // bare host are the two ways it goes wrong -- the second is what a
-        // `homepage` written as `example.com` in `Cargo.toml` becomes.
+        // `format: uri`, asserted: `$schema` names draft-07, where a
+        // validator checks formats. An empty string and a bare host are the
+        // two ways it goes wrong -- the second is what a `homepage` written as
+        // `example.com` in `Cargo.toml` becomes.
         if !is_http_uri(&self.schema) {
             return Err(invalid(format!(
                 "`{}` is not a `$schema`: the schema reads it as a URI",
@@ -649,23 +648,21 @@ impl ServerManifest {
             )));
         }
 
-        // A website is one the registry refuses over plain HTTP -- in code,
-        // for the reason its comment gives, security. The same goes for an
-        // icon below; a transport's URL is the one that may be `http`,
-        // because that is where a local server lives.
+        // `format: uri` again, and that is all the schema asks of it. Whether
+        // a listing wants HTTPS there is the listing's call to make.
         if let Some(url) = &self.website_url
-            && !is_https_uri(url)
+            && !is_http_uri(url)
         {
             return Err(invalid(format!(
-                "`{}` is not a `websiteUrl`: the registry takes one over `https://` only",
+                "`{}` is not a `websiteUrl`: the schema reads it as a URI",
                 elided(url)
             )));
         }
 
-        // An icon in a listing is one a client fetches: the schema types the
-        // source as a URI and its description asks for an HTTPS URL, with 255
-        // characters to say it in. An MCP `Icon` may instead carry the image
-        // itself in a `data:` URI -- that is a URI, and not a listing's icon.
+        // The one URL the schema does spell out: "A standard URI pointing to
+        // an icon resource. Must be an HTTPS URL", with 255 characters to say
+        // it in. An MCP `Icon` may instead carry the image itself in a `data:`
+        // URI -- that is a URI, and not a listing's icon.
         for icon in self.icons.iter().flatten() {
             let src = icon.src.as_ref();
             if !is_https_uri(src) {
@@ -692,19 +689,14 @@ impl ServerManifest {
                      from its host, so say which one it is with `with_source`",
                 ));
             }
-            if !is_forge_repository_url(source, &repository.url) {
-                return Err(invalid(match known_forge_host(source) {
-                    Some(host) => format!(
-                        "`{}` is not a {source} repository URL: a registry reads \
-                         `https://{host}/<owner>/<repo>` and nothing deeper -- a path inside the \
-                         repository goes to `with_subfolder`",
-                        elided(&repository.url)
-                    ),
-                    None => format!(
-                        "`{}` is not a URL a {source} repository could be read from",
-                        elided(&repository.url)
-                    ),
-                }));
+            // `url` and `source` are both required and the URL is
+            // `format: uri`. What shape a given forge's URLs take is that
+            // forge's business, and a registry's to check against it.
+            if !is_http_uri(&repository.url) {
+                return Err(invalid(format!(
+                    "`{}` is not a URL a {source} repository could be read from",
+                    elided(&repository.url)
+                )));
             }
         }
 
@@ -730,10 +722,9 @@ impl ServerManifest {
             ));
         }
 
-        // A remote is reached over the public internet, and the registry says
-        // so twice: HTTPS only, and never a loopback host. A package's
-        // transport is the opposite case -- it names where the thing just
-        // installed will answer, which is routinely `http://127.0.0.1`.
+        // The schema gives a remote's URL the same pattern a package's has,
+        // and the `{name}`s in it the same rule: something in the entry has to
+        // fill them.
         for remote in &self.remotes {
             let Some(url) = remote.transport.url() else {
                 continue;
@@ -746,39 +737,7 @@ impl ServerManifest {
                 )));
             }
 
-            // What is around a `{name}` still has to be a URL, so it is
-            // stood in for before the host is read -- as the registry does.
-            let dialable = without_templates(url);
-            if !is_https_uri(&dialable) {
-                return Err(invalid(format!(
-                    "`{}` is not a remote's URL: the registry reaches one over `https://` only",
-                    elided(url)
-                )));
-            }
-
-            if is_unreachable_host(&dialable) {
-                return Err(invalid(format!(
-                    "`{}` is not a host anyone else can reach: a remote is a server others \
-                     call, and a package is the entry for one they run themselves",
-                    elided(url)
-                )));
-            }
-
             declared_templates(url, remote.variables.keys().map(String::as_str), "remote")?;
-        }
-
-        if let Some(metadata) = self
-            .meta
-            .as_ref()
-            .and_then(|m| m.publisher_provided.as_ref())
-        {
-            let len = serde_json::to_vec(metadata).map_err(Error::from)?.len();
-            if len > MAX_PUBLISHER_METADATA {
-                return Err(invalid(format!(
-                    "publisher metadata is {len} bytes; the registry allows \
-                     {MAX_PUBLISHER_METADATA}"
-                )));
-            }
         }
 
         Ok(())
@@ -788,7 +747,7 @@ impl ServerManifest {
     /// newline-terminated.
     ///
     /// [`validate`](Self::validate) runs first: there is no use for a
-    /// `server.json` the registry will refuse.
+    /// `server.json` that is not the shape the schema describes.
     ///
     /// # Examples
     /// ```rust
@@ -811,13 +770,13 @@ impl ServerManifest {
 }
 
 impl Package {
-    /// What the registry will refuse about this entry.
+    /// What the schema asks of this entry.
     ///
     /// Every rule below is keyed off the spelling that goes on the wire rather
-    /// than the Rust variant that produced it. The registry reads a string,
-    /// and [`Other`](RegistryType::Other) can hold one this SDK also has a
-    /// variant for -- so a rule that matched on the variant would let
-    /// `Other("mcpb")` walk past a requirement the upload applies anyway.
+    /// than the Rust variant that produced it, because that is what is read at
+    /// the other end: [`Other`](RegistryType::Other) can hold a spelling this
+    /// SDK also has a variant for, and a rule matching on the variant would
+    /// miss it.
     pub(crate) fn validate(&self) -> Result<(), Error> {
         if self.identifier.is_empty() {
             return Err(invalid("a package needs an `identifier`"));
@@ -845,19 +804,18 @@ impl Package {
 
         validate_version(&self.version, "a package version")?;
 
-        if self.registry_type.as_str() == "mcpb" {
-            if self.file_sha256.is_none() {
-                return Err(invalid(
-                    "an MCPB package must carry the file's SHA-256: set it with `with_file_sha256`",
-                ));
-            }
-            validate_mcpb_identifier(&self.identifier)?;
+        // "Required for MCPB packages and optional for other package types":
+        // an MCPB identifier is a download URL, so the digest is what says the
+        // file that arrives is the file that was published.
+        if self.registry_type.as_str() == "mcpb" && self.file_sha256.is_none() {
+            return Err(invalid(
+                "an MCPB package must carry the file's SHA-256: set it with `with_file_sha256`",
+            ));
         }
 
         // Carrying one is half the requirement; the schema spells the other
         // half `^[a-f0-9]{64}$`. An empty string satisfies "present" and
-        // nothing else, and a digest pasted in upper case is refused just the
-        // same -- by the registry, if not here.
+        // nothing else, and a digest pasted in upper case is not a match.
         if let Some(hash) = &self.file_sha256
             && !is_sha256(hash)
         {
@@ -878,22 +836,6 @@ impl Package {
                     elided(url)
                 )));
             }
-            // A port the OS assigns when the listener starts is not one a
-            // client can be told about in advance.
-            if without_templates(url)
-                .parse::<http::Uri>()
-                .ok()
-                .and_then(|uri| uri.port_u16())
-                == Some(0)
-            {
-                return Err(invalid(format!(
-                    "`{}` names port 0, which the OS replaces when the listener starts: a \
-                     manifest cannot say which port that will be, so name one with \
-                     `with_transport`",
-                    elided(url)
-                )));
-            }
-
             let declared = self
                 .environment_variables
                 .iter()
@@ -907,38 +849,22 @@ impl Package {
             declared_templates(url, declared, "package")?;
         }
 
-        // Each type the registry knows has its own answer about
-        // `registryBaseUrl`, and two of them are "not at all": an OCI or MCPB
-        // identifier carries its host already, and the official registry
-        // refuses the field rather than ignoring it.
-        match (
-            self.registry_type.as_str(),
-            self.registry_base_url.as_deref(),
-        ) {
-            ("cargo", Some(url)) if url != CRATES_IO => Err(invalid(format!(
-                "a Cargo package comes from `{CRATES_IO}` or from nowhere the registry accepts; \
-                 `{url}` is refused. Leaving it unset is the same thing and says less"
-            ))),
-            (kind @ ("oci" | "mcpb"), Some(_)) => Err(invalid(format!(
-                "an `{kind}` package must not carry a `registryBaseUrl`: its identifier names \
-                 the host already"
-            ))),
-            // Which registry an unnamed type comes from is that type's
-            // business; that the field is a URL is the schema's, and it types
-            // this one as a URI.
-            (_, Some(url)) if !is_http_uri(url) => Err(invalid(format!(
+        // Which registry a package comes from is the package type's business.
+        // That the field is a URL is the schema's, and it types this one as a
+        // URI.
+        if let Some(url) = self.registry_base_url.as_deref()
+            && !is_http_uri(url)
+        {
+            return Err(invalid(format!(
                 "`{}` is not a `registryBaseUrl`: the schema reads it as a URI, so it is \
                  `http://` or `https://`",
                 elided(url)
-            ))),
-            _ => Ok(()),
+            )));
         }
+
+        Ok(())
     }
 }
-
-/// The one Cargo registry the official registry accepts: it defaults an unset
-/// `registryBaseUrl` to this and refuses every other value.
-const CRATES_IO: &str = "https://crates.io";
 
 /// What a manifest that never met an app assumes: a package it derives is for
 /// a binary the client spawns. Read back from JSON it is the same answer --
@@ -960,181 +886,7 @@ fn is_transport_url(url: &str) -> bool {
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"));
 
-    if !matches!(rest, Some(rest) if !rest.is_empty() && !rest.chars().any(char::is_whitespace)) {
-        return false;
-    }
-
-    // The pattern says nothing about the rest of the URL, but the registry
-    // parses it all the same: `IsValidURL` puts a placeholder in for each
-    // template and hands the result to Go's `url.Parse`, which insists on a
-    // port and on well-formed escapes. Both are asked of the substituted URL,
-    // because that is the string it parses.
-    let plain = without_templates(url);
-
-    plain
-        .parse::<http::Uri>()
-        .is_ok_and(|uri| port_is_a_port(&uri))
-        && escapes_are_escapes(&plain)
-}
-
-/// Whether the authority's port, if it has one, is a port.
-///
-/// Asked separately because `http::Uri` does not: it reads
-/// `example.com:notaport` as a host with something after it and answers `None`
-/// to `port_u16`, exactly as it does for a URL that names no port at all. RFC
-/// 3986 spells a port `*DIGIT`, and everything that reads these URLs agrees --
-/// the schema's `format: uri`, and the `url.Parse` the registry's own
-/// validators call, which refuses `:notaport`, `:`, `:-1` and a number past
-/// 65535 alike.
-fn port_is_a_port(uri: &http::Uri) -> bool {
-    let Some(authority) = uri.authority() else {
-        return true;
-    };
-    let host = authority
-        .as_str()
-        .rsplit_once('@')
-        .map_or(authority.as_str(), |(_, host)| host);
-
-    let port = match host.rsplit_once(']') {
-        // An IPv6 literal holds colons of its own; a port follows the bracket.
-        Some((_, after)) => after.strip_prefix(':'),
-        None => host.rsplit_once(':').map(|(_, port)| port),
-    };
-    port.is_none_or(|port| port.parse::<u16>().is_ok())
-}
-
-/// Whether every `%` in a URL introduces an escape.
-///
-/// RFC 3986 spells it `pct-encoded = "%" HEXDIG HEXDIG`, and a `%` followed by
-/// anything else is the same kind of malformed as a port that is not digits --
-/// which is why it is asked here for the same reason and in the same place.
-/// `http::Uri` asks neither: it takes `%` for an ordinary path character, so
-/// `https://example.com/%ZZ` parses.
-///
-/// The query is left alone. The registry's parser does not enforce the rule
-/// there, so a literal `%` in one is published today, and refusing it here
-/// would refuse a manifest the registry accepts.
-fn escapes_are_escapes(value: &str) -> bool {
-    fn escaped(part: &str) -> bool {
-        let bytes = part.as_bytes();
-        bytes
-            .iter()
-            .enumerate()
-            .filter(|(_, byte)| **byte == b'%')
-            .all(|(at, _)| {
-                matches!(
-                    bytes.get(at + 1..at + 3),
-                    Some([first, second])
-                        if first.is_ascii_hexdigit() && second.is_ascii_hexdigit()
-                )
-            })
-    }
-
-    // A fragment starts at the first `#`, and a query at the first `?` before
-    // it -- the order `url.Parse` splits them in, so that a `?` inside a
-    // fragment stays part of the fragment.
-    let (rest, fragment) = value.split_once('#').unwrap_or((value, ""));
-    let rest = rest.split_once('?').map_or(rest, |(before, _)| before);
-
-    escaped(rest) && escaped(fragment)
-}
-
-/// An MCPB package has no registry to look it up in: its identifier is the
-/// URL the archive is downloaded from, and the registry holds that URL to more
-/// than being one.
-///
-/// Everything it asks that can be asked of a string is asked here -- HTTPS, a
-/// release asset on GitHub or GitLab, and the `mcp` it wants to see in the URL
-/// somewhere. What is left to the upload is the one thing this cannot do: a
-/// `HEAD` to see that the file is there.
-fn validate_mcpb_identifier(identifier: &str) -> Result<(), Error> {
-    let refused = |why: &str| {
-        Err(invalid(format!(
-            "`{}` is not an MCPB download URL: {why}",
-            elided(identifier)
-        )))
-    };
-
-    let not_a_url = "it is not a URL, and an MCPB identifier is the archive's own";
-    let Ok(uri) = identifier.parse::<http::Uri>() else {
-        return refused(not_a_url);
-    };
-
-    match uri.scheme_str() {
-        Some("https") => {}
-        // `http::Uri` reads request targets too, so a bare name parses with no
-        // scheme at all -- that is a different mistake from naming `http`.
-        None => return refused(not_a_url),
-        Some(_) => return refused("the registry downloads one over `https://` only"),
-    }
-    // Asked here too: the host allowlist below reads `github.com` out of
-    // `github.com:notaport` and would be satisfied by it.
-    if !port_is_a_port(&uri) {
-        return refused("what follows the host's colon is not a port");
-    }
-    // ...and here for the same reason as everywhere else a URL is checked:
-    // `ValidateMCPB` hands this identifier to `url.Parse` before it looks at
-    // the host at all.
-    if !escapes_are_escapes(identifier) {
-        return refused("a `%` in it introduces no escape");
-    }
-
-    let host = uri.host().unwrap_or_default().to_ascii_lowercase();
-    let forge = match host.trim_start_matches("www.") {
-        "github.com" => "github",
-        "gitlab.com" => "gitlab",
-        _ => {
-            return refused(
-                "an MCPB archive is a release asset on github.com or gitlab.com, and nowhere else",
-            );
-        }
-    };
-
-    let segments = uri.path().split('/').skip(1).collect::<Vec<_>>();
-    let is_release_asset = match forge {
-        // `/owner/repo/releases/download/<tag>/<file>`
-        "github" => matches!(
-            segments.as_slice(),
-            [owner, repo, "releases", "download", tag, file]
-                if ![owner, repo, tag, file].iter().any(|s| s.is_empty())
-        ),
-        // `/<project>/-/releases/<tag>/downloads/<file>`, or
-        // `/<project>/-/package_files/<id>/download`. A project path may nest
-        // groups, so it is whatever precedes GitLab's `/-/` delimiter.
-        _ => match segments.iter().position(|segment| *segment == "-") {
-            Some(delimiter) if delimiter > 0 => {
-                matches!(
-                    &segments[delimiter + 1..],
-                    ["releases", tag, "downloads", file]
-                        if !tag.is_empty() && !file.is_empty()
-                ) || matches!(
-                    &segments[delimiter + 1..],
-                    ["package_files", id, "download"]
-                        if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())
-                )
-            }
-            _ => false,
-        },
-    };
-
-    if !is_release_asset {
-        return refused(match forge {
-            "github" => "a GitHub release asset is `/owner/repo/releases/download/<tag>/<file>`",
-            _ => {
-                "a GitLab release asset is `/<project>/-/releases/<tag>/downloads/<file>` or \
-                  `/<project>/-/package_files/<id>/download`"
-            }
-        });
-    }
-
-    // Odd, and enforced: the registry wants to see what the archive is for.
-    if !identifier.to_ascii_lowercase().contains("mcp") {
-        return refused(
-            "the registry asks the URL to say `mcp` somewhere -- name the asset for it",
-        );
-    }
-
-    Ok(())
+    matches!(rest, Some(rest) if !rest.is_empty() && !rest.chars().any(char::is_whitespace))
 }
 
 /// The schema's `format: uri`, with an `http` or `https` scheme -- every URI
@@ -1163,8 +915,7 @@ fn validate_mcpb_identifier(identifier: &str) -> Result<(), Error> {
 fn is_http_uri(value: &str) -> bool {
     value
         .parse::<http::Uri>()
-        .is_ok_and(|uri| matches!(uri.scheme_str(), Some("http" | "https")) && port_is_a_port(&uri))
-        && escapes_are_escapes(value)
+        .is_ok_and(|uri| matches!(uri.scheme_str(), Some("http" | "https")))
 }
 
 /// What a client dials, given where a server listens.
@@ -1173,10 +924,6 @@ fn is_http_uri(value: &str) -> bool {
 /// "every interface" -- and nothing connects to them; for a package entry,
 /// whose server the user runs on their own machine, that is the loopback. The
 /// rest of the URL is left alone.
-///
-/// A port of `0` has no such translation: the OS picks one when the listener
-/// starts, so it is not knowable here at all, and
-/// [`validate`](ServerManifest::validate) refuses it.
 ///
 /// Gated with its one caller: only an HTTP server has an address to translate.
 #[cfg(feature = "http-server")]
@@ -1228,40 +975,7 @@ fn declared_templates<'a>(
     }
 }
 
-/// Whether a URL names a host nobody else can reach: this machine, or no
-/// machine at all.
-///
-/// Deliberately wider than the registry, which asks after three spellings --
-/// `localhost`, `127.0.0.1` and `*.localhost`. This asks the address instead,
-/// which is the same question without the gaps: `::1` and the rest of
-/// `127.0.0.0/8` are equally this machine, and `0.0.0.0` and `::` are a bind
-/// wildcard rather than a destination at all. Nothing is ever published at one
-/// of them, so the wider answer refuses nothing real -- and the classification
-/// is [`IpAddr`](std::net::IpAddr)'s rather than a list of strings to keep
-/// extending.
-fn is_unreachable_host(url: &str) -> bool {
-    let Some(host) = url
-        .parse::<http::Uri>()
-        .ok()
-        .and_then(|uri| uri.host().map(str::to_ascii_lowercase))
-    else {
-        return false;
-    };
-
-    if host == "localhost" || host.ends_with(".localhost") {
-        return true;
-    }
-
-    // `Uri::host` keeps an IPv6 literal's brackets, and they are not part of
-    // the address.
-    host.trim_start_matches('[')
-        .trim_end_matches(']')
-        .parse::<std::net::IpAddr>()
-        .is_ok_and(|ip| ip.is_loopback() || ip.is_unspecified())
-}
-
-/// The `{name}`s a URL asks to have filled in, as the registry's own
-/// `\{([^}]+)\}` finds them.
+/// The `{name}`s a URL asks to have filled in.
 fn template_variables(url: &str) -> impl Iterator<Item = &str> {
     url.split('{')
         .skip(1)
@@ -1269,32 +983,8 @@ fn template_variables(url: &str) -> impl Iterator<Item = &str> {
         .map(|(name, _)| name)
 }
 
-/// The URL with every `{name}` stood in for, so that what is around them can
-/// be parsed. The registry does the same before it looks at a remote's host.
-///
-/// A digit, because a template may stand where a port goes -- the registry
-/// substitutes `8080` for `{port}` for the same reason -- and a digit is also
-/// a host label, which a letter would be but a number-only port would not.
-fn without_templates(url: &str) -> String {
-    let mut plain = String::with_capacity(url.len());
-    let mut rest = url;
-    while let Some((before, after)) = rest.split_once('{') {
-        match after.split_once('}') {
-            Some((_, after)) => {
-                plain.push_str(before);
-                plain.push('1');
-                rest = after;
-            }
-            None => break,
-        }
-    }
-    plain.push_str(rest);
-    plain
-}
-
-/// The same, for the two fields the registry refuses over plain HTTP: a
-/// `websiteUrl` and an icon's source, both checked in its code rather than
-/// merely described, and both for the reason it gives -- security.
+/// The same, for the one field the schema spells out: an icon's source is
+/// "a standard URI ... Must be an HTTPS URL".
 ///
 /// A transport's URL is deliberately not one of them: `http://127.0.0.1:3000`
 /// is where a server under development answers, and that is what
@@ -1302,47 +992,7 @@ fn without_templates(url: &str) -> String {
 fn is_https_uri(value: &str) -> bool {
     value
         .parse::<http::Uri>()
-        .is_ok_and(|uri| uri.scheme_str() == Some("https") && port_is_a_port(&uri))
-        && escapes_are_escapes(value)
-}
-
-/// The registry's own `^https?://(www\.)?<host>/[\w.-]+/[\w.-]+/?$`: a
-/// repository URL names the repository and stops there.
-///
-/// Keyed off the spelling, so `Other("github")` is checked as GitHub is. A
-/// forge this SDK does not name has no host and no shape to hold it to -- only
-/// whoever verifies that forge knows them -- so the URL is checked as a URL and
-/// no further.
-fn is_forge_repository_url(source: &str, url: &str) -> bool {
-    let Some(host) = known_forge_host(source) else {
-        return is_http_uri(url);
-    };
-
-    let Some(rest) = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-    else {
-        return false;
-    };
-    let rest = rest.strip_prefix("www.").unwrap_or(rest);
-    let Some(rest) = rest
-        .strip_prefix(host)
-        .and_then(|rest| rest.strip_prefix('/'))
-    else {
-        return false;
-    };
-
-    let mut segments = rest.strip_suffix('/').unwrap_or(rest).split('/');
-    let (Some(owner), Some(repo), None) = (segments.next(), segments.next(), segments.next())
-    else {
-        return false;
-    };
-    [owner, repo].iter().all(|segment| {
-        !segment.is_empty()
-            && segment
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
-    })
+        .is_ok_and(|uri| uri.scheme_str() == Some("https"))
 }
 
 /// The schema's `^[a-f0-9]{64}$`, checked by hand rather than by a regex
@@ -1364,9 +1014,9 @@ fn elided(value: &str) -> String {
     }
 }
 
-/// The reverse-DNS shape the registry requires, checked by hand: one `/`, a
-/// namespace of letters, digits, dots and dashes, and a server name that also
-/// allows underscores.
+/// The schema's `^[a-zA-Z0-9.-]+/[a-zA-Z0-9._-]+$`, spelled out so the error
+/// can say which half went wrong: one `/`, a namespace of letters, digits,
+/// dots and dashes, and a server name that also allows underscores.
 fn validate_name(name: &str) -> Result<(), Error> {
     let len = name.chars().count();
     if !(MIN_NAME..=MAX_NAME).contains(&len) {
@@ -1435,82 +1085,43 @@ fn validate_version(version: &str, what: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// The registry's own `looksLikeVersionRange`, mirrored by hand because this
-/// crate links no regex engine: a comparator in front of a version, two
-/// versions joined by ` - ` or `||`, or a dotted version with a wildcard in it.
+/// The five shapes the schema names: "Version ranges are rejected (e.g.,
+/// `^1.2.3`, `~1.2.3`, `>=1.2.3`, `1.x`, `1.*`)".
 ///
-/// Mirrored, not extended. The registry does not enforce semver ("we decided
-/// that we would not"), so a string that merely looks unusual -- `1.2.3,
-/// <2.0.0`, or the `1.2.3 <2.0.0` that upstream's patterns also let past -- is
-/// published as written, and refusing it here would refuse a manifest that
-/// uploads fine.
-///
-/// Two deliberate departures, in opposite directions:
-///
-/// * **A leading comparator is a range, whatever follows it.** Upstream asks
-///   the whole string to be one comparator and one version, so `^1.2.3 ||
-///   2.0.0` and `>=1.2.3 <2.0.0` -- a dependency requirement pasted where a
-///   version goes -- match none of its four patterns. No version begins with a
-///   comparator, so nothing real is refused by saying so here.
-/// * **A wildcard is looked for in the version, not in the text.** Upstream
-///   asks whether the whole string contains an `x`, which also catches a
-///   prerelease like `1.2.3-exp`. Refusing a valid prerelease is the worse
-///   mistake.
+/// Those, and no attempt at the rest. A version is whatever string the author
+/// publishes under, so the question here is only whether they have pasted a
+/// dependency requirement where a version goes -- a mistake with a recognizable
+/// shape, unlike a version that merely looks unusual.
 fn looks_like_version_range(version: &str) -> bool {
     let version = version.trim();
 
-    // `^1.2.3`, `>= 1.2.3`, `>=1.2.3 <2.0.0`. Whatever comes after it, a
-    // comparator in front says this names a set of versions rather than one.
-    if version.starts_with(['^', '~', '>', '<', '=']) {
-        return true;
-    }
-
-    // `1.2.3 - 2.0.0`, `1.2 || 1.3`. The hyphen needs the space in front of it;
-    // without one it is a prerelease.
-    for separator in [" -", "||"] {
-        if version.contains(separator) {
-            return version
-                .split(separator)
-                .all(|atom| is_version_atom(atom.trim()));
-        }
-    }
-
-    is_wildcard_version(version)
-}
-
-/// `v?\d+(\.\d+){0,3}(-[0-9A-Za-z.-]+)?` -- one version, as the range
-/// patterns spell the things they join.
-fn is_version_atom(value: &str) -> bool {
-    let (numbers, prerelease) = split_prerelease(value);
-    let numbers = numbers.split('.').collect::<Vec<_>>();
-
-    prerelease.is_none_or(is_prerelease)
-        && matches!(numbers.len(), 1..=4)
-        && numbers.iter().all(|number| is_number(number))
+    // `^1.2.3`, `~1.2.3`, `>=1.2.3`. No version begins with a comparator.
+    version.starts_with(['^', '~', '>', '<', '='])
+        // `1.x`, `1.*`, `x.2.3`. Looked for in the numbers rather than in the
+        // whole string, so that a prerelease like `1.2.3-exp` is left alone.
+        || is_wildcard_version(version)
 }
 
 /// `(v?\d+|x|X|\*)(\.(\d+|x|X|\*)){1,2}` holding at least one wildcard:
 /// `1.x`, `1.2.*`, `x.2.3`.
 fn is_wildcard_version(value: &str) -> bool {
-    let (numbers, prerelease) = split_prerelease(value);
+    let value = value.strip_prefix('v').unwrap_or(value);
+    let (numbers, prerelease) = match value.split_once('-') {
+        Some((numbers, prerelease)) => (numbers, Some(prerelease)),
+        None => (value, None),
+    };
     let segments = numbers.split('.').collect::<Vec<_>>();
 
-    prerelease.is_none_or(is_prerelease)
-        && matches!(segments.len(), 2..=3)
+    prerelease.is_none_or(|value| {
+        !value.is_empty()
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    }) && matches!(segments.len(), 2..=3)
         && segments
             .iter()
             .all(|segment| is_wildcard(segment) || is_number(segment))
         && segments.iter().any(|segment| is_wildcard(segment))
-}
-
-/// Splits `1.2.3-beta.1` into its numbers and its prerelease, dropping the
-/// leading `v` the range patterns allow.
-fn split_prerelease(value: &str) -> (&str, Option<&str>) {
-    let value = value.strip_prefix('v').unwrap_or(value);
-    match value.split_once('-') {
-        Some((numbers, prerelease)) => (numbers, Some(prerelease)),
-        None => (value, None),
-    }
 }
 
 fn is_number(segment: &str) -> bool {
@@ -1519,13 +1130,6 @@ fn is_number(segment: &str) -> bool {
 
 fn is_wildcard(segment: &str) -> bool {
     matches!(segment, "x" | "X" | "*")
-}
-
-fn is_prerelease(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
 }
 
 #[inline]
@@ -1752,7 +1356,7 @@ mod tests {
             .with_package(Package::cargo("weather-mcp", "0.3.0"))
     }
 
-    /// The whole document, against the shape the registry's own Cargo example
+    /// The whole document, against the shape the registry documents for a
     /// shows: `$schema` pinned, the name as given, one cargo package over
     /// stdio.
     #[test]
@@ -1803,7 +1407,7 @@ mod tests {
             ("io github/weather", Some("namespace")),
             ("io.github.me/wea ther", Some("server name")),
             ("io.github.me/a/b", Some("more than one `/`")),
-            // Short, but the registry's own floor is three characters.
+            // Short, but the schema's floor is three characters.
             ("a/b", None),
             ("a/", Some("2 characters")),
         ] {
@@ -1835,33 +1439,13 @@ mod tests {
         assert!(err.to_string().contains("with_description"), "got: {err}");
     }
 
-    /// `CARGO_PKG_VERSION` is a version; a dependency requirement is not. The
-    /// four shapes are the registry's own: a comparator, a hyphen range, an
-    /// `||` range, and a wildcard anywhere in a dotted version.
+    /// The five shapes the schema names, and the wildcard positions they
+    /// stand for. A version is otherwise whatever the author publishes under.
     #[test]
     fn a_version_range_is_refused() {
         for range in [
-            "^1.2.3",
-            "~1.2.3",
-            ">=1.2.3",
-            "> 1.2.3",
-            "=1.2.3",
-            // Compound ranges: a comparator in front settles it, whatever
-            // follows. Upstream's patterns want the whole string to be one
-            // comparator and one version, so these match none of them.
-            "^1.2.3 || 2.0.0",
-            ">=1.2.3 <2.0.0",
-            "~1.2 || ^2.0",
-            "1.*",
-            "1.x",
-            "1.2.X",
-            // A wildcard away from the end counts too.
-            "x.2.3",
+            "^1.2.3", "~1.2.3", ">=1.2.3", "> 1.2.3", "=1.2.3", "1.*", "1.x", "1.2.X", "x.2.3",
             "1.x.3",
-            "1.2.3 - 2.0.0",
-            "1 - 2",
-            "1.2 || 1.3",
-            "1.0.0-alpha || 2.0.0",
         ] {
             let err = manifest()
                 .with_version(range)
@@ -1873,6 +1457,15 @@ mod tests {
             assert!(
                 Package::cargo("weather-mcp", range).validate().is_err(),
                 "a package version is checked too: {range}"
+            );
+        }
+
+        // A prerelease is a version, and it is the one a wildcard check gets
+        // wrong if it goes looking for an `x` in the whole string.
+        for version in ["1.2.3", "1.2.3-exp.1", "v1.2.3", "2026.09.1"] {
+            assert!(
+                manifest().with_version(version).validate().is_ok(),
+                "`{version}` is a version"
             );
         }
     }
@@ -1926,31 +1519,10 @@ mod tests {
         );
     }
 
-    /// The 4KB ceiling is the registry's, and it is measured on the serialized
-    /// JSON rather than on what went in.
+    /// "Required for MCPB packages": the identifier is a download URL, so the
+    /// digest is what says the file that arrives is the file that was meant.
     #[test]
-    fn oversized_publisher_metadata_is_refused() {
-        let err = manifest()
-            .with_publisher_metadata(serde_json::json!({ "blob": "x".repeat(4096) }))
-            .validate()
-            .expect_err("the registry allows 4096 bytes");
-
-        assert!(err.to_string().contains("4096"), "got: {err}");
-
-        assert!(
-            manifest()
-                .with_publisher_metadata(serde_json::json!({ "tool": "neva" }))
-                .validate()
-                .is_ok()
-        );
-    }
-
-    /// An MCPB package is downloaded from a release rather than from a
-    /// registry, so its hash is what says the file is the published one --
-    /// and its identifier is the URL that file is at, held to what the
-    /// registry asks of one.
-    #[test]
-    fn an_mcpb_package_is_a_release_asset_with_a_hash() {
+    fn an_mcpb_package_carries_the_files_hash() {
         const DIGEST: &str = "fe333e598595000ae021bd27117db32ec69af6987f507ba7a63c90638ff633ce";
         const ASSET: &str =
             "https://github.com/example/weather/releases/download/v0.3.0/weather-mcp.mcpb";
@@ -1973,111 +1545,36 @@ mod tests {
         let err = judge(ASSET, None).expect_err("an MCPB package carries its hash");
         assert!(err.contains("SHA-256"), "got: {err}");
 
-        // Everything the registry asks of the URL that can be asked of a
-        // string. The `mcp` rule is its own, and surprising enough to be worth
-        // hearing about before the upload.
-        for (identifier, expected) in [
-            ("not-a-url", "not a URL"),
-            // The host allowlist reads `github.com` out of this and is
-            // satisfied; the port is what is wrong with it.
-            (
-                "https://github.com:notaport/example/weather/releases/download/v1/w-mcp.mcpb",
-                "not a port",
-            ),
-            (
-                "http://github.com/example/weather/releases/download/v0.3.0/w-mcp.mcpb",
-                "https://",
-            ),
-            (
-                "https://cdn.example.com/releases/download/v0.3.0/weather-mcp.mcpb",
-                "nowhere else",
-            ),
-            ("https://github.com/example/weather-mcp", "release asset is"),
-            (
-                "https://gitlab.com/group/sub/weather/-/releases/v1/files/w-mcp.mcpb",
-                "release asset is",
-            ),
-            (
-                "https://github.com/example/weather/releases/download/v0.3.0/bundle.zip",
-                "say `mcp`",
-            ),
-        ] {
-            let err = judge(identifier, Some(DIGEST)).expect_err("the registry refuses this URL");
-            assert!(err.contains(expected), "`{identifier}`: {err}");
-        }
-
-        // GitLab says the same thing two ways, and a nested group is a project
-        // path like any other.
-        for ok in [
-            "https://gitlab.com/group/sub/weather/-/releases/v1/downloads/w-mcp.mcpb",
-            "https://gitlab.com/me/weather/-/package_files/123/download?mcp=1",
-        ] {
-            assert!(judge(ok, Some(DIGEST)).is_ok(), "`{ok}` is a release asset");
-        }
-
         // And the spelling does not get a package out of the rule.
-        let err = judge("not-a-url", Some(DIGEST)).expect_err("refused as `Mcpb`");
         let spelled = ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
             .with_description("Weather")
-            .with_package(
-                Package::new(
-                    RegistryType::Other("mcpb".into()),
-                    "not-a-url",
-                    "0.3.0",
-                    Transport::Stdio,
-                )
-                .with_file_sha256(DIGEST),
-            )
+            .with_package(Package::new(
+                RegistryType::Other("mcpb".into()),
+                ASSET,
+                "0.3.0",
+                Transport::Stdio,
+            ))
             .validate()
             .expect_err("refused as `Other(\"mcpb\")` too");
-        assert_eq!(err, spelled.to_string());
+        assert_eq!(judge(ASSET, None).unwrap_err(), spelled.to_string());
     }
 
-    /// The official registry defaults a Cargo package's registry to crates.io
-    /// and refuses any other, and refuses the field outright on the two types
-    /// whose identifier carries a host. Three rules, one per named type.
+    /// A `registryBaseUrl` is a URI, which is all the schema asks of it.
+    /// Which registry a package type may come from is that type's business.
     #[test]
-    fn a_registry_base_url_is_checked_against_the_type_that_carries_it() {
-        let with_base = |package: Package, url: &str| {
+    fn a_registry_base_url_is_a_url() {
+        let with_base = |url: &str| {
             ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
                 .with_description("Weather")
-                .with_package(package.with_registry_base_url(url))
+                .with_package(Package::cargo("weather-mcp", "0.3.0").with_registry_base_url(url))
                 .validate()
         };
 
-        assert!(
-            with_base(Package::cargo("weather-mcp", "0.3.0"), CRATES_IO).is_ok(),
-            "crates.io is the one Cargo registry accepted"
-        );
-        let err = with_base(
-            Package::cargo("weather-mcp", "0.3.0"),
-            "https://crates.example.com",
-        )
-        .expect_err("a private Cargo mirror is not accepted");
-        assert!(err.to_string().contains("crates.io"), "got: {err}");
+        assert!(with_base("https://crates.io").is_ok());
+        assert!(with_base("https://crates.example.com").is_ok());
 
-        let oci = Package::new(
-            RegistryType::Oci,
-            "docker.io/example/weather:1.0.0",
-            "1.0.0",
-            Transport::Stdio,
-        );
-        let err = with_base(oci, "https://docker.io").expect_err("OCI refuses the field");
-        assert!(err.to_string().contains("must not carry"), "got: {err}");
-
-        // A registry this SDK does not name brings its own base URL, and what
-        // the schema asks of it is that it be a URI.
-        let other = || {
-            Package::new(
-                RegistryType::Other("npm".into()),
-                "@me/w",
-                "1.0.0",
-                Transport::Stdio,
-            )
-        };
-        assert!(with_base(other(), "https://registry.npmjs.org").is_ok());
         for bad in ["", "registry.npmjs.org", "not a url"] {
-            let err = with_base(other(), bad).expect_err("a base URL is a URL");
+            let err = with_base(bad).expect_err("a base URL is a URL");
             assert!(
                 err.to_string().contains("registryBaseUrl"),
                 "`{bad}`: {err}"
@@ -2188,10 +1685,9 @@ mod tests {
         assert!(read.validate().is_ok(), "a published manifest stays valid");
     }
 
-    /// Two spellings of one wire value, and the rules follow the wire. Nothing
-    /// canonicalizes a hand-written `Other("mcpb")` -- `From<&str>` and
-    /// deserialization both return the variant -- so validation reads the
-    /// string rather than the shape that carries it.
+    /// A rule keyed off the spelling on the wire, not off the Rust variant:
+    /// `Other("mcpb")` is what the registry reads as an MCPB package, so it is
+    /// what the hash requirement has to look at.
     #[test]
     fn a_reserved_spelling_under_other_is_held_to_the_same_rules() {
         let judge = |package: Package| {
@@ -2200,11 +1696,9 @@ mod tests {
                 .with_package(package)
                 .validate()
         };
-        let written_out = |name: &str| RegistryType::Other(name.to_owned());
 
-        // The MCPB hash, which the variant is refused for.
         let err = judge(Package::new(
-            written_out("mcpb"),
+            RegistryType::Other("mcpb".to_owned()),
             "https://github.com/example/weather/releases/download/v0.3.0/w.mcpb",
             "0.3.0",
             Transport::Stdio,
@@ -2212,36 +1706,11 @@ mod tests {
         .expect_err("`mcpb` spelled by hand is still an MCPB package");
         assert!(err.to_string().contains("SHA-256"), "got: {err}");
 
-        // ...and both `registryBaseUrl` rules.
-        let err = judge(
-            Package::new(
-                written_out("cargo"),
-                "weather-mcp",
-                "0.3.0",
-                Transport::Stdio,
-            )
-            .with_registry_base_url("https://crates.example.com"),
-        )
-        .expect_err("`cargo` spelled by hand keeps the crates.io rule");
-        assert!(err.to_string().contains("crates.io"), "got: {err}");
-
-        let err = judge(
-            Package::new(
-                written_out("oci"),
-                "docker.io/example/weather:1.0.0",
-                "1.0.0",
-                Transport::Stdio,
-            )
-            .with_registry_base_url("https://docker.io"),
-        )
-        .expect_err("`oci` spelled by hand still refuses the field");
-        assert!(err.to_string().contains("must not carry"), "got: {err}");
-
         // A name the registry does not reserve carries no rules of ours.
         assert!(
             judge(
                 Package::new(
-                    written_out("npm"),
+                    RegistryType::Other("npm".to_owned()),
                     "@example/weather",
                     "1.0.0",
                     Transport::Stdio
@@ -2292,10 +1761,8 @@ mod tests {
     /// `format: uri` and may not.
     #[test]
     fn a_uri_field_is_stricter_than_a_transport_url() {
-        // What a prefix check cannot see, and each of these was a bug in one:
-        // an unterminated authority, a scheme in capitals, a request target
-        // that names no host. Both checks parse now, so both refuse the first.
-        assert!(!is_transport_url("http://["));
+        // What a prefix check cannot see: an unterminated authority, a scheme
+        // in capitals, a request target that names no host.
         assert!(!is_http_uri("http://["));
         assert!(is_http_uri("HTTPS://EXAMPLE.COM/x"));
         assert!(!is_http_uri("example.com"));
@@ -2311,8 +1778,8 @@ mod tests {
     }
 
     /// A title is optional, and an empty one is not the way to leave it out:
-    /// the schema gives it a `minLength`, and the registry refuses one that is
-    /// only whitespace.
+    /// the schema gives it a `minLength`, and a blank one says nothing while
+    /// looking set.
     #[test]
     fn a_blank_title_is_refused_rather_than_published() {
         for blank in ["", "   ", "\t"] {
@@ -2328,27 +1795,22 @@ mod tests {
         assert!(manifest().with_title("Weather").validate().is_ok());
     }
 
-    /// Two fields the registry refuses over plain HTTP, in its own code and
-    /// for the reason it gives -- and one it does not, because that is where a
-    /// server under development answers.
+    /// The one URL the schema spells out: an icon source is an HTTPS URL.
+    /// Everything else that carries a URL is asked to be a URI and no more.
     #[test]
-    fn https_is_required_where_the_registry_requires_it() {
-        let http = "http://example.com/x.png";
-
+    fn an_icon_source_is_the_one_url_held_to_https() {
         let err = manifest()
-            .with_icons([crate::types::Icon::new(http)])
+            .with_icons([crate::types::Icon::new("http://example.com/x.png")])
             .validate()
             .expect_err("an icon is fetched over https");
         assert!(err.to_string().contains("https://"), "got: {err}");
 
-        let err = manifest()
-            .with_website_url("http://example.com")
-            .validate()
-            .expect_err("a website is linked over https");
-        assert!(err.to_string().contains("https://"), "got: {err}");
-
-        // A transport keeps http: `App::server_manifest` derives exactly this
-        // from a local HTTP server.
+        assert!(
+            manifest()
+                .with_website_url("http://example.com")
+                .validate()
+                .is_ok()
+        );
         assert!(
             ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
                 .with_description("Weather")
@@ -2362,7 +1824,7 @@ mod tests {
     }
 
     /// A package identifier names something in a registry, and the registry
-    /// refuses one with whitespace in it whatever the type. A space is the one
+    /// takes no whitespace in it whatever the type. A space is the one
     /// that gets typed; a tab or a newline is the one that gets pasted.
     #[test]
     fn a_package_identifier_carries_no_whitespace() {
@@ -2495,12 +1957,10 @@ mod tests {
         assert!(derived("https://git.example.com/me/server").is_none());
     }
 
-    /// The registry reads a repository URL as `<forge>/<owner>/<repo>` and
-    /// answers "invalid repository URL" for anything deeper -- including the
-    /// `/tree/<branch>/<path>` form a monorepo crate often puts in
-    /// `Cargo.toml`, whose registry spelling is `subfolder`.
+    /// A repository is a URL and a source, both required, and the URL is
+    /// `format: uri`. What shape a forge's URLs take is that forge's business.
     #[test]
-    fn a_repository_url_must_name_the_repository_and_stop() {
+    fn a_repository_needs_a_url_and_a_source() {
         let judge = |repository: Repository| {
             ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
                 .with_description("Weather")
@@ -2511,36 +1971,21 @@ mod tests {
 
         for url in [
             "https://github.com/RomanEmreis/neva",
-            "https://github.com/RomanEmreis/neva/",
-            "http://www.github.com/RomanEmreis/neva",
-            "https://github.com/RomanEmreis/neva.rs",
             "https://gitlab.com/me/server",
         ] {
-            assert!(
-                judge(Repository::new(url)).is_ok(),
-                "`{url}` names a repository"
-            );
+            assert!(judge(Repository::new(url)).is_ok(), "`{url}` is a URL");
         }
 
-        let err = judge(Repository::new(
-            "https://github.com/RomanEmreis/neva/tree/main/neva",
-        ))
-        .expect_err("a path inside the repository is not the repository");
-        assert!(err.to_string().contains("with_subfolder"), "got: {err}");
+        // A forge the URL does not name is named by its author, and until it
+        // is there is no `source` to publish.
+        let corporate = "https://git.example.com/team/server";
+        let err = judge(Repository::new(corporate)).expect_err("a repository needs a source");
+        assert!(err.to_string().contains("source"), "got: {err}");
+        assert!(judge(Repository::new(corporate).with_source("gitea")).is_ok());
 
-        for url in ["https://github.com/RomanEmreis", "https://github.com/"] {
-            assert!(
-                judge(Repository::new(url).with_source("github")).is_err(),
-                "`{url}` does not name a repository"
-            );
-        }
-
-        // The forge has to be the one the source names, however it got there.
-        assert!(
-            judge(Repository::new("https://github.com/RomanEmreis/neva").with_source("gitlab"))
-                .is_err(),
-            "a github.com URL is not a gitlab repository"
-        );
+        let err = judge(Repository::new("git.example.com/team/server").with_source("gitea"))
+            .expect_err("a bare host is not a URL");
+        assert!(err.to_string().contains("gitea"), "got: {err}");
     }
 
     /// A forge this SDK does not name is a forge all the same: `server.json`
@@ -2584,10 +2029,8 @@ mod tests {
         assert!(err.to_string().contains("with_source"), "got: {err}");
     }
 
-    /// A `streamable-http` transport is a URL a client dials, and the two
-    /// entries that carry one are dialled from different places: a package's
-    /// names where the thing just installed answers, a remote's names a server
-    /// somebody else runs.
+    /// The schema's `^https?://[^\s]+$`, and no more than that: where a
+    /// server answers is the author's to say.
     #[test]
     fn a_transport_url_must_be_one_a_client_could_call() {
         let package = |url: &str| {
@@ -2613,6 +2056,7 @@ mod tests {
             "localhost:3000/mcp",
             "ftp://example.com/mcp",
             "https://",
+            "https://exa mple.com/mcp",
         ] {
             assert!(package(url).is_err(), "`{url}` is not dialable");
             assert!(remote(url).is_err(), "`{url}` is not dialable");
@@ -2622,146 +2066,7 @@ mod tests {
         // is routinely on their own machine, and routinely not HTTPS.
         assert!(package("http://127.0.0.1:3000/mcp").is_ok());
         assert!(package("https://mcp.example.com/mcp").is_ok());
-
-        // A remote is neither: the registry refuses both.
-        let err = remote("http://mcp.example.com/mcp").expect_err("a remote is reached over TLS");
-        assert!(err.contains("https://"), "got: {err}");
-        // This machine, spelled every way it can be -- and the wildcards, which
-        // are not a machine at all. The registry asks after the first three;
-        // asking the address instead costs nothing and misses none.
-        for unreachable in [
-            "https://localhost:3000/mcp",
-            "https://tenant.localhost/mcp",
-            "https://127.0.0.1:3000/mcp",
-            "https://127.0.0.2/mcp",
-            "https://[::1]/mcp",
-            "https://0.0.0.0:3000/mcp",
-            "https://[::]:3000/mcp",
-        ] {
-            let err = remote(unreachable).expect_err("a remote is reachable by others");
-            assert!(
-                err.contains("anyone else can reach"),
-                "`{unreachable}`: {err}"
-            );
-        }
-
-        // A name that merely starts like one of them is a name like any other.
         assert!(remote("https://mcp.example.com/mcp").is_ok());
-        assert!(remote("https://127.example.com/mcp").is_ok());
-        assert!(remote("https://localhost.example.com/mcp").is_ok());
-    }
-
-    /// A port is digits. `http::Uri` does not insist -- it reads anything after
-    /// the colon as part of the authority and answers `None` for the port, the
-    /// same answer it gives for a URL that names none -- so it is asked here,
-    /// for every field that carries a URL.
-    #[test]
-    fn a_port_that_is_not_a_port_is_refused() {
-        let website = |url: &str| manifest().with_website_url(url).validate();
-        let transport = |url: &str| {
-            ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
-                .with_description("Weather")
-                .with_package(
-                    Package::cargo("weather-mcp", "0.3.0")
-                        .with_transport(Transport::streamable_http(url)),
-                )
-                .validate()
-        };
-
-        for bad in [
-            "https://example.com:notaport",
-            "https://example.com:",
-            "https://example.com:-1",
-            // Past 65535, which `http::Uri` also answers `None` to.
-            "https://example.com:99999",
-            "https://example.com:80abc/x",
-            // The two the OAuth client's `validate_published_url` names as
-            // what a hand-written authority check lets through. Parsing here
-            // rather than scanning is what stops them.
-            "https://[::1/client.json",
-            "https://example.com:bad/client.json",
-        ] {
-            assert!(website(bad).is_err(), "`{bad}` has no port");
-            assert!(transport(bad).is_err(), "`{bad}` has no port");
-        }
-
-        // And the ones that are ports, including an IPv6 literal's own colons
-        // and a userinfo's.
-        for ok in [
-            "https://example.com",
-            "https://example.com:3000/mcp",
-            "https://[::1]:3000/mcp",
-            "https://[2001:db8::1]/mcp",
-            "https://user@example.com:3000/mcp",
-        ] {
-            assert!(transport(ok).is_ok(), "`{ok}` is dialable");
-        }
-    }
-
-    /// A `%` in a URI field introduces an escape, and a `%` that introduces
-    /// nothing is how the field stops being a URI. `http::Uri` has no opinion
-    /// -- it reads `%` as an ordinary path character -- so this is asked
-    /// alongside the port, for the same fields and for the same reason.
-    #[test]
-    fn an_escape_that_escapes_nothing_is_refused() {
-        let website = |url: &str| manifest().with_website_url(url).validate();
-        let icon = |src: &str| {
-            manifest()
-                .with_icons([crate::types::Icon::new(src)])
-                .validate()
-        };
-
-        // A transport URL is a `pattern` rather than a `format: uri`, and is
-        // asked all the same: `IsValidURL` substitutes the templates and parses
-        // what is left, for packages and remotes alike. So does the MCPB
-        // validator, before it looks at the host.
-        let transport = |url: &str| {
-            ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
-                .with_description("Weather")
-                .with_package(
-                    Package::cargo("weather-mcp", "0.3.0")
-                        .with_transport(Transport::streamable_http(url)),
-                )
-                .validate()
-        };
-        let mcpb = |url: &str| {
-            Package::new(RegistryType::Mcpb, url, "0.3.0", Transport::Stdio)
-                .with_file_sha256(
-                    "fe333e598595000ae021bd27117db32ec69af6987f507ba7a63c90638ff633ce",
-                )
-                .validate()
-        };
-
-        for bad in [
-            "https://example.com/%ZZ",
-            "https://example.com/a%2/b",
-            "https://example.com/100%",
-            // The fragment is unescaped as the path is.
-            "https://example.com/x#%ZZ",
-        ] {
-            assert!(website(bad).is_err(), "`{bad}` is not a URI");
-            assert!(icon(bad).is_err(), "`{bad}` is not a URI");
-            assert!(transport(bad).is_err(), "`{bad}` is not a URI");
-        }
-
-        // ...and a template is substituted before the question is asked, so a
-        // `%` the template would have carried is not one of these.
-        assert!(transport("https://example.com/{tenant}%ZZ").is_err());
-        assert!(
-            mcpb("https://github.com/example/weather/releases/download/v1/%ZZ.mcpb")
-                .is_err_and(|err| err.to_string().contains("introduces no escape"))
-        );
-
-        for ok in [
-            "https://example.com/a%2Fb",
-            "https://example.com/%e2%9c%93",
-            // The query is the one part Go's `url.Parse` leaves raw, so a
-            // literal `%` there is a URI the registry publishes today.
-            "https://example.com/search?q=100%",
-            "https://example.com/x#a%2Fb",
-        ] {
-            assert!(website(ok).is_ok(), "`{ok}` is a URI");
-        }
     }
 
     /// A `{name}` in a URL is filled in by something the entry around it
@@ -2992,25 +2297,6 @@ mod app_tests {
             manifest("192.168.1.10:3000").packages[0].transport(),
             &Transport::streamable_http("http://192.168.1.10:3000/mcp")
         );
-    }
-
-    /// A port of `0` is the one bind address with no translation: the OS picks
-    /// the real one when the listener starts, long after this is written.
-    #[cfg(feature = "http-server-volga")]
-    #[test]
-    fn an_ephemeral_port_cannot_be_published() {
-        let manifest = App::new()
-            .with_options(|opt| {
-                opt.with_http(|http| http.bind("127.0.0.1:0"))
-                    .with_version("0.3.0")
-            })
-            .server_manifest("io.github.romanemreis/weather")
-            .with_description("Weather")
-            .with_cargo(CargoEnv::new("weather-mcp", "0.3.0"));
-
-        let err = manifest.validate().expect_err("port 0 is not a port");
-        assert!(err.to_string().contains("port 0"), "got: {err}");
-        assert!(err.to_string().contains("with_transport"), "got: {err}");
     }
 
     /// The macro is the two calls above in one, for the common case.

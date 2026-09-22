@@ -12,23 +12,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * **`server.json` for the [MCP Registry](https://registry.modelcontextprotocol.io)**
   (#135), under the new `registry` feature (in `server-full`).
   `App::server_manifest(name)` seeds a manifest from the app's version and
-  transport (a `0.0.0.0` or `[::]` bind becomes the loopback a client dials); `ServerManifest::with_cargo(neva::cargo_env!())` adds the crate's
-  description, repository, website and a `cargo` package;
-  `neva::server_manifest!(app, name)` is both at once, and
-  `with_cargo_package(cargo, |package| ..)` shapes the package it adds.
+  transport (a `0.0.0.0` or `[::]` bind becomes the loopback a client dials);
+  `ServerManifest::with_cargo(neva::cargo_env!())` adds the crate's description,
+  repository, website and a `cargo` package; `neva::server_manifest!(app, name)`
+  is both at once, and `with_cargo_package(cargo, |package| ..)` shapes the
+  package it adds.
 
   `name` is required: it is the registry identifier, not the MCP server name
   that `with_name` sets.
 
-  `to_json` validates first -- the reverse-DNS name, the 100-character
-  description, a blank title, version ranges, every URL the schema types as a
-  URI (parsed with `http::Uri`; a `websiteUrl` and an icon source are HTTPS
-  only, and an icon's is capped at 255 characters), `fileSha256`,
-  `registryBaseUrl` per registry type, an MCPB identifier that is not a GitHub
-  or GitLab release asset, and the 4KB publisher-metadata ceiling --
-  and refuses a manifest with no packages or remotes, a remote over stdio or on
-  a host no one else can reach, a `{template}` nothing declares, a transport on
-  port 0, or a package derived from an app that has no transport.
+  `to_json` validates the document against the schema it is written for -- the
+  reverse-DNS name, the 100-character description, a blank title, version
+  ranges, the fields typed `format: uri` (parsed with `http::Uri`), an icon
+  source's HTTPS and its 255 characters, `fileSha256`, a `{template}` nothing
+  declares -- and refuses a manifest with no packages or remotes, a remote over
+  stdio, or a package derived from an app that has no transport. It is not a
+  registry's validator: rules a registry adds of its own are reported by that
+  registry, which says which one was broken.
 
   `RegistryType` names `cargo`, `oci` and `mcpb`, with `Other` for the rest.
   `Transport` is stdio and Streamable HTTP: neva serves no HTTP+SSE endpoint.
