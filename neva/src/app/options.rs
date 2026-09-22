@@ -50,6 +50,16 @@ pub struct McpOptions {
     /// Information of current server's implementation
     pub(crate) implementation: Implementation,
 
+    /// Whether [`with_version`](Self::with_version) was ever called.
+    ///
+    /// `implementation.version` defaults to neva's own version, so its value
+    /// alone cannot tell a version the author chose from one they inherited --
+    /// and the two are told apart by
+    /// [`App::server_manifest`](crate::App::server_manifest), which must not
+    /// publish the SDK's version as the server's.
+    #[cfg(feature = "registry")]
+    pub(crate) version_is_explicit: bool,
+
     /// Timeout for the requests from server to a client
     pub(crate) request_timeout: Duration,
 
@@ -235,6 +245,8 @@ impl Default for McpOptions {
     fn default() -> Self {
         Self {
             implementation: Default::default(),
+            #[cfg(feature = "registry")]
+            version_is_explicit: false,
             request_timeout: Duration::from_secs(10),
             tools: Collection::new(),
             resources: Collection::new(),
@@ -356,6 +368,10 @@ impl McpOptions {
     /// Specifies the MCP server version
     pub fn with_version(mut self, ver: &str) -> Self {
         self.implementation.version = ver.into();
+        #[cfg(feature = "registry")]
+        {
+            self.version_is_explicit = true;
+        }
         self
     }
 
@@ -803,6 +819,27 @@ impl McpOptions {
     pub(crate) fn transport(&mut self) -> TransportProto {
         let transport = self.proto.take();
         transport.unwrap_or_default()
+    }
+
+    /// How a client would reach this server, as a `server.json` package entry
+    /// names it -- or `None` when no transport has been configured yet.
+    ///
+    /// The HTTP case carries the URL the server answers on, which is the one
+    /// thing a package entry cannot work out for itself.
+    #[cfg(feature = "registry")]
+    pub(crate) fn configured_transport(&self) -> Option<crate::registry::Transport> {
+        match &self.proto {
+            Some(TransportProto::StdIoServer(_)) => Some(crate::registry::Transport::Stdio),
+            #[cfg(feature = "http-server")]
+            // The label is the bind address; a manifest names where a client
+            // dials, which differs for a wildcard.
+            Some(TransportProto::HttpServer(http)) => {
+                Some(crate::registry::Transport::streamable_http(
+                    crate::registry::dial_url(http.url_label()),
+                ))
+            }
+            _ => None,
+        }
     }
 
     /// Returns a display label for the currently configured transport

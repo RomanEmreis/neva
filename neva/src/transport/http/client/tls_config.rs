@@ -62,8 +62,13 @@ impl TlsConfig {
     }
 
     /// Creates MCP client TLS config
-    pub(crate) fn build(self) -> Result<ClientTlsConfig, Error> {
-        let ca = if let Some(ca_path) = self.ca_path {
+    ///
+    /// Borrows rather than consumes: both certificates are read from disk and
+    /// either read can fail, and a transport whose `start` failed has to be
+    /// startable again -- with the TLS configuration it was given, not without
+    /// it (<https://github.com/RomanEmreis/neva/issues/131>).
+    pub(crate) fn build(&self) -> Result<ClientTlsConfig, Error> {
+        let ca = if let Some(ca_path) = &self.ca_path {
             let ca = std::fs::read(ca_path)
                 .map_err(Error::from)
                 .and_then(|b| Certificate::from_pem(&b).map_err(Into::into))?;
@@ -72,7 +77,7 @@ impl TlsConfig {
             None
         };
 
-        let identity = if let Some(cert_path) = self.cert_path {
+        let identity = if let Some(cert_path) = &self.cert_path {
             let identity = std::fs::read(cert_path)
                 .map_err(Error::from)
                 .and_then(|b| Identity::from_pem(&b).map_err(Into::into))?;

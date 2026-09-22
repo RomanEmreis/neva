@@ -894,22 +894,27 @@ impl HttpClient {
 
     /// Hands the `x-mcp-header` registry to this transport, so a `tools/call`
     /// can mirror the designated arguments into `Mcp-Param-*` headers.
+    ///
+    /// Takes `&mut self` rather than building a new transport: the client
+    /// applies this to the transport it still owns, so that a `connect` whose
+    /// `start` failed leaves one behind to retry with -- see
+    /// `McpOptions::start_transport`. Plain assignment, so re-applying it on
+    /// the next attempt replaces the registry rather than layering one on
+    /// another.
     #[cfg(all(not(feature = "legacy-spec"), feature = "http-client"))]
-    pub(crate) fn with_param_headers(
-        mut self,
-        registry: crate::shared::param_headers::Registry,
-    ) -> Self {
+    pub(crate) fn set_param_headers(&mut self, registry: crate::shared::param_headers::Registry) {
         self.param_headers = registry;
-        self
     }
 
     /// Hands the dual-mode protocol switch to this transport (set by
-    /// `McpOptions::transport`) so per-request headers follow the
+    /// `McpOptions::start_transport`) so per-request headers follow the
     /// negotiated protocol generation.
+    ///
+    /// `&mut self` and plain assignment for the same reason as
+    /// [`set_param_headers`](Self::set_param_headers).
     #[cfg(not(feature = "legacy-spec"))]
-    pub(crate) fn with_peer_mode(mut self, peer_mode: crate::shared::PeerMode) -> Self {
+    pub(crate) fn set_peer_mode(&mut self, peer_mode: crate::shared::PeerMode) {
         self.peer_mode = peer_mode;
-        self
     }
 
     /// Set the bearer token for requests
@@ -948,17 +953,36 @@ impl HttpClient {
         self
     }
 
+    /// Everything the connection task needs, taken out of this transport.
+    ///
+    /// Nothing is taken until every step that can be refused has succeeded, so
+    /// a transport that failed to start is the transport it was before it
+    /// tried -- which is what the client's retry rests on
+    /// (<https://github.com/RomanEmreis/neva/issues/131>). Taking a piece at a
+    /// time, as this did, meant a rejected OAuth configuration or an
+    /// unreadable certificate left the transport half-emptied: the retry then
+    /// failed somewhere else, and said something else.
     fn runtime(&mut self) -> Result<ClientRuntimeContext, Error> {
-        // Build the OAuth session before consuming transport state --
-        // same rationale as the server-side OAuth resolve.
+        // Both of these are refusals about configuration, and both are decided
+        // without touching it: `check` hands back what it made of the server
+        // URL, and building the TLS secrets borrows the paths it reads.
         #[cfg(feature = "client-oauth")]
-        let oauth = self
+        let resource = self
             .oauth
-            .take()
-            .map(|config| client::oauth::OAuthSession::new(config, &self.url.to_url()))
-            .transpose()?
-            .map(std::sync::Arc::new);
+            .as_ref()
+            .map(|config| client::oauth::OAuthSession::check(config, &self.url.to_url()))
+            .transpose()?;
 
+        #[cfg(feature = "client-tls")]
+        let tls_config = self
+            .tls_config
+            .as_ref()
+            .map(|tls| tls.build())
+            .transpose()?;
+
+        // The writer is the one piece that cannot be rebuilt, so this is where
+        // a second `start` is refused -- and refusing it here costs nothing,
+        // because everything above only borrowed.
         let Some(sender_rx) = self.sender.rx.take() else {
             return Err(Error::new(
                 ErrorCode::InternalError,
@@ -966,8 +990,13 @@ impl HttpClient {
             ));
         };
 
-        #[cfg(feature = "client-tls")]
-        let tls_config = self.tls_config.take().map(|tls| tls.build()).transpose()?;
+        // Past here nothing fails, so what is taken is taken for good. The two
+        // halves of the session were read off the same `Option`, so they are
+        // both present or both absent.
+        #[cfg(feature = "client-oauth")]
+        let oauth = self.oauth.take().zip(resource).map(|(config, resource)| {
+            std::sync::Arc::new(client::oauth::OAuthSession::from_resource(config, resource))
+        });
 
         Ok(ClientRuntimeContext {
             url: self.url.clone(),
@@ -1017,19 +1046,11 @@ where
 
     fn start(&mut self) -> Result<TransportHandle, Error> {
         let token = CancellationToken::new();
-        let (ctx, sender_rx) = match self.build_context_and_engine() {
-            Ok(x) => x,
-            Err(_err) => {
-                #[cfg(feature = "tracing")]
-                tracing::error!(logger = "neva", "Failed to start HTTP server: {}", _err);
-                // Hand back an already-cancelled token so `App::run`'s
-                // receive loop breaks immediately instead of waiting
-                // forever on a server that never bound. Nothing was started,
-                // so there is nothing to wait on draining either.
-                token.cancel();
-                return Ok(TransportHandle::detached(token));
-            }
-        };
+        // Nothing was started, so there is nothing to drain and nothing for
+        // the receive loop to break out of: `App::run` reports this and
+        // returns. It used to be handed an already-cancelled token instead,
+        // which got to the same place by running a loop with nothing in it.
+        let (ctx, sender_rx) = self.build_context_and_engine()?;
 
         // Take the engine out of the Option so we can move it into the
         // spawned task. start() must only be called once per HttpServer
@@ -1123,14 +1144,12 @@ impl Transport for HttpClient {
 
     fn start(&mut self) -> Result<TransportHandle, Error> {
         let token = CancellationToken::new();
-        let runtime = match self.runtime() {
-            Ok(runtime) => runtime,
-            Err(_err) => {
-                #[cfg(feature = "tracing")]
-                tracing::error!(logger = "neva", "Failed to start HTTP client: {}", _err);
-                return Ok(TransportHandle::detached(token));
-            }
-        };
+        // A transport that could not be prepared is not a transport that
+        // started. This used to answer `Ok` with a handle to nothing, so a
+        // rejected OAuth configuration or an unreadable certificate was logged
+        // here and then reported to the caller, a request timeout later, as
+        // the handshake not being answered.
+        let runtime = self.runtime()?;
         tokio::spawn(client::connect(runtime, token.clone()));
 
         // A client's outbound messages are written by the connection task,
@@ -1521,17 +1540,100 @@ mod engine_smoke_tests {
         assert_eq!(doc["authorization_servers"][0], "https://other.example.com");
     }
 
+    /// A server that could not be built did not start, and says so. It used to
+    /// answer `Ok` with an already-cancelled token, which `App::run` handled by
+    /// running a receive loop with nothing in it -- the same outcome, reached
+    /// by pretending the transport was up. `App::run` reports the error.
     #[cfg(feature = "server-oauth")]
-    #[tokio::test]
-    async fn invalid_oauth_resource_cancels_startup_token() {
+    #[test]
+    fn an_invalid_oauth_resource_fails_startup() {
         let mut server = HttpServer::from_engine("127.0.0.1:3000", MockEngine::default())
             .with_oauth_metadata(|oauth| oauth.with_resource("not a uri"));
 
-        let handle = <HttpServer<_, _> as Transport>::start(&mut server).unwrap();
+        let Err(err) = <HttpServer<_, _> as Transport>::start(&mut server) else {
+            panic!("a server whose configuration was refused must not start");
+        };
+        assert!(
+            err.to_string().contains("resource URI"),
+            "`start` reports what building the server refused, got: {err}"
+        );
+    }
+}
 
-        // A cancelled token breaks App::run's receive loop immediately;
-        // an uncancelled one would leave the app waiting forever on a
-        // server that never bound.
-        assert!(handle.token.is_cancelled());
+/// A transport that refuses to start has to refuse as a whole: the client puts
+/// it back and lets the caller try again
+/// (<https://github.com/RomanEmreis/neva/issues/131>), and a transport that
+/// spent half of itself on the way to the error would fail the retry somewhere
+/// else, with something else to say.
+///
+/// Both refusals a client transport has are configuration it is given under a
+/// feature, so the module goes with them.
+#[cfg(all(
+    test,
+    feature = "http-client",
+    any(feature = "client-tls", feature = "client-oauth")
+))]
+mod client_start_tests {
+    use super::*;
+
+    /// Asked twice on purpose: the second answer is the one that says nothing
+    /// was consumed by the first.
+    fn refuses_twice(http: &mut HttpClient, expected: &str) {
+        for attempt in 1..=2 {
+            let Err(err) = http.start() else {
+                panic!("attempt {attempt}: a transport that cannot be prepared must not start");
+            };
+            assert!(
+                err.to_string().contains(expected),
+                "attempt {attempt}: expected `{expected}`, got: {err}"
+            );
+        }
+        assert!(
+            http.sender.rx.is_some(),
+            "a start that failed must not have taken the writer"
+        );
+    }
+
+    /// Certificates are read from disk when the transport starts, and the read
+    /// can fail. It used to be logged and answered with `Ok`, so the caller
+    /// heard about it as a request timeout once the handshake went unanswered.
+    #[cfg(feature = "client-tls")]
+    #[test]
+    fn a_certificate_that_cannot_be_read_fails_the_start() {
+        let mut http =
+            HttpClient::default().with_tls(|tls| tls.with_ca("/neva/no/such/directory/ca.pem"));
+
+        // The io error's wording is the platform's; that it is the same error
+        // both times, and that the configuration is still here to produce it,
+        // is this crate's.
+        let first = <HttpClient as Transport>::start(&mut http)
+            .err()
+            .map(|err| err.to_string())
+            .expect("an unreadable CA file must fail the start");
+        refuses_twice(&mut http, &first);
+        assert!(
+            http.tls_config.is_some(),
+            "the TLS configuration outlives the start it failed"
+        );
+    }
+
+    /// The same for an OAuth configuration the session refuses. `OAuthSession`
+    /// takes the configuration it is given, so this is the case that used to
+    /// leave the transport with no OAuth at all -- a retry would have
+    /// connected unauthenticated.
+    #[cfg(feature = "client-oauth")]
+    #[test]
+    fn a_refused_oauth_configuration_fails_the_start() {
+        let mut http = HttpClient::default().with_oauth(|oauth| {
+            oauth
+                .with_client_id("mcp-cli")
+                .with_client_id_document("https://example.com/clients/mcp-cli")
+        });
+
+        refuses_twice(&mut http, "alternatives");
+        assert!(
+            http.oauth.is_some(),
+            "the configuration that was refused is still the transport's"
+        );
     }
 }

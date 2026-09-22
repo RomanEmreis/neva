@@ -2,7 +2,10 @@
 
 use crate::PROTOCOL_VERSIONS;
 use crate::client::notification_handler::NotificationsHandler;
-use crate::transport::{StdIoClient, TransportProto, stdio::options::StdIoOptions};
+use crate::error::Error;
+use crate::transport::{
+    StdIoClient, Transport, TransportHandle, TransportProto, stdio::options::StdIoOptions,
+};
 use crate::types::SamplingCapability;
 use crate::types::elicitation::ElicitationHandler;
 use crate::types::sampling::SamplingHandler;
@@ -458,23 +461,58 @@ impl McpOptions {
         }
     }
 
-    /// Returns current transport protocol
-    pub(crate) fn transport(&mut self) -> TransportProto {
-        let transport = self.proto.take().unwrap_or_default();
+    /// Starts the configured transport and hands it over, together with the
+    /// handle it was started with.
+    ///
+    /// A `start` that failed leaves the transport in `self.proto`, which is
+    /// what makes a failed [`Client::connect`](crate::Client::connect)
+    /// retryable on the same client: a stdio server that cannot be spawned
+    /// fails during `start`, before anything has been moved into a task, so
+    /// the configured transport is still here for the next attempt. Taking it
+    /// out unconditionally -- as this did before
+    /// <https://github.com/RomanEmreis/neva/issues/131> -- left the second
+    /// attempt with no transport at all, and the caller was told the transport
+    /// had never been specified.
+    ///
+    /// Once `start` returns, the transport is live and belongs to the caller:
+    /// a later failure (a handshake that the server rejects) is not undone by
+    /// putting it back, because a retry needs a fresh child process anyway.
+    ///
+    /// What is retryable is therefore exactly what `start` refuses as a whole,
+    /// which both transports are built to do: the stdio handshake fails before
+    /// it touches its own channels, and the HTTP transport decides every
+    /// refusal before it takes anything. A transport that consumed part of
+    /// itself on the way to an error would be put back half-used, and the
+    /// retry would fail somewhere else with something else to say.
+    pub(crate) fn start_transport(&mut self) -> Result<(TransportProto, TransportHandle), Error> {
         // Hand the dual-mode switch to the HTTP transport so request
         // headers follow the negotiated protocol generation. Only the
         // HTTP transport carries them, so this is gated on `http-client`
         // as well -- stdio-only 2026-07-28 clients (no `TransportProto::HttpClient`
         // variant at all) pass the transport through untouched.
+        //
+        // Applied in place, to the stored transport rather than to a value on
+        // its way out: a retry then re-applies the same two settings to the
+        // same transport, which is only harmless because both setters assign.
         #[cfg(all(not(feature = "legacy-spec"), feature = "http-client"))]
-        let transport = match transport {
-            TransportProto::HttpClient(http) => TransportProto::HttpClient(Box::new(
-                http.with_peer_mode(self.peer_mode.clone())
-                    .with_param_headers(self.param_headers.clone()),
-            )),
-            other => other,
+        if let Some(TransportProto::HttpClient(http)) = self.proto.as_mut() {
+            http.set_peer_mode(self.peer_mode.clone());
+            http.set_param_headers(self.param_headers.clone());
+        }
+
+        let Some(mut proto) = self.proto.take() else {
+            return Err(TransportProto::not_configured());
         };
-        transport
+        match proto.start() {
+            // Running: it belongs to the caller now.
+            Ok(handle) => Ok((proto, handle)),
+            // Not running, so nothing has been consumed -- put it back, and
+            // the next attempt is a real attempt.
+            Err(err) => {
+                self.proto = Some(proto);
+                Err(err)
+            }
+        }
     }
 
     /// The newest legacy protocol version -- what the dual-mode fallback
@@ -749,5 +787,68 @@ mod tests {
                 APP_MIME_TYPE
             );
         }
+    }
+
+    /// <https://github.com/RomanEmreis/neva/issues/131>: a `start` that failed
+    /// leaves the configured transport where it was, so the next attempt
+    /// starts the same one again. Taking it out first made every attempt after
+    /// the first report a transport that had never been specified -- which the
+    /// caller had, on the line above.
+    #[tokio::test]
+    async fn a_failed_start_leaves_the_transport_in_place() {
+        // Nothing is spawned: the command does not exist, which is the failure
+        // an embedder is most likely to want to retry (a typo, a server that
+        // is not built yet).
+        const COMMAND: &str = "neva-nonexistent-server-for-issue-131-repro";
+        let mut options = McpOptions::default().with_stdio(COMMAND, []);
+
+        // Three, not two: the second attempt must not be a one-off recovery
+        // that leaves the options in a worse state than it found them.
+        for attempt in 1..=3 {
+            let Err(err) = options.start_transport() else {
+                panic!("attempt {attempt}: a server that cannot be spawned must not start");
+            };
+            assert!(
+                err.to_string().contains(COMMAND),
+                "attempt {attempt}: every attempt names the spawn failure, got: {err}"
+            );
+            assert!(
+                options.proto.is_some(),
+                "attempt {attempt}: the transport that failed to start is still configured"
+            );
+        }
+    }
+
+    /// The other half of the same rule: once `start` succeeds the transport is
+    /// live and belongs to the caller, so the options let go of it. A second
+    /// `connect` on a connected client would otherwise start a second child
+    /// process behind the first one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_started_transport_is_handed_over() {
+        // `cat` is the cheapest well-behaved stdio peer there is: it reads
+        // until its stdin closes and says nothing on its own.
+        let mut options = McpOptions::default().with_stdio("cat", []);
+
+        let Ok((_transport, handle)) = options.start_transport() else {
+            panic!("`cat` must be spawnable");
+        };
+        assert!(
+            options.proto.is_none(),
+            "a running transport is the caller's, not the options'"
+        );
+
+        // Ends the child the handshake spawned.
+        handle.token.cancel();
+
+        // ...and with nothing left to start, the next attempt says so rather
+        // than pretending to connect.
+        let Err(err) = options.start_transport() else {
+            panic!("there is no transport left to start");
+        };
+        assert!(
+            err.to_string()
+                .contains("Transport protocol must be specified")
+        );
     }
 }

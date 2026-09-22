@@ -1,0 +1,15 @@
+[package]
+name = "example-registry"
+version = "0.1.0"
+edition = "2024"
+publish = false
+# Read by `neva::cargo_env!()`. The registry allows 100 characters for a
+# description, which is shorter than crates.io allows -- see the note in
+# `src/main.rs`.
+description = "Weather forecasts over MCP, published to the MCP Registry"
+repository = "https://github.com/RomanEmreis/neva"
+homepage = "https://romanemreis.github.io/neva-docs/"
+
+[dependencies]
+neva = { path = "../../neva", features = ["server-macros", "registry"] }
+tokio = { version = "1.47.1", features = ["full"] }

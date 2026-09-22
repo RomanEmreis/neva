@@ -539,9 +539,9 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chacha20"
-version = "0.10.0"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f8d983286843e49675a4b7a2d174efe136dc93a18d69130dd18198a6c167601"
+checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
  "cipher",
@@ -998,6 +998,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-registry"
+version = "0.1.0"
+dependencies = [
+ "neva",
+ "tokio",
+]
+
+[[package]]
 name = "example-server"
 version = "0.1.0"
 dependencies = [
@@ -1135,7 +1143,7 @@ checksum = "9fb9654ba8355388abeb8dcb4fc62f511300867002afc858860463bdd9fe0c44"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.5",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -1713,9 +1721,9 @@ dependencies = [
 
 [[package]]
 name = "jsonwebtoken"
-version = "11.0.0"
+version = "11.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "881733cbc631fc9e472e24447ce32a64bedf2da498d6d8570b08edc87de71f65"
+checksum = "e75fe14a82d81e5f5af639997db37d8b96045938a7ac6ab18cdbe1c7467e05e1"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
@@ -1878,7 +1886,7 @@ dependencies = [
 
 [[package]]
 name = "neva"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -1928,12 +1936,12 @@ dependencies = [
 
 [[package]]
 name = "neva_macros"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "proc-macro2",
  "quote",
  "serde_json",
- "syn 3.0.5",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -2536,9 +2544,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.40"
+version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "aws-lc-rs",
  "once_cell",
@@ -2599,9 +2607,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.13"
+version = "0.103.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
+checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -2661,7 +2669,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "serde_derive_internals",
- "syn 3.0.5",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -2726,7 +2734,7 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.5",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -2737,7 +2745,7 @@ checksum = "f852137cce035d6a4df67ccce505ff6b3e9fd3a10e3e52b24dc71e650bb1a9bd"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.5",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -2900,15 +2908,18 @@ dependencies = [
 
 [[package]]
 name = "sse-stream"
-version = "0.2.6"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c25ac7aff0abd1dbc474536e40416e1102c7dd9bfba0b9861c6d357f835dcfb4"
+checksum = "d385160fc0fba84f7b9cc8ef3263e410d0e3ca7ab4927f1356df33145ace69a4"
 dependencies = [
  "bytes",
  "futures-util",
  "http-body",
  "http-body-util",
+ "memchr",
  "pin-project-lite",
+ "simdutf8",
+ "thiserror",
 ]
 
 [[package]]
@@ -2957,9 +2968,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "3.0.5"
+version = "3.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12df2e0110f65b775f769bb17ef989067a1d931b2eb822bd4346631eeada89f9"
+checksum = "8593e8e72159ed2257d083c7a454a85cbf854f37a0966d8d483aff8c8a3ebcee"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3393,9 +3404,9 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "volga"
-version = "0.10.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "685e2e6b25c75cc3ae082f99e9b9f930d8dba0aa8593034154700f00dbb64c6c"
+checksum = "27d8fce04ecd3074bdadd2fd1309ee1ce8935d3460228908d78214046c0e071f"
 dependencies = [
  "async-stream",
  "bytes",
@@ -3405,7 +3416,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "itoa",
- "jsonwebtoken 11.0.0",
+ "jsonwebtoken 11.1.0",
  "memchr",
  "mime",
  "mime_guess",
@@ -3427,38 +3438,38 @@ dependencies = [
 
 [[package]]
 name = "volga-dev-cert"
-version = "0.10.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02b2499d40580d27bee6e911204c2ecd7fc0edc9527a1037f7aad0c7b438a0b6"
+checksum = "b70b84d68a8f9b90821daaa069bfb0dc0987f37e079e2a1849fb59343e4f0543"
 dependencies = [
  "rcgen",
 ]
 
 [[package]]
 name = "volga-di"
-version = "0.10.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9c8cc10e8fa399ba3060c9be366dec687e5b406223a379926c2516349324f4c"
+checksum = "d1a0933bebb17312d191b9b0c35fb795b432f83e53a5d3cb2fe44d6385aec2dd"
 dependencies = [
  "http 1.5.0",
 ]
 
 [[package]]
 name = "volga-macros"
-version = "0.10.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5caf09ba7fbe59cdcb29a49f42aac8f9cc58d48690da0aae02f5b592f23c462d"
+checksum = "8d92111b528c5806e428b3cfc21476d3fa5ac03beb65750fd1c2668b8e19c5bf"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.5",
+ "syn 3.0.6",
 ]
 
 [[package]]
 name = "volga-oauth-client"
-version = "0.10.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe93c8c35b8adc11a0aa5604ca47c078cc0584a945269318db98998badeebfb8"
+checksum = "8255461f1b2b4c416cd4224b7a0cf16946e68bf80dc719ac270898f494966992"
 dependencies = [
  "aws-lc-rs",
  "base64 0.23.1",
@@ -3469,7 +3480,7 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "hyper-util",
- "jsonwebtoken 11.0.0",
+ "jsonwebtoken 11.1.0",
  "serde",
  "serde_json",
  "tokio",
@@ -3478,9 +3489,9 @@ dependencies = [
 
 [[package]]
 name = "volga-oauth-core"
-version = "0.10.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ec705a7ee84bc331b43678e3f083181a026e842c7188927e79747fe32624688"
+checksum = "f27340765bfee4474b4308528321180bce43a6952f6c5a3088f40cdbf206ed95"
 dependencies = [
  "http 1.5.0",
  "serde",

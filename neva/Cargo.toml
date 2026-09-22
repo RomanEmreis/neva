@@ -38,15 +38,15 @@ inventory = { version = "0.3.24", optional = true }
 jsonschema = { version = "0.56.0", optional = true }
 once_cell = { version = "1.21.4", features = ["std"], optional = true }
 reqwest = { version = "0.13.5", features = ["stream", "json"], optional = true }
-sse-stream = { version = "0.2.6", optional = true }
+sse-stream = { version = "0.3.0", optional = true }
 tokio-stream = { version = "0.1.19", optional = true }
 tracing = { version = "0.1.44", optional = true }
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "json"], optional = true }
 url = { version = "2.5.8", optional = true }
-volga = { version = "0.10.0", features = ["di", "jwt-auth-full"], optional = true }
-volga-di = { version = "0.10.0", optional = true }
-volga-oauth-core = { version = "0.10.0", optional = true }
-volga-oauth-client = { version = "0.10.0", optional = true }
+volga = { version = "0.11.1", features = ["di", "jwt-auth-full"], optional = true }
+volga-di = { version = "0.11.1", optional = true }
+volga-oauth-core = { version = "0.11.1", optional = true }
+volga-oauth-client = { version = "0.11.1", optional = true }
 
 # neva
 neva_macros = { workspace = true, optional = true }
@@ -71,9 +71,12 @@ tasks = []
 # tool to one. Additive, no new dependencies.
 apps = ["neva_macros?/apps"]
 tracing = ["dep:tracing", "dep:tracing-subscriber", "dep:once_cell", "volga?/tracing"]
+# `server.json` manifests for the MCP Registry. Types and a validator, no new
+# dependencies -- opt-in so an embedded server does not carry them.
+registry = ["server"]
 
 # server
-server-full = ["server-macros", "tracing", "http-server-volga", "server-tls", "server-oauth", "di", "tasks", "apps"]
+server-full = ["server-macros", "tracing", "http-server-volga", "server-tls", "server-oauth", "di", "tasks", "apps", "registry"]
 server-macros = ["server", "macros", "neva_macros?/server"]
 server-tls = ["http-server-volga", "volga?/tls", "volga?/dev-cert"]
 server-oauth = ["http-server", "dep:volga-oauth-core", "volga?/oauth-client"]

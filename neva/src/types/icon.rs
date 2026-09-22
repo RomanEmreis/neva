@@ -37,6 +37,10 @@ pub struct Icon {
     /// the icon is designed to be used with a dark background.
     ///
     /// If not provided, the client should assume the icon can be used with any theme.
+    ///
+    /// Left out of the JSON when it is not set, as the two fields above are:
+    /// `theme` is an enum of `light` and `dark`, and a `null` is neither.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<IconTheme>,
 }
 
@@ -260,6 +264,19 @@ mod tests {
             serialized,
             r#"{"mimeType":"image/png","sizes":["48x48"],"src":"https://example.com/icon.png","theme":"dark"}"#
         );
+    }
+
+    /// `theme` is an enum of `light` and `dark`, so an icon that names no
+    /// theme leaves the key out rather than writing a `null` no reader of that
+    /// enum accepts -- the MCP Registry's schema among them.
+    #[test]
+    fn it_leaves_out_a_theme_that_was_never_set() {
+        let icon = Icon::new("https://example.com/icon.png");
+
+        let serialized = serde_json::to_string(&icon).unwrap();
+
+        assert_eq!(serialized, r#"{"src":"https://example.com/icon.png"}"#);
+        assert_eq!(serde_json::from_str::<Icon>(&serialized).unwrap(), icon);
     }
 
     #[test]

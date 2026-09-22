@@ -5,6 +5,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.6.1
+
+### Added
+
+* **`server.json` for the [MCP Registry](https://registry.modelcontextprotocol.io)**
+  (#135), under the new `registry` feature (in `server-full`).
+  `App::server_manifest(name)` seeds a manifest from the app's version and
+  transport (a `0.0.0.0` or `[::]` bind becomes the loopback a client dials);
+  `ServerManifest::with_cargo(neva::cargo_env!())` adds the crate's description,
+  repository, website and a `cargo` package; `neva::server_manifest!(app, name)`
+  is both at once, and `with_cargo_package(cargo, |package| ..)` shapes the
+  package it adds.
+
+  `name` is required: it is the registry identifier, not the MCP server name
+  that `with_name` sets.
+
+  `to_json` validates the document against the schema it is written for -- the
+  reverse-DNS name, the 100-character description, a blank title, version
+  ranges, the fields typed `format: uri` (parsed with `http::Uri`), an icon
+  source's HTTPS and its 255 characters, `fileSha256`, a `{template}` nothing
+  declares -- and refuses a manifest with no packages or remotes, a remote over
+  stdio, or a package derived from an app that has no transport. It is not a
+  registry's validator: rules a registry adds of its own are reported by that
+  registry, which says which one was broken.
+
+  `RegistryType` names `cargo`, `oci` and `mcpb`, with `Other` for the rest.
+  `Transport` is stdio and Streamable HTTP: neva serves no HTTP+SSE endpoint.
+  `Repository::new(url)` reads the forge off a github.com or gitlab.com host,
+  and `with_source` names any other.
+
+  Types: `ServerManifest`, `Package`, `RegistryType`, `Transport`, `Remote`,
+  `Repository`, `KeyValueInput`, `Argument`, `Input`, `InputFormat`, `CargoEnv`,
+  and the pinned `registry::SCHEMA_URL`. `examples/registry` covers the path
+  from `--emit-manifest` to `mcp-publisher publish`.
+
+### Fixed
+
+#### Client
+* **A failed `Client::connect` can be retried** (#131). The options keep the
+  configured transport until `Transport::start` succeeds, so a second `connect`
+  after a spawn failure (#125) starts the same transport again instead of
+  reporting `Transport protocol must be specified`. A `connect` that got past
+  `start` is still not retryable -- that needs a new `Client`.
+
+#### Transport
+* **A client or server with no transport is told so by `connect` / `run`**
+  rather than by the first send: `TransportProto::None::start` returns the
+  configuration error instead of a detached handle.
+
+* **An HTTP transport that cannot start reports why.** Both `start`
+  implementations answered `Ok` after logging the failure, so a rejected OAuth
+  or TLS configuration surfaced as a request timeout and a failed bind as an
+  already-cancelled token. The client transport also keeps its OAuth
+  configuration, TLS configuration and writer across a refused `start`, which is
+  what makes the retry above work over HTTP.
+
+* **An icon that names no theme leaves `theme` out** instead of writing
+  `"theme": null`, which is neither `light` nor `dark`.
+
 ## 0.6.0
 
 ### Added

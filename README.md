@@ -4,7 +4,7 @@ Blazingly fast and easily configurable [Model Context Protocol (MCP)](https://mo
 With simple configuration and ergonomic APIs, it provides everything you need to quickly build MCP clients and servers, 
 fully aligned with the latest MCP specification.
 
-[![latest](https://img.shields.io/badge/latest-0.6.0-d8eb34)](https://crates.io/crates/neva)
+[![latest](https://img.shields.io/badge/latest-0.6.1-d8eb34)](https://crates.io/crates/neva)
 [![latest](https://img.shields.io/badge/rustc-1.90+-964B00)](https://releases.rs/docs/1.90.0/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-624bd1.svg)](https://github.com/RomanEmreis/neva/blob/main/LICENSE)
 [![CI](https://github.com/RomanEmreis/neva/actions/workflows/rust.yml/badge.svg)](https://github.com/RomanEmreis/neva/actions/workflows/rust.yml)
@@ -24,6 +24,7 @@ fully aligned with the latest MCP specification.
 - **Structured Data** - output validation, embedded resources, and resource links out of the box.
 - **Safe Multi Round-Trip Requests** - a handler that asks the client for input mid-call re-runs from the top on every round, so neva owns the idempotency: `ctx.memo` computes once, `ctx.once` runs an effect once, `ctx.on_commit` defers it to the final result, and a lost response replays the committed answer instead of charging the card twice.
 - **Confidential request state** - the `requestState` blob that carries progress between rounds is sealed with ChaCha20-Poly1305, not merely signed, so what `ctx.memo` caches stays unreadable to the client that echoes it back.
+- **Registry publishing** - `server.json` for the [MCP Registry](https://registry.modelcontextprotocol.io) is generated from what the server already knows: its version, its transport and the crate Cargo is building. The registry's limits are checked before the upload rather than by it.
 - **Spec Alignment** - designed to track the latest MCP specification and cover its core functionality.
 
 ## Quick Start
@@ -31,7 +32,7 @@ fully aligned with the latest MCP specification.
 #### Dependencies
 ```toml
 [dependencies]
-neva = { version = "0.6.0", features = ["client-full"] }
+neva = { version = "0.6.1", features = ["client-full"] }
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -69,7 +70,7 @@ async fn main() -> Result<(), Error> {
 #### Dependencies
 ```toml
 [dependencies]
-neva = { version = "0.6.0", features = ["server-full"] }
+neva = { version = "0.6.1", features = ["server-full"] }
 tokio = { version = "1", features = ["full"] }
 ```
 #### Code

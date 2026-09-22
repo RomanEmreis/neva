@@ -93,6 +93,9 @@ impl DrainSignal {
 
     /// A signal that is already complete, for a transport with no writers of
     /// its own to wait for.
+    ///
+    /// Gated with its one caller, [`TransportHandle::detached`](super::TransportHandle::detached).
+    #[cfg(any(feature = "http-client", test))]
     pub(crate) fn ready() -> Self {
         let (guard, drained) = Self::new();
         drop(guard);

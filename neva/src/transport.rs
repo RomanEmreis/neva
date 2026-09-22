@@ -75,6 +75,14 @@ impl TransportHandle {
 
     /// A handle for a transport with no writers of its own to wait for: the
     /// drain signal is complete from the start, so awaiting it costs nothing.
+    ///
+    /// Only the HTTP client hands one back: its outbound messages are written
+    /// by the connection task, which owns its own teardown. The other two
+    /// callers were failures pretending to be starts -- a server that never
+    /// bound, and `TransportProto::None`, which is what let a transport-less
+    /// client get as far as its first send; see
+    /// [`TransportProto::not_configured`].
+    #[cfg(feature = "http-client")]
     #[inline]
     pub(crate) fn detached(token: CancellationToken) -> Self {
         Self::new(token, DrainSignal::ready())
@@ -141,6 +149,25 @@ pub(crate) enum TransportProtoReceiver {
     Http(http::HttpReceiver),
 }
 
+impl TransportProto {
+    /// The error every [`TransportProto::None`] path reports: a client or a
+    /// server that was never given a transport.
+    ///
+    /// One constructor, because the three places that can notice a missing
+    /// transport are steps apart and only the first of them -- `start` -- can
+    /// name the cause while the caller is still in `connect`/`run`. Before
+    /// <https://github.com/RomanEmreis/neva/issues/131> `start` answered `Ok`
+    /// with a detached handle, so the omission surfaced from the first `send`
+    /// instead, and a configuration mistake read as a send failure.
+    #[inline]
+    pub(crate) fn not_configured() -> Error {
+        Error::new(
+            ErrorCode::InternalError,
+            "Transport protocol must be specified: configure one with `with_stdio` or `with_http`",
+        )
+    }
+}
+
 impl Default for TransportProto {
     #[inline]
     fn default() -> Self {
@@ -155,10 +182,7 @@ impl Sender for TransportProtoSender {
             TransportProtoSender::Stdio(stdio) => stdio.send(resp).await,
             #[cfg(any(feature = "http-server", feature = "http-client"))]
             TransportProtoSender::Http(http) => http.send(resp).await,
-            TransportProtoSender::None => Err(Error::new(
-                ErrorCode::InternalError,
-                "Transport protocol must be specified",
-            )),
+            TransportProtoSender::None => Err(TransportProto::not_configured()),
             #[cfg(feature = "server")]
             TransportProtoSender::BatchCollect {
                 real_sender,
@@ -186,10 +210,7 @@ impl Receiver for TransportProtoReceiver {
             TransportProtoReceiver::Stdio(stdio) => stdio.recv().await,
             #[cfg(any(feature = "http-server", feature = "http-client"))]
             TransportProtoReceiver::Http(http) => http.recv().await,
-            TransportProtoReceiver::None => Err(Error::new(
-                ErrorCode::InternalError,
-                "Transport protocol must be specified",
-            )),
+            TransportProtoReceiver::None => Err(TransportProto::not_configured()),
         }
     }
 }
@@ -209,7 +230,7 @@ impl Transport for TransportProto {
             TransportProto::HttpServer(http) => http.start(),
             #[cfg(feature = "http-client")]
             TransportProto::HttpClient(http) => http.start(),
-            TransportProto::None => Ok(TransportHandle::detached(CancellationToken::new())),
+            TransportProto::None => Err(Self::not_configured()),
         }
     }
 
@@ -249,5 +270,51 @@ impl Transport for TransportProto {
             }
             TransportProto::None => (TransportProtoSender::None, TransportProtoReceiver::None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// <https://github.com/RomanEmreis/neva/issues/131>: a client or a server
+    /// that was never given a transport is told so by `start`, the one step
+    /// that can still name the cause. This used to answer `Ok` with a detached
+    /// handle, so the omission was first noticed by a send two steps later --
+    /// and a configuration mistake reached the caller as a send failure.
+    #[test]
+    fn starting_a_missing_transport_reports_the_configuration() {
+        let mut proto = TransportProto::None;
+
+        let Err(err) = proto.start() else {
+            panic!("a transport that was never configured cannot start");
+        };
+        assert!(
+            err.to_string()
+                .contains("Transport protocol must be specified"),
+            "the error names the missing configuration, got: {err}"
+        );
+    }
+
+    /// One message wherever a missing transport is noticed: the send half is
+    /// unreachable now that `start` refuses first, but it is the fallback for
+    /// anything that reaches a `None` sender by another route.
+    #[tokio::test]
+    async fn a_none_sender_reports_the_same_error_as_start() {
+        let mut sender = TransportProtoSender::None;
+        let mut receiver = TransportProtoReceiver::None;
+        let expected = TransportProto::not_configured().to_string();
+
+        let send = sender
+            .send(Message::Request(crate::types::Request::new(
+                None, "ping", None::<()>,
+            )))
+            .await
+            .err()
+            .map(|err| err.to_string());
+        let recv = receiver.recv().await.err().map(|err| err.to_string());
+
+        assert_eq!(send.as_deref(), Some(expected.as_str()));
+        assert_eq!(recv.as_deref(), Some(expected.as_str()));
     }
 }
