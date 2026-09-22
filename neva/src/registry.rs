@@ -823,9 +823,12 @@ impl Package {
             return Err(invalid("a package needs an `identifier`"));
         }
 
-        if self.identifier.contains(' ') {
+        // Whitespace rather than a space: a tab or a newline is no more
+        // resolvable than a space is, and the schema's own transport pattern
+        // spells the same rule `[^\s]+`.
+        if self.identifier.contains(char::is_whitespace) {
             return Err(invalid(format!(
-                "a package identifier carries no spaces: `{}`",
+                "a package identifier carries no whitespace: `{}`",
                 elided(&self.identifier)
             )));
         }
@@ -991,6 +994,42 @@ fn port_is_a_port(uri: &http::Uri) -> bool {
     port.is_none_or(|port| port.parse::<u16>().is_ok())
 }
 
+/// Whether every `%` in a URL introduces an escape.
+///
+/// Asked separately for the same reason the port is: `http::Uri` takes `%` for
+/// an ordinary path character, so `https://example.com/%ZZ` parses. What reads
+/// these fields at the registry does not -- Go's `url.Parse` unescapes the path
+/// and the fragment as it goes, and refuses a `%` that is not followed by two
+/// hex digits.
+///
+/// The query is the one part it leaves raw, and so is the one part left alone
+/// here. A literal `%` there is published today; refusing it would refuse a
+/// manifest the registry accepts, which is the worse way to be wrong.
+fn escapes_are_escapes(value: &str) -> bool {
+    fn escaped(part: &str) -> bool {
+        let bytes = part.as_bytes();
+        bytes
+            .iter()
+            .enumerate()
+            .filter(|(_, byte)| **byte == b'%')
+            .all(|(at, _)| {
+                matches!(
+                    bytes.get(at + 1..at + 3),
+                    Some([first, second])
+                        if first.is_ascii_hexdigit() && second.is_ascii_hexdigit()
+                )
+            })
+    }
+
+    // A fragment starts at the first `#`, and a query at the first `?` before
+    // it -- the order `url.Parse` splits them in, so that a `?` inside a
+    // fragment stays part of the fragment.
+    let (rest, fragment) = value.split_once('#').unwrap_or((value, ""));
+    let rest = rest.split_once('?').map_or(rest, |(before, _)| before);
+
+    escaped(rest) && escaped(fragment)
+}
+
 /// An MCPB package has no registry to look it up in: its identifier is the
 /// URL the archive is downloaded from, and the registry holds that URL to more
 /// than being one.
@@ -1110,6 +1149,7 @@ fn is_http_uri(value: &str) -> bool {
     value
         .parse::<http::Uri>()
         .is_ok_and(|uri| matches!(uri.scheme_str(), Some("http" | "https")) && port_is_a_port(&uri))
+        && escapes_are_escapes(value)
 }
 
 /// What a client dials, given where a server listens.
@@ -1248,6 +1288,7 @@ fn is_https_uri(value: &str) -> bool {
     value
         .parse::<http::Uri>()
         .is_ok_and(|uri| uri.scheme_str() == Some("https") && port_is_a_port(&uri))
+        && escapes_are_escapes(value)
 }
 
 /// The registry's own `^https?://(www\.)?<host>/[\w.-]+/[\w.-]+/?$`: a
@@ -2306,16 +2347,22 @@ mod tests {
     }
 
     /// A package identifier names something in a registry, and the registry
-    /// refuses one with a space in it whatever the type.
+    /// refuses one with whitespace in it whatever the type. A space is the one
+    /// that gets typed; a tab or a newline is the one that gets pasted.
     #[test]
-    fn a_package_identifier_carries_no_spaces() {
-        let err = ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
-            .with_description("Weather")
-            .with_package(Package::cargo("weather mcp", "0.3.0"))
-            .validate()
-            .expect_err("an identifier with a space is refused");
+    fn a_package_identifier_carries_no_whitespace() {
+        for split in ["weather mcp", "weather\tmcp", "weather\nmcp"] {
+            let err = ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
+                .with_description("Weather")
+                .with_package(Package::cargo(split, "0.3.0"))
+                .validate()
+                .expect_err("an identifier with whitespace is refused");
 
-        assert!(err.to_string().contains("no spaces"), "got: {err}");
+            assert!(
+                err.to_string().contains("no whitespace"),
+                "{split:?}: {err}"
+            );
+        }
     }
 
     /// A remote is a server already running somewhere. Stdio names a process
@@ -2633,6 +2680,42 @@ mod tests {
             "https://user@example.com:3000/mcp",
         ] {
             assert!(transport(ok).is_ok(), "`{ok}` is dialable");
+        }
+    }
+
+    /// A `%` in a URI field introduces an escape, and a `%` that introduces
+    /// nothing is how the field stops being a URI. `http::Uri` has no opinion
+    /// -- it reads `%` as an ordinary path character -- so this is asked
+    /// alongside the port, for the same fields and for the same reason.
+    #[test]
+    fn an_escape_that_escapes_nothing_is_refused() {
+        let website = |url: &str| manifest().with_website_url(url).validate();
+        let icon = |src: &str| {
+            manifest()
+                .with_icons([crate::types::Icon::new(src)])
+                .validate()
+        };
+
+        for bad in [
+            "https://example.com/%ZZ",
+            "https://example.com/a%2/b",
+            "https://example.com/100%",
+            // The fragment is unescaped as the path is.
+            "https://example.com/x#%ZZ",
+        ] {
+            assert!(website(bad).is_err(), "`{bad}` is not a URI");
+            assert!(icon(bad).is_err(), "`{bad}` is not a URI");
+        }
+
+        for ok in [
+            "https://example.com/a%2Fb",
+            "https://example.com/%e2%9c%93",
+            // The query is the one part Go's `url.Parse` leaves raw, so a
+            // literal `%` there is a URI the registry publishes today.
+            "https://example.com/search?q=100%",
+            "https://example.com/x#a%2Fb",
+        ] {
+            assert!(website(ok).is_ok(), "`{ok}` is a URI");
         }
     }
 
