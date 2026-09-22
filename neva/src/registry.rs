@@ -960,12 +960,21 @@ fn is_transport_url(url: &str) -> bool {
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"));
 
-    matches!(rest, Some(rest) if !rest.is_empty() && !rest.chars().any(char::is_whitespace))
-        // The pattern says nothing about the authority, but the registry parses
-        // one all the same -- with Go's `url.Parse`, which insists on a port.
-        && without_templates(url)
-            .parse::<http::Uri>()
-            .is_ok_and(|uri| port_is_a_port(&uri))
+    if !matches!(rest, Some(rest) if !rest.is_empty() && !rest.chars().any(char::is_whitespace)) {
+        return false;
+    }
+
+    // The pattern says nothing about the rest of the URL, but the registry
+    // parses it all the same: `IsValidURL` puts a placeholder in for each
+    // template and hands the result to Go's `url.Parse`, which insists on a
+    // port and on well-formed escapes. Both are asked of the substituted URL,
+    // because that is the string it parses.
+    let plain = without_templates(url);
+
+    plain
+        .parse::<http::Uri>()
+        .is_ok_and(|uri| port_is_a_port(&uri))
+        && escapes_are_escapes(&plain)
 }
 
 /// Whether the authority's port, if it has one, is a port.
@@ -996,15 +1005,15 @@ fn port_is_a_port(uri: &http::Uri) -> bool {
 
 /// Whether every `%` in a URL introduces an escape.
 ///
-/// Asked separately for the same reason the port is: `http::Uri` takes `%` for
-/// an ordinary path character, so `https://example.com/%ZZ` parses. What reads
-/// these fields at the registry does not -- Go's `url.Parse` unescapes the path
-/// and the fragment as it goes, and refuses a `%` that is not followed by two
-/// hex digits.
+/// RFC 3986 spells it `pct-encoded = "%" HEXDIG HEXDIG`, and a `%` followed by
+/// anything else is the same kind of malformed as a port that is not digits --
+/// which is why it is asked here for the same reason and in the same place.
+/// `http::Uri` asks neither: it takes `%` for an ordinary path character, so
+/// `https://example.com/%ZZ` parses.
 ///
-/// The query is the one part it leaves raw, and so is the one part left alone
-/// here. A literal `%` there is published today; refusing it would refuse a
-/// manifest the registry accepts, which is the worse way to be wrong.
+/// The query is left alone. The registry's parser does not enforce the rule
+/// there, so a literal `%` in one is published today, and refusing it here
+/// would refuse a manifest the registry accepts.
 fn escapes_are_escapes(value: &str) -> bool {
     fn escaped(part: &str) -> bool {
         let bytes = part.as_bytes();
@@ -1062,6 +1071,12 @@ fn validate_mcpb_identifier(identifier: &str) -> Result<(), Error> {
     // `github.com:notaport` and would be satisfied by it.
     if !port_is_a_port(&uri) {
         return refused("what follows the host's colon is not a port");
+    }
+    // ...and here for the same reason as everywhere else a URL is checked:
+    // `ValidateMCPB` hands this identifier to `url.Parse` before it looks at
+    // the host at all.
+    if !escapes_are_escapes(identifier) {
+        return refused("a `%` in it introduces no escape");
     }
 
     let host = uri.host().unwrap_or_default().to_ascii_lowercase();
@@ -2696,6 +2711,27 @@ mod tests {
                 .validate()
         };
 
+        // A transport URL is a `pattern` rather than a `format: uri`, and is
+        // asked all the same: `IsValidURL` substitutes the templates and parses
+        // what is left, for packages and remotes alike. So does the MCPB
+        // validator, before it looks at the host.
+        let transport = |url: &str| {
+            ServerManifest::new("io.github.romanemreis/weather", "0.3.0")
+                .with_description("Weather")
+                .with_package(
+                    Package::cargo("weather-mcp", "0.3.0")
+                        .with_transport(Transport::streamable_http(url)),
+                )
+                .validate()
+        };
+        let mcpb = |url: &str| {
+            Package::new(RegistryType::Mcpb, url, "0.3.0", Transport::Stdio)
+                .with_file_sha256(
+                    "fe333e598595000ae021bd27117db32ec69af6987f507ba7a63c90638ff633ce",
+                )
+                .validate()
+        };
+
         for bad in [
             "https://example.com/%ZZ",
             "https://example.com/a%2/b",
@@ -2705,7 +2741,16 @@ mod tests {
         ] {
             assert!(website(bad).is_err(), "`{bad}` is not a URI");
             assert!(icon(bad).is_err(), "`{bad}` is not a URI");
+            assert!(transport(bad).is_err(), "`{bad}` is not a URI");
         }
+
+        // ...and a template is substituted before the question is asked, so a
+        // `%` the template would have carried is not one of these.
+        assert!(transport("https://example.com/{tenant}%ZZ").is_err());
+        assert!(
+            mcpb("https://github.com/example/weather/releases/download/v1/%ZZ.mcpb")
+                .is_err_and(|err| err.to_string().contains("introduces no escape"))
+        );
 
         for ok in [
             "https://example.com/a%2Fb",
