@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::{
-    context::HttpContext,
+    context::{HttpContext, RequestMap},
     engine::HttpEngine,
     types::{EventId, HttpRequest, HttpResponse, StreamResponse},
 };
@@ -139,7 +139,7 @@ pub async fn handle_post(req: HttpRequest, ctx: &HttpContext) -> HttpResponse {
         PostPrep::Reply(resp) => resp,
         PostPrep::Dispatch { id, msg } => {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<Message>();
-            ctx.pending.insert(msg.full_id(), resp_tx);
+            let _slot = PendingSlot::occupy(&ctx.pending, msg.full_id(), resp_tx);
             if ctx.inbound_tx.send(Ok(msg)).await.is_err() {
                 return status_response(http::StatusCode::INTERNAL_SERVER_ERROR, id);
             }
@@ -147,6 +147,57 @@ pub async fn handle_post(req: HttpRequest, ctx: &HttpContext) -> HttpResponse {
                 Ok(resp) => build_json_response(dispatched_status(&resp), id, &resp),
                 Err(_) => status_response(http::StatusCode::INTERNAL_SERVER_ERROR, id),
             }
+        }
+    }
+}
+
+/// A POST's slot in [`HttpContext::pending`], held for as long as the POST is
+/// waiting on it.
+///
+/// The dispatch pump takes the slot when the response arrives. A POST that
+/// goes away first -- its caller closed the connection, and the engine
+/// dropped the future awaiting the reply -- takes its slot with it. Left
+/// behind, the slot would outlive the request until a response arrived for
+/// it, and forever if none ever did.
+struct PendingSlot<'a> {
+    pending: &'a RequestMap,
+    id: RequestId,
+    /// Cleared once the slot has been handed to something that outlives this
+    /// guard -- the body stream of a streamed reply.
+    owned: bool,
+}
+
+impl<'a> PendingSlot<'a> {
+    /// Registers `tx` as the recipient of the response to `id`.
+    #[inline]
+    fn occupy(
+        pending: &'a RequestMap,
+        id: RequestId,
+        tx: tokio::sync::oneshot::Sender<Message>,
+    ) -> Self {
+        pending.insert(id.clone(), tx);
+        Self {
+            pending,
+            id,
+            owned: true,
+        }
+    }
+
+    /// Gives up ownership of the slot, returning its key for whoever takes
+    /// over removing it.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[inline]
+    fn hand_over(mut self) -> RequestId {
+        self.owned = false;
+        self.id.clone()
+    }
+}
+
+impl Drop for PendingSlot<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        if self.owned {
+            self.pending.remove(&self.id);
         }
     }
 }
@@ -491,12 +542,10 @@ async fn handle_post_streaming<E: HttpEngine>(
         PostPrep::Reply(resp) => StreamResponse::Complete(resp),
         PostPrep::Dispatch { id, msg } => {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<Message>();
-            let full_id = msg.full_id();
-            ctx.pending.insert(full_id.clone(), resp_tx);
+            let slot = PendingSlot::occupy(&ctx.pending, msg.full_id(), resp_tx);
 
             if !opts_into_notifications(&msg) {
                 if ctx.inbound_tx.send(Ok(msg)).await.is_err() {
-                    ctx.pending.remove(&full_id);
                     return StreamResponse::Complete(status_response(
                         http::StatusCode::INTERNAL_SERVER_ERROR,
                         id,
@@ -528,16 +577,17 @@ async fn handle_post_streaming<E: HttpEngine>(
 
             if ctx.inbound_tx.send(Ok(msg)).await.is_err() {
                 crate::types::notification::sink::unregister(&id);
-                ctx.pending.remove(&full_id);
                 return StreamResponse::Complete(status_response(
                     http::StatusCode::INTERNAL_SERVER_ERROR,
                     id,
                 ));
             }
 
+            // From here the body stream owns the slot: its `Cleanup` removes it
+            // when the stream ends or is dropped.
             let stream = post_notification_stream(
                 id,
-                full_id,
+                slot.hand_over(),
                 ctx.pending.clone(),
                 notif_rx,
                 resp_rx,
@@ -2086,6 +2136,67 @@ mod tests {
         // We can't easily inspect it via public API; assert that pending has
         // exactly one entry (the oneshot for the init request).
         assert_eq!(ctx_arc.pending.len(), 1);
+    }
+
+    /// A POST dropped while its request is in flight -- the caller closed the
+    /// connection, so the engine dropped the future awaiting the reply --
+    /// takes its pending slot with it. A slot that outlived its POST is what a
+    /// late response used to fail against, and that failure stopped the
+    /// transport.
+    #[tokio::test]
+    async fn an_abandoned_post_releases_its_pending_slot() {
+        let (ctx, mut inbound) = make_ctx();
+        let ctx = Arc::new(ctx);
+        let req = post_builder_for("tools/list")
+            .body(make_request_body("tools/list"))
+            .unwrap();
+
+        let post = tokio::spawn({
+            let ctx = ctx.clone();
+            async move {
+                handle_post(req, &ctx).await;
+            }
+        });
+
+        // Dispatched: the runtime has the request and the slot is open.
+        assert!(matches!(inbound.recv().await, Some(Ok(_))));
+        assert_eq!(ctx.pending.len(), 1);
+
+        post.abort();
+        let _ = post.await;
+        assert!(
+            ctx.pending.is_empty(),
+            "an abandoned POST must not leave its slot behind"
+        );
+    }
+
+    /// The same, on the path `dispatch_post` takes under MCP 2026-07-28 for a
+    /// request that does not stream its reply.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[tokio::test]
+    async fn an_abandoned_post_releases_its_pending_slot_on_the_stateless_path() {
+        let (ctx, mut inbound) = make_ctx();
+        let ctx = Arc::new(ctx);
+        let req = post_builder_for("tools/list")
+            .body(make_request_body("tools/list"))
+            .unwrap();
+
+        let post = tokio::spawn({
+            let ctx = ctx.clone();
+            async move {
+                let _ = handle_post_streaming::<TestEngine>(req, &ctx).await;
+            }
+        });
+
+        assert!(matches!(inbound.recv().await, Some(Ok(_))));
+        assert_eq!(ctx.pending.len(), 1);
+
+        post.abort();
+        let _ = post.await;
+        assert!(
+            ctx.pending.is_empty(),
+            "an abandoned POST must not leave its slot behind"
+        );
     }
 
     #[tokio::test]
