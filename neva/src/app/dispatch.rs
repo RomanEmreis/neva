@@ -11,6 +11,7 @@
 //! [`super::mrtr`]).
 
 use super::*;
+use futures_util::FutureExt;
 
 impl App {
     #[cfg(feature = "tracing")]
@@ -215,13 +216,54 @@ impl App {
         let id = msg.id();
         let mut sender = runtime.sender();
 
-        if let Some(resp) = Self::handle_message(
+        // What a request is still owed if handling it panics: an answer, and
+        // the closing of the cancellation slot `track_request` opened for it.
+        // Without the first its caller waits for a reply that never comes --
+        // over HTTP, a POST held open until the caller gives up.
+        let owed = match &msg {
+            Message::Request(req) => Some((req.session_id, runtime.options())),
+            _ => None,
+        };
+
+        // The seam every request passes through, batched ones included, so
+        // one catch covers the handler, its `on_commit` effects and the
+        // request state store alike. A panic in user middleware wrapped
+        // around `next` happens outside it and is not caught here.
+        let handled = std::panic::AssertUnwindSafe(Self::handle_message(
             msg,
             runtime,
             #[cfg(feature = "di")]
             scope,
-        )
-        .await
+        ))
+        .catch_unwind()
+        .await;
+
+        let resp = match handled {
+            Ok(resp) => resp,
+            Err(_panic) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(
+                    logger = "neva",
+                    id = %id,
+                    "The request handler panicked: {}",
+                    panic_message(&*_panic)
+                );
+
+                // The panic message stays in the server's log: what went wrong
+                // inside a handler is not the caller's business.
+                owed.map(|(session_id, options)| {
+                    let mut resp =
+                        Response::error(id.clone(), Error::from(ErrorCode::InternalError));
+                    if let Some(session_id) = session_id {
+                        resp = resp.set_session_id(session_id);
+                    }
+                    options.complete_request(&resp.full_id());
+                    resp
+                })
+            }
+        };
+
+        if let Some(resp) = resp
             && let Err(_err) = sender.send(resp.into()).await
         {
             #[cfg(feature = "tracing")]
@@ -648,6 +690,18 @@ impl App {
             _ => {}
         }
     }
+}
+
+/// The message a panic was raised with, when it was raised with one --
+/// `panic!("...")` carries a `&str` or a `String`, and anything else passed to
+/// `std::panic::panic_any` carries no text to show.
+#[cfg(feature = "tracing")]
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("(no message)")
 }
 
 /// Builds the per-request tracing span carrying the session id.

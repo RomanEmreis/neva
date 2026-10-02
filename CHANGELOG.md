@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.6.2
+
+### Security
+* **A caller that gives up no longer stops the HTTP server**
+  ([GHSA-v789-mrvh-rj42](https://github.com/RomanEmreis/neva/security/advisories/GHSA-v789-mrvh-rj42)).
+  A response whose POST had already gone away -- a client timeout, a proxy
+  closing the connection -- cancelled the whole HTTP transport and `App::run`
+  returned. Such a response is now dropped, and a POST that goes away releases
+  its pending slot. Every release since 0.1.0 is affected.
+
+### Fixed
+* **A request whose handler panics is answered with `InternalError`.** Over
+  HTTP its POST used to stay open until the caller gave up; the panic message
+  stays in the server log.
+
 ## 0.6.1
 
 ### Added
