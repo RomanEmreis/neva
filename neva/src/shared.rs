@@ -7,8 +7,6 @@ use tokio_util::sync::CancellationToken;
 pub(crate) use message_registry::MessageRegistry;
 #[cfg(any(feature = "server", feature = "client"))]
 pub(crate) use requests_queue::PendingResponse;
-#[cfg(all(feature = "client", not(feature = "legacy-spec")))]
-pub(crate) use requests_queue::QueuedRequest;
 #[cfg(feature = "client")]
 pub(crate) use requests_queue::QueuedRequestGuard;
 #[cfg(any(feature = "server", feature = "client"))]

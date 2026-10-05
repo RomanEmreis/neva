@@ -128,33 +128,63 @@ async fn deprecated_methods_still_answer() {
     server.abort();
 }
 
-/// Two batches in flight with the same caller-chosen request id would share
-/// one response slot: the second would take over the first's waiter and be
-/// handed the first's response. The second is refused instead, before anything
-/// is sent, and the first still gets its own answer.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_request_id_already_in_flight_refuses_the_batch() {
-    use neva::types::{MessageEnvelope, Request, RequestId};
-    use std::sync::Arc;
-    use tokio::sync::Notify;
+type Gate = std::sync::Arc<tokio::sync::Notify>;
 
+/// A server holding its answers to `hold` and `hold_b` until their gates are
+/// released, and answering `quick` at once.
+async fn serve_held() -> (String, Gate, Gate, tokio::task::JoinHandle<()>) {
     let addr = format!("127.0.0.1:{}", pick_free_port());
-    let release = Arc::new(Notify::new());
+    let (release, release_b) = (Gate::default(), Gate::default());
     let mut app = App::new()
         .without_greeting()
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
-    let gate = release.clone();
-    app.map_tool("hold", move || {
+    for (name, gate, answer) in [("hold", &release, "held"), ("hold_b", &release_b, "held-b")] {
         let gate = gate.clone();
-        async move {
-            gate.notified().await;
-            "held".to_string()
-        }
-    });
+        app.map_tool(name, move || {
+            let gate = gate.clone();
+            async move {
+                gate.notified().await;
+                answer.to_string()
+            }
+        });
+    }
     app.map_tool("quick", || async move { "quick".to_string() });
     let server = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(Duration::from_millis(300)).await;
+    (addr, release, release_b, server)
+}
 
+fn call(id: i64, tool: &str) -> neva::types::MessageEnvelope {
+    neva::types::MessageEnvelope::Request(neva::types::Request::new(
+        Some(neva::types::RequestId::Number(id)),
+        "tools/call",
+        Some(serde_json::json!({ "name": tool, "arguments": {} })),
+    ))
+}
+
+fn answers(responses: &[neva::types::Response]) -> Vec<(neva::types::RequestId, String)> {
+    responses
+        .iter()
+        .map(|resp| {
+            let text = serde_json::to_string(resp).expect("serialize");
+            let answer = ["held-b", "held", "quick"]
+                .into_iter()
+                .find(|answer| text.contains(answer))
+                .unwrap_or("none");
+            (resp.id().clone(), answer.to_string())
+        })
+        .collect()
+}
+
+/// The client numbers every request it sends, a hand-built batch's included,
+/// so two batches in flight under the same caller-chosen id do not share a
+/// slot: each gets its own answer, under the id its caller gave.
+#[tokio::test(flavor = "multi_thread")]
+async fn batches_under_the_same_ids_get_their_own_answers() {
+    use neva::types::RequestId;
+    use std::sync::Arc;
+
+    let (addr, release, _release_b, server) = serve_held().await;
     let mut client = Client::new().with_options(|o| {
         o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
             .with_timeout(Duration::from_secs(10))
@@ -162,87 +192,52 @@ async fn a_request_id_already_in_flight_refuses_the_batch() {
     client.connect().await.expect("connect");
     let client = Arc::new(client);
 
-    let call = |tool: &str| {
-        MessageEnvelope::Request(Request::new(
-            Some(RequestId::Number(777)),
-            "tools/call",
-            Some(serde_json::json!({ "name": tool, "arguments": {} })),
-        ))
-    };
-
     let first = {
         let client = client.clone();
-        let item = call("hold");
-        tokio::spawn(async move { client.call_batch(vec![item]).await })
+        tokio::spawn(async move { client.call_batch(vec![call(777, "hold")]).await })
     };
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let err = client
-        .call_batch(vec![call("quick")])
+    let second = client
+        .call_batch(vec![call(777, "quick")])
         .await
-        .expect_err("id 777 is still waiting for the first batch's response");
-    assert!(err.to_string().contains("777"), "{err}");
+        .expect("the second batch is its own request on the wire");
+    assert_eq!(
+        answers(&second),
+        [(RequestId::Number(777), "quick".to_string())]
+    );
 
     release.notify_one();
-    let responses = tokio::time::timeout(Duration::from_secs(5), first)
+    let first = tokio::time::timeout(Duration::from_secs(5), first)
         .await
         .expect("the first batch must still be answered")
         .expect("task")
         .expect("batch");
-    let text = serde_json::to_string(&responses).expect("serialize");
-    assert!(
-        text.contains("held"),
-        "the first batch keeps its own response: {text}"
+    assert_eq!(
+        answers(&first),
+        [(RequestId::Number(777), "held".to_string())]
     );
 
     server.abort();
 }
 
 /// A batch its caller gave up on -- an outer `timeout`, a lost `select!`
-/// branch -- after it went out keeps its ids until the server answers. Freed
-/// at once, a retry under the same ids would be handed whichever answer came
-/// first, the abandoned request's included. So the retry is refused with a
-/// reason, a retry under fresh ids goes through, and once the late answers
-/// arrive and are discarded the old ids are free again -- and answer for the
-/// retry, not for the batch that was given up on.
+/// branch -- frees its slots at once, and its late answers have nowhere to go.
+/// A retry under the same caller ids is new requests on the wire: while it is
+/// still waiting, the abandoned batch's answers arrive and must not be taken
+/// for its own.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_dropped_batch_keeps_its_ids_until_answered() {
-    use neva::types::{MessageEnvelope, Request, RequestId};
+async fn a_dropped_batch_leaves_nothing_for_its_retry() {
+    use neva::types::RequestId;
     use std::sync::Arc;
-    use tokio::sync::Notify;
 
-    let addr = format!("127.0.0.1:{}", pick_free_port());
-    let release = Arc::new(Notify::new());
-    let mut app = App::new()
-        .without_greeting()
-        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
-    let gate = release.clone();
-    app.map_tool("hold", move || {
-        let gate = gate.clone();
-        async move {
-            gate.notified().await;
-            "held".to_string()
-        }
-    });
-    app.map_tool("quick", || async move { "quick".to_string() });
-    let server = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
+    let (addr, release, release_b, server) = serve_held().await;
     let mut client = Client::new().with_options(|o| {
         o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
-            // Far longer than this test waits: what frees the ids must be the
-            // late answers, not the requests' own timeout.
             .with_timeout(Duration::from_secs(30))
     });
     client.connect().await.expect("connect");
-
-    let call = |id: i64, tool: &str| {
-        MessageEnvelope::Request(Request::new(
-            Some(RequestId::Number(id)),
-            "tools/call",
-            Some(serde_json::json!({ "name": tool, "arguments": {} })),
-        ))
-    };
+    let client = Arc::new(client);
 
     assert!(
         tokio::time::timeout(
@@ -254,37 +249,33 @@ async fn a_dropped_batch_keeps_its_ids_until_answered() {
         "the server holds both calls, so the outer timeout must fire"
     );
 
-    let err = client
-        .call_batch(vec![call(881, "quick"), call(882, "quick")])
-        .await
-        .expect_err("an answer to the abandoned batch may still arrive");
-    assert!(err.to_string().contains("fresh id"), "{err}");
-
-    let fresh = client
-        .call_batch(vec![call(883, "quick"), call(884, "quick")])
-        .await
-        .expect("fresh ids go through");
-    assert_eq!(fresh.len(), 2);
-
-    release.notify_waiters();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let reused = loop {
-        match client
-            .call_batch(vec![call(881, "quick"), call(882, "quick")])
-            .await
-        {
-            Ok(responses) => break responses,
-            Err(err) if tokio::time::Instant::now() < deadline => {
-                assert!(err.to_string().contains("fresh id"), "{err}");
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-            Err(err) => panic!("the late answers never freed the ids: {err}"),
-        }
+    let retry = {
+        let client = client.clone();
+        tokio::spawn(async move {
+            client
+                .call_batch(vec![call(881, "hold_b"), call(882, "hold_b")])
+                .await
+        })
     };
-    let text = serde_json::to_string(&reused).expect("serialize");
-    assert!(
-        text.contains("quick") && !text.contains("held"),
-        "the reused ids answer for the retry: {text}"
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // The abandoned batch's answers arrive while the retry still waits.
+    release.notify_waiters();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    release_b.notify_waiters();
+
+    let retry = tokio::time::timeout(Duration::from_secs(5), retry)
+        .await
+        .expect("the retry must be answered")
+        .expect("task")
+        .expect("batch");
+    assert_eq!(
+        answers(&retry),
+        [
+            (RequestId::Number(881), "held-b".to_string()),
+            (RequestId::Number(882), "held-b".to_string()),
+        ],
+        "the retry gets its own answers, not the abandoned batch's"
     );
 
     server.abort();

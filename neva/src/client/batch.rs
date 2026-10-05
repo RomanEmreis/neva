@@ -191,7 +191,7 @@ impl<'a> BatchBuilder<'a> {
             .collect::<Vec<_>>();
 
         #[allow(unused_mut)]
-        let mut responses = self.client.call_batch(self.items).await?;
+        let mut responses = self.client.send_numbered_batch(self.items).await?;
 
         // A batched listing registers its `x-mcp-header` annotations and drops
         // its malformed tools exactly as `client.tools().list` does -- the

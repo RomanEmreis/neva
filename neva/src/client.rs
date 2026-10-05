@@ -188,16 +188,44 @@ impl Client {
     /// All in-flight requests are awaited concurrently; a failure in one
     /// does not cancel the others.
     ///
-    /// Request ids are the caller's here, and each must be one no response can
-    /// still arrive for. A batch given up on after it was sent -- its future
-    /// dropped -- keeps its ids until the server answers or the request TTL
-    /// runs out, so a retry needs fresh ids; one under the old ids is refused
-    /// until then. [`Self::batch`] generates its ids and never has to.
+    /// The client numbers every request it sends, and these too: on the wire
+    /// each request carries an id this client generated, and each response
+    /// comes back carrying the id the caller gave its request. An id chosen by
+    /// the caller could repeat one still owed an answer -- a request given up
+    /// on, another batch in flight -- and the answer would then reach the wrong
+    /// waiter.
     ///
     /// # Errors
     /// Returns [`Error`] if the client is not connected, the batch is empty,
     /// or any response channel is closed or times out.
     pub async fn call_batch(&self, items: Vec<MessageEnvelope>) -> Result<Vec<Response>, Error> {
+        let mut caller_ids = Vec::new();
+        let items = items
+            .into_iter()
+            .map(|envelope| match envelope {
+                MessageEnvelope::Request(mut req) => {
+                    caller_ids.push(std::mem::replace(&mut req.id, self.generate_id()?));
+                    Ok(MessageEnvelope::Request(req))
+                }
+                other => Ok(other),
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+
+        // One response per request, in order: the caller's ids go back on them.
+        let responses = self.send_numbered_batch(items).await?;
+        Ok(responses
+            .into_iter()
+            .zip(caller_ids)
+            .map(|(resp, id)| resp.set_id(id))
+            .collect())
+    }
+
+    /// [`Self::call_batch`] for requests this client already numbered, such as
+    /// [`BatchBuilder`]'s, whose ids also seed their progress tokens.
+    pub(super) async fn send_numbered_batch(
+        &self,
+        items: Vec<MessageEnvelope>,
+    ) -> Result<Vec<Response>, Error> {
         // One blocked tool fails the whole batch, the same as a duplicate id
         // does: the batch is one write, and there is no way to drop a single
         // entry from it without silently changing what the caller asked for.
@@ -711,12 +739,11 @@ mod abandoned_request_tests {
     }
 
     /// A caller dropping the future -- an outer `timeout`, a lost `select!`
-    /// branch -- runs none of the request's own error paths. Once the request
-    /// has gone out the server may still answer, so its slot stays until that
-    /// answer arrives and is discarded; freeing it sooner would let the answer
-    /// reach a later request under the same id.
+    /// branch -- runs none of the request's own error paths. The slot still
+    /// comes back at once, and the answer that arrives later finds no waiter:
+    /// the id is never sent again, so it cannot reach another request.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_dropped_call_keeps_its_slot_until_answered() {
+    async fn dropping_a_call_releases_its_slot() {
         let addr = format!("127.0.0.1:{}", pick_free_port());
 
         let release = Arc::new(tokio::sync::Notify::new());
@@ -731,13 +758,14 @@ mod abandoned_request_tests {
                 "held".to_string()
             }
         });
+        app.map_tool("quick", || async { "quick".to_string() });
         let server = tokio::spawn(async move { app.run().await });
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         let mut client = Client::new().with_options(|o| {
             o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
-                // Far longer than this test waits: the slot must be settled by
-                // the answer, not by the request's own timeout.
+                // Far longer than this test waits: the slot must be released
+                // by the dropped future, not by the request's own timeout.
                 .with_timeout(Duration::from_secs(30))
         });
         client.connect().await.expect("connect");
@@ -751,22 +779,18 @@ mod abandoned_request_tests {
                 .is_err(),
             "the tool holds its answer, so the outer timeout must fire"
         );
-        assert_eq!(
-            queued(&client),
-            idle + 1,
-            "the request went out, so its answer may still come"
-        );
+        assert_eq!(queued(&client), idle, "a dropped call releases its slot");
 
+        // The late answer is dropped, and the next call gets its own.
         release.notify_one();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        while queued(&client) != idle && tokio::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        assert_eq!(
-            queued(&client),
-            idle,
-            "the late answer is discarded, and takes the slot with it"
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let next = client.tools().call("quick", ()).await.expect("call");
+        assert!(
+            serde_json::to_string(&next)
+                .expect("json")
+                .contains("quick")
         );
+        assert_eq!(queued(&client), idle);
 
         server.abort();
     }

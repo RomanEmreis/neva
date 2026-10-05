@@ -80,28 +80,18 @@ impl Client {
         // of the branches below, and everything registered so far would be left
         // behind. Nothing between here and `watch_ack` awaits, so there is no
         // gap left to fall into.
-        let mut guard =
+        let guard =
             subscription::EstablishmentGuard::new(id.clone(), release.clone(), sender.clone());
 
-        // The slot is taken without awaiting, so the guard holds it before the
-        // send below can suspend. A refusal here -- the id still owed an answer
-        // under a hand-built batch -- leaves that batch's slot alone.
-        let mut response = match handler.reserve_listen(&id) {
-            Ok((response, queued)) => {
-                guard.hold(queued);
-                response
-            }
+        let mut response = match handler.send_listen(request).await {
+            Ok(response) => response,
+            // Never reached the wire, so there is no stream to cancel -- only
+            // this client's own bookkeeping to drop.
             Err(err) => {
                 guard.forget();
                 return Err(err);
             }
         };
-        if let Err(err) = handler.send_listen(request).await {
-            // Never reached the wire, so there is no stream to cancel -- only
-            // this client's own bookkeeping to drop.
-            guard.forget();
-            return Err(err);
-        }
 
         // Race the acknowledgment against the request's own reply: a peer that
         // rejects the subscription outright -- `MethodNotFound`, an
@@ -164,8 +154,8 @@ impl Client {
             ));
         }
 
-        // The handle takes over from here, slot included.
-        let queued = guard.disarm();
+        // The handle takes over from here.
+        guard.disarm();
 
         Ok(Subscription::new(
             id,
@@ -174,7 +164,6 @@ impl Client {
             response,
             sender,
             release,
-            queued,
         ))
     }
 

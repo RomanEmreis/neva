@@ -1,7 +1,7 @@
 //! Client-side handle for a live `subscriptions/listen` stream (MCP 2026-07-28).
 
 use crate::error::{Error, ErrorCode};
-use crate::shared::{PendingResponse, QueuedRequest};
+use crate::shared::PendingResponse;
 use crate::transport::{Sender as _, TransportProtoSender};
 use crate::types::{
     RequestId, SubscriptionFilter, SubscriptionsListenResult,
@@ -148,9 +148,6 @@ pub struct Subscription {
     sender: TransportProtoSender,
     /// Releases the request slot a cancelled subscription will never answer.
     release: SubscriptionRelease,
-    /// The slot this subscription's `subscriptions/listen` took, so teardown
-    /// releases that one and never a later request's under the same id.
-    queued: Option<QueuedRequest>,
     /// This client cancelled it -- what [`Subscription::closed`] reports.
     cancelled: bool,
     /// Teardown is already done or unnecessary, so [`Drop`] has nothing to do.
@@ -176,7 +173,6 @@ impl Subscription {
         response: oneshot::Receiver<PendingResponse>,
         sender: TransportProtoSender,
         release: SubscriptionRelease,
-        queued: Option<QueuedRequest>,
     ) -> Self {
         Self {
             id,
@@ -185,7 +181,6 @@ impl Subscription {
             response,
             sender,
             release,
-            queued,
             cancelled: false,
             settled: false,
         }
@@ -252,7 +247,7 @@ impl Subscription {
         // cycle, and these slots carry no TTL to expire them. Dropping the slot
         // also closes the receiver `closed()` awaits, which is what resolves it
         // to `Abrupt` when the send failed.
-        self.release.release(&self.id, self.queued.as_ref());
+        self.release.release(&self.id);
 
         sent
     }
@@ -282,7 +277,7 @@ impl Subscription {
         // However it ended, it ended: the peer is not streaming any more, so
         // the `Drop` below has nothing left to cancel.
         self.settled = true;
-        self.release.release(&self.id, self.queued.as_ref());
+        self.release.release(&self.id);
         end
     }
 
@@ -322,7 +317,7 @@ impl Drop for Subscription {
         if self.settled {
             return;
         }
-        self.release.release(&self.id, self.queued.as_ref());
+        self.release.release(&self.id);
 
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
@@ -362,14 +357,8 @@ impl SubscriptionRelease {
         }
     }
 
-    /// Drops the bookkeeping of the subscription `id`: its acknowledgment
-    /// waiter, its accepted filter, and -- once one was taken -- the request
-    /// slot `queued` names. Only that slot: after the subscription's final
-    /// response settled it, a later request may have taken the id.
-    pub(super) fn release(&self, id: &RequestId, queued: Option<&QueuedRequest>) {
-        if let Some(queued) = queued {
-            self.pending.release(queued);
-        }
+    pub(super) fn release(&self, id: &RequestId) {
+        let _ = self.pending.pop(id);
         self.ack_waiters.remove(id);
         self.filters.remove(id);
     }
@@ -398,8 +387,6 @@ impl std::fmt::Debug for SubscriptionRelease {
 /// handle ([`Self::disarm`]) or the establishment gives up ([`Self::abandon`]).
 pub(super) struct EstablishmentGuard {
     id: RequestId,
-    /// The request slot, once [`Self::hold`] is handed it.
-    queued: Option<QueuedRequest>,
     release: SubscriptionRelease,
     sender: TransportProtoSender,
     armed: bool,
@@ -413,37 +400,29 @@ impl EstablishmentGuard {
     ) -> Self {
         Self {
             id,
-            queued: None,
             release,
             sender,
             armed: true,
         }
     }
 
-    /// Takes charge of the request slot the listen took.
-    pub(super) fn hold(&mut self, queued: QueuedRequest) {
-        self.queued = Some(queued);
-    }
-
-    /// The stream is now the returned [`Subscription`]'s to end, and so is
-    /// the slot it hands back.
-    pub(super) fn disarm(mut self) -> Option<QueuedRequest> {
+    /// The stream is now the returned [`Subscription`]'s to end.
+    pub(super) fn disarm(mut self) {
         self.armed = false;
-        self.queued.take()
     }
 
     /// Drops the bookkeeping without telling the peer anything, for a request
     /// that never reached the wire.
     pub(super) fn forget(mut self) {
         self.armed = false;
-        self.release.release(&self.id, self.queued.as_ref());
+        self.release.release(&self.id);
     }
 
     /// Ends an establishment that failed, awaiting the cancellation rather than
     /// handing it to the runtime the way [`Drop`] must.
     pub(super) async fn abandon(mut self) {
         self.armed = false;
-        self.release.release(&self.id, self.queued.as_ref());
+        self.release.release(&self.id);
         let _ = self.sender.send(cancelled(&self.id).into()).await;
     }
 }
@@ -457,7 +436,7 @@ impl Drop for EstablishmentGuard {
             return;
         }
 
-        self.release.release(&self.id, self.queued.as_ref());
+        self.release.release(&self.id);
 
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
@@ -561,39 +540,6 @@ mod tests {
         assert!(parse_ack(&notification).is_err());
     }
 
-    /// A subscription's final response settles its slot, and a hand-built
-    /// batch may take the id before the handle tears down. The teardown is
-    /// that subscription's, so the batch keeps its slot.
-    #[test]
-    fn teardown_releases_only_its_own_slot() {
-        let queue = crate::shared::RequestQueue::default();
-        let release =
-            SubscriptionRelease::new(queue.clone(), Default::default(), Default::default());
-        let id = RequestId::Number(1);
-
-        let (_rx, listen) = queue.push(&id).expect("a fresh id");
-        queue.complete(Response::success(id.clone(), serde_json::json!({})));
-        let (_rx, _batch) = queue.push(&id).expect("the id is free again");
-
-        release.release(&id, Some(&listen));
-        assert_eq!(queue.len(), 1, "the batch keeps its slot");
-    }
-
-    /// A listen whose slot was refused -- the id still owed an answer under a
-    /// hand-built batch -- took nothing, so it has nothing to give back.
-    #[test]
-    fn an_establishment_that_took_no_slot_releases_none() {
-        let queue = crate::shared::RequestQueue::default();
-        let release =
-            SubscriptionRelease::new(queue.clone(), Default::default(), Default::default());
-        let id = RequestId::Number(1);
-
-        let (_rx, _batch) = queue.push(&id).expect("a fresh id");
-        EstablishmentGuard::new(id, release, TransportProtoSender::None).forget();
-
-        assert_eq!(queue.len(), 1, "the batch keeps its slot");
-    }
-
     #[tokio::test]
     async fn it_reports_a_graceful_close() {
         let (tx, rx) = oneshot::channel();
@@ -604,7 +550,6 @@ mod tests {
             rx,
             TransportProtoSender::None,
             release(),
-            None,
         );
 
         let result = serde_json::json!({ "_meta": { SUBSCRIPTION_ID_KEY: 1 } });
@@ -632,7 +577,6 @@ mod tests {
             rx,
             TransportProtoSender::None,
             release(),
-            None,
         );
 
         let result = serde_json::json!({ "_meta": { SUBSCRIPTION_ID_KEY: 2 } });
@@ -658,7 +602,6 @@ mod tests {
             rx,
             TransportProtoSender::None,
             release(),
-            None,
         );
 
         drop(tx);
@@ -681,7 +624,6 @@ mod tests {
             rx,
             TransportProtoSender::None,
             release(),
-            None,
         );
 
         assert!(!subscription.is_fully_honored());

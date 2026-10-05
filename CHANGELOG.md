@@ -25,12 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `connect`, `map_*`, `on_*`, roots -- still takes `&mut self`.
 * **`Context` methods take `&self`**, the registry changes included. A handler
   no longer needs `mut ctx`, and now gets an `unused_mut` warning for it.
-* A request whose future is dropped before it was sent releases its pending
-  slot at once. One dropped after it was sent keeps its id until the answer
-  arrives and is discarded, or the request TTL runs out.
-* A caller-chosen request id a response may still arrive for -- one waiting, or
-  one given up on after it was sent -- is refused in a hand-built `call_batch`,
-  rather than taking over that request's slot and its response.
+* A request whose future is dropped mid-call -- on its own or in a batch --
+  releases its pending slot at once instead of at the request TTL; a late
+  answer to it is dropped.
+* `call_batch` numbers the requests it sends itself, and puts the caller's ids
+  back on the responses. A caller-chosen id could repeat one still owed an
+  answer, and the answer would then reach the wrong request.
 * A tool dropped for a malformed `x-mcp-header` stays refused until a listing
   shows it fixed, or a listing complete in one page no longer carries it. A
   traversal starting over no longer lifts the block.
