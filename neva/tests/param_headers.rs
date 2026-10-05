@@ -309,11 +309,10 @@ async fn an_annotated_tool_survives_a_listing_that_is_stale_on_arrival() {
 /// The refusal recovery has to reach the tool it was sent back for, wherever
 /// the server pages it.
 ///
-/// A refreshed traversal starts over, clearing what the previous one
-/// registered, so stopping at the first page would leave a later-paged tool
-/// with no annotations at all -- and the retry would omit exactly the headers
-/// it was refused for. The server pages at ten, so the annotated tool is named
-/// to sort onto the second page.
+/// Stopping at the first page would leave a later-paged tool with nothing
+/// fetched for the retry -- and the retry would omit exactly the headers it
+/// was refused for. The server pages at ten, so the annotated tool is named to
+/// sort onto the second page.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_refusal_recovery_pages_until_it_finds_the_tool() {
     use neva::client::Client;
@@ -387,15 +386,16 @@ async fn the_refusal_recovery_pages_until_it_finds_the_tool() {
     handle.abort();
 }
 
-/// The recovery has to finish the listing, not stop where it found its tool.
+/// A recovery that stops where it found its tool must leave the pages after
+/// it as they were.
 ///
-/// A refreshed traversal starts over and clears what the last one recorded, so
-/// every page the recovery does not reach is left with nothing. For a tool that
-/// was dropped for a malformed `x-mcp-header` that is the sharp end: the client
-/// stops knowing it was dropped, and a tool whose annotations it cannot honor
-/// becomes callable again -- the one outcome dropping it exists to prevent.
-/// Here the refused tool sits on the first page and the malformed one is named
-/// to sort onto the second.
+/// The recovery starts the traversal over, and a traversal starting over
+/// clears nothing. For a tool that was dropped for a malformed `x-mcp-header`
+/// that is the sharp end: were the record cleared, the client would stop
+/// knowing the tool was dropped, and a tool whose annotations it cannot honor
+/// would become callable again -- the one outcome dropping it exists to
+/// prevent. Here the refused tool sits on the first page and the malformed one
+/// is named to sort onto the second.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_recovery_that_stops_early_would_unblock_a_later_page() {
     use neva::client::Client;
@@ -505,11 +505,10 @@ async fn a_recovery_that_stops_early_would_unblock_a_later_page() {
 /// A refresh that does not turn up the refused tool must leave the original
 /// answer standing.
 ///
-/// The refresh starts the traversal over and clears what the previous one
-/// registered, so a tool the current listing no longer carries has nothing to
-/// retry *with*: a second attempt goes out exactly as bare as the first, and
-/// whatever it comes back with replaces the refusal that actually explained the
-/// failure. A hand-rolled server here rather than an `App`, because the case is
+/// A tool the current listing no longer carries has nothing to retry *with*:
+/// no current schema comes back for it, so a second attempt goes out exactly
+/// as the first did, and whatever it comes back with replaces the refusal that
+/// actually explained the failure. A hand-rolled server here rather than an `App`, because the case is
 /// a tool that answers a call while never appearing in `tools/list` -- which is
 /// exactly what a real server does between withdrawing a tool and the caller
 /// noticing.

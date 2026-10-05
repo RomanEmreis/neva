@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * A tool dropped for a malformed `x-mcp-header` stays refused until a listing
   shows it fixed, or a listing complete in one page no longer carries it. A
   traversal starting over no longer lifts the block.
+* A `tools/list` traversal starting over no longer forgets the `x-mcp-header`
+  annotations of the tools on pages it has not reached yet. A tool withdrawn
+  from a paginated listing mirrors until that listing's TTL runs out, or a
+  listing complete in one page drops it. The refusal recovery stops at the
+  page that carries its tool.
 
 ### Fixed
 * **A `tasks/update` or `tasks/cancel` the server refuses is an error.** The

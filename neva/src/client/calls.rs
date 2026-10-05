@@ -67,8 +67,8 @@ impl Client {
             &RequestId,
         )>,
     ) -> Result<ListToolsResult, Error> {
-        // A cursor-less call starts the listing over, so it replaces what the
-        // previous traversal registered rather than merging into it.
+        // A cursor-less call starts the listing over: if it ends in one page,
+        // what it does not carry has been withdrawn.
         #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
         let fresh = cursor.is_none();
         let params = ListToolsRequestParams { cursor };
@@ -114,15 +114,18 @@ impl Client {
     /// must not take the whole listing down, and must not be callable either --
     /// so the offending tool is removed from the result the caller sees.
     ///
-    /// A refreshed listing replaces what the previous one registered, including
-    /// replacing it with nothing: a server that drops an annotation -- or drops
-    /// the whole tool -- must stop the client from mirroring that argument into
-    /// a header, which a leftover registration would keep doing even though the
-    /// current listing no longer designates it.
+    /// Each tool on the page replaces its own registration in place, including
+    /// replacing it with nothing: a server that drops an annotation must stop
+    /// the client from mirroring that argument into a header. Nothing is
+    /// cleared ahead of the pages, so a tool keeps the registration its last
+    /// listing gave it until its own page arrives -- over a shared client
+    /// another task can call it in between, and a cleared registration would
+    /// send that call without the headers it needs.
     ///
-    /// `fresh` marks the first page of a traversal, which clears the registry;
-    /// later pages accumulate onto it, since a tool absent from page two has
-    /// not been withdrawn, only listed elsewhere.
+    /// A tool the server withdrew is forgotten when a listing complete in one
+    /// page no longer carries it. One withdrawn from a listing that spans
+    /// pages keeps its registration, and with it mirrors only until the TTL of
+    /// the listing that declared it runs out.
     ///
     /// The name of a rejected tool is remembered as well, so that hiding it
     /// from the listing is not all that hiding it does -- see
@@ -144,13 +147,6 @@ impl Client {
     ) {
         use crate::shared::param_headers;
 
-        // Only the listings: a retry's own exception belongs to a call still in
-        // flight, which a listing started over by someone else must not strand.
-        // The blocks stay too; see above.
-        if fresh {
-            self.options.param_headers.tools.clear();
-        }
-
         // The whole listing in one page: what it does not carry, the server
         // has withdrawn.
         let complete = fresh && result.next_cursor.is_none();
@@ -160,12 +156,15 @@ impl Client {
         // mandatory and reads an absent one as `0` -- immediately stale -- so
         // every registration is stamped with the listing that produced it.
         let ttl_ms = result.ttl_ms;
+        let registry = &self.options.param_headers.tools;
 
         result.tools.retain(|tool| {
-            self.options.param_headers.tools.remove(&*tool.name);
+            // Replaced or removed in one step, never removed and put back: the
+            // gap between the two would be a moment for a call to go out bare.
             let schema = match serde_json::to_value(&tool.input_schema) {
                 Ok(schema) => schema,
                 Err(_) => {
+                    registry.remove(&*tool.name);
                     self.options.rejected_tools.remove(&*tool.name);
                     return true;
                 }
@@ -176,14 +175,16 @@ impl Client {
                     // Lifted here and not before the parse: a block taken away
                     // and put back would leave a moment for a call to pass.
                     self.options.rejected_tools.remove(&*tool.name);
-                    if !headers.is_empty() {
+                    if headers.is_empty() {
+                        registry.remove(&*tool.name);
+                    } else {
                         if let Some((_, retry)) = grace.filter(|(name, _)| *name == &*tool.name) {
                             self.options
                                 .param_headers
                                 .retries
                                 .insert(retry.clone(), headers.clone());
                         }
-                        self.options.param_headers.tools.insert(
+                        registry.insert(
                             tool.name.to_string(),
                             param_headers::Registration::new(headers, ttl_ms),
                         );
@@ -193,6 +194,7 @@ impl Client {
                 Err(_err) => {
                     #[cfg(feature = "tracing")]
                     tracing::warn!(logger = "neva", "Dropping tool `{}`: {_err}", tool.name);
+                    registry.remove(&*tool.name);
                     self.options.rejected_tools.insert(tool.name.to_string());
                     if complete {
                         rejected_here.push(tool.name.to_string());
@@ -202,7 +204,12 @@ impl Client {
             }
         });
 
+        // A retry's own exception is left alone: it belongs to a call still in
+        // flight, which a listing someone else fetched must not strand.
         if complete {
+            let listed: std::collections::HashSet<&str> =
+                result.tools.iter().map(|tool| &*tool.name).collect();
+            registry.retain(|name, _| listed.contains(name.as_str()));
             self.options
                 .rejected_tools
                 .retain(|name| rejected_here.contains(name));
@@ -332,11 +339,9 @@ impl Client {
     /// fresh attempt the same way is saying something the listing cannot fix,
     /// and repeating would turn that into a loop the caller cannot see.
     ///
-    /// The refresh follows `nextCursor` to the end of the listing, not merely
-    /// until the refused tool turns up: a traversal that restarts clears what
-    /// the previous one registered, so every page it does not reach is left
-    /// with nothing -- no annotations for the tools on it, and no record of the
-    /// ones that were dropped for a malformed declaration.
+    /// The refresh follows `nextCursor` until the refused tool turns up. A
+    /// traversal starting over clears nothing, so the pages it does not reach
+    /// keep what their last listing registered.
     #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
     pub(super) async fn retry_after_header_mismatch(
         &self,
@@ -350,14 +355,6 @@ impl Client {
             return Ok(resp);
         }
 
-        // The whole listing, not just up to the refused tool. A cursor-less
-        // call starts the traversal over and clears what the last one recorded,
-        // so stopping early would leave every later page unregistered against a
-        // registry that no longer holds their old entries: their calls would go
-        // out without the headers they need. (A tool dropped for a malformed
-        // annotation stays blocked either way: starting a traversal does not
-        // lift a block.)
-        //
         // Fetched for the retry below, by its id: this listing is the server's
         // current answer, and that request is what it was fetched for. Judging
         // it by its own TTL instead would make the remedy impossible against
@@ -380,7 +377,10 @@ impl Client {
             let Ok(page) = self.list_tools_inner(cursor, Some((&name, &id))).await else {
                 return Ok(resp);
             };
-            refreshed |= page.tools.iter().any(|tool| *tool.name == *name);
+            if page.tools.iter().any(|tool| *tool.name == *name) {
+                refreshed = true;
+                break;
+            }
             match page.next_cursor {
                 Some(next) => cursor = Some(next),
                 None => break,
@@ -389,10 +389,10 @@ impl Client {
 
         // The traversal ran out -- the listing no longer carries this tool, or
         // it is paged further out than the cap reaches. Either way there is
-        // nothing to retry *with*: the refresh started over and cleared the
-        // registration, so a second attempt would go out exactly as bare as the
-        // first and answer a different question. The original `HeaderMismatch`
-        // is the useful answer and it stands.
+        // nothing to retry *with*: no current schema came back for it, so a
+        // second attempt would go out exactly as the first did and answer a
+        // different question. The original `HeaderMismatch` is the useful
+        // answer and it stands.
         if !refreshed {
             return Ok(resp);
         }
@@ -687,6 +687,43 @@ mod param_header_registry_tests {
 
         assert!(client.options.param_headers.tools.contains_key("search"));
         assert!(client.options.param_headers.tools.contains_key("lookup"));
+    }
+
+    /// A traversal starting over must leave the tools on its later pages as
+    /// their last listing registered them: over a shared client another task
+    /// can call one before its page arrives, and a cleared registration would
+    /// send that call without its headers.
+    #[test]
+    fn a_restarted_traversal_keeps_later_pages_registered() {
+        let client = Client::new();
+        let page = |tools: serde_json::Value, next: Option<Cursor>| -> ListToolsResult {
+            serde_json::from_value(serde_json::json!({
+                "tools": tools,
+                "ttlMs": 60_000,
+                "nextCursor": next.map(|cursor| serde_json::to_value(cursor).expect("a cursor")),
+            }))
+            .expect("valid listing")
+        };
+        let id = RequestId::Number(1);
+        let args = serde_json::json!({ "region": "us-west1" });
+
+        let mut first = page(serde_json::json!([annotated("search")]), Some(Cursor(10)));
+        client.register_param_headers(&mut first, true, None);
+        let mut second = page(serde_json::json!([annotated("lookup")]), None);
+        client.register_param_headers(&mut second, false, None);
+
+        let mut restarted = page(serde_json::json!([annotated("search")]), Some(Cursor(10)));
+        client.register_param_headers(&mut restarted, true, None);
+
+        assert_eq!(
+            client
+                .options
+                .param_headers
+                .mirrored(&id, "lookup", &args)
+                .len(),
+            1,
+            "the second page has not arrived yet, so its tool still mirrors"
+        );
     }
 
     #[test]

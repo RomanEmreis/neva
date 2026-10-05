@@ -23,7 +23,8 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Registry {
     /// Tool name -> the arguments that tool mirrors, as its latest
-    /// `tools/list` declared them. A cursor-less listing starts this over.
+    /// `tools/list` declared them. Each listed tool replaces its own entry; a
+    /// listing complete in one page also drops the tools it does not carry.
     pub(crate) tools: Arc<dashmap::DashMap<String, Registration>>,
 
     /// Request id -> the arguments that one request mirrors whatever the
@@ -622,7 +623,7 @@ mod tests {
             assert_eq!(
                 registry.mirrored(&retry, "route", &args),
                 expected,
-                "a listing started over by another caller leaves it alone"
+                "another caller's listing dropping the tool leaves it alone"
             );
         }
 
