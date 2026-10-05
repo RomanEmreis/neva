@@ -17,6 +17,10 @@ use tokio_util::sync::CancellationToken;
 
 const DEFAULT_REQUEST_TTL: Duration = Duration::from_secs(10);
 
+/// The shortest period [`RequestQueue::sweep_period`] gives.
+#[cfg(feature = "client")]
+const MIN_SWEEP_PERIOD: Duration = Duration::from_millis(100);
+
 /// Result sent through the internal pending-request channel.
 ///
 /// This stays as an explicit enum instead of `Option<Response>` so the timeout
@@ -357,6 +361,38 @@ impl RequestQueue {
         }
 
         self.pending.remove(id).map(|(_, handle)| handle)
+    }
+
+    /// Times out every slot past its deadline, and drops the deadlines that
+    /// have passed.
+    ///
+    /// Sending and answering sweep as they go; this is for a connected client
+    /// that does neither for a while, which would otherwise keep every expired
+    /// slot -- an abandoned request's, a timed-out one's -- and every passed
+    /// deadline until its next request.
+    #[cfg(feature = "client")]
+    #[inline]
+    pub(crate) fn sweep(&self) {
+        self.cleanup_expired();
+    }
+
+    /// How often a connected client runs [`Self::sweep`]: once per TTL, so a
+    /// slot outlives its deadline by at most one period. Never faster than
+    /// [`MIN_SWEEP_PERIOD`], which a zero TTL would otherwise ask for.
+    #[cfg(feature = "client")]
+    #[inline]
+    pub(crate) fn sweep_period(&self) -> Duration {
+        self.ttl.max(MIN_SWEEP_PERIOD)
+    }
+
+    /// How many deadlines are still scheduled, the expired included.
+    #[inline]
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn scheduled(&self) -> usize {
+        self.expirations
+            .lock()
+            .map_or(0, |expirations| expirations.len())
     }
 
     /// Returns how many requests are currently queued.

@@ -770,4 +770,50 @@ mod abandoned_request_tests {
 
         server.abort();
     }
+
+    /// Deadlines are otherwise checked only when another request goes out or
+    /// an answer comes in. A client that goes quiet after a burst would keep
+    /// every slot its caller gave up on, and every deadline scheduled, until
+    /// its next request -- so a connected client sweeps on its own.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_idle_client_sweeps_expired_slots() {
+        let addr = format!("127.0.0.1:{}", pick_free_port());
+
+        let mut app = App::new()
+            .without_greeting()
+            .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+        app.map_tool("stall", || async { std::future::pending::<String>().await });
+        app.map_tool("quick", || async { "quick".to_string() });
+        let server = tokio::spawn(async move { app.run().await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let mut client = Client::new().with_options(|o| {
+            o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
+                .with_timeout(Duration::from_millis(200))
+        });
+        client.connect().await.expect("connect");
+        let queued = |client: &Client| client.handler.as_ref().expect("connected").pending().len();
+        let scheduled = |client: &Client| {
+            client
+                .handler
+                .as_ref()
+                .expect("connected")
+                .pending()
+                .scheduled()
+        };
+        let idle = queued(&client);
+
+        client.tools().call("quick", ()).await.expect("answered");
+        let _ =
+            tokio::time::timeout(Duration::from_millis(50), client.tools().call("stall", ())).await;
+        assert!(client.tools().call("stall", ()).await.is_err(), "timed out");
+
+        // Quiet from here on: nothing goes out, nothing comes in.
+        tokio::time::sleep(Duration::from_millis(900)).await;
+
+        assert_eq!(queued(&client), idle, "expired slots are swept");
+        assert_eq!(scheduled(&client), 0, "and so are their deadlines");
+
+        server.abort();
+    }
 }

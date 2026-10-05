@@ -431,6 +431,10 @@ impl RequestHandler {
         let subscription_filters = self.subscription_filters.clone();
 
         tokio::task::spawn(async move {
+            let period = pending.sweep_period();
+            let mut sweep = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
             loop {
                 // Cancellation is a first-class exit here, not just an EOF the
                 // receiver happens to report: over HTTP the receiver holds a
@@ -440,6 +444,13 @@ impl RequestHandler {
                 let msg = tokio::select! {
                     biased;
                     _ = token.cancelled() => break,
+                    // Deadlines are otherwise checked only when a request goes
+                    // out or an answer comes in; a client that goes quiet would
+                    // keep every expired slot until its next one.
+                    _ = sweep.tick() => {
+                        pending.sweep();
+                        continue;
+                    }
                     msg = rx.recv() => match msg {
                         Ok(msg) => msg,
                         Err(_) => break,
