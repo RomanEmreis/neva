@@ -513,7 +513,7 @@ impl Context {
     /// channel, so this is unused there.
     #[inline]
     #[cfg_attr(not(feature = "legacy-spec"), allow(dead_code))]
-    async fn send_request(&mut self, mut req: Request) -> Result<Response, Error> {
+    async fn send_request(&self, mut req: Request) -> Result<Response, Error> {
         if let Some(session_id) = self.session_id {
             req.session_id = Some(session_id);
         }

@@ -15,7 +15,7 @@ impl Client {
         Self {
             options: McpOptions::default(),
             server_capabilities: None,
-            server_info: None,
+            server_info: Default::default(),
             cancellation_token: None,
             handler: None,
         }
@@ -334,7 +334,7 @@ impl Client {
         self.validate_server_version(init_result.protocol_ver.as_str())?;
 
         self.server_capabilities = Some(init_result.capabilities);
-        self.server_info = Some(init_result.server_info);
+        self.server_info = std::sync::OnceLock::from(init_result.server_info);
 
         self.send_notification(crate::types::notification::commands::INITIALIZED, None)
             .await
@@ -448,7 +448,7 @@ impl Client {
     ///
     /// Removed in MCP 2026-07-28; available only under `legacy-spec`.
     #[cfg(feature = "legacy-spec")]
-    pub async fn ping(&mut self) -> Result<Response, Error> {
+    pub async fn ping(&self) -> Result<Response, Error> {
         self.command::<()>(crate::commands::PING, None).await
     }
 }
@@ -735,7 +735,7 @@ mod dual_mode_tests {
             .expect("fallback connect must succeed");
         assert!(client.is_legacy_peer(), "peer must be marked legacy");
         assert_eq!(
-            client.server_info.as_ref().map(|i| i.name.as_str()),
+            client.server_info.get().map(|i| i.name.as_str()),
             Some("legacy-mock")
         );
 
@@ -1057,7 +1057,7 @@ mod roundtrip_tests {
         // `_meta`, and the MRTR send path -- which every 2026-07-28 request
         // takes -- is what has to pick it up.
         assert!(
-            client.server_info.is_some(),
+            client.server_info.get().is_some(),
             "the server identifies itself in every result's `_meta`"
         );
     }

@@ -33,7 +33,7 @@ pub(crate) use drain::{DrainGuard, DrainSignal};
 /// Describes a sender that can send messages to a client
 pub(crate) trait Sender {
     /// Sends messages to a client
-    fn send(&mut self, resp: Message) -> impl Future<Output = Result<(), Error>>;
+    fn send(&self, resp: Message) -> impl Future<Output = Result<(), Error>>;
 }
 
 /// Describes a receiver that can receive messages from a client
@@ -129,10 +129,9 @@ pub(crate) enum TransportProtoSender {
     BatchCollect {
         /// The underlying transport sender for non-response messages.
         ///
-        /// `Arc` makes cloning this sender cheap. `tokio::sync::Mutex`
-        /// is required because `Sender::send` takes `&mut self` and the call
-        /// crosses an `.await` point.
-        real_sender: std::sync::Arc<tokio::sync::Mutex<TransportProtoSender>>,
+        /// `Arc` makes cloning this sender cheap; `Sender::send` takes `&self`,
+        /// so concurrent handlers in the batch share it without a lock.
+        real_sender: std::sync::Arc<TransportProtoSender>,
         /// Accumulated response envelopes to be bundled into the batch reply.
         ///
         /// `std::sync::Mutex` is intentional: the lock is never held across an
@@ -177,7 +176,7 @@ impl Default for TransportProto {
 
 impl Sender for TransportProtoSender {
     #[inline]
-    async fn send(&mut self, resp: Message) -> Result<(), Error> {
+    async fn send(&self, resp: Message) -> Result<(), Error> {
         match self {
             TransportProtoSender::Stdio(stdio) => stdio.send(resp).await,
             #[cfg(any(feature = "http-server", feature = "http-client"))]
@@ -194,10 +193,7 @@ impl Sender for TransportProtoSender {
                     }
                     Ok(())
                 }
-                other => {
-                    let mut guard = real_sender.lock().await;
-                    Box::pin(guard.send(other)).await
-                }
+                other => Box::pin(real_sender.send(other)).await,
             },
         }
     }
@@ -301,7 +297,7 @@ mod tests {
     /// anything that reaches a `None` sender by another route.
     #[tokio::test]
     async fn a_none_sender_reports_the_same_error_as_start() {
-        let mut sender = TransportProtoSender::None;
+        let sender = TransportProtoSender::None;
         let mut receiver = TransportProtoReceiver::None;
         let expected = TransportProto::not_configured().to_string();
 

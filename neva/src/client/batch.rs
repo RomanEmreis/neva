@@ -39,7 +39,7 @@ use crate::{
 /// }
 /// ```
 pub struct BatchBuilder<'a> {
-    pub(super) client: &'a mut Client,
+    pub(super) client: &'a Client,
     pub(super) items: Vec<MessageEnvelope>,
 }
 

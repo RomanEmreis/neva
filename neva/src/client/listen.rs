@@ -43,10 +43,7 @@ impl Client {
     /// }
     /// ```
     #[cfg(not(feature = "legacy-spec"))]
-    pub async fn listen(
-        &mut self,
-        notifications: SubscriptionFilter,
-    ) -> Result<Subscription, Error> {
+    pub async fn listen(&self, notifications: SubscriptionFilter) -> Result<Subscription, Error> {
         if self.is_legacy_peer() {
             return Err(Error::new(
                 ErrorCode::MethodNotFound,
@@ -65,7 +62,7 @@ impl Client {
 
         let handler = self
             .handler
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
 
         // Watch for the acknowledgment before sending: it is the first thing
@@ -177,7 +174,7 @@ impl Client {
     /// `listen` with a `resourceSubscriptions` entry is the way. The method
     /// stays available because the dual-mode fallback still reaches legacy
     /// peers.
-    pub async fn subscribe_to_resource(&mut self, uri: impl Into<Uri>) -> Result<(), Error> {
+    pub async fn subscribe_to_resource(&self, uri: impl Into<Uri>) -> Result<(), Error> {
         #[cfg(not(feature = "legacy-spec"))]
         if !self.is_legacy_peer() {
             return Err(Error::new(
@@ -208,7 +205,7 @@ impl Client {
     /// Legacy only in effect; see [`Self::subscribe_to_resource`]. Under MCP
     /// 2026-07-28 a subscription ends with the stream that carries it
     /// (`Subscription::cancel`).
-    pub async fn unsubscribe_from_resource(&mut self, uri: impl Into<Uri>) -> Result<(), Error> {
+    pub async fn unsubscribe_from_resource(&self, uri: impl Into<Uri>) -> Result<(), Error> {
         #[cfg(not(feature = "legacy-spec"))]
         if !self.is_legacy_peer() {
             return Err(Error::new(
@@ -405,7 +402,7 @@ mod listen_rejection_tests {
         use crate::transport::Sender as _;
 
         let id = RequestId::Number(99);
-        let mut sender = client.handler.as_ref().expect("connected").sender();
+        let sender = client.handler.as_ref().expect("connected").sender();
 
         let listen = Request::new(
             Some(id.clone()),

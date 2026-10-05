@@ -612,3 +612,80 @@ fn pick_free_port() -> u16 {
     drop(listener);
     port
 }
+
+/// Calls of an annotated tool from many tasks over one shared client.
+///
+/// Against a listing that is stale on arrival every call goes through the
+/// refusal recovery -- refresh, then retry with the headers -- so concurrent
+/// recoveries overlap: one's refresh lands between another's refresh and its
+/// retry. Each call still has to arrive with the headers it owes.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_calls_of_an_annotated_tool_all_carry_their_headers() {
+    use neva::client::Client;
+    use std::sync::Arc;
+
+    const CALLERS: usize = 16;
+
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app =
+        App::new().with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("query", |region: String| async move { region })
+        .with_input_schema(|_| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "region": { "type": "string", "x-mcp-header": "Region" }
+                }
+            })
+            .into()
+        })
+        .with_arg_names(["region"]);
+
+    let handle = tokio::spawn(async move { app.run().await });
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match tokio::net::TcpStream::connect(&addr).await {
+            Ok(_) => break,
+            Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await
+            }
+            Err(err) => panic!("server never became reachable: {err}"),
+        }
+    }
+
+    let mut client = Client::new().with_options(|opt| {
+        opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
+            .with_timeout(std::time::Duration::from_secs(5))
+    });
+    client.connect().await.expect("connect");
+    let client = Arc::new(client);
+
+    let calls = (0..CALLERS).map(|i| {
+        let client = client.clone();
+        tokio::spawn(async move {
+            let region = format!("region-{i}");
+            let result = client
+                .call_tool("query", [("region", region.as_str())])
+                .await;
+            (region, result)
+        })
+    });
+
+    for joined in futures_util::future::join_all(calls).await {
+        let (region, result) = joined.expect("task");
+        let result = result.unwrap_or_else(|err| panic!("{region}: {err}"));
+        assert_eq!(
+            serde_json::to_value(&result)
+                .ok()
+                .as_ref()
+                .and_then(|v| v.pointer("/content/0/text").and_then(|v| v.as_str())),
+            Some(region.as_str()),
+            "got: {result:?}"
+        );
+    }
+
+    handle.abort();
+}

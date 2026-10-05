@@ -323,7 +323,7 @@ impl Drop for Subscription {
             return;
         };
 
-        let mut sender = self.sender.clone();
+        let sender = self.sender.clone();
         let notification = cancelled(&self.id);
 
         runtime.spawn(async move {
@@ -442,7 +442,7 @@ impl Drop for EstablishmentGuard {
             return;
         };
 
-        let mut sender = self.sender.clone();
+        let sender = self.sender.clone();
         let notification = cancelled(&self.id);
 
         runtime.spawn(async move {

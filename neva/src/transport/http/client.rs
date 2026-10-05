@@ -891,11 +891,10 @@ mod tests {
     /// An exchange that builds its `POST` twice must send the same
     /// `Mcp-Param-*` headers both times.
     ///
-    /// The second build is the managed-OAuth retry, and the headers may be
-    /// mirrored on a grace: one call's worth, granted because the server refused
-    /// the first attempt for missing them. Reading the registry again there
-    /// finds the grace spent and the listing stale, so the retry would go out
-    /// bare -- and be refused for exactly what the recovery had just fixed.
+    /// The second build is the managed-OAuth retry, and the registry may have
+    /// changed by then: over a shared client another caller's listing can
+    /// start it over, and a TTL can run out. Reading it again there could send
+    /// the second build bare -- refused for headers the first one carried.
     #[cfg(not(feature = "legacy-spec"))]
     #[test]
     fn a_retried_post_mirrors_what_the_first_one_did() {
@@ -903,19 +902,19 @@ mod tests {
 
         let session = make_session();
         let registry: crate::shared::param_headers::Registry = Default::default();
+        let headers = vec![ParamHeader {
+            path: vec!["region".into()],
+            header: "Region".into(),
+        }];
         // `ttlMs: 0` -- stale on arrival, which is what an absent `ttlMs` means
-        // too, so the grace is the only thing that lets this call mirror at all.
-        registry.insert(
-            "route".to_string(),
-            Registration::new(
-                vec![ParamHeader {
-                    path: vec!["region".into()],
-                    header: "Region".into(),
-                }],
-                0,
-                true,
-            ),
-        );
+        // too, so the retry's own exception is the only thing that lets this
+        // call mirror at all.
+        registry
+            .tools
+            .insert("route".to_string(), Registration::new(headers.clone(), 0));
+        registry
+            .retries
+            .insert(crate::types::RequestId::Number(1), headers);
 
         let req = Message::Request(crate::types::Request::new(
             Some(crate::types::RequestId::Number(1)),
@@ -930,11 +929,16 @@ mod tests {
         assert_eq!(
             mirrored,
             vec![("Mcp-Param-Region".to_string(), "us-west1".to_string())],
-            "the grace covers this call"
+            "the retry's exception covers this call"
         );
+
+        // Whatever happens to the registry meanwhile, the exchange keeps what it
+        // read when it started.
+        registry.tools.clear();
+        registry.retries.clear();
         assert!(
             mirrored_param_headers(&session, &req, &registry).is_empty(),
-            "and reading is what spends it -- hence reading once"
+            "a second read would see what changed -- hence reading once"
         );
 
         let client = create_client(

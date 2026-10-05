@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.7.0
+
+### Changed
+* **`Client` request methods take `&self`.** A connected client can be shared
+  (`Arc<Client>`) and called from many tasks at once, its calls in flight
+  together. `BatchBuilder` and `TaskBuilder` borrow the client shared. Setup --
+  `connect`, `map_*`, `on_*`, roots -- still takes `&mut self`.
+* A request whose future is dropped mid-call releases its pending slot at once
+  instead of at the request TTL.
+
+### Changed (breaking)
+* `TaskApi` methods take `&self`, and `wait_to_completion` takes `&A`.
+  Callers are unaffected; implementations outside neva need the new receivers.
+
 ## 0.6.2
 
 ### Security

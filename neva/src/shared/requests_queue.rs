@@ -297,6 +297,44 @@ impl Default for RequestQueue {
     }
 }
 
+/// Releases a request's slot when the wait for its response ends, however it
+/// ends.
+///
+/// The wait can end without any of its own code running: a caller that drops
+/// the future (an outer `timeout`, a lost `select!` branch) stops it at its
+/// last suspension point. Without this the slot stays queued until the TTL
+/// sweep finds it -- and with requests sent concurrently over a shared client,
+/// a caller giving up on one is ordinary, not rare.
+///
+/// Releasing a slot the response already completed is a no-op.
+///
+/// The HTTP server's `PendingSlot` guards a different map: the transport's
+/// POST-to-reply routes, which it fills itself and can hand over to a streamed
+/// body. This one guards an entry [`RequestQueue::push`] made and never
+/// transfers.
+#[cfg(feature = "client")]
+pub(crate) struct QueuedRequestGuard<'a> {
+    queue: &'a RequestQueue,
+    id: &'a RequestId,
+}
+
+#[cfg(feature = "client")]
+impl<'a> QueuedRequestGuard<'a> {
+    /// Guards the slot of `id`, already pushed onto `queue`.
+    #[inline]
+    pub(crate) fn new(queue: &'a RequestQueue, id: &'a RequestId) -> Self {
+        Self { queue, id }
+    }
+}
+
+#[cfg(feature = "client")]
+impl Drop for QueuedRequestGuard<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        let _ = self.queue.pop(self.id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

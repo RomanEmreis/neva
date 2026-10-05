@@ -79,27 +79,19 @@ pub(super) fn param_headers(
     let Some(name) = params.get("name").and_then(|n| n.as_str()) else {
         return Vec::new();
     };
-    let Some(entry) = registry.get(name) else {
-        return Vec::new();
-    };
-    // Nothing is mirrored from a listing that has gone stale: the schema that
-    // declared these annotations may no longer be the server's.
-    let Some(headers) = entry.usable() else {
-        return Vec::new();
-    };
 
     let args = params.get("arguments").cloned().unwrap_or_default();
-    crate::shared::param_headers::extract(headers, &args)
+    registry.mirrored(&req.id(), name, &args)
 }
 
 /// The `Mcp-Param-*` headers a request mirrors -- read once per exchange.
 ///
-/// Once, because reading can *spend* something. A listing fetched to recover
-/// from a `HeaderMismatch` is good for exactly one call, and an exchange builds
-/// its `POST` more than once whenever a managed-OAuth `401` sends it back
-/// through authorization. Reading again there would find the grace gone and the
-/// listing stale, so the retry -- the very call the recovery was for -- would go
-/// out without the headers the server refused it for, and be refused again.
+/// Once, because the registry can change in between. An exchange builds its
+/// `POST` more than once whenever a managed-OAuth `401` sends it back through
+/// authorization, and a listing landing meanwhile -- another caller's, over a
+/// shared client -- or a TTL running out would make the second build describe
+/// a different call than the first. The headers are decided when the exchange
+/// starts, and every build of it sends those.
 #[cfg(not(feature = "legacy-spec"))]
 pub(super) fn mirrored_param_headers(
     session: &McpSession,

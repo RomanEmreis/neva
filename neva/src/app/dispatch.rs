@@ -85,7 +85,7 @@ impl App {
         // then snapshot whatever responses have been collected so far.
         let responses: Arc<std::sync::Mutex<Vec<MessageEnvelope>>> = Arc::default();
         let batch_sender = TransportProtoSender::BatchCollect {
-            real_sender: Arc::new(tokio::sync::Mutex::new(real_sender.clone())),
+            real_sender: Arc::new(real_sender.clone()),
             responses: Arc::clone(&responses),
         };
 
@@ -97,7 +97,7 @@ impl App {
 
         let futures = batch.into_iter().map(|envelope| {
             let runtime = runtime.clone();
-            let mut sender = batch_sender.clone();
+            let sender = batch_sender.clone();
             // Clone per-iteration so each async move block owns its own copy.
             #[cfg(feature = "http-server")]
             let batch_headers = batch_headers.clone();
@@ -174,7 +174,7 @@ impl App {
                     ack = ack.set_session_id(session_id);
                 }
 
-                let mut sender = real_sender;
+                let sender = real_sender;
                 let _ = sender.send(Message::Response(ack)).await;
             }
             return;
@@ -198,7 +198,7 @@ impl App {
         resp_batch.id = batch_id;
         resp_batch.session_id = batch_session_id;
 
-        let mut sender = real_sender;
+        let sender = real_sender;
         if let Err(_err) = sender.send(Message::Batch(resp_batch)).await {
             #[cfg(feature = "tracing")]
             tracing::error!(logger = "neva", "Error sending batch response: {:?}", _err);
@@ -214,7 +214,7 @@ impl App {
         } = ctx;
 
         let id = msg.id();
-        let mut sender = runtime.sender();
+        let sender = runtime.sender();
 
         // What a request is still owed if handling it panics: an answer, and
         // the closing of the cancellation slot `track_request` opened for it.

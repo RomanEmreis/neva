@@ -62,7 +62,7 @@ pub struct McpOptions {
     /// Tools the current listing withdrew over a malformed `x-mcp-header`
     /// declaration, kept so a call naming one anyway can be refused.
     #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
-    pub(crate) rejected_tools: std::collections::HashSet<String>,
+    pub(crate) rejected_tools: dashmap::DashSet<String>,
 
     /// Request timeout
     pub(super) timeout: Duration,

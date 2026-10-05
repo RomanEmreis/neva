@@ -288,7 +288,7 @@ impl Context {
 #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 impl crate::shared::TaskApi for Context {
     /// Retrieve task result from the client. If the task is not completed yet, waits until it completes or cancels.
-    async fn get_task_result<T>(&mut self, id: impl Into<String>) -> Result<T, Error>
+    async fn get_task_result<T>(&self, id: impl Into<String>) -> Result<T, Error>
     where
         T: DeserializeOwned,
     {
@@ -304,7 +304,7 @@ impl crate::shared::TaskApi for Context {
     }
 
     /// Retrieve task status from the client
-    async fn get_task(&mut self, id: impl Into<String>) -> Result<Task, Error> {
+    async fn get_task(&self, id: impl Into<String>) -> Result<Task, Error> {
         let params = GetTaskRequestParams { id: id.into() };
         let method = crate::types::task::commands::GET;
         let req = Request::new(
@@ -317,7 +317,7 @@ impl crate::shared::TaskApi for Context {
     }
 
     /// Cancels a task that is currently running on the client
-    async fn cancel_task(&mut self, id: impl Into<String>) -> Result<Task, Error> {
+    async fn cancel_task(&self, id: impl Into<String>) -> Result<Task, Error> {
         if !self.options.is_tasks_cancellation_supported() {
             return Err(Error::new(
                 ErrorCode::InvalidRequest,
@@ -337,7 +337,7 @@ impl crate::shared::TaskApi for Context {
     }
 
     /// Retrieves a list of tasks from the client
-    async fn list_tasks(&mut self, cursor: Option<Cursor>) -> Result<ListTasksResult, Error> {
+    async fn list_tasks(&self, cursor: Option<Cursor>) -> Result<ListTasksResult, Error> {
         if !self.options.is_tasks_list_supported() {
             return Err(Error::new(
                 ErrorCode::InvalidRequest,
@@ -356,7 +356,7 @@ impl crate::shared::TaskApi for Context {
         self.send_request(req).await?.into_result()
     }
 
-    async fn handle_input(&mut self, _id: &str, _params: TaskPayload) -> Result<(), Error> {
+    async fn handle_input(&self, _id: &str, _params: TaskPayload) -> Result<(), Error> {
         // Reserved, there are no cases so far, for the server
         // to handle input requests from client.
         Ok(())

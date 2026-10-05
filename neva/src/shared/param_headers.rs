@@ -14,13 +14,83 @@ use std::collections::HashMap;
 #[cfg(feature = "http-client")]
 use std::sync::Arc;
 
-/// Tool name -> the arguments that tool mirrors into headers.
+/// What the client may mirror into `Mcp-Param-*`, shared by handle so the
+/// transport task sees what the client registered.
 ///
-/// Populated from `tools/list` and read on `tools/call`; shared by handle so
-/// the transport task sees what the client registered. Client-side only -- a
-/// server reads the annotations straight off the tool it already owns.
+/// Client-side only -- a server reads the annotations straight off the tool it
+/// already owns.
 #[cfg(feature = "http-client")]
-pub(crate) type Registry = Arc<dashmap::DashMap<String, Registration>>;
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Registry {
+    /// Tool name -> the arguments that tool mirrors, as its latest
+    /// `tools/list` declared them. A cursor-less listing starts this over.
+    pub(crate) tools: Arc<dashmap::DashMap<String, Registration>>,
+
+    /// Request id -> the arguments that one request mirrors whatever the
+    /// listing's TTL says.
+    ///
+    /// SEP-2243's remedy for a refused call is to fetch the current
+    /// `inputSchema` and "retry the original request **with the appropriate
+    /// headers**" -- so a listing fetched *because* a call was refused is good
+    /// for that call. Without this the remedy could never work against a server
+    /// that states `ttlMs: 0` (the value an absent `ttlMs` also means): the
+    /// re-fetched listing would be stale on arrival too, the retry would omit
+    /// the headers again, and the call could never succeed.
+    ///
+    /// Keyed by the retry rather than the tool, and kept apart from
+    /// [`Self::tools`], because a shared client has many calls in flight. A
+    /// per-tool exception would be spent by whichever call of that tool went
+    /// out first, and wiped by any other caller's listing, leaving the retry it
+    /// was fetched for bare -- refused again for exactly what the recovery had
+    /// just fixed. A request id names one request, so nothing else can use the
+    /// entry, and a listing never touches it. The recovery removes it once the
+    /// retry is over ([`RetryGrace`]).
+    pub(crate) retries: Arc<dashmap::DashMap<crate::types::RequestId, Vec<ParamHeader>>>,
+}
+
+#[cfg(feature = "http-client")]
+impl Registry {
+    /// The arguments `id`, a call of `tool`, mirrors -- its own retry
+    /// exception first, then the tool's listing while it is fresh.
+    pub(crate) fn mirrored(
+        &self,
+        id: &crate::types::RequestId,
+        tool: &str,
+        args: &serde_json::Value,
+    ) -> Vec<(String, String)> {
+        if let Some(headers) = self.retries.get(id) {
+            return extract(&headers, args);
+        }
+
+        // Nothing is mirrored from a listing that has gone stale: the schema
+        // that declared these annotations may no longer be the server's.
+        self.tools
+            .get(tool)
+            .and_then(|entry| entry.usable().map(|headers| extract(headers, args)))
+            .unwrap_or_default()
+    }
+
+    /// Guards the retry exception of `id`, removing it when the retry is over
+    /// -- however it ends, the caller dropping its future included.
+    pub(crate) fn retry_grace<'a>(&'a self, id: &'a crate::types::RequestId) -> RetryGrace<'a> {
+        RetryGrace { registry: self, id }
+    }
+}
+
+/// Removes a retry's exception from the [`Registry`] when dropped.
+#[cfg(feature = "http-client")]
+#[derive(Debug)]
+pub(crate) struct RetryGrace<'a> {
+    registry: &'a Registry,
+    id: &'a crate::types::RequestId,
+}
+
+#[cfg(feature = "http-client")]
+impl Drop for RetryGrace<'_> {
+    fn drop(&mut self) {
+        self.registry.retries.remove(self.id);
+    }
+}
 
 /// What one tool's listing said, and how long that remains true.
 ///
@@ -38,52 +108,28 @@ pub(crate) struct Registration {
     /// `None` when the stated TTL is too far out to represent, which is as
     /// good as never expiring.
     expires_at: Option<std::time::Instant>,
-    /// One mirroring allowed regardless of the TTL.
-    ///
-    /// SEP-2243's remedy for a refused call is to fetch the current
-    /// `inputSchema` and "retry the original request **with the appropriate
-    /// headers**" -- so a listing fetched *because* a call was refused is good
-    /// for that call. Without this the remedy could never work against a server
-    /// that states `ttlMs: 0` (the value an absent `ttlMs` also means): the
-    /// re-fetched listing would be stale on arrival too, the retry would omit
-    /// the headers again, and the call could never succeed.
-    grace: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(feature = "http-client")]
 impl Registration {
     /// Records `headers` as usable for `ttl_ms` from now.
-    ///
-    /// `grace` marks a listing fetched to satisfy a call the server refused for
-    /// missing headers; see the field.
-    pub(crate) fn new(headers: Vec<ParamHeader>, ttl_ms: u64, grace: bool) -> Self {
+    pub(crate) fn new(headers: Vec<ParamHeader>, ttl_ms: u64) -> Self {
         Self {
             headers,
             // `ttl_ms == 0` lands exactly on `now`, which `usable` reads as
             // already past -- immediately stale, as the spec says.
             expires_at: std::time::Instant::now()
                 .checked_add(std::time::Duration::from_millis(ttl_ms)),
-            grace: Arc::new(std::sync::atomic::AtomicBool::new(grace)),
         }
     }
 
-    /// The annotations, or `None` once the listing they came from is stale and
-    /// its one grace mirroring is spent.
-    ///
-    /// The grace is spent on the first use whether or not it was needed. It
-    /// exists for one call -- the retry the listing was fetched for -- and a
-    /// listing with a TTL long enough to cover that retry has already served its
-    /// purpose without it. Letting it sit unspent until the TTL runs out would
-    /// hand one later call a mirroring from a schema that is by then stale,
-    /// which is the whole thing the expiry is for.
+    /// The annotations, or `None` once the listing they came from is stale.
     pub(crate) fn usable(&self) -> Option<&[ParamHeader]> {
         let fresh = match self.expires_at {
             Some(at) => std::time::Instant::now() < at,
             None => true,
         };
-        // Not `fresh ||`: that short-circuits, and the point is to consume.
-        let graced = self.grace.swap(false, std::sync::atomic::Ordering::AcqRel);
-        (fresh || graced).then_some(self.headers.as_slice())
+        fresh.then_some(self.headers.as_slice())
     }
 
     /// The annotations regardless of age -- for callers asking what was
@@ -533,36 +579,57 @@ mod tests {
         }
     }
 
-    /// The grace covers the retry its listing was fetched for, and nothing
-    /// after it.
-    ///
-    /// A listing whose TTL outlives that retry never needs the grace -- so if
-    /// the grace only went when it was called on, it would sit there until the
-    /// TTL ran out and then buy one mirroring from a schema that is stale by
-    /// definition. The client would put an argument in a header the server may
-    /// have stopped asking for, and an intermediary would route on it.
+    /// A retry's exception belongs to that one request. Another call of the
+    /// same tool, in flight at the same time over a shared client, mirrors
+    /// only what the listing's own TTL allows -- and neither that call nor
+    /// another caller's listing can take the exception away from the retry.
     #[cfg(feature = "http-client")]
     #[test]
-    fn a_grace_is_spent_by_the_call_it_was_fetched_for() {
+    fn a_retry_exception_covers_its_own_request_only() {
+        use crate::types::RequestId;
+
         let headers = vec![ParamHeader {
             path: vec!["region".into()],
             header: "Region".into(),
         }];
+        let args = json!({ "region": "us-west1" });
+        let retry = RequestId::Number(7);
+        let other = RequestId::Number(8);
 
-        // Fresh on arrival: the retry is served by the TTL, not the grace.
-        let registration = Registration::new(headers.clone(), 100, true);
-        assert!(registration.usable().is_some(), "the retry mirrors");
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        let registry = Registry::default();
+        // `ttlMs: 0` -- stale on arrival, the case the exception exists for.
+        registry
+            .tools
+            .insert("route".into(), Registration::new(headers.clone(), 0));
+
+        {
+            let _grace = registry.retry_grace(&retry);
+            registry.retries.insert(retry.clone(), headers);
+
+            let expected = vec![("Mcp-Param-Region".to_string(), "us-west1".to_string())];
+            assert_eq!(registry.mirrored(&retry, "route", &args), expected);
+            assert!(
+                registry.mirrored(&other, "route", &args).is_empty(),
+                "another call of the tool mirrors from the stale listing: nothing"
+            );
+            assert_eq!(
+                registry.mirrored(&retry, "route", &args),
+                expected,
+                "reading does not spend it"
+            );
+
+            registry.tools.clear();
+            assert_eq!(
+                registry.mirrored(&retry, "route", &args),
+                expected,
+                "a listing started over by another caller leaves it alone"
+            );
+        }
+
         assert!(
-            registration.usable().is_none(),
-            "and the grace did not survive the listing that carried it"
+            registry.retries.is_empty(),
+            "the exception goes with the retry it was for"
         );
-
-        // `ttlMs: 0` -- stale on arrival, which is the case the grace exists
-        // for: one mirroring, and only one.
-        let registration = Registration::new(headers, 0, true);
-        assert!(registration.usable().is_some(), "the retry still mirrors");
-        assert!(registration.usable().is_none(), "once");
     }
 
     #[test]

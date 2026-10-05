@@ -75,7 +75,7 @@ pub struct Client {
     server_capabilities: Option<ServerCapabilities>,
 
     /// Implementation information of the connected server.
-    server_info: Option<Implementation>,
+    server_info: std::sync::OnceLock<Implementation>,
 
     /// A [`CancellationToken`] that cancels transport background processes.
     cancellation_token: Option<CancellationToken>,
@@ -90,7 +90,7 @@ impl Debug for Client {
         f.debug_struct("Client")
             .field("options", &self.options)
             .field("server_capabilities", &self.server_capabilities)
-            .field("server_info", &self.server_info)
+            .field("server_info", &self.server_info.get())
             .finish()
     }
 }
@@ -115,7 +115,7 @@ impl Client {
 
     /// Sends a request to the MCP server
     #[inline]
-    pub(super) async fn send_request(&mut self, req: Request) -> Result<Response, Error> {
+    pub(super) async fn send_request(&self, req: Request) -> Result<Response, Error> {
         // Checked at the send seam rather than in `call_tool`, so every way of
         // reaching a tool -- the plain call, the task builder -- goes past it.
         #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
@@ -141,10 +141,10 @@ impl Client {
 
     /// Sends a request without the MRTR loop.
     #[inline]
-    pub(super) async fn plain_send_request(&mut self, req: Request) -> Result<Response, Error> {
+    pub(super) async fn plain_send_request(&self, req: Request) -> Result<Response, Error> {
         let resp = self
             .handler
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?
             .send_request(req)
             .await?;
@@ -175,7 +175,7 @@ impl Client {
     ///     client.disconnect().await
     /// }
     /// ```
-    pub fn batch(&mut self) -> BatchBuilder<'_> {
+    pub fn batch(&self) -> BatchBuilder<'_> {
         BatchBuilder {
             client: self,
             items: Vec::new(),
@@ -207,7 +207,7 @@ impl Client {
     /// }
     /// ```
     #[cfg(feature = "tasks")]
-    pub fn task(&mut self) -> TaskBuilder<'_> {
+    pub fn task(&self) -> TaskBuilder<'_> {
         TaskBuilder {
             client: self,
             metadata: TaskMetadata::default(),
@@ -227,10 +227,7 @@ impl Client {
     /// # Errors
     /// Returns [`Error`] if the client is not connected, the batch is empty,
     /// or any response channel is closed or times out.
-    pub async fn call_batch(
-        &mut self,
-        items: Vec<MessageEnvelope>,
-    ) -> Result<Vec<Response>, Error> {
+    pub async fn call_batch(&self, items: Vec<MessageEnvelope>) -> Result<Vec<Response>, Error> {
         // One blocked tool fails the whole batch, the same as a duplicate id
         // does: the batch is one write, and there is no way to drop a single
         // entry from it without silently changing what the caller asked for.
@@ -255,7 +252,7 @@ impl Client {
         }
         let handler = self
             .handler
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
 
         let request_timeout = handler.timeout();
@@ -274,9 +271,9 @@ impl Client {
     /// Only the legacy profile has server->client requests to answer.
     #[inline]
     #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
-    async fn send_response(&mut self, req: Response) -> Result<(), Error> {
+    async fn send_response(&self, req: Response) -> Result<(), Error> {
         self.handler
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?
             .send_response(req)
             .await;
@@ -286,13 +283,13 @@ impl Client {
     /// Sends a notification to the MCP server
     #[inline]
     async fn send_notification(
-        &mut self,
+        &self,
         method: &str,
         params: Option<serde_json::Value>,
     ) -> Result<(), Error> {
         let notification = Notification::new(method, params);
         self.handler
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?
             .send_notification(notification)
             .await
@@ -511,9 +508,31 @@ type Handler<P, O> =
 mod tests {
     use super::*;
 
+    /// Requests take `&self`, so one client can serve many tasks at once --
+    /// which only holds while the client is `Sync` and each request's future
+    /// is `Send`. Nothing else would notice either one being lost.
+    #[test]
+    fn a_client_can_be_shared_across_tasks() {
+        fn shared<T: Send + Sync>() {}
+        fn sendable<F: Future + Send>(_: F) {}
+
+        shared::<Client>();
+
+        let client = Client::new();
+        sendable(client.list_tools(None));
+        sendable(client.call_tool("add", [("a", 1), ("b", 2)]));
+        sendable(client.list_resources(None));
+        sendable(client.read_resource("file:///readme.md"));
+        sendable(client.list_prompts(None));
+        sendable(client.get_prompt("summarise", ()));
+        #[cfg(feature = "legacy-spec")]
+        sendable(client.ping());
+        sendable(client.batch().list_tools().send());
+    }
+
     #[tokio::test]
     async fn call_batch_requires_connected_client() {
-        let mut client = Client::new();
+        let client = Client::new();
         let result = client.call_batch(vec![]).await;
         assert!(
             result.is_err(),
@@ -710,5 +729,61 @@ mod tests {
         let meta = &req.params.as_ref().expect("params present")["_meta"];
         assert!(meta.get("traceparent").is_none());
         assert!(meta.get("tracestate").is_none());
+    }
+}
+
+/// A request a caller gives up on, against a real server that never answers it.
+#[cfg(all(test, feature = "http-server-volga", feature = "http-client"))]
+mod abandoned_request_tests {
+    use super::*;
+    use crate::App;
+    use std::time::Duration;
+
+    fn pick_free_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+        port
+    }
+
+    /// A caller dropping the future -- an outer `timeout`, a lost `select!`
+    /// branch -- runs none of the request's own error paths. The slot still
+    /// has to come back at once, not when the TTL sweep finds it: with one
+    /// client shared by many tasks, a call given up on is an ordinary event.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropping_a_call_releases_its_slot() {
+        let addr = format!("127.0.0.1:{}", pick_free_port());
+
+        let mut app = App::new()
+            .without_greeting()
+            .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+        app.map_tool("stall", || async { std::future::pending::<String>().await });
+        let server = tokio::spawn(async move { app.run().await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let mut client = Client::new().with_options(|o| {
+            o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
+                // Far longer than this test waits: the slot must be released
+                // by the dropped future, not by the request's own timeout.
+                .with_timeout(Duration::from_secs(30))
+        });
+        client.connect().await.expect("connect");
+
+        let queued = |client: &Client| client.handler.as_ref().expect("connected").pending().len();
+        let idle = queued(&client);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), client.call_tool("stall", ()))
+                .await
+                .is_err(),
+            "the tool never answers, so the outer timeout must fire"
+        );
+        assert_eq!(
+            queued(&client),
+            idle,
+            "a dropped call must release its request slot"
+        );
+
+        server.abort();
     }
 }
