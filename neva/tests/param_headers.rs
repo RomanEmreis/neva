@@ -211,7 +211,7 @@ async fn a_batched_call_of_an_annotated_tool_still_runs() {
     client.connect().await.expect("connect");
 
     // The listing is what registers the annotation client-side.
-    let tools = client.list_tools(None).await.expect("tools/list");
+    let tools = client.tools().list(None).await.expect("tools/list");
     assert_eq!(tools.tools.len(), 1, "the annotated tool must survive");
 
     let responses = client
@@ -285,11 +285,12 @@ async fn an_annotated_tool_survives_a_listing_that_is_stale_on_arrival() {
     });
     client.connect().await.expect("connect");
 
-    let tools = client.list_tools(None).await.expect("tools/list");
+    let tools = client.tools().list(None).await.expect("tools/list");
     assert_eq!(tools.ttl_ms, 0, "this test is about a zero-TTL listing");
 
     let result = client
-        .call_tool("query", [("region", "us-west1")])
+        .tools()
+        .call("query", [("region", "us-west1")])
         .await
         .expect("the retry must carry the headers the first attempt omitted");
 
@@ -308,11 +309,10 @@ async fn an_annotated_tool_survives_a_listing_that_is_stale_on_arrival() {
 /// The refusal recovery has to reach the tool it was sent back for, wherever
 /// the server pages it.
 ///
-/// A refreshed traversal starts over, clearing what the previous one
-/// registered, so stopping at the first page would leave a later-paged tool
-/// with no annotations at all -- and the retry would omit exactly the headers
-/// it was refused for. The server pages at ten, so the annotated tool is named
-/// to sort onto the second page.
+/// Stopping at the first page would leave a later-paged tool with nothing
+/// fetched for the retry -- and the retry would omit exactly the headers it
+/// was refused for. The server pages at ten, so the annotated tool is named to
+/// sort onto the second page.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_refusal_recovery_pages_until_it_finds_the_tool() {
     use neva::client::Client;
@@ -362,14 +362,15 @@ async fn the_refusal_recovery_pages_until_it_finds_the_tool() {
 
     // Only the first page, which is exactly what leaves the annotated tool
     // unregistered.
-    let page = client.list_tools(None).await.expect("tools/list");
+    let page = client.tools().list(None).await.expect("tools/list");
     assert!(
         page.next_cursor.is_some() && !page.tools.iter().any(|t| &*t.name == "z_query"),
         "this test needs the annotated tool to sit past the first page"
     );
 
     let result = client
-        .call_tool("z_query", [("region", "us-west1")])
+        .tools()
+        .call("z_query", [("region", "us-west1")])
         .await
         .expect("the recovery must page far enough to refresh the refused tool");
 
@@ -385,15 +386,16 @@ async fn the_refusal_recovery_pages_until_it_finds_the_tool() {
     handle.abort();
 }
 
-/// The recovery has to finish the listing, not stop where it found its tool.
+/// A recovery that stops where it found its tool must leave the pages after
+/// it as they were.
 ///
-/// A refreshed traversal starts over and clears what the last one recorded, so
-/// every page the recovery does not reach is left with nothing. For a tool that
-/// was dropped for a malformed `x-mcp-header` that is the sharp end: the client
-/// stops knowing it was dropped, and a tool whose annotations it cannot honor
-/// becomes callable again -- the one outcome dropping it exists to prevent.
-/// Here the refused tool sits on the first page and the malformed one is named
-/// to sort onto the second.
+/// The recovery starts the traversal over, and a traversal starting over
+/// clears nothing. For a tool that was dropped for a malformed `x-mcp-header`
+/// that is the sharp end: were the record cleared, the client would stop
+/// knowing the tool was dropped, and a tool whose annotations it cannot honor
+/// would become callable again -- the one outcome dropping it exists to
+/// prevent. Here the refused tool sits on the first page and the malformed one
+/// is named to sort onto the second.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_recovery_that_stops_early_would_unblock_a_later_page() {
     use neva::client::Client;
@@ -458,18 +460,20 @@ async fn a_recovery_that_stops_early_would_unblock_a_later_page() {
 
     // Walk the whole listing first, which is what puts the malformed tool on
     // record as dropped.
-    let first = client.list_tools(None).await.expect("tools/list");
+    let first = client.tools().list(None).await.expect("tools/list");
     let cursor = first
         .next_cursor
         .expect("this test needs the malformed tool to sit past the first page");
     assert!(!first.tools.iter().any(|t| &*t.name == "z_bad"));
     client
-        .list_tools(Some(cursor))
+        .tools()
+        .list(Some(cursor))
         .await
         .expect("the second page");
 
     let blocked = client
-        .call_tool("z_bad", [("region", "us-west1")])
+        .tools()
+        .call("z_bad", [("region", "us-west1")])
         .await
         .expect_err("a tool dropped for a malformed declaration cannot be called");
     assert!(
@@ -480,12 +484,14 @@ async fn a_recovery_that_stops_early_would_unblock_a_later_page() {
     // The listing is stale on arrival (`ttlMs: 0`), so this call goes out bare,
     // is refused, and runs the recovery -- finding its tool on the first page.
     client
-        .call_tool("a_query", [("region", "us-west1")])
+        .tools()
+        .call("a_query", [("region", "us-west1")])
         .await
         .expect("the recovery re-lists and the retry carries the headers");
 
     let still_blocked = client
-        .call_tool("z_bad", [("region", "us-west1")])
+        .tools()
+        .call("z_bad", [("region", "us-west1")])
         .await
         .expect_err("the recovery must not have forgotten the second page");
     assert!(
@@ -499,11 +505,10 @@ async fn a_recovery_that_stops_early_would_unblock_a_later_page() {
 /// A refresh that does not turn up the refused tool must leave the original
 /// answer standing.
 ///
-/// The refresh starts the traversal over and clears what the previous one
-/// registered, so a tool the current listing no longer carries has nothing to
-/// retry *with*: a second attempt goes out exactly as bare as the first, and
-/// whatever it comes back with replaces the refusal that actually explained the
-/// failure. A hand-rolled server here rather than an `App`, because the case is
+/// A tool the current listing no longer carries has nothing to retry *with*:
+/// no current schema comes back for it, so a second attempt goes out exactly
+/// as the first did, and whatever it comes back with replaces the refusal that
+/// actually explained the failure. A hand-rolled server here rather than an `App`, because the case is
 /// a tool that answers a call while never appearing in `tools/list` -- which is
 /// exactly what a real server does between withdrawing a tool and the caller
 /// noticing.
@@ -527,7 +532,8 @@ async fn a_tool_the_refresh_cannot_find_keeps_its_original_refusal() {
     client.connect().await.expect("connect");
 
     let err = client
-        .call_tool("withdrawn", [("region", "us-west1")])
+        .tools()
+        .call("withdrawn", [("region", "us-west1")])
         .await
         .expect_err("a call the server refuses for missing headers stays refused");
 
@@ -611,4 +617,82 @@ fn pick_free_port() -> u16 {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     port
+}
+
+/// Calls of an annotated tool from many tasks over one shared client.
+///
+/// Against a listing that is stale on arrival every call goes through the
+/// refusal recovery -- refresh, then retry with the headers -- so concurrent
+/// recoveries overlap: one's refresh lands between another's refresh and its
+/// retry. Each call still has to arrive with the headers it owes.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_calls_of_an_annotated_tool_all_carry_their_headers() {
+    use neva::client::Client;
+    use std::sync::Arc;
+
+    const CALLERS: usize = 16;
+
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app =
+        App::new().with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("query", |region: String| async move { region })
+        .with_input_schema(|_| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "region": { "type": "string", "x-mcp-header": "Region" }
+                }
+            })
+            .into()
+        })
+        .with_arg_names(["region"]);
+
+    let handle = tokio::spawn(async move { app.run().await });
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match tokio::net::TcpStream::connect(&addr).await {
+            Ok(_) => break,
+            Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await
+            }
+            Err(err) => panic!("server never became reachable: {err}"),
+        }
+    }
+
+    let mut client = Client::new().with_options(|opt| {
+        opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
+            .with_timeout(std::time::Duration::from_secs(5))
+    });
+    client.connect().await.expect("connect");
+    let client = Arc::new(client);
+
+    let calls = (0..CALLERS).map(|i| {
+        let client = client.clone();
+        tokio::spawn(async move {
+            let region = format!("region-{i}");
+            let result = client
+                .tools()
+                .call("query", [("region", region.as_str())])
+                .await;
+            (region, result)
+        })
+    });
+
+    for joined in futures_util::future::join_all(calls).await {
+        let (region, result) = joined.expect("task");
+        let result = result.unwrap_or_else(|err| panic!("{region}: {err}"));
+        assert_eq!(
+            serde_json::to_value(&result)
+                .ok()
+                .as_ref()
+                .and_then(|v| v.pointer("/content/0/text").and_then(|v| v.as_str())),
+            Some(region.as_str()),
+            "got: {result:?}"
+        );
+    }
+
+    handle.abort();
 }

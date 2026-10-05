@@ -16,6 +16,10 @@ use tokio_util::sync::CancellationToken;
 
 const DEFAULT_REQUEST_TTL: Duration = Duration::from_secs(10);
 
+/// The shortest period [`RequestQueue::sweep_period`] gives.
+#[cfg(feature = "client")]
+const MIN_SWEEP_PERIOD: Duration = Duration::from_millis(100);
+
 /// Result sent through the internal pending-request channel.
 ///
 /// This stays as an explicit enum instead of `Option<Response>` so the timeout
@@ -169,6 +173,27 @@ impl RequestQueue {
         receiver
     }
 
+    /// [`Self::push`], plus a guard that releases the slot however the wait for
+    /// its response ends.
+    ///
+    /// The client generates every id it sends, a batch's included, so an id
+    /// is never in two slots at once and the guard can release by id.
+    #[cfg(feature = "client")]
+    #[inline]
+    pub(crate) fn push_guarded(
+        &self,
+        id: &RequestId,
+    ) -> (oneshot::Receiver<PendingResponse>, QueuedRequestGuard<'_>) {
+        let receiver = self.push(id);
+        (
+            receiver,
+            QueuedRequestGuard {
+                pending: &self.pending,
+                id: id.clone(),
+            },
+        )
+    }
+
     /// Starts the TTL countdown for a queued request after it has been sent.
     ///
     /// Companion to [`Self::push`]; see it for why this is unused by a 2026-07-28
@@ -210,6 +235,37 @@ impl RequestQueue {
         }
 
         self.pending.remove(id).map(|(_, handle)| handle)
+    }
+
+    /// Times out every slot past its deadline, and drops the deadlines that
+    /// have passed.
+    ///
+    /// Sending and answering sweep as they go. This is for a connected client
+    /// that does neither for a while, which would otherwise keep every passed
+    /// deadline until its next request.
+    #[cfg(feature = "client")]
+    #[inline]
+    pub(crate) fn sweep(&self) {
+        self.cleanup_expired();
+    }
+
+    /// How often a connected client runs [`Self::sweep`]: once per TTL, and
+    /// never faster than [`MIN_SWEEP_PERIOD`], which a zero TTL would otherwise
+    /// ask for.
+    #[cfg(feature = "client")]
+    #[inline]
+    pub(crate) fn sweep_period(&self) -> Duration {
+        self.ttl.max(MIN_SWEEP_PERIOD)
+    }
+
+    /// How many deadlines are still scheduled, the passed ones included.
+    #[inline]
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn scheduled(&self) -> usize {
+        self.expirations
+            .lock()
+            .map_or(0, |expirations| expirations.len())
     }
 
     /// Returns how many requests are currently queued.
@@ -294,6 +350,52 @@ impl Default for RequestQueue {
     #[inline]
     fn default() -> Self {
         Self::new(DEFAULT_REQUEST_TTL)
+    }
+}
+
+/// Releases a request's slot when the wait for its response ends, however it
+/// ends.
+///
+/// The wait can end without any of its own code running: a caller that drops
+/// the future (an outer `timeout`, a lost `select!` branch) stops it at its
+/// last suspension point. Without this the slot stays queued until the TTL
+/// sweep finds it -- and with requests sent concurrently over a shared client,
+/// a caller giving up on one is ordinary, not rare.
+///
+/// Releasing a slot the response already completed is a no-op. An answer that
+/// arrives after the slot is gone finds no waiter and is dropped: the id is
+/// never sent again, so it cannot reach another request.
+///
+/// It borrows the queue's map for as long as the wait lasts and owns its id,
+/// so it can travel with whatever awaits the response: a batch hands each
+/// request's guard to the future collecting that request's reply. Its
+/// envelopes have gone into the batch by then, so there is no id left to
+/// borrow.
+///
+/// The HTTP server's `PendingSlot` guards a different map: the transport's
+/// POST-to-reply routes, which it fills itself and can hand over to a streamed
+/// body. This one guards an entry [`RequestQueue::push_guarded`] made and
+/// never transfers.
+#[cfg(feature = "client")]
+pub(crate) struct QueuedRequestGuard<'a> {
+    pending: &'a DashMap<RequestId, RequestHandle>,
+    id: RequestId,
+}
+
+#[cfg(feature = "client")]
+impl QueuedRequestGuard<'_> {
+    /// The id of the request whose slot this guards.
+    #[inline]
+    pub(crate) fn id(&self) -> &RequestId {
+        &self.id
+    }
+}
+
+#[cfg(feature = "client")]
+impl Drop for QueuedRequestGuard<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        self.pending.remove(&self.id);
     }
 }
 

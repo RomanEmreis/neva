@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.7.0
+
+### Added
+* **A namespaced client API** (`neva::client::api`): `client.tools()`,
+  `resources()`, `prompts()` and `tasks()`, one per MCP method prefix.
+  `list_all()` walks every page (an error past 64), and `tools().as_task()`
+  starts a task-augmented call.
+* **The same on `Context`** (`neva::app::context::api`): `ctx.tools()`,
+  `resources()` and `prompts()`.
+
+### Changed
+* **`Client` request methods take `&self`**, so a connected client can be
+  shared (`Arc<Client>`) across tasks. Setup (`connect`, `map_*`, `on_*`,
+  roots) keeps `&mut self`.
+* **`Context` methods take `&self`**; `mut ctx` in a handler now warns.
+* `call_batch` sends its requests under ids the client generates, and puts
+  the caller's ids back on the responses.
+* A request dropped mid-call releases its pending slot at once; a late answer
+  to it is dropped.
+* `x-mcp-header`: a `tools/list` traversal starting over no longer clears the
+  registrations of later pages or lifts the block on a malformed tool. Both
+  change when a page lists the tool, or a one-page listing omits it.
+
+### Fixed
+* A `tasks/update` or `tasks/cancel` the server refuses is an error instead
+  of `Ok(())`, and `wait_to_completion` stops at it. Since 0.5.4.
+
+### Deprecated
+* The flat methods on `Client` (`list_tools`, `call_tool`, `read_resource`,
+  `get_prompt`, `task`, ...) and `Context` (`find_tool`, `use_tool`,
+  `add_tool`, `resource`, `prompt`, ...), in favor of the namespaces. Each
+  note names its replacement.
+
+### Changed (breaking)
+* `ctx.tools()` returns the tools namespace: `ctx.tools().await` becomes
+  `ctx.tools().list().await`.
+* `TaskApi` methods take `&self`, and `wait_to_completion` takes `&A`. Only
+  implementations outside neva need the new receivers.
+
 ## 0.6.2
 
 ### Security

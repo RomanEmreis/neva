@@ -22,27 +22,24 @@ pub trait TaskApi {
     /// Retrieve task result from the client. If the task is not completed yet, waits until it completes or cancels.
     #[cfg(feature = "legacy-spec")]
     fn get_task_result<T: DeserializeOwned>(
-        &mut self,
+        &self,
         id: impl Into<String>,
     ) -> impl Future<Output = Result<T, Error>>;
 
     /// Retrieve task status from the client
     #[cfg(feature = "legacy-spec")]
-    fn get_task(&mut self, id: impl Into<String>) -> impl Future<Output = Result<Task, Error>>;
+    fn get_task(&self, id: impl Into<String>) -> impl Future<Output = Result<Task, Error>>;
 
     /// Retrieves the full task state (`tasks/get`): the status plus, depending
     /// on it, the outstanding input requests, the terminal result, or the error.
     #[cfg(not(feature = "legacy-spec"))]
-    fn get_task(
-        &mut self,
-        id: impl Into<String>,
-    ) -> impl Future<Output = Result<DetailedTask, Error>>;
+    fn get_task(&self, id: impl Into<String>) -> impl Future<Output = Result<DetailedTask, Error>>;
 
     /// Submits responses to a task's outstanding input requests
     /// (`tasks/update`).
     #[cfg(not(feature = "legacy-spec"))]
     fn update_task(
-        &mut self,
+        &self,
         id: impl Into<String>,
         responses: InputResponses,
     ) -> impl Future<Output = Result<(), Error>>;
@@ -52,11 +49,11 @@ pub trait TaskApi {
     /// Cancellation is cooperative: the acknowledgement means the intent was
     /// received, not that the task stopped.
     #[cfg(not(feature = "legacy-spec"))]
-    fn cancel_task(&mut self, id: impl Into<String>) -> impl Future<Output = Result<(), Error>>;
+    fn cancel_task(&self, id: impl Into<String>) -> impl Future<Output = Result<(), Error>>;
 
     /// Cancels a task that is currently running on the client
     #[cfg(feature = "legacy-spec")]
-    fn cancel_task(&mut self, id: impl Into<String>) -> impl Future<Output = Result<Task, Error>>;
+    fn cancel_task(&self, id: impl Into<String>) -> impl Future<Output = Result<Task, Error>>;
 
     /// Retrieves a list of tasks from the client
     ///
@@ -64,14 +61,14 @@ pub trait TaskApi {
     /// `tasks/list`.
     #[cfg(feature = "legacy-spec")]
     fn list_tasks(
-        &mut self,
+        &self,
         cursor: Option<Cursor>,
     ) -> impl Future<Output = Result<ListTasksResult, Error>>;
 
     /// Input callback
     #[cfg(feature = "legacy-spec")]
     fn handle_input(
-        &mut self,
+        &self,
         id: &str,
         params: TaskPayload,
     ) -> impl Future<Output = Result<(), Error>>;
@@ -80,7 +77,7 @@ pub trait TaskApi {
     /// result the peer expects back under the same key.
     #[cfg(not(feature = "legacy-spec"))]
     fn fulfil_input(
-        &mut self,
+        &self,
         request: &InputRequest,
     ) -> impl Future<Output = Result<serde_json::Value, Error>>;
 }
@@ -92,7 +89,7 @@ pub trait TaskApi {
 /// `error` is returned as an [`Error`]. A task whose TTL elapses is cancelled.
 #[cfg(not(feature = "legacy-spec"))]
 pub async fn wait_to_completion<A, T>(
-    api: &mut A,
+    api: &A,
     result: Either<CreateTaskResult, T>,
 ) -> Result<T, Error>
 where
@@ -200,7 +197,7 @@ where
 /// Call `tasks/result` if it completed or failed and `tasks/cancel` if expired.
 #[cfg(feature = "legacy-spec")]
 pub async fn wait_to_completion<A, T>(
-    api: &mut A,
+    api: &A,
     result: Either<CreateTaskResult, T>,
 ) -> Result<T, Error>
 where

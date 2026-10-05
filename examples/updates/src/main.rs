@@ -7,19 +7,19 @@
 use neva::prelude::*;
 
 #[tool]
-async fn add_resource(mut ctx: Context, uri: Uri) -> Result<(), Error> {
-    ctx.add_resource(Resource::from(uri)).await
+async fn add_resource(ctx: Context, uri: Uri) -> Result<(), Error> {
+    ctx.resources().add(Resource::from(uri)).await
 }
 
 #[tool]
-async fn remove_resource(mut ctx: Context, uri: Uri) -> Result<(), Error> {
-    _ = ctx.remove_resource(uri).await?;
+async fn remove_resource(ctx: Context, uri: Uri) -> Result<(), Error> {
+    _ = ctx.resources().remove(uri).await?;
     Ok(())
 }
 
 #[tool]
-async fn update_resource(mut ctx: Context, uri: Uri) -> Result<(), Error> {
-    ctx.resource_updated(uri).await
+async fn update_resource(ctx: Context, uri: Uri) -> Result<(), Error> {
+    ctx.resources().notify_updated(uri).await
 }
 
 #[resource(uri = "res://{name}")]

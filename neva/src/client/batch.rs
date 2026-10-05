@@ -39,7 +39,7 @@ use crate::{
 /// }
 /// ```
 pub struct BatchBuilder<'a> {
-    pub(super) client: &'a mut Client,
+    pub(super) client: &'a Client,
     pub(super) items: Vec<MessageEnvelope>,
 }
 
@@ -191,10 +191,10 @@ impl<'a> BatchBuilder<'a> {
             .collect::<Vec<_>>();
 
         #[allow(unused_mut)]
-        let mut responses = self.client.call_batch(self.items).await?;
+        let mut responses = self.client.send_numbered_batch(self.items).await?;
 
         // A batched listing registers its `x-mcp-header` annotations and drops
-        // its malformed tools exactly as `Client::list_tools` does -- the
+        // its malformed tools exactly as `client.tools().list` does -- the
         // annotations bind what a later `tools/call` must mirror into headers,
         // and where the listing came from does not change that.
         #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]

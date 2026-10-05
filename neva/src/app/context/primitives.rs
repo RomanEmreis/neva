@@ -1,366 +1,134 @@
-//! What a handler reaches for: the tools, prompts and resources this server
-//! serves, and the calls that run them.
+//! What the dispatch layer enters a registered handler through, plus the
+//! deprecated flat spellings of [`super::api`].
 //!
-//! Two audiences share one surface. A handler *reads* the registry
-//! (`tools`, `find_tool`) and *mutates* it (`add_tool`, `remove_resource`) --
-//! a mutation emits the matching `list_changed` to every subscriber, which is
-//! why these take `&mut self` even where nothing local changes. The
-//! `pub(crate)` calls at the end are the other audience: the dispatch layer
+//! A handler reaches the tools, prompts and resources this server serves
+//! through [`Context::tools`], [`Context::resources`] and [`Context::prompts`].
+//! The `pub(crate)` calls at the end are the other audience: the dispatch layer
 //! entering a registered handler.
 
 use super::*;
 
 impl Context {
-    /// Returns a list of all available tools
-    pub async fn tools(&self) -> Vec<Tool> {
-        self.options.tools.values().await
-    }
-
     /// Finds a tool by `name`
+    #[deprecated(since = "0.7.0", note = "use `ctx.tools().find(name)`")]
+    #[inline]
     pub async fn find_tool(&self, name: &str) -> Option<Tool> {
-        self.options.tools.get(name).await
+        self.tools().find(name).await
     }
 
     /// Returns a list of tools by name.
-    /// If some tools requested in `names` are missing, they won't be in the result list.
+    #[deprecated(since = "0.7.0", note = "use `ctx.tools().find_many(names)`")]
+    #[inline]
     pub async fn find_tools(&self, names: impl IntoIterator<Item = &str>) -> Vec<Tool> {
-        futures_util::future::join_all(names.into_iter().map(|name| self.options.tools.get(name)))
-            .await
-            .into_iter()
-            .flatten()
-            .collect()
+        self.tools().find_many(names).await
     }
 
     /// Initiates a tool call once a [`ToolUse`] request received from assistant
     /// withing a sampling window.
-    ///
-    /// For multiple [`ToolUse`] requests, use the [`Context::use_tools`] method.
-    ///
-    /// # Example
-    /// ```no_run
-    /// # #[cfg(all(feature = "server-macros", feature = "legacy-spec"))] {
-    /// use neva::prelude::*;
-    ///
-    /// #[tool]
-    /// async fn analyze_weather(ctx: Context, city: String) -> Result<(), Error> {
-    ///     let args = ("city", city);
-    ///     let weather = ctx.use_tool(ToolUse::new("get_weather", args)).await;
-    ///
-    ///     // do something with the weather result
-    ///
-    /// # Ok(())
-    /// }
-    ///
-    /// #[tool]
-    /// async fn get_weather(city: String) -> String {
-    ///     // ...
-    ///
-    ///     format!("Sunny in {city}")
-    /// }
-    /// # }
-    /// ```
+    #[deprecated(since = "0.7.0", note = "use `ctx.tools().call(tool)`")]
+    #[inline]
     pub async fn use_tool(&self, tool: ToolUse) -> ToolResult {
-        let id = tool.id.clone();
-        let res = self.clone().call_tool(tool.into()).await;
-
-        match res {
-            Ok(res) => ToolResult::new(id, res),
-            Err(err) => ToolResult::error(id, err),
-        }
+        self.tools().call(tool).await
     }
 
     /// Initiates a parallel tool calls for multiple [`ToolUse`] requests.
-    ///
-    /// For a single [`ToolUse`] use the [`Context::use_tool`] method.
-    ///
-    /// # Example
-    /// ```no_run
-    /// # #[cfg(feature = "server-macros")] {
-    /// use neva::prelude::*;
-    ///
-    /// #[tool]
-    /// async fn analyze_weather(ctx: Context) -> Result<(), Error> {
-    ///     let weather = ctx.use_tools([
-    ///         ToolUse::new("get_weather", ("city", "London")),
-    ///         ToolUse::new("get_weather", ("city", "Paris"))
-    ///     ]).await;
-    ///     
-    ///     // do something with the weather result
-    ///
-    /// # Ok(())
-    /// }
-    /// # }
-    /// ```
+    #[deprecated(since = "0.7.0", note = "use `ctx.tools().call_all(tools)`")]
+    #[inline]
     pub async fn use_tools<I>(&self, tools: I) -> Vec<ToolResult>
     where
         I: IntoIterator<Item = ToolUse>,
     {
-        futures_util::future::join_all(tools.into_iter().map(|t| self.use_tool(t))).await
+        self.tools().call_all(tools).await
+    }
+
+    /// Adds a new tool and notifies clients
+    #[deprecated(since = "0.7.0", note = "use `ctx.tools().add(tool)`")]
+    #[inline]
+    pub async fn add_tool(&self, tool: Tool) -> Result<(), Error> {
+        self.tools().add(tool).await
+    }
+
+    /// Removes a tool and notifies clients
+    #[deprecated(since = "0.7.0", note = "use `ctx.tools().remove(name)`")]
+    #[inline]
+    pub async fn remove_tool(&self, name: impl Into<String>) -> Result<Option<Tool>, Error> {
+        self.tools().remove(name).await
     }
 
     /// Gets the prompt by name
-    ///
-    /// # Example
-    /// ```no_run
-    /// # #[cfg(all(feature = "server-macros", feature = "legacy-spec"))] {
-    /// use neva::prelude::*;
-    ///
-    /// #[tool]
-    /// async fn analyze_weather(ctx: Context, city: String) -> Result<(), Error> {
-    ///     let prompt = ctx.prompt("get_weather", ("city", city)).await?;
-    ///
-    ///     // do something with the prompt
-    ///
-    /// # Ok(())
-    /// }
-    ///
-    /// #[prompt]
-    /// async fn get_weather(city: String) -> PromptMessage {
-    ///     PromptMessage::user()
-    ///         .with(format!("What's the weather in {city}"))
-    /// }
-    /// # }
-    /// ```
+    #[deprecated(since = "0.7.0", note = "use `ctx.prompts().get(name, args)`")]
+    #[inline]
     pub async fn prompt<N, Args>(&self, name: N, args: Args) -> Result<GetPromptResult, Error>
     where
         N: Into<String>,
         Args: IntoArgs,
     {
-        let params = GetPromptRequestParams {
-            name: name.into(),
-            args: args.into_args(),
-            meta: None,
-        };
-
-        self.clone().get_prompt(params).await
-    }
-
-    /// Reads a resource content
-    ///
-    /// # Example
-    /// ```no_run
-    /// # #[cfg(all(feature = "server-macros", feature = "legacy-spec"))] {
-    /// use neva::prelude::*;
-    ///
-    /// #[tool]
-    /// async fn summarize_document(ctx: Context, doc_uri: Uri) -> Result<(), Error> {
-    ///     let doc = ctx.resource(doc_uri).await?;
-    ///
-    ///     // do something with the doc
-    ///
-    /// # Ok(())
-    /// }
-    ///
-    /// #[resource(uri = "file://{name}")]
-    /// async fn get_doc(name: String) -> TextResourceContents {
-    ///     // read the doc
-    ///
-    /// # TextResourceContents::new("", "")
-    /// }
-    /// # }
-    /// ```
-    pub async fn resource(&self, uri: impl Into<Uri>) -> Result<ReadResourceResult, Error> {
-        let uri = uri.into();
-        let params = ReadResourceRequestParams::from(uri);
-
-        self.clone().read_resource(params).await
-    }
-
-    /// Adds a new resource and notifies clients
-    pub async fn add_resource(&mut self, res: impl Into<Resource>) -> Result<(), Error> {
-        let res: Resource = res.into();
-        self.options.resources.insert(res.name.clone(), res).await?;
-
-        if self.options.is_resource_list_changed_supported() {
-            self.send_notification(crate::types::resource::commands::LIST_CHANGED, None)
-                .await
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Removes a resource and notifies clients
-    pub async fn remove_resource(
-        &mut self,
-        uri: impl Into<Uri>,
-    ) -> Result<Option<Resource>, Error> {
-        let removed = self.options.resources.remove(&uri.into()).await?;
-
-        if removed.is_some() && self.options.is_resource_list_changed_supported() {
-            self.send_notification(crate::types::resource::commands::LIST_CHANGED, None)
-                .await?;
-        }
-
-        Ok(removed)
-    }
-
-    /// Sends a notification that the resource with the `uri` has been updated
-    #[cfg(feature = "legacy-spec")]
-    pub async fn resource_updated(&mut self, uri: impl Into<Uri>) -> Result<(), Error> {
-        if !self.options.is_resource_subscription_supported() {
-            return Err(Error::new(
-                ErrorCode::MethodNotFound,
-                "Server does not support sending resource/updated notifications",
-            ));
-        }
-
-        let uri = uri.into();
-        if self.is_subscribed(&uri) {
-            let params = serde_json::to_value(SubscribeRequestParams::from(uri)).ok();
-            self.send_notification(crate::types::resource::commands::UPDATED, params)
-                .await
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Sends a notification that the resource with the `uri` has been updated
-    ///
-    /// The notification is emitted unconditionally and routed by the
-    /// subscription filters it reaches: every live stream that named this URI
-    /// gets it, every other stream gets nothing. There is deliberately no
-    /// "is anybody watching?" pre-check -- [`Self::is_subscribed`] can only
-    /// answer for *this* instance, so under a
-    /// [`NotificationBus`](crate::app::notification_bus::NotificationBus) it
-    /// would skip an update a subscriber on another instance was waiting for.
-    /// Publishing one nobody wants is cheap; dropping one somebody wants is a
-    /// bug.
-    #[cfg(not(feature = "legacy-spec"))]
-    pub async fn resource_updated(&mut self, uri: impl Into<Uri>) -> Result<(), Error> {
-        if !self.options.is_resource_subscription_supported() {
-            return Err(Error::new(
-                ErrorCode::MethodNotFound,
-                "Server does not support sending resource/updated notifications",
-            ));
-        }
-
-        let params = serde_json::to_value(SubscribeRequestParams::from(uri.into())).ok();
-        self.send_notification(crate::types::resource::commands::UPDATED, params)
-            .await
-    }
-
-    /// Adds a subscription to the resource with the [`Uri`]
-    ///
-    /// Legacy only: under MCP 2026-07-28 a per-resource subscription is a URI
-    /// in the `subscriptions/listen` filter, established by the client and
-    /// scoped to that stream, so there is nothing for the server to add.
-    #[cfg(feature = "legacy-spec")]
-    pub fn subscribe_to_resource(&mut self, uri: impl Into<Uri>) {
-        self.options.resource_subscriptions.insert(uri.into());
-    }
-
-    /// Removes a subscription to the resource with the [`Uri`]
-    ///
-    /// Legacy only; see [`Self::subscribe_to_resource`].
-    #[cfg(feature = "legacy-spec")]
-    pub fn unsubscribe_from_resource(&mut self, uri: &Uri) {
-        self.options.resource_subscriptions.remove(uri);
-    }
-
-    /// Returns `true` if there is a subscription to changes of the resource with the [`Uri`]
-    #[cfg(feature = "legacy-spec")]
-    pub fn is_subscribed(&self, uri: &Uri) -> bool {
-        self.options.resource_subscriptions.contains(uri)
-    }
-
-    /// Returns `true` if any live `subscriptions/listen` stream watches the
-    /// resource with the [`Uri`].
-    ///
-    /// **Node-local.** A subscription lives in the process holding its socket
-    /// open, so this answers for *this instance only*. In a horizontally
-    /// scaled deployment a `false` here means "nobody on this instance", not
-    /// "nobody anywhere" -- so do not use it to decide whether to emit a
-    /// notification. [`Self::resource_updated`] deliberately does not:
-    /// notifications are published unconditionally and routed by the
-    /// subscription filters they reach, wherever those live. Use this only
-    /// where a node-local answer is what you actually want, such as skipping
-    /// expensive local work no one on this instance is streaming.
-    ///
-    /// # Examples
-    /// ```no_run
-    /// # #[cfg(all(feature = "server-macros", not(feature = "legacy-spec")))] {
-    /// use neva::prelude::*;
-    ///
-    /// #[tool]
-    /// async fn touch(ctx: Context) -> Result<(), Error> {
-    ///     if ctx.is_subscribed(&"res://config".into()) {
-    ///         // somebody is listening for this resource
-    ///     }
-    /// # Ok(())
-    /// }
-    /// # }
-    /// ```
-    #[cfg(not(feature = "legacy-spec"))]
-    pub fn is_subscribed(&self, uri: &Uri) -> bool {
-        self.options.subscriptions().is_resource_subscribed(uri)
+        self.prompts().get(name, args).await
     }
 
     /// Adds a new prompt and notifies clients
-    pub async fn add_prompt(&mut self, prompt: Prompt) -> Result<(), Error> {
-        // A prompt registered up front gets this same check at startup. One
-        // added while the server runs has no startup left to fail, so it is
-        // refused here rather than published in a shape no peer could
-        // successfully use.
-        if let Some(conflict) = prompt.arg_name_conflict() {
-            return Err(Error::new(ErrorCode::InternalError, conflict));
-        }
-
-        self.options
-            .prompts
-            .insert(prompt.name.clone(), prompt)
-            .await?;
-
-        if self.options.is_prompts_list_changed_supported() {
-            self.send_notification(crate::types::prompt::commands::LIST_CHANGED, None)
-                .await
-        } else {
-            Ok(())
-        }
+    #[deprecated(since = "0.7.0", note = "use `ctx.prompts().add(prompt)`")]
+    #[inline]
+    pub async fn add_prompt(&self, prompt: Prompt) -> Result<(), Error> {
+        self.prompts().add(prompt).await
     }
 
     /// Removes a prompt and notifies clients
-    pub async fn remove_prompt(
-        &mut self,
-        name: impl Into<String>,
-    ) -> Result<Option<Prompt>, Error> {
-        let removed = self.options.prompts.remove(&name.into()).await?;
-
-        if removed.is_some() && self.options.is_prompts_list_changed_supported() {
-            self.send_notification(crate::types::prompt::commands::LIST_CHANGED, None)
-                .await?;
-        }
-
-        Ok(removed)
+    #[deprecated(since = "0.7.0", note = "use `ctx.prompts().remove(name)`")]
+    #[inline]
+    pub async fn remove_prompt(&self, name: impl Into<String>) -> Result<Option<Prompt>, Error> {
+        self.prompts().remove(name).await
     }
 
-    /// Adds a new prompt and notifies clients
-    pub async fn add_tool(&mut self, tool: Tool) -> Result<(), Error> {
-        // See `add_prompt`: a tool added after startup has no startup check
-        // left to fail, so a schema its handler cannot read is refused here.
-        if let Some(conflict) = tool.arg_name_conflict() {
-            return Err(Error::new(ErrorCode::InternalError, conflict));
-        }
-
-        self.options.tools.insert(tool.name.clone(), tool).await?;
-
-        if self.options.is_tools_list_changed_supported() {
-            self.send_notification(crate::types::tool::commands::LIST_CHANGED, None)
-                .await
-        } else {
-            Ok(())
-        }
+    /// Reads a resource content
+    #[deprecated(since = "0.7.0", note = "use `ctx.resources().read(uri)`")]
+    #[inline]
+    pub async fn resource(&self, uri: impl Into<Uri>) -> Result<ReadResourceResult, Error> {
+        self.resources().read(uri).await
     }
 
-    /// Removes a tool and notifies clients
-    pub async fn remove_tool(&mut self, name: impl Into<String>) -> Result<Option<Tool>, Error> {
-        let removed = self.options.tools.remove(&name.into()).await?;
+    /// Adds a new resource and notifies clients
+    #[deprecated(since = "0.7.0", note = "use `ctx.resources().add(resource)`")]
+    #[inline]
+    pub async fn add_resource(&self, res: impl Into<Resource>) -> Result<(), Error> {
+        self.resources().add(res).await
+    }
 
-        if removed.is_some() && self.options.is_tools_list_changed_supported() {
-            self.send_notification(crate::types::tool::commands::LIST_CHANGED, None)
-                .await?;
-        }
+    /// Removes a resource and notifies clients
+    #[deprecated(since = "0.7.0", note = "use `ctx.resources().remove(uri)`")]
+    #[inline]
+    pub async fn remove_resource(&self, uri: impl Into<Uri>) -> Result<Option<Resource>, Error> {
+        self.resources().remove(uri).await
+    }
 
-        Ok(removed)
+    /// Sends a notification that the resource with the `uri` has been updated
+    #[deprecated(since = "0.7.0", note = "use `ctx.resources().notify_updated(uri)`")]
+    #[inline]
+    pub async fn resource_updated(&self, uri: impl Into<Uri>) -> Result<(), Error> {
+        self.resources().notify_updated(uri).await
+    }
+
+    /// Adds a subscription to the resource with the [`Uri`]
+    #[cfg(feature = "legacy-spec")]
+    #[deprecated(since = "0.7.0", note = "use `ctx.resources().subscribe(uri)`")]
+    #[inline]
+    pub fn subscribe_to_resource(&self, uri: impl Into<Uri>) {
+        self.resources().subscribe(uri)
+    }
+
+    /// Removes a subscription to the resource with the [`Uri`]
+    #[cfg(feature = "legacy-spec")]
+    #[deprecated(since = "0.7.0", note = "use `ctx.resources().unsubscribe(uri)`")]
+    #[inline]
+    pub fn unsubscribe_from_resource(&self, uri: &Uri) {
+        self.resources().unsubscribe(uri)
+    }
+
+    /// Returns `true` if there is a subscription to changes of the resource with the [`Uri`]
+    #[deprecated(since = "0.7.0", note = "use `ctx.resources().is_subscribed(uri)`")]
+    #[inline]
+    pub fn is_subscribed(&self, uri: &Uri) -> bool {
+        self.resources().is_subscribed(uri)
     }
 
     #[inline]
@@ -490,7 +258,7 @@ mod runtime_registration_tests {
         let mut tool = Tool::new("greet", |name: String| async move { name });
         tool.with_input_schema(|_| name_schema());
 
-        let err = ctx().add_tool(tool).await.expect_err("must be refused");
+        let err = ctx().tools().add(tool).await.expect_err("must be refused");
 
         assert!(
             err.to_string().contains("publishes an inputSchema without"),
@@ -505,7 +273,11 @@ mod runtime_registration_tests {
         });
         prompt.with_args(["topic"]);
 
-        let err = ctx().add_prompt(prompt).await.expect_err("must be refused");
+        let err = ctx()
+            .prompts()
+            .add(prompt)
+            .await
+            .expect_err("must be refused");
 
         assert!(
             err.to_string().contains("publishes 1 argument(s)"),
@@ -519,7 +291,7 @@ mod runtime_registration_tests {
         tool.with_input_schema(|_| name_schema())
             .with_arg_names(["name"]);
 
-        ctx().add_tool(tool).await.expect("must be accepted");
+        ctx().tools().add(tool).await.expect("must be accepted");
     }
 }
 

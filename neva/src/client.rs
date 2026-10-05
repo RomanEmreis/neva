@@ -3,19 +3,17 @@
 use crate::error::{Error, ErrorCode};
 use crate::shared;
 use crate::shared::{BlockingCall, BlockingFn, BoxFuture, marker};
+#[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+use crate::types::RequestParamsMeta;
 use crate::types::Root;
 use crate::types::sampling::{CreateMessageRequestParams, CreateMessageResult, SamplingHandler};
 use crate::types::{
-    CallToolRequestParams, CallToolResponse, GetPromptRequestParams, GetPromptResult,
-    Implementation, ListPromptsRequestParams, ListPromptsResult,
-    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ListResourcesRequestParams,
-    ListResourcesResult, ListToolsRequestParams, ListToolsResult, MessageEnvelope,
-    ReadResourceRequestParams, ReadResourceResult, Request, RequestId, RequestParamsMeta, Response,
-    ServerCapabilities, Uri,
+    CallToolRequestParams, CallToolResponse, GetPromptResult, Implementation, ListPromptsResult,
+    ListResourceTemplatesResult, ListResourcesResult, ListToolsRequestParams, ListToolsResult,
+    MessageEnvelope, ReadResourceResult, Request, RequestId, Response, ServerCapabilities, Uri,
     cursor::Cursor,
     elicitation::{ElicitRequestParams, ElicitResult, ElicitationHandler},
     notification::Notification,
-    resource::{SubscribeRequestParams, UnsubscribeRequestParams},
 };
 use crate::types::{ClientCapabilities, InitializeRequestParams, InitializeResult};
 #[cfg(not(feature = "legacy-spec"))]
@@ -27,23 +25,13 @@ use std::fmt::{Debug, Formatter};
 use std::{future::Future, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
-#[cfg(feature = "tasks")]
-use crate::types::TaskMetadata;
 #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
 #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 use crate::types::{
     GetTaskPayloadRequestParams, ListTasksRequestParams, ListTasksResult, Task, TaskPayload,
 };
 
-/// How many `tools/list` pages the `HeaderMismatch` recovery will walk looking
-/// for the tool it was sent back for.
-///
-/// The traversal ends on its own at a page without a `nextCursor`; this is the
-/// bound for a server that never stops handing them out, which would otherwise
-/// keep a single failed call walking forever with nothing above it able to see.
-#[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
-const MAX_REFRESH_PAGES: usize = 64;
-
+pub mod api;
 pub mod batch;
 mod calls;
 mod capabilities;
@@ -75,7 +63,7 @@ pub struct Client {
     server_capabilities: Option<ServerCapabilities>,
 
     /// Implementation information of the connected server.
-    server_info: Option<Implementation>,
+    server_info: std::sync::OnceLock<Implementation>,
 
     /// A [`CancellationToken`] that cancels transport background processes.
     cancellation_token: Option<CancellationToken>,
@@ -90,7 +78,7 @@ impl Debug for Client {
         f.debug_struct("Client")
             .field("options", &self.options)
             .field("server_capabilities", &self.server_capabilities)
-            .field("server_info", &self.server_info)
+            .field("server_info", &self.server_info.get())
             .finish()
     }
 }
@@ -115,7 +103,7 @@ impl Client {
 
     /// Sends a request to the MCP server
     #[inline]
-    pub(super) async fn send_request(&mut self, req: Request) -> Result<Response, Error> {
+    pub(super) async fn send_request(&self, req: Request) -> Result<Response, Error> {
         // Checked at the send seam rather than in `call_tool`, so every way of
         // reaching a tool -- the plain call, the task builder -- goes past it.
         #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
@@ -141,10 +129,10 @@ impl Client {
 
     /// Sends a request without the MRTR loop.
     #[inline]
-    pub(super) async fn plain_send_request(&mut self, req: Request) -> Result<Response, Error> {
+    pub(super) async fn plain_send_request(&self, req: Request) -> Result<Response, Error> {
         let resp = self
             .handler
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?
             .send_request(req)
             .await?;
@@ -175,7 +163,7 @@ impl Client {
     ///     client.disconnect().await
     /// }
     /// ```
-    pub fn batch(&mut self) -> BatchBuilder<'_> {
+    pub fn batch(&self) -> BatchBuilder<'_> {
         BatchBuilder {
             client: self,
             items: Vec::new(),
@@ -183,35 +171,11 @@ impl Client {
     }
 
     /// Returns a [`TaskBuilder`] for constructing a task-augmented request.
-    ///
-    /// Chain setters such as [`TaskBuilder::with_ttl`] to configure the task,
-    /// then call [`TaskBuilder::call_tool`] to execute.
-    ///
-    /// # Example
-    /// ```no_run
-    /// use neva::client::Client;
-    /// use neva::error::Error;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), Error> {
-    ///     let mut client = Client::new();
-    ///     client.connect().await?;
-    ///
-    ///     let result = client
-    ///         .task()
-    ///         .with_ttl(5000)
-    ///         .call_tool("echo", [("message", "Hello MCP!")])
-    ///         .await?;
-    ///
-    ///     client.disconnect().await
-    /// }
-    /// ```
     #[cfg(feature = "tasks")]
-    pub fn task(&mut self) -> TaskBuilder<'_> {
-        TaskBuilder {
-            client: self,
-            metadata: TaskMetadata::default(),
-        }
+    #[deprecated(since = "0.7.0", note = "use `client.tools().as_task()`")]
+    #[inline]
+    pub fn task(&self) -> TaskBuilder<'_> {
+        self.tools().as_task()
     }
 
     /// Sends a batch of messages to the MCP server and awaits all responses.
@@ -224,11 +188,42 @@ impl Client {
     /// All in-flight requests are awaited concurrently; a failure in one
     /// does not cancel the others.
     ///
+    /// The client numbers every request it sends, and these too: on the wire
+    /// each request carries an id this client generated, and each response
+    /// comes back carrying the id the caller gave its request. An id chosen by
+    /// the caller could repeat one still owed an answer -- a request given up
+    /// on, another batch in flight -- and the answer would then reach the wrong
+    /// waiter.
+    ///
     /// # Errors
     /// Returns [`Error`] if the client is not connected, the batch is empty,
     /// or any response channel is closed or times out.
-    pub async fn call_batch(
-        &mut self,
+    pub async fn call_batch(&self, items: Vec<MessageEnvelope>) -> Result<Vec<Response>, Error> {
+        let mut caller_ids = Vec::new();
+        let items = items
+            .into_iter()
+            .map(|envelope| match envelope {
+                MessageEnvelope::Request(mut req) => {
+                    caller_ids.push(std::mem::replace(&mut req.id, self.generate_id()?));
+                    Ok(MessageEnvelope::Request(req))
+                }
+                other => Ok(other),
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+
+        // One response per request, in order: the caller's ids go back on them.
+        let responses = self.send_numbered_batch(items).await?;
+        Ok(responses
+            .into_iter()
+            .zip(caller_ids)
+            .map(|(resp, id)| resp.set_id(id))
+            .collect())
+    }
+
+    /// [`Self::call_batch`] for requests this client already numbered, such as
+    /// [`BatchBuilder`]'s, whose ids also seed their progress tokens.
+    pub(super) async fn send_numbered_batch(
+        &self,
         items: Vec<MessageEnvelope>,
     ) -> Result<Vec<Response>, Error> {
         // One blocked tool fails the whole batch, the same as a duplicate id
@@ -255,15 +250,14 @@ impl Client {
         }
         let handler = self
             .handler
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
 
         let request_timeout = handler.timeout();
-        let pending = handler.pending().clone();
         let token = handler.cancellation();
-        let receivers = handler.send_batch(items).await?;
+        let slots = handler.send_batch(items).await?;
 
-        collect_batch_responses(receivers, &pending, request_timeout, token)
+        collect_batch_responses(slots, request_timeout, token)
             .await
             .into_iter()
             .collect()
@@ -274,9 +268,9 @@ impl Client {
     /// Only the legacy profile has server->client requests to answer.
     #[inline]
     #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
-    async fn send_response(&mut self, req: Response) -> Result<(), Error> {
+    async fn send_response(&self, req: Response) -> Result<(), Error> {
         self.handler
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?
             .send_response(req)
             .await;
@@ -286,13 +280,13 @@ impl Client {
     /// Sends a notification to the MCP server
     #[inline]
     async fn send_notification(
-        &mut self,
+        &self,
         method: &str,
         params: Option<serde_json::Value>,
     ) -> Result<(), Error> {
         let notification = Notification::new(method, params);
         self.handler
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?
             .send_notification(notification)
             .await
@@ -354,48 +348,43 @@ impl Client {
 }
 
 /// Awaits a batch's per-request receivers concurrently, returning one result
-/// per receiver in input order, with the same per-request timeout and pending
-/// cleanup as a single [`RequestHandler::send_request`].
+/// per receiver in input order, with the same per-request timeout and slot
+/// release as a single [`RequestHandler::send_request`].
 ///
-/// Uses `join_all` (not `try_join_all`) so every future runs to completion: the
-/// timeout-cleanup branch (`pending.pop`) executes for each timed-out request
-/// even when another request in the same batch has already failed.
+/// Each request's slot guard moves into the future awaiting its reply, so the
+/// slot goes back when that wait ends -- answered, timed out, or abandoned
+/// with the whole batch by a caller that dropped it. Uses `join_all` (not
+/// `try_join_all`) so one failed request does not cut the others' waits short.
 async fn collect_batch_responses(
-    receivers: Vec<(
-        RequestId,
+    slots: Vec<(
         tokio::sync::oneshot::Receiver<crate::shared::PendingResponse>,
+        crate::shared::QueuedRequestGuard<'_>,
     )>,
-    pending: &crate::shared::RequestQueue,
     request_timeout: std::time::Duration,
     token: tokio_util::sync::CancellationToken,
 ) -> Vec<Result<Response, Error>> {
     use futures_util::future::join_all;
 
-    let futures = receivers.into_iter().map(|(id, rx)| {
-        let pending = pending.clone();
+    let futures = slots.into_iter().map(|(rx, slot)| {
         let token = token.clone();
         async move {
+            let _slot = slot;
             tokio::select! {
                 biased;
                 // The transport died (or a shutdown signal cancelled it)
                 // -- no response is coming for any receiver.
                 _ = token.cancelled() => {
-                    let _ = pending.pop(&id);
                     Err(Error::new(ErrorCode::InternalError, "Connection closed"))
                 }
                 result = tokio::time::timeout(request_timeout, rx) => match result {
                     Ok(Ok(crate::shared::PendingResponse::Response(resp))) => Ok(resp),
-                    Ok(Ok(crate::shared::PendingResponse::Timeout)) => {
+                    Ok(Ok(crate::shared::PendingResponse::Timeout)) | Err(_) => {
                         Err(Error::new(ErrorCode::Timeout, "Batch request timed out"))
                     }
                     Ok(Err(_)) => Err(Error::new(
                         ErrorCode::InternalError,
                         "Response channel closed",
                     )),
-                    Err(_) => {
-                        let _ = pending.pop(&id);
-                        Err(Error::new(ErrorCode::Timeout, "Batch request timed out"))
-                    }
                 }
             }
         }
@@ -511,9 +500,31 @@ type Handler<P, O> =
 mod tests {
     use super::*;
 
+    /// Requests take `&self`, so one client can serve many tasks at once --
+    /// which only holds while the client is `Sync` and each request's future
+    /// is `Send`. Nothing else would notice either one being lost.
+    #[test]
+    fn a_client_can_be_shared_across_tasks() {
+        fn shared<T: Send + Sync>() {}
+        fn sendable<F: Future + Send>(_: F) {}
+
+        shared::<Client>();
+
+        let client = Client::new();
+        sendable(client.tools().list(None));
+        sendable(client.tools().call("add", [("a", 1), ("b", 2)]));
+        sendable(client.resources().list(None));
+        sendable(client.resources().read("file:///readme.md"));
+        sendable(client.prompts().list(None));
+        sendable(client.prompts().get("summarise", ()));
+        #[cfg(feature = "legacy-spec")]
+        sendable(client.ping());
+        sendable(client.batch().list_tools().send());
+    }
+
     #[tokio::test]
     async fn call_batch_requires_connected_client() {
-        let mut client = Client::new();
+        let client = Client::new();
         let result = client.call_batch(vec![]).await;
         assert!(
             result.is_err(),
@@ -710,5 +721,123 @@ mod tests {
         let meta = &req.params.as_ref().expect("params present")["_meta"];
         assert!(meta.get("traceparent").is_none());
         assert!(meta.get("tracestate").is_none());
+    }
+}
+
+/// A request a caller gives up on, against a real server that never answers it.
+#[cfg(all(test, feature = "http-server-volga", feature = "http-client"))]
+mod abandoned_request_tests {
+    use super::*;
+    use crate::App;
+    use std::time::Duration;
+
+    fn pick_free_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+        port
+    }
+
+    /// A caller dropping the future -- an outer `timeout`, a lost `select!`
+    /// branch -- runs none of the request's own error paths. The slot still
+    /// comes back at once, and the answer that arrives later finds no waiter:
+    /// the id is never sent again, so it cannot reach another request.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropping_a_call_releases_its_slot() {
+        let addr = format!("127.0.0.1:{}", pick_free_port());
+
+        let release = Arc::new(tokio::sync::Notify::new());
+        let gate = release.clone();
+        let mut app = App::new()
+            .without_greeting()
+            .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+        app.map_tool("hold", move || {
+            let gate = gate.clone();
+            async move {
+                gate.notified().await;
+                "held".to_string()
+            }
+        });
+        app.map_tool("quick", || async { "quick".to_string() });
+        let server = tokio::spawn(async move { app.run().await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let mut client = Client::new().with_options(|o| {
+            o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
+                // Far longer than this test waits: the slot must be released
+                // by the dropped future, not by the request's own timeout.
+                .with_timeout(Duration::from_secs(30))
+        });
+        client.connect().await.expect("connect");
+
+        let queued = |client: &Client| client.handler.as_ref().expect("connected").pending().len();
+        let idle = queued(&client);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), client.tools().call("hold", ()))
+                .await
+                .is_err(),
+            "the tool holds its answer, so the outer timeout must fire"
+        );
+        assert_eq!(queued(&client), idle, "a dropped call releases its slot");
+
+        // The late answer is dropped, and the next call gets its own.
+        release.notify_one();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let next = client.tools().call("quick", ()).await.expect("call");
+        assert!(
+            serde_json::to_string(&next)
+                .expect("json")
+                .contains("quick")
+        );
+        assert_eq!(queued(&client), idle);
+
+        server.abort();
+    }
+
+    /// Deadlines are otherwise checked only when another request goes out or
+    /// an answer comes in. A client that goes quiet after a burst would keep
+    /// every slot its caller gave up on, and every deadline scheduled, until
+    /// its next request -- so a connected client sweeps on its own.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_idle_client_sweeps_expired_slots() {
+        let addr = format!("127.0.0.1:{}", pick_free_port());
+
+        let mut app = App::new()
+            .without_greeting()
+            .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+        app.map_tool("stall", || async { std::future::pending::<String>().await });
+        app.map_tool("quick", || async { "quick".to_string() });
+        let server = tokio::spawn(async move { app.run().await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let mut client = Client::new().with_options(|o| {
+            o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
+                .with_timeout(Duration::from_millis(200))
+        });
+        client.connect().await.expect("connect");
+        let queued = |client: &Client| client.handler.as_ref().expect("connected").pending().len();
+        let scheduled = |client: &Client| {
+            client
+                .handler
+                .as_ref()
+                .expect("connected")
+                .pending()
+                .scheduled()
+        };
+        let idle = queued(&client);
+
+        client.tools().call("quick", ()).await.expect("answered");
+        let _ =
+            tokio::time::timeout(Duration::from_millis(50), client.tools().call("stall", ())).await;
+        assert!(client.tools().call("stall", ()).await.is_err(), "timed out");
+
+        // Quiet from here on: nothing goes out, nothing comes in.
+        tokio::time::sleep(Duration::from_millis(900)).await;
+
+        assert_eq!(queued(&client), idle, "expired slots are swept");
+        assert_eq!(scheduled(&client), 0, "and so are their deadlines");
+
+        server.abort();
     }
 }

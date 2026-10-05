@@ -21,8 +21,8 @@ use serde::de::DeserializeOwned;
 
 /// A fluent builder for constructing and sending a task-augmented `tools/call` request.
 ///
-/// Obtain via [`Client::task`]. Configure task options with the provided setters,
-/// then call [`TaskBuilder::call_tool`] to execute.
+/// Obtain via [`Tools::as_task`](crate::client::api::Tools::as_task). Configure
+/// task options with the provided setters, then [`TaskBuilder::call`] the tool.
 ///
 /// # Example
 /// ```no_run
@@ -35,9 +35,10 @@ use serde::de::DeserializeOwned;
 ///     client.connect().await?;
 ///
 ///     let result = client
-///         .task()
+///         .tools()
+///         .as_task()
 ///         .with_ttl(5000)
-///         .call_tool("echo", [("message", "Hello MCP!")])
+///         .call("echo", [("message", "Hello MCP!")])
 ///         .await?;
 ///
 ///     println!("{result:?}");
@@ -45,7 +46,7 @@ use serde::de::DeserializeOwned;
 /// }
 /// ```
 pub struct TaskBuilder<'a> {
-    pub(super) client: &'a mut Client,
+    pub(super) client: &'a Client,
     pub(super) metadata: TaskMetadata,
 }
 
@@ -68,11 +69,42 @@ impl<'a> TaskBuilder<'a> {
     }
 
     /// Sends a task-augmented `tools/call` request and waits for the task to complete.
+    #[deprecated(since = "0.7.0", note = "use `TaskBuilder::call`")]
+    #[inline]
+    pub async fn call_tool<N, Args>(self, name: N, args: Args) -> Result<CallToolResponse, Error>
+    where
+        N: Into<String>,
+        Args: IntoArgs,
+    {
+        self.call(name, args).await
+    }
+
+    /// Sends a task-augmented `tools/call` request and waits for the task to complete.
     ///
     /// # Errors
     /// Returns [`Error`] if the server does not support task-augmented tool calls,
     /// or if the underlying request fails.
-    pub async fn call_tool<N, Args>(self, name: N, args: Args) -> Result<CallToolResponse, Error>
+    ///
+    /// # Examples
+    /// ```no_run
+    /// use neva::client::Client;
+    /// use neva::error::Error;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let mut client = Client::new();
+    ///     client.connect().await?;
+    ///
+    ///     let result = client
+    ///         .tools()
+    ///         .as_task()
+    ///         .call("echo", [("message", "Hello MCP!")])
+    ///         .await?;
+    ///
+    ///     client.disconnect().await
+    /// }
+    /// ```
+    pub async fn call<N, Args>(self, name: N, args: Args) -> Result<CallToolResponse, Error>
     where
         N: Into<String>,
         Args: IntoArgs,
@@ -105,7 +137,7 @@ impl<'a> TaskBuilder<'a> {
             task: Some(self.metadata),
         };
 
-        let result = self.client.call_tool_raw(params).await?.into_result()?;
+        let result = self.client.tools().call_raw(params).await?.into_result()?;
         shared::wait_to_completion(self.client, result).await
     }
 }
@@ -114,7 +146,7 @@ impl<'a> TaskBuilder<'a> {
 impl shared::TaskApi for Client {
     /// Retrieves the full task state: status plus, depending on it, the
     /// outstanding input requests, the terminal result, or the error.
-    async fn get_task(&mut self, id: impl Into<String>) -> Result<DetailedTask, Error> {
+    async fn get_task(&self, id: impl Into<String>) -> Result<DetailedTask, Error> {
         let params = GetTaskRequestParams { id: id.into() };
         self.command(crate::types::task::commands::GET, Some(params))
             .await?
@@ -123,7 +155,7 @@ impl shared::TaskApi for Client {
 
     /// Submits responses to a task's outstanding input requests.
     async fn update_task(
-        &mut self,
+        &self,
         id: impl Into<String>,
         responses: crate::types::mrtr::InputResponses,
     ) -> Result<(), Error> {
@@ -132,8 +164,11 @@ impl shared::TaskApi for Client {
             input_responses: responses,
         };
 
+        // The acknowledgement is empty, but a refusal is not: read the
+        // response, or the error the server sent back reads as success.
         self.command(crate::types::task::commands::UPDATE, Some(params))
-            .await
+            .await?
+            .into_result::<serde::de::IgnoredAny>()
             .map(|_| ())
     }
 
@@ -142,17 +177,19 @@ impl shared::TaskApi for Client {
     /// The reply is an empty acknowledgement: cancellation is cooperative, so
     /// the task may still reach a non-`cancelled` terminal status. Poll
     /// `get_task` to learn the outcome.
-    async fn cancel_task(&mut self, id: impl Into<String>) -> Result<(), Error> {
+    async fn cancel_task(&self, id: impl Into<String>) -> Result<(), Error> {
         let params = CancelTaskRequestParams { id: id.into() };
+        // See `update_task`: an empty acknowledgement, but a refusal to read.
         self.command(crate::types::task::commands::CANCEL, Some(params))
-            .await
+            .await?
+            .into_result::<serde::de::IgnoredAny>()
             .map(|_| ())
     }
 
     /// Answers one outstanding input request with the client's configured
     /// handler for that kind.
     async fn fulfil_input(
-        &mut self,
+        &self,
         request: &crate::types::mrtr::InputRequest,
     ) -> Result<serde_json::Value, Error> {
         use crate::types::mrtr::InputRequest;
@@ -182,7 +219,7 @@ impl shared::TaskApi for Client {
 #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 impl shared::TaskApi for Client {
     /// Retrieves task result. If the task is not completed yet, waits until it completes or cancels.
-    async fn get_task_result<T>(&mut self, id: impl Into<String>) -> Result<T, Error>
+    async fn get_task_result<T>(&self, id: impl Into<String>) -> Result<T, Error>
     where
         T: DeserializeOwned,
     {
@@ -193,7 +230,7 @@ impl shared::TaskApi for Client {
     }
 
     /// Retrieve task status
-    async fn get_task(&mut self, id: impl Into<String>) -> Result<Task, Error> {
+    async fn get_task(&self, id: impl Into<String>) -> Result<Task, Error> {
         let params = GetTaskRequestParams { id: id.into() };
         self.command(crate::types::task::commands::GET, Some(params))
             .await?
@@ -204,7 +241,7 @@ impl shared::TaskApi for Client {
     ///
     /// # Panics
     /// If the client or server does not support cancelling tasks
-    async fn cancel_task(&mut self, id: impl Into<String>) -> Result<Task, Error> {
+    async fn cancel_task(&self, id: impl Into<String>) -> Result<Task, Error> {
         assert!(
             self.is_client_support_cancelling_tasks(),
             "Client does not support cancelling tasks.  You may configure it with `Client::with_options(|opt| opt.with_tasks(...))` method."
@@ -225,7 +262,7 @@ impl shared::TaskApi for Client {
     ///
     /// # Panics
     /// If the client or server does not support retrieving a task list
-    async fn list_tasks(&mut self, cursor: Option<Cursor>) -> Result<ListTasksResult, Error> {
+    async fn list_tasks(&self, cursor: Option<Cursor>) -> Result<ListTasksResult, Error> {
         assert!(
             self.is_client_support_task_list(),
             "Client does not support retrieving a task list.  You may configure it with `Client::with_options(|opt| opt.with_tasks(...))` method."
@@ -242,7 +279,7 @@ impl shared::TaskApi for Client {
             .into_result()
     }
 
-    async fn handle_input(&mut self, id: &str, params: TaskPayload) -> Result<(), Error> {
+    async fn handle_input(&self, id: &str, params: TaskPayload) -> Result<(), Error> {
         let params = params.to::<ElicitRequestParams>()?;
         if let Some(handler) = &self.options.elicitation_handler {
             use crate::types::IntoResponse;

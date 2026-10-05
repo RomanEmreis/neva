@@ -16,8 +16,8 @@ impl Client {
     /// than once in a handshake, so the first result that carries it is what
     /// populates [`Self::server_info`].
     #[cfg(not(feature = "legacy-spec"))]
-    pub(super) fn record_server_info(&mut self, resp: &Response) {
-        if self.server_info.is_some() {
+    pub(super) fn record_server_info(&self, resp: &Response) {
+        if self.server_info.get().is_some() {
             return;
         }
 
@@ -28,7 +28,9 @@ impl Client {
             .and_then(|m| m.get("io.modelcontextprotocol/serverInfo"))
             .and_then(|v| serde_json::from_value::<Implementation>(v.clone()).ok())
         {
-            self.server_info = Some(info);
+            // A concurrent request may have recorded it first; both carry
+            // the same server, so losing the race loses nothing.
+            let _ = self.server_info.set(info);
         }
     }
 
@@ -37,7 +39,7 @@ impl Client {
     /// elicitation via the configured handler and re-issue the original
     /// request (new id) with `inputResponses` + the echoed `requestState`.
     #[cfg(not(feature = "legacy-spec"))]
-    pub(super) async fn run_with_mrtr(&mut self, req: Request) -> Result<Response, Error> {
+    pub(super) async fn run_with_mrtr(&self, req: Request) -> Result<Response, Error> {
         let max_rounds = self.options.max_mrtr_rounds;
         let method = req.method.clone();
         let original_params = req.params.clone();
@@ -52,7 +54,7 @@ impl Client {
         for _ in 0..=max_rounds {
             let resp = self
                 .handler
-                .as_mut()
+                .as_ref()
                 .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?
                 .send_request(req)
                 .await?;
@@ -248,7 +250,7 @@ impl Client {
     /// first round, and produce no slot.
     #[cfg(not(feature = "legacy-spec"))]
     pub(super) async fn run_batch_with_mrtr(
-        &mut self,
+        &self,
         items: Vec<MessageEnvelope>,
     ) -> Result<Vec<Response>, Error> {
         let max_rounds = self.options.max_mrtr_rounds;
@@ -290,13 +292,12 @@ impl Client {
         if slots.is_empty() {
             let handler = self
                 .handler
-                .as_mut()
+                .as_ref()
                 .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
             let request_timeout = handler.timeout();
-            let pending = handler.pending().clone();
             let token = handler.cancellation();
-            let receivers = handler.send_batch(extras).await?;
-            return collect_batch_responses(receivers, &pending, request_timeout, token)
+            let taken = handler.send_batch(extras).await?;
+            return collect_batch_responses(taken, request_timeout, token)
                 .await
                 .into_iter()
                 .collect();
@@ -329,15 +330,13 @@ impl Client {
             // One transport write; await this round's replies concurrently.
             let handler = self
                 .handler
-                .as_mut()
+                .as_ref()
                 .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
 
             let request_timeout = handler.timeout();
-            let pending = handler.pending().clone();
             let token = handler.cancellation();
-            let receivers = handler.send_batch(envelopes).await?;
-            let responses =
-                collect_batch_responses(receivers, &pending, request_timeout, token).await;
+            let taken = handler.send_batch(envelopes).await?;
+            let responses = collect_batch_responses(taken, request_timeout, token).await;
 
             // `responses` aligns with `round_slots`: `send_batch` preserves
             // request order and extras produce no receiver. Final responses fill

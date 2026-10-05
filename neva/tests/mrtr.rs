@@ -24,7 +24,7 @@ async fn tool_elicits_then_completes_over_two_rounds() {
         .with_request_state_secret(b"test-secret")
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
-    app.map_tool("greet", |mut ctx: Context| async move {
+    app.map_tool("greet", |ctx: Context| async move {
         let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
             .with_required("name", "string")
             .into();
@@ -127,7 +127,7 @@ async fn a_retry_stating_its_answers_in_meta_is_still_understood() {
         .with_request_state_secret(b"test-secret")
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
-    app.map_tool("greet", |mut ctx: Context| async move {
+    app.map_tool("greet", |ctx: Context| async move {
         let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
             .with_required("name", "string")
             .into();
@@ -227,7 +227,7 @@ async fn final_round_replay_is_idempotent_after_a_lost_response() {
         .with_request_state_secret(b"test-secret")
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
-    app.map_tool("greet", |mut ctx: Context| async move {
+    app.map_tool("greet", |ctx: Context| async move {
         let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
             .with_required("name", "string")
             .into();
@@ -359,7 +359,7 @@ async fn an_ignored_answer_does_not_buy_a_second_run_of_the_final_round() {
         .with_request_state_secret(b"test-secret")
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
-    app.map_tool("greet", |mut ctx: Context| async move {
+    app.map_tool("greet", |ctx: Context| async move {
         let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
             .with_required("name", "string")
             .into();
@@ -489,7 +489,7 @@ async fn a_round_that_failed_midway_through_its_commits_is_not_repeatable() {
         .with_request_state_secret(b"test-secret")
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
-    app.map_tool("checkout", |mut ctx: Context| async move {
+    app.map_tool("checkout", |ctx: Context| async move {
         let params: ElicitRequestParams = ElicitRequestParams::form("Confirm?")
             .with_required("card", "string")
             .into();
@@ -618,7 +618,7 @@ async fn concurrent_final_round_retries_commit_exactly_once() {
         .with_request_state_secret(b"test-secret")
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
-    app.map_tool("greet", |mut ctx: Context| async move {
+    app.map_tool("greet", |ctx: Context| async move {
         let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
             .with_required("name", "string")
             .into();
@@ -730,7 +730,7 @@ async fn distinct_answers_to_the_same_state_do_not_collide_in_the_cache() {
         .with_request_state_secret(b"test-secret")
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
-    app.map_tool("greet", |mut ctx: Context| async move {
+    app.map_tool("greet", |ctx: Context| async move {
         let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
             .with_required("name", "string")
             .into();
@@ -835,7 +835,7 @@ async fn effects_run_once_memo_caches_commit_fires_on_final_round() {
         .with_request_state_secret(b"test-secret")
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
-    app.map_tool("effectful", |mut ctx: Context| async move {
+    app.map_tool("effectful", |ctx: Context| async move {
         let price: i32 = ctx
             .memo("quote", async {
                 FETCHES.fetch_add(1, Ordering::SeqCst);
@@ -967,7 +967,7 @@ async fn oversized_request_state_is_rejected() {
         .with_max_state_bytes(256) // smaller than the memoized payload
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
-    app.map_tool("bloated", |mut ctx: Context| async move {
+    app.map_tool("bloated", |ctx: Context| async move {
         let big: String = ctx.memo("big", async { Ok("x".repeat(2048)) }).await?;
         let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
             .with_required("name", "string")
@@ -1023,7 +1023,7 @@ async fn oversized_inbound_request_state_is_rejected_before_decoding() {
         .with_max_state_bytes(256)
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
-    app.map_tool("greet", |mut ctx: Context| async move {
+    app.map_tool("greet", |ctx: Context| async move {
         let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
             .with_required("name", "string")
             .into();
@@ -1078,7 +1078,7 @@ async fn replaying_request_state_against_a_different_request_is_rejected() {
         .with_request_state_secret(b"test-secret")
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
-    app.map_tool("greet", |mut ctx: Context| async move {
+    app.map_tool("greet", |ctx: Context| async move {
         let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
             .with_required("name", "string")
             .into();
@@ -1159,7 +1159,7 @@ async fn a_request_state_minted_by_another_service_is_rejected() {
             .with_request_state_audience(audience)
             .with_options(|o| o.with_http(|h| h.bind(addr).with_endpoint("/mcp")));
 
-        app.map_tool("greet", |mut ctx: Context| async move {
+        app.map_tool("greet", |ctx: Context| async move {
             let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
                 .with_required("name", "string")
                 .into();
@@ -1257,7 +1257,7 @@ async fn eliciting_without_declared_capability_is_rejected() {
         .with_request_state_secret(b"test-secret")
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
-    app.map_tool("greet", |mut ctx: Context| async move {
+    app.map_tool("greet", |ctx: Context| async move {
         let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
             .with_required("name", "string")
             .into();
@@ -1335,7 +1335,7 @@ async fn client_drives_mrtr_elicitation_end_to_end() {
         .with_request_state_secret(b"test-secret")
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
-    app.map_tool("client_effectful", |mut ctx: Context| async move {
+    app.map_tool("client_effectful", |ctx: Context| async move {
         let price: i32 = ctx
             .memo("quote", async {
                 C_FETCHES.fetch_add(1, Ordering::SeqCst);
@@ -1375,7 +1375,8 @@ async fn client_drives_mrtr_elicitation_end_to_end() {
     client.connect().await.expect("client connects");
 
     let resp = client
-        .call_tool("client_effectful", ())
+        .tools()
+        .call("client_effectful", ())
         .await
         .expect("tool call completes through the MRTR loop");
 
@@ -1414,7 +1415,7 @@ async fn client_drives_mrtr_across_a_batch_end_to_end() {
         .with_request_state_secret(b"test-secret")
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
-    app.map_tool("greet", |mut ctx: Context| async move {
+    app.map_tool("greet", |ctx: Context| async move {
         let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
             .with_required("name", "string")
             .into();
@@ -1504,7 +1505,7 @@ async fn batch_isolates_a_single_slot_failure_after_elicitation() {
         .with_request_state_secret(b"test-secret")
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
-    app.map_tool("greet", |mut ctx: Context| async move {
+    app.map_tool("greet", |ctx: Context| async move {
         let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
             .with_required("name", "string")
             .into();
@@ -1517,7 +1518,7 @@ async fn batch_isolates_a_single_slot_failure_after_elicitation() {
     });
 
     // Same elicitation shape, but fails *after* the round-2 input arrives.
-    app.map_tool("boom", |mut ctx: Context| async move {
+    app.map_tool("boom", |ctx: Context| async move {
         let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
             .with_required("name", "string")
             .into();
@@ -1594,7 +1595,7 @@ async fn configurable_max_rounds_caps_the_mrtr_loop() {
         .with_request_state_secret(b"test-secret")
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
-    app.map_tool("greet", |mut ctx: Context| async move {
+    app.map_tool("greet", |ctx: Context| async move {
         let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
             .with_required("name", "string")
             .into();
@@ -1615,7 +1616,8 @@ async fn configurable_max_rounds_caps_the_mrtr_loop() {
     client.connect().await.expect("client connects");
 
     let err = client
-        .call_tool("greet", ())
+        .tools()
+        .call("greet", ())
         .await
         .expect_err("a 0-retry cap must not let the elicitation converge");
     assert!(
@@ -1639,7 +1641,7 @@ async fn one_retry_budget_completes_a_single_question_flow() {
         .with_request_state_secret(b"test-secret")
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
-    app.map_tool("greet", |mut ctx: Context| async move {
+    app.map_tool("greet", |ctx: Context| async move {
         let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
             .with_required("name", "string")
             .into();
@@ -1664,7 +1666,8 @@ async fn one_retry_budget_completes_a_single_question_flow() {
     client.connect().await.expect("client connects");
 
     let res = client
-        .call_tool("greet", ())
+        .tools()
+        .call("greet", ())
         .await
         .expect("a 1-retry budget must let a one-question flow converge");
     let text = res
@@ -1692,7 +1695,7 @@ async fn tool_samples_then_completes_over_two_rounds() {
         .with_request_state_secret(b"test-secret")
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
-    app.map_tool("summarize", |mut ctx: Context| async move {
+    app.map_tool("summarize", |ctx: Context| async move {
         let params = CreateMessageRequestParams::new()
             .with_message(SamplingMessage::user().with("Summarize the repo"));
         #[allow(deprecated)]
@@ -1788,7 +1791,7 @@ async fn tool_lists_roots_then_completes_over_two_rounds() {
         .with_request_state_secret(b"test-secret")
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
-    app.map_tool("scan", |mut ctx: Context| async move {
+    app.map_tool("scan", |ctx: Context| async move {
         #[allow(deprecated)]
         let roots = ctx.list_roots("dirs").await?;
         let names = roots
@@ -1880,7 +1883,7 @@ async fn client_drives_sampling_and_roots_end_to_end() {
 
     // Two different kinds in one call: each is a separate round, and both
     // replay from the same `requestState` log.
-    app.map_tool("audit", |mut ctx: Context| async move {
+    app.map_tool("audit", |ctx: Context| async move {
         #[allow(deprecated)]
         let roots = ctx.list_roots("dirs").await?;
         let params = CreateMessageRequestParams::new()
@@ -1912,7 +1915,8 @@ async fn client_drives_sampling_and_roots_end_to_end() {
     client.connect().await.expect("client connects");
 
     let resp = client
-        .call_tool("audit", ())
+        .tools()
+        .call("audit", ())
         .await
         .expect("tool call completes through the MRTR loop");
 
@@ -1943,7 +1947,7 @@ async fn a_client_with_an_empty_roots_list_still_answers() {
         .with_request_state_secret(b"test-secret")
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
-    app.map_tool("scan", |mut ctx: Context| async move {
+    app.map_tool("scan", |ctx: Context| async move {
         #[allow(deprecated)]
         let roots = ctx.list_roots("dirs").await?;
         Ok::<String, Error>(format!("{} root(s)", roots.roots.len()))
@@ -1961,7 +1965,8 @@ async fn a_client_with_an_empty_roots_list_still_answers() {
     client.connect().await.expect("client connects");
 
     let resp = client
-        .call_tool("scan", ())
+        .tools()
+        .call("scan", ())
         .await
         .expect("the round-trip must complete");
     let text = resp
@@ -1989,7 +1994,7 @@ async fn sampling_without_declared_capability_is_rejected() {
         .with_request_state_secret(b"test-secret")
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
-    app.map_tool("summarize", |mut ctx: Context| async move {
+    app.map_tool("summarize", |ctx: Context| async move {
         let params =
             CreateMessageRequestParams::new().with_message(SamplingMessage::user().with("hi"));
         #[allow(deprecated)]
@@ -2050,7 +2055,7 @@ async fn one_round_carries_every_input_the_handler_asked_for() {
         .with_request_state_secret(b"test-secret")
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
-    app.map_tool("intake", |mut ctx: Context| async move {
+    app.map_tool("intake", |ctx: Context| async move {
         let form: ElicitRequestParams = ElicitRequestParams::form("Your name?")
             .with_required("name", "string")
             .into();
@@ -2162,7 +2167,7 @@ async fn an_answer_of_the_wrong_shape_is_a_protocol_error() {
         .with_request_state_secret(b"test-secret")
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
-    app.map_tool("greet", |mut ctx: Context| async move {
+    app.map_tool("greet", |ctx: Context| async move {
         let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
             .with_required("name", "string")
             .into();
@@ -2225,7 +2230,7 @@ async fn a_handler_asks_only_for_what_the_caller_declared() {
         .with_request_state_secret(b"test-secret")
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
-    app.map_tool("ask", |mut ctx: Context| async move {
+    app.map_tool("ask", |ctx: Context| async move {
         if ctx.client_capabilities().elicitation.is_some() {
             let form: ElicitRequestParams = ElicitRequestParams::form("Your name?")
                 .with_required("name", "string")

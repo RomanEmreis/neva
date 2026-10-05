@@ -44,7 +44,7 @@ async fn main() -> Result<(), Error> {
     // `#[elicitation]` handler via `map_elicitation`.
     client.connect().await?;
 
-    let result = client.call_tool("place_order", ()).await?;
+    let result = client.tools().call("place_order", ()).await?;
     tracing::info!("Result: {:?}", result.content);
 
     client.disconnect().await

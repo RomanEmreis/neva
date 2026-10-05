@@ -4,7 +4,7 @@
 //! ## Dependencies
 //! ```toml
 //! [dependencies]
-//! neva = { version = "0.5.0", features = ["full"] }
+//! neva = { version = "0.7.0", features = ["full"] }
 //! tokio = { version = "1", features = ["full"] }
 //! ```
 //!
@@ -64,7 +64,7 @@
 //!
 //!     // Call a tool
 //!     let args = [("message", "Hello MCP!")];
-//!     let result = client.call_tool("echo", Some(args)).await?;
+//!     let result = client.tools().call("echo", Some(args)).await?;
 //!     println!("{:?}", result.content);
 //!
 //!     client.disconnect().await

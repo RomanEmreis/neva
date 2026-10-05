@@ -42,12 +42,13 @@ async fn a_listen_stream_opens_with_its_acknowledgment() {
             tracing::warn!(logger = "mw", "{MARKER}");
             next(ctx).await
         });
-    app.map_tool("grow", |mut ctx: neva::Context| async move {
-        ctx.add_tool(neva::types::Tool::new(
-            format!("grown-{}", uuid::Uuid::new_v4()),
-            || async { "ok" },
-        ))
-        .await?;
+    app.map_tool("grow", |ctx: neva::Context| async move {
+        ctx.tools()
+            .add(neva::types::Tool::new(
+                format!("grown-{}", uuid::Uuid::new_v4()),
+                || async { "ok" },
+            ))
+            .await?;
         Ok::<_, neva::error::Error>("grown".to_string())
     });
 
@@ -193,12 +194,13 @@ async fn a_flood_before_the_acknowledgment_never_displaces_it() {
             }
             next(ctx).await
         });
-    app.map_tool("grow", |mut ctx: neva::Context| async move {
-        ctx.add_tool(neva::types::Tool::new(
-            format!("grown-{}", uuid::Uuid::new_v4()),
-            || async { "ok" },
-        ))
-        .await?;
+    app.map_tool("grow", |ctx: neva::Context| async move {
+        ctx.tools()
+            .add(neva::types::Tool::new(
+                format!("grown-{}", uuid::Uuid::new_v4()),
+                || async { "ok" },
+            ))
+            .await?;
         Ok::<_, neva::error::Error>("grown".to_string())
     });
 

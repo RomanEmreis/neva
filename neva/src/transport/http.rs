@@ -1016,7 +1016,7 @@ impl HttpClient {
 }
 
 impl TransportSender for HttpSender {
-    async fn send(&mut self, msg: Message) -> Result<(), Error> {
+    async fn send(&self, msg: Message) -> Result<(), Error> {
         self.tx
             .send(msg)
             .map_err(|err| Error::new(ErrorCode::InternalError, err))
@@ -1307,7 +1307,7 @@ mod engine_smoke_tests {
         let slot = Arc::new(std::sync::Mutex::new(None));
         let mut server =
             HttpServer::from_engine("127.0.0.1:0", CapturingEngine { ctx: slot.clone() });
-        let mut sender = server.sender.clone();
+        let sender = server.sender.clone();
 
         let handle = <HttpServer<_, _> as Transport>::start(&mut server).unwrap();
         let ctx = captured(&slot).await;
@@ -1446,7 +1446,7 @@ mod engine_smoke_tests {
     async fn run_returns_once_the_transport_has_written_what_was_queued() {
         let slot = Arc::new(std::sync::Mutex::new(None));
         let server = HttpServer::from_engine("127.0.0.1:0", CapturingEngine { ctx: slot.clone() });
-        let mut sender = server.sender.clone();
+        let sender = server.sender.clone();
 
         let (app, shutdown) = crate::App::new()
             .without_greeting()

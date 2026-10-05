@@ -18,7 +18,7 @@ use neva::types::sampling::{CreateMessageRequestParams, SamplingMessage};
 use tracing_subscriber::prelude::*;
 
 #[tool]
-async fn summarize_report(mut ctx: Context, topic: String) -> Result<String, Error> {
+async fn summarize_report(ctx: Context, topic: String) -> Result<String, Error> {
     tracing::info!("📝 summarize_report round starting...");
 
     // memo: the "fetch" happens once and is replayed on the second round,

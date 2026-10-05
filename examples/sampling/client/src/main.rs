@@ -54,7 +54,7 @@ async fn main() -> Result<(), Error> {
 
     // One call from here; the MRTR round-trips happen inside.
     let result = client
-        .call_tool("summarize_report", [("topic", "EMEA")])
+        .tools().call("summarize_report", [("topic", "EMEA")])
         .await?;
     tracing::info!("Result: {:?}", result.content);
 

@@ -132,7 +132,7 @@ async fn test_error_handling() -> Result<String, Error> {
 /// must answer `-32021 MissingRequiredClientCapability`.
 #[cfg(not(feature = "legacy-spec"))]
 #[tool(descr = "Requires the sampling capability the caller may not have declared")]
-async fn test_missing_capability(mut ctx: Context) -> Result<String, Error> {
+async fn test_missing_capability(ctx: Context) -> Result<String, Error> {
     let params = CreateMessageRequestParams::new()
         .with_message(SamplingMessage::user().with("ping"))
         .with_max_tokens(8);
@@ -144,31 +144,31 @@ async fn test_missing_capability(mut ctx: Context) -> Result<String, Error> {
 /// Mutates the tool list so an open `subscriptions/listen` stream must receive
 /// `notifications/tools/list_changed`.
 #[tool(descr = "Adds or removes a tool to trigger tools/list_changed")]
-async fn test_trigger_tool_change(mut ctx: Context) -> Result<String, Error> {
+async fn test_trigger_tool_change(ctx: Context) -> Result<String, Error> {
     const NAME: &str = "test_dynamic_tool";
-    if ctx.find_tool(NAME).await.is_some() {
-        ctx.remove_tool(NAME).await?;
+    if ctx.tools().find(NAME).await.is_some() {
+        ctx.tools().remove(NAME).await?;
         Ok(format!("{NAME} removed"))
     } else {
         let mut tool = Tool::new(NAME, || async { "dynamically added tool" });
         tool.with_description("A tool registered while the server was running");
-        ctx.add_tool(tool).await?;
+        ctx.tools().add(tool).await?;
         Ok(format!("{NAME} added"))
     }
 }
 
 /// The prompt-list counterpart of [`test_trigger_tool_change`].
 #[tool(descr = "Adds or removes a prompt to trigger prompts/list_changed")]
-async fn test_trigger_prompt_change(mut ctx: Context) -> Result<String, Error> {
+async fn test_trigger_prompt_change(ctx: Context) -> Result<String, Error> {
     const NAME: &str = "test_dynamic_prompt";
-    if ctx.remove_prompt(NAME).await?.is_some() {
+    if ctx.prompts().remove(NAME).await?.is_some() {
         return Ok(format!("{NAME} removed"));
     }
     let mut prompt = Prompt::new(NAME, || async {
         PromptMessage::user().with("dynamically added prompt")
     });
     prompt.with_description("A prompt registered while the server was running");
-    ctx.add_prompt(prompt).await?;
+    ctx.prompts().add(prompt).await?;
     Ok(format!("{NAME} added"))
 }
 
@@ -186,7 +186,7 @@ async fn test_logging_tool() -> &'static str {
 /// server never puts an independent JSON-RPC request on one.
 #[cfg(not(feature = "legacy-spec"))]
 #[tool(descr = "Elicits input so the response is a stream")]
-async fn test_streaming_elicitation(mut ctx: Context) -> Result<String, Error> {
+async fn test_streaming_elicitation(ctx: Context) -> Result<String, Error> {
     let params = ElicitRequestParams::form("Streaming elicitation")
         .with_required("name", "string")
         .into();
@@ -352,7 +352,7 @@ async fn test_elicitation_sep1330_enums(mut ctx: Context) -> Result<String, Erro
 
 #[cfg(not(feature = "legacy-spec"))]
 #[tool(descr = "Elicits a name, then greets it")]
-async fn test_input_required_result_elicitation(mut ctx: Context) -> Result<String, Error> {
+async fn test_input_required_result_elicitation(ctx: Context) -> Result<String, Error> {
     let params = ElicitRequestParams::form("What is your name?")
         .with_required("name", "string")
         .into();
@@ -362,7 +362,7 @@ async fn test_input_required_result_elicitation(mut ctx: Context) -> Result<Stri
 
 #[cfg(not(feature = "legacy-spec"))]
 #[tool(descr = "Asks the client's model a question")]
-async fn test_input_required_result_sampling(mut ctx: Context) -> Result<String, Error> {
+async fn test_input_required_result_sampling(ctx: Context) -> Result<String, Error> {
     let params = CreateMessageRequestParams::new()
         .with_message(SamplingMessage::user().with("What is the capital of France?"))
         .with_max_tokens(100);
@@ -373,7 +373,7 @@ async fn test_input_required_result_sampling(mut ctx: Context) -> Result<String,
 
 #[cfg(not(feature = "legacy-spec"))]
 #[tool(descr = "Asks the client for its roots")]
-async fn test_input_required_result_list_roots(mut ctx: Context) -> Result<String, Error> {
+async fn test_input_required_result_list_roots(ctx: Context) -> Result<String, Error> {
     #[allow(deprecated)]
     let roots = ctx.list_roots("client_roots").await?;
     Ok(format!("Client exposes {} root(s)", roots.roots.len()))
@@ -381,7 +381,7 @@ async fn test_input_required_result_list_roots(mut ctx: Context) -> Result<Strin
 
 #[cfg(not(feature = "legacy-spec"))]
 #[tool(descr = "Carries server state across the round-trip")]
-async fn test_input_required_result_request_state(mut ctx: Context) -> Result<String, Error> {
+async fn test_input_required_result_request_state(ctx: Context) -> Result<String, Error> {
     // `memo` is what puts server-computed data into `requestState`: it is
     // sealed into the blob on round 1 and replayed on round 2.
     let ticket: String = ctx
@@ -402,7 +402,7 @@ async fn test_input_required_result_request_state(mut ctx: Context) -> Result<St
 /// three round-trips for what fits in one.
 #[cfg(not(feature = "legacy-spec"))]
 #[tool(descr = "Asks for several inputs at once")]
-async fn test_input_required_result_multiple_inputs(mut ctx: Context) -> Result<String, Error> {
+async fn test_input_required_result_multiple_inputs(ctx: Context) -> Result<String, Error> {
     let form = ElicitRequestParams::form("What is your name?")
         .with_required("name", "string")
         .into();
@@ -426,7 +426,7 @@ async fn test_input_required_result_multiple_inputs(mut ctx: Context) -> Result<
 
 #[cfg(not(feature = "legacy-spec"))]
 #[tool(descr = "Needs two separate rounds of input")]
-async fn test_input_required_result_multi_round(mut ctx: Context) -> Result<String, Error> {
+async fn test_input_required_result_multi_round(ctx: Context) -> Result<String, Error> {
     let first = ElicitRequestParams::form("Step 1: your name?")
         .with_required("name", "string")
         .into();
@@ -442,7 +442,7 @@ async fn test_input_required_result_multi_round(mut ctx: Context) -> Result<Stri
 
 #[cfg(not(feature = "legacy-spec"))]
 #[tool(descr = "Elicits input so a tampered requestState can be replayed at it")]
-async fn test_input_required_result_tampered_state(mut ctx: Context) -> Result<String, Error> {
+async fn test_input_required_result_tampered_state(ctx: Context) -> Result<String, Error> {
     let params = ElicitRequestParams::form("State check")
         .with_required("name", "string")
         .into();
@@ -457,7 +457,7 @@ async fn test_input_required_result_tampered_state(mut ctx: Context) -> Result<S
 /// declaration before it asks, not after it is refused.
 #[cfg(not(feature = "legacy-spec"))]
 #[tool(descr = "Asks only for the input kinds the caller declared")]
-async fn test_input_required_result_capabilities(mut ctx: Context) -> Result<String, Error> {
+async fn test_input_required_result_capabilities(ctx: Context) -> Result<String, Error> {
     let declared = ctx.client_capabilities();
 
     // Down to the mode: a caller that named only `url` has not said it can fill
@@ -488,7 +488,7 @@ async fn test_input_required_result_capabilities(mut ctx: Context) -> Result<Str
 
 #[cfg(not(feature = "legacy-spec"))]
 #[prompt(descr = "A prompt that needs elicited input before it can render")]
-async fn test_input_required_result_prompt(mut ctx: Context) -> Result<PromptMessage, Error> {
+async fn test_input_required_result_prompt(ctx: Context) -> Result<PromptMessage, Error> {
     let params = ElicitRequestParams::form("What is your name?")
         .with_required("name", "string")
         .into();

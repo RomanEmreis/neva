@@ -54,8 +54,8 @@ async fn main() -> Result<(), Error> {
 
     // Both calls mutate server state, and both notifications come back on the
     // subscription rather than on the call's own reply.
-    client.call_tool("publish", ("name", "greet")).await?;
-    client.call_tool("touch", ()).await?;
+    client.tools().call("publish", ("name", "greet")).await?;
+    client.tools().call("touch", ()).await?;
 
     // The stream is live and independent of these calls, so give the
     // notifications a moment to land before tearing it down.

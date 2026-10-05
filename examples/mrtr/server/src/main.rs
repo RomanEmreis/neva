@@ -17,7 +17,7 @@ struct Shipping {
 }
 
 #[tool]
-async fn place_order(mut ctx: Context) -> Result<String, Error> {
+async fn place_order(ctx: Context) -> Result<String, Error> {
     // memo: fetched once; on every replay round this returns the cached value
     // instead of running the future again.
     let quote_cents: u32 = ctx

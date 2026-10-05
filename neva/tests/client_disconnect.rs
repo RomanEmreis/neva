@@ -52,7 +52,7 @@ async fn disconnecting_sends_no_notification() {
                 .with_timeout(std::time::Duration::from_secs(10))
         });
         client.connect().await.expect("connect");
-        client.list_tools(None).await.expect("list tools");
+        client.tools().list(None).await.expect("list tools");
         client.disconnect().await.expect("disconnect");
     }
 

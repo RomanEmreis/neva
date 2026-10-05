@@ -12,8 +12,8 @@ const WATCHED: &str = "res://config";
 
 /// Adds a tool, which emits `notifications/tools/list_changed`.
 #[tool]
-async fn publish(mut ctx: Context, name: String) -> Result<String, Error> {
-    ctx.add_tool(Tool::new(name.clone(), || async { "hello" }))
+async fn publish(ctx: Context, name: String) -> Result<String, Error> {
+    ctx.tools().add(Tool::new(name.clone(), || async { "hello" }))
         .await?;
     tracing::info!("published tool `{name}`");
     Ok(format!("published `{name}`"))
@@ -23,8 +23,8 @@ async fn publish(mut ctx: Context, name: String) -> Result<String, Error> {
 /// `notifications/resources/updated` -- but only to the streams whose filter
 /// lists this URI.
 #[tool]
-async fn touch(mut ctx: Context) -> Result<String, Error> {
-    ctx.resource_updated(WATCHED).await?;
+async fn touch(ctx: Context) -> Result<String, Error> {
+    ctx.resources().notify_updated(WATCHED).await?;
     tracing::info!("touched {WATCHED}");
     Ok(format!("touched {WATCHED}"))
 }

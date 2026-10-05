@@ -150,7 +150,7 @@ impl Context {
                 Error::new(ErrorCode::InternalError, "Subscription stream is closed")
             })?;
 
-        let mut sender = self.sender.clone();
+        let sender = self.sender.clone();
         let pump = tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
                 if sender.send(msg).await.is_err() {

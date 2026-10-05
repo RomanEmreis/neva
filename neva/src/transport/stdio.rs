@@ -517,7 +517,7 @@ impl StdIoServer {
 }
 
 impl TransportSender for StdIoSender {
-    async fn send(&mut self, msg: Message) -> Result<(), Error> {
+    async fn send(&self, msg: Message) -> Result<(), Error> {
         self.tx
             .send(msg)
             .map_err(|err| Error::new(ErrorCode::InternalError, err))

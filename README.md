@@ -4,7 +4,7 @@ Blazingly fast and easily configurable [Model Context Protocol (MCP)](https://mo
 With simple configuration and ergonomic APIs, it provides everything you need to quickly build MCP clients and servers, 
 fully aligned with the latest MCP specification.
 
-[![latest](https://img.shields.io/badge/latest-0.6.2-d8eb34)](https://crates.io/crates/neva)
+[![latest](https://img.shields.io/badge/latest-0.7.0-d8eb34)](https://crates.io/crates/neva)
 [![latest](https://img.shields.io/badge/rustc-1.90+-964B00)](https://releases.rs/docs/1.90.0/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-624bd1.svg)](https://github.com/RomanEmreis/neva/blob/main/LICENSE)
 [![CI](https://github.com/RomanEmreis/neva/actions/workflows/rust.yml/badge.svg)](https://github.com/RomanEmreis/neva/actions/workflows/rust.yml)
@@ -32,7 +32,7 @@ fully aligned with the latest MCP specification.
 #### Dependencies
 ```toml
 [dependencies]
-neva = { version = "0.6.2", features = ["client-full"] }
+neva = { version = "0.7.0", features = ["client-full"] }
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -50,8 +50,7 @@ async fn main() -> Result<(), Error> {
     client.connect().await?;
 
     // List tools
-    let tools = client.list_tools(None).await?;
-    for tool in tools.tools {
+    for tool in client.tools().list_all().await? {
         println!("- {}", tool.name);
     }
 
@@ -59,7 +58,7 @@ async fn main() -> Result<(), Error> {
     let args = [
         ("message", "Hello MCP!")
     ];
-    let result = client.call_tool("echo", args).await?;
+    let result = client.tools().call("echo", args).await?;
     println!("{:?}", result.content);
 
     client.disconnect().await
@@ -70,7 +69,7 @@ async fn main() -> Result<(), Error> {
 #### Dependencies
 ```toml
 [dependencies]
-neva = { version = "0.6.2", features = ["server-full"] }
+neva = { version = "0.7.0", features = ["server-full"] }
 tokio = { version = "1", features = ["full"] }
 ```
 #### Code

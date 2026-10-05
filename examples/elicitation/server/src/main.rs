@@ -8,7 +8,7 @@ struct Contact {
 }
 
 #[tool]
-async fn generate_business_card(mut ctx: Context) -> Result<String, Error> {
+async fn generate_business_card(ctx: Context) -> Result<String, Error> {
     let params = ElicitRequestParams::form("Please provide your contact information")
         .with_schema::<Contact>();
     
@@ -18,7 +18,7 @@ async fn generate_business_card(mut ctx: Context) -> Result<String, Error> {
 }
 
 #[tool]
-async fn pay_a_bill(mut ctx: Context) -> Result<String, Error> {
+async fn pay_a_bill(ctx: Context) -> Result<String, Error> {
     let params = ElicitRequestParams::url(
         "https://www.paypal.com/us/webapps/mpp/paypal-payment", 
         "Please pay your bill using PayPal.");

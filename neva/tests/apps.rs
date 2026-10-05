@@ -53,7 +53,11 @@ async fn serve(addr: &str) -> tokio::task::JoinHandle<()> {
 }
 
 async fn get_time(client: &mut Client) -> String {
-    let resp = client.call_tool("get_time", ()).await.expect("tools/call");
+    let resp = client
+        .tools()
+        .call("get_time", ())
+        .await
+        .expect("tools/call");
     resp.content
         .first()
         .and_then(|c| c.as_text())

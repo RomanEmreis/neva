@@ -6,7 +6,7 @@ use crate::types::{Root, root::ListRootsResult};
 use crate::{
     client::options::McpOptions,
     error::{Error, ErrorCode},
-    shared::{PendingResponse, RequestQueue},
+    shared::{PendingResponse, QueuedRequestGuard, RequestQueue},
     transport::{
         Receiver, Sender, Transport, TransportProto, TransportProtoReceiver, TransportProtoSender,
     },
@@ -112,7 +112,7 @@ impl Roots {
             roots.sender = Some(tx);
 
             let roots = roots.inner.clone();
-            let mut sender = notifications_sender.clone();
+            let sender = notifications_sender.clone();
             // `notifications/roots/list_changed` is removed in MCP 2026-07-28:
             // the server reads roots on the MRTR loop, so a change is simply
             // picked up on the next ask. A peer reached through the dual-mode
@@ -208,6 +208,9 @@ impl RequestHandler {
     }
 
     /// Returns a reference to the pending request queue
+    ///
+    /// Only the tests look: every send releases its own slot through a guard.
+    #[cfg(all(test, feature = "http-client"))]
     #[inline]
     pub(super) fn pending(&self) -> &RequestQueue {
         &self.pending
@@ -215,13 +218,12 @@ impl RequestHandler {
 
     /// Sends a request to MCP server
     #[inline]
-    pub(super) async fn send_request(&mut self, request: Request) -> Result<Response, Error> {
+    pub(super) async fn send_request(&self, request: Request) -> Result<Response, Error> {
         let id = request.id();
-        let receiver = self.pending.push(&id);
-        if let Err(err) = self.sender.send(request.into()).await {
-            let _ = self.pending.pop(&id);
-            return Err(err);
-        }
+        // Every way out releases the slot, the caller dropping this future
+        // included.
+        let (receiver, _slot) = self.pending.push_guarded(&id);
+        self.sender.send(request.into()).await?;
         self.pending.activate(&id);
 
         tokio::select! {
@@ -230,22 +232,17 @@ impl RequestHandler {
             // no response is coming; fail now rather than after the
             // full request timeout.
             _ = self.token.cancelled() => {
-                _ = self.pending.pop(&id);
                 Err(Error::new(ErrorCode::InternalError, "Connection closed"))
             }
             result = timeout(self.timeout, receiver) => match result {
                 Ok(Ok(PendingResponse::Response(resp))) => Ok(resp),
-                Ok(Ok(PendingResponse::Timeout)) => {
+                Ok(Ok(PendingResponse::Timeout)) | Err(_) => {
                     Err(Error::new(ErrorCode::Timeout, "Request timed out"))
                 }
                 Ok(Err(_)) => Err(Error::new(
                     ErrorCode::InternalError,
                     "Response channel closed",
                 )),
-                Err(_) => {
-                    _ = self.pending.pop(&id);
-                    Err(Error::new(ErrorCode::Timeout, "Request timed out"))
-                }
             }
         }
     }
@@ -258,7 +255,7 @@ impl RequestHandler {
     /// subscription is answered only when it ends, which may be hours later.
     #[cfg(not(feature = "legacy-spec"))]
     pub(super) async fn send_listen(
-        &mut self,
+        &self,
         request: Request,
     ) -> Result<tokio::sync::oneshot::Receiver<PendingResponse>, Error> {
         let id = request.id();
@@ -341,52 +338,52 @@ impl RequestHandler {
     /// - [`ErrorCode::InvalidRequest`] if `items` contains duplicate request IDs
     /// - Transport error if the underlying sender fails
     pub(super) async fn send_batch(
-        &mut self,
+        &self,
         items: Vec<MessageEnvelope>,
-    ) -> Result<Vec<(RequestId, tokio::sync::oneshot::Receiver<PendingResponse>)>, Error> {
+    ) -> Result<
+        Vec<(
+            tokio::sync::oneshot::Receiver<PendingResponse>,
+            QueuedRequestGuard<'_>,
+        )>,
+        Error,
+    > {
         validate_batch_ids(&items)?;
         #[cfg(not(feature = "legacy-spec"))]
         validate_no_listen(&items)?;
 
-        let mut receivers = Vec::new();
+        // Each slot's guard goes back to the caller with its receiver, and
+        // releases the slot however the wait for that reply ends. Until then
+        // it does the same for every way out of here: a batch that cannot be
+        // built, a write that fails.
+        let mut slots = Vec::new();
         let mut envelopes = Vec::new();
 
         for envelope in items {
             if let MessageEnvelope::Request(ref req) = envelope {
-                let id = req.id();
-                let receiver = self.pending.push(&id);
-                receivers.push((id, receiver));
+                slots.push(self.pending.push_guarded(&req.id()));
             }
             envelopes.push(envelope);
         }
 
         let batch = MessageBatch::new(envelopes)?;
-        if let Err(e) = self.sender.send(Message::Batch(batch)).await {
-            for (id, _rx) in &receivers {
-                let _ = self.pending.pop(id);
-            }
-            return Err(e);
-        }
-        for (id, _rx) in &receivers {
-            self.pending.activate(id);
+        self.sender.send(Message::Batch(batch)).await?;
+        for (_rx, slot) in &slots {
+            self.pending.activate(slot.id());
         }
 
-        Ok(receivers)
+        Ok(slots)
     }
 
     /// Sends the response to MCP server
     #[inline]
     #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
-    pub(super) async fn send_response(&mut self, resp: Response) {
-        send_response_impl(&mut self.sender, resp).await;
+    pub(super) async fn send_response(&self, resp: Response) {
+        send_response_impl(&self.sender, resp).await;
     }
 
     /// Sends a notification to MCP server
     #[inline]
-    pub(super) async fn send_notification(
-        &mut self,
-        notification: Notification,
-    ) -> Result<(), Error> {
+    pub(super) async fn send_notification(&self, notification: Notification) -> Result<(), Error> {
         self.sender.send(notification.into()).await
     }
 
@@ -398,7 +395,7 @@ impl RequestHandler {
     #[inline]
     fn start(self, mut rx: TransportProtoReceiver) -> Self {
         let pending = self.pending.clone();
-        let mut sender = self.sender.clone();
+        let sender = self.sender.clone();
         let roots = self.roots.inner.clone();
         let sampling_handler = self.sampling_handler.clone();
         let elicitation_handler = self.elicitation_handler.clone();
@@ -415,6 +412,10 @@ impl RequestHandler {
         let subscription_filters = self.subscription_filters.clone();
 
         tokio::task::spawn(async move {
+            let period = pending.sweep_period();
+            let mut sweep = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
             loop {
                 // Cancellation is a first-class exit here, not just an EOF the
                 // receiver happens to report: over HTTP the receiver holds a
@@ -424,6 +425,13 @@ impl RequestHandler {
                 let msg = tokio::select! {
                     biased;
                     _ = token.cancelled() => break,
+                    // Deadlines are otherwise checked only when a request goes
+                    // out or an answer comes in; a client that goes quiet would
+                    // keep every expired slot until its next one.
+                    _ = sweep.tick() => {
+                        pending.sweep();
+                        continue;
+                    }
                     msg = rx.recv() => match msg {
                         Ok(msg) => msg,
                         Err(_) => break,
@@ -444,7 +452,7 @@ impl RequestHandler {
                             &peer_mode,
                         )
                         .await;
-                        send_response_impl(&mut sender, resp).await;
+                        send_response_impl(&sender, resp).await;
                     }
                     Message::Notification(notification) => {
                         #[cfg(not(feature = "legacy-spec"))]
@@ -571,7 +579,7 @@ async fn dispatch_batch_deferred(
 }
 
 #[inline]
-async fn send_response_impl(sender: &mut TransportProtoSender, resp: Response) {
+async fn send_response_impl(sender: &TransportProtoSender, resp: Response) {
     if let Err(_err) = sender.send(resp.into()).await {
         #[cfg(feature = "tracing")]
         tracing::error!("Error sending response: {_err:?}");
@@ -1052,7 +1060,7 @@ mod tests {
         use tokio::time::{Duration, timeout};
 
         let token = CancellationToken::new();
-        let mut handler = RequestHandler::new(
+        let handler = RequestHandler::new(
             TransportProto::HttpClient(Box::default()),
             &McpOptions::default(),
             token.clone(),

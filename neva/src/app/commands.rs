@@ -146,16 +146,16 @@ impl App {
     /// Not registered under MCP 2026-07-28, where the method is folded into the
     /// `subscriptions/listen` filter; see [`Self::subscriptions_listen`].
     #[cfg(feature = "legacy-spec")]
-    pub(super) async fn resource_subscribe(mut ctx: Context, params: SubscribeRequestParams) {
-        ctx.subscribe_to_resource(params.uri);
+    pub(super) async fn resource_subscribe(ctx: Context, params: SubscribeRequestParams) {
+        ctx.resources().subscribe(params.uri);
     }
 
     /// An unsubscription to from resource change request handler
     ///
     /// Not registered under MCP 2026-07-28; see [`Self::resource_subscribe`].
     #[cfg(feature = "legacy-spec")]
-    pub(super) async fn resource_unsubscribe(mut ctx: Context, params: UnsubscribeRequestParams) {
-        ctx.unsubscribe_from_resource(&params.uri);
+    pub(super) async fn resource_unsubscribe(ctx: Context, params: UnsubscribeRequestParams) {
+        ctx.resources().unsubscribe(&params.uri);
     }
 
     /// A `subscriptions/listen` request handler (MCP 2026-07-28).

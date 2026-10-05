@@ -34,7 +34,7 @@ async fn main() -> Result<(), Error> {
     // `connect()` runs `server/discover` -- no `initialize` handshake under MCP 2026-07-28.
     client.connect().await?;
 
-    let result = client.call_tool("scan_workspace", ()).await?;
+    let result = client.tools().call("scan_workspace", ()).await?;
     tracing::info!("Result: {:?}", result.content);
 
     client.disconnect().await
