@@ -54,6 +54,9 @@ pub(crate) struct RequestHandle {
     /// Which push made this entry, so a guard releases its own and never a
     /// later request that took the same id.
     slot: u64,
+    /// Whether the request has gone out, so a response to it may still come.
+    /// Set by [`RequestQueue::activate`].
+    sent: bool,
 }
 
 /// Represents a request tracking "queue" that holds a hash map of [`oneshot::Sender`] for requests
@@ -115,22 +118,23 @@ impl RequestHandle {
             _cancellation_token: CancellationToken::new(),
             expires_at: (!ttl.is_zero()).then_some(Instant::now() + ttl),
             slot: 0,
+            sent: false,
         }
     }
 
     /// Sends a [`Response`] to MCP server
     pub(crate) fn send(self, resp: Response) {
-        match self.sender.send(PendingResponse::Response(resp)) {
-            Ok(_) => (),
-            Err(_err) => {
-                #[cfg(feature = "tracing")]
-                tracing::error!(
-                    logger = "neva",
-                    "Request handler failed to send response: {:?}",
-                    _err
-                );
-            }
-        };
+        // Nobody waiting is an ordinary outcome: a request its caller gave up
+        // on after it went out stays queued until its answer comes, and the
+        // answer then has nowhere to go but here.
+        if let Err(_resp) = self.sender.send(PendingResponse::Response(resp)) {
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                logger = "neva",
+                "Discarding a response its caller gave up waiting for: {:?}",
+                _resp
+            );
+        }
     }
 
     /// Whether this entry's TTL has run out.
@@ -173,13 +177,14 @@ impl RequestQueue {
     /// Pushes a request with [`RequestId`] to the "queue"
     /// and returns a [`oneshot::Receiver`] for the response.
     ///
-    /// Refuses an `id` that is already waiting for its response. Two requests
-    /// in flight under one id would share one slot: the second would replace
-    /// the first's waiter, and the first's response would be handed to the
-    /// second caller. Ids this crate generates never repeat, but a caller's own
-    /// -- a batch built by hand -- can repeat one, and with a client shared
+    /// Refuses an `id` a response may still arrive for: one that is waiting,
+    /// and one its caller gave up on after it was sent. Two requests under one
+    /// id would share one slot, and the first's response would be handed to
+    /// the second caller. Ids this crate generates never repeat, but a caller's
+    /// own -- a batch built by hand -- can repeat one, and with a client shared
     /// across tasks the two can be in flight together. An entry whose TTL has
-    /// run out is no longer waited on, so it gives its id up.
+    /// run out gives its id up: that is the point past which this client no
+    /// longer expects an answer.
     ///
     /// Outbound-request path. Its callers are the client's `listen` (2026-07-28)
     /// and the legacy server's callbacks; a build with neither has none, and
@@ -233,6 +238,15 @@ impl RequestQueue {
                 None
             }
             Entry::Occupied(mut entry) if entry.get().is_expired() => Some(entry.insert(handle)),
+            Entry::Occupied(entry) if entry.get().sender.is_closed() => {
+                return Err(Error::new(
+                    ErrorCode::InvalidRequest,
+                    format!(
+                        "Request id `{id}` was given up on after it was sent, and its response \
+                         may still arrive; send the retry under a fresh id"
+                    ),
+                ));
+            }
             Entry::Occupied(_) => {
                 return Err(Error::new(
                     ErrorCode::InvalidRequest,
@@ -257,6 +271,7 @@ impl RequestQueue {
     #[cfg_attr(not(feature = "legacy-spec"), allow(dead_code))]
     pub(crate) fn activate(&self, id: &RequestId) {
         if let Some(mut handle) = self.pending.get_mut(id) {
+            handle.sent = true;
             let Some(expires_at) = (!self.ttl.is_zero()).then_some(Instant::now() + self.ttl)
             else {
                 handle.expires_at = None;
@@ -376,18 +391,25 @@ impl Default for RequestQueue {
     }
 }
 
-/// Releases a request's slot when the wait for its response ends, however it
+/// Settles a request's slot when the wait for its response ends, however it
 /// ends.
 ///
 /// The wait can end without any of its own code running: a caller that drops
 /// the future (an outer `timeout`, a lost `select!` branch) stops it at its
-/// last suspension point. Without this the slot stays queued until the TTL
-/// sweep finds it -- and with requests sent concurrently over a shared client,
-/// a caller giving up on one is ordinary, not rare.
+/// last suspension point. What the slot needs then depends on whether the
+/// request went out:
+///
+/// - **Never sent** -- a refused id, a batch that could not be built, a failed
+///   write. No answer can come, so the slot is released at once.
+/// - **Sent.** The server may still answer, and an answer matched by id alone
+///   would be handed to whichever request holds that id next. So the entry
+///   stays, its waiter gone, until the answer arrives and is discarded or the
+///   TTL sweeps it; until then [`RequestQueue::push`] refuses the id. Freeing
+///   it sooner would trade a refused retry for a misrouted response.
 ///
 /// Releasing a slot the response already completed is a no-op, and so is
 /// releasing one a later request has since taken under the same id: the guard
-/// removes the entry its own push made and nothing else.
+/// touches the entry its own push made and nothing else.
 ///
 /// It borrows the queue for as long as the wait lasts and owns its id, so it
 /// can travel with whatever awaits the response: a batch hands each request's
@@ -418,8 +440,9 @@ impl QueuedRequestGuard<'_> {
 impl Drop for QueuedRequestGuard<'_> {
     #[inline]
     fn drop(&mut self) {
-        self.pending
-            .remove_if(&self.id, |_, handle| handle.slot == self.slot);
+        self.pending.remove_if(&self.id, |_, handle| {
+            handle.slot == self.slot && !handle.sent
+        });
     }
 }
 
@@ -460,6 +483,28 @@ mod tests {
 
         let _fresh = queue.push(&id).expect("an expired entry gives its id up");
         assert!(matches!(stale.await, Ok(PendingResponse::Timeout)));
+    }
+
+    /// A request given up on after it went out may still be answered, so its
+    /// id stays taken until the answer comes -- and the answer is discarded,
+    /// not handed to whoever asks under that id next.
+    #[cfg(feature = "client")]
+    #[test]
+    fn a_request_given_up_after_it_went_out_keeps_its_id() {
+        let queue = RequestQueue::default();
+        let id = RequestId::Number(7);
+
+        let (rx, guard) = queue.push_guarded(&id).expect("a fresh id");
+        queue.activate(&id);
+        drop(rx);
+        drop(guard);
+
+        let err = queue.push(&id).expect_err("its answer may still arrive");
+        assert!(err.to_string().contains("fresh id"), "{err}");
+
+        queue.complete(Response::success(id.clone(), json!({ "late": true })));
+        assert_eq!(queue.len(), 0, "the late answer settles the slot");
+        assert!(queue.push(&id).is_ok(), "and frees the id");
     }
 
     /// A guard releases the entry its own push made. By the time it drops, its

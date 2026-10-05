@@ -199,11 +199,14 @@ async fn a_request_id_already_in_flight_refuses_the_batch() {
 }
 
 /// A batch its caller gave up on -- an outer `timeout`, a lost `select!`
-/// branch -- gives its ids back at once. Held until the server answered or the
-/// TTL ran out, they would refuse a retry of the same hand-built batch for that
-/// whole time, against a server that may never answer.
+/// branch -- after it went out keeps its ids until the server answers. Freed
+/// at once, a retry under the same ids would be handed whichever answer came
+/// first, the abandoned request's included. So the retry is refused with a
+/// reason, a retry under fresh ids goes through, and once the late answers
+/// arrive and are discarded the old ids are free again -- and answer for the
+/// retry, not for the batch that was given up on.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_dropped_batch_gives_its_ids_back() {
+async fn a_dropped_batch_keeps_its_ids_until_answered() {
     use neva::types::{MessageEnvelope, Request, RequestId};
     use std::sync::Arc;
     use tokio::sync::Notify;
@@ -227,8 +230,8 @@ async fn a_dropped_batch_gives_its_ids_back() {
 
     let mut client = Client::new().with_options(|o| {
         o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
-            // Far longer than this test waits: the ids must come back because
-            // the batch was dropped, not because its requests timed out.
+            // Far longer than this test waits: what frees the ids must be the
+            // late answers, not the requests' own timeout.
             .with_timeout(Duration::from_secs(30))
     });
     client.connect().await.expect("connect");
@@ -251,14 +254,39 @@ async fn a_dropped_batch_gives_its_ids_back() {
         "the server holds both calls, so the outer timeout must fire"
     );
 
-    let responses = client
+    let err = client
         .call_batch(vec![call(881, "quick"), call(882, "quick")])
         .await
-        .expect("the abandoned batch gave its ids back");
-    let text = serde_json::to_string(&responses).expect("serialize");
-    assert!(text.contains("quick"), "{text}");
+        .expect_err("an answer to the abandoned batch may still arrive");
+    assert!(err.to_string().contains("fresh id"), "{err}");
+
+    let fresh = client
+        .call_batch(vec![call(883, "quick"), call(884, "quick")])
+        .await
+        .expect("fresh ids go through");
+    assert_eq!(fresh.len(), 2);
 
     release.notify_waiters();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let reused = loop {
+        match client
+            .call_batch(vec![call(881, "quick"), call(882, "quick")])
+            .await
+        {
+            Ok(responses) => break responses,
+            Err(err) if tokio::time::Instant::now() < deadline => {
+                assert!(err.to_string().contains("fresh id"), "{err}");
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(err) => panic!("the late answers never freed the ids: {err}"),
+        }
+    };
+    let text = serde_json::to_string(&reused).expect("serialize");
+    assert!(
+        text.contains("quick") && !text.contains("held"),
+        "the reused ids answer for the retry: {text}"
+    );
+
     server.abort();
 }
 
