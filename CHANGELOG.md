@@ -8,62 +8,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## 0.7.0
 
 ### Added
-* **A namespaced client API**, one namespace per MCP method prefix
-  (`neva::client::api`): `client.tools()`, `client.resources()`,
-  `client.prompts()` and `client.tasks()`. `client.tools().list(cursor)` is
-  `tools/list`, `client.prompts().get(name, args)` is `prompts/get`.
-  `list_all()` on tools, resources and prompts walks every page, and fails
-  past 64. A task-augmented call is `client.tools().as_task()`.
-* **The same shape on `Context`** (`neva::app::context::api`): `ctx.tools()`,
-  `ctx.resources()` and `ctx.prompts()` -- `list`, `find`, `call`, `read`,
-  `get`, `add`, `remove`, `notify_updated`.
+* **A namespaced client API** (`neva::client::api`): `client.tools()`,
+  `resources()`, `prompts()` and `tasks()`, one per MCP method prefix.
+  `list_all()` walks every page (an error past 64), and `tools().as_task()`
+  starts a task-augmented call.
+* **The same on `Context`** (`neva::app::context::api`): `ctx.tools()`,
+  `resources()` and `prompts()`.
 
 ### Changed
-* **`Client` request methods take `&self`.** A connected client can be shared
-  (`Arc<Client>`) and called from many tasks at once, its calls in flight
-  together. `BatchBuilder` and `TaskBuilder` borrow the client shared. Setup --
-  `connect`, `map_*`, `on_*`, roots -- still takes `&mut self`.
-* **`Context` methods take `&self`**, the registry changes included. A handler
-  no longer needs `mut ctx`, and now gets an `unused_mut` warning for it.
-* A request whose future is dropped mid-call -- on its own or in a batch --
-  releases its pending slot at once instead of at the request TTL; a late
-  answer to it is dropped.
-* `call_batch` numbers the requests it sends itself, and puts the caller's ids
-  back on the responses. A caller-chosen id could repeat one still owed an
-  answer, and the answer would then reach the wrong request.
-* A tool dropped for a malformed `x-mcp-header` stays refused until a listing
-  shows it fixed, or a listing complete in one page no longer carries it. A
-  traversal starting over no longer lifts the block.
-* A `tools/list` traversal starting over no longer forgets the `x-mcp-header`
-  annotations of the tools on pages it has not reached yet. A tool withdrawn
-  from a paginated listing mirrors until that listing's TTL runs out, or a
-  listing complete in one page drops it. The refusal recovery stops at the
-  page that carries its tool.
+* **`Client` request methods take `&self`**, so a connected client can be
+  shared (`Arc<Client>`) across tasks. Setup (`connect`, `map_*`, `on_*`,
+  roots) keeps `&mut self`.
+* **`Context` methods take `&self`**; `mut ctx` in a handler now warns.
+* `call_batch` sends its requests under ids the client generates, and puts
+  the caller's ids back on the responses.
+* A request dropped mid-call releases its pending slot at once; a late answer
+  to it is dropped.
+* `x-mcp-header`: a `tools/list` traversal starting over no longer clears the
+  registrations of later pages or lifts the block on a malformed tool. Both
+  change when a page lists the tool, or a one-page listing omits it.
 
 ### Fixed
-* **A `tasks/update` or `tasks/cancel` the server refuses is an error.** The
-  client answered `Ok(())` for a JSON-RPC error too -- through `TaskApi` on
-  `Client` and `client.tasks()` -- so a caller could wait on input the server
-  never took, or stop tending a task that was never cancelled.
-  `wait_to_completion` now stops at a refused update. Since 0.5.4.
+* A `tasks/update` or `tasks/cancel` the server refuses is an error instead
+  of `Ok(())`, and `wait_to_completion` stops at it. Since 0.5.4.
 
 ### Deprecated
-* The flat client methods, in favor of the namespaces: `list_tools`,
-  `call_tool`, `call_tool_raw`, `call_tool_as_task`, `list_resources`,
-  `list_resource_templates`, `read_resource`, `subscribe_to_resource`,
-  `unsubscribe_from_resource`, `list_prompts`, `get_prompt`, `task`, and
-  `TaskBuilder::call_tool`.
-* Their `Context` counterparts: `find_tool`, `find_tools`, `use_tool`,
-  `use_tools`, `add_tool`, `remove_tool`, `resource`, `add_resource`,
-  `remove_resource`, `resource_updated`, `subscribe_to_resource`,
-  `unsubscribe_from_resource`, `is_subscribed`, `prompt`, `add_prompt`,
-  `remove_prompt`. Each deprecation note names its replacement.
+* The flat methods on `Client` (`list_tools`, `call_tool`, `read_resource`,
+  `get_prompt`, `task`, ...) and `Context` (`find_tool`, `use_tool`,
+  `add_tool`, `resource`, `prompt`, ...), in favor of the namespaces. Each
+  note names its replacement.
 
 ### Changed (breaking)
-* `Context::tools()` returns the tools namespace rather than `Vec<Tool>`:
-  `ctx.tools().await` becomes `ctx.tools().list().await`.
-* `TaskApi` methods take `&self`, and `wait_to_completion` takes `&A`.
-  Callers are unaffected; implementations outside neva need the new receivers.
+* `ctx.tools()` returns the tools namespace: `ctx.tools().await` becomes
+  `ctx.tools().list().await`.
+* `TaskApi` methods take `&self`, and `wait_to_completion` takes `&A`. Only
+  implementations outside neva need the new receivers.
 
 ## 0.6.2
 
