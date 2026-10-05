@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * A request whose future is dropped mid-call releases its pending slot at once
   instead of at the request TTL.
 
+### Fixed
+* **A `tasks/update` or `tasks/cancel` the server refuses is an error.** The
+  client answered `Ok(())` for a JSON-RPC error too -- through `TaskApi` on
+  `Client` and `client.tasks()` -- so a caller could wait on input the server
+  never took, or stop tending a task that was never cancelled.
+  `wait_to_completion` now stops at a refused update. Since 0.5.4.
+
 ### Deprecated
 * The flat client methods, in favor of the namespaces: `list_tools`,
   `call_tool`, `call_tool_raw`, `call_tool_as_task`, `list_resources`,

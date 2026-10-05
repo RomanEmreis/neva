@@ -432,6 +432,48 @@ async fn mrtr_once_in_a_required_task_is_rejected() {
     handle.abort();
 }
 
+/// A refused `tasks/update` or `tasks/cancel` is an error to the caller.
+///
+/// Both acknowledge with an empty result, so there is nothing to read back on
+/// success -- which made it easy to read nothing back on failure too. A caller
+/// told `Ok` for input the server never took waits for a task that cannot
+/// resume; one told `Ok` for a cancellation that never happened stops tending
+/// a task that is still running.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_task_update_or_cancel_is_an_error() {
+    use neva::{client::Client, types::mrtr::InputResponses};
+
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new().with_options(|opt| {
+        opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
+            .with_tasks()
+    });
+    app.map_tool("ping", || async move { "pong".to_string() });
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let mut client = Client::new().with_options(|opt| {
+        opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
+            .with_timeout(std::time::Duration::from_secs(5))
+    });
+    client.connect().await.expect("connect");
+
+    let tasks = client.tasks();
+    let update = tasks.update("no-such-task", InputResponses::new()).await;
+    assert!(
+        update.is_err(),
+        "the server refused the update, so the caller must hear it: {update:?}"
+    );
+    let cancel = tasks.cancel("no-such-task").await;
+    assert!(
+        cancel.is_err(),
+        "the server refused the cancellation, so the caller must hear it: {cancel:?}"
+    );
+
+    handle.abort();
+}
+
 fn pick_free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();

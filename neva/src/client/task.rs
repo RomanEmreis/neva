@@ -164,8 +164,11 @@ impl shared::TaskApi for Client {
             input_responses: responses,
         };
 
+        // The acknowledgement is empty, but a refusal is not: read the
+        // response, or the error the server sent back reads as success.
         self.command(crate::types::task::commands::UPDATE, Some(params))
-            .await
+            .await?
+            .into_result::<serde::de::IgnoredAny>()
             .map(|_| ())
     }
 
@@ -176,8 +179,10 @@ impl shared::TaskApi for Client {
     /// `get_task` to learn the outcome.
     async fn cancel_task(&self, id: impl Into<String>) -> Result<(), Error> {
         let params = CancelTaskRequestParams { id: id.into() };
+        // See `update_task`: an empty acknowledgement, but a refusal to read.
         self.command(crate::types::task::commands::CANCEL, Some(params))
-            .await
+            .await?
+            .into_result::<serde::de::IgnoredAny>()
             .map(|_| ())
     }
 
