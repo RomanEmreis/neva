@@ -25,8 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `connect`, `map_*`, `on_*`, roots -- still takes `&mut self`.
 * **`Context` methods take `&self`**, the registry changes included. A handler
   no longer needs `mut ctx`, and now gets an `unused_mut` warning for it.
-* A request whose future is dropped mid-call releases its pending slot at once
-  instead of at the request TTL.
+* A request whose future is dropped mid-call -- on its own or in a batch --
+  releases its pending slot at once instead of at the request TTL.
 * A caller-chosen request id that is still waiting for a response -- in a hand
   built `call_batch`, say -- is refused, rather than taking over the other
   request's slot and its response.

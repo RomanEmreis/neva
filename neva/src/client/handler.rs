@@ -6,7 +6,7 @@ use crate::types::{Root, root::ListRootsResult};
 use crate::{
     client::options::McpOptions,
     error::{Error, ErrorCode},
-    shared::{PendingResponse, RequestQueue},
+    shared::{PendingResponse, QueuedRequestGuard, RequestQueue},
     transport::{
         Receiver, Sender, Transport, TransportProto, TransportProtoReceiver, TransportProtoSender,
     },
@@ -208,6 +208,9 @@ impl RequestHandler {
     }
 
     /// Returns a reference to the pending request queue
+    ///
+    /// Only the tests look: every send releases its own slot through a guard.
+    #[cfg(all(test, feature = "http-client"))]
     #[inline]
     pub(super) fn pending(&self) -> &RequestQueue {
         &self.pending
@@ -337,47 +340,41 @@ impl RequestHandler {
     pub(super) async fn send_batch(
         &self,
         items: Vec<MessageEnvelope>,
-    ) -> Result<Vec<(RequestId, tokio::sync::oneshot::Receiver<PendingResponse>)>, Error> {
+    ) -> Result<
+        Vec<(
+            tokio::sync::oneshot::Receiver<PendingResponse>,
+            QueuedRequestGuard<'_>,
+        )>,
+        Error,
+    > {
         validate_batch_ids(&items)?;
         #[cfg(not(feature = "legacy-spec"))]
         validate_no_listen(&items)?;
 
-        let mut receivers = Vec::new();
+        // Each slot's guard goes back to the caller with its receiver, and
+        // releases the slot however the wait for that reply ends. Until then
+        // it does the same for every way out of here: a refused id, a batch
+        // that cannot be built, a write that fails.
+        let mut slots = Vec::new();
         let mut envelopes = Vec::new();
 
         for envelope in items {
             if let MessageEnvelope::Request(ref req) = envelope {
-                let id = req.id();
                 // An id another request is still waiting on refuses the whole
                 // batch, as a duplicate inside it does: the batch is one write,
-                // and none of it has gone out yet. The slots this batch already
-                // took are handed back.
-                let receiver = match self.pending.push(&id) {
-                    Ok(receiver) => receiver,
-                    Err(err) => {
-                        for (taken, _rx) in &receivers {
-                            let _ = self.pending.pop(taken);
-                        }
-                        return Err(err);
-                    }
-                };
-                receivers.push((id, receiver));
+                // and none of it has gone out yet.
+                slots.push(self.pending.push_guarded(&req.id())?);
             }
             envelopes.push(envelope);
         }
 
         let batch = MessageBatch::new(envelopes)?;
-        if let Err(e) = self.sender.send(Message::Batch(batch)).await {
-            for (id, _rx) in &receivers {
-                let _ = self.pending.pop(id);
-            }
-            return Err(e);
-        }
-        for (id, _rx) in &receivers {
-            self.pending.activate(id);
+        self.sender.send(Message::Batch(batch)).await?;
+        for (_rx, slot) in &slots {
+            self.pending.activate(slot.id());
         }
 
-        Ok(receivers)
+        Ok(slots)
     }
 
     /// Sends the response to MCP server

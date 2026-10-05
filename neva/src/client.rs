@@ -220,11 +220,10 @@ impl Client {
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
 
         let request_timeout = handler.timeout();
-        let pending = handler.pending().clone();
         let token = handler.cancellation();
-        let receivers = handler.send_batch(items).await?;
+        let slots = handler.send_batch(items).await?;
 
-        collect_batch_responses(receivers, &pending, request_timeout, token)
+        collect_batch_responses(slots, request_timeout, token)
             .await
             .into_iter()
             .collect()
@@ -315,48 +314,43 @@ impl Client {
 }
 
 /// Awaits a batch's per-request receivers concurrently, returning one result
-/// per receiver in input order, with the same per-request timeout and pending
-/// cleanup as a single [`RequestHandler::send_request`].
+/// per receiver in input order, with the same per-request timeout and slot
+/// release as a single [`RequestHandler::send_request`].
 ///
-/// Uses `join_all` (not `try_join_all`) so every future runs to completion: the
-/// timeout-cleanup branch (`pending.pop`) executes for each timed-out request
-/// even when another request in the same batch has already failed.
+/// Each request's slot guard moves into the future awaiting its reply, so the
+/// slot goes back when that wait ends -- answered, timed out, or abandoned
+/// with the whole batch by a caller that dropped it. Uses `join_all` (not
+/// `try_join_all`) so one failed request does not cut the others' waits short.
 async fn collect_batch_responses(
-    receivers: Vec<(
-        RequestId,
+    slots: Vec<(
         tokio::sync::oneshot::Receiver<crate::shared::PendingResponse>,
+        crate::shared::QueuedRequestGuard<'_>,
     )>,
-    pending: &crate::shared::RequestQueue,
     request_timeout: std::time::Duration,
     token: tokio_util::sync::CancellationToken,
 ) -> Vec<Result<Response, Error>> {
     use futures_util::future::join_all;
 
-    let futures = receivers.into_iter().map(|(id, rx)| {
-        let pending = pending.clone();
+    let futures = slots.into_iter().map(|(rx, slot)| {
         let token = token.clone();
         async move {
+            let _slot = slot;
             tokio::select! {
                 biased;
                 // The transport died (or a shutdown signal cancelled it)
                 // -- no response is coming for any receiver.
                 _ = token.cancelled() => {
-                    let _ = pending.pop(&id);
                     Err(Error::new(ErrorCode::InternalError, "Connection closed"))
                 }
                 result = tokio::time::timeout(request_timeout, rx) => match result {
                     Ok(Ok(crate::shared::PendingResponse::Response(resp))) => Ok(resp),
-                    Ok(Ok(crate::shared::PendingResponse::Timeout)) => {
+                    Ok(Ok(crate::shared::PendingResponse::Timeout)) | Err(_) => {
                         Err(Error::new(ErrorCode::Timeout, "Batch request timed out"))
                     }
                     Ok(Err(_)) => Err(Error::new(
                         ErrorCode::InternalError,
                         "Response channel closed",
                     )),
-                    Err(_) => {
-                        let _ = pending.pop(&id);
-                        Err(Error::new(ErrorCode::Timeout, "Batch request timed out"))
-                    }
                 }
             }
         }

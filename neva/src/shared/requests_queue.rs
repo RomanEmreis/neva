@@ -181,10 +181,17 @@ impl RequestQueue {
     /// across tasks the two can be in flight together. An entry whose TTL has
     /// run out is no longer waited on, so it gives its id up.
     ///
-    /// Outbound-request path (client, or legacy server callbacks); unused by an
-    /// 2026-07-28 server build without the client.
+    /// Outbound-request path. Its callers are the client's `listen` (2026-07-28)
+    /// and the legacy server's callbacks; a build with neither has none, and
+    /// other client sends go through [`Self::push_guarded`].
     #[inline]
-    #[cfg_attr(not(feature = "legacy-spec"), allow(dead_code))]
+    #[cfg_attr(
+        not(any(
+            all(feature = "client", not(feature = "legacy-spec")),
+            all(feature = "server", feature = "legacy-spec")
+        )),
+        allow(dead_code)
+    )]
     pub(crate) fn push(&self, id: &RequestId) -> Result<oneshot::Receiver<PendingResponse>, Error> {
         self.push_slot(id).map(|(receiver, _)| receiver)
     }
@@ -192,16 +199,16 @@ impl RequestQueue {
     /// [`Self::push`], plus a guard that releases the slot when dropped.
     #[cfg(feature = "client")]
     #[inline]
-    pub(crate) fn push_guarded<'a>(
-        &'a self,
-        id: &'a RequestId,
-    ) -> Result<(oneshot::Receiver<PendingResponse>, QueuedRequestGuard<'a>), Error> {
+    pub(crate) fn push_guarded(
+        &self,
+        id: &RequestId,
+    ) -> Result<(oneshot::Receiver<PendingResponse>, QueuedRequestGuard<'_>), Error> {
         let (receiver, slot) = self.push_slot(id)?;
         Ok((
             receiver,
             QueuedRequestGuard {
-                queue: self,
-                id,
+                pending: &self.pending,
+                id: id.clone(),
                 slot,
             },
         ))
@@ -382,24 +389,37 @@ impl Default for RequestQueue {
 /// releasing one a later request has since taken under the same id: the guard
 /// removes the entry its own push made and nothing else.
 ///
+/// It borrows the queue for as long as the wait lasts and owns its id, so it
+/// can travel with whatever awaits the response: a batch hands each request's
+/// guard to the future collecting that request's reply. Its envelopes have
+/// gone into the batch by then, so there is no id left to borrow.
+///
 /// The HTTP server's `PendingSlot` guards a different map: the transport's
 /// POST-to-reply routes, which it fills itself and can hand over to a streamed
 /// body. This one guards an entry [`RequestQueue::push_guarded`] made and
 /// never transfers.
 #[cfg(feature = "client")]
 pub(crate) struct QueuedRequestGuard<'a> {
-    queue: &'a RequestQueue,
-    id: &'a RequestId,
+    pending: &'a DashMap<RequestId, RequestHandle>,
+    id: RequestId,
     slot: u64,
+}
+
+#[cfg(feature = "client")]
+impl QueuedRequestGuard<'_> {
+    /// The id of the request whose slot this guards.
+    #[inline]
+    pub(crate) fn id(&self) -> &RequestId {
+        &self.id
+    }
 }
 
 #[cfg(feature = "client")]
 impl Drop for QueuedRequestGuard<'_> {
     #[inline]
     fn drop(&mut self) {
-        self.queue
-            .pending
-            .remove_if(self.id, |_, handle| handle.slot == self.slot);
+        self.pending
+            .remove_if(&self.id, |_, handle| handle.slot == self.slot);
     }
 }
 

@@ -198,6 +198,70 @@ async fn a_request_id_already_in_flight_refuses_the_batch() {
     server.abort();
 }
 
+/// A batch its caller gave up on -- an outer `timeout`, a lost `select!`
+/// branch -- gives its ids back at once. Held until the server answered or the
+/// TTL ran out, they would refuse a retry of the same hand-built batch for that
+/// whole time, against a server that may never answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dropped_batch_gives_its_ids_back() {
+    use neva::types::{MessageEnvelope, Request, RequestId};
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let release = Arc::new(Notify::new());
+    let mut app = App::new()
+        .without_greeting()
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+    let gate = release.clone();
+    app.map_tool("hold", move || {
+        let gate = gate.clone();
+        async move {
+            gate.notified().await;
+            "held".to_string()
+        }
+    });
+    app.map_tool("quick", || async move { "quick".to_string() });
+    let server = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let mut client = Client::new().with_options(|o| {
+        o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
+            // Far longer than this test waits: the ids must come back because
+            // the batch was dropped, not because its requests timed out.
+            .with_timeout(Duration::from_secs(30))
+    });
+    client.connect().await.expect("connect");
+
+    let call = |id: i64, tool: &str| {
+        MessageEnvelope::Request(Request::new(
+            Some(RequestId::Number(id)),
+            "tools/call",
+            Some(serde_json::json!({ "name": tool, "arguments": {} })),
+        ))
+    };
+
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(300),
+            client.call_batch(vec![call(881, "hold"), call(882, "hold")]),
+        )
+        .await
+        .is_err(),
+        "the server holds both calls, so the outer timeout must fire"
+    );
+
+    let responses = client
+        .call_batch(vec![call(881, "quick"), call(882, "quick")])
+        .await
+        .expect("the abandoned batch gave its ids back");
+    let text = serde_json::to_string(&responses).expect("serialize");
+    assert!(text.contains("quick"), "{text}");
+
+    release.notify_waiters();
+    server.abort();
+}
+
 fn pick_free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
