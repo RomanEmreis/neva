@@ -46,7 +46,8 @@ async fn calls_from_many_tasks_are_in_flight_together() {
         tokio::spawn(async move {
             let name = format!("caller-{i}");
             let resp = client
-                .call_tool("meet", [("name", name.as_str())])
+                .tools()
+                .call("meet", [("name", name.as_str())])
                 .await
                 .expect("call");
             (name, resp)

@@ -3,19 +3,17 @@
 use crate::error::{Error, ErrorCode};
 use crate::shared;
 use crate::shared::{BlockingCall, BlockingFn, BoxFuture, marker};
+#[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
+use crate::types::RequestParamsMeta;
 use crate::types::Root;
 use crate::types::sampling::{CreateMessageRequestParams, CreateMessageResult, SamplingHandler};
 use crate::types::{
-    CallToolRequestParams, CallToolResponse, GetPromptRequestParams, GetPromptResult,
-    Implementation, ListPromptsRequestParams, ListPromptsResult,
-    ListResourceTemplatesRequestParams, ListResourceTemplatesResult, ListResourcesRequestParams,
-    ListResourcesResult, ListToolsRequestParams, ListToolsResult, MessageEnvelope,
-    ReadResourceRequestParams, ReadResourceResult, Request, RequestId, RequestParamsMeta, Response,
-    ServerCapabilities, Uri,
+    CallToolRequestParams, CallToolResponse, GetPromptResult, Implementation, ListPromptsResult,
+    ListResourceTemplatesResult, ListResourcesResult, ListToolsRequestParams, ListToolsResult,
+    MessageEnvelope, ReadResourceResult, Request, RequestId, Response, ServerCapabilities, Uri,
     cursor::Cursor,
     elicitation::{ElicitRequestParams, ElicitResult, ElicitationHandler},
     notification::Notification,
-    resource::{SubscribeRequestParams, UnsubscribeRequestParams},
 };
 use crate::types::{ClientCapabilities, InitializeRequestParams, InitializeResult};
 #[cfg(not(feature = "legacy-spec"))]
@@ -27,23 +25,13 @@ use std::fmt::{Debug, Formatter};
 use std::{future::Future, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
-#[cfg(feature = "tasks")]
-use crate::types::TaskMetadata;
 #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
 #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 use crate::types::{
     GetTaskPayloadRequestParams, ListTasksRequestParams, ListTasksResult, Task, TaskPayload,
 };
 
-/// How many `tools/list` pages the `HeaderMismatch` recovery will walk looking
-/// for the tool it was sent back for.
-///
-/// The traversal ends on its own at a page without a `nextCursor`; this is the
-/// bound for a server that never stops handing them out, which would otherwise
-/// keep a single failed call walking forever with nothing above it able to see.
-#[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
-const MAX_REFRESH_PAGES: usize = 64;
-
+pub mod api;
 pub mod batch;
 mod calls;
 mod capabilities;
@@ -183,35 +171,11 @@ impl Client {
     }
 
     /// Returns a [`TaskBuilder`] for constructing a task-augmented request.
-    ///
-    /// Chain setters such as [`TaskBuilder::with_ttl`] to configure the task,
-    /// then call [`TaskBuilder::call_tool`] to execute.
-    ///
-    /// # Example
-    /// ```no_run
-    /// use neva::client::Client;
-    /// use neva::error::Error;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), Error> {
-    ///     let mut client = Client::new();
-    ///     client.connect().await?;
-    ///
-    ///     let result = client
-    ///         .task()
-    ///         .with_ttl(5000)
-    ///         .call_tool("echo", [("message", "Hello MCP!")])
-    ///         .await?;
-    ///
-    ///     client.disconnect().await
-    /// }
-    /// ```
     #[cfg(feature = "tasks")]
+    #[deprecated(since = "0.7.0", note = "use `client.tools().as_task()`")]
+    #[inline]
     pub fn task(&self) -> TaskBuilder<'_> {
-        TaskBuilder {
-            client: self,
-            metadata: TaskMetadata::default(),
-        }
+        self.tools().as_task()
     }
 
     /// Sends a batch of messages to the MCP server and awaits all responses.
@@ -519,12 +483,12 @@ mod tests {
         shared::<Client>();
 
         let client = Client::new();
-        sendable(client.list_tools(None));
-        sendable(client.call_tool("add", [("a", 1), ("b", 2)]));
-        sendable(client.list_resources(None));
-        sendable(client.read_resource("file:///readme.md"));
-        sendable(client.list_prompts(None));
-        sendable(client.get_prompt("summarise", ()));
+        sendable(client.tools().list(None));
+        sendable(client.tools().call("add", [("a", 1), ("b", 2)]));
+        sendable(client.resources().list(None));
+        sendable(client.resources().read("file:///readme.md"));
+        sendable(client.prompts().list(None));
+        sendable(client.prompts().get("summarise", ()));
         #[cfg(feature = "legacy-spec")]
         sendable(client.ping());
         sendable(client.batch().list_tools().send());
@@ -773,7 +737,7 @@ mod abandoned_request_tests {
         let idle = queued(&client);
 
         assert!(
-            tokio::time::timeout(Duration::from_millis(300), client.call_tool("stall", ()))
+            tokio::time::timeout(Duration::from_millis(300), client.tools().call("stall", ()))
                 .await
                 .is_err(),
             "the tool never answers, so the outer timeout must fire"

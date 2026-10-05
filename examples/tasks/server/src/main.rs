@@ -16,7 +16,7 @@ async fn endless_tool() {
 // `examples/sampling` for that round-trip. Elicitation is the one input kind a
 // task can await, via `ctx.task()`.
 #[tool(task_support = "required")]
-async fn tool_with_elicitation(mut ctx: Context, task: Meta<RelatedTaskMetadata>) -> String {
+async fn tool_with_elicitation(ctx: Context, task: Meta<RelatedTaskMetadata>) -> String {
     let params = ElicitRequestParams::form("Are you sure to proceed?")
         .with_related_task(task);
 

@@ -2,12 +2,12 @@ use tracing_subscriber::prelude::*;
 use neva::prelude::*;
 
 #[tool]
-async fn generate_weather_report(mut ctx: Context, city1: String, city2: String) -> Result<String, Error> {
-    let Some(tool) = ctx.find_tool("get_weather").await else {
+async fn generate_weather_report(ctx: Context, city1: String, city2: String) -> Result<String, Error> {
+    let Some(tool) = ctx.tools().find("get_weather").await else {
         return Err(ErrorCode::MethodNotFound.into());
     };
 
-    let prompt = ctx.prompt("weather", [
+    let prompt = ctx.prompts().get("weather", [
         ("city1", city1),
         ("city2", city2)
     ]).await?;
@@ -33,7 +33,7 @@ async fn generate_weather_report(mut ctx: Context, city1: String, city2: String)
                 .iter()
                 .fold(SamplingMessage::assistant(), |msg, tool| msg.with(tool.clone()));
 
-            let tool_results = ctx.use_tools(tools).await;
+            let tool_results = ctx.tools().call_all(tools).await;
 
             let user_msg = tool_results
                 .into_iter()

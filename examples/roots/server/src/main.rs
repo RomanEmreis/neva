@@ -14,7 +14,7 @@ use neva::prelude::*;
 use tracing_subscriber::prelude::*;
 
 #[tool]
-async fn scan_workspace(mut ctx: Context) -> Result<String, Error> {
+async fn scan_workspace(ctx: Context) -> Result<String, Error> {
     // Everything above an input point re-runs on every round-trip, so guard
     // side effects with `once` / `memo` -- here the log line proves the handler
     // really does execute twice.

@@ -34,7 +34,7 @@ async fn main() -> Result<(), Error> {
 
     client.connect().await?;
 
-    let tools = client.list_tools(None).await?;
+    let tools = client.tools().list(None).await?;
 
     for tool in tools.tools.iter() {
         // Every tool has a `content` answer; only some have a face.
@@ -60,7 +60,7 @@ async fn main() -> Result<(), Error> {
         .and_then(|tool| tool.ui())
         .and_then(|ui| ui.resource_uri)
     {
-        let result = client.read_resource(uri).await?;
+        let result = client.resources().read(uri).await?;
         for contents in result.contents.iter() {
             println!(
                 "\n{} [{}] {} bytes",
@@ -77,7 +77,7 @@ async fn main() -> Result<(), Error> {
 
     // This client declared MCP Apps, so the server answers with the bare time
     // for the clock face. Drop `.with_apps()` above and it answers in a sentence.
-    let result = client.call_tool("get_time", ()).await?;
+    let result = client.tools().call("get_time", ()).await?;
     if let Some(text) = result.content.first().and_then(|c| c.as_text()) {
         println!("\nget_time: {}", text.text);
     }

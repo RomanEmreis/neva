@@ -411,7 +411,7 @@ async fn run(client: &mut Client, scenario: &str) -> Result<(), Error> {
         // it back: list the tools, then hand the observed `inputSchema` to the
         // echo tool verbatim. What arrives is what survived the round trip.
         "json-schema-2020-12-preservation" => {
-            let tools = client.list_tools(None).await?;
+            let tools = client.tools().list(None).await?;
             let observed = tools
                 .tools
                 .iter()
@@ -427,7 +427,8 @@ async fn run(client: &mut Client, scenario: &str) -> Result<(), Error> {
                 })?;
 
             let result = client
-                .call_tool("json_schema_echo", Some([("schema", observed)]))
+                .tools()
+                .call("json_schema_echo", Some([("schema", observed)]))
                 .await?;
             tracing::info!(?result, "echoed the observed schema back");
         }
@@ -436,7 +437,8 @@ async fn run(client: &mut Client, scenario: &str) -> Result<(), Error> {
         // is the behavior under test.
         "elicitation-sep1034-client-defaults" => {
             let result = client
-                .call_tool(
+                .tools()
+                .call(
                     "test_client_elicitation_defaults",
                     None::<[(&str, &str); 0]>,
                 )
@@ -449,9 +451,9 @@ async fn run(client: &mut Client, scenario: &str) -> Result<(), Error> {
         // from is filled by `tools/list`, so a call issued before one would
         // rightly carry no `Mcp-Param-*` header at all.
         "http-custom-headers" => {
-            client.list_tools(None).await?;
+            client.tools().list(None).await?;
             for call in dictated_calls() {
-                let result = client.call_tool(&*call.name, call.arguments).await?;
+                let result = client.tools().call(&*call.name, call.arguments).await?;
                 tracing::info!(tool = %call.name, ?result, "dictated call returned");
             }
         }
@@ -460,7 +462,7 @@ async fn run(client: &mut Client, scenario: &str) -> Result<(), Error> {
         // that survived `tools/list` states both halves at once: the valid tool
         // is still reachable, and no invalid one is.
         "http-invalid-tool-headers" => {
-            let tools = client.list_tools(None).await?;
+            let tools = client.tools().list(None).await?;
             let names = tools
                 .tools
                 .iter()
@@ -468,7 +470,7 @@ async fn run(client: &mut Client, scenario: &str) -> Result<(), Error> {
                 .collect::<Vec<_>>();
             tracing::info!(?names, "tools that survived listing");
             for name in names {
-                match client.call_tool(&*name, None::<[(&str, &str); 0]>).await {
+                match client.tools().call(&*name, None::<[(&str, &str); 0]>).await {
                     Ok(result) => tracing::info!(%name, ?result, "tool returned"),
                     Err(err) => tracing::warn!(%name, %err, "tool failed"),
                 }
@@ -481,9 +483,10 @@ async fn run(client: &mut Client, scenario: &str) -> Result<(), Error> {
         // here; the reconnection is the whole subject, so a call that ends in
         // an error has still produced the traffic being judged.
         "sse-retry" => {
-            client.list_tools(None).await?;
+            client.tools().list(None).await?;
             match client
-                .call_tool("test_reconnection", None::<[(&str, &str); 0]>)
+                .tools()
+                .call("test_reconnection", None::<[(&str, &str); 0]>)
                 .await
             {
                 Ok(result) => tracing::info!(?result, "resumed and completed"),
@@ -495,13 +498,13 @@ async fn run(client: &mut Client, scenario: &str) -> Result<(), Error> {
         // more. Listing first is what puts a token in hand for the escalation
         // to widen rather than replace.
         "auth/scope-step-up" => {
-            let tools = client.list_tools(None).await?;
+            let tools = client.tools().list(None).await?;
             let name = tools
                 .tools
                 .first()
                 .map(|t| t.name.to_string())
                 .unwrap_or_else(|| "test-tool".to_string());
-            match client.call_tool(&*name, None::<[(&str, &str); 0]>).await {
+            match client.tools().call(&*name, None::<[(&str, &str); 0]>).await {
                 Ok(result) => tracing::info!(%name, ?result, "call succeeded after step-up"),
                 Err(err) => tracing::warn!(%name, %err, "call failed"),
             }
@@ -512,10 +515,11 @@ async fn run(client: &mut Client, scenario: &str) -> Result<(), Error> {
         | "request-metadata"
         | "http-standard-headers"
         | "json-schema-ref-no-deref" => {
-            let tools = client.list_tools(None).await?;
+            let tools = client.tools().list(None).await?;
             tracing::info!(count = tools.tools.len(), "tools listed");
             let result = client
-                .call_tool(
+                .tools()
+                .call(
                     "add_numbers",
                     Some([("a", serde_json::json!(2)), ("b", serde_json::json!(3))]),
                 )
@@ -536,7 +540,7 @@ async fn run(client: &mut Client, scenario: &str) -> Result<(), Error> {
                 "test_mrtr_unrelated",
                 "test_mrtr_no_result_type",
             ] {
-                match client.call_tool(tool, None::<[(&str, &str); 0]>).await {
+                match client.tools().call(tool, None::<[(&str, &str); 0]>).await {
                     Ok(result) => tracing::info!(%tool, ?result, "tool returned"),
                     Err(err) => tracing::warn!(%tool, %err, "tool failed"),
                 }
@@ -545,7 +549,7 @@ async fn run(client: &mut Client, scenario: &str) -> Result<(), Error> {
         // Everything else: exercise the read-only surface so the scenario has
         // traffic to inspect without guessing at fixture names.
         _ => {
-            let tools = client.list_tools(None).await?;
+            let tools = client.tools().list(None).await?;
             tracing::info!(count = tools.tools.len(), "tools listed");
         }
     }

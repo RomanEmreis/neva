@@ -740,7 +740,8 @@ mod dual_mode_tests {
         );
 
         let tools = client
-            .list_tools(None)
+            .tools()
+            .list(None)
             .await
             .expect("tools/list must work after the fallback");
         assert!(tools.tools.is_empty());
@@ -810,7 +811,8 @@ mod dual_mode_tests {
         assert!(client.is_legacy_peer(), "peer must be marked legacy");
 
         let tools = client
-            .list_tools(None)
+            .tools()
+            .list(None)
             .await
             .expect("tools/list must work after the fallback");
         assert!(tools.tools.is_empty());
@@ -1049,7 +1051,7 @@ mod roundtrip_tests {
         client.connect().await.expect("discover must succeed");
         assert!(!client.is_legacy_peer(), "2026-07-28 peers never fall back");
 
-        let tools = client.list_tools(None).await.expect("tools/list");
+        let tools = client.tools().list(None).await.expect("tools/list");
         assert_eq!(tools.tools.len(), 1);
         assert_eq!(tools.tools[0].name, "echo");
 

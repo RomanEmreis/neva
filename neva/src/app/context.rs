@@ -25,7 +25,6 @@ use crate::{
         Prompt, ReadResourceRequestParams, ReadResourceResult, Request, Resource, Response, Tool,
         ToolResult, ToolUse, Uri,
         elicitation::{ElicitRequestParams, ElicitResult},
-        resource::SubscribeRequestParams,
     },
 };
 
@@ -69,6 +68,7 @@ pub(crate) type ToolOrTaskResponse = Either<CreateTaskResult, CallToolResponse>;
 
 type RequestHandlers = HashMap<String, RequestHandler<Response>>;
 
+pub mod api;
 mod effects;
 mod interaction;
 mod listen;
@@ -324,7 +324,7 @@ impl Context {
     /// };
     ///
     /// #[tool]
-    /// async fn generate_poem(mut ctx: Context, _topic: String) -> Result<String, Error> {
+    /// async fn generate_poem(ctx: Context, _topic: String) -> Result<String, Error> {
     ///     let params = ElicitRequestParams::new("What is the poem mood you'd like?")
     ///         .with_required("mood", "string");
     ///     let result = ctx.elicit(params).await?;
@@ -333,7 +333,7 @@ impl Context {
     /// # }
     /// ```
     #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
-    pub async fn elicit(&mut self, params: ElicitRequestParams) -> Result<ElicitResult, Error> {
+    pub async fn elicit(&self, params: ElicitRequestParams) -> Result<ElicitResult, Error> {
         let related_task = params.related_task();
 
         if let Some(related_task) = related_task {
@@ -393,7 +393,7 @@ impl Context {
     ///
     /// Removed in MCP 2026-07-28; available only under `legacy-spec`.
     #[cfg(feature = "legacy-spec")]
-    pub async fn complete_elicitation(&mut self, id: impl Into<String>) -> Result<(), Error> {
+    pub async fn complete_elicitation(&self, id: impl Into<String>) -> Result<(), Error> {
         let params = serde_json::to_value(
             crate::types::elicitation::ElicitationCompleteParams::new(id),
         )
@@ -409,7 +409,7 @@ impl Context {
     /// a bare status would send it back to `tasks/get` for the
     /// `inputRequests` / `result` / `error` the notification is meant to carry.
     #[cfg(all(feature = "tasks", not(feature = "legacy-spec")))]
-    pub async fn task_changed(&mut self, id: &str) -> Result<(), Error> {
+    pub async fn task_changed(&self, id: &str) -> Result<(), Error> {
         let task = self.options.tasks.get_state(id)?;
         let params = serde_json::to_value(task).ok();
         self.send_notification(crate::types::task::commands::STATUS, params)
@@ -418,7 +418,7 @@ impl Context {
 
     /// Sends notification that a task with `id` was changed.
     #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
-    pub async fn task_changed(&mut self, id: &str) -> Result<(), Error> {
+    pub async fn task_changed(&self, id: &str) -> Result<(), Error> {
         let task = self.options.tasks.get_status(id)?;
         let params = serde_json::to_value(task).ok();
         self.send_notification(crate::types::task::commands::STATUS, params)
@@ -493,7 +493,7 @@ impl Context {
     #[inline]
     #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     async fn send_maybe_task_augmented_request<T: DeserializeOwned>(
-        &mut self,
+        &self,
         req: Request,
         is_task_aug: bool,
     ) -> Result<T, Error> {
@@ -560,7 +560,7 @@ impl Context {
     /// bus, which delivers straight to the local registry.
     #[inline]
     async fn send_notification(
-        &mut self,
+        &self,
         method: &str,
         params: Option<serde_json::Value>,
     ) -> Result<(), Error> {

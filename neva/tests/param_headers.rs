@@ -211,7 +211,7 @@ async fn a_batched_call_of_an_annotated_tool_still_runs() {
     client.connect().await.expect("connect");
 
     // The listing is what registers the annotation client-side.
-    let tools = client.list_tools(None).await.expect("tools/list");
+    let tools = client.tools().list(None).await.expect("tools/list");
     assert_eq!(tools.tools.len(), 1, "the annotated tool must survive");
 
     let responses = client
@@ -285,11 +285,12 @@ async fn an_annotated_tool_survives_a_listing_that_is_stale_on_arrival() {
     });
     client.connect().await.expect("connect");
 
-    let tools = client.list_tools(None).await.expect("tools/list");
+    let tools = client.tools().list(None).await.expect("tools/list");
     assert_eq!(tools.ttl_ms, 0, "this test is about a zero-TTL listing");
 
     let result = client
-        .call_tool("query", [("region", "us-west1")])
+        .tools()
+        .call("query", [("region", "us-west1")])
         .await
         .expect("the retry must carry the headers the first attempt omitted");
 
@@ -362,14 +363,15 @@ async fn the_refusal_recovery_pages_until_it_finds_the_tool() {
 
     // Only the first page, which is exactly what leaves the annotated tool
     // unregistered.
-    let page = client.list_tools(None).await.expect("tools/list");
+    let page = client.tools().list(None).await.expect("tools/list");
     assert!(
         page.next_cursor.is_some() && !page.tools.iter().any(|t| &*t.name == "z_query"),
         "this test needs the annotated tool to sit past the first page"
     );
 
     let result = client
-        .call_tool("z_query", [("region", "us-west1")])
+        .tools()
+        .call("z_query", [("region", "us-west1")])
         .await
         .expect("the recovery must page far enough to refresh the refused tool");
 
@@ -458,18 +460,20 @@ async fn a_recovery_that_stops_early_would_unblock_a_later_page() {
 
     // Walk the whole listing first, which is what puts the malformed tool on
     // record as dropped.
-    let first = client.list_tools(None).await.expect("tools/list");
+    let first = client.tools().list(None).await.expect("tools/list");
     let cursor = first
         .next_cursor
         .expect("this test needs the malformed tool to sit past the first page");
     assert!(!first.tools.iter().any(|t| &*t.name == "z_bad"));
     client
-        .list_tools(Some(cursor))
+        .tools()
+        .list(Some(cursor))
         .await
         .expect("the second page");
 
     let blocked = client
-        .call_tool("z_bad", [("region", "us-west1")])
+        .tools()
+        .call("z_bad", [("region", "us-west1")])
         .await
         .expect_err("a tool dropped for a malformed declaration cannot be called");
     assert!(
@@ -480,12 +484,14 @@ async fn a_recovery_that_stops_early_would_unblock_a_later_page() {
     // The listing is stale on arrival (`ttlMs: 0`), so this call goes out bare,
     // is refused, and runs the recovery -- finding its tool on the first page.
     client
-        .call_tool("a_query", [("region", "us-west1")])
+        .tools()
+        .call("a_query", [("region", "us-west1")])
         .await
         .expect("the recovery re-lists and the retry carries the headers");
 
     let still_blocked = client
-        .call_tool("z_bad", [("region", "us-west1")])
+        .tools()
+        .call("z_bad", [("region", "us-west1")])
         .await
         .expect_err("the recovery must not have forgotten the second page");
     assert!(
@@ -527,7 +533,8 @@ async fn a_tool_the_refresh_cannot_find_keeps_its_original_refusal() {
     client.connect().await.expect("connect");
 
     let err = client
-        .call_tool("withdrawn", [("region", "us-west1")])
+        .tools()
+        .call("withdrawn", [("region", "us-west1")])
         .await
         .expect_err("a call the server refuses for missing headers stays refused");
 
@@ -668,7 +675,8 @@ async fn concurrent_calls_of_an_annotated_tool_all_carry_their_headers() {
         tokio::spawn(async move {
             let region = format!("region-{i}");
             let result = client
-                .call_tool("query", [("region", region.as_str())])
+                .tools()
+                .call("query", [("region", region.as_str())])
                 .await;
             (region, result)
         })

@@ -33,8 +33,8 @@ async fn main() -> Result<(), Error> {
     tracing::info!("Calling tool with elicitation as task...");
     
     let result = client
-        .task()
-        .call_tool("tool_with_elicitation", ()).await;
+        .tools().as_task()
+        .call("tool_with_elicitation", ()).await;
     
     tracing::info!("Received result: {:?}", result);
 
@@ -43,9 +43,9 @@ async fn main() -> Result<(), Error> {
     let ttl = 10000; // 10 seconds
     
     let result = client
-        .task()
+        .tools().as_task()
         .with_ttl(ttl)
-        .call_tool("endless_tool", ()).await;
+        .call("endless_tool", ()).await;
     
     tracing::info!("Received result: {:?}", result);
 

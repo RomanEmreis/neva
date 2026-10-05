@@ -34,7 +34,7 @@ async fn main() -> Result<(), Error> {
 
     // List tools
     tracing::info!("--- LIST TOOLS ---");
-    let tools = client.list_tools(None).await?;
+    let tools = client.tools().list(None).await?;
     for tool in tools.tools.iter() {
         tracing::info!("- {}", tool.name);
     }
@@ -42,27 +42,27 @@ async fn main() -> Result<(), Error> {
     // Call a tool
     tracing::info!("--- CALL TOOL ---");
     let args = ("message", "Hello MCP!");
-    let result = client.call_tool("echo", args).await?;
+    let result = client.tools().call("echo", args).await?;
     tracing::info!("{:?}", result.content);
 
     // Structured content
     tracing::info!("--- STRUCTURED CONTENT ---");
     let tool = tools.get("get-structured-content").unwrap();
     let args = ("location", "New York");
-    let result = client.call_tool(&tool.name, args).await?;
+    let result = client.tools().call(&tool.name, args).await?;
     let weather: Weather = tool.validate(&result).and_then(|res| res.as_json())?;
     tracing::info!("{:?}", weather);
 
     // List resources
     tracing::info!("--- LIST RESOURCES ---");
-    let resources = client.list_resources(None).await?;
+    let resources = client.resources().list(None).await?;
 
     tracing::info!("--- PAGE: 1 ---");
     for res in resources.resources {
         tracing::info!("- {}: {:?}", res.name, res.uri);
     }
     // Fetch the next "page"
-    let resources = client.list_resources(resources.next_cursor).await?;
+    let resources = client.resources().list(resources.next_cursor).await?;
     tracing::info!("--- PAGE: 2 ---");
     for res in resources.resources {
         tracing::info!("- {}: {:?}", res.name, res.uri);
@@ -70,7 +70,7 @@ async fn main() -> Result<(), Error> {
 
     // List templates
     tracing::info!("--- LIST RESOURCE TEMPLATES ---");
-    let templates = client.list_resource_templates(None).await?;
+    let templates = client.resources().templates(None).await?;
     for template in templates.templates {
         tracing::info!("- {}: {:?}", template.name, template.uri_template);
     }
@@ -78,13 +78,14 @@ async fn main() -> Result<(), Error> {
     // Read resource
     tracing::info!("--- READ RESOURCE ---");
     let resource = client
-        .read_resource("demo://resource/static/document/architecture.md")
+        .resources()
+        .read("demo://resource/static/document/architecture.md")
         .await?;
     tracing::info!("{:?}", resource.contents);
 
     // List prompts
     tracing::info!("--- LIST PROMPTS ---");
-    let prompts = client.list_prompts(None).await?;
+    let prompts = client.prompts().list(None).await?;
     for prompt in prompts.prompts {
         tracing::info!("- {}, {:?}", prompt.name, prompt.args);
     }
@@ -92,7 +93,7 @@ async fn main() -> Result<(), Error> {
     // Get prompt
     tracing::info!("--- GET PROMPT ---");
     let args = [("city", "New York"), ("state", "NY")];
-    let prompt = client.get_prompt("args-prompt", args).await?;
+    let prompt = client.prompts().get("args-prompt", args).await?;
     tracing::info!("{:?}: {:?}", prompt.descr, prompt.messages);
 
     // This can be uncommented to check the log notifications from MCP server

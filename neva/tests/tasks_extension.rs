@@ -112,7 +112,7 @@ async fn task_augmented_tool_elicits_via_suspend_resume() {
         opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
             .with_tasks()
     });
-    app.map_tool("greet_task", |mut ctx: Context| async move {
+    app.map_tool("greet_task", |ctx: Context| async move {
         let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
             .with_required("name", "string")
             .into();
@@ -267,7 +267,7 @@ async fn mrtr_elicit_inside_a_task_is_rejected_with_guidance() {
         opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
             .with_tasks()
     });
-    app.map_tool("bad_elicit", |mut ctx: Context| async move {
+    app.map_tool("bad_elicit", |ctx: Context| async move {
         let params: ElicitRequestParams = ElicitRequestParams::form("Your name?")
             .with_required("name", "string")
             .into();

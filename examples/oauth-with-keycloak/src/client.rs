@@ -35,12 +35,12 @@ async fn main() -> Result<(), Error> {
     client.connect().await?;
 
     tracing::info!("--- CALL whoami ---");
-    let result = client.call_tool("whoami", ()).await?;
+    let result = client.tools().call("whoami", ()).await?;
     tracing::info!("{:?}", result.content);
 
     // `demo` carries the `admin` realm role, so the gated tool works too
     tracing::info!("--- CALL admin_report ---");
-    let result = client.call_tool("admin_report", ("name", "q3")).await?;
+    let result = client.tools().call("admin_report", ("name", "q3")).await?;
     tracing::info!("{:?}", result.content);
 
     client.disconnect().await

@@ -18,7 +18,7 @@ impl Context {
     /// use neva::{Context, error::Error, tool};
     ///
     /// #[tool]
-    /// async fn handle_roots(mut ctx: Context) -> Result<(), Error> {
+    /// async fn handle_roots(ctx: Context) -> Result<(), Error> {
     ///     let roots = ctx.list_roots().await?;
     ///
     ///     // do something with roots
@@ -28,7 +28,7 @@ impl Context {
     /// # }
     /// ```
     #[cfg(feature = "legacy-spec")]
-    pub async fn list_roots(&mut self) -> Result<ListRootsResult, Error> {
+    pub async fn list_roots(&self) -> Result<ListRootsResult, Error> {
         let method = crate::types::root::commands::LIST;
         let req = Request::new(
             Some(RequestId::Uuid(uuid::Uuid::new_v4())),
@@ -52,7 +52,7 @@ impl Context {
     /// };
     ///
     /// #[tool]
-    /// async fn generate_poem(mut ctx: Context, topic: String) -> Result<String, Error> {
+    /// async fn generate_poem(ctx: Context, topic: String) -> Result<String, Error> {
     ///     let params = CreateMessageRequestParams::new()
     ///         .with_message(format!("Write a short poem about {topic}"))
     ///         .with_sys_prompt("You are a talented poet who writes concise, evocative verses.");
@@ -64,7 +64,7 @@ impl Context {
     /// ```
     #[cfg(all(not(feature = "tasks"), feature = "legacy-spec"))]
     pub async fn sample(
-        &mut self,
+        &self,
         params: CreateMessageRequestParams,
     ) -> Result<CreateMessageResult, Error> {
         let method = crate::types::sampling::commands::CREATE;
@@ -90,7 +90,7 @@ impl Context {
     /// };
     ///
     /// #[tool]
-    /// async fn generate_poem(mut ctx: Context, topic: String) -> Result<String, Error> {
+    /// async fn generate_poem(ctx: Context, topic: String) -> Result<String, Error> {
     ///     let params = CreateMessageRequestParams::new()
     ///         .with_message(format!("Write a short poem about {topic}"))
     ///         .with_sys_prompt("You are a talented poet who writes concise, evocative verses.");
@@ -102,7 +102,7 @@ impl Context {
     /// ```
     #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     pub async fn sample(
-        &mut self,
+        &self,
         params: CreateMessageRequestParams,
     ) -> Result<CreateMessageResult, Error> {
         let method = crate::types::sampling::commands::CREATE;
@@ -130,7 +130,7 @@ impl Context {
     /// };
     ///
     /// #[tool]
-    /// async fn generate_poem(mut ctx: Context, _topic: String) -> Result<String, Error> {
+    /// async fn generate_poem(ctx: Context, _topic: String) -> Result<String, Error> {
     ///     let params = ElicitRequestParams::new("What is the poem mood you'd like?")
     ///         .with_required("mood", "string");
     ///     let result = ctx.elicit(params).await?;
@@ -139,7 +139,7 @@ impl Context {
     /// # }
     /// ```
     #[cfg(all(not(feature = "tasks"), feature = "legacy-spec"))]
-    pub async fn elicit(&mut self, params: ElicitRequestParams) -> Result<ElicitResult, Error> {
+    pub async fn elicit(&self, params: ElicitRequestParams) -> Result<ElicitResult, Error> {
         let method = crate::types::elicitation::commands::CREATE;
         let req = Request::new(
             Some(RequestId::Uuid(uuid::Uuid::new_v4())),
@@ -167,7 +167,7 @@ impl Context {
     /// use neva::{Context, error::Error, types::elicitation::ElicitRequestParams, tool};
     ///
     /// #[tool]
-    /// async fn greet(mut ctx: Context) -> Result<String, Error> {
+    /// async fn greet(ctx: Context) -> Result<String, Error> {
     ///     let params = ElicitRequestParams::form("Your name?")
     ///         .with_required("name", "string")
     ///         .into();
@@ -178,7 +178,7 @@ impl Context {
     /// ```
     #[cfg(not(feature = "legacy-spec"))]
     pub async fn elicit(
-        &mut self,
+        &self,
         key: impl Into<String>,
         params: ElicitRequestParams,
     ) -> Result<ElicitResult, Error> {
@@ -225,7 +225,7 @@ impl Context {
     /// use neva::{Context, error::Error, types::elicitation::ElicitRequestParams, tool};
     ///
     /// #[tool]
-    /// async fn greet(mut ctx: Context) -> Result<String, Error> {
+    /// async fn greet(ctx: Context) -> Result<String, Error> {
     ///     if ctx.client_capabilities().elicitation.is_none() {
     ///         return Ok("Hello, stranger!".to_string());
     ///     }
@@ -340,7 +340,7 @@ impl Context {
     /// use neva::types::sampling::{CreateMessageRequestParams, SamplingMessage};
     ///
     /// #[tool]
-    /// async fn summarize(mut ctx: Context, text: String) -> Result<String, Error> {
+    /// async fn summarize(ctx: Context, text: String) -> Result<String, Error> {
     ///     let params = CreateMessageRequestParams::new()
     ///         .with_message(SamplingMessage::user().with(format!("Summarize: {text}")));
     ///     # #[allow(deprecated)]
@@ -354,7 +354,7 @@ impl Context {
         note = "sampling is deprecated in MCP 2026-07-28; it returns as an MRTR input-request kind only for migration"
     )]
     pub async fn sample(
-        &mut self,
+        &self,
         key: impl Into<String>,
         params: crate::types::sampling::CreateMessageRequestParams,
     ) -> Result<crate::types::sampling::CreateMessageResult, Error> {
@@ -383,7 +383,7 @@ impl Context {
     /// use neva::{Context, error::Error, tool};
     ///
     /// #[tool]
-    /// async fn scan(mut ctx: Context) -> Result<String, Error> {
+    /// async fn scan(ctx: Context) -> Result<String, Error> {
     ///     # #[allow(deprecated)]
     ///     let roots = ctx.list_roots("roots").await?;
     ///     Ok(format!("{} roots", roots.roots.len()))
@@ -395,7 +395,7 @@ impl Context {
         note = "roots are deprecated in MCP 2026-07-28; they return as an MRTR input-request kind only for migration"
     )]
     pub async fn list_roots(
-        &mut self,
+        &self,
         key: impl Into<String>,
     ) -> Result<crate::types::root::ListRootsResult, Error> {
         #[allow(deprecated)]

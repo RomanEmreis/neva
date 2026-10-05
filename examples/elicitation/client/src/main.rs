@@ -45,10 +45,10 @@ async fn main() -> Result<(), Error> {
     // No `on_elicitation_completed` under MCP 2026-07-28: the notification is
     // gone, and answering the URL elicitation *is* the completion signal.
 
-    let result = client.call_tool("generate_business_card", ()).await?;
+    let result = client.tools().call("generate_business_card", ()).await?;
     tracing::info!("Received result: {:?}", result.content);
 
-    let result = client.call_tool("pay_a_bill", ()).await?;
+    let result = client.tools().call("pay_a_bill", ()).await?;
     tracing::info!("Received result: {:?}", result.content);
 
     client.disconnect().await

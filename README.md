@@ -50,8 +50,7 @@ async fn main() -> Result<(), Error> {
     client.connect().await?;
 
     // List tools
-    let tools = client.list_tools(None).await?;
-    for tool in tools.tools {
+    for tool in client.tools().list_all().await? {
         println!("- {}", tool.name);
     }
 
@@ -59,7 +58,7 @@ async fn main() -> Result<(), Error> {
     let args = [
         ("message", "Hello MCP!")
     ];
-    let result = client.call_tool("echo", args).await?;
+    let result = client.tools().call("echo", args).await?;
     println!("{:?}", result.content);
 
     client.disconnect().await

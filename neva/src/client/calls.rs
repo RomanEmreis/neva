@@ -1,10 +1,11 @@
-//! The MCP methods a client calls on a server.
+//! The MCP methods a client calls on a server, and the machinery behind them.
 //!
-//! Listing is paginated behind the scenes: the `list_*` methods walk the cursor
-//! and hand back whole collections. `call_tool` carries the extra machinery --
-//! `Mcp-Param-*` header mirroring is derived from the tool annotations this
-//! client last listed, so a call can be rejected for headers built from a stale
-//! listing and has to recover by re-listing and retrying once.
+//! The methods themselves live in [`super::api`], one namespace per method
+//! prefix; the flat ones here are their deprecated spellings. What stays is
+//! `command` and the `tools/call` machinery: `Mcp-Param-*` header mirroring is
+//! derived from the tool annotations this client last listed, so a call can be
+//! rejected for headers built from a stale listing and has to recover by
+//! re-listing and retrying once.
 
 use super::*;
 
@@ -44,42 +45,18 @@ impl Client {
     }
 
     /// Requests a list of tools that MCP server provides
-    ///
-    /// # Example
-    /// ```no_run
-    /// use neva::client::Client;
-    /// use neva::error::Error;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), Error> {
-    ///     let mut client = Client::new();
-    ///
-    ///     client.connect().await?;
-    ///
-    ///     // Fetch all or initial list of tools if the MCP server provides pagination
-    ///     let tools = client.list_tools(None).await?;
-    ///     
-    ///     // Fetch the next page of tools is any   
-    ///     let tools = client.list_tools(tools.next_cursor).await?;
-    ///
-    ///     client.disconnect().await
-    /// }
-    /// ```
+    #[deprecated(since = "0.7.0", note = "use `client.tools().list(cursor)`")]
+    #[inline]
     pub async fn list_tools(&self, cursor: Option<Cursor>) -> Result<ListToolsResult, Error> {
-        self.list_tools_inner(
-            cursor,
-            #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
-            None,
-        )
-        .await
+        self.tools().list(cursor).await
     }
 
-    /// [`Self::list_tools`], plus the tool this listing was fetched to retry and
-    /// the id of that retry -- which may mirror the tool's annotations
-    /// regardless of the listing's TTL. Only that request: every other call,
-    /// of this tool or any other on the page, is held to the TTL, and handing
-    /// them the same exception would let them mirror from a listing nothing
-    /// refreshed on their behalf.
+    /// [`Tools::list`](super::api::Tools::list), plus the tool this listing was
+    /// fetched to retry and the id of that retry -- which may mirror the tool's
+    /// annotations regardless of the listing's TTL. Only that request: every
+    /// other call, of this tool or any other on the page, is held to the TTL,
+    /// and handing them the same exception would let them mirror from a
+    /// listing nothing refreshed on their behalf.
     ///
     /// See [`Self::retry_after_header_mismatch`].
     pub(super) async fn list_tools_inner(
@@ -109,8 +86,9 @@ impl Client {
     }
 
     /// Runs a batched `tools/list` response through the same registry update a
-    /// direct [`Self::list_tools`] performs, rewriting the response in place so
-    /// the caller never sees a tool the client refuses to call.
+    /// direct [`Tools::list`](super::api::Tools::list) performs, rewriting the
+    /// response in place so the caller never sees a tool the client refuses to
+    /// call.
     ///
     /// A batched listing is always a fresh traversal: [`BatchBuilder`] enqueues
     /// it without a cursor. A response that does not parse as a listing is left
@@ -245,232 +223,49 @@ impl Client {
     }
 
     /// Requests a list of resources that MCP server provides
-    ///
-    /// # Example
-    /// ```no_run
-    /// use neva::client::Client;
-    /// use neva::error::Error;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), Error> {
-    ///     let mut client = Client::new();
-    ///
-    ///     client.connect().await?;
-    ///
-    ///     // Fetch all or initial list of resources if the MCP server provides pagination
-    ///     let resources = client.list_resources(None).await?;
-    ///     
-    ///     // Fetch the next page of resources is any   
-    ///     let resources = client.list_resources(resources.next_cursor).await?;
-    ///
-    ///     client.disconnect().await
-    /// }
-    /// ```
+    #[deprecated(since = "0.7.0", note = "use `client.resources().list(cursor)`")]
+    #[inline]
     pub async fn list_resources(
         &self,
         cursor: Option<Cursor>,
     ) -> Result<ListResourcesResult, Error> {
-        let params = ListResourcesRequestParams { cursor };
-        self.command(crate::types::resource::commands::LIST, Some(params))
-            .await?
-            .into_result()
+        self.resources().list(cursor).await
     }
 
     /// Requests a list of resource templates that MCP server provides
-    ///
-    /// # Example
-    /// ```no_run
-    /// use neva::client::Client;
-    /// use neva::error::Error;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), Error> {
-    ///     let mut client = Client::new();
-    ///
-    ///     client.connect().await?;
-    ///
-    ///     // Fetch all or initial list of resource templates if the MCP server provides pagination
-    ///     let templates = client.list_resource_templates(None).await?;
-    ///     
-    ///     // Fetch the next page of resource templates is any   
-    ///     let templates = client.list_resource_templates(templates.next_cursor).await?;
-    ///
-    ///     client.disconnect().await
-    /// }
-    /// ```
+    #[deprecated(since = "0.7.0", note = "use `client.resources().templates(cursor)`")]
+    #[inline]
     pub async fn list_resource_templates(
         &self,
         cursor: Option<Cursor>,
     ) -> Result<ListResourceTemplatesResult, Error> {
-        let params = ListResourceTemplatesRequestParams { cursor };
-        self.command(
-            crate::types::resource::commands::TEMPLATES_LIST,
-            Some(params),
-        )
-        .await?
-        .into_result()
+        self.resources().templates(cursor).await
     }
 
     /// Requests a list of prompts that MCP server provides
-    ///
-    /// # Example
-    /// ```no_run
-    /// use neva::client::Client;
-    /// use neva::error::Error;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), Error> {
-    ///     let mut client = Client::new();
-    ///
-    ///     client.connect().await?;
-    ///
-    ///     // Fetch all or initial list of prompts if the MCP server provides pagination
-    ///     let prompts = client.list_prompts(None).await?;
-    ///     
-    ///     // Fetch the next page of prompts templates is any   
-    ///     let prompts = client.list_prompts(prompts.next_cursor).await?;
-    ///
-    ///     client.disconnect().await
-    /// }
-    /// ```
+    #[deprecated(since = "0.7.0", note = "use `client.prompts().list(cursor)`")]
+    #[inline]
     pub async fn list_prompts(&self, cursor: Option<Cursor>) -> Result<ListPromptsResult, Error> {
-        let params = ListPromptsRequestParams { cursor };
-        self.command(crate::types::prompt::commands::LIST, Some(params))
-            .await?
-            .into_result()
+        self.prompts().list(cursor).await
     }
 
     /// Calls a tool that MCP server supports
-    ///
-    /// # Example
-    /// ```no_run
-    /// use neva::client::Client;
-    /// use neva::error::Error;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), Error> {
-    ///     let mut client = Client::new();
-    ///
-    ///     client.connect().await?;
-    ///
-    ///     let args = [("message", "Hello MCP!")]; // or let args = ("message", "Hello MCP!");
-    ///     let result = client.call_tool("echo", args).await?;
-    ///     // Do something with the result
-    ///
-    ///     client.disconnect().await
-    /// }
-    /// ```
-    ///
-    /// # Structured output
-    /// ```no_run
-    /// use neva::prelude::*;
-    ///
-    /// #[json_schema(de)]
-    /// struct Weather {
-    ///     conditions: String,
-    ///     temperature: f32,
-    ///     humidity: f32,
-    /// }
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), Error> {
-    ///     let mut client = Client::new();
-    ///
-    ///     client.connect().await?;
-    ///
-    ///     let tools = client.list_tools(None).await?;
-    ///
-    ///     // Get the tool by name
-    ///     let tool: &Tool = tools.get("weather-forecast")
-    ///         .expect("Weather forecast tool not found");
-    ///
-    ///     let args = ("location", "London");
-    ///     let result = client.call_tool("weather-forecast", args).await?;
-    ///
-    ///     // Validate the output structure and deserialize the result
-    ///     let weather: Weather = tool
-    ///         .validate(&result)
-    ///         .and_then(|res| res.as_json())?;
-    ///     
-    ///     // Do something with the result
-    ///
-    ///     client.disconnect().await
-    /// }
-    /// ```
+    #[deprecated(since = "0.7.0", note = "use `client.tools().call(name, args)`")]
+    #[inline]
     pub async fn call_tool<N, Args>(&self, name: N, args: Args) -> Result<CallToolResponse, Error>
     where
         N: Into<String>,
         Args: shared::IntoArgs,
     {
-        let params = CallToolRequestParams {
-            name: name.into(),
-            meta: None,
-            args: args.into_args(),
-            #[cfg(feature = "tasks")]
-            task: None,
-        };
-
-        self.call_tool_raw(params).await?.into_result()
+        self.tools().call(name, args).await
     }
 
-    /// Calls a task-augmented tool that MCP server supports
-    ///
-    /// # Example
-    /// ```no_run
-    /// use neva::client::Client;
-    /// use neva::error::Error;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), Error> {
-    ///     let mut client = Client::new();
-    ///
-    ///     client.connect().await?;
-    ///
-    ///     let args = [("message", "Hello MCP!")]; // or let args = ("message", "Hello MCP!");
-    ///     let result = client.call_tool_as_task("echo", args, None).await?;
-    ///     // Do something with the result
-    ///
-    ///     client.disconnect().await
-    /// }
-    /// ```
-    ///
-    /// # Structured output
-    /// ```no_run
-    /// use neva::prelude::*;
-    ///
-    /// #[json_schema(de)]
-    /// struct Weather {
-    ///     conditions: String,
-    ///     temperature: f32,
-    ///     humidity: f32,
-    /// }
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), Error> {
-    ///     let mut client = Client::new();
-    ///
-    ///     client.connect().await?;
-    ///
-    ///     let tools = client.list_tools(None).await?;
-    ///
-    ///     // Get the tool by name
-    ///     let tool: &Tool = tools.get("weather-forecast")
-    ///         .expect("Weather forecast tool not found");
-    ///
-    ///     let args = ("location", "London");
-    ///     let result = client.call_tool_as_task("weather-forecast", args, None).await?;
-    ///
-    ///     // Validate the output structure and deserialize the result
-    ///     let weather: Weather = tool
-    ///         .validate(&result)
-    ///         .and_then(|res| res.as_json())?;
-    ///     
-    ///     // Do something with the result
-    ///
-    ///     client.disconnect().await
-    /// }
-    /// ```
+    /// Calls a tool as a task and waits for its result
     #[cfg(feature = "tasks")]
+    #[deprecated(
+        since = "0.7.0",
+        note = "use `client.tools().as_task().with_ttl(ttl).call(name, args)`"
+    )]
     pub async fn call_tool_as_task<N, Args>(
         &self,
         name: N,
@@ -481,40 +276,20 @@ impl Client {
         N: Into<String>,
         Args: shared::IntoArgs,
     {
-        let builder = self.task();
-        let builder = if let Some(t) = ttl {
-            builder.with_ttl(t)
-        } else {
-            builder
+        let builder = self.tools().as_task();
+        let builder = match ttl {
+            Some(ttl) => builder.with_ttl(ttl),
+            None => builder,
         };
 
-        builder.call_tool(name, args).await
+        builder.call(name, args).await
     }
 
     /// Calls a tool
+    #[deprecated(since = "0.7.0", note = "use `client.tools().call_raw(params)`")]
     #[inline]
     pub async fn call_tool_raw(&self, params: CallToolRequestParams) -> Result<Response, Error> {
-        let id = self.generate_id()?;
-
-        // Held back for the SEP-2243 retry: `with_meta` consumes the params,
-        // and the call cannot be reconstructed from its own answer. A handful
-        // of small allocations next to the round trip they may save.
-        #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
-        let for_retry = params.clone();
-
-        let request = Request::new(
-            Some(id.clone()),
-            crate::types::tool::commands::CALL,
-            Some(params.with_meta(RequestParamsMeta::new(&id))),
-        );
-
-        #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
-        {
-            let resp = self.send_request(request).await?;
-            self.retry_after_header_mismatch(resp, for_retry).await
-        }
-        #[cfg(not(all(feature = "http-client", not(feature = "legacy-spec"))))]
-        self.send_request(request).await
+        self.tools().call_raw(params).await
     }
 
     /// The second half of SEP-2243's stale-schema rule: re-list, then retry.
@@ -574,7 +349,7 @@ impl Client {
         let mut refreshed = false;
         // A server that keeps handing out cursors would otherwise walk this
         // recovery forever, and nothing above it can see that happening.
-        for _ in 0..MAX_REFRESH_PAGES {
+        for _ in 0..api::MAX_LIST_PAGES {
             let Ok(page) = self.list_tools_inner(cursor, Some((&name, &id))).await else {
                 return Ok(resp);
             };
@@ -605,80 +380,21 @@ impl Client {
     }
 
     /// Requests resource contents from MCP server
-    ///
-    /// # Example
-    /// ```no_run
-    /// use neva::client::Client;
-    /// use neva::error::Error;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), Error> {
-    ///     let mut client = Client::new();
-    ///
-    ///     client.connect().await?;
-    ///
-    ///     let resource = client.read_resource("res://res_1").await?;
-    ///     // Do something with the resource
-    ///
-    ///     client.disconnect().await
-    /// }
-    /// ```
+    #[deprecated(since = "0.7.0", note = "use `client.resources().read(uri)`")]
+    #[inline]
     pub async fn read_resource(&self, uri: impl Into<Uri>) -> Result<ReadResourceResult, Error> {
-        let id = self.generate_id()?;
-        let request = Request::new(
-            Some(id.clone()),
-            crate::types::resource::commands::READ,
-            Some(ReadResourceRequestParams {
-                uri: uri.into(),
-                meta: Some(RequestParamsMeta::new(&id)),
-                #[cfg(feature = "server")]
-                args: None,
-            }),
-        );
-
-        self.send_request(request).await?.into_result()
+        self.resources().read(uri).await
     }
 
     /// Gets a prompt that MCP server provides
-    ///
-    /// # Example
-    /// ```no_run
-    /// use neva::client::Client;
-    /// use neva::error::Error;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), Error> {
-    ///     let mut client = Client::new();
-    ///
-    ///     client.connect().await?;
-    ///
-    ///     let args = [
-    ///         ("temperature", "50"),
-    ///         ("style", "anything")
-    ///     ];
-    ///     let prompt = client.get_prompt("complex_prompt", args).await?;
-    ///     // Do something with the prompt
-    ///
-    ///     client.disconnect().await
-    /// }
-    /// ```
+    #[deprecated(since = "0.7.0", note = "use `client.prompts().get(name, args)`")]
+    #[inline]
     pub async fn get_prompt<N, Args>(&self, name: N, args: Args) -> Result<GetPromptResult, Error>
     where
         N: Into<String>,
         Args: shared::IntoArgs,
     {
-        let id = self.generate_id()?;
-        let request = Request::new(
-            Some(id.clone()),
-            crate::types::prompt::commands::GET,
-            Some(GetPromptRequestParams {
-                name: name.into(),
-                meta: Some(RequestParamsMeta::new(&id)),
-                args: args.into_args(),
-            }),
-        );
-
-        self.send_request(request).await?.into_result()
+        self.prompts().get(name, args).await
     }
 }
 

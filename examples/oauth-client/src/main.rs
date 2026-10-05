@@ -55,13 +55,13 @@ async fn main() -> Result<(), Error> {
     client.connect().await?;
 
     tracing::info!("--- LIST TOOLS ---");
-    let tools = client.list_tools(None).await?;
+    let tools = client.tools().list(None).await?;
     for tool in tools.tools.iter() {
         tracing::info!("- {}", tool.name);
     }
 
     tracing::info!("--- CALL TOOL ---");
-    let result = client.call_tool("whoami", ()).await?;
+    let result = client.tools().call("whoami", ()).await?;
     tracing::info!("{:?}", result.content);
 
     client.disconnect().await

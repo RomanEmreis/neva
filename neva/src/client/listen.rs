@@ -168,68 +168,17 @@ impl Client {
     }
 
     /// Subscribes to a resource on the server to receive notifications when it changes.
-    ///
-    /// Legacy only in effect: MCP 2026-07-28 folds per-resource subscriptions
-    /// into the `listen` filter, so against a 2026-07-28 peer this fails and
-    /// `listen` with a `resourceSubscriptions` entry is the way. The method
-    /// stays available because the dual-mode fallback still reaches legacy
-    /// peers.
+    #[deprecated(since = "0.7.0", note = "use `client.resources().subscribe(uri)`")]
+    #[inline]
     pub async fn subscribe_to_resource(&self, uri: impl Into<Uri>) -> Result<(), Error> {
-        #[cfg(not(feature = "legacy-spec"))]
-        if !self.is_legacy_peer() {
-            return Err(Error::new(
-                ErrorCode::MethodNotFound,
-                "resources/subscribe is legacy-only; use listen with a resource filter",
-            ));
-        }
-        if !self.is_resource_subscription_supported() {
-            return Err(Error::new(
-                ErrorCode::MethodNotFound,
-                "Server does not support resource subscriptions",
-            ));
-        }
-
-        let params = SubscribeRequestParams::from(uri);
-        let resp = self
-            .command(crate::types::resource::commands::SUBSCRIBE, Some(params))
-            .await?;
-
-        match resp {
-            Response::Ok(_) => Ok(()),
-            Response::Err(err) => Err(err.error.into()),
-        }
+        self.resources().subscribe(uri).await
     }
 
     /// Unsubscribes from a resource on the server to stop receiving notifications about its changes.
-    ///
-    /// Legacy only in effect; see [`Self::subscribe_to_resource`]. Under MCP
-    /// 2026-07-28 a subscription ends with the stream that carries it
-    /// (`Subscription::cancel`).
+    #[deprecated(since = "0.7.0", note = "use `client.resources().unsubscribe(uri)`")]
+    #[inline]
     pub async fn unsubscribe_from_resource(&self, uri: impl Into<Uri>) -> Result<(), Error> {
-        #[cfg(not(feature = "legacy-spec"))]
-        if !self.is_legacy_peer() {
-            return Err(Error::new(
-                ErrorCode::MethodNotFound,
-                "resources/unsubscribe is legacy-only; cancel the subscription instead",
-            ));
-        }
-
-        if !self.is_resource_subscription_supported() {
-            return Err(Error::new(
-                ErrorCode::MethodNotFound,
-                "Server does not support resource subscriptions",
-            ));
-        }
-
-        let params = UnsubscribeRequestParams::from(uri);
-        let resp = self
-            .command(crate::types::resource::commands::UNSUBSCRIBE, Some(params))
-            .await?;
-
-        match resp {
-            Response::Ok(_) => Ok(()),
-            Response::Err(err) => Err(err.error.into()),
-        }
+        self.resources().unsubscribe(uri).await
     }
 }
 

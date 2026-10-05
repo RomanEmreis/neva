@@ -109,7 +109,7 @@ async fn tool_error() -> Result<String, Error> {
 
 #[tool(descr = "Resource metadata")]
 async fn read_resource(ctx: Context, res: Uri) -> Result<Content, Error> {
-    let result = ctx.resource(res).await?;
+    let result = ctx.resources().read(res).await?;
     let resource = result
         .contents
         .into_iter()

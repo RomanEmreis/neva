@@ -43,7 +43,7 @@ impl TaskExec {
 #[cfg(all(not(feature = "legacy-spec"), feature = "tasks"))]
 #[derive(Debug)]
 pub struct TaskContext<'a> {
-    ctx: &'a mut Context,
+    ctx: &'a Context,
 }
 
 #[cfg(all(not(feature = "legacy-spec"), feature = "tasks"))]
@@ -60,7 +60,7 @@ impl TaskContext<'_> {
     /// # #[cfg(all(feature = "server-macros", not(feature = "legacy-spec"), feature = "tasks"))] {
     /// # use neva::{Context, error::Error, types::elicitation::ElicitRequestParams};
     ///
-    /// # async fn f(mut ctx: Context, params: ElicitRequestParams) -> Result<(), Error> {
+    /// # async fn f(ctx: Context, params: ElicitRequestParams) -> Result<(), Error> {
     /// let _ans = ctx.task().elicit(params).await?;
     /// # Ok(()) }
     /// # }
@@ -190,7 +190,7 @@ impl Context {
     /// ```no_run
     /// # #[cfg(all(feature = "server-macros", not(feature = "legacy-spec"), feature = "tasks"))] {
     /// # use neva::{Context, error::Error, types::elicitation::ElicitRequestParams};
-    /// # async fn f(mut ctx: Context, params: ElicitRequestParams) -> Result<(), Error> {
+    /// # async fn f(ctx: Context, params: ElicitRequestParams) -> Result<(), Error> {
     /// let _ans = if ctx.is_task() {
     ///     ctx.task().elicit(params).await?
     /// } else {
@@ -222,13 +222,13 @@ impl Context {
     /// ```no_run
     /// # #[cfg(all(feature = "server-macros", not(feature = "legacy-spec"), feature = "tasks"))] {
     /// # use neva::{Context, error::Error, types::elicitation::ElicitRequestParams};
-    /// # async fn f(mut ctx: Context, params: ElicitRequestParams) -> Result<(), Error> {
+    /// # async fn f(ctx: Context, params: ElicitRequestParams) -> Result<(), Error> {
     /// let _ans = ctx.task().elicit(params).await?;
     /// # Ok(()) }
     /// # }
     /// ```
     #[cfg(all(not(feature = "legacy-spec"), feature = "tasks"))]
-    pub fn task(&mut self) -> TaskContext<'_> {
+    pub fn task(&self) -> TaskContext<'_> {
         TaskContext { ctx: self }
     }
 
@@ -245,7 +245,7 @@ impl Context {
     /// `tasks/update` carrying it still matches.
     #[cfg(all(not(feature = "legacy-spec"), feature = "tasks"))]
     async fn task_elicit(
-        &mut self,
+        &self,
         task_id: String,
         params: ElicitRequestParams,
     ) -> Result<ElicitResult, Error> {

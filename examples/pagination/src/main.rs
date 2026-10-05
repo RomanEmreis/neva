@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 #[tool]
 async fn validate_resource(ctx: Context, uri: Uri) -> Result<bool, Error> {
-    let res = ctx.resource(uri).await?;
+    let res = ctx.resources().read(uri).await?;
     Ok(!res.contents.is_empty())
 }
 

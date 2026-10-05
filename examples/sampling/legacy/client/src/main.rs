@@ -57,7 +57,7 @@ async fn main() -> Result<(), Error> {
         ("city2", "Paris"),
     ];
     let result = client
-        .call_tool("generate_weather_report", args).await?;
+        .tools().call("generate_weather_report", args).await?;
     
     tracing::info!("Received result: {:?}", result.content);
 

@@ -29,19 +29,22 @@ async fn subscription_streams_only_the_requested_notifications() {
     });
     // Mutations a client can trigger, each producing one subscribable
     // notification.
-    app.map_tool("grow", |mut ctx: neva::Context| async move {
-        ctx.add_tool(Tool::new("grown", || async { "ok" })).await?;
+    app.map_tool("grow", |ctx: neva::Context| async move {
+        ctx.tools()
+            .add(Tool::new("grown", || async { "ok" }))
+            .await?;
         Ok::<_, neva::error::Error>("grown".to_string())
     });
-    app.map_tool("touch", |mut ctx: neva::Context| async move {
-        ctx.resource_updated(RESOURCE).await?;
+    app.map_tool("touch", |ctx: neva::Context| async move {
+        ctx.resources().notify_updated(RESOURCE).await?;
         Ok::<_, neva::error::Error>("touched".to_string())
     });
-    app.map_tool("add_prompt", |mut ctx: neva::Context| async move {
-        ctx.add_prompt(neva::types::Prompt::new("fresh", || async {
-            neva::types::PromptMessage::user().with("hi")
-        }))
-        .await?;
+    app.map_tool("add_prompt", |ctx: neva::Context| async move {
+        ctx.prompts()
+            .add(neva::types::Prompt::new("fresh", || async {
+                neva::types::PromptMessage::user().with("hi")
+            }))
+            .await?;
         Ok::<_, neva::error::Error>("added".to_string())
     });
 
@@ -212,8 +215,10 @@ async fn client_listen_delivers_to_registered_handlers() {
         opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
             .with_tools(|t| t.with_list_changed())
     });
-    app.map_tool("grow", |mut ctx: neva::Context| async move {
-        ctx.add_tool(Tool::new("grown", || async { "ok" })).await?;
+    app.map_tool("grow", |ctx: neva::Context| async move {
+        ctx.tools()
+            .add(Tool::new("grown", || async { "ok" }))
+            .await?;
         Ok::<_, neva::error::Error>("grown".to_string())
     });
 
@@ -245,7 +250,7 @@ async fn client_listen_delivers_to_registered_handlers() {
     assert!(subscription.acknowledged().tools_list_changed);
     assert!(subscription.is_fully_honored());
 
-    client.call_tool("grow", ()).await.expect("tools/call");
+    client.tools().call("grow", ()).await.expect("tools/call");
 
     // The notification travels on the listen stream, so it arrives out of band
     // from the call's own reply.
@@ -278,12 +283,13 @@ async fn client_cancel_ends_the_stream_over_http() {
         opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
             .with_tools(|t| t.with_list_changed())
     });
-    app.map_tool("grow", |mut ctx: neva::Context| async move {
-        ctx.add_tool(Tool::new(
-            format!("grown-{}", uuid::Uuid::new_v4()),
-            || async { "ok" },
-        ))
-        .await?;
+    app.map_tool("grow", |ctx: neva::Context| async move {
+        ctx.tools()
+            .add(Tool::new(
+                format!("grown-{}", uuid::Uuid::new_v4()),
+                || async { "ok" },
+            ))
+            .await?;
         Ok::<_, neva::error::Error>("grown".to_string())
     });
 
@@ -310,7 +316,11 @@ async fn client_cancel_ends_the_stream_over_http() {
         .await
         .expect("listen");
 
-    client.call_tool("grow", ()).await.expect("first mutation");
+    client
+        .tools()
+        .call("grow", ())
+        .await
+        .expect("first mutation");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while seen.load(Ordering::SeqCst) == 0 && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -327,7 +337,11 @@ async fn client_cancel_ends_the_stream_over_http() {
 
     // Nothing arrives after the cancel.
     tokio::time::sleep(Duration::from_millis(200)).await;
-    client.call_tool("grow", ()).await.expect("second mutation");
+    client
+        .tools()
+        .call("grow", ())
+        .await
+        .expect("second mutation");
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     assert_eq!(
@@ -353,12 +367,13 @@ async fn dropping_the_handle_ends_the_subscription() {
         opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
             .with_tools(|t| t.with_list_changed())
     });
-    app.map_tool("grow", |mut ctx: neva::Context| async move {
-        ctx.add_tool(Tool::new(
-            format!("grown-{}", uuid::Uuid::new_v4()),
-            || async { "ok" },
-        ))
-        .await?;
+    app.map_tool("grow", |ctx: neva::Context| async move {
+        ctx.tools()
+            .add(Tool::new(
+                format!("grown-{}", uuid::Uuid::new_v4()),
+                || async { "ok" },
+            ))
+            .await?;
         Ok::<_, neva::error::Error>("grown".to_string())
     });
 
@@ -386,7 +401,11 @@ async fn dropping_the_handle_ends_the_subscription() {
             .await
             .expect("listen");
 
-        client.call_tool("grow", ()).await.expect("first mutation");
+        client
+            .tools()
+            .call("grow", ())
+            .await
+            .expect("first mutation");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while seen.load(Ordering::SeqCst) == 0 && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -395,7 +414,11 @@ async fn dropping_the_handle_ends_the_subscription() {
     } // <- handle dropped here, with no cancel() and no closed()
 
     tokio::time::sleep(Duration::from_millis(300)).await;
-    client.call_tool("grow", ()).await.expect("second mutation");
+    client
+        .tools()
+        .call("grow", ())
+        .await
+        .expect("second mutation");
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     assert_eq!(
@@ -423,7 +446,11 @@ async fn disconnecting_ends_the_subscription_abruptly() {
             .with_resources(|r| r.with_list_changed().with_subscribe())
     });
     app.map_tool("watched", |ctx: neva::Context| async move {
-        Ok::<_, neva::error::Error>(ctx.is_subscribed(&"res://config".into()).to_string())
+        Ok::<_, neva::error::Error>(
+            ctx.resources()
+                .is_subscribed(&"res://config".into())
+                .to_string(),
+        )
     });
 
     let handle = tokio::spawn(async move { app.run().await });
@@ -551,7 +578,11 @@ async fn shutting_down_without_subscriptions_does_not_wait() {
 
 /// Asks the server whether anything is currently listening for `res://config`.
 async fn watched(client: &mut neva::Client) -> Option<String> {
-    let resp = client.call_tool("watched", ()).await.expect("watched call");
+    let resp = client
+        .tools()
+        .call("watched", ())
+        .await
+        .expect("watched call");
     resp.content
         .first()
         .and_then(|c| c.as_text())
@@ -797,12 +828,14 @@ fn instance(addr: &str, bus: Option<BroadcastBus>) -> App {
     if let Some(bus) = bus {
         app = app.with_notification_bus(bus);
     }
-    app.map_tool("grow", |mut ctx: neva::Context| async move {
-        ctx.add_tool(Tool::new("grown", || async { "ok" })).await?;
+    app.map_tool("grow", |ctx: neva::Context| async move {
+        ctx.tools()
+            .add(Tool::new("grown", || async { "ok" }))
+            .await?;
         Ok::<_, neva::error::Error>("grown".to_string())
     });
-    app.map_tool("touch", |mut ctx: neva::Context| async move {
-        ctx.resource_updated(RESOURCE).await?;
+    app.map_tool("touch", |ctx: neva::Context| async move {
+        ctx.resources().notify_updated(RESOURCE).await?;
         Ok::<_, neva::error::Error>("touched".to_string())
     });
     app

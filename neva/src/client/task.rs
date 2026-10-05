@@ -21,8 +21,8 @@ use serde::de::DeserializeOwned;
 
 /// A fluent builder for constructing and sending a task-augmented `tools/call` request.
 ///
-/// Obtain via [`Client::task`]. Configure task options with the provided setters,
-/// then call [`TaskBuilder::call_tool`] to execute.
+/// Obtain via [`Tools::as_task`](crate::client::api::Tools::as_task). Configure
+/// task options with the provided setters, then [`TaskBuilder::call`] the tool.
 ///
 /// # Example
 /// ```no_run
@@ -35,9 +35,10 @@ use serde::de::DeserializeOwned;
 ///     client.connect().await?;
 ///
 ///     let result = client
-///         .task()
+///         .tools()
+///         .as_task()
 ///         .with_ttl(5000)
-///         .call_tool("echo", [("message", "Hello MCP!")])
+///         .call("echo", [("message", "Hello MCP!")])
 ///         .await?;
 ///
 ///     println!("{result:?}");
@@ -68,11 +69,42 @@ impl<'a> TaskBuilder<'a> {
     }
 
     /// Sends a task-augmented `tools/call` request and waits for the task to complete.
+    #[deprecated(since = "0.7.0", note = "use `TaskBuilder::call`")]
+    #[inline]
+    pub async fn call_tool<N, Args>(self, name: N, args: Args) -> Result<CallToolResponse, Error>
+    where
+        N: Into<String>,
+        Args: IntoArgs,
+    {
+        self.call(name, args).await
+    }
+
+    /// Sends a task-augmented `tools/call` request and waits for the task to complete.
     ///
     /// # Errors
     /// Returns [`Error`] if the server does not support task-augmented tool calls,
     /// or if the underlying request fails.
-    pub async fn call_tool<N, Args>(self, name: N, args: Args) -> Result<CallToolResponse, Error>
+    ///
+    /// # Examples
+    /// ```no_run
+    /// use neva::client::Client;
+    /// use neva::error::Error;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let mut client = Client::new();
+    ///     client.connect().await?;
+    ///
+    ///     let result = client
+    ///         .tools()
+    ///         .as_task()
+    ///         .call("echo", [("message", "Hello MCP!")])
+    ///         .await?;
+    ///
+    ///     client.disconnect().await
+    /// }
+    /// ```
+    pub async fn call<N, Args>(self, name: N, args: Args) -> Result<CallToolResponse, Error>
     where
         N: Into<String>,
         Args: IntoArgs,
@@ -105,7 +137,7 @@ impl<'a> TaskBuilder<'a> {
             task: Some(self.metadata),
         };
 
-        let result = self.client.call_tool_raw(params).await?.into_result()?;
+        let result = self.client.tools().call_raw(params).await?.into_result()?;
         shared::wait_to_completion(self.client, result).await
     }
 }

@@ -4,7 +4,7 @@
 //! it is held open. Any other in-flight request can then fan a notification out
 //! to the streams that asked for it -- the registry lives on the shared
 //! [`McpOptions`](crate::app::options::McpOptions), so a tool handler calling
-//! [`Context::add_tool`](crate::Context::add_tool) reaches every listener
+//! [`Tools::add`](crate::app::context::api::Tools::add) reaches every listener
 //! without knowing anything about them.
 //!
 //! This registry is **node-local by construction**: half of every entry is a

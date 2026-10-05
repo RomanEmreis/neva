@@ -7,15 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## 0.7.0
 
+### Added
+* **A namespaced client API**, one namespace per MCP method prefix
+  (`neva::client::api`): `client.tools()`, `client.resources()`,
+  `client.prompts()` and `client.tasks()`. `client.tools().list(cursor)` is
+  `tools/list`, `client.prompts().get(name, args)` is `prompts/get`.
+  `list_all()` on tools, resources and prompts walks every page, and fails
+  past 64. A task-augmented call is `client.tools().as_task()`.
+* **The same shape on `Context`** (`neva::app::context::api`): `ctx.tools()`,
+  `ctx.resources()` and `ctx.prompts()` -- `list`, `find`, `call`, `read`,
+  `get`, `add`, `remove`, `notify_updated`.
+
 ### Changed
 * **`Client` request methods take `&self`.** A connected client can be shared
   (`Arc<Client>`) and called from many tasks at once, its calls in flight
   together. `BatchBuilder` and `TaskBuilder` borrow the client shared. Setup --
   `connect`, `map_*`, `on_*`, roots -- still takes `&mut self`.
+* **`Context` methods take `&self`**, the registry changes included. A handler
+  no longer needs `mut ctx`, and now gets an `unused_mut` warning for it.
 * A request whose future is dropped mid-call releases its pending slot at once
   instead of at the request TTL.
 
+### Deprecated
+* The flat client methods, in favor of the namespaces: `list_tools`,
+  `call_tool`, `call_tool_raw`, `call_tool_as_task`, `list_resources`,
+  `list_resource_templates`, `read_resource`, `subscribe_to_resource`,
+  `unsubscribe_from_resource`, `list_prompts`, `get_prompt`, `task`, and
+  `TaskBuilder::call_tool`.
+* Their `Context` counterparts: `find_tool`, `find_tools`, `use_tool`,
+  `use_tools`, `add_tool`, `remove_tool`, `resource`, `add_resource`,
+  `remove_resource`, `resource_updated`, `subscribe_to_resource`,
+  `unsubscribe_from_resource`, `is_subscribed`, `prompt`, `add_prompt`,
+  `remove_prompt`. Each deprecation note names its replacement.
+
 ### Changed (breaking)
+* `Context::tools()` returns the tools namespace rather than `Vec<Tool>`:
+  `ctx.tools().await` becomes `ctx.tools().list().await`.
 * `TaskApi` methods take `&self`, and `wait_to_completion` takes `&A`.
   Callers are unaffected; implementations outside neva need the new receivers.
 
