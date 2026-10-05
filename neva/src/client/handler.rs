@@ -1,6 +1,8 @@
 //! Request handling utilities
 
 use crate::client::notification_handler::NotificationsHandler;
+#[cfg(not(feature = "legacy-spec"))]
+use crate::shared::QueuedRequest;
 use crate::types::sampling::SamplingHandler;
 use crate::types::{Root, root::ListRootsResult};
 use crate::{
@@ -222,9 +224,9 @@ impl RequestHandler {
         let id = request.id();
         // Every way out releases the slot, the caller dropping this future
         // included.
-        let (receiver, _queued) = self.pending.push_guarded(&id)?;
+        let (receiver, queued) = self.pending.push_guarded(&id)?;
         self.sender.send(request.into()).await?;
-        self.pending.activate(&id);
+        self.pending.activate(queued.queued());
 
         tokio::select! {
             biased;
@@ -247,24 +249,38 @@ impl RequestHandler {
         }
     }
 
-    /// Sends a `subscriptions/listen` request and returns the slot its final
-    /// response will arrive in.
+    /// Takes the slot a `subscriptions/listen` request's final response will
+    /// arrive in, for [`Self::send_listen`] to send.
     ///
-    /// Unlike [`Self::send_request`] this does not await the reply and -- by
-    /// skipping [`RequestQueue::activate`] -- never starts the request TTL: a
-    /// subscription is answered only when it ends, which may be hours later.
+    /// Separate from the send, and not awaiting anything, so the caller holds
+    /// the [`QueuedRequest`] before the first suspension point: the teardown of
+    /// a subscription releases exactly this slot, and never one a later request
+    /// took under the same id.
+    ///
+    /// Unlike [`Self::send_request`] the slot is never activated, so it never
+    /// starts the request TTL: a subscription is answered only when it ends,
+    /// which may be hours later.
     #[cfg(not(feature = "legacy-spec"))]
-    pub(super) async fn send_listen(
+    #[inline]
+    pub(super) fn reserve_listen(
         &self,
-        request: Request,
-    ) -> Result<tokio::sync::oneshot::Receiver<PendingResponse>, Error> {
-        let id = request.id();
-        let receiver = self.pending.push(&id)?;
-        if let Err(err) = self.sender.send(request.into()).await {
-            let _ = self.pending.pop(&id);
-            return Err(err);
-        }
-        Ok(receiver)
+        id: &RequestId,
+    ) -> Result<
+        (
+            tokio::sync::oneshot::Receiver<PendingResponse>,
+            QueuedRequest,
+        ),
+        Error,
+    > {
+        self.pending.push(id)
+    }
+
+    /// Sends a `subscriptions/listen` request whose slot
+    /// [`Self::reserve_listen`] took.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[inline]
+    pub(super) async fn send_listen(&self, request: Request) -> Result<(), Error> {
+        self.sender.send(request.into()).await
     }
 
     /// Registers interest in the acknowledgment of the subscription `id`.
@@ -371,7 +387,7 @@ impl RequestHandler {
         let batch = MessageBatch::new(envelopes)?;
         self.sender.send(Message::Batch(batch)).await?;
         for (_rx, slot) in &slots {
-            self.pending.activate(slot.id());
+            self.pending.activate(slot.queued());
         }
 
         Ok(slots)
@@ -1091,8 +1107,8 @@ mod tests {
         let id1 = RequestId::Number(1);
         let id2 = RequestId::Number(2);
 
-        let rx1 = queue.push(&id1).expect("a fresh id");
-        let rx2 = queue.push(&id2).expect("a fresh id");
+        let (rx1, _) = queue.push(&id1).expect("a fresh id");
+        let (rx2, _) = queue.push(&id2).expect("a fresh id");
 
         let resp1 = Response::success(id1.clone(), json!({"result": "a"}));
         // A Request envelope in the middle -- must be skipped, not completed
@@ -1480,7 +1496,7 @@ mod tests {
         for envelope in &items {
             if let MessageEnvelope::Request(req) = envelope {
                 let id = req.id();
-                let receiver = queue.push(&id).expect("a fresh id");
+                let (receiver, _) = queue.push(&id).expect("a fresh id");
                 receivers.push((id, receiver));
             }
         }

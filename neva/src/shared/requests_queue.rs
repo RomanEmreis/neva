@@ -81,6 +81,23 @@ struct RequestExpiry {
     expires_at: Instant,
     sequence: u64,
     id: RequestId,
+    /// The push this deadline belongs to, so the sweep never times out a
+    /// later request that took the same id.
+    slot: u64,
+}
+
+/// One push onto a [`RequestQueue`]: its id, and which push under that id.
+///
+/// An id alone does not name a slot for long. Once a response settles one, a
+/// caller-chosen id can be taken again by another request, and anything still
+/// holding only the id -- an activation running late, a subscription tearing
+/// down -- would act on that newer request instead. Operations that act on a
+/// request after its push take this, and touch the slot only if it is still
+/// the one this push made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QueuedRequest {
+    id: RequestId,
+    slot: u64,
 }
 
 impl PartialEq for RequestExpiry {
@@ -197,8 +214,11 @@ impl RequestQueue {
         )),
         allow(dead_code)
     )]
-    pub(crate) fn push(&self, id: &RequestId) -> Result<oneshot::Receiver<PendingResponse>, Error> {
-        self.push_slot(id).map(|(receiver, _)| receiver)
+    pub(crate) fn push(
+        &self,
+        id: &RequestId,
+    ) -> Result<(oneshot::Receiver<PendingResponse>, QueuedRequest), Error> {
+        self.push_slot(id)
     }
 
     /// [`Self::push`], plus a guard that releases the slot when dropped.
@@ -208,13 +228,12 @@ impl RequestQueue {
         &self,
         id: &RequestId,
     ) -> Result<(oneshot::Receiver<PendingResponse>, QueuedRequestGuard<'_>), Error> {
-        let (receiver, slot) = self.push_slot(id)?;
+        let (receiver, queued) = self.push_slot(id)?;
         Ok((
             receiver,
             QueuedRequestGuard {
                 pending: &self.pending,
-                id: id.clone(),
-                slot,
+                queued,
             },
         ))
     }
@@ -223,7 +242,7 @@ impl RequestQueue {
     fn push_slot(
         &self,
         id: &RequestId,
-    ) -> Result<(oneshot::Receiver<PendingResponse>, u64), Error> {
+    ) -> Result<(oneshot::Receiver<PendingResponse>, QueuedRequest), Error> {
         use dashmap::mapref::entry::Entry;
 
         let (sender, receiver) = oneshot::channel();
@@ -260,17 +279,32 @@ impl RequestQueue {
             expired.send_timeout();
         }
 
-        Ok((receiver, slot))
+        Ok((
+            receiver,
+            QueuedRequest {
+                id: id.clone(),
+                slot,
+            },
+        ))
     }
 
-    /// Starts the TTL countdown for a queued request after it has been sent.
+    /// Starts the TTL countdown for a queued request after it has been sent,
+    /// and records that it went out.
+    ///
+    /// Only the slot `queued` names: a response can settle it before the
+    /// activation gets there, and a later request may have taken the id since.
+    /// Marking that one sent would make its guard keep an id for an answer
+    /// that is never coming.
     ///
     /// Companion to [`Self::push`]; see it for why this is unused by a 2026-07-28
     /// server build without the client.
     #[inline]
     #[cfg_attr(not(feature = "legacy-spec"), allow(dead_code))]
-    pub(crate) fn activate(&self, id: &RequestId) {
-        if let Some(mut handle) = self.pending.get_mut(id) {
+    pub(crate) fn activate(&self, queued: &QueuedRequest) {
+        let id = &queued.id;
+        if let Some(mut handle) = self.pending.get_mut(id)
+            && handle.slot == queued.slot
+        {
             handle.sent = true;
             let Some(expires_at) = (!self.ttl.is_zero()).then_some(Instant::now() + self.ttl)
             else {
@@ -287,11 +321,30 @@ impl RequestQueue {
                     expires_at,
                     sequence,
                     id: id.clone(),
+                    slot: queued.slot,
                 });
             }
         }
 
         self.cleanup_expired();
+    }
+
+    /// Removes the slot `queued` names, if it is still that push's: the
+    /// teardown of a request that will not be answered here, such as a
+    /// subscription that ended or a wait that timed out.
+    ///
+    /// Callers are the same as [`Self::push`]'s.
+    #[inline]
+    #[cfg_attr(
+        not(any(
+            all(feature = "client", not(feature = "legacy-spec")),
+            all(feature = "server", feature = "legacy-spec")
+        )),
+        allow(dead_code)
+    )]
+    pub(crate) fn release(&self, queued: &QueuedRequest) {
+        self.pending
+            .remove_if(&queued.id, |_, handle| handle.slot == queued.slot);
     }
 
     /// Pops the [`RequestHandle`] by [`RequestId`] and removes it from the queue
@@ -360,17 +413,13 @@ impl RequestQueue {
                 .is_some_and(|entry| entry.expires_at <= now)
             {
                 let entry = expirations.pop().expect("peeked entry must exist");
-                expired.push((entry.id, entry.expires_at));
+                expired.push((entry.id, entry.slot));
             }
         }
 
-        for (id, expires_at) in expired {
-            let should_remove = self
-                .pending
-                .get(&id)
-                .is_some_and(|handle| handle.expires_at == Some(expires_at));
-
-            if should_remove && let Some((_, handle)) = self.pending.remove(&id) {
+        for (id, slot) in expired {
+            if let Some((_, handle)) = self.pending.remove_if(&id, |_, handle| handle.slot == slot)
+            {
                 handle.send_timeout();
             }
         }
@@ -423,16 +472,15 @@ impl Default for RequestQueue {
 #[cfg(feature = "client")]
 pub(crate) struct QueuedRequestGuard<'a> {
     pending: &'a DashMap<RequestId, RequestHandle>,
-    id: RequestId,
-    slot: u64,
+    queued: QueuedRequest,
 }
 
 #[cfg(feature = "client")]
 impl QueuedRequestGuard<'_> {
-    /// The id of the request whose slot this guards.
+    /// The push whose slot this guards.
     #[inline]
-    pub(crate) fn id(&self) -> &RequestId {
-        &self.id
+    pub(crate) fn queued(&self) -> &QueuedRequest {
+        &self.queued
     }
 }
 
@@ -440,8 +488,8 @@ impl QueuedRequestGuard<'_> {
 impl Drop for QueuedRequestGuard<'_> {
     #[inline]
     fn drop(&mut self) {
-        self.pending.remove_if(&self.id, |_, handle| {
-            handle.slot == self.slot && !handle.sent
+        self.pending.remove_if(&self.queued.id, |_, handle| {
+            handle.slot == self.queued.slot && !handle.sent
         });
     }
 }
@@ -459,7 +507,7 @@ mod tests {
         let queue = RequestQueue::default();
         let id = RequestId::Number(7);
 
-        let _first = queue.push(&id).expect("a fresh id");
+        let (_first, _) = queue.push(&id).expect("a fresh id");
         let err = queue.push(&id).expect_err("the id is in flight");
         assert_eq!(err.code, ErrorCode::InvalidRequest);
 
@@ -477,11 +525,11 @@ mod tests {
         let queue = RequestQueue::new(Duration::from_millis(1));
         let id = RequestId::Number(7);
 
-        let stale = queue.push(&id).expect("a fresh id");
-        queue.activate(&id);
+        let (stale, id_slot) = queue.push(&id).expect("a fresh id");
+        queue.activate(&id_slot);
         tokio::time::sleep(Duration::from_millis(5)).await;
 
-        let _fresh = queue.push(&id).expect("an expired entry gives its id up");
+        let (_fresh, _) = queue.push(&id).expect("an expired entry gives its id up");
         assert!(matches!(stale.await, Ok(PendingResponse::Timeout)));
     }
 
@@ -495,7 +543,7 @@ mod tests {
         let id = RequestId::Number(7);
 
         let (rx, guard) = queue.push_guarded(&id).expect("a fresh id");
-        queue.activate(&id);
+        queue.activate(guard.queued());
         drop(rx);
         drop(guard);
 
@@ -505,6 +553,31 @@ mod tests {
         queue.complete(Response::success(id.clone(), json!({ "late": true })));
         assert_eq!(queue.len(), 0, "the late answer settles the slot");
         assert!(queue.push(&id).is_ok(), "and frees the id");
+    }
+
+    /// An activation can run late: a fast answer settles its slot first, and a
+    /// later request takes the id before the activation gets there. Marking
+    /// that one sent would make its guard keep the id for an answer that is
+    /// never coming, should it then fail to go out.
+    #[cfg(feature = "client")]
+    #[test]
+    fn a_late_activation_leaves_a_newer_slot_alone() {
+        let queue = RequestQueue::default();
+        let id = RequestId::Number(7);
+
+        let (_rx, first) = queue.push(&id).expect("a fresh id");
+        queue.complete(Response::success(id.clone(), json!({})));
+        let (_rx, second) = queue.push_guarded(&id).expect("the id is free again");
+
+        queue.activate(&first);
+        drop(second);
+
+        assert_eq!(
+            queue.len(),
+            0,
+            "a request that never went out leaves nothing"
+        );
+        assert!(queue.push(&id).is_ok());
     }
 
     /// A guard releases the entry its own push made. By the time it drops, its
@@ -518,7 +591,7 @@ mod tests {
 
         let (_rx, guard) = queue.push_guarded(&id).expect("a fresh id");
         assert!(queue.pop(&id).is_some(), "the response arrives");
-        let _next = queue.push(&id).expect("the id is free again");
+        let (_next, _) = queue.push(&id).expect("the id is free again");
 
         drop(guard);
         assert_eq!(queue.len(), 1, "the later request keeps its slot");
@@ -539,7 +612,7 @@ mod tests {
         let queue = RequestQueue::default();
         let id = RequestId::Number(1);
 
-        let receiver = queue.push(&id).expect("a fresh id");
+        let (receiver, _) = queue.push(&id).expect("a fresh id");
         let handle = queue.pop(&id);
 
         assert!(handle.is_some(), "Expected handle to exist");
@@ -556,7 +629,7 @@ mod tests {
         let queue = RequestQueue::default();
         let id = RequestId::Number(1);
 
-        let receiver = queue.push(&id).expect("a fresh id");
+        let (receiver, _) = queue.push(&id).expect("a fresh id");
         let handle = queue.pop(&id).expect("Should have handle");
 
         let expected = Response::success(id, json!({ "content": "done" }));
@@ -583,7 +656,7 @@ mod tests {
         let queue = RequestQueue::default();
         let id = RequestId::Number(1);
 
-        let receiver = queue.push(&id).expect("a fresh id");
+        let (receiver, _) = queue.push(&id).expect("a fresh id");
 
         let response = Response::success(id, json!({ "content": "done" }));
         queue.complete(response.clone());
@@ -622,8 +695,8 @@ mod tests {
         let queue = RequestQueue::new(Duration::from_millis(1));
         let id = RequestId::Number(1);
 
-        let _receiver = queue.push(&id).expect("a fresh id");
-        queue.activate(&id);
+        let (_receiver, id_slot) = queue.push(&id).expect("a fresh id");
+        queue.activate(&id_slot);
         std::thread::sleep(Duration::from_millis(10));
 
         assert!(queue.pop(&id).is_none());
@@ -635,9 +708,9 @@ mod tests {
         let expired_id = RequestId::Number(1);
         let live_id = RequestId::Number(2);
 
-        let _expired = queue.push(&expired_id).expect("a fresh id");
-        let live = queue.push(&live_id).expect("a fresh id");
-        queue.activate(&expired_id);
+        let (_expired, expired_id_slot) = queue.push(&expired_id).expect("a fresh id");
+        let (live, _) = queue.push(&live_id).expect("a fresh id");
+        queue.activate(&expired_id_slot);
 
         std::thread::sleep(Duration::from_millis(10));
 
@@ -657,8 +730,8 @@ mod tests {
         let queue = RequestQueue::new(Duration::from_millis(5));
         let id = RequestId::Number(1);
 
-        let receiver = queue.push(&id).expect("a fresh id");
-        queue.activate(&id);
+        let (receiver, id_slot) = queue.push(&id).expect("a fresh id");
+        queue.activate(&id_slot);
 
         std::thread::sleep(Duration::from_millis(10));
 
@@ -679,9 +752,9 @@ mod tests {
         let expired_id = RequestId::Number(1);
         let live_id = RequestId::Number(2);
 
-        let expired = queue.push(&expired_id).expect("a fresh id");
-        let _live = queue.push(&live_id).expect("a fresh id");
-        queue.activate(&expired_id);
+        let (expired, expired_id_slot) = queue.push(&expired_id).expect("a fresh id");
+        let (_live, _) = queue.push(&live_id).expect("a fresh id");
+        queue.activate(&expired_id_slot);
 
         std::thread::sleep(Duration::from_millis(10));
 
@@ -702,7 +775,7 @@ mod tests {
         let queue = RequestQueue::new(Duration::from_millis(1));
         let id = RequestId::Number(1);
 
-        let _receiver = queue.push(&id).expect("a fresh id");
+        let (_receiver, _) = queue.push(&id).expect("a fresh id");
         std::thread::sleep(Duration::from_millis(10));
 
         assert!(queue.pop(&id).is_some());

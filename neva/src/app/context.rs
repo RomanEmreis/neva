@@ -347,7 +347,7 @@ impl Context {
                 id = id.concat(session_id.into());
             }
 
-            let receiver = self.pending.push(&id)?;
+            let (receiver, queued) = self.pending.push(&id)?;
 
             self.options.tasks.set_result(&task_id, params);
             self.options.tasks.require_input(&task_id);
@@ -366,7 +366,7 @@ impl Context {
                     ));
                 }
                 Err(_) => {
-                    _ = self.pending.pop(&id);
+                    self.pending.release(&queued);
                     self.options.tasks.fail(&task_id);
                     return Err(Error::new(ErrorCode::Timeout, "Request timed out"));
                 }
@@ -519,12 +519,12 @@ impl Context {
         }
 
         let id = req.full_id();
-        let receiver = self.pending.push(&id)?;
+        let (receiver, queued) = self.pending.push(&id)?;
         if let Err(err) = self.sender.send(req.into()).await {
-            let _ = self.pending.pop(&id);
+            self.pending.release(&queued);
             return Err(err);
         }
-        self.pending.activate(&id);
+        self.pending.activate(&queued);
 
         match timeout(self.timeout, receiver).await {
             Ok(Ok(crate::shared::PendingResponse::Response(resp))) => Ok(resp),
@@ -536,7 +536,7 @@ impl Context {
                 "Response channel closed",
             )),
             Err(_) => {
-                _ = self.pending.pop(&id);
+                self.pending.release(&queued);
                 Err(Error::new(ErrorCode::Timeout, "Request timed out"))
             }
         }
