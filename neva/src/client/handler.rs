@@ -6,7 +6,7 @@ use crate::types::{Root, root::ListRootsResult};
 use crate::{
     client::options::McpOptions,
     error::{Error, ErrorCode},
-    shared::{PendingResponse, QueuedRequestGuard, RequestQueue},
+    shared::{PendingResponse, RequestQueue},
     transport::{
         Receiver, Sender, Transport, TransportProto, TransportProtoReceiver, TransportProtoSender,
     },
@@ -217,10 +217,9 @@ impl RequestHandler {
     #[inline]
     pub(super) async fn send_request(&self, request: Request) -> Result<Response, Error> {
         let id = request.id();
-        let receiver = self.pending.push(&id);
         // Every way out releases the slot, the caller dropping this future
         // included.
-        let _queued = QueuedRequestGuard::new(&self.pending, &id);
+        let (receiver, _queued) = self.pending.push_guarded(&id)?;
         self.sender.send(request.into()).await?;
         self.pending.activate(&id);
 
@@ -257,7 +256,7 @@ impl RequestHandler {
         request: Request,
     ) -> Result<tokio::sync::oneshot::Receiver<PendingResponse>, Error> {
         let id = request.id();
-        let receiver = self.pending.push(&id);
+        let receiver = self.pending.push(&id)?;
         if let Err(err) = self.sender.send(request.into()).await {
             let _ = self.pending.pop(&id);
             return Err(err);
@@ -349,7 +348,19 @@ impl RequestHandler {
         for envelope in items {
             if let MessageEnvelope::Request(ref req) = envelope {
                 let id = req.id();
-                let receiver = self.pending.push(&id);
+                // An id another request is still waiting on refuses the whole
+                // batch, as a duplicate inside it does: the batch is one write,
+                // and none of it has gone out yet. The slots this batch already
+                // took are handed back.
+                let receiver = match self.pending.push(&id) {
+                    Ok(receiver) => receiver,
+                    Err(err) => {
+                        for (taken, _rx) in &receivers {
+                            let _ = self.pending.pop(taken);
+                        }
+                        return Err(err);
+                    }
+                };
                 receivers.push((id, receiver));
             }
             envelopes.push(envelope);
@@ -1083,8 +1094,8 @@ mod tests {
         let id1 = RequestId::Number(1);
         let id2 = RequestId::Number(2);
 
-        let rx1 = queue.push(&id1);
-        let rx2 = queue.push(&id2);
+        let rx1 = queue.push(&id1).expect("a fresh id");
+        let rx2 = queue.push(&id2).expect("a fresh id");
 
         let resp1 = Response::success(id1.clone(), json!({"result": "a"}));
         // A Request envelope in the middle -- must be skipped, not completed
@@ -1472,7 +1483,7 @@ mod tests {
         for envelope in &items {
             if let MessageEnvelope::Request(req) = envelope {
                 let id = req.id();
-                let receiver = queue.push(&id);
+                let receiver = queue.push(&id).expect("a fresh id");
                 receivers.push((id, receiver));
             }
         }

@@ -128,6 +128,76 @@ async fn deprecated_methods_still_answer() {
     server.abort();
 }
 
+/// Two batches in flight with the same caller-chosen request id would share
+/// one response slot: the second would take over the first's waiter and be
+/// handed the first's response. The second is refused instead, before anything
+/// is sent, and the first still gets its own answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_id_already_in_flight_refuses_the_batch() {
+    use neva::types::{MessageEnvelope, Request, RequestId};
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let release = Arc::new(Notify::new());
+    let mut app = App::new()
+        .without_greeting()
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+    let gate = release.clone();
+    app.map_tool("hold", move || {
+        let gate = gate.clone();
+        async move {
+            gate.notified().await;
+            "held".to_string()
+        }
+    });
+    app.map_tool("quick", || async move { "quick".to_string() });
+    let server = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let mut client = Client::new().with_options(|o| {
+        o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
+            .with_timeout(Duration::from_secs(10))
+    });
+    client.connect().await.expect("connect");
+    let client = Arc::new(client);
+
+    let call = |tool: &str| {
+        MessageEnvelope::Request(Request::new(
+            Some(RequestId::Number(777)),
+            "tools/call",
+            Some(serde_json::json!({ "name": tool, "arguments": {} })),
+        ))
+    };
+
+    let first = {
+        let client = client.clone();
+        let item = call("hold");
+        tokio::spawn(async move { client.call_batch(vec![item]).await })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let err = client
+        .call_batch(vec![call("quick")])
+        .await
+        .expect_err("id 777 is still waiting for the first batch's response");
+    assert!(err.to_string().contains("777"), "{err}");
+
+    release.notify_one();
+    let responses = tokio::time::timeout(Duration::from_secs(5), first)
+        .await
+        .expect("the first batch must still be answered")
+        .expect("task")
+        .expect("batch");
+    let text = serde_json::to_string(&responses).expect("serialize");
+    assert!(
+        text.contains("held"),
+        "the first batch keeps its own response: {text}"
+    );
+
+    server.abort();
+}
+
 fn pick_free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();

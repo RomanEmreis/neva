@@ -126,7 +126,15 @@ impl Client {
     ///
     /// The name of a rejected tool is remembered as well, so that hiding it
     /// from the listing is not all that hiding it does -- see
-    /// [`Self::blocked_tool_error`].
+    /// [`Self::blocked_tool_error`]. That record is not cleared with the
+    /// registry. A block is lifted only on evidence: a page that lists the tool
+    /// with a declaration that parses, or a listing complete in one page that
+    /// no longer carries it. A traversal merely starting is no evidence -- the
+    /// malformed tool may sit on a later page -- and over a shared client
+    /// another task can call it in between, sent without the headers its
+    /// declaration asked for. A tool withdrawn from a listing that spans pages
+    /// therefore stays refused, under the reason the last listing that carried
+    /// it gave, until one of the two arrives.
     #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
     pub(super) fn register_param_headers(
         &self,
@@ -138,10 +146,15 @@ impl Client {
 
         // Only the listings: a retry's own exception belongs to a call still in
         // flight, which a listing started over by someone else must not strand.
+        // The blocks stay too; see above.
         if fresh {
             self.options.param_headers.tools.clear();
-            self.options.rejected_tools.clear();
         }
+
+        // The whole listing in one page: what it does not carry, the server
+        // has withdrawn.
+        let complete = fresh && result.next_cursor.is_none();
+        let mut rejected_here = Vec::new();
 
         // How long this listing may be mirrored from. The spec makes `ttlMs`
         // mandatory and reads an absent one as `0` -- immediately stale -- so
@@ -150,14 +163,19 @@ impl Client {
 
         result.tools.retain(|tool| {
             self.options.param_headers.tools.remove(&*tool.name);
-            self.options.rejected_tools.remove(&*tool.name);
             let schema = match serde_json::to_value(&tool.input_schema) {
                 Ok(schema) => schema,
-                Err(_) => return true,
+                Err(_) => {
+                    self.options.rejected_tools.remove(&*tool.name);
+                    return true;
+                }
             };
 
             match param_headers::collect(&schema) {
                 Ok(headers) => {
+                    // Lifted here and not before the parse: a block taken away
+                    // and put back would leave a moment for a call to pass.
+                    self.options.rejected_tools.remove(&*tool.name);
                     if !headers.is_empty() {
                         if let Some((_, retry)) = grace.filter(|(name, _)| *name == &*tool.name) {
                             self.options
@@ -176,10 +194,19 @@ impl Client {
                     #[cfg(feature = "tracing")]
                     tracing::warn!(logger = "neva", "Dropping tool `{}`: {_err}", tool.name);
                     self.options.rejected_tools.insert(tool.name.to_string());
+                    if complete {
+                        rejected_here.push(tool.name.to_string());
+                    }
                     false
                 }
             }
         });
+
+        if complete {
+            self.options
+                .rejected_tools
+                .retain(|name| rejected_here.contains(name));
+        }
     }
 
     /// Refuses a `tools/call` naming a tool the current listing withdrew for a
@@ -327,9 +354,9 @@ impl Client {
         // call starts the traversal over and clears what the last one recorded,
         // so stopping early would leave every later page unregistered against a
         // registry that no longer holds their old entries: their calls would go
-        // out without the headers they need, and a tool dropped for a malformed
-        // annotation would stop being blocked -- which is the one outcome
-        // dropping it exists to prevent.
+        // out without the headers they need. (A tool dropped for a malformed
+        // annotation stays blocked either way: starting a traversal does not
+        // lift a block.)
         //
         // Fetched for the retry below, by its id: this listing is the server's
         // current answer, and that request is what it was fetched for. Judging
@@ -727,6 +754,46 @@ mod param_header_registry_tests {
                 ))
                 .is_none()
         );
+    }
+
+    /// A traversal starting over is no evidence that a block can go: the
+    /// malformed tool may sit on a later page, and over a shared client another
+    /// task can call it before the refresh gets there. Only a page that lists
+    /// it well-formed lifts the block.
+    #[test]
+    fn a_partial_refresh_keeps_the_block() {
+        let client = Client::new();
+        let continued = |tools: serde_json::Value| -> ListToolsResult {
+            serde_json::from_value(serde_json::json!({
+                "tools": tools,
+                "nextCursor": serde_json::to_value(Cursor(10)).expect("a cursor"),
+            }))
+            .expect("valid listing")
+        };
+        let broken = serde_json::json!({
+            "name": "broken",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "p": { "type": "array", "items": { "x-mcp-header": "P" } } }
+            }
+        });
+
+        let mut first = continued(serde_json::json!([plain("other"), broken]));
+        client.register_param_headers(&mut first, true, None);
+        assert!(client.blocked_tool_error(&call("broken")).is_some());
+
+        // A new traversal's first page, without the malformed tool on it.
+        let mut restarted = continued(serde_json::json!([plain("other")]));
+        client.register_param_headers(&mut restarted, true, None);
+        assert!(
+            client.blocked_tool_error(&call("broken")).is_some(),
+            "the rest of the listing has not arrived, so the block stands"
+        );
+
+        // A later page of it, where the server now declares the tool properly.
+        let mut fixed = listing(serde_json::json!([annotated("broken")]));
+        client.register_param_headers(&mut fixed, false, None);
+        assert!(client.blocked_tool_error(&call("broken")).is_none());
     }
 
     /// The block follows the listing: a definition the server fixed -- or

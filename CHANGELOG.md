@@ -27,6 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   no longer needs `mut ctx`, and now gets an `unused_mut` warning for it.
 * A request whose future is dropped mid-call releases its pending slot at once
   instead of at the request TTL.
+* A caller-chosen request id that is still waiting for a response -- in a hand
+  built `call_batch`, say -- is refused, rather than taking over the other
+  request's slot and its response.
+* A tool dropped for a malformed `x-mcp-header` stays refused until a listing
+  shows it fixed, or a listing complete in one page no longer carries it. A
+  traversal starting over no longer lifts the block.
 
 ### Fixed
 * **A `tasks/update` or `tasks/cancel` the server refuses is an error.** The

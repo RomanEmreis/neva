@@ -347,7 +347,7 @@ impl Context {
                 id = id.concat(session_id.into());
             }
 
-            let receiver = self.pending.push(&id);
+            let receiver = self.pending.push(&id)?;
 
             self.options.tasks.set_result(&task_id, params);
             self.options.tasks.require_input(&task_id);
@@ -519,7 +519,7 @@ impl Context {
         }
 
         let id = req.full_id();
-        let receiver = self.pending.push(&id);
+        let receiver = self.pending.push(&id)?;
         if let Err(err) = self.sender.send(req.into()).await {
             let _ = self.pending.pop(&id);
             return Err(err);

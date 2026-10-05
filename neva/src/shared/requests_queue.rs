@@ -1,5 +1,6 @@
 //! Utilities for tracking requests
 
+use crate::error::{Error, ErrorCode};
 use crate::types::{RequestId, Response};
 use dashmap::DashMap;
 use std::{
@@ -50,6 +51,9 @@ pub(crate) struct RequestHandle {
     sender: oneshot::Sender<PendingResponse>,
     _cancellation_token: CancellationToken,
     expires_at: Option<Instant>,
+    /// Which push made this entry, so a guard releases its own and never a
+    /// later request that took the same id.
+    slot: u64,
 }
 
 /// Represents a request tracking "queue" that holds a hash map of [`oneshot::Sender`] for requests
@@ -63,6 +67,9 @@ pub(crate) struct RequestQueue {
     // A 2026-07-28 server build without the client never activates, leaving them unread.
     #[cfg_attr(not(feature = "legacy-spec"), allow(dead_code))]
     next_expiry_seq: Arc<AtomicU64>,
+    /// Numbers each push; see [`RequestHandle::slot`].
+    #[cfg_attr(not(feature = "legacy-spec"), allow(dead_code))]
+    next_slot: Arc<AtomicU64>,
     #[cfg_attr(not(feature = "legacy-spec"), allow(dead_code))]
     ttl: Duration,
 }
@@ -107,6 +114,7 @@ impl RequestHandle {
             sender,
             _cancellation_token: CancellationToken::new(),
             expires_at: (!ttl.is_zero()).then_some(Instant::now() + ttl),
+            slot: 0,
         }
     }
 
@@ -123,6 +131,13 @@ impl RequestHandle {
                 );
             }
         };
+    }
+
+    /// Whether this entry's TTL has run out.
+    #[inline]
+    fn is_expired(&self) -> bool {
+        self.expires_at
+            .is_some_and(|expires_at| expires_at <= Instant::now())
     }
 
     /// Completes the pending request with a timeout response.
@@ -150,6 +165,7 @@ impl RequestQueue {
             pending: Arc::new(DashMap::new()),
             expirations: Arc::new(Mutex::new(BinaryHeap::new())),
             next_expiry_seq: Arc::new(AtomicU64::new(0)),
+            next_slot: Arc::new(AtomicU64::new(0)),
             ttl,
         }
     }
@@ -157,16 +173,73 @@ impl RequestQueue {
     /// Pushes a request with [`RequestId`] to the "queue"
     /// and returns a [`oneshot::Receiver`] for the response.
     ///
+    /// Refuses an `id` that is already waiting for its response. Two requests
+    /// in flight under one id would share one slot: the second would replace
+    /// the first's waiter, and the first's response would be handed to the
+    /// second caller. Ids this crate generates never repeat, but a caller's own
+    /// -- a batch built by hand -- can repeat one, and with a client shared
+    /// across tasks the two can be in flight together. An entry whose TTL has
+    /// run out is no longer waited on, so it gives its id up.
+    ///
     /// Outbound-request path (client, or legacy server callbacks); unused by an
     /// 2026-07-28 server build without the client.
     #[inline]
     #[cfg_attr(not(feature = "legacy-spec"), allow(dead_code))]
-    pub(crate) fn push(&self, id: &RequestId) -> oneshot::Receiver<PendingResponse> {
+    pub(crate) fn push(&self, id: &RequestId) -> Result<oneshot::Receiver<PendingResponse>, Error> {
+        self.push_slot(id).map(|(receiver, _)| receiver)
+    }
+
+    /// [`Self::push`], plus a guard that releases the slot when dropped.
+    #[cfg(feature = "client")]
+    #[inline]
+    pub(crate) fn push_guarded<'a>(
+        &'a self,
+        id: &'a RequestId,
+    ) -> Result<(oneshot::Receiver<PendingResponse>, QueuedRequestGuard<'a>), Error> {
+        let (receiver, slot) = self.push_slot(id)?;
+        Ok((
+            receiver,
+            QueuedRequestGuard {
+                queue: self,
+                id,
+                slot,
+            },
+        ))
+    }
+
+    #[cfg_attr(not(feature = "legacy-spec"), allow(dead_code))]
+    fn push_slot(
+        &self,
+        id: &RequestId,
+    ) -> Result<(oneshot::Receiver<PendingResponse>, u64), Error> {
+        use dashmap::mapref::entry::Entry;
+
         let (sender, receiver) = oneshot::channel();
         let mut handle = RequestHandle::new(sender, self.ttl);
         handle.expires_at = None;
-        self.pending.insert(id.clone(), handle);
-        receiver
+        let slot = self.next_slot.fetch_add(1, AtomicOrdering::Relaxed);
+        handle.slot = slot;
+
+        let replaced = match self.pending.entry(id.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(handle);
+                None
+            }
+            Entry::Occupied(mut entry) if entry.get().is_expired() => Some(entry.insert(handle)),
+            Entry::Occupied(_) => {
+                return Err(Error::new(
+                    ErrorCode::InvalidRequest,
+                    format!("Request id `{id}` is already waiting for a response"),
+                ));
+            }
+        };
+        // Outside the map's lock: whoever was waiting on the expired entry
+        // learns it timed out.
+        if let Some(expired) = replaced {
+            expired.send_timeout();
+        }
+
+        Ok((receiver, slot))
     }
 
     /// Starts the TTL countdown for a queued request after it has been sent.
@@ -285,8 +358,7 @@ impl RequestQueue {
     fn is_expired(&self, id: &RequestId) -> bool {
         self.pending
             .get(id)
-            .and_then(|handle| handle.expires_at)
-            .is_some_and(|expires_at| expires_at <= Instant::now())
+            .is_some_and(|handle| handle.is_expired())
     }
 }
 
@@ -306,32 +378,28 @@ impl Default for RequestQueue {
 /// sweep finds it -- and with requests sent concurrently over a shared client,
 /// a caller giving up on one is ordinary, not rare.
 ///
-/// Releasing a slot the response already completed is a no-op.
+/// Releasing a slot the response already completed is a no-op, and so is
+/// releasing one a later request has since taken under the same id: the guard
+/// removes the entry its own push made and nothing else.
 ///
 /// The HTTP server's `PendingSlot` guards a different map: the transport's
 /// POST-to-reply routes, which it fills itself and can hand over to a streamed
-/// body. This one guards an entry [`RequestQueue::push`] made and never
-/// transfers.
+/// body. This one guards an entry [`RequestQueue::push_guarded`] made and
+/// never transfers.
 #[cfg(feature = "client")]
 pub(crate) struct QueuedRequestGuard<'a> {
     queue: &'a RequestQueue,
     id: &'a RequestId,
-}
-
-#[cfg(feature = "client")]
-impl<'a> QueuedRequestGuard<'a> {
-    /// Guards the slot of `id`, already pushed onto `queue`.
-    #[inline]
-    pub(crate) fn new(queue: &'a RequestQueue, id: &'a RequestId) -> Self {
-        Self { queue, id }
-    }
+    slot: u64,
 }
 
 #[cfg(feature = "client")]
 impl Drop for QueuedRequestGuard<'_> {
     #[inline]
     fn drop(&mut self) {
-        let _ = self.queue.pop(self.id);
+        self.queue
+            .pending
+            .remove_if(self.id, |_, handle| handle.slot == self.slot);
     }
 }
 
@@ -341,12 +409,72 @@ mod tests {
     use serde_json::json;
     use tokio::time::{Duration, timeout};
 
+    /// Two requests waiting under one id would share one slot: the second would
+    /// replace the first's waiter and be handed the first's response.
+    #[test]
+    fn an_id_already_waiting_is_refused() {
+        let queue = RequestQueue::default();
+        let id = RequestId::Number(7);
+
+        let _first = queue.push(&id).expect("a fresh id");
+        let err = queue.push(&id).expect_err("the id is in flight");
+        assert_eq!(err.code, ErrorCode::InvalidRequest);
+
+        assert!(queue.pop(&id).is_some());
+        assert!(
+            queue.push(&id).is_ok(),
+            "once answered, the id is free again"
+        );
+    }
+
+    /// An entry whose TTL ran out is no longer waited on: its id can be taken,
+    /// and its waiter hears that it timed out.
+    #[tokio::test]
+    async fn an_expired_id_is_given_up() {
+        let queue = RequestQueue::new(Duration::from_millis(1));
+        let id = RequestId::Number(7);
+
+        let stale = queue.push(&id).expect("a fresh id");
+        queue.activate(&id);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        let _fresh = queue.push(&id).expect("an expired entry gives its id up");
+        assert!(matches!(stale.await, Ok(PendingResponse::Timeout)));
+    }
+
+    /// A guard releases the entry its own push made. By the time it drops, its
+    /// response may have arrived and a later request may have taken the id;
+    /// that request's slot is not the guard's to release.
+    #[cfg(feature = "client")]
+    #[test]
+    fn a_guard_releases_only_its_own_slot() {
+        let queue = RequestQueue::default();
+        let id = RequestId::Number(7);
+
+        let (_rx, guard) = queue.push_guarded(&id).expect("a fresh id");
+        assert!(queue.pop(&id).is_some(), "the response arrives");
+        let _next = queue.push(&id).expect("the id is free again");
+
+        drop(guard);
+        assert_eq!(queue.len(), 1, "the later request keeps its slot");
+
+        let (_rx, guard) = queue
+            .push_guarded(&RequestId::Number(8))
+            .expect("a fresh id");
+        drop(guard);
+        assert_eq!(
+            queue.len(),
+            1,
+            "an abandoned request gives its own slot back"
+        );
+    }
+
     #[test]
     fn it_pushes_and_pops_request() {
         let queue = RequestQueue::default();
         let id = RequestId::Number(1);
 
-        let receiver = queue.push(&id);
+        let receiver = queue.push(&id).expect("a fresh id");
         let handle = queue.pop(&id);
 
         assert!(handle.is_some(), "Expected handle to exist");
@@ -363,7 +491,7 @@ mod tests {
         let queue = RequestQueue::default();
         let id = RequestId::Number(1);
 
-        let receiver = queue.push(&id);
+        let receiver = queue.push(&id).expect("a fresh id");
         let handle = queue.pop(&id).expect("Should have handle");
 
         let expected = Response::success(id, json!({ "content": "done" }));
@@ -390,7 +518,7 @@ mod tests {
         let queue = RequestQueue::default();
         let id = RequestId::Number(1);
 
-        let receiver = queue.push(&id);
+        let receiver = queue.push(&id).expect("a fresh id");
 
         let response = Response::success(id, json!({ "content": "done" }));
         queue.complete(response.clone());
@@ -429,7 +557,7 @@ mod tests {
         let queue = RequestQueue::new(Duration::from_millis(1));
         let id = RequestId::Number(1);
 
-        let _receiver = queue.push(&id);
+        let _receiver = queue.push(&id).expect("a fresh id");
         queue.activate(&id);
         std::thread::sleep(Duration::from_millis(10));
 
@@ -442,8 +570,8 @@ mod tests {
         let expired_id = RequestId::Number(1);
         let live_id = RequestId::Number(2);
 
-        let _expired = queue.push(&expired_id);
-        let live = queue.push(&live_id);
+        let _expired = queue.push(&expired_id).expect("a fresh id");
+        let live = queue.push(&live_id).expect("a fresh id");
         queue.activate(&expired_id);
 
         std::thread::sleep(Duration::from_millis(10));
@@ -464,7 +592,7 @@ mod tests {
         let queue = RequestQueue::new(Duration::from_millis(5));
         let id = RequestId::Number(1);
 
-        let receiver = queue.push(&id);
+        let receiver = queue.push(&id).expect("a fresh id");
         queue.activate(&id);
 
         std::thread::sleep(Duration::from_millis(10));
@@ -486,8 +614,8 @@ mod tests {
         let expired_id = RequestId::Number(1);
         let live_id = RequestId::Number(2);
 
-        let expired = queue.push(&expired_id);
-        let _live = queue.push(&live_id);
+        let expired = queue.push(&expired_id).expect("a fresh id");
+        let _live = queue.push(&live_id).expect("a fresh id");
         queue.activate(&expired_id);
 
         std::thread::sleep(Duration::from_millis(10));
@@ -509,7 +637,7 @@ mod tests {
         let queue = RequestQueue::new(Duration::from_millis(1));
         let id = RequestId::Number(1);
 
-        let _receiver = queue.push(&id);
+        let _receiver = queue.push(&id).expect("a fresh id");
         std::thread::sleep(Duration::from_millis(10));
 
         assert!(queue.pop(&id).is_some());
