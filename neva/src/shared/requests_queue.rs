@@ -306,12 +306,11 @@ impl RequestQueue {
             && handle.slot == queued.slot
         {
             handle.sent = true;
-            let Some(expires_at) = (!self.ttl.is_zero()).then_some(Instant::now() + self.ttl)
-            else {
-                handle.expires_at = None;
-                return;
-            };
-
+            // Always a deadline, a zero TTL included: a slot that went out is
+            // kept for its answer (see `QueuedRequestGuard`), and unanswered,
+            // nothing but the sweep would ever free it. A zero TTL makes the
+            // deadline now, which is when the wait for the answer ends too.
+            let expires_at = Instant::now() + self.ttl;
             handle.expires_at = Some(expires_at);
             drop(handle);
 
@@ -553,6 +552,26 @@ mod tests {
         queue.complete(Response::success(id.clone(), json!({ "late": true })));
         assert_eq!(queue.len(), 0, "the late answer settles the slot");
         assert!(queue.push(&id).is_ok(), "and frees the id");
+    }
+
+    /// A slot that went out always gets a deadline: unanswered, nothing else
+    /// would ever free it. With a zero TTL the deadline is now -- the wait for
+    /// the answer is already over -- so the id comes back, and the slots of
+    /// abandoned requests do not pile up.
+    #[cfg(feature = "client")]
+    #[test]
+    fn a_sent_slot_expires_even_with_a_zero_ttl() {
+        let queue = RequestQueue::new(Duration::ZERO);
+        let id = RequestId::Number(7);
+
+        let (rx, guard) = queue.push_guarded(&id).expect("a fresh id");
+        queue.activate(guard.queued());
+        drop(rx);
+        drop(guard);
+
+        let (_rx, next) = queue.push(&id).expect("an expired slot gives its id up");
+        queue.activate(&next);
+        assert_eq!(queue.len(), 0, "the sweep frees what has expired");
     }
 
     /// An activation can run late: a fast answer settles its slot first, and a

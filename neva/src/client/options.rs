@@ -377,6 +377,10 @@ impl McpOptions {
 
     /// Specifies request timeout
     ///
+    /// It is also how long the client keeps the id of a request it gave up on
+    /// after sending, in case the answer still arrives. A zero timeout times
+    /// every request out at once.
+    ///
     /// Default: 10 seconds
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
