@@ -185,6 +185,11 @@ pub struct Context {
     /// Represents a DI scope
     #[cfg(feature = "di")]
     pub(crate) scope: Option<Container>,
+
+    /// The runtime this request runs on, for a toolbox of the server's own
+    /// tools handed to a model from inside a handler.
+    #[cfg(feature = "svir")]
+    pub(crate) runtime: Option<ServerRuntime>,
 }
 
 impl Debug for Context {
@@ -266,6 +271,8 @@ impl ServerRuntime {
             client_extensions: None,
             #[cfg(feature = "di")]
             scope: None,
+            #[cfg(feature = "svir")]
+            runtime: Some(self.clone()),
         }
     }
 
@@ -293,6 +300,8 @@ impl ServerRuntime {
             client_extensions: None,
             #[cfg(feature = "di")]
             scope: None,
+            #[cfg(feature = "svir")]
+            runtime: Some(self.clone()),
         }
     }
 

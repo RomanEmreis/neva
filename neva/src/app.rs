@@ -115,6 +115,12 @@ pub struct App {
     /// transport is torn down. See [`DEFAULT_SHUTDOWN_DRAIN`].
     #[cfg(not(feature = "legacy-spec"))]
     shutdown_drain: std::time::Duration,
+
+    /// Hands the runtime to the toolboxes [`Self::with_toolbox`] gave out,
+    /// once [`Self::run`] has built it. Dropped without a value if the server
+    /// never gets that far, which is what tells them it is not coming.
+    #[cfg(feature = "svir")]
+    pub(crate) toolbox: Option<tokio::sync::watch::Sender<Option<ServerRuntime>>>,
 }
 
 impl Debug for App {
@@ -143,6 +149,8 @@ impl App {
             shutdown: ShutdownHandle::new(),
             #[cfg(not(feature = "legacy-spec"))]
             shutdown_drain: DEFAULT_SHUTDOWN_DRAIN,
+            #[cfg(feature = "svir")]
+            toolbox: None,
         };
 
         #[cfg(feature = "legacy-spec")]
@@ -541,7 +549,13 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
         }
 
         let (sender, mut receiver) = transport.split();
+        #[cfg(feature = "svir")]
+        let toolbox = self.toolbox.take();
         let runtime = self.build_runtime(sender);
+        #[cfg(feature = "svir")]
+        if let Some(toolbox) = toolbox {
+            toolbox.send_replace(Some(runtime.clone()));
+        }
         loop {
             tokio::select! {
                 biased;

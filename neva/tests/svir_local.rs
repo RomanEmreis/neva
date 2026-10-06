@@ -7,7 +7,7 @@
     feature = "svir",
     feature = "server-macros",
     feature = "di",
-    feature = "http-server"
+    feature = "http-server-volga"
 ))]
 
 use neva::{
@@ -15,7 +15,7 @@ use neva::{
     di::Dc,
     error::{Error, ErrorCode},
     tool,
-    types::{Response, elicitation::ElicitRequestParams},
+    types::{Response, Tool, elicitation::ElicitRequestParams},
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -56,6 +56,29 @@ async fn wipe() -> String {
     "wiped".to_string()
 }
 
+/// Drives a "model" over the server's other tools.
+#[tool]
+async fn agent(ctx: Context) -> Result<String, Error> {
+    let tools = ctx
+        .tools()
+        .toolbox()
+        .filter(|tool| tool.name == "add")
+        .load()
+        .await?;
+    let told = tools
+        .call(&ToolCall::new("inner", "add", r#"{"a": 20, "b": 22}"#))
+        .await;
+    Ok(told.content)
+}
+
+#[tool]
+async fn install(ctx: Context) -> Result<String, Error> {
+    ctx.tools()
+        .add(Tool::new("late", || async { "late" }))
+        .await?;
+    Ok("installed".to_string())
+}
+
 fn app() -> App {
     App::new()
         .without_greeting()
@@ -73,7 +96,17 @@ async fn a_tool_written_once_is_offered_to_a_model() {
     let mut names: Vec<_> = tools.tools().into_iter().map(|tool| tool.name).collect();
     names.sort();
     // `wipe` requires a role, and an in-process call has no claims.
-    assert_eq!(names, ["add", "ask_name", "count_tools", "greet"]);
+    assert_eq!(
+        names,
+        [
+            "add",
+            "agent",
+            "ask_name",
+            "count_tools",
+            "greet",
+            "install"
+        ]
+    );
 
     let add = tools
         .tools()
@@ -98,7 +131,7 @@ async fn a_tool_gets_its_dependencies_and_context() {
     assert_eq!(told.content, "Hello, Ann!", "{told:?}");
 
     let told = tools.call(&call("c2", "count_tools", "")).await;
-    assert_eq!(told.content, "5", "{told:?}");
+    assert_eq!(told.content, "7", "{told:?}");
 }
 
 /// There is no peer to ask: the call is refused at once, not left to wait
@@ -189,4 +222,68 @@ async fn only_offered_tools_can_be_called() {
         .call(&call("c2", "local_add", r#"{"a": 1, "b": 2}"#))
         .await;
     assert_eq!(told.content, "3", "{told:?}");
+}
+
+/// A tool can hand the server's other tools to a model of its own.
+#[tokio::test]
+async fn a_tool_can_drive_a_model_over_the_others() {
+    let tools = app().into_toolbox().load().await.expect("load");
+
+    let told = tools.call(&call("c1", "agent", "")).await;
+    assert_eq!(told.content, "42", "{told:?}");
+}
+
+/// The snapshot is renewed when asked: a tool added at runtime is offered
+/// after a refresh, and not before.
+#[tokio::test]
+async fn a_refresh_sees_tools_added_at_runtime() {
+    let tools = app().into_toolbox().load().await.expect("load");
+
+    let told = tools.call(&call("c1", "install", "")).await;
+    assert_eq!(told.content, "installed", "{told:?}");
+    assert!(tools.call(&call("c2", "late", "")).await.is_error);
+
+    tools.refresh().await.expect("refresh");
+    let told = tools.call(&call("c3", "late", "")).await;
+    assert_eq!(told.content, "late", "{told:?}");
+}
+
+/// A server can serve over MCP and be a toolbox at once; the toolbox is bound
+/// when the server runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_served_server_is_a_toolbox_too() {
+    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let (app, tools) = app()
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")))
+        .with_toolbox();
+    let server = tokio::spawn(app.run());
+
+    let tools = tokio::time::timeout(Duration::from_secs(10), tools.load())
+        .await
+        .expect("bound once the server runs")
+        .expect("load");
+    let told = tools.call(&call("c1", "add", r#"{"a": 2, "b": 3}"#)).await;
+    assert_eq!(told.content, "5", "{told:?}");
+
+    server.abort();
+}
+
+/// Waiting for a server that is gone would never end.
+#[tokio::test]
+async fn a_toolbox_of_a_server_that_never_ran_says_so() {
+    let (app, tools) = app().with_toolbox();
+    drop(app);
+
+    let err = tokio::time::timeout(Duration::from_secs(2), tools.load())
+        .await
+        .expect("answered at once")
+        .expect_err("the server never ran");
+    assert!(err.to_string().contains("stopped before it ran"), "{err}");
+}
+
+fn pick_free_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    port
 }

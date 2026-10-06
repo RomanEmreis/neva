@@ -2,17 +2,20 @@
 
 use super::convert;
 use super::offer::Offer;
-use crate::App;
 use crate::app::context::ServerRuntime;
 use crate::error::{Error, ErrorCode};
 use crate::transport::TransportProtoSender;
 use crate::types::{CallToolResponse, Message, Request, RequestId, Tool};
+use crate::{App, Context};
 use ::svir::{ToolCall, ToolResult, Toolbox};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio::sync::watch;
+
+#[cfg(feature = "http-server")]
+use crate::auth::Claims;
 
 /// The `_meta` keys MCP 2026-07-28 requires of every request.
 #[cfg(not(feature = "legacy-spec"))]
@@ -44,11 +47,43 @@ impl App {
     pub fn into_toolbox(mut self) -> LocalTools {
         self.prepare();
         self.compose_pipeline();
-        LocalTools {
-            runtime: self.build_runtime(TransportProtoSender::None),
-            next_id: AtomicI64::new(1),
-            offer: Offer::default(),
-        }
+        LocalTools::new(Some(self.build_runtime(TransportProtoSender::None)))
+    }
+
+    /// This server's tools as a [`Toolbox`] as well as over MCP: the server
+    /// runs as configured, and the toolbox calls the same tools in this
+    /// process. See [`LocalTools`].
+    ///
+    /// The toolbox is bound to the server once [`Self::run`] has built it, so
+    /// [`LocalTools::load`] waits for that; it fails if the server is dropped
+    /// without running, or stops before it gets that far.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// use neva::{App, error::Error};
+    ///
+    /// # async fn run() -> Result<(), Error> {
+    /// let mut app = App::new().with_options(|opt| opt.with_stdio());
+    /// app.map_tool("add", |a: i64, b: i64| async move { a + b });
+    ///
+    /// let (app, tools) = app.with_toolbox();
+    /// tokio::spawn(app.run());
+    ///
+    /// let tools = tools.load().await?;
+    /// // Served over stdio, and offered to a model here.
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_toolbox(mut self) -> (Self, LocalTools) {
+        let runtime = match &self.toolbox {
+            Some(toolbox) => toolbox.subscribe(),
+            None => {
+                let (toolbox, runtime) = watch::channel(None);
+                self.toolbox = Some(toolbox);
+                runtime
+            }
+        };
+        (self, LocalTools::bound_later(runtime))
     }
 }
 
@@ -64,10 +99,13 @@ impl App {
 /// log notifications go nowhere.
 ///
 /// The descriptors are a snapshot, taken by [`Self::load`] and renewed by
-/// [`Self::refresh`]. Only the tools in it can be called. The snapshot leaves
-/// out a tool that requires roles or permissions, since there are no claims
-/// to satisfy them, and one that can only be called as a task, as well as,
-/// with the `apps` feature, one MCP Apps hides from the model. Beyond that,
+/// [`Self::refresh`] -- after `ctx.tools().add(..)` or `remove(..)`, for
+/// example. Only the tools in it can be called. The snapshot leaves out a tool
+/// that requires roles or permissions the caller does not hold -- a toolbox
+/// from [`App::into_toolbox`] or [`App::with_toolbox`] holds none, one from
+/// `ctx.tools().toolbox()` holds its request's -- and one that can only be
+/// called as a task, as well as, with the `apps` feature, one MCP Apps hides
+/// from the model. Beyond that,
 /// [`Self::filter`], [`Self::rename`] and [`Self::prefixed`] work as they do
 /// on `RemoteTools`.
 ///
@@ -91,9 +129,13 @@ impl App {
 /// # }
 /// ```
 pub struct LocalTools {
-    runtime: ServerRuntime,
-    /// The ids of the calls: unique, as the server's request tracking needs.
-    next_id: AtomicI64,
+    /// The runtime the calls run on, once there is one: at once for
+    /// [`App::into_toolbox`], when the server runs for [`App::with_toolbox`].
+    runtime: watch::Receiver<Option<ServerRuntime>>,
+    /// What the caller holds, for a toolbox handed out inside a handler: the
+    /// claims of that handler's request.
+    #[cfg(feature = "http-server")]
+    claims: Option<Arc<dyn Claims>>,
     offer: Offer,
 }
 
@@ -106,6 +148,32 @@ impl Debug for LocalTools {
 }
 
 impl LocalTools {
+    /// A toolbox on `runtime`, already there or not.
+    fn new(runtime: Option<ServerRuntime>) -> Self {
+        Self::bound_later(watch::channel(runtime).1)
+    }
+
+    fn bound_later(runtime: watch::Receiver<Option<ServerRuntime>>) -> Self {
+        Self {
+            runtime,
+            #[cfg(feature = "http-server")]
+            claims: None,
+            offer: Offer::default(),
+        }
+    }
+
+    /// The server's tools, called from inside the handler of `ctx`'s request
+    /// and holding its claims. See [`Tools::toolbox`](crate::app::context::api::Tools::toolbox).
+    pub(crate) fn of_context(ctx: &Context) -> Self {
+        #[cfg_attr(not(feature = "http-server"), allow(unused_mut))]
+        let mut tools = Self::new(ctx.runtime.clone());
+        #[cfg(feature = "http-server")]
+        {
+            tools.claims = ctx.claims.clone();
+        }
+        tools
+    }
+
     /// Offers only the tools `filter` keeps.
     ///
     /// Filters add up: a tool is offered only if every one of them keeps it.
@@ -214,9 +282,38 @@ impl LocalTools {
     /// # }
     /// ```
     pub async fn refresh(&self) -> Result<(), Error> {
-        let listed = self.runtime.options().all_tools().await;
+        let listed = self.bound().await?.options().all_tools().await;
         self.offer
-            .replace(listed.iter().filter(|tool| unrestricted(tool)))
+            .replace(listed.iter().filter(|tool| self.may_call(tool)))
+    }
+
+    /// The runtime, once the server has built it.
+    async fn bound(&self) -> Result<ServerRuntime, Error> {
+        let mut runtime = self.runtime.clone();
+        let bound = runtime.wait_for(Option::is_some).await.map_err(|_| {
+            Error::new(
+                ErrorCode::InternalError,
+                "The server stopped before it ran, and has no tools to call",
+            )
+        })?;
+        
+        bound
+            .clone()
+            .ok_or_else(|| Error::new(ErrorCode::InternalError, "The server is not running"))
+    }
+
+    /// Whether the caller's claims reach `tool`: one that requires roles or
+    /// permissions the caller does not hold would refuse every call the model
+    /// made. Without `http-server` there are no claims, and no tool requires
+    /// any.
+    fn may_call(&self, tool: &Tool) -> bool {
+        #[cfg(feature = "http-server")]
+        return tool.required.validate(self.claims.as_deref()).is_ok();
+        #[cfg(not(feature = "http-server"))]
+        {
+            let _ = tool;
+            true
+        }
     }
 
     /// Runs `tools/call` of `name` through the server's pipeline.
@@ -225,20 +322,33 @@ impl LocalTools {
         name: String,
         args: HashMap<String, Value>,
     ) -> Result<CallToolResponse, Error> {
-        let id = RequestId::Number(self.next_id.fetch_add(1, Ordering::Relaxed));
-        let request = Request::new(
+        // A snapshot exists only once the runtime does, so a call never
+        // waits here.
+        let runtime = self
+            .runtime
+            .borrow()
+            .clone()
+            .ok_or_else(|| Error::new(ErrorCode::InternalError, "The server is not running"))?;
+
+        // A UUID and not a counter: the server tracks requests by id, and a
+        // server that also serves over MCP sees its clients' ids beside these.
+        let id = RequestId::Uuid(uuid::Uuid::new_v4());
+        #[cfg_attr(not(feature = "http-server"), allow(unused_mut))]
+        let mut request = Request::new(
             Some(id),
             crate::types::tool::commands::CALL,
             Some(params(name, args)),
         );
+        #[cfg(feature = "http-server")]
+        {
+            request.claims = self.claims.clone();
+        }
 
         // The dispatcher sends the answer, and the sender keeps it. What the
         // pipeline returns is the answer only when a middleware gave one
         // without calling `next`; over a transport that one is never sent.
         let answer = Arc::new(Mutex::new(None));
-        let returned = self
-            .runtime
-            .clone()
+        let returned = runtime
             .with_sender(TransportProtoSender::InProcess(answer.clone()))
             .answer(Message::Request(request))
             .await;
@@ -294,21 +404,6 @@ fn params(name: String, args: HashMap<String, Value>) -> Value {
     params
 }
 
-/// Whether a call without claims may reach `tool`: one that requires roles or
-/// permissions would refuse every call the model made.
-#[cfg(feature = "http-server")]
-#[inline]
-fn unrestricted(tool: &Tool) -> bool {
-    tool.required.validate(None).is_ok()
-}
-
-/// Without `http-server` there are no claims, and no tool requires any.
-#[cfg(not(feature = "http-server"))]
-#[inline]
-fn unrestricted(_: &Tool) -> bool {
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,5 +413,39 @@ mod tests {
     fn a_toolbox_can_be_shared_across_tasks() {
         fn shared<T: Send + Sync + 'static>() {}
         shared::<LocalTools>();
+    }
+
+    /// A toolbox handed out inside a handler holds that request's claims: it
+    /// offers what they reach, and the server's own check sees them on the
+    /// call.
+    #[cfg(feature = "http-server")]
+    #[tokio::test]
+    async fn a_handlers_toolbox_holds_its_requests_claims() {
+        use crate::auth::DefaultClaims;
+
+        let mut app = App::new();
+        app.map_tool("wipe", || async { "wiped" })
+            .with_roles(["admin"]);
+        app.prepare();
+        app.compose_pipeline();
+        let runtime = app.build_runtime(TransportProtoSender::None);
+
+        let holding = |role: &str| -> Option<Arc<dyn Claims>> {
+            Some(Arc::new(DefaultClaims {
+                role: Some(role.into()),
+                ..Default::default()
+            }))
+        };
+        let offered = |tools: &LocalTools| tools.tools().iter().any(|tool| tool.name == "wipe");
+
+        let admin = runtime.context(None, Default::default(), holding("admin"));
+        let tools = LocalTools::of_context(&admin).load().await.expect("load");
+        assert!(offered(&tools), "an admin is offered `wipe`");
+        let told = tools.call(&ToolCall::new("c1", "wipe", "")).await;
+        assert_eq!(told.content, "wiped", "{told:?}");
+
+        let guest = runtime.context(None, Default::default(), holding("guest"));
+        let tools = LocalTools::of_context(&guest).load().await.expect("load");
+        assert!(!offered(&tools), "a guest is not");
     }
 }
