@@ -5,7 +5,9 @@
 //! [`Toolbox`](::svir::Toolbox) trait a request takes its tools from. It has no
 //! MCP of its own; this module implements `Toolbox` over MCP.
 //!
-//! - [`RemoteTools`]: the tools of a connected [`Client`](crate::Client).
+//! - `RemoteTools` (feature `client`): the tools of a connected `Client`.
+//! - `LocalTools` (feature `server`): this server's own tools, called in the
+//!   same process through `App::into_toolbox`.
 //! - [`prompt_messages`] and [`resource_parts`]: a prompt as the messages it
 //!   opens a conversation with, and a resource as the parts attached to one.
 //!   They are not tools: in MCP the user picks a prompt and the application
@@ -29,7 +31,14 @@
 //! `Toolbox` trait, no HTTP client. The model is called through svir directly.
 
 mod convert;
+#[cfg(feature = "server")]
+mod local;
+mod offer;
+#[cfg(feature = "client")]
 mod remote;
 
 pub use convert::{prompt_messages, resource_parts};
+#[cfg(feature = "server")]
+pub use local::LocalTools;
+#[cfg(feature = "client")]
 pub use remote::RemoteTools;

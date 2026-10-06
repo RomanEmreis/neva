@@ -102,7 +102,7 @@ pub mod middleware;
 #[cfg(feature = "registry")]
 pub mod registry;
 pub mod shared;
-#[cfg(all(feature = "svir", feature = "client"))]
+#[cfg(all(feature = "svir", any(feature = "server", feature = "client")))]
 pub mod svir;
 #[cfg(any(feature = "server", feature = "client"))]
 pub mod transport;

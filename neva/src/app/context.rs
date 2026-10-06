@@ -308,6 +308,19 @@ impl ServerRuntime {
             mw_start(MwContext::msg(msg, self)).await;
         }
     }
+
+    /// Runs `msg` through the middleware pipeline, and returns what the
+    /// pipeline answered.
+    ///
+    /// [`Self::execute`] drops that answer: the dispatcher at the end of the
+    /// pipeline has sent the real one already. It is what is left when a
+    /// middleware answers without calling `next`, and an in-process caller,
+    /// with no transport to wait on, can still read it.
+    #[cfg(feature = "svir")]
+    pub(crate) async fn answer(self, msg: Message) -> Option<Response> {
+        let mw_start = self.mw_start.clone()?;
+        Some(mw_start(MwContext::msg(msg, self)).await)
+    }
 }
 
 impl Context {

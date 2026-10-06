@@ -1,17 +1,13 @@
 //! The tools of a connected MCP server, handed to a model.
 
 use super::convert;
+use super::offer::Offer;
 use crate::Client;
-use crate::error::{Error, ErrorCode};
+use crate::error::Error;
 use crate::types::{CallToolRequestParams, CallToolResponse, Tool};
 use ::svir::{ToolCall, ToolResult, Toolbox};
-use std::borrow::Cow;
-use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
-use std::sync::{Arc, PoisonError, RwLock};
-
-type Filter = Box<dyn Fn(&Tool) -> bool + Send + Sync>;
-type Rename = Box<dyn Fn(&str) -> String + Send + Sync>;
+use std::sync::Arc;
 
 /// The tools of a connected MCP server as a [`Toolbox`]: `tools/list` gives
 /// the descriptors a model is offered, and each call the model makes is
@@ -26,8 +22,8 @@ type Rename = Box<dyn Fn(&str) -> String + Send + Sync>;
 /// Which tools a model may use is the caller's policy: [`Self::filter`]
 /// narrows them, and [`Self::rename`] and [`Self::prefixed`] choose the names
 /// they are offered under, keeping the tools of several servers apart in one
-/// request. With the `apps` feature, a tool MCP Apps hides from the model is
-/// never offered.
+/// request. A tool that can only be called as a task is not offered, nor,
+/// with the `apps` feature, one MCP Apps hides from the model.
 ///
 /// Calls go over the shared [`Client`], so [`Toolbox::call_all`] runs them
 /// concurrently, answering in order.
@@ -54,27 +50,13 @@ type Rename = Box<dyn Fn(&str) -> String + Send + Sync>;
 /// ```
 pub struct RemoteTools {
     client: Arc<Client>,
-    filters: Vec<Filter>,
-    renames: Vec<Rename>,
-    snapshot: RwLock<Snapshot>,
-}
-
-/// What one listing offered.
-#[derive(Default)]
-struct Snapshot {
-    /// The descriptors, as the model is offered them.
-    tools: Vec<::svir::Tool>,
-    /// The name a model calls -> the name the server knows.
-    names: HashMap<String, String>,
+    offer: Offer,
 }
 
 impl Debug for RemoteTools {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let snapshot = self.snapshot.read().unwrap_or_else(PoisonError::into_inner);
         f.debug_struct("RemoteTools")
-            .field("filters", &self.filters.len())
-            .field("renames", &self.renames.len())
-            .field("tools", &snapshot.names.keys())
+            .field("offer", &self.offer)
             .finish_non_exhaustive()
     }
 }
@@ -98,9 +80,7 @@ impl RemoteTools {
     pub fn new(client: impl Into<Arc<Client>>) -> Self {
         Self {
             client: client.into(),
-            filters: Vec::new(),
-            renames: Vec::new(),
-            snapshot: RwLock::default(),
+            offer: Offer::default(),
         }
     }
 
@@ -144,7 +124,7 @@ impl RemoteTools {
     where
         F: Fn(&Tool) -> bool + Send + Sync + 'static,
     {
-        self.filters.push(Box::new(filter));
+        self.offer.filter(Box::new(filter));
         self
     }
 
@@ -174,7 +154,7 @@ impl RemoteTools {
     where
         F: Fn(&str) -> String + Send + Sync + 'static,
     {
-        self.renames.push(Box::new(rename));
+        self.offer.rename(Box::new(rename));
         self
     }
 
@@ -236,81 +216,17 @@ impl RemoteTools {
     /// ```
     pub async fn refresh(&self) -> Result<(), Error> {
         let listed = self.client.tools().list_all().await?;
-
-        let mut snapshot = Snapshot::default();
-        let offered = listed
-            .iter()
-            .filter(|tool| visible(tool) && self.filters.iter().all(|keep| keep(tool)));
-
-        for tool in offered {
-            let name = self
-                .renames
-                .iter()
-                .fold(Cow::Borrowed(tool.name.as_str()), |name, rename| {
-                    Cow::Owned(rename(&name))
-                })
-                .into_owned();
-
-            if snapshot.names.contains_key(&name) {
-                return Err(Error::new(
-                    ErrorCode::InvalidParams,
-                    format!(
-                        "Tool `{}` is offered as `{name}`, a name already taken",
-                        tool.name
-                    ),
-                ));
-            }
-
-            snapshot
-                .tools
-                .push(convert::descriptor(tool, name.clone())?);
-
-            snapshot.names.insert(name, tool.name.clone());
-        }
-
-        *self
-            .snapshot
-            .write()
-            .unwrap_or_else(PoisonError::into_inner) = snapshot;
-
-        Ok(())
+        self.offer.replace(&listed)
     }
-}
-
-/// Whether the model may be offered `tool`: MCP Apps can hide a tool from it.
-#[cfg(feature = "apps")]
-#[inline]
-fn visible(tool: &Tool) -> bool {
-    tool.is_model_visible()
-}
-
-/// Without the `apps` feature nothing is read of MCP Apps, as in the rest of
-/// neva: every tool the server lists is an ordinary tool.
-#[cfg(not(feature = "apps"))]
-#[inline]
-fn visible(_: &Tool) -> bool {
-    true
 }
 
 impl Toolbox for RemoteTools {
     fn tools(&self) -> Vec<::svir::Tool> {
-        self.snapshot
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .tools
-            .clone()
+        self.offer.tools()
     }
 
     async fn call(&self, call: &ToolCall) -> ToolResult {
-        let name = self
-            .snapshot
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .names
-            .get(&call.name)
-            .cloned();
-
-        let Some(name) = name else {
+        let Some(name) = self.offer.server_name(&call.name) else {
             return ToolResult::error(&call.id, format!("There is no tool named `{}`", call.name));
         };
 

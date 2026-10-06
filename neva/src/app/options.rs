@@ -858,6 +858,13 @@ impl McpOptions {
         self.tools.get(name).await
     }
 
+    /// Returns every tool, in name order.
+    #[cfg(feature = "svir")]
+    #[inline]
+    pub(crate) async fn all_tools(&self) -> Vec<Tool> {
+        self.tools.values().await
+    }
+
     /// Returns a paginated list of available tools.
     #[inline]
     pub(crate) async fn list_tools_page(

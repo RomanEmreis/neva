@@ -232,6 +232,8 @@ jobs:
         run: cargo doc --no-deps --features "server-full client-full svir"
       - name: Check docs build clean on a slim client with svir
         run: cargo doc --no-deps --features "client svir"
+      - name: Check docs build clean on a slim server with svir
+        run: cargo doc --no-deps --features "server svir"
 
   build:
     environment: CICD
