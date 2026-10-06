@@ -51,6 +51,14 @@ jobs:
         run: cargo clippy --all-targets --features "client legacy-spec" -- -D warnings
       - name: Run slim server with legacy-spec
         run: cargo clippy --all-targets --features "server legacy-spec" -- -D warnings
+      # `svir` is in no `-full` set, so only `--all-features` above would see
+      # it, and on the legacy profile at that.
+      - name: Run server+client with svir
+        run: cargo clippy --all-targets --features "server-full client-full svir" -- -D warnings
+      - name: Run slim client with svir
+        run: cargo clippy --all-targets --features "client svir" -- -D warnings
+      - name: Run slim server with svir
+        run: cargo clippy --all-targets --features "server svir" -- -D warnings
 
   os_check:
     strategy:
@@ -220,6 +228,10 @@ jobs:
         run: cargo doc --no-deps --features client
       - name: Check docs build clean on a client-only legacy build
         run: cargo doc --no-deps --features "client legacy-spec"
+      - name: Check docs build clean with svir
+        run: cargo doc --no-deps --features "server-full client-full svir"
+      - name: Check docs build clean on a slim client with svir
+        run: cargo doc --no-deps --features "client svir"
 
   build:
     environment: CICD
@@ -240,3 +252,5 @@ jobs:
         run: cargo test --features "server-full client-full" --verbose
       - name: Run tests with legacy-spec
         run: cargo test --features "server-full client-full legacy-spec" --verbose
+      - name: Run tests with svir
+        run: cargo test --features "server-full client-full svir" --verbose
