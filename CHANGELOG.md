@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   starts a task-augmented call.
 * **The same on `Context`** (`neva::app::context::api`): `ctx.tools()`,
   `resources()` and `prompts()`.
+* **The svir bridge** (feature `svir`, `neva::svir`): MCP tools as a
+  [svir](https://docs.rs/svir) `Toolbox`, for handing them to a model.
+  `RemoteTools` offers a connected server's tools; `App::into_toolbox`,
+  `App::with_toolbox` and `ctx.tools().toolbox()` offer a server's own,
+  called in-process through its middleware. `filter`, `rename` and `prefixed`
+  choose what is offered and under which name. `prompt_messages` and
+  `resource_parts` turn a prompt and a resource into svir messages. Not in
+  `server-full` or `client-full`. Example: `examples/svir`.
 
 ### Changed
 * **`Client` request methods take `&self`**, so a connected client can be

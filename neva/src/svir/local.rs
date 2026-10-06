@@ -296,7 +296,7 @@ impl LocalTools {
                 "The server stopped before it ran, and has no tools to call",
             )
         })?;
-        
+
         bound
             .clone()
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "The server is not running"))
