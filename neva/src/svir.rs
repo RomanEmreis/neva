@@ -6,6 +6,10 @@
 //! MCP of its own; this module implements `Toolbox` over MCP.
 //!
 //! - [`RemoteTools`]: the tools of a connected [`Client`](crate::Client).
+//! - [`prompt_messages`] and [`resource_parts`]: a prompt as the messages it
+//!   opens a conversation with, and a resource as the parts attached to one.
+//!   They are not tools: in MCP the user picks a prompt and the application
+//!   picks a resource, so neither is the model's to call.
 //!
 //! A model takes less than MCP carries, and nothing is lost silently:
 //!
@@ -27,4 +31,5 @@
 mod convert;
 mod remote;
 
+pub use convert::{prompt_messages, resource_parts};
 pub use remote::RemoteTools;

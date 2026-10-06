@@ -1,9 +1,12 @@
-//! Between MCP's tool types and svir's: what a model is offered, what it
-//! sends back, and what it is told.
+//! Between MCP's types and svir's: the tools a model is offered, what it
+//! sends back and is told, and the prompts and resources a conversation is
+//! given.
 
 use crate::error::{Error, ErrorCode};
-use crate::types::{CallToolResponse, Content, ResourceContents, Tool};
-use ::svir::{ToolCall, ToolResult};
+use crate::types::{
+    CallToolResponse, Content, GetPromptResult, ReadResourceResult, ResourceContents, Role, Tool,
+};
+use ::svir::{Image, Message, Part, TextFile, ToolCall, ToolResult};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -138,6 +141,122 @@ fn flatten(response: &CallToolResponse) -> Result<String, String> {
 
 fn unsupported(what: &str) -> String {
     format!("The tool returned {what}, which cannot be passed on to the model")
+}
+
+/// A prompt (`prompts/get`) as the messages it opens a conversation with.
+///
+/// Roles carry over, and consecutive messages of one role become one message:
+/// MCP gives each content block a message of its own, where a turn of a
+/// conversation is a role and its parts. Text is text, an image an image, an
+/// embedded resource is attached as [`resource_parts`] attaches it, and a
+/// resource link is its name and URI. Audio, binary resources other than
+/// images, and sampling content cannot be passed on, and are an error rather
+/// than dropped. The prompt's description is for the user, not the model,
+/// and is left out.
+///
+/// # Examples
+/// ```no_run
+/// use neva::{Client, error::Error};
+///
+/// # async fn run(client: Client) -> Result<(), Error> {
+/// let prompt = client.prompts().get("review", [("lang", "rust")]).await?;
+/// let messages = neva::svir::prompt_messages(prompt)?;
+///
+/// // The conversation so far, before the model answers: each one goes to
+/// // `svir::Request::message`.
+/// # Ok(())
+/// # }
+/// ```
+pub fn prompt_messages(prompt: GetPromptResult) -> Result<Vec<Message>, Error> {
+    let mut messages: Vec<Message> = Vec::with_capacity(prompt.messages.len());
+
+    for message in prompt.messages {
+        let role = match message.role {
+            Role::User => ::svir::Role::User,
+            Role::Assistant => ::svir::Role::Assistant,
+        };
+        let Some(part) = content_part(message.content)? else {
+            continue;
+        };
+
+        match messages.last_mut() {
+            Some(turn) if turn.role == role => turn.parts.push(part),
+            _ => messages.push(Message::new(role).with(part)),
+        }
+    }
+
+    Ok(messages)
+}
+
+/// A resource (`resources/read`) as the parts to attach to a message.
+///
+/// Text contents are a text file named by the resource's URI, which is how
+/// the model is told where they came from; JSON contents likewise, as JSON
+/// text; an image is an image. Other binary contents cannot be passed on, and
+/// are an error rather than dropped.
+///
+/// # Examples
+/// ```no_run
+/// use neva::{Client, error::Error};
+///
+/// # async fn run(client: Client) -> Result<(), Error> {
+/// let notes = client.resources().read("file:///notes.md").await?;
+/// let parts = neva::svir::resource_parts(notes)?;
+///
+/// // Attached to a question: each one goes to `svir::Message::with`, after
+/// // `svir::Message::user("Summarise these notes.")`.
+/// # Ok(())
+/// # }
+/// ```
+pub fn resource_parts(resource: ReadResourceResult) -> Result<Vec<Part>, Error> {
+    resource
+        .contents
+        .into_iter()
+        .filter_map(|contents| resource_part(contents).transpose())
+        .collect()
+}
+
+/// One content block of a prompt, or `None` for an empty one.
+fn content_part(content: Content) -> Result<Option<Part>, Error> {
+    match content {
+        Content::Text(text) => Ok(Some(Part::Text(text.text))),
+        Content::Image(image) => Ok(Some(Image::bytes(image.data, image.mime).into())),
+        Content::Resource(embedded) => resource_part(embedded.resource),
+        Content::ResourceLink(link) => Ok(Some(Part::Text(format!("{}: {}", link.name, link.uri)))),
+        Content::Audio(_) => Err(refused("Audio")),
+        Content::ToolUse(_) | Content::ToolResult(_) => Err(refused("Sampling content")),
+        Content::Empty(_) => Ok(None),
+    }
+}
+
+/// One content of a resource, or `None` for an empty one.
+fn resource_part(contents: ResourceContents) -> Result<Option<Part>, Error> {
+    match contents {
+        ResourceContents::Text(text) => {
+            Ok(Some(TextFile::text(text.uri.to_string(), text.text).into()))
+        }
+        ResourceContents::Json(json) => Ok(Some(
+            TextFile::text(json.uri.to_string(), json.value.to_string()).into(),
+        )),
+        ResourceContents::Blob(blob) => match blob.mime {
+            Some(mime) if mime.starts_with("image/") => {
+                Ok(Some(Image::bytes(blob.blob, mime).into()))
+            }
+            mime => Err(refused(&format!(
+                "The binary resource `{}` ({})",
+                blob.uri,
+                mime.as_deref().unwrap_or("no media type")
+            ))),
+        },
+        ResourceContents::Empty(_) => Ok(None),
+    }
+}
+
+fn refused(what: &str) -> Error {
+    Error::new(
+        ErrorCode::InvalidParams,
+        format!("{what} cannot be passed on to the model"),
+    )
 }
 
 #[cfg(test)]
@@ -296,5 +415,114 @@ mod tests {
         let told = result("c", Err(refused));
         assert!(told.is_error);
         assert_eq!(told.content, "Tool not found");
+    }
+
+    fn prompt(messages: serde_json::Value) -> GetPromptResult {
+        serde_json::from_value(json!({ "messages": messages })).expect("a prompt")
+    }
+
+    fn resource(contents: serde_json::Value) -> ReadResourceResult {
+        serde_json::from_value(json!({ "contents": contents, "ttlMs": 0 })).expect("a resource")
+    }
+
+    /// MCP gives each content block a message of its own; a turn of a
+    /// conversation is a role and its parts.
+    #[test]
+    fn a_prompt_is_its_turns() {
+        let messages = prompt_messages(prompt(json!([
+            { "role": "user", "content": { "type": "text", "text": "What is on this chart?" } },
+            { "role": "user", "content": { "type": "image", "data": "AQID", "mimeType": "image/png" } },
+            { "role": "assistant", "content": { "type": "text", "text": "A rising line." } },
+            { "role": "user", "content": { "type": "text", "text": "Why?" } }
+        ])))
+        .expect("messages");
+
+        let roles: Vec<_> = messages.iter().map(|message| message.role).collect();
+        assert_eq!(
+            roles,
+            [
+                ::svir::Role::User,
+                ::svir::Role::Assistant,
+                ::svir::Role::User
+            ]
+        );
+
+        let first = &messages[0].parts;
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0], Part::Text("What is on this chart?".into()));
+        assert_eq!(
+            first[1],
+            Part::Image(Image::bytes(vec![1, 2, 3], "image/png"))
+        );
+    }
+
+    #[test]
+    fn a_prompt_attaches_its_resources() {
+        let messages = prompt_messages(prompt(json!([
+            {
+                "role": "user",
+                "content": {
+                    "type": "resource",
+                    "resource": { "uri": "file:///notes.md", "text": "# Notes" }
+                }
+            },
+            {
+                "role": "user",
+                "content": { "type": "resource_link", "uri": "file:///report.pdf", "name": "report" }
+            }
+        ])))
+        .expect("messages");
+
+        assert_eq!(
+            messages[0].parts,
+            [
+                Part::File(TextFile::text("file:///notes.md", "# Notes")),
+                Part::Text("report: file:///report.pdf".into())
+            ]
+        );
+    }
+
+    /// Dropping a block would leave the model reading part of the prompt
+    /// without knowing it.
+    #[test]
+    fn a_prompt_with_audio_is_an_error() {
+        let err = prompt_messages(prompt(json!([
+            { "role": "user", "content": { "type": "audio", "data": "AQID", "mimeType": "audio/wav" } }
+        ])))
+        .expect_err("audio cannot be passed on");
+        assert!(err.to_string().contains("Audio"), "{err}");
+    }
+
+    #[test]
+    fn a_resource_is_files_and_images() {
+        let mut read = resource(json!([
+            { "uri": "file:///notes.md", "text": "# Notes" },
+            { "uri": "file:///chart.png", "blob": "AQID", "mimeType": "image/png" }
+        ]));
+        read.contents.push(ResourceContents::Json(
+            crate::types::resource::JsonResourceContents::new(
+                "file:///data.json",
+                json!({ "a": 1 }),
+            ),
+        ));
+
+        assert_eq!(
+            resource_parts(read).expect("parts"),
+            [
+                Part::File(TextFile::text("file:///notes.md", "# Notes")),
+                Part::Image(Image::bytes(vec![1, 2, 3], "image/png")),
+                Part::File(TextFile::text("file:///data.json", r#"{"a":1}"#)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_binary_resource_that_is_not_an_image_is_an_error() {
+        let err = resource_parts(resource(json!([
+            { "uri": "file:///report.pdf", "blob": "AQID", "mimeType": "application/pdf" }
+        ])))
+        .expect_err("a PDF cannot be passed on");
+        assert!(err.to_string().contains("file:///report.pdf"), "{err}");
+        assert!(err.to_string().contains("application/pdf"), "{err}");
     }
 }

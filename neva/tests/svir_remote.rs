@@ -13,13 +13,14 @@ use neva::{
     client::Client,
     error::{Error, ErrorCode},
     svir::RemoteTools,
-    types::{CallToolResponse, Content},
+    types::{CallToolResponse, Content, Role},
 };
 use std::{sync::Arc, time::Duration};
-use svir::{ToolCall, Toolbox};
+use svir::{Part, TextFile, ToolCall, Toolbox};
 
 /// Serves `add`, `greet`, `fail`, `photo` and, with `apps`, an app-only
 /// `cart`; plus `files.read` when `dotted` -- a name a model API cannot carry.
+/// Also a `review` prompt and `notes://{day}` resources.
 async fn serve(dotted: bool) -> (Arc<Client>, tokio::task::JoinHandle<()>) {
     let addr = format!("127.0.0.1:{}", pick_free_port());
 
@@ -43,6 +44,15 @@ async fn serve(dotted: bool) -> (Arc<Client>, tokio::task::JoinHandle<()>) {
     if dotted {
         app.map_tool("files.read", || async { "contents" });
     }
+    app.map_prompt("review", || async {
+        ("Review this change.".to_string(), Role::User)
+    });
+    app.map_resource("notes://{day}", "notes", |day: String| async move {
+        (
+            format!("notes://{day}"),
+            format!("Ship the bridge on {day}."),
+        )
+    });
 
     let server = tokio::spawn(async move { app.run().await });
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -262,6 +272,44 @@ async fn a_refresh_renews_the_snapshot() {
             .await
             .content,
         "2"
+    );
+
+    server.abort();
+}
+
+/// A prompt and a resource reach a conversation as messages and parts, read
+/// through the client the toolbox owns.
+#[tokio::test(flavor = "multi_thread")]
+async fn prompts_and_resources_become_messages() {
+    let (client, server) = serve(false).await;
+    let tools = RemoteTools::new(client);
+
+    let prompt = tools
+        .client()
+        .prompts()
+        .get("review", ())
+        .await
+        .expect("prompts/get");
+    let messages = neva::svir::prompt_messages(prompt).expect("messages");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].role, svir::Role::User);
+    assert_eq!(
+        messages[0].parts,
+        [Part::Text("Review this change.".into())]
+    );
+
+    let notes = tools
+        .client()
+        .resources()
+        .read("notes://monday")
+        .await
+        .expect("resources/read");
+    assert_eq!(
+        neva::svir::resource_parts(notes).expect("parts"),
+        [Part::File(TextFile::text(
+            "notes://monday",
+            "Ship the bridge on monday."
+        ))]
     );
 
     server.abort();
