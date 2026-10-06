@@ -179,6 +179,7 @@ jobs:
             examples/sampling examples/sampling/legacy \
             examples/elicitation \
             examples/mrtr \
+            examples/subscriptions \
             examples/svir \
             examples/tasks
           do

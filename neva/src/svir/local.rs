@@ -284,7 +284,7 @@ impl LocalTools {
     pub async fn refresh(&self) -> Result<(), Error> {
         let listed = self.bound().await?.options().all_tools().await;
         self.offer
-            .replace(listed.iter().filter(|tool| self.may_call(tool)))
+            .replace(listed.into_iter().filter(|tool| self.may_call(tool)))
     }
 
     /// The runtime, once the server has built it.

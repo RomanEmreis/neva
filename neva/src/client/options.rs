@@ -663,7 +663,7 @@ mod tests {
         );
 
         opts.add_sampling_handler(Arc::new(|_params| {
-            Box::pin(async move { crate::types::sampling::CreateMessageResult::assistant() })
+            Box::pin(async move { Ok(crate::types::sampling::CreateMessageResult::assistant()) })
         }));
         opts.add_elicitation_handler(Arc::new(|_params| {
             Box::pin(async move { crate::types::elicitation::ElicitResult::decline() })

@@ -5,6 +5,7 @@
 use crate::error::{Error, ErrorCode};
 use crate::types::{
     CallToolResponse, Content, GetPromptResult, ReadResourceResult, ResourceContents, Role, Tool,
+    ToolInputSchema,
 };
 use ::svir::{Image, Message, Part, TextFile, ToolCall, ToolResult};
 use serde_json::Value;
@@ -16,13 +17,14 @@ const MAX_NAME_LEN: usize = 64;
 /// What separates the parts of a result: svir joins text the same way (P12).
 const SEPARATOR: &str = "\n\n";
 
-/// `tool` as a model is offered it, under `name`.
+/// `tool` as a model is offered it, under `name`; the tool's own name is not
+/// read.
 ///
 /// Fails for a name a model API cannot carry. Function names are
 /// `[a-zA-Z0-9_-]{1,64}`, where MCP also allows `.` and up to 128
 /// characters; rewriting one would have the model call a tool the server does
 /// not know by that name, and the caller would not know why.
-pub(super) fn descriptor(tool: &Tool, name: String) -> Result<::svir::Tool, Error> {
+pub(super) fn descriptor(tool: Tool, name: String) -> Result<::svir::Tool, Error> {
     let carried = name
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
@@ -37,16 +39,24 @@ pub(super) fn descriptor(tool: &Tool, name: String) -> Result<::svir::Tool, Erro
         ));
     }
 
-    let description = tool
-        .descr
-        .as_ref()
-        .or(tool.title.as_ref())
-        .cloned()
-        .unwrap_or_default();
-
-    let schema = serde_json::to_value(&tool.input_schema)?;
+    let description = tool.descr.or(tool.title).unwrap_or_default();
+    let schema = schema(tool.input_schema)?;
 
     Ok(::svir::Tool::new(name, description).schema(schema))
+}
+
+/// The input schema as JSON. Under MCP 2026-07-28 it already is JSON, and is
+/// moved rather than serialized into a copy.
+#[cfg(not(feature = "legacy-spec"))]
+#[inline]
+fn schema(schema: ToolInputSchema) -> Result<Value, Error> {
+    Ok(schema.into_value())
+}
+
+#[cfg(feature = "legacy-spec")]
+#[inline]
+fn schema(schema: ToolInputSchema) -> Result<Value, Error> {
+    Ok(serde_json::to_value(schema)?)
 }
 
 /// The arguments of `call`, as `tools/call` takes them.
@@ -60,10 +70,11 @@ pub(super) fn arguments(call: &ToolCall) -> Result<HashMap<String, Value>, Strin
         return Ok(HashMap::new());
     }
 
-    match serde_json::from_str(raw) {
-        Ok(Value::Object(args)) => Ok(args.into_iter().collect()),
-        Ok(Value::Null) => Ok(HashMap::new()),
-        Ok(_) => Err(format!(
+    // Straight into the map `tools/call` takes: valid JSON of another shape
+    // is a data error, anything else is not JSON at all.
+    match serde_json::from_str::<Option<HashMap<String, Value>>>(raw) {
+        Ok(args) => Ok(args.unwrap_or_default()),
+        Err(err) if err.is_data() => Err(format!(
             "The arguments of `{}` must be a JSON object",
             call.name
         )),
@@ -88,33 +99,39 @@ pub(super) fn arguments(call: &ToolCall) -> Result<HashMap<String, Value>, Strin
 /// Images, audio and binary resources answer an error naming what could not
 /// be passed on, rather than being dropped. A result the tool flagged as an
 /// error, and a call the server refused, answer an error with its message.
-pub(super) fn result(call_id: &str, outcome: Result<CallToolResponse, Error>) -> ToolResult {
+pub(super) fn result(
+    call_id: impl Into<String>,
+    outcome: Result<CallToolResponse, Error>,
+) -> ToolResult {
     let response = match outcome {
         Ok(response) => response,
         Err(err) => return ToolResult::error(call_id, err.to_string()),
     };
 
-    match flatten(&response) {
-        Ok(text) if response.is_error => ToolResult::error(call_id, text),
+    let is_error = response.is_error;
+    match flatten(response) {
+        Ok(text) if is_error => ToolResult::error(call_id, text),
         Ok(text) => ToolResult::new(call_id, text),
         Err(err) => ToolResult::error(call_id, err),
     }
 }
 
-fn flatten(response: &CallToolResponse) -> Result<String, String> {
-    let mut parts = Vec::with_capacity(response.content.len());
+/// The response as one string, its text moved rather than copied: a tool
+/// answering with one text block is told it as it is.
+fn flatten(response: CallToolResponse) -> Result<String, String> {
+    let mut told = None;
     let mut has_text = false;
 
-    for block in &response.content {
+    for block in response.content {
         match block {
             Content::Text(text) => {
                 has_text = true;
-                parts.push(text.text.clone());
+                join(&mut told, text.text);
             }
-            Content::ResourceLink(link) => parts.push(format!("{}: {}", link.name, link.uri)),
-            Content::Resource(embedded) => match &embedded.resource {
-                ResourceContents::Text(resource) => parts.push(resource.text.clone()),
-                ResourceContents::Json(resource) => parts.push(resource.value.to_string()),
+            Content::ResourceLink(link) => join(&mut told, format!("{}: {}", link.name, link.uri)),
+            Content::Resource(embedded) => match embedded.resource {
+                ResourceContents::Text(resource) => join(&mut told, resource.text),
+                ResourceContents::Json(resource) => join(&mut told, resource.value.to_string()),
                 ResourceContents::Blob(resource) => {
                     return Err(unsupported(&format!(
                         "a binary resource (`{}`)",
@@ -132,11 +149,22 @@ fn flatten(response: &CallToolResponse) -> Result<String, String> {
         }
     }
 
-    if !has_text && let Some(structured) = &response.struct_content {
-        parts.push(structured.to_string());
+    if !has_text && let Some(structured) = response.struct_content {
+        join(&mut told, structured.to_string());
     }
 
-    Ok(parts.join(SEPARATOR))
+    Ok(told.unwrap_or_default())
+}
+
+/// Adds `part` to what the model is told, after a blank line.
+fn join(told: &mut Option<String>, part: String) {
+    match told {
+        Some(told) => {
+            told.push_str(SEPARATOR);
+            told.push_str(&part);
+        }
+        None => *told = Some(part),
+    }
 }
 
 fn unsupported(what: &str) -> String {
@@ -216,8 +244,9 @@ pub fn resource_parts(resource: ReadResourceResult) -> Result<Vec<Part>, Error> 
         .collect()
 }
 
-/// One content block of a prompt, or `None` for an empty one.
-fn content_part(content: Content) -> Result<Option<Part>, Error> {
+/// One content block of a prompt or a sampling message, or `None` for an
+/// empty one.
+pub(super) fn content_part(content: Content) -> Result<Option<Part>, Error> {
     match content {
         Content::Text(text) => Ok(Some(Part::Text(text.text))),
         Content::Image(image) => Ok(Some(Image::bytes(image.data, image.mime).into())),
@@ -252,7 +281,7 @@ fn resource_part(contents: ResourceContents) -> Result<Option<Part>, Error> {
     }
 }
 
-fn refused(what: &str) -> Error {
+pub(super) fn refused(what: &str) -> Error {
     Error::new(
         ErrorCode::InvalidParams,
         format!("{what} cannot be passed on to the model"),
@@ -291,7 +320,7 @@ mod tests {
 
     #[test]
     fn a_descriptor_carries_name_description_and_schema() {
-        let offered = descriptor(&tool("add"), "math_add".into()).expect("a descriptor");
+        let offered = descriptor(tool("add"), "math_add".into()).expect("a descriptor");
 
         assert_eq!(offered.name, "math_add");
         assert_eq!(offered.description, "Adds two numbers.");
@@ -304,7 +333,7 @@ mod tests {
         titled.descr = None;
         titled.title = Some("Addition".into());
 
-        let offered = descriptor(&titled, "add".into()).expect("a descriptor");
+        let offered = descriptor(titled, "add".into()).expect("a descriptor");
         assert_eq!(offered.description, "Addition");
     }
 
@@ -314,11 +343,11 @@ mod tests {
     fn a_name_a_model_cannot_carry_is_refused() {
         for name in ["files.read", "has space", "", &"x".repeat(MAX_NAME_LEN + 1)] {
             assert!(
-                descriptor(&tool("add"), name.to_string()).is_err(),
+                descriptor(tool("add"), name.to_string()).is_err(),
                 "{name:?} must be refused"
             );
         }
-        assert!(descriptor(&tool("add"), "x".repeat(MAX_NAME_LEN)).is_ok());
+        assert!(descriptor(tool("add"), "x".repeat(MAX_NAME_LEN)).is_ok());
     }
 
     #[test]

@@ -61,16 +61,13 @@ impl Offer {
     /// that would be offered has a name a model API cannot carry or shares
     /// its name with another: it is refused rather than renamed behind the
     /// caller's back.
-    pub(super) fn replace<'a>(
-        &self,
-        listed: impl IntoIterator<Item = &'a Tool>,
-    ) -> Result<(), Error> {
+    pub(super) fn replace(&self, listed: impl IntoIterator<Item = Tool>) -> Result<(), Error> {
         let mut snapshot = Snapshot::default();
         let offered = listed
             .into_iter()
             .filter(|tool| offerable(tool) && self.filters.iter().all(|keep| keep(tool)));
 
-        for tool in offered {
+        for mut tool in offered {
             let name = self
                 .renames
                 .iter()
@@ -89,11 +86,11 @@ impl Offer {
                 ));
             }
 
-            snapshot
-                .tools
-                .push(convert::descriptor(tool, name.clone())?);
-
-            snapshot.names.insert(name, tool.name.clone());
+            // The descriptor carries the offered name; the server's moves
+            // into the map that finds it again.
+            let server = std::mem::take(&mut tool.name);
+            snapshot.names.insert(name.clone(), server);
+            snapshot.tools.push(convert::descriptor(tool, name)?);
         }
 
         *self
@@ -191,7 +188,7 @@ mod tests {
         offer.filter(Box::new(|tool| tool.name != "issues"));
 
         let listed = [tool("files.read"), tool("files.delete"), tool("issues")];
-        offer.replace(&listed).expect("a snapshot");
+        offer.replace(listed).expect("a snapshot");
 
         assert_eq!(names(&offer), ["gh_files_read"]);
         assert_eq!(
@@ -205,11 +202,11 @@ mod tests {
     #[test]
     fn a_name_taken_twice_keeps_the_previous_snapshot() {
         let mut offer = Offer::default();
-        offer.replace(&[tool("one")]).expect("a snapshot");
+        offer.replace([tool("one")]).expect("a snapshot");
 
         offer.rename(Box::new(|_| "same".into()));
         let err = offer
-            .replace(&[tool("one"), tool("two")])
+            .replace([tool("one"), tool("two")])
             .expect_err("two tools under one name");
         assert!(err.to_string().contains("already taken"), "{err}");
         assert_eq!(names(&offer), ["one"]);
@@ -234,7 +231,7 @@ mod tests {
         .expect("a tool");
 
         let offer = Offer::default();
-        offer.replace(&[task_only, optional]).expect("a snapshot");
+        offer.replace([task_only, optional]).expect("a snapshot");
         assert_eq!(names(&offer), ["either"]);
     }
 }

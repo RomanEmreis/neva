@@ -221,8 +221,10 @@ impl Client {
                 Some(handler) => serde_json::to_value(handler(params).await)?,
                 None => return Err(no_fulfiller("elicitation")),
             },
+            // A sampling handler that fails fails the call, as a missing
+            // handler does: there is no result to send the server.
             InputRequest::Sampling(params) => match self.options.sampling_handler.clone() {
-                Some(handler) => serde_json::to_value(handler(*params).await)?,
+                Some(handler) => serde_json::to_value(handler(*params).await?)?,
                 None => return Err(no_fulfiller("sampling")),
             },
             // Roots are configured data, not a handler: the client answers

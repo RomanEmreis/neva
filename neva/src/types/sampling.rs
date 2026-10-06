@@ -1,5 +1,6 @@
 //! Utilities for Sampling
 
+use crate::error::Error;
 use crate::shared::{IntoArgs, OneOrMany};
 use crate::types::{
     AudioContent, Content, EmbeddedResource, ImageContent, IntoResponse, PromptMessage, RequestId,
@@ -833,12 +834,21 @@ impl CreateMessageResult {
     }
 }
 
+/// A sampling handler that cannot fail answers with its result alone.
+impl From<CreateMessageResult> for Result<CreateMessageResult, Error> {
+    #[inline]
+    fn from(result: CreateMessageResult) -> Self {
+        Ok(result)
+    }
+}
+
 /// Represents a dynamic handler for handling sampling requests
 #[cfg(feature = "client")]
 pub(crate) type SamplingHandler = Arc<
     dyn Fn(
             CreateMessageRequestParams,
-        ) -> Pin<Box<dyn Future<Output = CreateMessageResult> + Send + 'static>>
+        )
+            -> Pin<Box<dyn Future<Output = Result<CreateMessageResult, Error>> + Send + 'static>>
         + Send
         + Sync,
 >;

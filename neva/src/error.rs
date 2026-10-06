@@ -63,6 +63,26 @@ impl From<Infallible> for Error {
     }
 }
 
+/// A model's failure, called through svir. The message is svir's own
+/// account, which leaves out what the model server said: this error may be
+/// what an MCP server is answered with, and a provider's message can name the
+/// account. The svir error stays the source, `server_message` included.
+#[cfg(feature = "svir")]
+impl From<::svir::Error> for Error {
+    fn from(err: ::svir::Error) -> Error {
+        let code = match err.kind() {
+            ::svir::ErrorKind::Timeout => ErrorCode::Timeout,
+            ::svir::ErrorKind::Unsupported => ErrorCode::InvalidParams,
+            _ => ErrorCode::InternalError,
+        };
+        Self {
+            inner: err.into(),
+            code,
+            data: None,
+        }
+    }
+}
+
 impl Error {
     /// Creates a new [`Error`]
     #[inline]
@@ -125,12 +145,49 @@ impl Error {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(all(not(feature = "legacy-spec"), feature = "server"))]
+    #[cfg(any(
+        all(not(feature = "legacy-spec"), feature = "server"),
+        feature = "svir"
+    ))]
     use super::*;
 
     #[cfg(all(not(feature = "legacy-spec"), feature = "server"))]
     #[test]
     fn input_required_sentinel_carries_the_sentinel_code() {
         assert_eq!(Error::input_required().code, ErrorCode::InputRequired);
+    }
+
+    /// What an MCP server is told of a model's failure is svir's own account
+    /// of it: the model server's message stays with the caller.
+    #[cfg(feature = "svir")]
+    #[test]
+    fn a_model_failure_leaves_the_model_servers_message_out() {
+        let failure = ::svir::Error::new(::svir::ErrorKind::Authentication)
+            .with_server_message("Incorrect API key provided: sk-abc...xyz");
+
+        let err = Error::from(failure);
+        assert_eq!(err.code, ErrorCode::InternalError);
+        assert_eq!(err.to_string(), "the model server refused the credentials");
+
+        let source = StdError::source(&err)
+            .and_then(|source| source.downcast_ref::<::svir::Error>())
+            .expect("the svir error is the source");
+        assert!(
+            source
+                .server_message()
+                .is_some_and(|m| m.contains("sk-abc"))
+        );
+    }
+
+    #[cfg(feature = "svir")]
+    #[test]
+    fn a_model_failure_keeps_what_kind_it_was() {
+        for (kind, code) in [
+            (::svir::ErrorKind::Timeout, ErrorCode::Timeout),
+            (::svir::ErrorKind::Unsupported, ErrorCode::InvalidParams),
+            (::svir::ErrorKind::ContextOverflow, ErrorCode::InternalError),
+        ] {
+            assert_eq!(Error::from(::svir::Error::new(kind)).code, code);
+        }
     }
 }
