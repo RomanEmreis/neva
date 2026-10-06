@@ -10,6 +10,7 @@ exclude = [
     "examples/elicitation",
     "examples/mrtr",
     "examples/subscriptions",
+    "examples/svir",
     "examples/tasks"
 ]
 

@@ -185,6 +185,11 @@ pub struct Context {
     /// Represents a DI scope
     #[cfg(feature = "di")]
     pub(crate) scope: Option<Container>,
+
+    /// The runtime this request runs on, for a toolbox of the server's own
+    /// tools handed to a model from inside a handler.
+    #[cfg(feature = "svir")]
+    pub(crate) runtime: Option<ServerRuntime>,
 }
 
 impl Debug for Context {
@@ -266,6 +271,8 @@ impl ServerRuntime {
             client_extensions: None,
             #[cfg(feature = "di")]
             scope: None,
+            #[cfg(feature = "svir")]
+            runtime: Some(self.clone()),
         }
     }
 
@@ -293,6 +300,8 @@ impl ServerRuntime {
             client_extensions: None,
             #[cfg(feature = "di")]
             scope: None,
+            #[cfg(feature = "svir")]
+            runtime: Some(self.clone()),
         }
     }
 
@@ -307,6 +316,19 @@ impl ServerRuntime {
         if let Some(mw_start) = self.mw_start.clone() {
             mw_start(MwContext::msg(msg, self)).await;
         }
+    }
+
+    /// Runs `msg` through the middleware pipeline, and returns what the
+    /// pipeline answered.
+    ///
+    /// [`Self::execute`] drops that answer: the dispatcher at the end of the
+    /// pipeline has sent the real one already. It is what is left when a
+    /// middleware answers without calling `next`, and an in-process caller,
+    /// with no transport to wait on, can still read it.
+    #[cfg(feature = "svir")]
+    pub(crate) async fn answer(self, msg: Message) -> Option<Response> {
+        let mw_start = self.mw_start.clone()?;
+        Some(mw_start(MwContext::msg(msg, self)).await)
     }
 }
 

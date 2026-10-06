@@ -153,6 +153,41 @@ impl Tools<'_> {
         self.ctx.options.tools.values().await
     }
 
+    /// This server's tools as a [`svir::Toolbox`], for a tool
+    /// that drives a model over the others.
+    ///
+    /// The calls run in this process, through the server's pipeline, and hold
+    /// the claims of the current request: a tool those claims do not reach is
+    /// not offered, and the server's checks see them on every call. The
+    /// calling tool is offered too unless a filter leaves it out, and a model
+    /// that calls it starts the loop over.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// # #[cfg(feature = "server")] {
+    /// use neva::prelude::*;
+    ///
+    /// # fn main() {
+    /// let mut app = App::new();
+    /// app.map_tool("agent", |ctx: Context| async move {
+    ///     let tools = ctx
+    ///         .tools()
+    ///         .toolbox()
+    ///         .filter(|tool| tool.name != "agent")
+    ///         .load()
+    ///         .await?;
+    ///     // `svir::Request::new(model).tools(&tools)`, and the model's calls
+    ///     // answered with `tools.call_all(..)`.
+    ///     Ok::<_, Error>("done".to_string())
+    /// });
+    /// # }
+    /// # }
+    /// ```
+    #[cfg(feature = "svir")]
+    pub fn toolbox(&self) -> crate::svir::LocalTools {
+        crate::svir::LocalTools::of_context(self.ctx)
+    }
+
     /// The tool named `name`, if this server serves one.
     ///
     /// # Examples

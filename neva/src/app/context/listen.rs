@@ -181,6 +181,8 @@ mod subscription_sink_tests {
             client_extensions: None,
             #[cfg(feature = "di")]
             scope: None,
+            #[cfg(feature = "svir")]
+            runtime: None,
         }
     }
 

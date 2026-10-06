@@ -139,6 +139,12 @@ pub(crate) enum TransportProtoSender {
         /// synchronous mutex is the right tool here.
         responses: std::sync::Arc<std::sync::Mutex<Vec<crate::types::MessageEnvelope>>>,
     },
+    /// The sender of one in-process call, made by the svir bridge: the answer
+    /// is kept for the caller, and there is no peer for anything else. A
+    /// request for input is refused at once rather than left to time out, and
+    /// a notification goes nowhere.
+    #[cfg(all(feature = "server", feature = "svir"))]
+    InProcess(std::sync::Arc<std::sync::Mutex<Option<crate::types::Response>>>),
 }
 
 pub(crate) enum TransportProtoReceiver {
@@ -194,6 +200,21 @@ impl Sender for TransportProtoSender {
                     Ok(())
                 }
                 other => Box::pin(real_sender.send(other)).await,
+            },
+            #[cfg(all(feature = "server", feature = "svir"))]
+            TransportProtoSender::InProcess(answer) => match resp {
+                Message::Response(response) => {
+                    if let Ok(mut slot) = answer.lock() {
+                        *slot = Some(response);
+                    }
+                    Ok(())
+                }
+                Message::Request(_) => Err(Error::new(
+                    ErrorCode::InvalidRequest,
+                    "The tool was called in-process, without an MCP session to ask \
+                     its caller over: elicitation, sampling and roots need one",
+                )),
+                _ => Ok(()),
             },
         }
     }

@@ -454,6 +454,8 @@ mod client_extension_tests {
                 .map(|value| Arc::new(serde_json::from_value(value).expect("an extensions map"))),
             #[cfg(feature = "di")]
             scope: None,
+            #[cfg(feature = "svir")]
+            runtime: None,
         }
     }
 

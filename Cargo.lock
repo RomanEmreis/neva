@@ -1908,6 +1908,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sse-stream",
+ "svir",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -2955,6 +2956,18 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "svir"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76d80e5862e934db1c1d63be6fbc0529371de211a47a55f6bab012d995d713cc"
+dependencies = [
+ "base64 0.23.1",
+ "bytes",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "syn"

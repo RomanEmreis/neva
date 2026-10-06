@@ -41,6 +41,8 @@ jsonschema = { version = "0.58.5", optional = true }
 once_cell = { version = "1.21.4", features = ["std"], optional = true }
 reqwest = { version = "0.13.5", features = ["stream", "json"], optional = true }
 sse-stream = { version = "0.3.0", optional = true }
+# Types and the `Toolbox` trait only: no hyper, no TLS.
+svir = { version = "0.1.4", default-features = false, optional = true }
 tokio-stream = { version = "0.1.19", optional = true }
 tracing = { version = "0.1.44", optional = true }
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "json"], optional = true }
@@ -76,6 +78,11 @@ tracing = ["dep:tracing", "dep:tracing-subscriber", "dep:once_cell", "volga?/tra
 # `server.json` manifests for the MCP Registry. Types and a validator, no new
 # dependencies -- opt-in so an embedded server does not carry them.
 registry = ["server"]
+# The svir bridge: MCP tools handed to a model as a `svir::Toolbox`. With
+# `apps` on as well, a tool MCP Apps hides from the model is never offered to
+# it. Not in the `-full` sets while svir is 0.x: its breaking releases would
+# become neva's.
+svir = ["dep:svir"]
 
 # server
 server-full = ["server-macros", "tracing", "http-server-volga", "server-tls", "server-oauth", "di", "tasks", "apps", "registry"]
@@ -126,5 +133,6 @@ legacy-spec = ["neva_macros?/legacy-spec"]
 # 2026-07-28 surface *out*. docs.rs would then publish the legacy profile as if
 # it were the crate -- no `server/discover`, no MRTR, no `DetailedTask`, and
 # `with_mcp_version` presented as current. `full` is every feature except the
-# generation flag, which is the default build users get.
-features = ["full"]
+# generation flag, which is the default build users get; `svir` is added on
+# top, since `full` leaves it out only to keep svir's 0.x releases out of it.
+features = ["full", "svir"]

@@ -238,6 +238,8 @@ mod runtime_registration_tests {
             client_extensions: None,
             #[cfg(feature = "di")]
             scope: None,
+            #[cfg(feature = "svir")]
+            runtime: None,
         }
     }
 
@@ -321,6 +323,8 @@ mod read_resource_claims_tests {
             client_extensions: None,
             #[cfg(feature = "di")]
             scope: None,
+            #[cfg(feature = "svir")]
+            runtime: None,
         }
     }
 

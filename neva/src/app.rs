@@ -10,7 +10,7 @@ use crate::app::handler::{
 };
 use crate::error::{Error, ErrorCode};
 use crate::middleware::{MwContext, Next, make_fn::make_mw};
-use crate::transport::{Receiver, Sender, Transport, TransportHandle};
+use crate::transport::{Receiver, Sender, Transport, TransportHandle, TransportProtoSender};
 use crate::types::{
     CallToolRequestParams, CallToolResponse, CompleteResult, FromHandlerArgs,
     GetPromptRequestParams, GetPromptResult, IntoResponse, ListPromptsRequestParams,
@@ -115,6 +115,12 @@ pub struct App {
     /// transport is torn down. See [`DEFAULT_SHUTDOWN_DRAIN`].
     #[cfg(not(feature = "legacy-spec"))]
     shutdown_drain: std::time::Duration,
+
+    /// Hands the runtime to the toolboxes [`Self::with_toolbox`] gave out,
+    /// once [`Self::run`] has built it. Dropped without a value if the server
+    /// never gets that far, which is what tells them it is not coming.
+    #[cfg(feature = "svir")]
+    pub(crate) toolbox: Option<tokio::sync::watch::Sender<Option<ServerRuntime>>>,
 }
 
 impl Debug for App {
@@ -143,6 +149,8 @@ impl App {
             shutdown: ShutdownHandle::new(),
             #[cfg(not(feature = "legacy-spec"))]
             shutdown_drain: DEFAULT_SHUTDOWN_DRAIN,
+            #[cfg(feature = "svir")]
+            toolbox: None,
         };
 
         #[cfg(feature = "legacy-spec")]
@@ -377,14 +385,7 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
     /// # }
     /// ```
     pub async fn run(mut self) {
-        #[cfg(feature = "macros")]
-        self.register_methods();
-
-        // Must follow register_methods() for the same reason the greeting does:
-        // macro-registered tools are not in the collection before it.
-        self.validate_arg_names();
-        #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
-        self.validate_ui_resources();
+        self.prepare();
 
         // ORDERING CONSTRAINT: must execute after register_methods() so macro-registered
         // tools/prompts are present; must execute before self.options.transport() consumes
@@ -435,16 +436,7 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
             );
         }
 
-        // The request tracing span must wrap the whole composed pipeline -- user
-        // `wrap` middleware included -- so log events they emit around
-        // `next(ctx)` stay inside the span and see the request-scoped level.
-        // Prepending makes it the outermost layer; the terminal dispatcher
-        // (`message_middleware`) stays innermost.
-        #[cfg(feature = "tracing")]
-        self.options
-            .add_middleware_front(make_mw(Self::tracing_middleware));
-        self.options
-            .add_middleware(make_mw(Self::message_middleware));
+        self.compose_pipeline();
 
         // Read before `self.options` moves into the runtime below.
         let greeted = self.greeting;
@@ -557,13 +549,13 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
         }
 
         let (sender, mut receiver) = transport.split();
-        let runtime = ServerRuntime::new(
-            sender,
-            self.options,
-            self.handlers,
-            #[cfg(feature = "di")]
-            self.container.build(),
-        );
+        #[cfg(feature = "svir")]
+        let toolbox = self.toolbox.take();
+        let runtime = self.build_runtime(sender);
+        #[cfg(feature = "svir")]
+        if let Some(toolbox) = toolbox {
+            toolbox.send_replace(Some(runtime.clone()));
+        }
         loop {
             tokio::select! {
                 biased;
@@ -643,6 +635,54 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
         if greeted {
             greeter::print_farewell(std::env::var_os("NO_COLOR").is_none());
         }
+    }
+
+    /// Everything a runtime is built from that is not there until now: the
+    /// handlers the macros registered, and the checks on all of them.
+    ///
+    /// The first step of [`Self::run`], and of anything else that builds a
+    /// runtime: whatever reads the collections -- the greeting, the
+    /// validation -- has to come after the macro registration.
+    pub(crate) fn prepare(&mut self) {
+        #[cfg(feature = "macros")]
+        self.register_methods();
+
+        // Must follow register_methods() for the same reason the greeting does:
+        // macro-registered tools are not in the collection before it.
+        self.validate_arg_names();
+        #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
+        self.validate_ui_resources();
+    }
+
+    /// Closes the middleware pipeline every message runs through: the tracing
+    /// span outermost, the dispatcher innermost.
+    ///
+    /// The request tracing span must wrap the whole composed pipeline -- user
+    /// `wrap` middleware included -- so log events they emit around
+    /// `next(ctx)` stay inside the span and see the request-scoped level.
+    /// Prepending makes it the outermost layer; the terminal dispatcher
+    /// (`message_middleware`) stays innermost.
+    pub(crate) fn compose_pipeline(&mut self) {
+        #[cfg(feature = "tracing")]
+        self.options
+            .add_middleware_front(make_mw(Self::tracing_middleware));
+        self.options
+            .add_middleware(make_mw(Self::message_middleware));
+    }
+
+    /// The runtime every message is executed on, answering through `sender`.
+    ///
+    /// Moves the collections into their runtime state, after which they can
+    /// no longer be read synchronously: [`Self::prepare`] and anything else
+    /// that does so comes first.
+    pub(crate) fn build_runtime(self, sender: TransportProtoSender) -> ServerRuntime {
+        ServerRuntime::new(
+            sender,
+            self.options,
+            self.handlers,
+            #[cfg(feature = "di")]
+            self.container.build(),
+        )
     }
 
     /// Sets the shared secret used to encrypt and authenticate MRTR
