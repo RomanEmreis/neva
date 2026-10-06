@@ -100,12 +100,18 @@ impl Client {
     ///
     /// The handler may be asynchronous or synchronous, and a blocking one goes
     /// through [`blocking`](crate::blocking); see [`ClientHandler`].
+    ///
+    /// It answers with a [`CreateMessageResult`], or with a
+    /// `Result<CreateMessageResult, Error>` when it can fail, for example when
+    /// the model cannot be reached. Under `legacy-spec` the error is what the
+    /// server is answered with; under MCP 2026-07-28 the call that asked for
+    /// the sample fails with it.
     #[deprecated(
         note = "Sampling is deprecated in MCP 2026-07-28: the capability-driven `sampling/createMessage` request is gone and the ability is re-homed onto MRTR -- see `Context::sample`. Under MCP 2026-07-28 this handler fulfils MRTR `sampling/createMessage` input requests."
     )]
     pub fn map_sampling<F, M>(&mut self, handler: F) -> &mut Self
     where
-        F: ClientHandler<CreateMessageRequestParams, CreateMessageResult, M>,
+        F: ClientHandler<CreateMessageRequestParams, Result<CreateMessageResult, Error>, M>,
     {
         let handler: SamplingHandler = make_handler(handler);
         self.options.add_sampling_handler(handler);

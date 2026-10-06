@@ -14,7 +14,7 @@ use std::{
 use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
 #[cfg(feature = "legacy-spec")]
 use {
-    crate::types::TaskPayload,
+    crate::types::{ErrorDetails, TaskPayload},
     serde::Serialize,
     tokio::sync::watch::{Receiver, Sender, channel},
 };
@@ -28,9 +28,10 @@ pub(crate) struct TaskTracker {
     next_expiry_seq: AtomicU64,
 }
 
-/// Alias for [`Option<TaskPayload>`]
+/// What `tasks/result` answers once there is an answer: the result, or the
+/// error the request failed with.
 #[cfg(feature = "legacy-spec")]
-pub(crate) type MaybePayload = Option<TaskPayload>;
+pub(crate) type MaybePayload = Option<Result<TaskPayload, ErrorDetails>>;
 
 /// Represents a task currently running on the server
 pub(crate) struct TaskEntry {
@@ -228,7 +229,7 @@ impl TaskTracker {
     }
 
     /// Fails the task
-    #[cfg(feature = "server")]
+    #[cfg(any(feature = "server", all(feature = "client", feature = "legacy-spec")))]
     pub(crate) fn fail(&self, id: &str) {
         self.cleanup_expired();
 
@@ -274,7 +275,7 @@ impl TaskTracker {
                     return;
                 }
             };
-            let _ = entry.tx.send(Some(TaskPayload(result)));
+            let _ = entry.tx.send(Some(Ok(TaskPayload(result))));
         }
     }
 
@@ -451,7 +452,7 @@ impl TaskTracker {
             if status != TaskStatus::InputRequired {
                 self.tasks.remove(id);
             }
-            return Ok(result.clone());
+            return result.clone().map_err(Error::from);
         }
 
         loop {
@@ -466,7 +467,7 @@ impl TaskTracker {
                         if task.status != TaskStatus::InputRequired {
                             self.tasks.remove(id);
                         }
-                        return Ok(result);
+                        return result.map_err(Error::from);
                     }
                 }
                 _ = token.cancelled() => {
@@ -554,7 +555,13 @@ impl TaskHandle {
                 return;
             }
         };
-        let _ = self.tx.send(Some(TaskPayload(result)));
+        let _ = self.tx.send(Some(Ok(TaskPayload(result))));
+    }
+
+    /// Ends the [`Task`] with `err`, which `tasks/result` then answers.
+    #[cfg(all(feature = "client", feature = "legacy-spec"))]
+    pub(crate) fn set_error(self, err: Error) {
+        let _ = self.tx.send(Some(Err(ErrorDetails::from(err))));
     }
 
     /// Returns a [`Future`] that gets fulfilled when cancellation is requested.

@@ -12,6 +12,11 @@
 //!   opens a conversation with, and a resource as the parts attached to one.
 //!   They are not tools: in MCP the user picks a prompt and the application
 //!   picks a resource, so neither is the model's to call.
+//! - `sampling_request` and `sampling_result` (feature `client`): a server's
+//!   `sampling/createMessage` as a request to a model, and the model's answer
+//!   as the sample, for a `Client::map_sampling` handler to call the model
+//!   in between. A `svir::Error` converts into neva's, so `?` passes a
+//!   model's failure on to the server.
 //!
 //! A model takes less than MCP carries, and nothing is lost silently:
 //!
@@ -36,9 +41,13 @@ mod local;
 mod offer;
 #[cfg(feature = "client")]
 mod remote;
+#[cfg(feature = "client")]
+mod sampling;
 
 pub use convert::{prompt_messages, resource_parts};
 #[cfg(feature = "server")]
 pub use local::LocalTools;
 #[cfg(feature = "client")]
 pub use remote::RemoteTools;
+#[cfg(feature = "client")]
+pub use sampling::{sampling_request, sampling_result};

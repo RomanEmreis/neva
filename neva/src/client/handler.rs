@@ -803,8 +803,10 @@ async fn handle_sampling(req: Request, handler: &Option<SamplingHandler>) -> Res
         let Ok(params) = serde_json::from_value(params) else {
             return Response::error(id, Error::from(ErrorCode::ParseError));
         };
-        let result = handler(params).await;
-        result.into_response(id)
+        match handler(params).await {
+            Ok(result) => result.into_response(id),
+            Err(err) => Response::error(id, err),
+        }
     } else {
         Response::error(
             id,
@@ -840,17 +842,25 @@ async fn handle_sampling(
             let tasks = tasks.clone();
             tokio::spawn(async move {
                 tokio::select! {
-                    result = handler(params) => {
-                        tasks.complete(&task_id);
-                        handle.set_result(result);
+                    result = handler(params) => match result {
+                        Ok(result) => {
+                            tasks.complete(&task_id);
+                            handle.set_result(result);
+                        }
+                        Err(err) => {
+                            tasks.fail(&task_id);
+                            handle.set_error(err);
+                        }
                     },
                     _ = handle.cancelled() => {}
                 }
             });
             CreateTaskResult::new(task).into_response(id)
         } else {
-            let result = handler(params).await;
-            result.into_response(id)
+            match handler(params).await {
+                Ok(result) => result.into_response(id),
+                Err(err) => Response::error(id, err),
+            }
         }
     } else {
         Response::error(
@@ -992,9 +1002,12 @@ async fn get_task_result(req: Request, tasks: &Arc<TaskTracker>) -> Response {
     let Ok(params) = serde_json::from_value::<GetTaskPayloadRequestParams>(params) else {
         return Response::error(id, Error::from(ErrorCode::ParseError));
     };
+    // An error is the tracker's own (an unknown or cancelled task) or the one
+    // the task failed with, and either goes out with its code, as the server
+    // answers `tasks/result`.
     match tasks.get_result(&params.id).await {
         Ok(task) => task.into_response(id),
-        Err(err) => Response::error(id, Error::new(ErrorCode::InvalidParams, err.to_string())),
+        Err(err) => Response::error(id, err),
     }
 }
 
@@ -1139,11 +1152,11 @@ mod tests {
         let roots = Arc::new(RwLock::new(Vec::<Root>::new()));
         let sampling_handler: Option<SamplingHandler> = Some(Arc::new(
             |_params: CreateMessageRequestParams| -> Pin<
-                Box<dyn Future<Output = CreateMessageResult> + Send + 'static>,
+                Box<dyn Future<Output = Result<CreateMessageResult, Error>> + Send + 'static>,
             > {
                 Box::pin(async move {
                     tokio::time::sleep(Duration::from_millis(100)).await;
-                    CreateMessageResult::assistant()
+                    Ok(CreateMessageResult::assistant())
                 })
             },
         ));
@@ -1205,8 +1218,8 @@ mod tests {
         let roots = Arc::new(RwLock::new(Vec::<Root>::new()));
         let sampling_handler: Option<SamplingHandler> = Some(Arc::new(
             |_params: CreateMessageRequestParams| -> Pin<
-                Box<dyn Future<Output = CreateMessageResult> + Send + 'static>,
-            > { Box::pin(async move { CreateMessageResult::assistant() }) },
+                Box<dyn Future<Output = Result<CreateMessageResult, Error>> + Send + 'static>,
+            > { Box::pin(async move { Ok(CreateMessageResult::assistant()) }) },
         ));
         let elicitation_handler = None;
         let peer_mode = crate::shared::PeerMode::default();
@@ -1257,6 +1270,103 @@ mod tests {
                 "a legacy peer must reach the `{method}` handler"
             );
         }
+    }
+
+    fn failing_sampling() -> Option<SamplingHandler> {
+        Some(Arc::new(|_params| {
+            Box::pin(async {
+                Err(Error::new(
+                    ErrorCode::InternalError,
+                    "could not reach the model server",
+                ))
+            })
+        }))
+    }
+
+    /// The legacy server-push path, wherever it runs: a 2026-07-28 build gets
+    /// there after the dual-mode fallback.
+    async fn dispatch_legacy(req: Request, sampling: &Option<SamplingHandler>) -> Response {
+        #[cfg(not(feature = "legacy-spec"))]
+        let peer_mode = {
+            let peer_mode = crate::shared::PeerMode::default();
+            peer_mode.set_legacy();
+            peer_mode
+        };
+
+        dispatch_request(
+            req,
+            &Arc::new(RwLock::new(Vec::new())),
+            sampling,
+            &None,
+            #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
+            &Arc::new(crate::shared::TaskTracker::default()),
+            #[cfg(not(feature = "legacy-spec"))]
+            &peer_mode,
+        )
+        .await
+    }
+
+    /// A model that cannot answer is the server's answer, not a result.
+    #[tokio::test]
+    async fn a_sampling_handler_that_fails_answers_its_error() {
+        use crate::types::sampling::CreateMessageRequestParams;
+
+        let req = Request::new(
+            Some(RequestId::Number(1)),
+            crate::types::sampling::commands::CREATE,
+            Some(CreateMessageRequestParams::default()),
+        );
+
+        let Response::Err(err) = dispatch_legacy(req, &failing_sampling()).await else {
+            panic!("a failed sample must be answered with an error");
+        };
+        assert_eq!(err.error.code, ErrorCode::InternalError);
+        assert_eq!(err.error.message, "could not reach the model server");
+    }
+
+    /// A task-augmented sample that fails ends its task, and `tasks/result`
+    /// answers what it failed with rather than waiting out the TTL.
+    #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
+    #[tokio::test]
+    async fn a_sampling_task_that_fails_answers_its_error() {
+        use crate::types::sampling::CreateMessageRequestParams;
+
+        let roots = Arc::new(RwLock::new(Vec::new()));
+        let tasks = Arc::new(TaskTracker::default());
+        let sampling = failing_sampling();
+        let dispatch =
+            async |req: Request| dispatch_request(req, &roots, &sampling, &None, &tasks).await;
+
+        let created = dispatch(Request::new(
+            Some(RequestId::Number(1)),
+            crate::types::sampling::commands::CREATE,
+            Some(CreateMessageRequestParams::default().with_ttl(Some(60_000))),
+        ))
+        .await;
+        let Response::Ok(created) = created else {
+            panic!("a task-augmented sample answers with its task");
+        };
+        let task_id = created.result["task"]["taskId"]
+            .as_str()
+            .expect("a task id")
+            .to_owned();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            dispatch(Request::new(
+                Some(RequestId::Number(2)),
+                crate::types::task::commands::RESULT,
+                Some(serde_json::json!({ "taskId": task_id })),
+            )),
+        )
+        .await
+        .expect("`tasks/result` answers without waiting out the TTL");
+
+        let Response::Err(err) = result else {
+            panic!("a failed task's result is its error");
+        };
+        assert_eq!(err.error.code, ErrorCode::InternalError);
+        assert_eq!(err.error.message, "could not reach the model server");
     }
 
     #[test]

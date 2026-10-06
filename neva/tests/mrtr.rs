@@ -1936,6 +1936,51 @@ async fn client_drives_sampling_and_roots_end_to_end() {
     handle.abort();
 }
 
+/// A sampling handler that cannot answer, a model that is not reachable say,
+/// fails the call with its error: there is no sample to send the server.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sampling_handler_that_fails_fails_the_call() {
+    use neva::types::sampling::{CreateMessageRequestParams, SamplingMessage};
+
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut app = App::new()
+        .with_request_state_secret(b"test-secret")
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+
+    app.map_tool("summarise", |ctx: Context| async move {
+        let params = CreateMessageRequestParams::new()
+            .with_message(SamplingMessage::user().with("Summarise the week"));
+        #[allow(deprecated)]
+        let sampled = ctx.sample("summary", params).await?;
+        Ok::<String, Error>(format!("{:?}", sampled.content))
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let mut client =
+        Client::new().with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+    #[allow(deprecated)]
+    client.map_sampling(|_params: CreateMessageRequestParams| async move {
+        Err(Error::new(
+            ErrorCode::InternalError,
+            "could not reach the model server",
+        ))
+    });
+    client.connect().await.expect("client connects");
+
+    let err = client
+        .tools()
+        .call("summarise", ())
+        .await
+        .expect_err("a failed sample fails the call");
+    assert_eq!(err.to_string(), "could not reach the model server");
+
+    client.disconnect().await.ok();
+    handle.abort();
+}
+
 /// A client that opted into roots but exposes none must still be askable -- an
 /// empty `ListRootsResult` is a valid answer, and gating it out would leave the
 /// server unable to complete the call at all.

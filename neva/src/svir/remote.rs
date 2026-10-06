@@ -216,7 +216,7 @@ impl RemoteTools {
     /// ```
     pub async fn refresh(&self) -> Result<(), Error> {
         let listed = self.client.tools().list_all().await?;
-        self.offer.replace(&listed)
+        self.offer.replace(listed)
     }
 }
 

@@ -20,8 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `App::with_toolbox` and `ctx.tools().toolbox()` offer a server's own,
   called in-process through its middleware. `filter`, `rename` and `prefixed`
   choose what is offered and under which name. `prompt_messages` and
-  `resource_parts` turn a prompt and a resource into svir messages. Not in
-  `server-full` or `client-full`. Example: `examples/svir`.
+  `resource_parts` turn a prompt and a resource into svir messages, and
+  `sampling_request` and `sampling_result` answer a server's sampling with a
+  model, tool calls included. Not in `server-full` or `client-full`.
+  Example: `examples/svir`.
+* **A sampling handler can fail**: `map_sampling` takes one returning
+  `Result<CreateMessageResult, Error>`. Under `legacy-spec` the server is
+  answered with the error, and a sampling task fails with it; under
+  2026-07-28 the call that asked fails.
 
 ### Changed
 * **`Client` request methods take `&self`**, so a connected client can be
@@ -32,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the caller's ids back on the responses.
 * A request dropped mid-call releases its pending slot at once; a late answer
   to it is dropped.
+* Under `legacy-spec`, the client answers a failed `tasks/result` with the
+  error's own code, not always `InvalidParams`.
 * `x-mcp-header`: a `tools/list` traversal starting over no longer clears the
   registrations of later pages or lifts the block on a malformed tool. Both
   change when a page lists the tool, or a one-page listing omits it.
@@ -51,6 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `ctx.tools().list().await`.
 * `TaskApi` methods take `&self`, and `wait_to_completion` takes `&A`. Only
   implementations outside neva need the new receivers.
+* `map_sampling` is bound by `ClientHandler<_, Result<CreateMessageResult,
+  Error>, _>`. A handler returning `CreateMessageResult` is unaffected; only
+  code naming the old bound changes.
 
 ## 0.6.2
 
