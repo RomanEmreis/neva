@@ -4,14 +4,19 @@ use crate::types::notification::Notification;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::{Arc, PoisonError, RwLock};
 
 /// Represents a notification handler function
 pub(crate) type NotificationsHandlerFunc =
     Arc<dyn Fn(Notification) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>;
 
 /// Represents a notification handler
+///
+/// The lock is held only for a map insert, removal or lookup, and never across
+/// an `.await`: [`Self::notify`] clones the handler out before it runs it. A
+/// synchronous lock does that from any runtime flavor, where taking an async
+/// lock from the synchronous `subscribe` meant `block_in_place`, which panics
+/// on a `current_thread` runtime.
 #[derive(Default)]
 pub(super) struct NotificationsHandler {
     handlers: RwLock<HashMap<String, NotificationsHandlerFunc>>,
@@ -31,24 +36,78 @@ impl NotificationsHandler {
                 handler(params).await;
             })
         });
-        tokio::task::block_in_place(|| {
-            self.handlers.blocking_write().insert(event.into(), handler);
-        });
+        self.handlers
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(event.into(), handler);
     }
 
     /// Unsubscribes from the `event`
     pub(super) fn unsubscribe(&self, event: impl AsRef<str>) {
-        tokio::task::block_in_place(|| {
-            self.handlers.blocking_write().remove(event.as_ref());
-        });
+        self.handlers
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(event.as_ref());
     }
 
     /// Calls an appropriate notifications handler
     pub(super) async fn notify(&self, notification: Notification) {
-        let guard = self.handlers.read().await;
-        if let Some(handler) = guard.get(&notification.method).cloned() {
-            drop(guard);
+        let handler = self
+            .handlers
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&notification.method)
+            .cloned();
+        if let Some(handler) = handler {
             handler(notification).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn notification(method: &str) -> Notification {
+        Notification::new(method, None)
+    }
+
+    /// The `current_thread` runtime is `#[tokio::main(flavor = "current_thread")]`
+    /// and every `#[tokio::test]`: subscribing there must not panic (#139).
+    #[tokio::test(flavor = "current_thread")]
+    async fn handlers_come_and_go_on_a_current_thread_runtime() {
+        let handler = NotificationsHandler::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let counted = calls.clone();
+        handler.subscribe("notifications/tools/list_changed", move |_| {
+            let counted = counted.clone();
+            async move {
+                counted.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        handler
+            .notify(notification("notifications/tools/list_changed"))
+            .await;
+        handler
+            .notify(notification("notifications/prompts/list_changed"))
+            .await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        handler.unsubscribe("notifications/tools/list_changed");
+        handler
+            .notify(notification("notifications/tools/list_changed"))
+            .await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "unsubscribed");
+    }
+
+    /// The case from #139, through the public API.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_client_subscribes_on_a_current_thread_runtime() {
+        let mut client = crate::Client::new();
+        client.subscribe("notifications/tools/list_changed", |_| async {});
+        client.unsubscribe("notifications/tools/list_changed");
     }
 }

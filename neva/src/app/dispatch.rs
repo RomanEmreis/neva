@@ -675,7 +675,16 @@ impl App {
                     if runtime.options().subscriptions().cancel(&params.request_id) {
                         return;
                     }
-                    runtime.options().cancel_request(&params.request_id);
+                    // A request is tracked under its full id, which carries
+                    // the session it came in on; a cancel names it by its id
+                    // alone, on the same session.
+                    let id = match notification.session_id {
+                        Some(session_id) => params
+                            .request_id
+                            .concat(crate::types::RequestId::Uuid(session_id)),
+                        None => params.request_id,
+                    };
+                    runtime.options().cancel_request(&id);
                 }
             }
             crate::types::notification::commands::MESSAGE => {

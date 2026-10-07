@@ -42,6 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   to it is dropped.
 * Under `legacy-spec`, the client answers a failed `tasks/result` with the
   error's own code, not always `InvalidParams`.
+* **A request the client stops waiting for is cancelled**, on a timeout or a
+  dropped call, as MCP asks: over Streamable HTTP under 2026-07-28 by closing
+  its stream, over stdio and to a legacy peer by `notifications/cancelled`.
+  `initialize` is never cancelled.
+* Over Streamable HTTP under 2026-07-28, a cancelled subscription is ended by
+  closing its stream alone: the client no longer also sends
+  `notifications/cancelled`, which the spec does not expect there.
 * `x-mcp-header`: a `tools/list` traversal starting over no longer clears the
   registrations of later pages or lifts the block on a malformed tool. Both
   change when a page lists the tool, or a one-page listing omits it.
@@ -49,6 +56,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 * A `tasks/update` or `tasks/cancel` the server refuses is an error instead
   of `Ok(())`, and `wait_to_completion` stops at it. Since 0.5.4.
+* `Client::subscribe` and the `on_*_changed` helpers no longer panic on a
+  `current_thread` runtime (#139). Since 0.0.8.
+* The server finds the request a `notifications/cancelled` names on an HTTP
+  session; it looked the request up without the session, and cancelled
+  nothing. Since 0.1.0.
 * `tools().call_raw` (and `call_tool_raw`) send the `_meta` their params
   carry, a `traceparent` say, where they replaced it; only the progress token
   is the client's. Since 0.2.5. A request's own trace context is kept over the

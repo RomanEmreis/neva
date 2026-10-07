@@ -324,13 +324,11 @@ mod listen_rejection_tests {
     /// task it spawns, so the two are ordered by the wire, not by the
     /// scheduler.
     ///
-    /// A single worker on purpose: it pins the interleaving this is about.
+    /// A single thread on purpose: it pins the interleaving this is about.
     /// Both messages are queued before the connection loop runs, so it reads
     /// the cancel on the turn right after spawning the listen, while that task
-    /// has had no chance to run. (One worker rather than `current_thread`
-    /// because connecting uses `block_in_place`, which the current-thread
-    /// runtime refuses.)
-    #[tokio::test(flavor = "multi_thread")]
+    /// has had no chance to run.
+    #[tokio::test(flavor = "current_thread")]
     async fn a_cancel_queued_behind_a_listen_still_closes_the_stream() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

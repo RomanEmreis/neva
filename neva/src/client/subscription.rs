@@ -4,8 +4,7 @@ use crate::error::{Error, ErrorCode};
 use crate::shared::PendingResponse;
 use crate::transport::{Sender as _, TransportProtoSender};
 use crate::types::{
-    RequestId, SubscriptionFilter, SubscriptionsListenResult,
-    notification::{CancelledNotificationParams, Notification},
+    RequestId, SubscriptionFilter, SubscriptionsListenResult, notification::Notification,
 };
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -467,15 +466,7 @@ impl std::fmt::Debug for EstablishmentGuard {
 /// notification as its cue to drop the listen response body, and the server
 /// learns of the cancellation from the close rather than from the message.
 pub(super) fn cancelled(id: &RequestId) -> Notification {
-    let params = CancelledNotificationParams {
-        request_id: id.clone(),
-        reason: Some("subscription cancelled by the client".into()),
-    };
-
-    Notification::new(
-        crate::types::notification::commands::CANCELLED,
-        serde_json::to_value(params).ok(),
-    )
+    Notification::cancelled(id, "subscription cancelled by the client")
 }
 
 /// Reads the acknowledged filter and its subscription id out of a
