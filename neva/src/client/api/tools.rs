@@ -4,8 +4,8 @@ use super::{Client, collect_pages};
 use crate::error::Error;
 use crate::shared::IntoArgs;
 use crate::types::{
-    CallToolRequestParams, CallToolResponse, ListToolsResult, Request, RequestParamsMeta, Response,
-    Tool, cursor::Cursor,
+    CallToolRequestParams, CallToolResponse, ListToolsResult, Request, Response, Tool,
+    cursor::Cursor,
 };
 use std::fmt::{Debug, Formatter};
 
@@ -154,6 +154,10 @@ impl<'a> Tools<'a> {
     /// Calls a tool with fully formed `params` and returns the raw JSON-RPC
     /// response, error responses included.
     ///
+    /// The `_meta` the params carry goes out as given, a `traceparent` say,
+    /// but for the progress token: that one is the client's, since progress
+    /// notifications find their call by it.
+    ///
     /// # Examples
     /// ```no_run
     /// use neva::client::Client;
@@ -171,26 +175,20 @@ impl<'a> Tools<'a> {
     ///     client.disconnect().await
     /// }
     /// ```
-    pub async fn call_raw(&self, params: CallToolRequestParams) -> Result<Response, Error> {
+    pub async fn call_raw(&self, mut params: CallToolRequestParams) -> Result<Response, Error> {
         let client = self.client;
         let id = client.generate_id()?;
+        params.track_progress(&id);
 
-        // Held back for the SEP-2243 retry: `with_meta` consumes the params,
-        // and the call cannot be reconstructed from its own answer. A handful
-        // of small allocations next to the round trip they may save.
-        #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
-        let for_retry = params.clone();
-
-        let request = Request::new(
-            Some(id.clone()),
-            crate::types::tool::commands::CALL,
-            Some(params.with_meta(RequestParamsMeta::new(&id))),
-        );
+        // Serialized from a borrow: the params stay at hand for the SEP-2243
+        // retry, which the call cannot be rebuilt for from its own answer,
+        // without a copy of the arguments on every call.
+        let request = Request::new(Some(id), crate::types::tool::commands::CALL, Some(&params));
 
         #[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
         {
             let resp = client.send_request(request).await?;
-            client.retry_after_header_mismatch(resp, for_retry).await
+            client.retry_after_header_mismatch(resp, params).await
         }
         #[cfg(not(all(feature = "http-client", not(feature = "legacy-spec"))))]
         client.send_request(request).await

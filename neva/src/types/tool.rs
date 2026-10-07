@@ -877,6 +877,15 @@ impl CallToolRequestParams {
         self
     }
 
+    /// Points the progress token at request `id`, keeping whatever else the
+    /// caller put in `_meta`. The token has to be the client's: progress
+    /// notifications find their call by it.
+    #[cfg(feature = "client")]
+    pub(crate) fn track_progress(&mut self, id: &crate::types::RequestId) {
+        self.meta.get_or_insert_default().progress_token =
+            Some(crate::types::ProgressToken::from(id));
+    }
+
     /// Sets the TTL for the [`CallToolRequestParams`],
     /// which will be used if the tool is support tasks.
     #[cfg(feature = "tasks")]

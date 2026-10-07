@@ -346,7 +346,7 @@ impl Client {
     pub(super) async fn retry_after_header_mismatch(
         &self,
         resp: Response,
-        params: CallToolRequestParams,
+        mut params: CallToolRequestParams,
     ) -> Result<Response, Error> {
         let Response::Err(ref err) = resp else {
             return Ok(resp);
@@ -366,7 +366,7 @@ impl Client {
         //
         // A listing this client cannot obtain leaves the original answer as the
         // truthful one: it says the headers were wrong, and they still are.
-        let name = params.name.clone();
+        let name = params.name.as_str();
         let id = self.generate_id()?;
         let _grace = self.options.param_headers.retry_grace(&id);
         let mut cursor = None;
@@ -374,7 +374,7 @@ impl Client {
         // A server that keeps handing out cursors would otherwise walk this
         // recovery forever, and nothing above it can see that happening.
         for _ in 0..api::MAX_LIST_PAGES {
-            let Ok(page) = self.list_tools_inner(cursor, Some((&name, &id))).await else {
+            let Ok(page) = self.list_tools_inner(cursor, Some((name, &id))).await else {
                 return Ok(resp);
             };
             if page.tools.iter().any(|tool| *tool.name == *name) {
@@ -397,10 +397,12 @@ impl Client {
             return Ok(resp);
         }
 
+        // The caller's `_meta` again, under this request's progress token.
+        params.track_progress(&id);
         let retry = Request::new(
             Some(id.clone()),
             crate::types::tool::commands::CALL,
-            Some(params.with_meta(RequestParamsMeta::new(&id))),
+            Some(params),
         );
 
         self.send_request(retry).await

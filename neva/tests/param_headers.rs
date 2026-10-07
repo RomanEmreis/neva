@@ -306,6 +306,84 @@ async fn an_annotated_tool_survives_a_listing_that_is_stale_on_arrival() {
     handle.abort();
 }
 
+/// The retry after a `HeaderMismatch` is the same call: the `_meta` the
+/// caller gave `call_raw` goes out again.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_retry_keeps_the_callers_meta() {
+    use neva::client::Client;
+    use neva::types::{CallToolRequestParams, RequestParamsMeta, Response};
+    use std::sync::{Arc, Mutex};
+
+    let port = pick_free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
+    let log = seen.clone();
+
+    let mut app =
+        App::new().with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")));
+    app.map_tool("query", |region: String| async move { region })
+        .with_input_schema(|_| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "region": { "type": "string", "x-mcp-header": "Region" }
+                }
+            })
+            .into()
+        })
+        .with_arg_names(["region"]);
+    let app = app.wrap_tools(move |ctx, next| {
+        let meta = ctx
+            .request()
+            .and_then(|req| req.params.as_ref())
+            .and_then(|params| params.get("_meta"))
+            .cloned();
+        log.lock().expect("the log").extend(meta);
+        next(ctx)
+    });
+
+    let handle = tokio::spawn(async move { app.run().await });
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while tokio::net::TcpStream::connect(&addr).await.is_err() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "server never became reachable"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let mut client = Client::new().with_options(|opt| {
+        opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
+            .with_timeout(std::time::Duration::from_secs(5))
+    });
+    client.connect().await.expect("connect");
+    // A zero-TTL listing: the first attempt omits the header and is refused.
+    client.tools().list(None).await.expect("tools/list");
+
+    let mut meta = RequestParamsMeta::default();
+    meta.traceparent = Some("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01".into());
+    let params = CallToolRequestParams::new("query")
+        .with_args([("region", "us-west1")])
+        .with_meta(meta);
+    let resp = client.tools().call_raw(params).await.expect("the call");
+    assert!(
+        matches!(resp, Response::Ok(_)),
+        "the retry succeeds: {resp:?}"
+    );
+
+    let seen = std::mem::take(&mut *seen.lock().expect("the log"));
+    assert!(!seen.is_empty(), "the retry reached the tool");
+    for meta in &seen {
+        assert_eq!(
+            meta["traceparent"], "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+            "{seen:?}"
+        );
+    }
+
+    client.disconnect().await.ok();
+    handle.abort();
+}
+
 /// The refusal recovery has to reach the tool it was sent back for, wherever
 /// the server pages it.
 ///

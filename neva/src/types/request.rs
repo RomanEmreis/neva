@@ -107,25 +107,6 @@ pub struct RequestParamsMeta {
     )]
     pub(crate) client_info: Option<super::Implementation>,
 
-    /// MRTR: the client's results for a prior `InputRequiredResult`.
-    ///
-    /// **Read-only, and only for peers older than 0.5.3.** The spec puts this
-    /// on the params (`InputResponseRequestParams`), which is where neva now
-    /// writes it and where [`Request::input_responses`] looks first; the field
-    /// survives here so a request from a 0.5.x neva client is still understood.
-    /// It is never serialized, so nothing this build sends can carry it.
-    #[cfg(not(feature = "legacy-spec"))]
-    #[serde(rename = "inputResponses", default, skip_serializing)]
-    pub(crate) input_responses: Option<crate::types::mrtr::InputResponses>,
-
-    /// MRTR: the opaque `requestState` echoed back from `InputRequiredResult`.
-    ///
-    /// Read-only for the same reason as [`Self::input_responses`]; see
-    /// [`Request::state`].
-    #[cfg(not(feature = "legacy-spec"))]
-    #[serde(rename = "requestState", default, skip_serializing)]
-    pub(crate) request_state: Option<String>,
-
     /// Request-scoped logging level (MCP 2026-07-28).
     ///
     /// The minimum severity the client wants to receive as
@@ -214,6 +195,10 @@ impl RequestParamsMeta {
     }
 }
 
+/// The `_meta` key of the capabilities a 2026-07-28 request declares.
+#[cfg(not(feature = "legacy-spec"))]
+const CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
+
 impl Request {
     /// Creates a new [`Request`]
     pub fn new<T: Serialize>(
@@ -277,7 +262,6 @@ impl Request {
         use crate::error::{Error, ErrorCode};
 
         const VERSION: &str = "io.modelcontextprotocol/protocolVersion";
-        const CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
 
         let meta = self.params.as_ref().and_then(|p| p.get("_meta"));
         let malformed = |key: &str, expected: &str| {
@@ -295,10 +279,10 @@ impl Request {
             return malformed(VERSION, "string");
         }
         if meta
-            .and_then(|m| m.get(CAPABILITIES))
+            .and_then(|m| m.get(CLIENT_CAPABILITIES))
             .is_none_or(|v| !v.is_object())
         {
-            return malformed(CAPABILITIES, "object");
+            return malformed(CLIENT_CAPABILITIES, "object");
         }
         None
     }
@@ -349,9 +333,9 @@ impl Request {
             .params
             .as_ref()
             .and_then(|p| p.get("inputResponses"))
-            .and_then(|v| serde_json::from_value(v.clone()).ok());
+            .and_then(|v| crate::types::mrtr::InputResponses::deserialize(v).ok());
 
-        from_params.or_else(|| self.meta().and_then(|m| m.input_responses))
+        from_params.or_else(|| self.meta_field("inputResponses"))
     }
 
     /// The opaque MRTR `requestState` this request echoes back, if any.
@@ -382,7 +366,7 @@ impl Request {
             .and_then(|v| v.as_str())
             .map(str::to_owned);
 
-        from_params.or_else(|| self.meta().and_then(|m| m.request_state))
+        from_params.or_else(|| self.meta_field("requestState"))
     }
 
     /// Why this request's MRTR fields are not acceptable, if they are not.
@@ -512,11 +496,27 @@ impl Request {
 
     /// Returns [`Request`] params metadata
     pub fn meta(&self) -> Option<RequestParamsMeta> {
-        self.params
-            .as_ref()?
-            .get("_meta")
-            .cloned()
-            .and_then(|meta| serde_json::from_value(meta).ok())
+        RequestParamsMeta::deserialize(self.params.as_ref()?.get("_meta")?).ok()
+    }
+
+    /// One `_meta` field, read without parsing the rest: under MCP 2026-07-28
+    /// every request's `_meta` carries the client's identity and capabilities,
+    /// and a reader mostly wants one key of it.
+    #[cfg(not(feature = "legacy-spec"))]
+    fn meta_field<T: serde::de::DeserializeOwned>(&self, key: &str) -> Option<T> {
+        T::deserialize(self.params.as_ref()?.get("_meta")?.get(key)?).ok()
+    }
+
+    /// The client capabilities this request declares in `_meta`.
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+    pub(crate) fn client_capabilities(&self) -> Option<crate::types::RequestClientCapabilities> {
+        self.meta_field(CLIENT_CAPABILITIES)
+    }
+
+    /// The logging level this request asks for in `_meta`.
+    #[cfg(all(feature = "server", feature = "tracing", not(feature = "legacy-spec")))]
+    pub(crate) fn log_level(&self) -> Option<crate::types::notification::LoggingLevel> {
+        self.meta_field("io.modelcontextprotocol/logLevel")
     }
 
     /// Merges `meta` into the request's `_meta`, creating the params/`_meta`
@@ -686,9 +686,6 @@ mod tests {
         let got = req.meta().expect("meta present");
         assert_eq!(got.traceparent.as_deref(), Some("tp"));
         assert_eq!(got.client_info.expect("client_info present").name, "c");
-        // MRTR meta fields default to None and survive set/get.
-        assert!(got.input_responses.is_none());
-        assert!(got.request_state.is_none());
         // pre-existing params keys are untouched.
         assert_eq!(req.params.expect("params present")["x"], json!(1));
     }
@@ -807,26 +804,6 @@ mod tests {
                 .is_none(),
             "a request without params states no MRTR fields at all"
         );
-    }
-
-    /// Nothing this build sends may carry the old location, or a peer reading
-    /// the spec one would see an answered retry as a fresh call.
-    #[cfg(not(feature = "legacy-spec"))]
-    #[test]
-    fn mrtr_meta_fields_are_never_written() {
-        let meta = RequestParamsMeta {
-            request_state: Some("sealed".into()),
-            input_responses: Some(
-                [("who".to_string(), serde_json::json!({ "action": "accept" }))]
-                    .into_iter()
-                    .collect(),
-            ),
-            ..Default::default()
-        };
-
-        let json = serde_json::to_value(&meta).expect("serialize");
-        assert!(json.get("requestState").is_none(), "got: {json}");
-        assert!(json.get("inputResponses").is_none(), "got: {json}");
     }
 
     #[cfg(all(feature = "client", not(feature = "legacy-spec")))]

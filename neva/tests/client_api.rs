@@ -281,6 +281,63 @@ async fn a_dropped_batch_leaves_nothing_for_its_retry() {
     server.abort();
 }
 
+/// `call_raw` takes fully formed params: the `_meta` they carry reaches the
+/// server, with the client's progress token next to it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_raw_call_sends_the_callers_meta() {
+    use neva::types::{CallToolRequestParams, RequestParamsMeta};
+    use std::sync::{Arc, Mutex};
+
+    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
+    let log = seen.clone();
+
+    let mut app = App::new()
+        .without_greeting()
+        .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+    app.map_tool("ping", || async { "pong" });
+    let app = app.wrap_tools(move |ctx, next| {
+        let meta = ctx
+            .request()
+            .and_then(|req| req.params.as_ref())
+            .and_then(|params| params.get("_meta"))
+            .cloned();
+        log.lock().expect("the log").extend(meta);
+        next(ctx)
+    });
+
+    let server = tokio::spawn(async move { app.run().await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let mut client = Client::new().with_options(|o| {
+        o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
+            .with_timeout(Duration::from_secs(10))
+    });
+    client.connect().await.expect("connect");
+
+    let mut meta = RequestParamsMeta::default();
+    meta.traceparent = Some("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01".into());
+    meta.baggage = Some("tenant=7".into());
+    let resp = client
+        .tools()
+        .call_raw(CallToolRequestParams::new("ping").with_meta(meta))
+        .await
+        .expect("the call");
+    assert!(matches!(resp, neva::types::Response::Ok(_)), "{resp:?}");
+
+    let seen = std::mem::take(&mut *seen.lock().expect("the log"));
+    assert_eq!(seen.len(), 1, "one call, one `_meta`: {seen:?}");
+    assert_eq!(
+        seen[0]["traceparent"],
+        "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+    );
+    assert_eq!(seen[0]["baggage"], "tenant=7");
+    assert!(seen[0].get("progressToken").is_some(), "{seen:?}");
+
+    client.disconnect().await.ok();
+    server.abort();
+}
+
 fn pick_free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();

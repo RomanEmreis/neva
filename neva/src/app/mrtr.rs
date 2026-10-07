@@ -37,18 +37,13 @@ pub(super) fn salient_params(params: &serde_json::Value) -> serde_json::Value {
 /// `inputResponses` into the replay log, producing the per-dispatch MRTR state.
 pub(super) fn seed_mrtr_ctx(
     req: &Request,
+    client_capabilities: crate::types::mrtr::ClientMrtrCapabilities,
     method: &str,
     salient: &serde_json::Value,
     options: &crate::app::options::RuntimeMcpOptions,
     principal: Option<&str>,
 ) -> Result<std::sync::Arc<crate::app::context::MrtrCtx>, Error> {
     use crate::types::mrtr::state::{StateCodec, now_secs, request_binding};
-
-    let client_capabilities = req
-        .meta()
-        .and_then(|m| m.client_capabilities)
-        .map(|caps| caps.mrtr)
-        .unwrap_or_default();
 
     let mut answers = std::collections::HashMap::new();
     let mut memos = std::collections::HashMap::new();
@@ -299,6 +294,19 @@ mod tests {
                 .into_runtime()
         }
 
+        /// Seeds as dispatch does, with the capabilities the request declares.
+        fn seed(
+            req: &Request,
+            options: &crate::app::options::RuntimeMcpOptions,
+            principal: Option<&str>,
+        ) -> Result<std::sync::Arc<crate::app::context::MrtrCtx>, crate::error::Error> {
+            let caps = req
+                .client_capabilities()
+                .map(|caps| caps.mrtr)
+                .unwrap_or_default();
+            super::super::seed_mrtr_ctx(req, caps, METHOD, &salient(), options, principal)
+        }
+
         fn salient() -> serde_json::Value {
             serde_json::json!({ "name": "greet", "arguments": {} })
         }
@@ -330,8 +338,7 @@ mod tests {
                 aud: None,
             };
             let req = request_with_state(&encode(&payload));
-            let err = super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), None)
-                .expect_err("expired state must be rejected");
+            let err = seed(&req, &options(), None).expect_err("expired state must be rejected");
             assert_eq!(err.code, ErrorCode::InvalidParams);
             assert!(format!("{err}").contains("expired"), "{err}");
         }
@@ -351,9 +358,8 @@ mod tests {
             };
             let req = request_with_state(&encode(&payload));
             // ...replayed by "bob".
-            let err =
-                super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), Some("bob"))
-                    .expect_err("principal mismatch must be rejected");
+            let err = seed(&req, &options(), Some("bob"))
+                .expect_err("principal mismatch must be rejected");
             assert_eq!(err.code, ErrorCode::InvalidParams);
             assert!(format!("{err}").contains("principal mismatch"), "{err}");
         }
@@ -390,9 +396,8 @@ mod tests {
             let req = request_with_state(&encode(&payload_for(Some(
                 "https://billing.example.com/mcp",
             ))));
-            let err =
-                super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options_for(AUDIENCE), None)
-                    .expect_err("a state minted for another service must be rejected");
+            let err = seed(&req, &options_for(AUDIENCE), None)
+                .expect_err("a state minted for another service must be rejected");
             assert_eq!(err.code, ErrorCode::InvalidParams);
             assert!(format!("{err}").contains("audience mismatch"), "{err}");
         }
@@ -400,10 +405,7 @@ mod tests {
         #[test]
         fn a_state_minted_for_this_service_is_accepted() {
             let req = request_with_state(&encode(&payload_for(Some(AUDIENCE))));
-            assert!(
-                super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options_for(AUDIENCE), None)
-                    .is_ok()
-            );
+            assert!(seed(&req, &options_for(AUDIENCE), None).is_ok());
         }
 
         /// Checked in both directions, like the principal guard. A payload
@@ -413,9 +415,8 @@ mod tests {
         #[test]
         fn an_unbound_state_is_refused_where_an_audience_is_demanded() {
             let req = request_with_state(&encode(&payload_for(None)));
-            let err =
-                super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options_for(AUDIENCE), None)
-                    .expect_err("an unbound state must not pass an audience check");
+            let err = seed(&req, &options_for(AUDIENCE), None)
+                .expect_err("an unbound state must not pass an audience check");
             assert!(format!("{err}").contains("audience mismatch"), "{err}");
         }
 
@@ -424,7 +425,7 @@ mod tests {
         #[test]
         fn a_bound_state_is_refused_where_no_audience_is_configured() {
             let req = request_with_state(&encode(&payload_for(Some(AUDIENCE))));
-            let err = super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), None)
+            let err = seed(&req, &options(), None)
                 .expect_err("a bound state must not pass an unbound server");
             assert!(format!("{err}").contains("audience mismatch"), "{err}");
         }
@@ -486,8 +487,8 @@ mod tests {
             // key. Erroring instead would break a client that knows what the
             // tool will ask and answers in one shot.
             let req = request_with_answers(None, &[("ask_name", "offered")]);
-            let ctx = super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), None)
-                .expect("unsolicited answers must not fail the call");
+            let ctx =
+                seed(&req, &options(), None).expect("unsolicited answers must not fail the call");
             assert_eq!(tag_of(&ctx, "ask_name").as_deref(), Some("offered"));
         }
 
@@ -503,8 +504,8 @@ mod tests {
                 Some(&state),
                 &[("ask_name", "solicited"), ("ask_age", "unsolicited")],
             );
-            let ctx = super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), None)
-                .expect("an unsolicited key must not fail the call");
+            let ctx =
+                seed(&req, &options(), None).expect("an unsolicited key must not fail the call");
             assert_eq!(tag_of(&ctx, "ask_name").as_deref(), Some("solicited"));
             assert!(!ctx.answers.contains_key("ask_age"));
         }
@@ -516,8 +517,8 @@ mod tests {
             // replayed carrying a different answer than the round that made it.
             let state = state_with(&[("ask_name", "settled")], &["ask_name"]);
             let req = request_with_answers(Some(&state), &[("ask_name", "overwrite")]);
-            let ctx = super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), None)
-                .expect("a repeated answer must not fail the call");
+            let ctx =
+                seed(&req, &options(), None).expect("a repeated answer must not fail the call");
             assert_eq!(tag_of(&ctx, "ask_name").as_deref(), Some("settled"));
         }
 
@@ -526,8 +527,7 @@ mod tests {
             // The happy path: client answers exactly the requested key.
             let state = state_with(&[], &["ask_name"]);
             let req = request_with_answers(Some(&state), &[("ask_name", "answered")]);
-            let ctx = super::super::seed_mrtr_ctx(&req, METHOD, &salient(), &options(), None)
-                .expect("solicited response must be accepted");
+            let ctx = seed(&req, &options(), None).expect("solicited response must be accepted");
             assert_eq!(tag_of(&ctx, "ask_name").as_deref(), Some("answered"));
         }
     }
