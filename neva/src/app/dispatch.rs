@@ -121,7 +121,10 @@ impl App {
                             .execute(Message::Request(req))
                             .await;
                     }
-                    MessageEnvelope::Notification(notification) => {
+                    MessageEnvelope::Notification(mut notification) => {
+                        // On the batch's session, like its requests: a cancel
+                        // names its request by its id on that session.
+                        notification.session_id = batch_session_id;
                         Self::handle_notification(notification, runtime.clone()).await;
                     }
                     MessageEnvelope::Response(mut resp) => {
@@ -1027,6 +1030,30 @@ mod opens_subscription_tests {
 
 #[cfg(test)]
 mod tests {
+    /// A `notifications/cancelled` in a batch is read on the batch's session,
+    /// as the batch's requests are, so it finds a request tracked there.
+    #[tokio::test]
+    async fn a_batched_cancel_finds_its_request_on_the_batch_session() {
+        use crate::app::App;
+        use crate::transport::TransportProtoSender;
+        use crate::types::notification::{Notification, commands::CANCELLED};
+        use crate::types::{MessageBatch, MessageEnvelope, RequestId};
+
+        let session = uuid::Uuid::new_v4();
+        let runtime = App::new().build_runtime(TransportProtoSender::None);
+        let token = runtime
+            .options()
+            .track_request(&RequestId::Number(1).concat(RequestId::Uuid(session)));
+
+        let cancel = Notification::new(CANCELLED, Some(serde_json::json!({ "requestId": 1 })));
+        let mut batch =
+            MessageBatch::new(vec![MessageEnvelope::Notification(cancel)]).expect("non-empty");
+        batch.session_id = Some(session);
+        App::execute_batch(batch, runtime).await;
+
+        assert!(token.is_cancelled(), "the cancel must find its request");
+    }
+
     /// The request span carries the routing and filtering context for every
     /// event emitted while handling a request, so a common global threshold
     /// (`LevelFilter::WARN`) must not disable it: WARN/ERROR events stay enabled

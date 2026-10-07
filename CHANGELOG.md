@@ -60,8 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * `Client::subscribe` and the `on_*_changed` helpers no longer panic on a
   `current_thread` runtime (#139). Since 0.0.8.
 * The server finds the request a `notifications/cancelled` names on an HTTP
-  session; it looked the request up without the session, and cancelled
-  nothing. Since 0.1.0.
+  session, from a batch too; it looked the request up without the session,
+  and cancelled nothing. Since 0.1.0.
 * A `notifications/cancelled` read right behind its request, or its batch,
   is no longer lost when it overtakes the request on the way to its handler,
   past the middleware: the server tracks a request as it reads it, and a
