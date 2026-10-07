@@ -437,7 +437,10 @@ impl McpOptions {
     }
 
     /// Installs a W3C Trace Context provider. Called before each outbound
-    /// request; the returned [`TraceContext`] is injected into `_meta`.
+    /// request; the returned [`TraceContext`] is injected into `_meta`. A
+    /// request that already carries a `traceparent`, set through
+    /// [`CallToolRequestParams::with_meta`](crate::types::CallToolRequestParams::with_meta)
+    /// say, keeps its own.
     #[cfg(not(feature = "legacy-spec"))]
     pub fn with_trace_context_provider<F>(mut self, f: F) -> Self
     where

@@ -47,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 * A `tasks/update` or `tasks/cancel` the server refuses is an error instead
   of `Ok(())`, and `wait_to_completion` stops at it. Since 0.5.4.
+* `tools().call_raw` (and `call_tool_raw`) send the `_meta` their params
+  carry, a `traceparent` say, where they replaced it; only the progress token
+  is the client's. Since 0.2.5. A request's own trace context is kept over the
+  trace context provider's. Since 0.4.0.
 
 ### Deprecated
 * The flat methods on `Client` (`list_tools`, `call_tool`, `read_resource`,

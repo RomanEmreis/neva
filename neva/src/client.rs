@@ -3,8 +3,6 @@
 use crate::error::{Error, ErrorCode};
 use crate::shared;
 use crate::shared::{BlockingCall, BlockingFn, BoxFuture, marker};
-#[cfg(all(feature = "http-client", not(feature = "legacy-spec")))]
-use crate::types::RequestParamsMeta;
 use crate::types::Root;
 use crate::types::sampling::{CreateMessageRequestParams, CreateMessageResult, SamplingHandler};
 use crate::types::{

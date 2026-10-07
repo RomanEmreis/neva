@@ -102,8 +102,9 @@ impl Client {
     ///
     /// Also populates W3C Trace Context (`traceparent` / `tracestate`) from the
     /// configured [`trace_context_provider`](crate::client::options::McpOptions::with_trace_context_provider),
-    /// when installed. This is the single assembly point for outbound 2026-07-28 `_meta`,
-    /// so both single sends (via [`Self::run_with_mrtr`]) and batched requests
+    /// when installed, unless the request carries a trace context of its own.
+    /// This is the single assembly point for outbound 2026-07-28 `_meta`, so
+    /// both single sends (via [`Self::run_with_mrtr`]) and batched requests
     /// (via [`Self::run_batch_with_mrtr`]) carry trace context.
     #[cfg(not(feature = "legacy-spec"))]
     pub(super) fn apply_client_meta(
@@ -145,7 +146,11 @@ impl Client {
             extensions: self.options.extensions(),
         });
 
-        if let Some(provider) = self.options.trace_context_provider.as_ref()
+        // A `traceparent` the caller set is the one it means: the provider is
+        // the client's default, and its `tracestate` and `baggage` belong to
+        // its own `traceparent`, not the caller's.
+        if meta.traceparent.is_none()
+            && let Some(provider) = self.options.trace_context_provider.as_ref()
             && let Some(tc) = provider()
         {
             meta.traceparent = Some(tc.traceparent);
@@ -415,4 +420,57 @@ fn no_fulfiller(kind: &str) -> Error {
         ErrorCode::InvalidRequest,
         format!("server requested {kind} but no handler is configured"),
     )
+}
+
+#[cfg(test)]
+#[cfg(not(feature = "legacy-spec"))]
+mod tests {
+    use super::*;
+    use crate::client::options::TraceContext;
+    use crate::types::{CallToolRequestParams, RequestParamsMeta};
+
+    fn traced(client: &Client, meta: Option<RequestParamsMeta>) -> RequestParamsMeta {
+        let mut params = CallToolRequestParams::new("add");
+        params.meta = meta;
+        let mut req = Request::new(
+            Some(RequestId::Number(1)),
+            crate::types::tool::commands::CALL,
+            Some(params),
+        );
+        client.apply_client_meta(&mut req, None, None);
+        req.meta().expect("the client's `_meta`")
+    }
+
+    /// The provider is the client's default trace context; a request that
+    /// carries its own keeps it, `tracestate` and `baggage` included.
+    #[test]
+    fn a_request_keeps_its_own_trace_context() {
+        let client = Client::new().with_options(|o| {
+            o.with_trace_context_provider(|| {
+                Some(TraceContext {
+                    traceparent: "00-provider-01".into(),
+                    tracestate: Some("provider=1".into()),
+                    baggage: None,
+                })
+            })
+        });
+
+        let defaulted = traced(&client, None);
+        assert_eq!(defaulted.traceparent.as_deref(), Some("00-provider-01"));
+        assert_eq!(defaulted.tracestate.as_deref(), Some("provider=1"));
+
+        let own = RequestParamsMeta {
+            traceparent: Some("00-caller-01".into()),
+            baggage: Some("user=7".into()),
+            ..Default::default()
+        };
+        let kept = traced(&client, Some(own));
+        assert_eq!(kept.traceparent.as_deref(), Some("00-caller-01"));
+        assert_eq!(kept.tracestate, None);
+        assert_eq!(kept.baggage.as_deref(), Some("user=7"));
+        assert!(
+            kept.client_info.is_some(),
+            "the client's own fields are still set"
+        );
+    }
 }

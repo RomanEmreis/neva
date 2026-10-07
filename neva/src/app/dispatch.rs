@@ -23,10 +23,7 @@ impl App {
         // can decide which `notifications/message` to deliver for this request.
         #[cfg(not(feature = "legacy-spec"))]
         let span = {
-            let log_level = ctx
-                .request()
-                .and_then(|req| req.meta())
-                .and_then(|meta| meta.log_level);
+            let log_level = ctx.request().and_then(Request::log_level);
             create_tracing_span(ctx.session_id().cloned(), log_level)
         };
 
@@ -403,10 +400,7 @@ impl App {
         // answer needs to know that on any substrate.
         #[cfg(not(feature = "legacy-spec"))]
         {
-            let caps = req
-                .meta()
-                .and_then(|m| m.client_capabilities)
-                .unwrap_or_default();
+            let caps = req.client_capabilities().unwrap_or_default();
 
             context.client_capabilities = caps.mrtr;
             context.client_extensions = caps.extensions.map(Arc::new);
@@ -423,6 +417,7 @@ impl App {
 
             match seed_mrtr_ctx(
                 &req,
+                context.client_capabilities,
                 &req_method,
                 &salient_params,
                 &options,
