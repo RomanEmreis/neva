@@ -181,7 +181,8 @@ struct PendingSlot<'a> {
 /// POST's own session, so each names exactly its request. It goes through the
 /// same channel the requests did, behind them, and the dispatch handles it as
 /// any other cancel. A subscription needs none: its handler sees its stream go
-/// through the notification sink, and ends it gracefully.
+/// through the notification sink, and ends it gracefully. In a batch, that
+/// leaves out the listen alone, and the requests beside it are cancelled.
 #[cfg(not(feature = "legacy-spec"))]
 struct Abandoned {
     inbound: tokio::sync::mpsc::Sender<Result<Message, Error>>,
@@ -192,12 +193,13 @@ struct Abandoned {
 impl Abandoned {
     fn of(msg: &Message, inbound: &tokio::sync::mpsc::Sender<Result<Message, Error>>) -> Self {
         let ids: Vec<RequestId> = match msg {
-            _ if is_subscription_stream(msg) => Vec::new(),
-            Message::Request(req) => vec![req.id.clone()],
+            Message::Request(req) if !is_listen(req) => vec![req.id.clone()],
             Message::Batch(batch) => batch
                 .iter()
                 .filter_map(|envelope| match envelope {
-                    crate::types::MessageEnvelope::Request(req) => Some(req.id.clone()),
+                    crate::types::MessageEnvelope::Request(req) if !is_listen(req) => {
+                        Some(req.id.clone())
+                    }
                     _ => None,
                 })
                 .collect(),
@@ -738,10 +740,6 @@ fn opts_into_notifications(msg: &Message) -> bool {
 /// this same body with the same ordering requirement.
 #[cfg(not(feature = "legacy-spec"))]
 fn is_subscription_stream(msg: &Message) -> bool {
-    fn is_listen(req: &crate::types::Request) -> bool {
-        req.method == crate::types::subscription::commands::LISTEN
-    }
-
     match msg {
         Message::Request(r) => is_listen(r),
         Message::Batch(batch) => batch
@@ -751,12 +749,18 @@ fn is_subscription_stream(msg: &Message) -> bool {
     }
 }
 
+/// Whether a request opens a subscription: `subscriptions/listen`.
+#[cfg(not(feature = "legacy-spec"))]
+fn is_listen(req: &crate::types::Request) -> bool {
+    req.method == crate::types::subscription::commands::LISTEN
+}
+
 /// Whether a single request needs the streaming reply: `subscriptions/listen`
 /// (whose whole point is a long-lived notification stream), or a request
 /// carrying `logLevel` or `progressToken` in `_meta`.
 #[cfg(not(feature = "legacy-spec"))]
 fn request_opts_in(req: &crate::types::Request) -> bool {
-    if req.method == crate::types::subscription::commands::LISTEN {
+    if is_listen(req) {
         return true;
     }
     req.params
@@ -2306,6 +2310,58 @@ mod tests {
         assert!(
             ctx.pending.is_empty(),
             "an abandoned POST must not leave its slot behind"
+        );
+    }
+
+    /// A batch that carries a listen and a call, its POST closed before the
+    /// answer: the call is cancelled, on the POST's session, and the listen is
+    /// left to end through its stream.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[tokio::test]
+    async fn a_closed_post_cancels_the_requests_beside_a_batched_listen() {
+        let (ctx, mut inbound) = make_ctx();
+        let body = serde_json::json!([
+            {
+                "jsonrpc": "2.0", "id": 1, "method": "subscriptions/listen",
+                "params": { "notifications": {}, "_meta": meta() }
+            },
+            {
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": { "name": "slow", "arguments": {}, "_meta": meta() }
+            }
+        ]);
+        let req = post_builder()
+            .body(Bytes::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let StreamResponse::Stream { stream, .. } =
+            handle_post_streaming::<TestEngine>(req, &ctx).await
+        else {
+            panic!("a batched listen streams its reply");
+        };
+        let Some(Ok(Message::Batch(batch))) = inbound.recv().await else {
+            panic!("the batch is dispatched");
+        };
+
+        drop(stream);
+        let wait = std::time::Duration::from_secs(1);
+        let Ok(Some(Ok(Message::Notification(cancel)))) =
+            tokio::time::timeout(wait, inbound.recv()).await
+        else {
+            panic!("the call is cancelled");
+        };
+        assert_eq!(
+            cancel.method,
+            crate::types::notification::commands::CANCELLED
+        );
+        assert_eq!(cancel.session_id, batch.session_id);
+        let params = cancel.params.expect("a cancel names its request");
+        assert_eq!(params["requestId"], 2);
+
+        let wait = std::time::Duration::from_millis(100);
+        assert!(
+            tokio::time::timeout(wait, inbound.recv()).await.is_err(),
+            "the listen is not cancelled"
         );
     }
 
