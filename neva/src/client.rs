@@ -251,11 +251,9 @@ impl Client {
             .as_ref()
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
 
-        let request_timeout = handler.timeout();
-        let token = handler.cancellation();
         let slots = handler.send_batch(items).await?;
 
-        collect_batch_responses(slots, request_timeout, token)
+        collect_batch_responses(slots, handler)
             .await
             .into_iter()
             .collect()
@@ -355,16 +353,22 @@ impl Client {
 /// `try_join_all`) so one failed request does not cut the others' waits short.
 async fn collect_batch_responses(
     slots: Vec<(
-        tokio::sync::oneshot::Receiver<crate::shared::PendingResponse>,
-        crate::shared::QueuedRequestGuard<'_>,
+        tokio::sync::oneshot::Receiver<shared::PendingResponse>,
+        shared::QueuedRequestGuard<'_>,
     )>,
-    request_timeout: std::time::Duration,
-    token: tokio_util::sync::CancellationToken,
+    handler: &RequestHandler,
 ) -> Vec<Result<Response, Error>> {
     use futures_util::future::join_all;
 
+    let request_timeout = handler.timeout();
+    let token = handler.cancellation();
+    let sender = handler.sender();
+
     let futures = slots.into_iter().map(|(rx, slot)| {
         let token = token.clone();
+        // The batch is out, so each of its requests can be cancelled: one the
+        // caller stops waiting for tells the server, as a single request does.
+        let mut abandon = handler::Abandon::new(Some((slot.id().clone(), sender.clone())));
         async move {
             let _slot = slot;
             tokio::select! {
@@ -372,17 +376,25 @@ async fn collect_batch_responses(
                 // The transport died (or a shutdown signal cancelled it)
                 // -- no response is coming for any receiver.
                 _ = token.cancelled() => {
+                    abandon.disarm();
                     Err(Error::new(ErrorCode::InternalError, "Connection closed"))
                 }
                 result = tokio::time::timeout(request_timeout, rx) => match result {
-                    Ok(Ok(crate::shared::PendingResponse::Response(resp))) => Ok(resp),
-                    Ok(Ok(crate::shared::PendingResponse::Timeout)) | Err(_) => {
+                    Ok(Ok(shared::PendingResponse::Response(resp))) => {
+                        abandon.disarm();
+                        Ok(resp)
+                    }
+                    Ok(Ok(shared::PendingResponse::Timeout)) | Err(_) => {
+                        abandon.timed_out();
                         Err(Error::new(ErrorCode::Timeout, "Batch request timed out"))
                     }
-                    Ok(Err(_)) => Err(Error::new(
-                        ErrorCode::InternalError,
-                        "Response channel closed",
-                    )),
+                    Ok(Err(_)) => {
+                        abandon.disarm();
+                        Err(Error::new(
+                            ErrorCode::InternalError,
+                            "Response channel closed",
+                        ))
+                    }
                 }
             }
         }

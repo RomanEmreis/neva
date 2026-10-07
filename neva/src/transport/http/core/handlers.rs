@@ -139,7 +139,10 @@ pub async fn handle_post(req: HttpRequest, ctx: &HttpContext) -> HttpResponse {
         PostPrep::Reply(resp) => resp,
         PostPrep::Dispatch { id, msg } => {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<Message>();
-            let _slot = PendingSlot::occupy(&ctx.pending, msg.full_id(), resp_tx);
+            let slot = PendingSlot::occupy(&ctx.pending, msg.full_id(), resp_tx);
+            #[cfg(not(feature = "legacy-spec"))]
+            let slot = slot.cancelling(Abandoned::of(&msg, &ctx.inbound_tx));
+            let _slot = slot;
             if ctx.inbound_tx.send(Ok(msg)).await.is_err() {
                 return status_response(http::StatusCode::INTERNAL_SERVER_ERROR, id);
             }
@@ -165,6 +168,78 @@ struct PendingSlot<'a> {
     /// Cleared once the slot has been handed to something that outlives this
     /// guard -- the body stream of a streamed reply.
     owned: bool,
+    /// Cancels the POST's requests if it goes before their answer does.
+    #[cfg(not(feature = "legacy-spec"))]
+    abandoned: Option<Abandoned>,
+}
+
+/// What a POST that goes away before its answer tells the runtime, under MCP
+/// 2026-07-28: there, a client closing the stream is how it cancels the
+/// request, and the server MUST treat the disconnect as that cancellation.
+///
+/// A `notifications/cancelled` for each request the POST carried, on the
+/// POST's own session, so each names exactly its request. It goes through the
+/// same channel the requests did, behind them, and the dispatch handles it as
+/// any other cancel. A subscription needs none: its handler sees its stream go
+/// through the notification sink, and ends it gracefully.
+#[cfg(not(feature = "legacy-spec"))]
+struct Abandoned {
+    inbound: tokio::sync::mpsc::Sender<Result<Message, Error>>,
+    cancels: Vec<crate::types::notification::Notification>,
+}
+
+#[cfg(not(feature = "legacy-spec"))]
+impl Abandoned {
+    fn of(msg: &Message, inbound: &tokio::sync::mpsc::Sender<Result<Message, Error>>) -> Self {
+        let ids: Vec<RequestId> = match msg {
+            _ if is_subscription_stream(msg) => Vec::new(),
+            Message::Request(req) => vec![req.id.clone()],
+            Message::Batch(batch) => batch
+                .iter()
+                .filter_map(|envelope| match envelope {
+                    crate::types::MessageEnvelope::Request(req) => Some(req.id.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        let session_id = msg.session_id().copied();
+        let cancels = ids
+            .iter()
+            .map(|id| {
+                let mut cancel = crate::types::notification::Notification::cancelled(
+                    id,
+                    "the client closed the request's stream",
+                );
+                cancel.session_id = session_id;
+                cancel
+            })
+            .collect();
+
+        Self {
+            inbound: inbound.clone(),
+            cancels,
+        }
+    }
+
+    /// Sends the cancels, as the POST is gone and its answer was never taken.
+    fn fire(self) {
+        if self.cancels.is_empty() {
+            return;
+        }
+        // Sending waits on the channel, which a drop cannot.
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        runtime.spawn(async move {
+            for cancel in self.cancels {
+                if self.inbound.send(Ok(cancel.into())).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
 }
 
 impl<'a> PendingSlot<'a> {
@@ -180,24 +255,50 @@ impl<'a> PendingSlot<'a> {
             pending,
             id,
             owned: true,
+            #[cfg(not(feature = "legacy-spec"))]
+            abandoned: None,
         }
+    }
+
+    /// Cancels the POST's requests, as [`Abandoned`] describes, if it goes
+    /// before their answer does.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[inline]
+    fn cancelling(mut self, abandoned: Abandoned) -> Self {
+        self.abandoned = Some(abandoned);
+        self
     }
 
     /// Gives up ownership of the slot, returning its key for whoever takes
     /// over removing it.
     #[cfg(not(feature = "legacy-spec"))]
     #[inline]
-    fn hand_over(mut self) -> RequestId {
+    fn hand_over(mut self) -> HandedOver {
         self.owned = false;
-        self.id.clone()
+        HandedOver {
+            full_id: self.id.clone(),
+            abandoned: self.abandoned.take(),
+        }
     }
+}
+
+/// A slot handed over to a streamed reply's body: its key, and the cancel it
+/// owes if the stream goes before the answer.
+#[cfg(not(feature = "legacy-spec"))]
+struct HandedOver {
+    full_id: RequestId,
+    abandoned: Option<Abandoned>,
 }
 
 impl Drop for PendingSlot<'_> {
     #[inline]
     fn drop(&mut self) {
-        if self.owned {
-            self.pending.remove(&self.id);
+        // A slot still here is an answer no one took: the POST went first.
+        if self.owned && self.pending.remove(&self.id).is_some() {
+            #[cfg(not(feature = "legacy-spec"))]
+            if let Some(abandoned) = self.abandoned.take() {
+                abandoned.fire();
+            }
         }
     }
 }
@@ -542,7 +643,8 @@ async fn handle_post_streaming<E: HttpEngine>(
         PostPrep::Reply(resp) => StreamResponse::Complete(resp),
         PostPrep::Dispatch { id, msg } => {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<Message>();
-            let slot = PendingSlot::occupy(&ctx.pending, msg.full_id(), resp_tx);
+            let slot = PendingSlot::occupy(&ctx.pending, msg.full_id(), resp_tx)
+                .cancelling(Abandoned::of(&msg, &ctx.inbound_tx));
 
             if !opts_into_notifications(&msg) {
                 if ctx.inbound_tx.send(Ok(msg)).await.is_err() {
@@ -693,8 +795,8 @@ fn request_opts_in(req: &crate::types::Request) -> bool {
 #[cfg(not(feature = "legacy-spec"))]
 fn post_notification_stream(
     id: uuid::Uuid,
-    full_id: RequestId,
-    pending: super::context::RequestMap,
+    slot: HandedOver,
+    pending: RequestMap,
     notif_rx: tokio::sync::mpsc::Receiver<Message>,
     resp_rx: tokio::sync::oneshot::Receiver<Message>,
     hold_for_ack: bool,
@@ -703,12 +805,19 @@ fn post_notification_stream(
     struct Cleanup {
         id: uuid::Uuid,
         full_id: RequestId,
-        pending: super::context::RequestMap,
+        abandoned: Option<Abandoned>,
+        pending: RequestMap,
     }
     impl Drop for Cleanup {
         fn drop(&mut self) {
             crate::types::notification::sink::unregister(&self.id);
-            self.pending.remove(&self.full_id);
+            // A slot still here is an answer no one took: the client closed
+            // the stream first.
+            if self.pending.remove(&self.full_id).is_some()
+                && let Some(abandoned) = self.abandoned.take()
+            {
+                abandoned.fire();
+            }
         }
     }
 
@@ -753,7 +862,8 @@ fn post_notification_stream(
         notifs_open: true,
         _cleanup: Cleanup {
             id,
-            full_id,
+            full_id: slot.full_id,
+            abandoned: slot.abandoned,
             pending,
         },
         awaiting_ack: hold_for_ack,

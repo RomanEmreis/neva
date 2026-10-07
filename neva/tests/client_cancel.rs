@@ -6,22 +6,23 @@
 
 use neva::client::Client;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
-
-/// Waits up to `limit` for `flag`.
-async fn raised(flag: &AtomicBool, limit: Duration) -> bool {
-    let deadline = tokio::time::Instant::now() + limit;
-    while !flag.load(Ordering::SeqCst) && tokio::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    flag.load(Ordering::SeqCst)
-}
 
 #[cfg(not(feature = "legacy-spec"))]
 mod streamable_http {
     use super::*;
     use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
+
+    /// Waits up to `limit` for `flag`.
+    async fn raised(flag: &AtomicBool, limit: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + limit;
+        while !flag.load(Ordering::SeqCst) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        flag.load(Ordering::SeqCst)
+    }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
@@ -158,7 +159,7 @@ mod streamable_http {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_call_that_times_out_closes_its_stream() {
         let server = Holding::start().await;
-        let client = connect(&server, Duration::from_millis(300)).await;
+        let client = connect(&server, Duration::from_secs(1)).await;
 
         let err = client
             .tools()
@@ -199,18 +200,21 @@ mod streamable_http {
     }
 }
 
-#[cfg(feature = "legacy-spec")]
-mod legacy {
+/// Against neva's own server, in both profiles: the server stops a call the
+/// client gave up on, whether it was told by the stream closing (2026-07-28)
+/// or by `notifications/cancelled` (legacy).
+mod against_neva {
     use super::*;
     use neva::App;
+    use neva::types::{CallToolRequestParams, MessageEnvelope, Request, RequestId};
+    use std::sync::atomic::AtomicUsize;
 
-    /// Raises its flag when the tool's handler is dropped, as a cancelled one
-    /// is.
-    struct RaiseOnDrop(Arc<AtomicBool>);
+    /// Counts the tool handlers that were dropped, as a cancelled one is.
+    struct CountOnDrop(Arc<AtomicUsize>);
 
-    impl Drop for RaiseOnDrop {
+    impl Drop for CountOnDrop {
         fn drop(&mut self) {
-            self.0.store(true, Ordering::SeqCst);
+            self.0.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -221,33 +225,81 @@ mod legacy {
         port
     }
 
-    /// To a legacy peer the client sends `notifications/cancelled`, on the
-    /// session the call was made on, and the server stops the call.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_call_that_times_out_is_cancelled_on_the_server() {
+    /// Serves `slow`, which counts its handlers starting and being dropped,
+    /// behind a middleware that holds each call for `hold`.
+    async fn serve(
+        hold: Duration,
+    ) -> (
+        String,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let addr = format!("127.0.0.1:{}", pick_free_port());
-        let stopped = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(AtomicUsize::new(0));
+        let stopped = Arc::new(AtomicUsize::new(0));
 
-        let flag = stopped.clone();
+        let (on_start, on_stop) = (started.clone(), stopped.clone());
         let mut app = App::new()
             .without_greeting()
             .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
         app.map_tool("slow", move || {
-            let flag = flag.clone();
+            let (on_start, on_stop) = (on_start.clone(), on_stop.clone());
             async move {
-                let _stopped = RaiseOnDrop(flag);
+                on_start.fetch_add(1, Ordering::SeqCst);
+                let _stopped = CountOnDrop(on_stop);
                 tokio::time::sleep(Duration::from_secs(30)).await;
                 "late"
             }
         });
+        let app = app.wrap_tools(move |ctx, next| async move {
+            tokio::time::sleep(hold).await;
+            next(ctx).await
+        });
         let server = tokio::spawn(async move { app.run().await });
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while tokio::net::TcpStream::connect(&addr).await.is_err() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "server never became reachable"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
 
+        (addr, started, stopped, server)
+    }
+
+    async fn connect(addr: &str, timeout: Duration) -> Client {
         let mut client = Client::new().with_options(|o| {
-            o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
-                .with_timeout(Duration::from_millis(300))
+            o.with_http(|h| h.bind(addr).with_endpoint("/mcp"))
+                .with_timeout(timeout)
         });
         client.connect().await.expect("connect");
+        client
+    }
+
+    /// Whether, after `wait`, every handler that started was also stopped.
+    ///
+    /// A cancel may land before a handler starts, so none starting is a pass
+    /// as well; what may not happen is one left running. The wait is fixed
+    /// rather than polled: no handler may be counted as stopped before it had
+    /// its chance to start.
+    async fn none_left_running(
+        started: &AtomicUsize,
+        stopped: &AtomicUsize,
+        wait: Duration,
+    ) -> (usize, usize) {
+        tokio::time::sleep(wait).await;
+        (
+            started.load(Ordering::SeqCst),
+            stopped.load(Ordering::SeqCst),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_call_that_times_out_is_cancelled_on_the_server() {
+        let (addr, started, stopped, server) = serve(Duration::ZERO).await;
+        let client = connect(&addr, Duration::from_secs(1)).await;
 
         let err = client
             .tools()
@@ -256,47 +308,21 @@ mod legacy {
             .expect_err("the call times out");
         assert!(err.to_string().contains("timed out"), "{err}");
 
-        assert!(
-            raised(&stopped, Duration::from_secs(3)).await,
-            "the server must stop the call"
-        );
+        let (started, stopped) =
+            none_left_running(&started, &stopped, Duration::from_millis(1500)).await;
+        assert_eq!(started, stopped, "the server must stop the call");
 
-        client.disconnect().await.ok();
         server.abort();
     }
-    /// A cancel read while its request is still on the way to the handler --
-    /// held up here by a middleware -- stops it all the same: the server tracks
-    /// a request as it reads it, not once the handler starts.
+
+    /// A cancel that reaches the server while its request is still on the way
+    /// to the handler -- held up here by a middleware for a second -- stops it
+    /// all the same:
+    /// the server tracks a request as it reads it, not once the handler starts.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_call_dropped_before_its_handler_starts_never_runs() {
-        let addr = format!("127.0.0.1:{}", pick_free_port());
-        let started = Arc::new(AtomicBool::new(false));
-
-        let flag = started.clone();
-        let mut app = App::new()
-            .without_greeting()
-            .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
-        app.map_tool("slow", move || {
-            let flag = flag.clone();
-            async move {
-                flag.store(true, Ordering::SeqCst);
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                "late"
-            }
-        });
-        let app = app.wrap_tools(|ctx, next| async move {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            next(ctx).await
-        });
-        let server = tokio::spawn(async move { app.run().await });
-        tokio::time::sleep(Duration::from_millis(300)).await;
-
-        let mut client = Client::new().with_options(|o| {
-            o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
-                .with_timeout(Duration::from_secs(30))
-        });
-        client.connect().await.expect("connect");
-        let client = Arc::new(client);
+        let (addr, started, _stopped, server) = serve(Duration::from_secs(1)).await;
+        let client = Arc::new(connect(&addr, Duration::from_secs(30)).await);
 
         let caller = client.clone();
         let call = tokio::spawn(async move { caller.tools().call("slow", ()).await });
@@ -304,10 +330,64 @@ mod legacy {
         call.abort();
 
         // Well past the middleware's hold.
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        assert!(
-            !started.load(Ordering::SeqCst),
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            0,
             "a call cancelled on its way must not reach its handler"
+        );
+
+        server.abort();
+    }
+
+    fn slow_call(id: i64) -> MessageEnvelope {
+        MessageEnvelope::Request(Request::new(
+            Some(RequestId::Number(id)),
+            "tools/call",
+            Some(CallToolRequestParams::new("slow")),
+        ))
+    }
+
+    /// The requests of a batch the caller gave up on are each cancelled.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_abandoned_batch_is_cancelled_on_the_server() {
+        let (addr, started, stopped, server) = serve(Duration::ZERO).await;
+        let client = connect(&addr, Duration::from_secs(1)).await;
+
+        let call = slow_call;
+        let err = client
+            .call_batch(vec![call(1), call(2)])
+            .await
+            .expect_err("the batch times out");
+        assert!(err.to_string().contains("timed out"), "{err}");
+
+        let (started, stopped) =
+            none_left_running(&started, &stopped, Duration::from_millis(1500)).await;
+        assert_eq!(started, stopped, "the server must stop both calls");
+
+        server.abort();
+    }
+
+    /// A batch given up on while a middleware holds its requests on the way to
+    /// their handlers: the server has them tracked from the moment it read the
+    /// batch, so none starts.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_batch_dropped_before_its_handlers_start_never_runs() {
+        let (addr, started, _stopped, server) = serve(Duration::from_secs(1)).await;
+        let client = Arc::new(connect(&addr, Duration::from_secs(30)).await);
+
+        let caller = client.clone();
+        let call =
+            tokio::spawn(async move { caller.call_batch(vec![slow_call(1), slow_call(2)]).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        call.abort();
+
+        // Well past the middleware's hold.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            0,
+            "a batch cancelled on its way must not reach its handlers"
         );
 
         server.abort();

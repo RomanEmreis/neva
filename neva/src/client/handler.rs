@@ -165,13 +165,15 @@ impl Roots {
 ///
 /// Armed only once the request is out, since a cancel may only name a
 /// request that was issued, and disarmed by an answer or a closed connection.
-struct Abandon {
+/// A batch's requests have one each, so the ones still unanswered when the
+/// caller gives up are cancelled.
+pub(super) struct Abandon {
     armed: Option<(RequestId, TransportProtoSender)>,
     reason: &'static str,
 }
 
 impl Abandon {
-    fn new(armed: Option<(RequestId, TransportProtoSender)>) -> Self {
+    pub(super) fn new(armed: Option<(RequestId, TransportProtoSender)>) -> Self {
         Self {
             armed,
             reason: "the caller stopped waiting for the answer",
@@ -179,11 +181,11 @@ impl Abandon {
     }
 
     /// The answer came, or nothing can carry a cancel any more.
-    fn disarm(&mut self) {
+    pub(super) fn disarm(&mut self) {
         self.armed = None;
     }
 
-    fn timed_out(&mut self) {
+    pub(super) fn timed_out(&mut self) {
         self.reason = "the request timed out";
     }
 }
@@ -370,11 +372,10 @@ impl RequestHandler {
         )
     }
 
-    /// Returns a handle on the transport sender, so a [`Subscription`] can
-    /// cancel itself without borrowing the client.
+    /// Returns a handle on the transport sender, so a [`Subscription`] or an
+    /// abandoned batch request can cancel itself without borrowing the client.
     ///
     /// [`Subscription`]: crate::client::Subscription
-    #[cfg(not(feature = "legacy-spec"))]
     #[inline]
     pub(super) fn sender(&self) -> TransportProtoSender {
         self.sender.clone()

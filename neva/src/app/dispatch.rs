@@ -775,29 +775,40 @@ fn create_tracing_span(
 /// same registration up. Dropping this releases it however the task ends, a
 /// middleware answering without calling `next` included.
 ///
-/// A batch is not registered here: its requests take the batch's session
-/// inside its task, which is the key they are tracked under.
+/// A batch's requests are registered under the key their task gives them: a
+/// request of a batch takes the batch's session there, so it is tracked under
+/// its id on that session.
 pub(super) struct ReadRequest {
     options: RuntimeMcpOptions,
-    id: Option<crate::types::RequestId>,
+    ids: Vec<RequestId>,
 }
 
 impl ReadRequest {
     pub(super) fn register(msg: &Message, options: RuntimeMcpOptions) -> Self {
-        let id = match msg {
-            Message::Request(req) => Some(req.full_id()),
-            _ => None,
+        let ids: Vec<_> = match msg {
+            Message::Request(req) => vec![req.full_id()],
+            Message::Batch(batch) => batch
+                .iter()
+                .filter_map(|envelope| match envelope {
+                    MessageEnvelope::Request(req) => Some(match batch.session_id {
+                        Some(session_id) => req.id.clone().concat(RequestId::Uuid(session_id)),
+                        None => req.id.clone(),
+                    }),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
         };
-        if let Some(id) = &id {
+        for id in &ids {
             options.track_request(id);
         }
-        Self { options, id }
+        Self { options, ids }
     }
 }
 
 impl Drop for ReadRequest {
     fn drop(&mut self) {
-        if let Some(id) = &self.id {
+        for id in &self.ids {
             self.options.complete_request(id);
         }
     }

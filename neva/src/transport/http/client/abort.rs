@@ -60,12 +60,13 @@ impl Drop for StreamAbort {
 /// scheduler. Registering here makes the order the order the messages were
 /// written in.
 ///
-/// A standalone request qualifies. A batch shares one POST among its requests,
-/// so closing it would cancel them all, and a legacy peer cancels by the
-/// notification, the close meaning nothing to it; neither is tracked.
+/// A batch is tracked under each of its requests' ids: they share one POST,
+/// so a cancel naming any of them closes it, which cancels them all. They are
+/// given up together too, as one `call_batch`. A legacy peer cancels by the
+/// notification, the close meaning nothing to it, and is not tracked.
 pub(super) fn track_request(req: &Message, session: &Arc<McpSession>) -> StreamAbort {
     let ids = match req {
-        Message::Request(_) if !session.is_legacy() => request_ids(req),
+        Message::Request(_) | Message::Batch(_) if !session.is_legacy() => request_ids(req),
         _ => Vec::new(),
     };
 

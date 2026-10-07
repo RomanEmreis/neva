@@ -580,6 +580,7 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
                                     tokio::spawn(async move {
                                         #[cfg(not(feature = "legacy-spec"))]
                                         let _arriving = arriving;
+                                        let _read = read;
                                         Self::execute_batch(batch, runtime).await;
                                     });
                                 },

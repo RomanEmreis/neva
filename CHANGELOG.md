@@ -45,7 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * **A request the client stops waiting for is cancelled**, on a timeout or a
   dropped call, as MCP asks: over Streamable HTTP under 2026-07-28 by closing
   its stream, over stdio and to a legacy peer by `notifications/cancelled`.
-  `initialize` is never cancelled.
+  The requests of an abandoned `call_batch` are too. `initialize` is never
+  cancelled.
 * Over Streamable HTTP under 2026-07-28, a cancelled subscription is ended by
   closing its stream alone: the client no longer also sends
   `notifications/cancelled`, which the spec does not expect there.
@@ -61,10 +62,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * The server finds the request a `notifications/cancelled` names on an HTTP
   session; it looked the request up without the session, and cancelled
   nothing. Since 0.1.0.
-* A `notifications/cancelled` read right behind its request is no longer
-  lost when it overtakes the request on the way to its handler, past the
-  middleware: the server tracks a request as it reads it, and a request
-  cancelled by then never starts its handler.
+* A `notifications/cancelled` read right behind its request, or its batch,
+  is no longer lost when it overtakes the request on the way to its handler,
+  past the middleware: the server tracks a request as it reads it, and a
+  request cancelled by then never starts its handler.
+* Under 2026-07-28 the HTTP server treats a client closing a request's stream
+  as that request's cancellation, as the spec requires; the handler ran on to
+  an answer no one read. Since 0.4.0.
 * `tools().call_raw` (and `call_tool_raw`) send the `_meta` their params
   carry, a `traceparent` say, where they replaced it; only the progress token
   is the client's. Since 0.2.5. A request's own trace context is kept over the
