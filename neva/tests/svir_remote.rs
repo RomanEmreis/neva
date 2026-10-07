@@ -75,7 +75,7 @@ async fn a_model_is_offered_the_tools_it_may_call() {
     let (client, server) = serve(false).await;
 
     let tools = RemoteTools::new(client)
-        .prefixed("shop_")
+        .with_prefix("shop_")
         .filter(|tool| tool.name != "greet")
         // Filters add up, and see the server's names whatever the renames.
         .filter(|tool| tool.name != "fail")
@@ -103,7 +103,7 @@ async fn a_model_is_offered_the_tools_it_may_call() {
 async fn a_call_is_forwarded_and_answered() {
     let (client, server) = serve(false).await;
     let tools = RemoteTools::new(client)
-        .prefixed("shop_")
+        .with_prefix("shop_")
         .load()
         .await
         .expect("load");
@@ -216,7 +216,7 @@ async fn a_name_a_model_cannot_carry_fails_the_load() {
     // Renames add up in order, and the call reaches the server's name.
     let renamed = RemoteTools::new(client.clone())
         .rename(|name| name.replace('.', "_"))
-        .prefixed("gh_")
+        .with_prefix("gh_")
         .load()
         .await
         .expect("renamed");

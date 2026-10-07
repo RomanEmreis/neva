@@ -87,6 +87,10 @@ impl App {
     }
 }
 
+/// How deep in-process calls nest unless [`LocalTools::with_max_depth`] says
+/// otherwise: room for an orchestrator, a sub-agent it calls, and two more.
+const MAX_DEPTH: usize = 4;
+
 /// A server's own tools as a [`Toolbox`], from [`App::into_toolbox`]: each
 /// call the model makes is a `tools/call` run in this process, through the
 /// same pipeline a call over MCP takes.
@@ -105,8 +109,10 @@ impl App {
 /// from [`App::into_toolbox`] or [`App::with_toolbox`] holds none, one from
 /// `ctx.tools().toolbox()` holds its request's -- and one that can only be
 /// called as a task, as well as, with the `apps` feature, one MCP Apps hides
-/// from the model. Beyond that,
-/// [`Self::filter`], [`Self::rename`] and [`Self::prefixed`] work as they do
+/// from the model. A toolbox from `ctx.tools().toolbox()` also leaves out the
+/// tool it was taken in, unless [`Self::with_caller`] keeps it, and calls
+/// nest at most four in-process calls deep ([`Self::with_max_depth`]). Beyond that,
+/// [`Self::filter`], [`Self::rename`] and [`Self::with_prefix`] work as they do
 /// on `RemoteTools`.
 ///
 /// [`Toolbox::call_all`] runs the calls concurrently, answering in order.
@@ -136,6 +142,10 @@ pub struct LocalTools {
     /// claims of that handler's request.
     #[cfg(feature = "http-server")]
     claims: Option<Arc<dyn Claims>>,
+    /// The tool whose handler took this toolbox, which it leaves out.
+    caller: Option<String>,
+    /// How many in-process calls deep a call through this toolbox may go.
+    max_depth: usize,
     offer: Offer,
 }
 
@@ -158,6 +168,8 @@ impl LocalTools {
             runtime,
             #[cfg(feature = "http-server")]
             claims: None,
+            caller: None,
+            max_depth: MAX_DEPTH,
             offer: Offer::default(),
         }
     }
@@ -165,12 +177,12 @@ impl LocalTools {
     /// The server's tools, called from inside the handler of `ctx`'s request
     /// and holding its claims. See [`Tools::toolbox`](crate::app::context::api::Tools::toolbox).
     pub(crate) fn of_context(ctx: &Context) -> Self {
-        #[cfg_attr(not(feature = "http-server"), allow(unused_mut))]
         let mut tools = Self::new(ctx.runtime.clone());
         #[cfg(feature = "http-server")]
         {
             tools.claims = ctx.claims.clone();
         }
+        tools.caller = ctx.tool.clone();
         tools
     }
 
@@ -236,13 +248,74 @@ impl LocalTools {
     /// use neva::{App, error::Error};
     ///
     /// # async fn run(app: App) -> Result<(), Error> {
-    /// let tools = app.into_toolbox().prefixed("local_").load().await?;
+    /// let tools = app.into_toolbox().with_prefix("local_").load().await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn prefixed(self, prefix: impl Into<String>) -> Self {
+    pub fn with_prefix(self, prefix: impl Into<String>) -> Self {
         let prefix = prefix.into();
         self.rename(move |name| format!("{prefix}{name}"))
+    }
+
+    /// Offers the tool this toolbox was taken in as well, for a tool that means
+    /// to recurse.
+    ///
+    /// A toolbox from `ctx.tools().toolbox()` leaves that tool out: a model
+    /// calling it would start the whole loop over inside the call still
+    /// running it. A toolbox from [`App::into_toolbox`] or
+    /// [`App::with_toolbox`] is taken in no tool, and offers every one anyway.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// use neva::prelude::*;
+    ///
+    /// # fn main() {
+    /// let mut app = App::new();
+    /// app.map_tool("explore", |ctx: Context| async move {
+    ///     // `explore` may hand a branch to a nested `explore`.
+    ///     let tools = ctx.tools().toolbox().with_caller().load().await?;
+    ///     // ...
+    ///     Ok::<_, Error>("done".to_string())
+    /// });
+    /// # }
+    /// ```
+    pub fn with_caller(mut self) -> Self {
+        self.caller = None;
+        self
+    }
+
+    /// Lets a call through this toolbox go `depth` in-process calls deep;
+    /// four unless set.
+    ///
+    /// A tool that drives a model is itself called in-process, and may take a
+    /// toolbox of its own: `a` calls `b`, which calls `a` again. Leaving the
+    /// caller out stops the direct loop; this bounds the rest. A call past the
+    /// bound is not made, and the model is told why. The bound is this
+    /// toolbox's own: one taken in a nested call has its own as well.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// use neva::prelude::*;
+    ///
+    /// # fn main() {
+    /// let mut app = App::new();
+    /// app.map_tool("explore", |ctx: Context| async move {
+    ///     // A search that may hand a branch to a nested `explore`, eight deep.
+    ///     let tools = ctx
+    ///         .tools()
+    ///         .toolbox()
+    ///         .with_caller()
+    ///         .with_max_depth(8)
+    ///         .load()
+    ///         .await?;
+    ///     // ...
+    ///     Ok::<_, Error>("done".to_string())
+    /// });
+    /// # }
+    /// ```
+    pub fn with_max_depth(mut self, depth: usize) -> Self {
+        self.max_depth = depth;
+        self
     }
 
     /// Takes the first snapshot of the server's tools.
@@ -283,8 +356,17 @@ impl LocalTools {
     /// ```
     pub async fn refresh(&self) -> Result<(), Error> {
         let listed = self.bound().await?.options().all_tools().await;
-        self.offer
-            .replace(listed.into_iter().filter(|tool| self.may_call(tool)))
+        self.offer.replace(
+            listed
+                .into_iter()
+                .filter(|tool| self.may_call(tool) && !self.is_caller(tool)),
+        )
+    }
+
+    /// Whether `tool` is the one this toolbox was taken in. The server's name
+    /// is compared, so the renames have no say.
+    fn is_caller(&self, tool: &Tool) -> bool {
+        self.caller.as_deref() == Some(tool.name.as_str())
     }
 
     /// The runtime, once the server has built it.
@@ -330,6 +412,18 @@ impl LocalTools {
             .clone()
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "The server is not running"))?;
 
+        // One level deeper than the call this toolbox was taken in, if any.
+        let depth = runtime.depth() + 1;
+        if depth > self.max_depth {
+            return Err(Error::new(
+                ErrorCode::InvalidRequest,
+                format!(
+                    "`{name}` was not called: in-process tool calls nest at most {} deep",
+                    self.max_depth
+                ),
+            ));
+        }
+
         // A UUID and not a counter: the server tracks requests by id, and a
         // server that also serves over MCP sees its clients' ids beside these.
         let id = RequestId::Uuid(uuid::Uuid::new_v4());
@@ -350,8 +444,10 @@ impl LocalTools {
         let answer = Arc::new(Mutex::new(None));
         let returned = runtime
             .with_sender(TransportProtoSender::InProcess(answer.clone()))
+            .nested(depth)
             .answer(Message::Request(request))
             .await;
+
         let sent = answer.lock().ok().and_then(|mut slot| slot.take());
 
         sent.or(returned)

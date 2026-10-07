@@ -32,8 +32,8 @@ and its answer is printed at the end.
 ## What it shows
 
 - **`RemoteTools`** (client): a connected server's tools as a `svir::Toolbox`.
-  `prefixed("board_")` keeps them apart from any other server's in one request;
-  the calls of one turn run concurrently over the shared client.
+  `with_prefix("board_")` keeps them apart from any other server's in one
+  request; the calls of one turn run concurrently over the shared client.
 - **`prompt_messages`** (client): the server's `plan_week` prompt opens the
   conversation, as svir messages.
 - **`App::into_toolbox`** (server, `--local`): the same `#[tool]` functions

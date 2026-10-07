@@ -18,12 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   [svir](https://docs.rs/svir) `Toolbox`, for handing them to a model.
   `RemoteTools` offers a connected server's tools; `App::into_toolbox`,
   `App::with_toolbox` and `ctx.tools().toolbox()` offer a server's own,
-  called in-process through its middleware. `filter`, `rename` and `prefixed`
-  choose what is offered and under which name. `prompt_messages` and
-  `resource_parts` turn a prompt and a resource into svir messages, and
-  `sampling_request` and `sampling_result` answer a server's sampling with a
-  model, tool calls included. Not in `server-full` or `client-full`.
-  Example: `examples/svir`.
+  called in-process through its middleware; the last leaves out the tool it
+  is called from, unless `with_caller` keeps it, and in-process calls nest at
+  most four deep (`with_max_depth`). `filter`, `rename` and `with_prefix`
+  choose what is offered and under which name.
+  `prompt_messages` and `resource_parts` turn a prompt and a resource into
+  svir messages, and `sampling_request` and `sampling_result` answer a
+  server's sampling with a model, tool calls included. Not in `server-full`
+  or `client-full`. Example: `examples/svir`.
 * **A sampling handler can fail**: `map_sampling` takes one returning
   `Result<CreateMessageResult, Error>`. Under `legacy-spec` the server is
   answered with the error, and a sampling task fails with it; under

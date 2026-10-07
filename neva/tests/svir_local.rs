@@ -71,6 +71,51 @@ async fn agent(ctx: Context) -> Result<String, Error> {
     Ok(told.content)
 }
 
+/// What a toolbox taken in this handler offers: the tool itself is left out,
+/// whatever it is renamed to.
+#[tool]
+async fn peers(ctx: Context) -> Result<String, Error> {
+    let tools = ctx.tools().toolbox().with_prefix("x_").load().await?;
+    Ok(names(&tools))
+}
+
+/// The same, for a tool that means to recurse.
+#[tool]
+async fn recurse(ctx: Context) -> Result<String, Error> {
+    let tools = ctx.tools().toolbox().with_caller().load().await?;
+    Ok(names(&tools))
+}
+
+/// Calls itself through its own toolbox until a call is refused. Each level
+/// that got its call through adds an `x` to what the refusal said.
+#[tool]
+async fn dive(ctx: Context) -> Result<String, Error> {
+    let tools = ctx.tools().toolbox().with_caller();
+    descend(tools, "dive").await
+}
+
+/// The same, under a bound of two.
+#[tool]
+async fn dive_shallow(ctx: Context) -> Result<String, Error> {
+    let tools = ctx.tools().toolbox().with_caller().with_max_depth(2);
+    descend(tools, "dive_shallow").await
+}
+
+async fn descend(tools: neva::svir::LocalTools, name: &str) -> Result<String, Error> {
+    let tools = tools
+        .filter(|tool| tool.name.starts_with("dive"))
+        .load()
+        .await?;
+    let told = tools.call(&ToolCall::new("down", name, "")).await;
+    Ok(format!("x{}", told.content))
+}
+
+fn names(tools: &impl Toolbox) -> String {
+    let mut names: Vec<_> = tools.tools().into_iter().map(|tool| tool.name).collect();
+    names.sort();
+    names.join(",")
+}
+
 #[tool]
 async fn install(ctx: Context) -> Result<String, Error> {
     ctx.tools()
@@ -103,8 +148,12 @@ async fn a_tool_written_once_is_offered_to_a_model() {
             "agent",
             "ask_name",
             "count_tools",
+            "dive",
+            "dive_shallow",
             "greet",
-            "install"
+            "install",
+            "peers",
+            "recurse"
         ]
     );
 
@@ -131,7 +180,7 @@ async fn a_tool_gets_its_dependencies_and_context() {
     assert_eq!(told.content, "Hello, Ann!", "{told:?}");
 
     let told = tools.call(&call("c2", "count_tools", "")).await;
-    assert_eq!(told.content, "7", "{told:?}");
+    assert_eq!(told.content, "11", "{told:?}");
 }
 
 /// There is no peer to ask: the call is refused at once, not left to wait
@@ -207,7 +256,7 @@ async fn only_offered_tools_can_be_called() {
     let tools = app()
         .into_toolbox()
         .filter(|tool| tool.name != "greet")
-        .prefixed("local_")
+        .with_prefix("local_")
         .load()
         .await
         .expect("load");
@@ -231,6 +280,46 @@ async fn a_tool_can_drive_a_model_over_the_others() {
 
     let told = tools.call(&call("c1", "agent", "")).await;
     assert_eq!(told.content, "42", "{told:?}");
+}
+
+/// A toolbox taken in a handler leaves out the tool that handler serves,
+/// compared by the server's name whatever the renames, unless that tool asks
+/// to be kept. The nested calls here go through the pipeline, so each one's
+/// `Context` names its own tool.
+#[tokio::test]
+async fn a_handlers_toolbox_leaves_its_own_tool_out() {
+    let tools = app().into_toolbox().load().await.expect("load");
+
+    let peers = tools.call(&call("c1", "peers", "")).await.content;
+    let offered: Vec<_> = peers.split(',').collect();
+    assert!(!offered.contains(&"x_peers"), "{peers}");
+    assert!(offered.contains(&"x_recurse"), "{peers}");
+
+    let recurse = tools.call(&call("c2", "recurse", "")).await.content;
+    let offered: Vec<_> = recurse.split(',').collect();
+    assert!(offered.contains(&"recurse"), "{recurse}");
+    assert!(offered.contains(&"peers"), "{recurse}");
+}
+
+/// A tool that keeps calling itself is stopped four in-process calls deep:
+/// the fourth gets its call refused, with the reason, and each level above it
+/// answers. A toolbox can set its own bound.
+#[tokio::test]
+async fn nested_calls_stop_at_the_depth_bound() {
+    let tools = app().into_toolbox().load().await.expect("load");
+
+    let told = tools.call(&call("c1", "dive", "")).await.content;
+    assert!(
+        told.starts_with("xxxx`dive` was not called"),
+        "four levels, then the refusal: {told}"
+    );
+    assert!(told.contains("at most 4 deep"), "{told}");
+
+    let told = tools.call(&call("c2", "dive_shallow", "")).await.content;
+    assert!(
+        told.starts_with("xx`dive_shallow` was not called"),
+        "two levels under a bound of two: {told}"
+    );
 }
 
 /// The snapshot is renewed when asked: a tool added at runtime is offered

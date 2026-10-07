@@ -126,6 +126,11 @@ pub(crate) struct ServerRuntime {
     /// Represents a DI container
     #[cfg(feature = "di")]
     pub(crate) container: Container,
+
+    /// How many in-process tool calls deep this runtime answers: none for a
+    /// transport, one more for each `LocalTools` call made inside another.
+    #[cfg(feature = "svir")]
+    depth: usize,
 }
 
 /// Represents MCP Request Context
@@ -190,6 +195,12 @@ pub struct Context {
     /// tools handed to a model from inside a handler.
     #[cfg(feature = "svir")]
     pub(crate) runtime: Option<ServerRuntime>,
+
+    /// The tool whose call this context serves, which a toolbox taken from it
+    /// leaves out: offered to the model, it would start the loop over inside
+    /// the call still running it.
+    #[cfg(feature = "svir")]
+    pub(crate) tool: Option<String>,
 }
 
 impl Debug for Context {
@@ -220,6 +231,8 @@ impl ServerRuntime {
             sender,
             #[cfg(feature = "di")]
             container,
+            #[cfg(feature = "svir")]
+            depth: 0,
         }
     }
 
@@ -249,6 +262,19 @@ impl ServerRuntime {
         self
     }
 
+    /// This runtime, answering a call `depth` in-process calls deep.
+    #[cfg(feature = "svir")]
+    pub(crate) fn nested(mut self, depth: usize) -> Self {
+        self.depth = depth;
+        self
+    }
+
+    /// How many in-process calls deep this runtime answers.
+    #[cfg(feature = "svir")]
+    pub(crate) fn depth(&self) -> usize {
+        self.depth
+    }
+
     /// Provides a hash map of registered request handlers
     pub(crate) fn request_handlers(&self) -> Arc<RequestHandlers> {
         self.handlers.clone()
@@ -273,6 +299,8 @@ impl ServerRuntime {
             scope: None,
             #[cfg(feature = "svir")]
             runtime: Some(self.clone()),
+            #[cfg(feature = "svir")]
+            tool: None,
         }
     }
 
@@ -302,6 +330,8 @@ impl ServerRuntime {
             scope: None,
             #[cfg(feature = "svir")]
             runtime: Some(self.clone()),
+            #[cfg(feature = "svir")]
+            tool: None,
         }
     }
 
@@ -333,6 +363,14 @@ impl ServerRuntime {
 }
 
 impl Context {
+    /// This context, serving a call of `tool`.
+    #[cfg(feature = "svir")]
+    #[inline]
+    pub(crate) fn serving(mut self, tool: &str) -> Self {
+        self.tool = Some(tool.to_owned());
+        self
+    }
+
     /// Sends the elicitation request to the client
     ///
     /// # Example

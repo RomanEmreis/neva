@@ -899,6 +899,8 @@ impl CallToolRequestParams {
 impl CallToolRequestParams {
     /// Includes [`Context`] into request metadata. If metadata is `None` it creates a new.
     pub(crate) fn with_context(mut self, ctx: Context) -> Self {
+        #[cfg(feature = "svir")]
+        let ctx = ctx.serving(&self.name);
         self.meta.get_or_insert_default().context = Some(ctx);
         self
     }
