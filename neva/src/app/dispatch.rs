@@ -11,6 +11,7 @@
 //! [`super::mrtr`]).
 
 use super::*;
+use crate::types::RequestId;
 use futures_util::FutureExt;
 
 impl App {
