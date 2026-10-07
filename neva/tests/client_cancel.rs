@@ -264,4 +264,52 @@ mod legacy {
         client.disconnect().await.ok();
         server.abort();
     }
+    /// A cancel read while its request is still on the way to the handler --
+    /// held up here by a middleware -- stops it all the same: the server tracks
+    /// a request as it reads it, not once the handler starts.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_call_dropped_before_its_handler_starts_never_runs() {
+        let addr = format!("127.0.0.1:{}", pick_free_port());
+        let started = Arc::new(AtomicBool::new(false));
+
+        let flag = started.clone();
+        let mut app = App::new()
+            .without_greeting()
+            .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
+        app.map_tool("slow", move || {
+            let flag = flag.clone();
+            async move {
+                flag.store(true, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                "late"
+            }
+        });
+        let app = app.wrap_tools(|ctx, next| async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            next(ctx).await
+        });
+        let server = tokio::spawn(async move { app.run().await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let mut client = Client::new().with_options(|o| {
+            o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
+                .with_timeout(Duration::from_secs(30))
+        });
+        client.connect().await.expect("connect");
+        let client = Arc::new(client);
+
+        let caller = client.clone();
+        let call = tokio::spawn(async move { caller.tools().call("slow", ()).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        call.abort();
+
+        // Well past the middleware's hold.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(
+            !started.load(Ordering::SeqCst),
+            "a call cancelled on its way must not reach its handler"
+        );
+
+        server.abort();
+    }
 }

@@ -544,16 +544,22 @@ impl McpOptions {
         }
     }
 
-    /// Tracks the request with `req_id` and returns the [`CancellationToken`] for this request
+    /// Tracks the request with `req_id` and returns the [`CancellationToken`]
+    /// for it, the one it was given already if it is tracked.
+    ///
+    /// The receive loop tracks a request as it reads it, and the dispatch picks
+    /// that token up later; a cancel that lands in between has cancelled it.
     pub(crate) fn track_request(&self, req_id: &RequestId) -> CancellationToken {
-        let token = CancellationToken::new();
-        self.requests.insert(req_id.clone(), token.clone());
-        token
+        self.requests.entry(req_id.clone()).or_default().clone()
     }
 
-    /// Cancels the request with `req_id` if it is present
+    /// Cancels the request with `req_id` if it is present.
+    ///
+    /// The cancelled token stays tracked until the request completes: a
+    /// request cancelled before the dispatch reached it is then found
+    /// cancelled when it does, rather than tracked afresh.
     pub(crate) fn cancel_request(&self, req_id: &RequestId) {
-        if let Some((_, token)) = self.requests.remove(req_id) {
+        if let Some(token) = self.requests.get(req_id) {
             token.cancel();
         }
     }

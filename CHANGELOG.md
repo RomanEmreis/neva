@@ -61,6 +61,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * The server finds the request a `notifications/cancelled` names on an HTTP
   session; it looked the request up without the session, and cancelled
   nothing. Since 0.1.0.
+* A `notifications/cancelled` read right behind its request is no longer
+  lost when it overtakes the request on the way to its handler, past the
+  middleware: the server tracks a request as it reads it, and a request
+  cancelled by then never starts its handler.
 * `tools().call_raw` (and `call_tool_raw`) send the `_meta` their params
   carry, a `traceparent` say, where they replaced it; only the progress token
   is the client's. Since 0.2.5. A request's own trace context is kept over the

@@ -511,18 +511,22 @@ impl App {
         #[cfg(feature = "tracing")]
         tracing::trace!(logger = "neva", "Received: {:?}", req);
         let resp = if let Some(handler) = handlers.get(&req.method) {
+            // The token first: a request cancelled before it got here never
+            // starts its handler.
             tokio::select! {
-            resp = handler.call(HandlerParams::Request(context, req)) => {
-                options.complete_request(&full_id);
-                resp
-            }
+            biased;
             _ = token.cancelled() => {
+                options.complete_request(&full_id);
                 #[cfg(feature = "tracing")]
                 tracing::debug!(
                     logger = "neva",
                     "The request with ID: {} has been cancelled", full_id);
                     Err(Error::from(ErrorCode::RequestCancelled))
                 }
+            resp = handler.call(HandlerParams::Request(context, req)) => {
+                options.complete_request(&full_id);
+                resp
+            }
             }
         } else {
             Err(Error::from(ErrorCode::MethodNotFound))
@@ -761,6 +765,44 @@ fn create_tracing_span(
 /// the same batch-aware check), so it can register and is owed the same
 /// graceful close as any other. Reading only the top-level request would leave
 /// exactly that case undrained.
+/// A request the receive loop has registered for cancellation, until the task
+/// that runs it is done.
+///
+/// Registered on the accepting task, before the spawn: a `notifications/cancelled`
+/// read right behind the request is spawned too, and would otherwise be able
+/// to run before the request's own task gets as far as registering it -- past
+/// the whole middleware pipeline -- and cancel nothing. The dispatch picks the
+/// same registration up. Dropping this releases it however the task ends, a
+/// middleware answering without calling `next` included.
+///
+/// A batch is not registered here: its requests take the batch's session
+/// inside its task, which is the key they are tracked under.
+pub(super) struct ReadRequest {
+    options: RuntimeMcpOptions,
+    id: Option<crate::types::RequestId>,
+}
+
+impl ReadRequest {
+    pub(super) fn register(msg: &Message, options: RuntimeMcpOptions) -> Self {
+        let id = match msg {
+            Message::Request(req) => Some(req.full_id()),
+            _ => None,
+        };
+        if let Some(id) = &id {
+            options.track_request(id);
+        }
+        Self { options, id }
+    }
+}
+
+impl Drop for ReadRequest {
+    fn drop(&mut self) {
+        if let Some(id) = &self.id {
+            self.options.complete_request(id);
+        }
+    }
+}
+
 #[cfg(not(feature = "legacy-spec"))]
 pub(super) fn opens_subscription(msg: &Message) -> bool {
     fn is_listen(req: &crate::types::Request) -> bool {
