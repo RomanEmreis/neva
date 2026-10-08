@@ -569,6 +569,13 @@ impl McpOptions {
         self.requests.remove(req_id);
     }
 
+    /// Completes the request with `req_id` if `token` is still the one tracked
+    /// for it: a request tracked under the same id since keeps its own.
+    pub(crate) fn release_request(&self, req_id: &RequestId, token: &CancellationToken) {
+        self.requests
+            .remove_if(req_id, |_, tracked| tracked == token);
+    }
+
     /// Returns a list of currently running tasks
     #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
     pub(crate) fn list_tasks(&self) -> Vec<Task> {

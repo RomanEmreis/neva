@@ -748,6 +748,19 @@ mod abandoned_request_tests {
         port
     }
 
+    /// Waits for the server to listen, rather than for a fixed delay a
+    /// loaded runner can outlast.
+    async fn reachable(addr: &str) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while tokio::net::TcpStream::connect(addr).await.is_err() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "server never became reachable"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     /// A caller dropping the future -- an outer `timeout`, a lost `select!`
     /// branch -- runs none of the request's own error paths. The slot still
     /// comes back at once, and the answer that arrives later finds no waiter:
@@ -770,7 +783,7 @@ mod abandoned_request_tests {
         });
         app.map_tool("quick", || async { "quick".to_string() });
         let server = tokio::spawn(async move { app.run().await });
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        reachable(&addr).await;
 
         let mut client = Client::new().with_options(|o| {
             o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
@@ -819,11 +832,13 @@ mod abandoned_request_tests {
         app.map_tool("stall", || async { std::future::pending::<String>().await });
         app.map_tool("quick", || async { "quick".to_string() });
         let server = tokio::spawn(async move { app.run().await });
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        reachable(&addr).await;
 
+        // The handshake is held to it too, so it allows for a loaded runner.
+        // The sweep runs once per timeout: the wait below spans a few.
         let mut client = Client::new().with_options(|o| {
             o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
-                .with_timeout(Duration::from_millis(200))
+                .with_timeout(Duration::from_secs(1))
         });
         client.connect().await.expect("connect");
         let queued = |client: &Client| client.handler.as_ref().expect("connected").pending().len();
@@ -843,7 +858,7 @@ mod abandoned_request_tests {
         assert!(client.tools().call("stall", ()).await.is_err(), "timed out");
 
         // Quiet from here on: nothing goes out, nothing comes in.
-        tokio::time::sleep(Duration::from_millis(900)).await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
 
         assert_eq!(queued(&client), idle, "expired slots are swept");
         assert_eq!(scheduled(&client), 0, "and so are their deadlines");

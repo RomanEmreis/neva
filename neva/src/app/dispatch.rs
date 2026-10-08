@@ -13,6 +13,7 @@
 use super::*;
 use crate::types::RequestId;
 use futures_util::FutureExt;
+use tokio_util::sync::CancellationToken;
 
 impl App {
     #[cfg(feature = "tracing")]
@@ -760,15 +761,6 @@ fn create_tracing_span(
     }
 }
 
-/// Whether `msg` would open a subscription -- a `subscriptions/listen`
-/// request, alone or inside a batch.
-///
-/// Batches count. Nothing on the server refuses a batched listen: it reaches
-/// `App::subscriptions_listen` like any other request, and the HTTP transport
-/// holds an acknowledgment permit for it (`is_subscription_stream` there makes
-/// the same batch-aware check), so it can register and is owed the same
-/// graceful close as any other. Reading only the top-level request would leave
-/// exactly that case undrained.
 /// A request the receive loop has registered for cancellation, until the task
 /// that runs it is done.
 ///
@@ -777,19 +769,21 @@ fn create_tracing_span(
 /// to run before the request's own task gets as far as registering it -- past
 /// the whole middleware pipeline -- and cancel nothing. The dispatch picks the
 /// same registration up. Dropping this releases it however the task ends, a
-/// middleware answering without calling `next` included.
+/// middleware answering without calling `next` included, and only if it is
+/// still this one's: the task can outlive the answer, and a request read since
+/// under the same id keeps its own.
 ///
 /// A batch's requests are registered under the key their task gives them: a
 /// request of a batch takes the batch's session there, so it is tracked under
 /// its id on that session.
 pub(super) struct ReadRequest {
     options: RuntimeMcpOptions,
-    ids: Vec<RequestId>,
+    tracked: Vec<(RequestId, CancellationToken)>,
 }
 
 impl ReadRequest {
     pub(super) fn register(msg: &Message, options: RuntimeMcpOptions) -> Self {
-        let ids: Vec<_> = match msg {
+        let ids: Vec<RequestId> = match msg {
             Message::Request(req) => vec![req.full_id()],
             Message::Batch(batch) => batch
                 .iter()
@@ -803,21 +797,36 @@ impl ReadRequest {
                 .collect(),
             _ => Vec::new(),
         };
-        for id in &ids {
-            options.track_request(id);
-        }
-        Self { options, ids }
+
+        let tracked = ids
+            .into_iter()
+            .map(|id| {
+                let token = options.track_request(&id);
+                (id, token)
+            })
+            .collect();
+
+        Self { options, tracked }
     }
 }
 
 impl Drop for ReadRequest {
     fn drop(&mut self) {
-        for id in &self.ids {
-            self.options.complete_request(id);
+        for (id, token) in &self.tracked {
+            self.options.release_request(id, token);
         }
     }
 }
 
+/// Whether `msg` would open a subscription -- a `subscriptions/listen`
+/// request, alone or inside a batch.
+///
+/// Batches count. Nothing on the server refuses a batched listen: it reaches
+/// `App::subscriptions_listen` like any other request, and the HTTP transport
+/// holds an acknowledgment permit for it (`is_subscription_stream` there makes
+/// the same batch-aware check), so it can register and is owed the same
+/// graceful close as any other. Reading only the top-level request would leave
+/// exactly that case undrained.
 #[cfg(not(feature = "legacy-spec"))]
 pub(super) fn opens_subscription(msg: &Message) -> bool {
     fn is_listen(req: &crate::types::Request) -> bool {
@@ -1052,6 +1061,36 @@ mod tests {
         App::execute_batch(batch, runtime).await;
 
         assert!(token.is_cancelled(), "the cancel must find its request");
+    }
+
+    /// A read request's task can outlive its answer, and a peer can send the
+    /// same id again once answered. Releasing the first leaves the second
+    /// tracked, so a cancel still reaches it.
+    #[tokio::test]
+    async fn a_read_request_releases_only_its_own_tracking() {
+        use super::ReadRequest;
+        use crate::app::App;
+        use crate::transport::TransportProtoSender;
+        use crate::types::{Message, Request, RequestId};
+
+        let options = App::new()
+            .build_runtime(TransportProtoSender::None)
+            .options();
+        let req = Request::new(Some(RequestId::Number(1)), "ping", None::<()>);
+        let id = req.full_id();
+        let msg = Message::Request(req);
+
+        let first = ReadRequest::register(&msg, options.clone());
+        // Answered: the dispatch completes it, while the task runs on.
+        options.complete_request(&id);
+        let second = ReadRequest::register(&msg, options.clone());
+        drop(first);
+
+        options.cancel_request(&id);
+        assert!(
+            second.tracked[0].1.is_cancelled(),
+            "the second request must still be tracked"
+        );
     }
 
     /// The request span carries the routing and filtering context for every
