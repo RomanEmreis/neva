@@ -14,11 +14,12 @@ use neva::{
     App, Context,
     di::Dc,
     error::{Error, ErrorCode},
+    svir::LocalTools,
     tool,
     types::{Response, Tool, elicitation::ElicitRequestParams},
 };
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use svir::{ToolCall, Toolbox};
 
@@ -101,7 +102,7 @@ async fn dive_shallow(ctx: Context) -> Result<String, Error> {
     descend(tools, "dive_shallow").await
 }
 
-async fn descend(tools: neva::svir::LocalTools, name: &str) -> Result<String, Error> {
+async fn descend(tools: LocalTools, name: &str) -> Result<String, Error> {
     let tools = tools
         .filter(|tool| tool.name.starts_with("dive"))
         .load()
@@ -319,6 +320,43 @@ async fn nested_calls_stop_at_the_depth_bound() {
     assert!(
         told.starts_with("xx`dive_shallow` was not called"),
         "two levels under a bound of two: {told}"
+    );
+}
+
+/// The same through a toolbox kept from outside the handler, which was made
+/// at no depth: the bound counts the chain of calls, not the toolbox.
+#[tokio::test]
+async fn a_kept_toolbox_stops_at_the_depth_bound_too() {
+    let kept = Arc::new(OnceLock::<LocalTools>::new());
+    let levels = Arc::new(AtomicUsize::new(0));
+
+    let mut app = app();
+    let (inner, reached) = (kept.clone(), levels.clone());
+    app.map_tool("again", move || {
+        let (inner, reached) = (inner.clone(), reached.clone());
+        async move {
+            // Unbounded, this would recurse until the stack gave out.
+            if reached.fetch_add(1, Ordering::SeqCst) > 8 {
+                return "runaway".to_string();
+            }
+            let tools = inner.get().expect("the toolbox is kept");
+            let told = tools.call(&ToolCall::new("down", "again", "")).await;
+            format!("x{}", told.content)
+        }
+    });
+    let tools = app
+        .into_toolbox()
+        .filter(|tool| tool.name == "again")
+        .load()
+        .await
+        .expect("load");
+    assert!(kept.set(tools).is_ok());
+
+    let tools = kept.get().expect("the toolbox is kept");
+    let told = tools.call(&call("c1", "again", "")).await.content;
+    assert!(
+        told.starts_with("xxxx`again` was not called"),
+        "four levels, then the refusal: {told}"
     );
 }
 

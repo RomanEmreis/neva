@@ -91,6 +91,13 @@ impl App {
 /// otherwise: room for an orchestrator, a sub-agent it calls, and two more.
 const MAX_DEPTH: usize = 4;
 
+tokio::task_local! {
+    /// How many in-process calls deep the call this task is answering is. Set
+    /// around each one, so a toolbox kept from outside the handler, which
+    /// knows no call of its own, counts the chain it is called in.
+    static DEPTH: usize;
+}
+
 /// A server's own tools as a [`Toolbox`], from [`App::into_toolbox`]: each
 /// call the model makes is a `tools/call` run in this process, through the
 /// same pipeline a call over MCP takes.
@@ -293,6 +300,11 @@ impl LocalTools {
     /// bound is not made, and the model is told why. The bound is this
     /// toolbox's own: one taken in a nested call has its own as well.
     ///
+    /// The depth is the chain's, whichever toolbox makes the calls: one from
+    /// [`App::into_toolbox`] kept and called inside a handler counts as deep as
+    /// one taken from the handler's `Context`. On a task the handler spawns,
+    /// only the one from the `Context` knows how deep it is.
+    ///
     /// # Examples
     /// ```no_run
     /// use neva::prelude::*;
@@ -412,8 +424,10 @@ impl LocalTools {
             .clone()
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "The server is not running"))?;
 
-        // One level deeper than the call this toolbox was taken in, if any.
-        let depth = runtime.depth() + 1;
+        // One level deeper than the call this toolbox was taken in, or the one
+        // this task is answering, whichever is deeper.
+        let current = DEPTH.try_with(|depth| *depth).unwrap_or_default();
+        let depth = runtime.depth().max(current) + 1;
         if depth > self.max_depth {
             return Err(Error::new(
                 ErrorCode::InvalidRequest,
@@ -442,11 +456,11 @@ impl LocalTools {
         // pipeline returns is the answer only when a middleware gave one
         // without calling `next`; over a transport that one is never sent.
         let answer = Arc::new(Mutex::new(None));
-        let returned = runtime
+        let call = runtime
             .with_sender(TransportProtoSender::InProcess(answer.clone()))
             .nested(depth)
-            .answer(Message::Request(request))
-            .await;
+            .answer(Message::Request(request));
+        let returned = DEPTH.scope(depth, call).await;
 
         let sent = answer.lock().ok().and_then(|mut slot| slot.take());
 
