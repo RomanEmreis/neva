@@ -156,6 +156,57 @@ impl Roots {
     }
 }
 
+/// Tells the server it may stop on a request this client no longer waits for:
+/// one that timed out, or whose call was dropped. MCP asks for it on a
+/// timeout, and a dropped call is waiting even less. Over stdio, and to a
+/// legacy peer, that is `notifications/cancelled`; the HTTP transport turns it
+/// into closing the request's stream, which is how MCP 2026-07-28 cancels
+/// there.
+///
+/// Armed only once the request is out, since a cancel may only name a
+/// request that was issued, and disarmed by an answer or a closed connection.
+/// A batch's requests have one each, so the ones still unanswered when the
+/// caller gives up are cancelled.
+pub(super) struct Abandon {
+    armed: Option<(RequestId, TransportProtoSender)>,
+    reason: &'static str,
+}
+
+impl Abandon {
+    pub(super) fn new(armed: Option<(RequestId, TransportProtoSender)>) -> Self {
+        Self {
+            armed,
+            reason: "the caller stopped waiting for the answer",
+        }
+    }
+
+    /// The answer came, or nothing can carry a cancel any more.
+    pub(super) fn disarm(&mut self) {
+        self.armed = None;
+    }
+
+    pub(super) fn timed_out(&mut self) {
+        self.reason = "the request timed out";
+    }
+}
+
+impl Drop for Abandon {
+    fn drop(&mut self) {
+        let Some((id, sender)) = self.armed.take() else {
+            return;
+        };
+        // Sending waits on the transport, which a drop cannot. One outside a
+        // runtime has no transport left to tell anyway.
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let cancel = Notification::cancelled(&id, self.reason);
+        runtime.spawn(async move {
+            let _ = sender.send(cancel.into()).await;
+        });
+    }
+}
+
 impl RequestHandler {
     /// Creates a new [`RequestHandler`]
     pub(super) fn new(
@@ -220,10 +271,15 @@ impl RequestHandler {
     #[inline]
     pub(super) async fn send_request(&self, request: Request) -> Result<Response, Error> {
         let id = request.id();
+        // A client MUST NOT cancel its `initialize`.
+        let cancellable = request.method != crate::commands::INIT;
         // Every way out releases the slot, the caller dropping this future
         // included.
         let (receiver, _slot) = self.pending.push_guarded(&id);
         self.sender.send(request.into()).await?;
+        // And every way out without an answer, now that the request is out,
+        // tells the server it may stop.
+        let mut abandon = Abandon::new(cancellable.then(|| (id.clone(), self.sender.clone())));
         self.pending.activate(&id);
 
         tokio::select! {
@@ -232,17 +288,25 @@ impl RequestHandler {
             // no response is coming; fail now rather than after the
             // full request timeout.
             _ = self.token.cancelled() => {
+                abandon.disarm();
                 Err(Error::new(ErrorCode::InternalError, "Connection closed"))
             }
             result = timeout(self.timeout, receiver) => match result {
-                Ok(Ok(PendingResponse::Response(resp))) => Ok(resp),
+                Ok(Ok(PendingResponse::Response(resp))) => {
+                    abandon.disarm();
+                    Ok(resp)
+                }
                 Ok(Ok(PendingResponse::Timeout)) | Err(_) => {
+                    abandon.timed_out();
                     Err(Error::new(ErrorCode::Timeout, "Request timed out"))
                 }
-                Ok(Err(_)) => Err(Error::new(
-                    ErrorCode::InternalError,
-                    "Response channel closed",
-                )),
+                Ok(Err(_)) => {
+                    abandon.disarm();
+                    Err(Error::new(
+                        ErrorCode::InternalError,
+                        "Response channel closed",
+                    ))
+                }
             }
         }
     }
@@ -308,11 +372,10 @@ impl RequestHandler {
         )
     }
 
-    /// Returns a handle on the transport sender, so a [`Subscription`] can
-    /// cancel itself without borrowing the client.
+    /// Returns a handle on the transport sender, so a [`Subscription`] or an
+    /// abandoned batch request can cancel itself without borrowing the client.
     ///
     /// [`Subscription`]: crate::client::Subscription
-    #[cfg(not(feature = "legacy-spec"))]
     #[inline]
     pub(super) fn sender(&self) -> TransportProtoSender {
         self.sender.clone()

@@ -65,15 +65,15 @@ pub(super) fn build_post(
 }
 
 /// Sends one message, racing the whole exchange against a cancellation of the
-/// subscription it opens (if it opens one).
+/// request (when it can be cancelled by a close).
 ///
 /// The race wraps *everything* rather than individual awaits: a cancel can land
 /// while the token is being refreshed, while an authorization flow runs, while
 /// the peer sits on the response headers, or mid-stream. Dropping the inner
 /// future at any of those points drops the request and its response body, which
-/// is exactly the close the server reads as "this subscription is over".
+/// is exactly the close the server reads as the request's cancellation.
 ///
-/// `abort` is handed in already registered -- see [`track_listen`] for why the
+/// `abort` is handed in already registered -- see [`track_request`] for why the
 /// registration cannot happen in here.
 pub(super) async fn send_request(
     client: reqwest::Client,
@@ -82,14 +82,15 @@ pub(super) async fn send_request(
     resp_tx: mpsc::Sender<Result<Message, Error>>,
     auth: ClientAuth,
     #[cfg(not(feature = "legacy-spec"))] param_registry: crate::shared::param_headers::Registry,
-    #[cfg(not(feature = "legacy-spec"))] abort: ListenAbort,
+    #[cfg(not(feature = "legacy-spec"))] abort: StreamAbort,
 ) {
     #[cfg(not(feature = "legacy-spec"))]
     if abort.is_tracked() {
         // The session token belongs in this race too: `Client::disconnect`
-        // cancels it and the connection loop exits, but a listen POST is the
-        // one request nothing else stops -- it would go on draining its body,
-        // holding the server-side subscription open past the disconnect.
+        // cancels it and the connection loop exits, but nothing else stops a
+        // POST in flight -- a listen would go on draining its body, holding the
+        // server-side subscription open past the disconnect, and a slow call
+        // would keep its handler running for an answer no one reads.
         let session_token = session.cancellation_token();
         tokio::select! {
             _ = exchange(client, session, req, resp_tx, auth, param_registry) => {}

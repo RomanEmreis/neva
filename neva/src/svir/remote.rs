@@ -20,7 +20,7 @@ use std::sync::Arc;
 /// called: a model naming another one is told there is no such tool.
 ///
 /// Which tools a model may use is the caller's policy: [`Self::filter`]
-/// narrows them, and [`Self::rename`] and [`Self::prefixed`] choose the names
+/// narrows them, and [`Self::rename`] and [`Self::with_prefix`] choose the names
 /// they are offered under, keeping the tools of several servers apart in one
 /// request. A tool that can only be called as a task is not offered, nor,
 /// with the `apps` feature, one MCP Apps hides from the model.
@@ -38,7 +38,7 @@ use std::sync::Arc;
 ///     client.connect().await?;
 ///
 ///     let tools = RemoteTools::new(client)
-///         .prefixed("docs_")
+///         .with_prefix("docs_")
 ///         .filter(|tool| tool.name != "delete_everything")
 ///         .load()
 ///         .await?;
@@ -144,7 +144,7 @@ impl RemoteTools {
     /// // The server's `files.read` is offered as `gh_files_read`.
     /// let tools = RemoteTools::new(client)
     ///     .rename(|name| name.replace('.', "_"))
-    ///     .prefixed("gh_")
+    ///     .with_prefix("gh_")
     ///     .load()
     ///     .await?;
     /// # Ok(())
@@ -168,11 +168,11 @@ impl RemoteTools {
     ///
     /// # async fn run(client: Client) -> Result<(), Error> {
     /// // The server's `search` is offered as `docs_search`.
-    /// let tools = RemoteTools::new(client).prefixed("docs_").load().await?;
+    /// let tools = RemoteTools::new(client).with_prefix("docs_").load().await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn prefixed(self, prefix: impl Into<String>) -> Self {
+    pub fn with_prefix(self, prefix: impl Into<String>) -> Self {
         let prefix = prefix.into();
         self.rename(move |name| format!("{prefix}{name}"))
     }

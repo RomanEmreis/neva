@@ -259,15 +259,15 @@ async fn send_authorized(
 // SSE constants -- the standalone GET stream serves legacy peers only;
 // its machinery compiles under both flags for the dual-mode client and
 // activates at runtime when a legacy `initialize` handshake happens.
-mod headers;
 #[cfg(not(feature = "legacy-spec"))]
-mod listen;
+mod abort;
+mod headers;
 mod send;
 mod sse;
 
-use headers::*;
 #[cfg(not(feature = "legacy-spec"))]
-use listen::*;
+use abort::*;
+use headers::*;
 use send::*;
 use sse::*;
 
@@ -355,21 +355,22 @@ async fn handle_connection(
                     tracing::error!(logger = "neva", "Unexpected messaging error");
                     break;
                 };
-                // A cancel naming a request whose reply is a long-lived stream
-                // ends it the way this transport can: by closing the body. The
-                // notification still goes out -- a peer may want the reason --
-                // but the close is what the server acts on.
+                // Under MCP 2026-07-28 a cancel is a close: the stream of the
+                // request it names is closed, and the notification goes no
+                // further.
                 #[cfg(not(feature = "legacy-spec"))]
-                abort_cancelled_stream(&req, &session);
+                if cancel_by_close(&req, &session) {
+                    continue;
+                }
 
                 // Tracked here rather than inside the spawned task, so that a
-                // cancel arriving right behind a listen -- which is exactly
+                // cancel arriving right behind a request -- which is exactly
                 // what a dropped `Client::listen` sends -- finds the handle.
                 // Registering it in the task would leave the ordering to the
                 // scheduler; registering it in this loop makes it the order the
                 // messages arrived in.
                 #[cfg(not(feature = "legacy-spec"))]
-                let abort = track_listen(&req, &session);
+                let abort = track_request(&req, &session);
 
                 crate::spawn_fair!(send_request(
                     client.clone(),

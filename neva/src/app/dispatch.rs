@@ -11,7 +11,9 @@
 //! [`super::mrtr`]).
 
 use super::*;
+use crate::types::RequestId;
 use futures_util::FutureExt;
+use tokio_util::sync::CancellationToken;
 
 impl App {
     #[cfg(feature = "tracing")]
@@ -120,7 +122,10 @@ impl App {
                             .execute(Message::Request(req))
                             .await;
                     }
-                    MessageEnvelope::Notification(notification) => {
+                    MessageEnvelope::Notification(mut notification) => {
+                        // On the batch's session, like its requests: a cancel
+                        // names its request by its id on that session.
+                        notification.session_id = batch_session_id;
                         Self::handle_notification(notification, runtime.clone()).await;
                     }
                     MessageEnvelope::Response(mut resp) => {
@@ -511,18 +516,22 @@ impl App {
         #[cfg(feature = "tracing")]
         tracing::trace!(logger = "neva", "Received: {:?}", req);
         let resp = if let Some(handler) = handlers.get(&req.method) {
+            // The token first: a request cancelled before it got here never
+            // starts its handler.
             tokio::select! {
-            resp = handler.call(HandlerParams::Request(context, req)) => {
-                options.complete_request(&full_id);
-                resp
-            }
+            biased;
             _ = token.cancelled() => {
+                options.complete_request(&full_id);
                 #[cfg(feature = "tracing")]
                 tracing::debug!(
                     logger = "neva",
                     "The request with ID: {} has been cancelled", full_id);
                     Err(Error::from(ErrorCode::RequestCancelled))
                 }
+            resp = handler.call(HandlerParams::Request(context, req)) => {
+                options.complete_request(&full_id);
+                resp
+            }
             }
         } else {
             Err(Error::from(ErrorCode::MethodNotFound))
@@ -675,7 +684,16 @@ impl App {
                     if runtime.options().subscriptions().cancel(&params.request_id) {
                         return;
                     }
-                    runtime.options().cancel_request(&params.request_id);
+                    // A request is tracked under its full id, which carries
+                    // the session it came in on; a cancel names it by its id
+                    // alone, on the same session.
+                    let id = match notification.session_id {
+                        Some(session_id) => params
+                            .request_id
+                            .concat(crate::types::RequestId::Uuid(session_id)),
+                        None => params.request_id,
+                    };
+                    runtime.options().cancel_request(&id);
                 }
             }
             crate::types::notification::commands::MESSAGE => {
@@ -740,6 +758,63 @@ fn create_tracing_span(
             tracing::error_span!("request", mcp_log_level = u64::from(level.severity()))
         }
         (None, None) => tracing::error_span!("request"),
+    }
+}
+
+/// A request the receive loop has registered for cancellation, until the task
+/// that runs it is done.
+///
+/// Registered on the accepting task, before the spawn: a `notifications/cancelled`
+/// read right behind the request is spawned too, and would otherwise be able
+/// to run before the request's own task gets as far as registering it -- past
+/// the whole middleware pipeline -- and cancel nothing. The dispatch picks the
+/// same registration up. Dropping this releases it however the task ends, a
+/// middleware answering without calling `next` included, and only if it is
+/// still this one's: the task can outlive the answer, and a request read since
+/// under the same id keeps its own.
+///
+/// A batch's requests are registered under the key their task gives them: a
+/// request of a batch takes the batch's session there, so it is tracked under
+/// its id on that session.
+pub(super) struct ReadRequest {
+    options: RuntimeMcpOptions,
+    tracked: Vec<(RequestId, CancellationToken)>,
+}
+
+impl ReadRequest {
+    pub(super) fn register(msg: &Message, options: RuntimeMcpOptions) -> Self {
+        let ids: Vec<RequestId> = match msg {
+            Message::Request(req) => vec![req.full_id()],
+            Message::Batch(batch) => batch
+                .iter()
+                .filter_map(|envelope| match envelope {
+                    MessageEnvelope::Request(req) => Some(match batch.session_id {
+                        Some(session_id) => req.id.clone().concat(RequestId::Uuid(session_id)),
+                        None => req.id.clone(),
+                    }),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        let tracked = ids
+            .into_iter()
+            .map(|id| {
+                let token = options.track_request(&id);
+                (id, token)
+            })
+            .collect();
+
+        Self { options, tracked }
+    }
+}
+
+impl Drop for ReadRequest {
+    fn drop(&mut self) {
+        for (id, token) in &self.tracked {
+            self.options.release_request(id, token);
+        }
     }
 }
 
@@ -964,6 +1039,60 @@ mod opens_subscription_tests {
 
 #[cfg(test)]
 mod tests {
+    /// A `notifications/cancelled` in a batch is read on the batch's session,
+    /// as the batch's requests are, so it finds a request tracked there.
+    #[tokio::test]
+    async fn a_batched_cancel_finds_its_request_on_the_batch_session() {
+        use crate::app::App;
+        use crate::transport::TransportProtoSender;
+        use crate::types::notification::{Notification, commands::CANCELLED};
+        use crate::types::{MessageBatch, MessageEnvelope, RequestId};
+
+        let session = uuid::Uuid::new_v4();
+        let runtime = App::new().build_runtime(TransportProtoSender::None);
+        let token = runtime
+            .options()
+            .track_request(&RequestId::Number(1).concat(RequestId::Uuid(session)));
+
+        let cancel = Notification::new(CANCELLED, Some(serde_json::json!({ "requestId": 1 })));
+        let mut batch =
+            MessageBatch::new(vec![MessageEnvelope::Notification(cancel)]).expect("non-empty");
+        batch.session_id = Some(session);
+        App::execute_batch(batch, runtime).await;
+
+        assert!(token.is_cancelled(), "the cancel must find its request");
+    }
+
+    /// A read request's task can outlive its answer, and a peer can send the
+    /// same id again once answered. Releasing the first leaves the second
+    /// tracked, so a cancel still reaches it.
+    #[tokio::test]
+    async fn a_read_request_releases_only_its_own_tracking() {
+        use super::ReadRequest;
+        use crate::app::App;
+        use crate::transport::TransportProtoSender;
+        use crate::types::{Message, Request, RequestId};
+
+        let options = App::new()
+            .build_runtime(TransportProtoSender::None)
+            .options();
+        let req = Request::new(Some(RequestId::Number(1)), "ping", None::<()>);
+        let id = req.full_id();
+        let msg = Message::Request(req);
+
+        let first = ReadRequest::register(&msg, options.clone());
+        // Answered: the dispatch completes it, while the task runs on.
+        options.complete_request(&id);
+        let second = ReadRequest::register(&msg, options.clone());
+        drop(first);
+
+        options.cancel_request(&id);
+        assert!(
+            second.tracked[0].1.is_cancelled(),
+            "the second request must still be tracked"
+        );
+    }
+
     /// The request span carries the routing and filtering context for every
     /// event emitted while handling a request, so a common global threshold
     /// (`LevelFilter::WARN`) must not disable it: WARN/ERROR events stay enabled

@@ -119,6 +119,19 @@ impl FromHandlerParams for CancelledNotificationParams {
 }
 
 impl Notification {
+    /// `notifications/cancelled` for request `id`, saying why.
+    #[cfg(any(
+        feature = "client",
+        all(feature = "http-server", not(feature = "legacy-spec"))
+    ))]
+    pub(crate) fn cancelled(id: &RequestId, reason: &str) -> Self {
+        let params = CancelledNotificationParams {
+            request_id: id.clone(),
+            reason: Some(reason.into()),
+        };
+        Self::new(commands::CANCELLED, serde_json::to_value(params).ok())
+    }
+
     /// Create a new [`Notification`]
     #[inline]
     pub fn new(method: &str, params: Option<serde_json::Value>) -> Self {

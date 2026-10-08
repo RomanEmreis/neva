@@ -158,9 +158,12 @@ impl Tools<'_> {
     ///
     /// The calls run in this process, through the server's pipeline, and hold
     /// the claims of the current request: a tool those claims do not reach is
-    /// not offered, and the server's checks see them on every call. The
-    /// calling tool is offered too unless a filter leaves it out, and a model
-    /// that calls it starts the loop over.
+    /// not offered, and the server's checks see them on every call. The tool
+    /// this handler serves is left out, since a model calling it would start
+    /// the loop over inside the call still running it;
+    /// [`LocalTools::with_caller`](crate::svir::LocalTools::with_caller)
+    /// keeps it. Calls nest at most four in-process calls deep, which
+    /// [`LocalTools::with_max_depth`](crate::svir::LocalTools::with_max_depth) changes.
     ///
     /// # Examples
     /// ```no_run
@@ -170,12 +173,8 @@ impl Tools<'_> {
     /// # fn main() {
     /// let mut app = App::new();
     /// app.map_tool("agent", |ctx: Context| async move {
-    ///     let tools = ctx
-    ///         .tools()
-    ///         .toolbox()
-    ///         .filter(|tool| tool.name != "agent")
-    ///         .load()
-    ///         .await?;
+    ///     // Every other tool of this server: `agent` itself is left out.
+    ///     let tools = ctx.tools().toolbox().load().await?;
     ///     // `svir::Request::new(model).tools(&tools)`, and the model's calls
     ///     // answered with `tools.call_all(..)`.
     ///     Ok::<_, Error>("done".to_string())

@@ -251,11 +251,9 @@ impl Client {
             .as_ref()
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
 
-        let request_timeout = handler.timeout();
-        let token = handler.cancellation();
         let slots = handler.send_batch(items).await?;
 
-        collect_batch_responses(slots, request_timeout, token)
+        collect_batch_responses(slots, handler)
             .await
             .into_iter()
             .collect()
@@ -355,16 +353,22 @@ impl Client {
 /// `try_join_all`) so one failed request does not cut the others' waits short.
 async fn collect_batch_responses(
     slots: Vec<(
-        tokio::sync::oneshot::Receiver<crate::shared::PendingResponse>,
-        crate::shared::QueuedRequestGuard<'_>,
+        tokio::sync::oneshot::Receiver<shared::PendingResponse>,
+        shared::QueuedRequestGuard<'_>,
     )>,
-    request_timeout: std::time::Duration,
-    token: tokio_util::sync::CancellationToken,
+    handler: &RequestHandler,
 ) -> Vec<Result<Response, Error>> {
     use futures_util::future::join_all;
 
+    let request_timeout = handler.timeout();
+    let token = handler.cancellation();
+    let sender = handler.sender();
+
     let futures = slots.into_iter().map(|(rx, slot)| {
         let token = token.clone();
+        // The batch is out, so each of its requests can be cancelled: one the
+        // caller stops waiting for tells the server, as a single request does.
+        let mut abandon = handler::Abandon::new(Some((slot.id().clone(), sender.clone())));
         async move {
             let _slot = slot;
             tokio::select! {
@@ -372,17 +376,25 @@ async fn collect_batch_responses(
                 // The transport died (or a shutdown signal cancelled it)
                 // -- no response is coming for any receiver.
                 _ = token.cancelled() => {
+                    abandon.disarm();
                     Err(Error::new(ErrorCode::InternalError, "Connection closed"))
                 }
                 result = tokio::time::timeout(request_timeout, rx) => match result {
-                    Ok(Ok(crate::shared::PendingResponse::Response(resp))) => Ok(resp),
-                    Ok(Ok(crate::shared::PendingResponse::Timeout)) | Err(_) => {
+                    Ok(Ok(shared::PendingResponse::Response(resp))) => {
+                        abandon.disarm();
+                        Ok(resp)
+                    }
+                    Ok(Ok(shared::PendingResponse::Timeout)) | Err(_) => {
+                        abandon.timed_out();
                         Err(Error::new(ErrorCode::Timeout, "Batch request timed out"))
                     }
-                    Ok(Err(_)) => Err(Error::new(
-                        ErrorCode::InternalError,
-                        "Response channel closed",
-                    )),
+                    Ok(Err(_)) => {
+                        abandon.disarm();
+                        Err(Error::new(
+                            ErrorCode::InternalError,
+                            "Response channel closed",
+                        ))
+                    }
                 }
             }
         }
@@ -736,6 +748,19 @@ mod abandoned_request_tests {
         port
     }
 
+    /// Waits for the server to listen, rather than for a fixed delay a
+    /// loaded runner can outlast.
+    async fn reachable(addr: &str) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while tokio::net::TcpStream::connect(addr).await.is_err() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "server never became reachable"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     /// A caller dropping the future -- an outer `timeout`, a lost `select!`
     /// branch -- runs none of the request's own error paths. The slot still
     /// comes back at once, and the answer that arrives later finds no waiter:
@@ -758,7 +783,7 @@ mod abandoned_request_tests {
         });
         app.map_tool("quick", || async { "quick".to_string() });
         let server = tokio::spawn(async move { app.run().await });
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        reachable(&addr).await;
 
         let mut client = Client::new().with_options(|o| {
             o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
@@ -807,11 +832,13 @@ mod abandoned_request_tests {
         app.map_tool("stall", || async { std::future::pending::<String>().await });
         app.map_tool("quick", || async { "quick".to_string() });
         let server = tokio::spawn(async move { app.run().await });
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        reachable(&addr).await;
 
+        // The handshake is held to it too, so it allows for a loaded runner.
+        // The sweep runs once per timeout: the wait below spans a few.
         let mut client = Client::new().with_options(|o| {
             o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
-                .with_timeout(Duration::from_millis(200))
+                .with_timeout(Duration::from_secs(1))
         });
         client.connect().await.expect("connect");
         let queued = |client: &Client| client.handler.as_ref().expect("connected").pending().len();
@@ -831,7 +858,7 @@ mod abandoned_request_tests {
         assert!(client.tools().call("stall", ()).await.is_err(), "timed out");
 
         // Quiet from here on: nothing goes out, nothing comes in.
-        tokio::time::sleep(Duration::from_millis(900)).await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
 
         assert_eq!(queued(&client), idle, "expired slots are swept");
         assert_eq!(scheduled(&client), 0, "and so are their deadlines");

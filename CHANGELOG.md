@@ -9,48 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 * **A namespaced client API** (`neva::client::api`): `client.tools()`,
-  `resources()`, `prompts()` and `tasks()`, one per MCP method prefix.
-  `list_all()` walks every page (an error past 64), and `tools().as_task()`
-  starts a task-augmented call.
+  `resources()`, `prompts()` and `tasks()`. `list_all()` walks every page (an
+  error past 64), and `tools().as_task()` starts a task-augmented call.
 * **The same on `Context`** (`neva::app::context::api`): `ctx.tools()`,
   `resources()` and `prompts()`.
 * **The svir bridge** (feature `svir`, `neva::svir`): MCP tools as a
   [svir](https://docs.rs/svir) `Toolbox`, for handing them to a model.
   `RemoteTools` offers a connected server's tools; `App::into_toolbox`,
-  `App::with_toolbox` and `ctx.tools().toolbox()` offer a server's own,
-  called in-process through its middleware. `filter`, `rename` and `prefixed`
-  choose what is offered and under which name. `prompt_messages` and
-  `resource_parts` turn a prompt and a resource into svir messages, and
+  `App::with_toolbox` and `ctx.tools().toolbox()` offer a server's own, called
+  in-process through its middleware. `filter`, `rename` and `with_prefix`
+  choose what is offered and under which name. `ctx.tools().toolbox()` leaves
+  out the tool it is called from (`with_caller` keeps it), and in-process calls
+  nest at most four deep (`with_max_depth`). `prompt_messages` and
+  `resource_parts` turn prompts and resources into svir messages;
   `sampling_request` and `sampling_result` answer a server's sampling with a
-  model, tool calls included. Not in `server-full` or `client-full`.
-  Example: `examples/svir`.
+  model. Not in `server-full` or `client-full`. Example: `examples/svir`.
 * **A sampling handler can fail**: `map_sampling` takes one returning
-  `Result<CreateMessageResult, Error>`. Under `legacy-spec` the server is
-  answered with the error, and a sampling task fails with it; under
-  2026-07-28 the call that asked fails.
+  `Result<CreateMessageResult, Error>`. Under `legacy-spec` the error answers
+  the server, or fails the sampling task; under 2026-07-28 the asking call
+  fails with it.
 
 ### Changed
 * **`Client` request methods take `&self`**, so a connected client can be
   shared (`Arc<Client>`) across tasks. Setup (`connect`, `map_*`, `on_*`,
   roots) keeps `&mut self`.
 * **`Context` methods take `&self`**; `mut ctx` in a handler now warns.
-* `call_batch` sends its requests under ids the client generates, and puts
-  the caller's ids back on the responses.
+* **A request the client stops waiting for is cancelled**, on a timeout or a
+  dropped call, the requests of an abandoned `call_batch` included, never
+  `initialize`. Over Streamable HTTP under 2026-07-28 the client closes the
+  request's stream and sends no `notifications/cancelled`, a cancelled
+  subscription included; over stdio and to a legacy peer it sends the
+  notification.
+* `call_batch` sends its requests under ids the client generates, and puts the
+  caller's ids back on the responses.
 * A request dropped mid-call releases its pending slot at once; a late answer
   to it is dropped.
 * Under `legacy-spec`, the client answers a failed `tasks/result` with the
   error's own code, not always `InvalidParams`.
-* `x-mcp-header`: a `tools/list` traversal starting over no longer clears the
-  registrations of later pages or lifts the block on a malformed tool. Both
-  change when a page lists the tool, or a one-page listing omits it.
+* `x-mcp-header`: a `tools/list` traversal that starts over no longer clears
+  the registrations of later pages or lifts the block on a malformed tool; they
+  change only when a page lists the tool, or a one-page listing omits it.
 
-### Fixed
-* A `tasks/update` or `tasks/cancel` the server refuses is an error instead
-  of `Ok(())`, and `wait_to_completion` stops at it. Since 0.5.4.
-* `tools().call_raw` (and `call_tool_raw`) send the `_meta` their params
-  carry, a `traceparent` say, where they replaced it; only the progress token
-  is the client's. Since 0.2.5. A request's own trace context is kept over the
-  trace context provider's. Since 0.4.0.
+### Changed (breaking)
+* `ctx.tools()` returns the tools namespace: `ctx.tools().await` becomes
+  `ctx.tools().list().await`.
+* `TaskApi` methods take `&self`, and `wait_to_completion` takes `&A`; only
+  implementations outside neva are affected.
+* `map_sampling` is bound by `ClientHandler<_, Result<CreateMessageResult,
+  Error>, _>`. A handler returning `CreateMessageResult` still fits; only code
+  naming the old bound changes.
 
 ### Deprecated
 * The flat methods on `Client` (`list_tools`, `call_tool`, `read_resource`,
@@ -58,14 +65,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `add_tool`, `resource`, `prompt`, ...), in favor of the namespaces. Each
   note names its replacement.
 
-### Changed (breaking)
-* `ctx.tools()` returns the tools namespace: `ctx.tools().await` becomes
-  `ctx.tools().list().await`.
-* `TaskApi` methods take `&self`, and `wait_to_completion` takes `&A`. Only
-  implementations outside neva need the new receivers.
-* `map_sampling` is bound by `ClientHandler<_, Result<CreateMessageResult,
-  Error>, _>`. A handler returning `CreateMessageResult` is unaffected; only
-  code naming the old bound changes.
+### Fixed
+* A `tasks/update` or `tasks/cancel` the server refuses is an error, not
+  `Ok(())`, and `wait_to_completion` stops at it. Since 0.5.4.
+* `Client::subscribe` and the `on_*_changed` helpers no longer panic on a
+  `current_thread` runtime (#139). Since 0.0.8.
+* A `notifications/cancelled` on an HTTP session, batched or not, finds its
+  request; it was looked up without the session, and cancelled nothing.
+  Since 0.1.0.
+* A cancel that overtakes its request on the way to the handler is no longer
+  lost: the request is tracked as it is read, and one cancelled by then never
+  starts its handler.
+* Under 2026-07-28 the HTTP server treats a client closing a request's stream
+  as its cancellation, as the spec requires; the handler used to run on.
+  Since 0.4.0.
+* `tools().call_raw` (and `call_tool_raw`) keep the `_meta` their params
+  carry, a `traceparent` say, instead of replacing it; only the progress token
+  is the client's. Since 0.2.5. A request's own trace context wins over the
+  trace context provider's. Since 0.4.0.
 
 ## 0.6.2
 

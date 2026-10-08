@@ -240,6 +240,8 @@ mod runtime_registration_tests {
             scope: None,
             #[cfg(feature = "svir")]
             runtime: None,
+            #[cfg(feature = "svir")]
+            tool: None,
         }
     }
 
@@ -325,6 +327,8 @@ mod read_resource_claims_tests {
             scope: None,
             #[cfg(feature = "svir")]
             runtime: None,
+            #[cfg(feature = "svir")]
+            tool: None,
         }
     }
 

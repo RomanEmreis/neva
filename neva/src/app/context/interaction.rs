@@ -456,6 +456,8 @@ mod client_extension_tests {
             scope: None,
             #[cfg(feature = "svir")]
             runtime: None,
+            #[cfg(feature = "svir")]
+            tool: None,
         }
     }
 

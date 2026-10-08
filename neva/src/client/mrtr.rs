@@ -301,10 +301,9 @@ impl Client {
                 .handler
                 .as_ref()
                 .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
-            let request_timeout = handler.timeout();
-            let token = handler.cancellation();
+
             let taken = handler.send_batch(extras).await?;
-            return collect_batch_responses(taken, request_timeout, token)
+            return collect_batch_responses(taken, handler)
                 .await
                 .into_iter()
                 .collect();
@@ -340,10 +339,8 @@ impl Client {
                 .as_ref()
                 .ok_or_else(|| Error::new(ErrorCode::InternalError, "Connection closed"))?;
 
-            let request_timeout = handler.timeout();
-            let token = handler.cancellation();
             let taken = handler.send_batch(envelopes).await?;
-            let responses = collect_batch_responses(taken, request_timeout, token).await;
+            let responses = collect_batch_responses(taken, handler).await;
 
             // `responses` aligns with `round_slots`: `send_batch` preserves
             // request order and extras produce no receiver. Final responses fill

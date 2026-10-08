@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The server's tools, offered as `board_add_task` and so on: a prefix
     // keeps them apart from any other server's in the same request.
-    let tools = RemoteTools::new(client).prefixed("board_").load().await?;
+    let tools = RemoteTools::new(client).with_prefix("board_").load().await?;
 
     // The conversation starts from the server's own prompt.
     let prompt = tools

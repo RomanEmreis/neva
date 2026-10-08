@@ -183,6 +183,8 @@ mod subscription_sink_tests {
             scope: None,
             #[cfg(feature = "svir")]
             runtime: None,
+            #[cfg(feature = "svir")]
+            tool: None,
         }
     }
 
