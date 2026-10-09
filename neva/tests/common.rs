@@ -12,67 +12,40 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-/// How many ports there are to hand out.
-const PORTS: u32 = 10_000;
-
-/// Where the ports [`free_port`] hands out start: the [`PORTS`] right below
-/// the range the OS takes the local port of an outgoing connection from, so no
-/// client connection in another test can be holding one.
+/// The first of the ports [`free_port`] hands out.
 ///
-/// Linux lets a host move that range, and where privileged ports end, and says
-/// where both are, so they are read there: the ports go above the range when
-/// there is no unprivileged room below it. macOS and Windows are taken at
-/// their defaults, from 49152, as is a Linux with no room on either side.
-fn first_port() -> u16 {
-    const DEFAULT: u16 = 20_000;
-    let sysctl = |name: &str| std::fs::read_to_string(format!("/proc/sys/net/ipv4/{name}")).ok();
+/// They are below the range every common OS takes the local port of an
+/// outgoing connection from by default (from 32768 on Linux, from 49152 on
+/// macOS and Windows), so no client connection in another test can be holding
+/// one. A host that moves that range over them brings the race back, and
+/// loudly: a client's socket takes no connections, so [`serving`] reports the
+/// server that could not bind instead of a test talking to something else.
+const FIRST_PORT: u16 = 20_000;
 
-    let Some(range) = sysctl("ip_local_port_range") else {
-        return DEFAULT;
-    };
-    let mut bounds = range.split_whitespace().map(str::parse::<u32>);
-    let (Some(Ok(low)), Some(Ok(high))) = (bounds.next(), bounds.next()) else {
-        return DEFAULT;
-    };
-    let unprivileged = sysctl("ip_unprivileged_port_start")
-        .and_then(|start| start.trim().parse::<u32>().ok())
-        .unwrap_or(1_024);
-
-    let below = low
-        .checked_sub(PORTS)
-        .filter(|first| *first >= unprivileged);
-    let above =
-        Some((high + 1).max(unprivileged)).filter(|first| first + PORTS - 1 <= u32::from(u16::MAX));
-    below
-        .or(above)
-        .and_then(|first| u16::try_from(first).ok())
-        .unwrap_or(DEFAULT)
-}
+/// How many ports there are to hand out, from [`FIRST_PORT`].
+const PORTS: u32 = 10_000;
 
 /// A port on `127.0.0.1` that nothing else in this process has been handed,
 /// and that was free a moment ago.
 ///
 /// Asking the OS for port 0 and letting it go hands back a port from the range
 /// it then gives to outgoing connections, and by the time the server binds it
-/// a client in another test can hold it. These come one at a time from beside
-/// that range ([`first_port`]), starting where this process's id puts them, so
-/// that test processes run side by side start apart. One already taken, by
-/// anything, is skipped.
+/// a client in another test can hold it. These come one at a time from a range
+/// the OS does not give out, starting where this process's id puts it, so that
+/// test processes run side by side start apart. One already taken, by anything,
+/// is skipped.
 pub(crate) fn free_port() -> u16 {
-    static NEXT: OnceLock<(u16, AtomicU32)> = OnceLock::new();
-    let (first, next) = NEXT.get_or_init(|| {
-        let start = std::process::id().wrapping_mul(7_919);
-        (first_port(), AtomicU32::new(start))
-    });
+    static NEXT: OnceLock<AtomicU32> = OnceLock::new();
+    let next = NEXT.get_or_init(|| AtomicU32::new(std::process::id().wrapping_mul(7_919)));
 
     for _ in 0..PORTS {
         let offset = next.fetch_add(1, Ordering::Relaxed) % PORTS;
-        let port = first + u16::try_from(offset).expect("an offset below PORTS");
+        let port = FIRST_PORT + u16::try_from(offset).expect("an offset below PORTS");
         if TcpListener::bind(("127.0.0.1", port)).is_ok() {
             return port;
         }
     }
-    panic!("no free port from {first} on");
+    panic!("no free port from {FIRST_PORT} on");
 }
 
 /// Waits for the server `server` runs to take connections at `addr`.
