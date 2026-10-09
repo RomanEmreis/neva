@@ -10,6 +10,8 @@
     feature = "http-server-volga"
 ))]
 
+mod common;
+
 use neva::{
     App, Context,
     di::Dc,
@@ -379,7 +381,7 @@ async fn a_refresh_sees_tools_added_at_runtime() {
 /// when the server runs.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_served_server_is_a_toolbox_too() {
-    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let addr = format!("127.0.0.1:{}", common::free_port());
     let (app, tools) = app()
         .with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")))
         .with_toolbox();
@@ -406,11 +408,4 @@ async fn a_toolbox_of_a_server_that_never_ran_says_so() {
         .expect("answered at once")
         .expect_err("the server never ran");
     assert!(err.to_string().contains("stopped before it ran"), "{err}");
-}
-
-fn pick_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
 }

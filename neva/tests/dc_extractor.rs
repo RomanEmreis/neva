@@ -17,6 +17,8 @@
     feature = "di"
 ))]
 
+mod common;
+
 use neva::App;
 use neva::di::Dc;
 
@@ -46,14 +48,14 @@ async fn add_to_counter(delta: i64, counter: Dc<Counter>) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn dc_extractor_is_injected_not_advertised() {
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
 
     let app = App::new()
         .with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")))
         .add_singleton(Counter { value: 41 });
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -164,13 +166,6 @@ async fn dc_extractor_is_injected_not_advertised() {
     assert_eq!(text, "42", "Dc<Counter> + real arg did not both resolve");
 
     handle.abort();
-}
-
-fn pick_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
 }
 
 /// The `_meta` MCP 2026-07-28 requires on every request: the protocol version,

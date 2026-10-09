@@ -17,6 +17,8 @@
     feature = "tracing"
 ))]
 
+mod common;
+
 use neva::App;
 use neva::types::notification;
 use std::time::Duration;
@@ -28,7 +30,7 @@ const MARKER: &str = "logged-before-next";
 async fn a_listen_stream_opens_with_its_acknowledgment() {
     install_subscriber();
 
-    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let addr = format!("127.0.0.1:{}", common::free_port());
     let mut app = App::new()
         .with_options(|opt| {
             opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
@@ -53,7 +55,7 @@ async fn a_listen_stream_opens_with_its_acknowledgment() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -173,7 +175,7 @@ async fn a_flood_before_the_acknowledgment_never_displaces_it() {
 
     install_subscriber();
 
-    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let addr = format!("127.0.0.1:{}", common::free_port());
     let mut app = App::new()
         .with_options(|opt| {
             opt.with_http(|http| {
@@ -205,7 +207,7 @@ async fn a_flood_before_the_acknowledgment_never_displaces_it() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -287,7 +289,7 @@ async fn a_flood_before_the_acknowledgment_never_displaces_it() {
 async fn a_burst_that_fills_the_sink_still_opens_the_subscription() {
     install_subscriber();
 
-    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let addr = format!("127.0.0.1:{}", common::free_port());
     let mut app = App::new()
         .with_options(|opt| {
             opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp").with_sse_log_queue(1))
@@ -304,7 +306,7 @@ async fn a_burst_that_fills_the_sink_still_opens_the_subscription() {
     app.map_tool("ping", || async { "pong" });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -375,11 +377,4 @@ fn take_frame(body: &mut String) -> Option<serde_json::Value> {
         .lines()
         .find_map(|line| line.strip_prefix("data:"))
         .and_then(|data| serde_json::from_str(data.trim()).ok())
-}
-
-fn pick_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
 }

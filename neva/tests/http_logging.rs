@@ -11,6 +11,8 @@
     feature = "tracing"
 ))]
 
+mod common;
+
 use neva::App;
 use neva::types::notification;
 use tracing_subscriber::prelude::*;
@@ -45,7 +47,7 @@ async fn request_scoped_logging_streams_over_post() {
         .with(notification::fmt::layer())
         .init();
 
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")))
@@ -74,7 +76,7 @@ async fn request_scoped_logging_streams_over_post() {
         "b".to_string()
     });
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     // `no_proxy`: reqwest honors `HTTP_PROXY`/`HTTPS_PROXY` from the environment,
     // and an uppercase `NO_PROXY` that omits localhost would still send these
@@ -249,13 +251,6 @@ async fn request_scoped_logging_streams_over_post() {
     );
 
     handle.abort();
-}
-
-fn pick_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
 }
 
 /// The `_meta` MCP 2026-07-28 requires on every request. A request that does

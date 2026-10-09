@@ -12,6 +12,8 @@
     feature = "http-client"
 ))]
 
+mod common;
+
 use neva::{App, Context, client::Client};
 
 /// A UI-bound tool that answers with bare data when a UI will present it, and
@@ -37,18 +39,7 @@ async fn serve(addr: &str) -> tokio::task::JoinHandle<()> {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        match tokio::net::TcpStream::connect(addr).await {
-            Ok(_) => break,
-            Err(_) if tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await
-            }
-            Err(err) => panic!("server never became reachable: {err}"),
-        }
-    }
-
+    common::serving(addr, &handle).await;
     handle
 }
 
@@ -67,7 +58,7 @@ async fn get_time(client: &mut Client) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_client_declaring_apps_is_seen_as_one() {
-    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let addr = format!("127.0.0.1:{}", common::free_port());
     let handle = serve(&addr).await;
 
     let mut client = Client::new().with_options(|opt| {
@@ -85,7 +76,7 @@ async fn a_client_declaring_apps_is_seen_as_one() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_client_declaring_nothing_gets_the_text_fallback() {
-    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let addr = format!("127.0.0.1:{}", common::free_port());
     let handle = serve(&addr).await;
 
     let mut client = Client::new().with_options(|opt| {
@@ -105,7 +96,7 @@ async fn a_client_declaring_nothing_gets_the_text_fallback() {
 /// knows nothing about, which a handler can still read.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_server_reads_the_map_off_the_wire() {
-    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let addr = format!("127.0.0.1:{}", common::free_port());
     let handle = serve(&addr).await;
     let http = reqwest::Client::builder()
         .no_proxy()
@@ -172,13 +163,6 @@ async fn the_server_reads_the_map_off_the_wire() {
     assert_eq!(text(resp), r#"{"fuzzy":true}"#);
 
     handle.abort();
-}
-
-fn pick_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
 }
 
 /// Attaches the routing headers MCP 2026-07-28 requires on every request.

@@ -11,6 +11,8 @@
     feature = "http-client"
 ))]
 
+mod common;
+
 use neva::App;
 use neva::types::Json;
 use serde::{Deserialize, Serialize};
@@ -119,13 +121,13 @@ async fn make_greeting(name: String) -> Json<Greeting> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_macro_emits_json_schema_2020() {
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
 
     let app =
         App::new().with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")));
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -320,13 +322,6 @@ async fn tool_macro_emits_json_schema_2020() {
     }
 
     handle.abort();
-}
-
-fn pick_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
 }
 
 /// The `_meta` MCP 2026-07-28 requires on every request: the protocol version,

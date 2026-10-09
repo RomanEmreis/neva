@@ -739,27 +739,8 @@ mod tests {
 mod abandoned_request_tests {
     use super::*;
     use crate::App;
+    use crate::test_common as common;
     use std::time::Duration;
-
-    fn pick_free_port() -> u16 {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let port = listener.local_addr().expect("local addr").port();
-        drop(listener);
-        port
-    }
-
-    /// Waits for the server to listen, rather than for a fixed delay a
-    /// loaded runner can outlast.
-    async fn reachable(addr: &str) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        while tokio::net::TcpStream::connect(addr).await.is_err() {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "server never became reachable"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    }
 
     /// A caller dropping the future -- an outer `timeout`, a lost `select!`
     /// branch -- runs none of the request's own error paths. The slot still
@@ -767,7 +748,7 @@ mod abandoned_request_tests {
     /// the id is never sent again, so it cannot reach another request.
     #[tokio::test(flavor = "multi_thread")]
     async fn dropping_a_call_releases_its_slot() {
-        let addr = format!("127.0.0.1:{}", pick_free_port());
+        let addr = format!("127.0.0.1:{}", common::free_port());
 
         let release = Arc::new(tokio::sync::Notify::new());
         let gate = release.clone();
@@ -783,7 +764,7 @@ mod abandoned_request_tests {
         });
         app.map_tool("quick", || async { "quick".to_string() });
         let server = tokio::spawn(async move { app.run().await });
-        reachable(&addr).await;
+        common::serving(&addr, &server).await;
 
         let mut client = Client::new().with_options(|o| {
             o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
@@ -824,7 +805,7 @@ mod abandoned_request_tests {
     /// its next request -- so a connected client sweeps on its own.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_idle_client_sweeps_expired_slots() {
-        let addr = format!("127.0.0.1:{}", pick_free_port());
+        let addr = format!("127.0.0.1:{}", common::free_port());
 
         let mut app = App::new()
             .without_greeting()
@@ -832,7 +813,7 @@ mod abandoned_request_tests {
         app.map_tool("stall", || async { std::future::pending::<String>().await });
         app.map_tool("quick", || async { "quick".to_string() });
         let server = tokio::spawn(async move { app.run().await });
-        reachable(&addr).await;
+        common::serving(&addr, &server).await;
 
         // The handshake is held to it too, so it allows for a loaded runner.
         // The sweep runs once per timeout: the wait below spans a few.

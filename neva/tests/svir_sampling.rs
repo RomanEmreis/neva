@@ -9,6 +9,8 @@
     feature = "http-client"
 ))]
 
+mod common;
+
 use neva::{
     App, Context,
     client::Client,
@@ -95,7 +97,7 @@ async fn serve(
     Arc<Mutex<Vec<svir::Request>>>,
     tokio::task::JoinHandle<()>,
 ) {
-    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let addr = format!("127.0.0.1:{}", common::free_port());
 
     let app = App::new().without_greeting();
     #[cfg(not(feature = "legacy-spec"))]
@@ -135,7 +137,7 @@ async fn serve(
     });
 
     let server = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    common::serving(&addr, &server).await;
 
     let seen: Arc<Mutex<Vec<svir::Request>>> = Arc::default();
     let log = seen.clone();
@@ -243,11 +245,4 @@ async fn a_model_that_fails_is_a_failed_sample() {
 
     client.disconnect().await.ok();
     server.abort();
-}
-
-fn pick_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
 }
