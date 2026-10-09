@@ -4,6 +4,8 @@
 //! over one shared client; `list_all` walks every page the server hands out.
 #![cfg(all(feature = "http-server-volga", feature = "http-client"))]
 
+mod common;
+
 use neva::{App, client::Client, types::Role};
 use std::time::Duration;
 
@@ -11,7 +13,7 @@ use std::time::Duration;
 const COUNT: usize = 25;
 
 async fn serve() -> (String, tokio::task::JoinHandle<()>) {
-    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let addr = format!("127.0.0.1:{}", common::free_port());
 
     let mut app = App::new()
         .without_greeting()
@@ -27,7 +29,7 @@ async fn serve() -> (String, tokio::task::JoinHandle<()>) {
     }
 
     let server = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    common::serving(&addr, &server).await;
     (addr, server)
 }
 
@@ -133,7 +135,7 @@ type Gate = std::sync::Arc<tokio::sync::Notify>;
 /// A server holding its answers to `hold` and `hold_b` until their gates are
 /// released, and answering `quick` at once.
 async fn serve_held() -> (String, Gate, Gate, tokio::task::JoinHandle<()>) {
-    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let addr = format!("127.0.0.1:{}", common::free_port());
     let (release, release_b) = (Gate::default(), Gate::default());
     let mut app = App::new()
         .without_greeting()
@@ -150,7 +152,7 @@ async fn serve_held() -> (String, Gate, Gate, tokio::task::JoinHandle<()>) {
     }
     app.map_tool("quick", || async move { "quick".to_string() });
     let server = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    common::serving(&addr, &server).await;
     (addr, release, release_b, server)
 }
 
@@ -288,7 +290,7 @@ async fn a_raw_call_sends_the_callers_meta() {
     use neva::types::{CallToolRequestParams, RequestParamsMeta};
     use std::sync::{Arc, Mutex};
 
-    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let addr = format!("127.0.0.1:{}", common::free_port());
     let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
     let log = seen.clone();
 
@@ -307,7 +309,7 @@ async fn a_raw_call_sends_the_callers_meta() {
     });
 
     let server = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    common::serving(&addr, &server).await;
 
     let mut client = Client::new().with_options(|o| {
         o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
@@ -336,11 +338,4 @@ async fn a_raw_call_sends_the_callers_meta() {
 
     client.disconnect().await.ok();
     server.abort();
-}
-
-fn pick_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
 }

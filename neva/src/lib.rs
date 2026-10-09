@@ -108,6 +108,12 @@ pub mod svir;
 pub mod transport;
 pub mod types;
 
+/// The integration tests' ports and wait, for the unit tests that start a
+/// server too: one copy, in `tests/common.rs`.
+#[cfg(all(test, feature = "http-server-volga", feature = "http-client"))]
+#[path = "../tests/common.rs"]
+mod test_common;
+
 #[cfg(feature = "client-macros")]
 pub use neva_macros::elicitation;
 #[cfg(feature = "macros")]

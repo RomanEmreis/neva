@@ -5,6 +5,8 @@
 //! after another.
 #![cfg(all(feature = "http-server-volga", feature = "http-client"))]
 
+mod common;
+
 use neva::{App, client::Client};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Barrier;
@@ -17,7 +19,7 @@ const CALLERS: usize = 8;
 /// rather than depend on how fast anything is.
 #[tokio::test(flavor = "multi_thread")]
 async fn calls_from_many_tasks_are_in_flight_together() {
-    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let addr = format!("127.0.0.1:{}", common::free_port());
 
     let barrier = Arc::new(Barrier::new(CALLERS));
     let mut app = App::new()
@@ -32,7 +34,7 @@ async fn calls_from_many_tasks_are_in_flight_together() {
     })
     .with_arg_names(["name"]);
     let server = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    common::serving(&addr, &server).await;
 
     let mut client = Client::new().with_options(|o| {
         o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
@@ -68,11 +70,4 @@ async fn calls_from_many_tasks_are_in_flight_together() {
     }
 
     server.abort();
-}
-
-fn pick_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
 }

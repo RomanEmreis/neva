@@ -9,6 +9,8 @@
 //! panicked left its POST waiting for an answer that never came.
 #![cfg(all(feature = "http-server-volga", feature = "http-client"))]
 
+mod common;
+
 use neva::App;
 use std::time::Duration;
 
@@ -87,7 +89,7 @@ async fn a_panicking_handler_is_answered_with_an_internal_error() {
 /// Starts a server with a slow, a fast and a panicking tool, returning its
 /// address and the task running it.
 async fn serve() -> (String, tokio::task::JoinHandle<()>) {
-    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let addr = format!("127.0.0.1:{}", common::free_port());
     let mut app = App::new()
         .without_greeting()
         .with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")));
@@ -100,7 +102,7 @@ async fn serve() -> (String, tokio::task::JoinHandle<()>) {
     app.map_tool("boom", || async { fail() });
 
     let server = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    common::serving(&addr, &server).await;
     (addr, server)
 }
 
@@ -157,11 +159,4 @@ fn request(tool: &str, id: u64) -> serde_json::Value {
         "jsonrpc": "2.0", "id": id, "method": "tools/call",
         "params": { "name": tool, "arguments": {} }
     })
-}
-
-fn pick_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
 }

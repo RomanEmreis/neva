@@ -10,17 +10,19 @@
     feature = "http-client"
 ))]
 
+mod common;
+
 use neva::App;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn stateless_discover_and_call() {
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app =
         App::new().with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")));
     app.map_tool("ping", || async move { "pong".to_string() });
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -192,13 +194,6 @@ fn meta() -> serde_json::Value {
         "io.modelcontextprotocol/protocolVersion": "2026-07-28",
         "io.modelcontextprotocol/clientCapabilities": {}
     })
-}
-
-fn pick_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
 }
 
 /// Attaches the routing headers MCP 2026-07-28 requires on every request, the

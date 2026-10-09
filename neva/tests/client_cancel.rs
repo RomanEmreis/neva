@@ -4,6 +4,8 @@
 //! notification. Either on a timeout or when the caller drops the call.
 #![cfg(all(feature = "http-server-volga", feature = "http-client"))]
 
+mod common;
+
 use neva::client::Client;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -218,13 +220,6 @@ mod against_neva {
         }
     }
 
-    fn pick_free_port() -> u16 {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        port
-    }
-
     /// Serves `slow`, which counts its handlers starting and being dropped,
     /// behind a middleware that holds each call for `hold`.
     async fn serve(
@@ -235,7 +230,7 @@ mod against_neva {
         Arc<AtomicUsize>,
         tokio::task::JoinHandle<()>,
     ) {
-        let addr = format!("127.0.0.1:{}", pick_free_port());
+        let addr = format!("127.0.0.1:{}", common::free_port());
         let started = Arc::new(AtomicUsize::new(0));
         let stopped = Arc::new(AtomicUsize::new(0));
 
@@ -257,14 +252,7 @@ mod against_neva {
             next(ctx).await
         });
         let server = tokio::spawn(async move { app.run().await });
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        while tokio::net::TcpStream::connect(&addr).await.is_err() {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "server never became reachable"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        common::serving(&addr, &server).await;
 
         (addr, started, stopped, server)
     }

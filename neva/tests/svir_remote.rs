@@ -8,6 +8,8 @@
     feature = "http-client"
 ))]
 
+mod common;
+
 use neva::{
     App,
     client::Client,
@@ -22,7 +24,7 @@ use svir::{Part, TextFile, ToolCall, Toolbox};
 /// `cart`; plus `files.read` when `dotted` -- a name a model API cannot carry.
 /// Also a `review` prompt and `notes://{day}` resources.
 async fn serve(dotted: bool) -> (Arc<Client>, tokio::task::JoinHandle<()>) {
-    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let addr = format!("127.0.0.1:{}", common::free_port());
 
     let mut app = App::new()
         .without_greeting()
@@ -55,7 +57,7 @@ async fn serve(dotted: bool) -> (Arc<Client>, tokio::task::JoinHandle<()>) {
     });
 
     let server = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    common::serving(&addr, &server).await;
 
     let mut client = Client::new().with_options(|o| {
         o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
@@ -313,11 +315,4 @@ async fn prompts_and_resources_become_messages() {
     );
 
     server.abort();
-}
-
-fn pick_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
 }

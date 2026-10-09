@@ -12,11 +12,13 @@
     feature = "legacy-spec"
 ))]
 
+mod common;
+
 use neva::App;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn volga_engine_round_trip() {
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
 
     let mut app =
@@ -26,7 +28,7 @@ async fn volga_engine_round_trip() {
 
     let handle = tokio::spawn(async move { app.run().await });
 
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -92,11 +94,4 @@ async fn volga_engine_round_trip() {
     assert!(resp.status().is_success());
 
     handle.abort();
-}
-
-fn pick_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
 }

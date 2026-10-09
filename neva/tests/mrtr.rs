@@ -9,6 +9,8 @@
     feature = "http-client"
 ))]
 
+mod common;
+
 use neva::{
     App, Context,
     client::Client,
@@ -18,7 +20,7 @@ use neva::{
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_elicits_then_completes_over_two_rounds() {
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -37,7 +39,7 @@ async fn tool_elicits_then_completes_over_two_rounds() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -121,7 +123,7 @@ async fn tool_elicits_then_completes_over_two_rounds() {
 /// location is still read -- after the spec one, and only if it is empty.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_retry_stating_its_answers_in_meta_is_still_understood() {
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -140,7 +142,7 @@ async fn a_retry_stating_its_answers_in_meta_is_still_understood() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -221,7 +223,7 @@ async fn final_round_replay_is_idempotent_after_a_lost_response() {
     // the on_commit side effect fires exactly once across both finals.
     LOST_RESPONSE_COMMITS.store(0, Ordering::SeqCst);
 
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -244,7 +246,7 @@ async fn final_round_replay_is_idempotent_after_a_lost_response() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -353,7 +355,7 @@ async fn final_round_replay_is_idempotent_after_a_lost_response() {
 async fn an_ignored_answer_does_not_buy_a_second_run_of_the_final_round() {
     IGNORED_ANSWER_COMMITS.store(0, Ordering::SeqCst);
 
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -376,7 +378,7 @@ async fn an_ignored_answer_does_not_buy_a_second_run_of_the_final_round() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -483,7 +485,7 @@ async fn an_ignored_answer_does_not_buy_a_second_run_of_the_final_round() {
 async fn a_round_that_failed_midway_through_its_commits_is_not_repeatable() {
     PARTIAL_COMMIT_CHARGES.store(0, Ordering::SeqCst);
 
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -507,7 +509,7 @@ async fn a_round_that_failed_midway_through_its_commits_is_not_repeatable() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -612,7 +614,7 @@ async fn concurrent_final_round_retries_commit_exactly_once() {
     // reservation must still serialise them so the commit fires exactly once.
     CONCURRENT_FINAL_COMMITS.store(0, Ordering::SeqCst);
 
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -638,7 +640,7 @@ async fn concurrent_final_round_retries_commit_exactly_once() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -724,7 +726,7 @@ async fn distinct_answers_to_the_same_state_do_not_collide_in_the_cache() {
     // principal, no nonce) but supply DIFFERENT inputResponses. The final cache
     // is keyed by the state tag plus the answers digest, so the second flow must
     // see its own answer reflected -- never the first flow's cached result.
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -743,7 +745,7 @@ async fn distinct_answers_to_the_same_state_do_not_collide_in_the_cache() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -829,7 +831,7 @@ async fn effects_run_once_memo_caches_commit_fires_on_final_round() {
     CHARGES.store(0, Ordering::SeqCst);
     RECEIPTS.store(0, Ordering::SeqCst);
 
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -863,7 +865,7 @@ async fn effects_run_once_memo_caches_commit_fires_on_final_round() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -960,7 +962,7 @@ async fn effects_run_once_memo_caches_commit_fires_on_final_round() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn oversized_request_state_is_rejected() {
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -977,7 +979,7 @@ async fn oversized_request_state_is_rejected() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -1016,7 +1018,7 @@ async fn oversized_inbound_request_state_is_rejected_before_decoding() {
     // configured cap. It must be rejected on size *before* base64 decoding and
     // HMAC verification run, so the cap protects inbound retries -- not just the
     // outbound states the server mints.
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -1032,7 +1034,7 @@ async fn oversized_inbound_request_state_is_rejected_before_decoding() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -1072,7 +1074,7 @@ async fn oversized_inbound_request_state_is_rejected_before_decoding() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn replaying_request_state_against_a_different_request_is_rejected() {
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -1087,7 +1089,7 @@ async fn replaying_request_state_against_a_different_request_is_rejected() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -1170,11 +1172,12 @@ async fn a_request_state_minted_by_another_service_is_rejected() {
         tokio::spawn(async move { app.run().await })
     }
 
-    let weather_addr = format!("127.0.0.1:{}", pick_free_port());
-    let billing_addr = format!("127.0.0.1:{}", pick_free_port());
+    let weather_addr = format!("127.0.0.1:{}", common::free_port());
+    let billing_addr = format!("127.0.0.1:{}", common::free_port());
     let weather = spawn(&weather_addr, "https://weather.example.com/mcp").await;
     let billing = spawn(&billing_addr, "https://billing.example.com/mcp").await;
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&weather_addr, &weather).await;
+    common::serving(&billing_addr, &billing).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -1251,7 +1254,7 @@ async fn a_request_state_minted_by_another_service_is_rejected() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn eliciting_without_declared_capability_is_rejected() {
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -1266,7 +1269,7 @@ async fn eliciting_without_declared_capability_is_rejected() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -1329,7 +1332,7 @@ async fn client_drives_mrtr_elicitation_end_to_end() {
     C_CHARGES.store(0, Ordering::SeqCst);
     C_RECEIPTS.store(0, Ordering::SeqCst);
 
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -1363,7 +1366,7 @@ async fn client_drives_mrtr_elicitation_end_to_end() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     // The client declares `clientCapabilities.elicitation` automatically because
     // an elicitation handler is registered; the handler answers every prompt.
@@ -1409,7 +1412,7 @@ async fn client_drives_mrtr_elicitation_end_to_end() {
 /// keep their slots in order, and notifications produce no slot.
 #[tokio::test(flavor = "multi_thread")]
 async fn client_drives_mrtr_across_a_batch_end_to_end() {
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -1428,7 +1431,7 @@ async fn client_drives_mrtr_across_a_batch_end_to_end() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let mut client =
         Client::new().with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
@@ -1499,7 +1502,7 @@ async fn client_drives_mrtr_across_a_batch_end_to_end() {
 /// a per-slot tool failure is isolated, not fatal to the whole batch.
 #[tokio::test(flavor = "multi_thread")]
 async fn batch_isolates_a_single_slot_failure_after_elicitation() {
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -1530,7 +1533,7 @@ async fn batch_isolates_a_single_slot_failure_after_elicitation() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let mut client =
         Client::new().with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
@@ -1589,7 +1592,7 @@ async fn batch_isolates_a_single_slot_failure_after_elicitation() {
 /// instead of looping the default 8 times.
 #[tokio::test(flavor = "multi_thread")]
 async fn configurable_max_rounds_caps_the_mrtr_loop() {
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -1604,7 +1607,7 @@ async fn configurable_max_rounds_caps_the_mrtr_loop() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let mut client = Client::new().with_options(|o| {
         o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
@@ -1635,7 +1638,7 @@ async fn configurable_max_rounds_caps_the_mrtr_loop() {
 /// send and erroring before it can retry.
 #[tokio::test(flavor = "multi_thread")]
 async fn one_retry_budget_completes_a_single_question_flow() {
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -1654,7 +1657,7 @@ async fn one_retry_budget_completes_a_single_question_flow() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let mut client = Client::new().with_options(|o| {
         o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
@@ -1689,7 +1692,7 @@ async fn one_retry_budget_completes_a_single_question_flow() {
 async fn tool_samples_then_completes_over_two_rounds() {
     use neva::types::sampling::{CreateMessageRequestParams, SamplingMessage};
 
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -1710,7 +1713,7 @@ async fn tool_samples_then_completes_over_two_rounds() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -1785,7 +1788,7 @@ async fn tool_samples_then_completes_over_two_rounds() {
 /// `ListRootsResult`.
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_lists_roots_then_completes_over_two_rounds() {
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -1804,7 +1807,7 @@ async fn tool_lists_roots_then_completes_over_two_rounds() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -1875,7 +1878,7 @@ async fn tool_lists_roots_then_completes_over_two_rounds() {
 async fn client_drives_sampling_and_roots_end_to_end() {
     use neva::types::sampling::{CreateMessageRequestParams, CreateMessageResult, SamplingMessage};
 
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -1900,7 +1903,7 @@ async fn client_drives_sampling_and_roots_end_to_end() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let mut client =
         Client::new().with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
@@ -1942,7 +1945,7 @@ async fn client_drives_sampling_and_roots_end_to_end() {
 async fn a_sampling_handler_that_fails_fails_the_call() {
     use neva::types::sampling::{CreateMessageRequestParams, SamplingMessage};
 
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -1957,7 +1960,7 @@ async fn a_sampling_handler_that_fails_fails_the_call() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let mut client =
         Client::new().with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
@@ -1986,7 +1989,7 @@ async fn a_sampling_handler_that_fails_fails_the_call() {
 /// server unable to complete the call at all.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_client_with_an_empty_roots_list_still_answers() {
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -1999,7 +2002,7 @@ async fn a_client_with_an_empty_roots_list_still_answers() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     // Explicit opt-in, no roots added.
     #[allow(deprecated)]
@@ -2033,7 +2036,7 @@ async fn a_client_with_an_empty_roots_list_still_answers() {
 async fn sampling_without_declared_capability_is_rejected() {
     use neva::types::sampling::{CreateMessageRequestParams, SamplingMessage};
 
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -2048,7 +2051,7 @@ async fn sampling_without_declared_capability_is_rejected() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -2094,7 +2097,7 @@ async fn sampling_without_declared_capability_is_rejected() {
 async fn one_round_carries_every_input_the_handler_asked_for() {
     use neva::types::sampling::{CreateMessageRequestParams, SamplingMessage};
 
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -2123,7 +2126,7 @@ async fn one_round_carries_every_input_the_handler_asked_for() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -2206,7 +2209,7 @@ async fn one_round_carries_every_input_the_handler_asked_for() {
 /// call having run and failed.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_answer_of_the_wrong_shape_is_a_protocol_error() {
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -2221,7 +2224,7 @@ async fn an_answer_of_the_wrong_shape_is_a_protocol_error() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -2269,7 +2272,7 @@ async fn an_answer_of_the_wrong_shape_is_a_protocol_error() {
 async fn a_handler_asks_only_for_what_the_caller_declared() {
     use neva::types::sampling::{CreateMessageRequestParams, SamplingMessage};
 
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new()
         .with_request_state_secret(b"test-secret")
@@ -2292,7 +2295,7 @@ async fn a_handler_asks_only_for_what_the_caller_declared() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -2325,13 +2328,6 @@ async fn a_handler_asks_only_for_what_the_caller_declared() {
     handle.abort();
 }
 
-fn pick_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
-}
-
 /// Attaches the routing headers MCP 2026-07-28 requires on every request, the
 /// way a conforming client derives them: from the body it is about to send.
 /// `requestState` and `inputResponses` are protocol fields on the methods MRTR
@@ -2341,14 +2337,14 @@ fn pick_free_port() -> u16 {
 /// by the MRTR shapes would refuse a request this server was written to serve.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_custom_method_owns_its_own_params() {
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app = App::new().with_options(|o| o.with_http(|h| h.bind(&addr).with_endpoint("/mcp")));
 
     app.map_handler("custom/echo", || async move { "served" });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()

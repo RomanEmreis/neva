@@ -10,11 +10,13 @@
     feature = "http-client"
 ))]
 
+mod common;
+
 use neva::App;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mirrored_headers_must_describe_the_call() {
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app =
         App::new().with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")));
@@ -32,7 +34,7 @@ async fn mirrored_headers_must_describe_the_call() {
         .with_arg_names(["region"]);
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -108,7 +110,7 @@ async fn mirrored_headers_must_describe_the_call() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_header_without_the_argument_it_mirrors_is_rejected() {
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app =
         App::new().with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")));
@@ -127,7 +129,7 @@ async fn a_header_without_the_argument_it_mirrors_is_rejected() {
         });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -174,7 +176,7 @@ async fn a_header_without_the_argument_it_mirrors_is_rejected() {
 async fn a_batched_call_of_an_annotated_tool_still_runs() {
     use neva::client::Client;
 
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app =
         App::new().with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")));
@@ -192,17 +194,7 @@ async fn a_batched_call_of_an_annotated_tool_still_runs() {
         .with_arg_names(["region"]);
 
     let handle = tokio::spawn(async move { app.run().await });
-
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        match tokio::net::TcpStream::connect(&addr).await {
-            Ok(_) => break,
-            Err(_) if tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await
-            }
-            Err(err) => panic!("server never became reachable: {err}"),
-        }
-    }
+    common::serving(&addr, &handle).await;
 
     let mut client = Client::new().with_options(|opt| {
         opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
@@ -249,7 +241,7 @@ async fn a_batched_call_of_an_annotated_tool_still_runs() {
 async fn an_annotated_tool_survives_a_listing_that_is_stale_on_arrival() {
     use neva::client::Client;
 
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app =
         App::new().with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")));
@@ -267,17 +259,7 @@ async fn an_annotated_tool_survives_a_listing_that_is_stale_on_arrival() {
         .with_arg_names(["region"]);
 
     let handle = tokio::spawn(async move { app.run().await });
-
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        match tokio::net::TcpStream::connect(&addr).await {
-            Ok(_) => break,
-            Err(_) if tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await
-            }
-            Err(err) => panic!("server never became reachable: {err}"),
-        }
-    }
+    common::serving(&addr, &handle).await;
 
     let mut client = Client::new().with_options(|opt| {
         opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
@@ -314,7 +296,7 @@ async fn the_retry_keeps_the_callers_meta() {
     use neva::types::{CallToolRequestParams, RequestParamsMeta, Response};
     use std::sync::{Arc, Mutex};
 
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
     let log = seen.clone();
@@ -343,14 +325,7 @@ async fn the_retry_keeps_the_callers_meta() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-    while tokio::net::TcpStream::connect(&addr).await.is_err() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "server never became reachable"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    common::serving(&addr, &handle).await;
 
     let mut client = Client::new().with_options(|opt| {
         opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
@@ -395,7 +370,7 @@ async fn the_retry_keeps_the_callers_meta() {
 async fn the_refusal_recovery_pages_until_it_finds_the_tool() {
     use neva::client::Client;
 
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app =
         App::new().with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")));
@@ -420,17 +395,7 @@ async fn the_refusal_recovery_pages_until_it_finds_the_tool() {
         .with_arg_names(["region"]);
 
     let handle = tokio::spawn(async move { app.run().await });
-
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        match tokio::net::TcpStream::connect(&addr).await {
-            Ok(_) => break,
-            Err(_) if tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await
-            }
-            Err(err) => panic!("server never became reachable: {err}"),
-        }
-    }
+    common::serving(&addr, &handle).await;
 
     let mut client = Client::new().with_options(|opt| {
         opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
@@ -478,7 +443,7 @@ async fn the_refusal_recovery_pages_until_it_finds_the_tool() {
 async fn a_recovery_that_stops_early_would_unblock_a_later_page() {
     use neva::client::Client;
 
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app =
         App::new().with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")));
@@ -518,17 +483,7 @@ async fn a_recovery_that_stops_early_would_unblock_a_later_page() {
         .with_arg_names(["region"]);
 
     let handle = tokio::spawn(async move { app.run().await });
-
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        match tokio::net::TcpStream::connect(&addr).await {
-            Ok(_) => break,
-            Err(_) if tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await
-            }
-            Err(err) => panic!("server never became reachable: {err}"),
-        }
-    }
+    common::serving(&addr, &handle).await;
 
     let mut client = Client::new().with_options(|opt| {
         opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
@@ -690,13 +645,6 @@ async fn write_json(stream: &mut tokio::net::TcpStream, body: &serde_json::Value
     let _ = stream.flush().await;
 }
 
-fn pick_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
-}
-
 /// Calls of an annotated tool from many tasks over one shared client.
 ///
 /// Against a listing that is stale on arrival every call goes through the
@@ -710,7 +658,7 @@ async fn concurrent_calls_of_an_annotated_tool_all_carry_their_headers() {
 
     const CALLERS: usize = 16;
 
-    let port = pick_free_port();
+    let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut app =
         App::new().with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")));
@@ -728,17 +676,7 @@ async fn concurrent_calls_of_an_annotated_tool_all_carry_their_headers() {
         .with_arg_names(["region"]);
 
     let handle = tokio::spawn(async move { app.run().await });
-
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        match tokio::net::TcpStream::connect(&addr).await {
-            Ok(_) => break,
-            Err(_) if tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await
-            }
-            Err(err) => panic!("server never became reachable: {err}"),
-        }
-    }
+    common::serving(&addr, &handle).await;
 
     let mut client = Client::new().with_options(|opt| {
         opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))

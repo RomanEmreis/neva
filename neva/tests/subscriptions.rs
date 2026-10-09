@@ -10,6 +10,8 @@
     feature = "http-client"
 ))]
 
+mod common;
+
 use neva::App;
 use neva::shared::Stream;
 use neva::types::{SUBSCRIPTION_ID_KEY, Tool};
@@ -20,7 +22,7 @@ const RESOURCE: &str = "res://watched";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn subscription_streams_only_the_requested_notifications() {
-    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let addr = format!("127.0.0.1:{}", common::free_port());
     let mut app = App::new().with_options(|opt| {
         opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
             .with_tools(|t| t.with_list_changed())
@@ -49,7 +51,7 @@ async fn subscription_streams_only_the_requested_notifications() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -159,13 +161,13 @@ async fn subscription_streams_only_the_requested_notifications() {
 async fn subscription_is_narrowed_to_advertised_capabilities() {
     // A server that never advertises `listChanged` cannot promise it: the
     // acknowledgment reports an empty filter rather than refusing the stream.
-    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let addr = format!("127.0.0.1:{}", common::free_port());
     let mut app =
         App::new().with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")));
     app.map_tool("noop", || async { "ok" });
 
     let handle = tokio::spawn(async move { app.run().await });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    common::serving(&addr, &handle).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -210,7 +212,7 @@ async fn client_listen_delivers_to_registered_handlers() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let addr = format!("127.0.0.1:{}", common::free_port());
     let mut app = App::new().with_options(|opt| {
         opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
             .with_tools(|t| t.with_list_changed())
@@ -223,7 +225,7 @@ async fn client_listen_delivers_to_registered_handlers() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    await_reachable(&addr).await;
+    common::serving(&addr, &handle).await;
 
     let seen = Arc::new(AtomicUsize::new(0));
     let counter = seen.clone();
@@ -278,7 +280,7 @@ async fn client_cancel_ends_the_stream_over_http() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let addr = format!("127.0.0.1:{}", common::free_port());
     let mut app = App::new().with_options(|opt| {
         opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
             .with_tools(|t| t.with_list_changed())
@@ -294,7 +296,7 @@ async fn client_cancel_ends_the_stream_over_http() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    await_reachable(&addr).await;
+    common::serving(&addr, &handle).await;
 
     let seen = Arc::new(AtomicUsize::new(0));
     let counter = seen.clone();
@@ -362,7 +364,7 @@ async fn dropping_the_handle_ends_the_subscription() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let addr = format!("127.0.0.1:{}", common::free_port());
     let mut app = App::new().with_options(|opt| {
         opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
             .with_tools(|t| t.with_list_changed())
@@ -378,7 +380,7 @@ async fn dropping_the_handle_ends_the_subscription() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    await_reachable(&addr).await;
+    common::serving(&addr, &handle).await;
 
     let seen = Arc::new(AtomicUsize::new(0));
     let counter = seen.clone();
@@ -439,7 +441,7 @@ async fn disconnecting_ends_the_subscription_abruptly() {
     use neva::Client;
     use neva::client::SubscriptionEnd;
 
-    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let addr = format!("127.0.0.1:{}", common::free_port());
     let mut app = App::new().with_options(|opt| {
         opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
             .with_tools(|t| t.with_list_changed())
@@ -454,7 +456,7 @@ async fn disconnecting_ends_the_subscription_abruptly() {
     });
 
     let handle = tokio::spawn(async move { app.run().await });
-    await_reachable(&addr).await;
+    common::serving(&addr, &handle).await;
 
     let mut observer = Client::new().with_options(|opt| {
         opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
@@ -513,7 +515,7 @@ async fn shutting_down_ends_live_subscriptions_gracefully() {
     use neva::Client;
     use neva::client::SubscriptionEnd;
 
-    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let addr = format!("127.0.0.1:{}", common::free_port());
     let app = App::new().with_options(|opt| {
         opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
             .with_tools(|t| t.with_list_changed())
@@ -522,7 +524,7 @@ async fn shutting_down_ends_live_subscriptions_gracefully() {
     let (app, shutdown) = app.with_shutdown();
 
     let handle = tokio::spawn(async move { app.run().await });
-    await_reachable(&addr).await;
+    common::serving(&addr, &handle).await;
 
     let mut client = Client::new().with_options(|opt| {
         opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
@@ -558,7 +560,7 @@ async fn shutting_down_without_subscriptions_does_not_wait() {
     // The drain is owed only to live subscriptions. A server that never opened
     // one must shut down as immediately as it did before the drain existed --
     // otherwise every server pays a subscription feature it does not use.
-    let addr = format!("127.0.0.1:{}", pick_free_port());
+    let addr = format!("127.0.0.1:{}", common::free_port());
     let app = App::new()
         .with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")))
         // Long enough that waiting it out would be unmistakable.
@@ -566,7 +568,7 @@ async fn shutting_down_without_subscriptions_does_not_wait() {
     let (app, shutdown) = app.with_shutdown();
 
     let handle = tokio::spawn(async move { app.run().await });
-    await_reachable(&addr).await;
+    common::serving(&addr, &handle).await;
 
     shutdown.shutdown();
 
@@ -587,19 +589,6 @@ async fn watched(client: &mut neva::Client) -> Option<String> {
         .first()
         .and_then(|c| c.as_text())
         .map(|t| t.text.to_string())
-}
-
-async fn await_reachable(addr: &str) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        match tokio::net::TcpStream::connect(addr).await {
-            Ok(_) => break,
-            Err(_) if tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(50)).await
-            }
-            Err(err) => panic!("server never became reachable: {err}"),
-        }
-    }
 }
 
 /// Calls a tool over a plain (non-streaming) POST and waits for its reply, so
@@ -657,13 +646,6 @@ fn content_type(resp: &reqwest::Response) -> String {
         .to_owned()
 }
 
-fn pick_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
-}
-
 /// The `_meta` MCP 2026-07-28 requires on every request.
 fn meta() -> serde_json::Value {
     serde_json::json!({
@@ -699,12 +681,12 @@ async fn a_notification_bus_delivers_across_instances() {
     let (tx, _) = tokio::sync::broadcast::channel(64);
     let bus = BroadcastBus(tx);
 
-    let addr_a = format!("127.0.0.1:{}", pick_free_port());
-    let addr_b = format!("127.0.0.1:{}", pick_free_port());
+    let addr_a = format!("127.0.0.1:{}", common::free_port());
+    let addr_b = format!("127.0.0.1:{}", common::free_port());
     let a = tokio::spawn(instance(&addr_a, Some(bus.clone())).run());
     let b = tokio::spawn(instance(&addr_b, Some(bus)).run());
-    await_reachable(&addr_a).await;
-    await_reachable(&addr_b).await;
+    common::serving(&addr_a, &a).await;
+    common::serving(&addr_b, &b).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -747,12 +729,12 @@ async fn a_notification_bus_delivers_across_instances() {
 /// default -- an instance delivers to its own subscribers and to nobody else's.
 #[tokio::test(flavor = "multi_thread")]
 async fn without_a_bus_a_notification_stays_on_its_own_instance() {
-    let addr_a = format!("127.0.0.1:{}", pick_free_port());
-    let addr_b = format!("127.0.0.1:{}", pick_free_port());
+    let addr_a = format!("127.0.0.1:{}", common::free_port());
+    let addr_b = format!("127.0.0.1:{}", common::free_port());
     let a = tokio::spawn(instance(&addr_a, None).run());
     let b = tokio::spawn(instance(&addr_b, None).run());
-    await_reachable(&addr_a).await;
-    await_reachable(&addr_b).await;
+    common::serving(&addr_a, &a).await;
+    common::serving(&addr_b, &b).await;
 
     let client = reqwest::Client::builder()
         .no_proxy()
