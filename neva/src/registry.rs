@@ -36,6 +36,21 @@
 //! README: it must carry the server name as visible text, `mcp-name:
 //! io.github.<user>/<server>`. crates.io strips HTML comments when it renders
 //! markdown, so the hidden-comment form that works for PyPI does not work here.
+//!
+//! # Imports
+//!
+//! [`neva::prelude`](crate::prelude) brings in the completion request's
+//! `Argument` too, so with both globs in scope `Argument` is ambiguous
+//! (E0659). Import this module's by name, which shadows the globs:
+//!
+//! ```rust
+//! use neva::prelude::*;
+//! use neva::registry::*;
+//! use neva::registry::Argument;
+//!
+//! let package = Package::cargo("weather-mcp", "0.3.0")
+//!     .with_package_argument(Argument::named("--port"));
+//! ```
 
 use crate::error::{Error, ErrorCode};
 use crate::types::Icon;
@@ -274,9 +289,9 @@ pub struct ServerManifest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     remotes: Vec<Remote>,
 
-    /// Icons a client may show. Taken from the app's
-    /// [`Implementation`](crate::types::Implementation), which declares them in
-    /// the same shape.
+    /// Icons a client may show, set with
+    /// [`with_icons`](ServerManifest::with_icons). Not taken from the app,
+    /// which declares none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     icons: Option<Vec<Icon>>,
 
@@ -515,8 +530,10 @@ impl ServerManifest {
     /// Attaches publisher metadata, which the registry keeps verbatim under
     /// `_meta["io.modelcontextprotocol.registry/publisher-provided"]`.
     ///
-    /// At most 4KB once serialized; anything larger is refused by
-    /// [`validate`](Self::validate) rather than by the upload.
+    /// The schema types it as a JSON object, and [`validate`](Self::validate)
+    /// refuses anything else. How much of it a registry takes is that
+    /// registry's rule, not the schema's, and is left to it: the official
+    /// registry refuses more than 4 KB, serialized, at the upload.
     ///
     /// # Examples
     /// ```rust
@@ -698,6 +715,21 @@ impl ServerManifest {
                     elided(&repository.url)
                 )));
             }
+        }
+
+        // The schema types it `object`, and a registry reads it as a map of
+        // the publisher's keys: anything else fails to decode at the upload.
+        if let Some(metadata) = self
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.publisher_provided.as_ref())
+            && !metadata.is_object()
+        {
+            return Err(invalid(
+                "publisher metadata is a JSON object of your own keys, as the schema types \
+                 `_meta[\"io.modelcontextprotocol.registry/publisher-provided\"]`: wrap the \
+                 value in one",
+            ));
         }
 
         // A package says how to talk to what it installs, and an app with no
@@ -2146,6 +2178,26 @@ mod tests {
         assert_eq!(read, manifest);
         assert!(json.contains("\"$schema\""));
         assert!(json.contains("\"io.modelcontextprotocol.registry/publisher-provided\""));
+    }
+
+    /// Publisher metadata is an object of the publisher's keys, whatever its
+    /// size: how much of it a registry takes is the registry's to say.
+    #[test]
+    fn publisher_metadata_is_an_object() {
+        for metadata in [
+            serde_json::json!("neva"),
+            serde_json::json!(["neva"]),
+            serde_json::json!(null),
+        ] {
+            let err = manifest()
+                .with_publisher_metadata(metadata)
+                .validate()
+                .expect_err("not an object");
+            assert!(err.to_string().contains("JSON object"), "{err}");
+        }
+
+        let large = serde_json::json!({ "blob": "x".repeat(10_000) });
+        assert!(manifest().with_publisher_metadata(large).validate().is_ok());
     }
 
     impl ServerManifest {
