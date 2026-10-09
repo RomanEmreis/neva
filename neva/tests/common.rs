@@ -19,29 +19,34 @@ const PORTS: u32 = 10_000;
 /// the range the OS takes the local port of an outgoing connection from, so no
 /// client connection in another test can be holding one.
 ///
-/// Linux lets a host move that range and says where it is, so it is read
-/// there, and the ports go above it when there is no room below. macOS and
-/// Windows are taken at their defaults, from 49152, as is a Linux with no room
-/// on either side.
+/// Linux lets a host move that range, and where privileged ports end, and says
+/// where both are, so they are read there: the ports go above the range when
+/// there is no unprivileged room below it. macOS and Windows are taken at
+/// their defaults, from 49152, as is a Linux with no room on either side.
 fn first_port() -> u16 {
     const DEFAULT: u16 = 20_000;
+    let sysctl = |name: &str| std::fs::read_to_string(format!("/proc/sys/net/ipv4/{name}")).ok();
 
-    let Ok(range) = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range") else {
+    let Some(range) = sysctl("ip_local_port_range") else {
         return DEFAULT;
     };
     let mut bounds = range.split_whitespace().map(str::parse::<u32>);
     let (Some(Ok(low)), Some(Ok(high))) = (bounds.next(), bounds.next()) else {
         return DEFAULT;
     };
-    // Below 1024 a port is a privileged one.
-    let first = if low >= 1_024 + PORTS {
-        low - PORTS
-    } else if high + PORTS <= u32::from(u16::MAX) {
-        high + 1
-    } else {
-        return DEFAULT;
-    };
-    u16::try_from(first).unwrap_or(DEFAULT)
+    let unprivileged = sysctl("ip_unprivileged_port_start")
+        .and_then(|start| start.trim().parse::<u32>().ok())
+        .unwrap_or(1_024);
+
+    let below = low
+        .checked_sub(PORTS)
+        .filter(|first| *first >= unprivileged);
+    let above =
+        Some((high + 1).max(unprivileged)).filter(|first| first + PORTS - 1 <= u32::from(u16::MAX));
+    below
+        .or(above)
+        .and_then(|first| u16::try_from(first).ok())
+        .unwrap_or(DEFAULT)
 }
 
 /// A port on `127.0.0.1` that nothing else in this process has been handed,
