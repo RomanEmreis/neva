@@ -1887,7 +1887,7 @@ dependencies = [
 
 [[package]]
 name = "neva"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -1938,7 +1938,7 @@ dependencies = [
 
 [[package]]
 name = "neva_macros"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2959,9 +2959,9 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "svir"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76d80e5862e934db1c1d63be6fbc0529371de211a47a55f6bab012d995d713cc"
+checksum = "92815d7c00ff827da15089f82d949fd46a8e661494d99e9de1942245917af9c1"
 dependencies = [
  "base64 0.23.1",
  "bytes",

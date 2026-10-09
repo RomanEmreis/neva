@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.7.1
+
+### Added
+* `sampling_request` passes `toolChoice: required` on to the model, as
+  svir's `ToolChoice::Required`, where it was an error. With no tools given it
+  is an `InvalidParams` error.
+
+### Changed
+* The `svir` feature requires svir 0.1.5.
+
+### Fixed
+* `sampling_result` reports a model's refusal as the stop reason `refusal`;
+  with svir 0.1.5 it said `endTurn`.
+
 ## 0.7.0
 
 ### Added
