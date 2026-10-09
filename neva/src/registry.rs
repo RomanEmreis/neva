@@ -221,6 +221,8 @@ impl Repository {
 /// dropped when publishing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct Meta {
+    /// A `null` read here is no metadata, as the registry reads it: none is
+    /// written back, so there is nothing for `validate` to refuse.
     #[serde(
         rename = "io.modelcontextprotocol.registry/publisher-provided",
         default,
@@ -2198,6 +2200,21 @@ mod tests {
 
         let large = serde_json::json!({ "blob": "x".repeat(10_000) });
         assert!(manifest().with_publisher_metadata(large).validate().is_ok());
+    }
+
+    /// `validate` judges what `to_json` writes. A `null` read from JSON is no
+    /// metadata, as the registry reads it too, and is not written back; one
+    /// set through the builder would be, and is refused above.
+    #[test]
+    fn null_publisher_metadata_read_from_json_is_none() {
+        let mut json: serde_json::Value =
+            serde_json::from_str(&manifest().to_json().expect("a manifest")).expect("json");
+        json["_meta"] =
+            serde_json::json!({ "io.modelcontextprotocol.registry/publisher-provided": null });
+
+        let read: ServerManifest = serde_json::from_value(json).expect("reads");
+        let written = read.to_json().expect("nothing to refuse");
+        assert!(!written.contains("publisher-provided"), "{written}");
     }
 
     impl ServerManifest {
