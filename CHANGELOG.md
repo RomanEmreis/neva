@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 * `sampling_result` reports a model's refusal as the stop reason `refusal`;
   with svir 0.1.5 it said `endTurn`.
+* `ServerManifest::validate` refuses publisher metadata that is not a JSON
+  object, as the schema types it. `with_publisher_metadata` no longer promises
+  a 4 KB check: that limit is the official registry's, applied at the upload
+  (#153).
+
+### Documentation
+* The `registry` module shows the explicit `Argument` import that a
+  `neva::prelude::*` beside `neva::registry::*` needs (#155).
 
 ## 0.7.0
 
