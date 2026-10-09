@@ -8,7 +8,7 @@ use crate::types::sampling::{
     CreateMessageRequestParams, CreateMessageResult, SamplingMessage, StopReason, ToolChoiceMode,
 };
 use crate::types::{CallToolResponse, Content, Role, ToolUse};
-use ::svir::{Completion, FinishReason, Message, Part, Request, ToolCall};
+use ::svir::{Completion, FinishReason, Message, Part, Request, ToolCall, ToolChoice};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -23,10 +23,12 @@ use std::collections::BTreeMap;
 ///   is for a model: text joined, and an image, audio or a binary resource
 ///   an error the model is told of;
 /// - text, images and resources are as in [`prompt_messages`](super::prompt_messages);
-/// - `toolChoice: none` leaves the tools out.
+/// - `toolChoice: none` leaves the tools out, and `toolChoice: required` asks
+///   the model for a call, which needs tools to call. A model server may take
+///   it and answer without one; the sample then says so with `endTurn`.
 ///
-/// Audio, stop sequences and `toolChoice: required` cannot be passed on, and
-/// are an error rather than dropped. What the spec leaves to the client is
+/// Audio and stop sequences cannot be passed on, and are an error rather than
+/// dropped. What the spec leaves to the client is
 /// left out: `includeContext`, `modelPreferences`, since the model is the
 /// caller's choice, and the provider `metadata`.
 ///
@@ -76,17 +78,21 @@ pub fn sampling_request(
         request = request.temperature(temperature);
     }
 
-    match params.tool_choice.map(|choice| choice.mode) {
-        Some(ToolChoiceMode::Required) => {
-            return Err(refused("A required tool call (`toolChoice: required`)"));
+    let choice = params.tool_choice.map(|choice| choice.mode);
+    if choice != Some(ToolChoiceMode::None) {
+        for mut tool in params.tools.into_iter().flatten() {
+            let name = std::mem::take(&mut tool.name);
+            request = request.tool(convert::descriptor(tool, name)?);
         }
-        Some(ToolChoiceMode::None) => {}
-        Some(ToolChoiceMode::Auto) | None => {
-            for mut tool in params.tools.into_iter().flatten() {
-                let name = std::mem::take(&mut tool.name);
-                request = request.tool(convert::descriptor(tool, name)?);
-            }
+    }
+    if choice == Some(ToolChoiceMode::Required) {
+        if request.tools.is_empty() {
+            return Err(Error::new(
+                ErrorCode::InvalidParams,
+                "`toolChoice: required` asks for a tool call, and no tools were given",
+            ));
         }
+        request = request.tool_choice(ToolChoice::Required);
     }
 
     Ok(turns(params.messages)?
@@ -99,8 +105,9 @@ pub fn sampling_request(
 /// Its text, then a `tool_use` block per call, each keeping the call's id so
 /// that the `tool_result` the server sends back finds it. The stop reason is
 /// `toolUse` when the model called a tool, and otherwise follows why it
-/// stopped: `endTurn`, `maxTokens`, or `contentFilter` when the model
-/// server's filter stopped the answer. The model is the one `request` asked
+/// stopped: `endTurn`, `maxTokens`, `contentFilter` when the model server's
+/// filter stopped the answer, or `refusal` when the model refused, the text
+/// then its refusal. The model is the one `request` asked
 /// for. Reasoning and token counts have no place in a sample and are left out.
 ///
 /// A call whose arguments are not a JSON object is an error: the server could
@@ -220,6 +227,7 @@ fn stop_reason(finish: FinishReason) -> StopReason {
     match finish {
         FinishReason::Length => StopReason::MaxTokens,
         FinishReason::ContentFilter => StopReason::Other("contentFilter".into()),
+        FinishReason::Refusal => StopReason::Other("refusal".into()),
         // `Stop`, `ToolCalls` without a call, and whatever svir adds later:
         // the answer ended.
         _ => StopReason::EndTurn,
@@ -359,19 +367,36 @@ mod tests {
         let stops = CreateMessageRequestParams::new()
             .with_message("Count to ten.")
             .with_stop_seq(vec!["5".into()]);
-        let required = CreateMessageRequestParams::new()
-            .with_message("2 + 3?")
-            .with_tools([serde_json::from_value(add_tool()).expect("a tool")])
-            .with_tool_choice(ToolChoiceMode::Required);
 
-        for (params, what) in [
-            (audio, "Audio"),
-            (stops, "Stop sequences"),
-            (required, "toolChoice: required"),
-        ] {
+        for (params, what) in [(audio, "Audio"), (stops, "Stop sequences")] {
             let err = sampling_request("qwen3", params).expect_err("refused");
             assert!(err.to_string().contains(what), "{err}");
         }
+    }
+
+    #[test]
+    fn a_required_call_is_asked_of_the_model() {
+        let request = sampling_request(
+            "qwen3",
+            CreateMessageRequestParams::new()
+                .with_message("2 + 3?")
+                .with_tools([serde_json::from_value(add_tool()).expect("a tool")])
+                .with_tool_choice(ToolChoiceMode::Required),
+        )
+        .expect("a request");
+
+        assert_eq!(request.tools.len(), 1);
+        assert_eq!(request.tool_choice, ToolChoice::Required);
+    }
+
+    /// A call required with nothing to call is one no model can make.
+    #[test]
+    fn a_required_call_needs_tools() {
+        let params = CreateMessageRequestParams::new()
+            .with_message("2 + 3?")
+            .with_tool_choice(ToolChoiceMode::Required);
+        let err = sampling_request("qwen3", params).expect_err("refused");
+        assert!(err.to_string().contains("toolChoice: required"), "{err}");
     }
 
     #[test]
@@ -445,6 +470,7 @@ mod tests {
                 FinishReason::ContentFilter,
                 StopReason::Other("contentFilter".into()),
             ),
+            (FinishReason::Refusal, StopReason::Other("refusal".into())),
         ] {
             let sample = sampling_result(&request, Completion::new(finish)).expect("a sample");
             assert_eq!(sample.stop_reason, Some(stop));
