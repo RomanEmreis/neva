@@ -2959,9 +2959,9 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "svir"
-version = "0.1.5"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92815d7c00ff827da15089f82d949fd46a8e661494d99e9de1942245917af9c1"
+checksum = "9da72af59fd69ba3bbe49a600737b6f44902a74f6b894c3a369fca5cf8759f2a"
 dependencies = [
  "base64 0.23.1",
  "bytes",

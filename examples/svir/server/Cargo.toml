@@ -8,5 +8,5 @@ rust-version.workspace = true
 [dependencies]
 neva = { path = "../../../neva", features = ["server-macros", "http-server-volga", "di", "svir"] }
 # The model client: svir's default features bring its HTTP client and TLS.
-svir = "0.1.5"
+svir = "0.1.6"
 tokio = { version = "1.47.1", features = ["full"] }
