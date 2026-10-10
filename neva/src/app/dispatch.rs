@@ -3,7 +3,8 @@
 //! [`App::run`](super::App::run) hands each inbound message to
 //! [`App::execute`], which drives it through the middleware pipeline;
 //! `message_middleware` sits at the end of that pipeline, routes the message by
-//! kind, awaits the handler and sends the response.
+//! kind, awaits the handler and sends the response. A request that a middleware
+//! answers before it gets there is answered by the pipeline's runner instead.
 //!
 //! Everything request-scoped that has to outlive the handler is set up and torn
 //! down here: the tracing span, the notification sink, the in-flight count the
@@ -211,9 +212,14 @@ impl App {
         let MwContext {
             msg,
             runtime,
+            dispatched,
             #[cfg(feature = "di")]
             scope,
         } = ctx;
+
+        // From here the reply is this dispatcher's to send, whatever the
+        // middleware around it returns.
+        dispatched.store(true, std::sync::atomic::Ordering::Release);
 
         let id = msg.id();
         let sender = runtime.sender();

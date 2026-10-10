@@ -341,25 +341,45 @@ impl ServerRuntime {
         &self.pending
     }
 
-    /// Starts the middleware pipeline
-    #[inline]
-    pub(crate) async fn execute(self, msg: Message) {
-        if let Some(mw_start) = self.mw_start.clone() {
-            mw_start(MwContext::msg(msg, self)).await;
-        }
-    }
-
-    /// Runs `msg` through the middleware pipeline, and returns what the
-    /// pipeline answered.
+    /// Runs `msg` through the middleware pipeline.
     ///
-    /// [`Self::execute`] drops that answer: the dispatcher at the end of the
-    /// pipeline has sent the real one already. It is what is left when a
-    /// middleware answers without calling `next`, and an in-process caller,
-    /// with no transport to wait on, can still read it.
-    #[cfg(feature = "svir")]
-    pub(crate) async fn answer(self, msg: Message) -> Option<Response> {
-        let mw_start = self.mw_start.clone()?;
-        Some(mw_start(MwContext::msg(msg, self)).await)
+    /// The dispatcher at the end of the pipeline sends a request's reply. A
+    /// middleware that answers without calling `next` keeps the request from
+    /// ever getting there, so what the pipeline returned is sent here instead,
+    /// on the request's session: the transport matches a reply to its request
+    /// by session and id.
+    pub(crate) async fn execute(self, msg: Message) {
+        let Some(mw_start) = self.mw_start.clone() else {
+            return;
+        };
+
+        let owed = match &msg {
+            Message::Request(req) => Some(req.session_id),
+            _ => None,
+        };
+        let sender = self.sender.clone();
+        let ctx = MwContext::msg(msg, self);
+        let dispatched = ctx.dispatched.clone();
+
+        let answer = mw_start(ctx).await;
+
+        let Some(session_id) = owed else {
+            return;
+        };
+        if dispatched.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        let answer = match session_id {
+            Some(session_id) => answer.set_session_id(session_id),
+            None => answer,
+        };
+        if let Err(_err) = sender.send(answer.into()).await {
+            #[cfg(feature = "tracing")]
+            tracing::error!(
+                logger = "neva",
+                error = format!("Error sending a middleware's response: {:?}", _err)
+            );
+        }
     }
 }
 
@@ -698,5 +718,114 @@ impl Context {
             }
             self.sender.send(notification.into()).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::App;
+    use crate::error::{Error, ErrorCode};
+    use crate::middleware::{MwContext, Next};
+    use crate::transport::TransportProtoSender;
+    use crate::types::notification::Notification;
+    use crate::types::{Message, MessageEnvelope, Request, RequestId, Response};
+    use std::sync::{Arc, Mutex};
+
+    /// Runs `msg` through `app`'s pipeline and returns every reply sent for it.
+    async fn replies(mut app: App, msg: Message) -> Vec<Response> {
+        let sent: Arc<Mutex<Vec<MessageEnvelope>>> = Arc::default();
+        app.prepare();
+        app.compose_pipeline();
+        let runtime = app.build_runtime(TransportProtoSender::BatchCollect {
+            real_sender: Arc::new(TransportProtoSender::None),
+            responses: sent.clone(),
+        });
+
+        runtime.execute(msg).await;
+
+        let sent = std::mem::take(&mut *sent.lock().expect("replies"));
+        sent.into_iter()
+            .filter_map(|envelope| match envelope {
+                MessageEnvelope::Response(resp) => Some(resp),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A `tools/call` of `tool`, with the `_meta` MCP 2026-07-28 requires.
+    fn call(tool: &str) -> Request {
+        #[cfg_attr(feature = "legacy-spec", allow(unused_mut))]
+        let mut params = serde_json::json!({ "name": tool, "arguments": {} });
+        #[cfg(not(feature = "legacy-spec"))]
+        {
+            params["_meta"] = serde_json::json!({
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {}
+            });
+        }
+        Request::new(
+            Some(RequestId::Number(1)),
+            crate::types::tool::commands::CALL,
+            Some(params),
+        )
+    }
+
+    fn app() -> App {
+        let mut app = App::new();
+        app.map_tool("ping", || async { "pong" });
+        app
+    }
+
+    fn refused(ctx: &MwContext) -> Response {
+        Response::error(
+            ctx.id(),
+            Error::new(ErrorCode::InvalidRequest, "refused by middleware"),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_request_a_middleware_answers_gets_that_answer() {
+        let app = app().wrap(|ctx: MwContext, _: Next| async move { refused(&ctx) });
+        let session = uuid::Uuid::new_v4();
+        let mut req = call("ping");
+        req.session_id = Some(session);
+
+        let replies = replies(app, Message::Request(req)).await;
+
+        let [Response::Err(err)] = replies.as_slice() else {
+            panic!("one error reply expected, got {replies:?}");
+        };
+        assert_eq!(err.id, RequestId::Number(1));
+        assert_eq!(err.error.message, "refused by middleware");
+        // The transport matches a reply to its request by session and id.
+        assert_eq!(replies[0].session_id(), Some(&session));
+    }
+
+    #[tokio::test]
+    async fn a_request_that_reaches_its_handler_is_answered_once_by_it() {
+        // What a middleware returns once it has called `next` is not sent:
+        // the handler's reply already was.
+        let app = app().wrap(|ctx: MwContext, next: Next| async move {
+            let id = ctx.id();
+            next(ctx).await;
+            Response::error(id, Error::new(ErrorCode::InternalError, "replaced"))
+        });
+
+        let replies = replies(app, Message::Request(call("ping"))).await;
+
+        let [Response::Ok(ok)] = replies.as_slice() else {
+            panic!("one reply from the handler expected, got {replies:?}");
+        };
+        assert_eq!(ok.result["content"][0]["text"], "pong", "{:?}", ok.result);
+    }
+
+    #[tokio::test]
+    async fn a_notification_a_middleware_stops_gets_no_reply() {
+        let app = app().wrap(|ctx: MwContext, _: Next| async move { refused(&ctx) });
+        let notification = Notification::new("notifications/initialized", None);
+
+        let replies = replies(app, Message::Notification(notification)).await;
+
+        assert!(replies.is_empty(), "{replies:?}");
     }
 }

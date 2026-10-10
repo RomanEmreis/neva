@@ -7,7 +7,7 @@ use crate::{
     types::{Message, Request, RequestId, Response, notification::Notification},
 };
 use std::fmt::Debug;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicBool};
 
 #[cfg(feature = "di")]
 use {crate::error::Error, volga_di::Container};
@@ -25,6 +25,12 @@ pub struct MwContext {
     /// Server runtime reference
     pub(super) runtime: ServerRuntime,
 
+    /// Set by the dispatcher at the end of the pipeline when the message
+    /// reaches it: from then on a request's reply is the dispatcher's to send.
+    /// A request that never gets there is answered with what the pipeline
+    /// returned instead.
+    pub(super) dispatched: Arc<AtomicBool>,
+
     /// Dependency injection container scope.
     #[cfg(feature = "di")]
     pub(super) scope: Container,
@@ -37,7 +43,33 @@ impl Debug for MwContext {
     }
 }
 
-/// A reference to the next middleware in the chain
+/// A reference to the next middleware in the chain.
+///
+/// # Answering a request
+///
+/// A middleware that calls `next` hands the request on, and the reply the
+/// caller gets is the one the request's handler produced: it is sent once the
+/// request reaches the end of the pipeline, so a different [`Response`]
+/// returned after `next` is not sent.
+///
+/// A middleware that returns without calling `next` answers the request
+/// itself: what it returns is sent to the caller, over any transport and
+/// inside a batch alike. Build it with the request's id, from
+/// [`MwContext::id`]. A notification gets no reply either way.
+///
+/// # Examples
+///
+/// ```no_run
+/// use neva::prelude::*;
+///
+/// let app = App::new().wrap_tools(|ctx: MwContext, next: Next| async move {
+///     if ctx.request().is_some_and(|req| req.params.is_none()) {
+///         let err = Error::new(ErrorCode::InvalidParams, "a tool call needs params");
+///         return Response::error(ctx.id(), err);
+///     }
+///     next(ctx).await
+/// });
+/// ```
 pub type Next = Arc<dyn Fn(MwContext) -> BoxFuture<'static, Response> + Send + Sync>;
 
 /// Middleware function wrapper
@@ -59,6 +91,7 @@ impl MwContext {
         Self {
             msg,
             runtime,
+            dispatched: Arc::default(),
             #[cfg(feature = "di")]
             scope,
         }
