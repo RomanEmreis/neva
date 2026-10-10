@@ -9,6 +9,7 @@
 //! See [`crate::types::mrtr`] for the state codec and why it seals rather than
 //! signs.
 
+use crate::auth::Claims;
 use crate::error::{Error, ErrorCode};
 use crate::types::{Request, Response};
 
@@ -31,6 +32,17 @@ pub(super) fn salient_params(params: &serde_json::Value) -> serde_json::Value {
         }
         other => other.clone(),
     }
+}
+
+/// The caller a `requestState` is bound to: the token's subject together with
+/// its issuer, since a subject is unique only within its issuer (RFC 7519
+/// section 4.1.2). `None` when the token names no subject.
+///
+/// Encoded as a JSON pair so the binding is unambiguous whatever the two
+/// strings hold.
+pub(super) fn principal_of(claims: &dyn Claims) -> Option<String> {
+    let subject = claims.subject()?;
+    Some(serde_json::json!([claims.issuer(), subject]).to_string())
 }
 
 /// Decodes/verifies any incoming `requestState` and merges this round's
@@ -362,6 +374,71 @@ mod tests {
                 .expect_err("principal mismatch must be rejected");
             assert_eq!(err.code, ErrorCode::InvalidParams);
             assert!(format!("{err}").contains("principal mismatch"), "{err}");
+        }
+
+        #[test]
+        fn the_same_subject_from_another_issuer_is_another_principal() {
+            use crate::auth::DefaultClaims;
+
+            let alice_at = |iss: &str| {
+                super::super::principal_of(&DefaultClaims {
+                    sub: Some("alice".into()),
+                    iss: Some(iss.into()),
+                    ..Default::default()
+                })
+            };
+            let payload = StatePayload {
+                answers: Default::default(),
+                requested: Default::default(),
+                memos: Default::default(),
+                effects: Default::default(),
+                exp: now_secs() + 300,
+                req: request_binding(METHOD, &salient()),
+                principal: alice_at("https://a.example.com"),
+                aud: None,
+            };
+            let req = request_with_state(&encode(&payload));
+
+            let err = seed(
+                &req,
+                &options(),
+                alice_at("https://b.example.com").as_deref(),
+            )
+            .expect_err("another issuer's alice must be rejected");
+            assert!(format!("{err}").contains("principal mismatch"), "{err}");
+            assert!(
+                seed(
+                    &req,
+                    &options(),
+                    alice_at("https://a.example.com").as_deref()
+                )
+                .is_ok()
+            );
+        }
+
+        #[test]
+        fn no_subject_is_no_principal() {
+            use crate::auth::DefaultClaims;
+
+            let issuer_only = DefaultClaims {
+                iss: Some("https://a.example.com".into()),
+                ..Default::default()
+            };
+            assert_eq!(super::super::principal_of(&issuer_only), None);
+
+            // No issuer still binds the subject, and not to the same principal
+            // as a subject whose issuer is named.
+            let subject_only = DefaultClaims {
+                sub: Some("alice".into()),
+                ..Default::default()
+            };
+            let with_issuer = DefaultClaims {
+                iss: Some("https://a.example.com".into()),
+                ..subject_only.clone()
+            };
+            let bare = super::super::principal_of(&subject_only);
+            assert!(bare.is_some());
+            assert_ne!(bare, super::super::principal_of(&with_issuer));
         }
 
         const AUDIENCE: &str = "https://weather.example.com/mcp";

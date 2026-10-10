@@ -3,6 +3,7 @@
 use crate::shared::BoxFuture;
 use crate::{
     app::context::ServerRuntime,
+    auth::Claims,
     types::{Message, Request, RequestId, Response, notification::Notification},
 };
 use std::fmt::Debug;
@@ -137,6 +138,36 @@ impl MwContext {
         if let Message::Notification(notify) = &mut self.msg {
             Some(notify)
         } else {
+            None
+        }
+    }
+
+    /// The claims of the caller's access token, when the current message is
+    /// a [`Request`] from an authenticated caller.
+    ///
+    /// The same claims a handler reads with `Context::claims`, and `None` in
+    /// the same cases: a server without bearer auth, or one built without an
+    /// HTTP transport.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use neva::prelude::*;
+    ///
+    /// let app = App::new().wrap_tools(|ctx, next| async move {
+    ///     let client = ctx.claims().and_then(|c| c.client_id()).unwrap_or("-");
+    ///     eprintln!("tool call by client {client}");
+    ///     next(ctx).await
+    /// });
+    /// ```
+    #[inline]
+    pub fn claims(&self) -> Option<&dyn Claims> {
+        #[cfg(feature = "http-server")]
+        {
+            self.request()?.claims.as_deref()
+        }
+        #[cfg(not(feature = "http-server"))]
+        {
             None
         }
     }

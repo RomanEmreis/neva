@@ -43,6 +43,7 @@ use std::{
 };
 use tokio::time::timeout;
 
+use crate::auth::Claims;
 #[cfg(feature = "http-server")]
 use crate::transport::http::core::auth::RequiredClaims;
 #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
@@ -55,13 +56,13 @@ use crate::{
     shared::Either,
     types::{CreateTaskResult, Task, tool::TaskSupport},
 };
+#[cfg(feature = "http-server")]
+use http::HeaderMap;
 #[cfg(feature = "tasks")]
 #[cfg(feature = "legacy-spec")]
 use serde::de::DeserializeOwned;
 #[cfg(feature = "di")]
 use volga_di::Container;
-#[cfg(feature = "http-server")]
-use {crate::auth::Claims, http::HeaderMap};
 
 #[cfg(feature = "tasks")]
 pub(crate) type ToolOrTaskResponse = Either<CreateTaskResult, CallToolResponse>;
@@ -515,6 +516,40 @@ impl Context {
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "DI scope is not set"))?
             .resolve_shared::<T>()
             .map_err(Into::into)
+    }
+
+    /// The claims of the caller's access token: who is calling, and what the
+    /// token grants them.
+    ///
+    /// `None` when there is no authenticated caller: a server without
+    /// bearer auth, or one built without an HTTP transport, where this
+    /// always answers `None` and handler code builds the same.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use neva::prelude::*;
+    ///
+    /// let mut app = App::new();
+    /// app.map_tool("remember", |ctx: Context, fact: String| async move {
+    ///     let Some(caller) = ctx.claims() else {
+    ///         return Err(Error::new(ErrorCode::InvalidRequest, "no authenticated caller"));
+    ///     };
+    ///     // A subject is unique only within its issuer: key per-user data by both.
+    ///     let owner = (caller.issuer(), caller.subject());
+    ///     Ok(format!("{owner:?} remembers {fact}"))
+    /// });
+    /// ```
+    #[inline]
+    pub fn claims(&self) -> Option<&dyn Claims> {
+        #[cfg(feature = "http-server")]
+        {
+            self.claims.as_deref()
+        }
+        #[cfg(not(feature = "http-server"))]
+        {
+            None
+        }
     }
 
     #[inline]

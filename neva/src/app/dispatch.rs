@@ -412,13 +412,7 @@ impl App {
         }
         #[cfg(not(feature = "legacy-spec"))]
         let (mrtr_arc, mrtr_principal) = if mrtr_method {
-            #[cfg(feature = "http-server")]
-            let principal = context
-                .claims
-                .as_ref()
-                .and_then(|c| c.subject().map(|s| s.to_owned()));
-            #[cfg(not(feature = "http-server"))]
-            let principal: Option<String> = None;
+            let principal = context.claims().and_then(principal_of);
 
             match seed_mrtr_ctx(
                 &req,

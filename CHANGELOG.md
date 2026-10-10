@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+* **Who is calling**: `claims()` on `Context` and `MwContext` returns the
+  claims of the caller's access token, `None` without an authenticated caller.
+  It compiles without `http-server` too, answering `None` there (#161).
+* `Claims::issuer()`, `audience()`, `client_id()` and `scopes()`, defaulted
+  like the rest. `DefaultClaims` answers them from `iss`, `aud`, `client_id`
+  and `scope`, the last split on spaces (#161).
+* `downcast_ref::<T>()` on `dyn Claims`, for an engine's own claims type.
+  `Any` is a supertrait of `Claims`, which every implementor already is (#161).
+
+### Changed
+* `neva::auth::{Claims, DefaultClaims}` are available under `server`, without
+  `http-server`. `neva::transport::http::core::types` still re-exports them.
+* A `requestState` is bound to the caller's issuer as well as its subject.
+
+### Changed (breaking)
+* `DefaultClaims.aud` is a `Vec<String>`, empty when the token names no
+  audience; it was `Option<String>`. `DefaultClaims` gains the `client_id` and
+  `scope` fields.
+
+### Fixed
+* A token whose `aud` is an array is accepted; decoding it into
+  `DefaultClaims` failed, so the request was refused (#161).
+
 ## 0.7.1
 
 ### Added
