@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   is an `InvalidParams` error.
 
 ### Changed
-* The `svir` feature requires svir 0.1.5.
+* The `svir` feature requires svir 0.1.6.
 
 ### Fixed
 * `sampling_result` reports a model's refusal as the stop reason `refusal`;
