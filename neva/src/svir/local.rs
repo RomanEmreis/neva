@@ -452,20 +452,19 @@ impl LocalTools {
             request.claims = self.claims.clone();
         }
 
-        // The dispatcher sends the answer, and the sender keeps it. What the
-        // pipeline returns is the answer only when a middleware gave one
-        // without calling `next`; over a transport that one is never sent.
+        // The answer is sent, by the dispatcher or by a middleware that gave
+        // one without calling `next`, and the sender keeps it.
         let answer = Arc::new(Mutex::new(None));
         let call = runtime
             .with_sender(TransportProtoSender::InProcess(answer.clone()))
             .nested(depth)
-            .answer(Message::Request(request));
-        let returned = DEPTH.scope(depth, call).await;
+            .execute(Message::Request(request));
+
+        DEPTH.scope(depth, call).await;
 
         let sent = answer.lock().ok().and_then(|mut slot| slot.take());
 
-        sent.or(returned)
-            .ok_or_else(|| Error::new(ErrorCode::InternalError, "The call was not answered"))?
+        sent.ok_or_else(|| Error::new(ErrorCode::InternalError, "The call was not answered"))?
             .into_result()
     }
 }

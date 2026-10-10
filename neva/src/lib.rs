@@ -155,48 +155,15 @@ pub(crate) const LATEST_PROTOCOL_VERSION: &str = "2026-07-28";
 ))]
 compile_error!("Only one protocol-generation feature flag may be enabled per build");
 
-#[cfg(any(feature = "http-server", feature = "client-oauth"))]
+#[cfg(any(feature = "server", feature = "client-oauth"))]
 pub mod auth {
-    //! Authentication utilities: neva's engine-neutral `Claims` trait
-    //! (under the HTTP server features),
-    //! the bearer-auth configuration types (under the Volga adapter),
-    //! and the OAuth 2.1 building blocks for both sides of the
-    //! Streamable HTTP transport (under the OAuth features).
+    //! Authentication utilities: the `Claims` of the caller's access token
+    //! (under `server`), the bearer-auth configuration types (under the
+    //! Volga adapter), and the OAuth 2.1 building blocks for both sides of
+    //! the Streamable HTTP transport (under the OAuth features).
 
-    /// `Claims` is neva's engine-neutral trait for typed per-tool
-    /// authorization. Implement this for your custom claims type to enable
-    /// `with_roles` / `with_permissions` gating regardless of which HTTP
-    /// engine delivered the request.
-    ///
-    /// The Volga adapter's `DefaultClaims` already implements both this
-    /// trait and `volga::auth::AuthClaims`, so the same per-tool validator
-    /// runs across every engine.
-    ///
-    /// # Engine contract
-    ///
-    /// An [`HttpEngine`](crate::transport::http::core::engine::HttpEngine)
-    /// adapter that wants protected tools/prompts/resources to authorize
-    /// must wrap its decoded claims in `Arc<dyn Claims>` and insert it
-    /// into the inbound request's extensions before calling the
-    /// `dispatch_post` helper:
-    ///
-    /// ```rust,ignore
-    /// use std::sync::Arc;
-    /// use neva::auth::Claims;
-    ///
-    /// // in the engine's POST route, after decoding the bearer token:
-    /// let claims: Arc<dyn Claims> = Arc::new(my_decoded_claims);
-    /// neutral_req.extensions_mut().insert(claims);
-    /// ```
-    #[cfg(feature = "http-server")]
-    pub use crate::transport::http::core::types::Claims;
-
-    /// `DefaultClaims` is a pre-built [`Claims`] impl matching the JWT
-    /// standard claim names. Engine-agnostic -- under the Volga adapter
-    /// it additionally implements `volga::auth::AuthClaims` so it can
-    /// be fed straight into Volga's bearer-auth pipeline.
-    #[cfg(feature = "http-server")]
-    pub use crate::transport::http::core::types::DefaultClaims;
+    #[cfg(feature = "server")]
+    pub use crate::app::claims::{Claims, DefaultClaims};
 
     /// `AuthConfig` is the Volga-flavored builder used with
     /// `HttpServer::with_auth(...)`. Available only under the Volga adapter.
@@ -501,7 +468,7 @@ pub mod prelude {
     pub use crate::auth::AuthConfig;
     #[cfg(feature = "server-oauth")]
     pub use crate::auth::oauth::OAuthResourceOptions;
-    #[cfg(feature = "http-server")]
+    #[cfg(feature = "server")]
     pub use crate::auth::{Claims, DefaultClaims};
 
     #[cfg(feature = "http-server")]
