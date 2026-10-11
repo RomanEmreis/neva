@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+* **Who is calling**: `claims()` on `Context` and `MwContext`, the claims of
+  the caller's access token. `None` without an authenticated caller, and
+  always without `http-server` (#161).
+* `Claims::issuer()`, `audience()`, `client_id()` and `scopes()`, answered by
+  `DefaultClaims` from `iss`, `aud`, `client_id` and `scope` (#161).
+* `downcast_ref::<T>()` on `dyn Claims`; `Any` is a supertrait of `Claims`
+  (#161).
+
+### Changed
+* `neva::auth::{Claims, DefaultClaims}` no longer need `http-server` (#161).
+* A `requestState` is bound to the caller's issuer as well as its subject.
+
+### Changed (breaking)
+* `DefaultClaims.aud` is a `Vec<String>`, was `Option<String>`; new fields
+  `client_id` and `scope` (#161).
+
+### Fixed
+* A token whose `aud` is an array is no longer refused (#161).
+* A middleware's own answer to a request, without calling `next` or after a
+  timeout around it, reaches the caller instead of being dropped.
+
 ## 0.7.1
 
 ### Added

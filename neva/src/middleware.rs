@@ -3,10 +3,14 @@
 use crate::shared::BoxFuture;
 use crate::{
     app::context::ServerRuntime,
+    auth::Claims,
     types::{Message, Request, RequestId, Response, notification::Notification},
 };
 use std::fmt::Debug;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 #[cfg(feature = "di")]
 use {crate::error::Error, volga_di::Container};
@@ -24,6 +28,9 @@ pub struct MwContext {
     /// Server runtime reference
     pub(super) runtime: ServerRuntime,
 
+    /// Who sends a request's reply: see [`ReplyClaim`].
+    pub(super) reply: Arc<AtomicBool>,
+
     /// Dependency injection container scope.
     #[cfg(feature = "di")]
     pub(super) scope: Container,
@@ -36,7 +43,79 @@ impl Debug for MwContext {
     }
 }
 
-/// A reference to the next middleware in the chain
+/// The right to send a request's reply, so that exactly one is sent: the one
+/// ready first.
+///
+/// The dispatcher at the end of the pipeline takes it once the handler's reply
+/// is ready, and holds it while the reply goes out. The pipeline's runner
+/// takes it once the pipeline returns, for what the pipeline returned. Neither
+/// sends without it.
+///
+/// So a middleware that stops waiting for `next` -- a timeout around it, say --
+/// has its own answer sent: the dispatcher it dropped never got as far. And a
+/// middleware that lets the request through on a task of its own and answers
+/// at once gets that answer out, while the handler's reply, when it comes,
+/// finds the right taken.
+///
+/// Dropped before [`Self::keep`], mid-send, the right is given back. A send
+/// cut short sent nothing: both transports queue on a bounded channel, whose
+/// send is cancel-safe.
+pub(crate) struct ReplyClaim(Option<Arc<AtomicBool>>);
+
+impl ReplyClaim {
+    /// Takes the right to send the reply, unless it is taken already.
+    #[inline]
+    pub(crate) fn take(reply: Arc<AtomicBool>) -> Option<Self> {
+        reply
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+            .then(|| Self(Some(reply)))
+    }
+
+    /// Keeps the right for good: the reply is out.
+    #[inline]
+    pub(crate) fn keep(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for ReplyClaim {
+    #[inline]
+    fn drop(&mut self) {
+        if let Some(reply) = self.0.take() {
+            reply.store(false, Ordering::Release);
+        }
+    }
+}
+
+/// A reference to the next middleware in the chain.
+///
+/// # Answering a request
+///
+/// A middleware that calls `next` hands the request on, and the reply the
+/// caller gets is the one the request's handler produced: it is sent once the
+/// request reaches the end of the pipeline, so a different [`Response`]
+/// returned after `next` is not sent.
+///
+/// A middleware that returns without calling `next` answers the request
+/// itself: what it returns is sent to the caller, over any transport and
+/// inside a batch alike. So does one that stops waiting for `next` before the
+/// reply is out, a timeout around it say. Build the answer with the request's
+/// id, from [`MwContext::id`]. A notification gets no reply either way.
+///
+/// # Examples
+///
+/// ```no_run
+/// use neva::prelude::*;
+///
+/// let app = App::new().wrap_tools(|ctx: MwContext, next: Next| async move {
+///     if ctx.request().is_some_and(|req| req.params.is_none()) {
+///         let err = Error::new(ErrorCode::InvalidParams, "a tool call needs params");
+///         return Response::error(ctx.id(), err);
+///     }
+///     next(ctx).await
+/// });
+/// ```
 pub type Next = Arc<dyn Fn(MwContext) -> BoxFuture<'static, Response> + Send + Sync>;
 
 /// Middleware function wrapper
@@ -58,6 +137,7 @@ impl MwContext {
         Self {
             msg,
             runtime,
+            reply: Arc::default(),
             #[cfg(feature = "di")]
             scope,
         }
@@ -141,6 +221,36 @@ impl MwContext {
         }
     }
 
+    /// The claims of the caller's access token, when the current message is
+    /// a [`Request`] from an authenticated caller.
+    ///
+    /// The same claims a handler reads with `Context::claims`, and `None` in
+    /// the same cases: a server without bearer auth, or one built without an
+    /// HTTP transport.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use neva::prelude::*;
+    ///
+    /// let app = App::new().wrap_tools(|ctx, next| async move {
+    ///     let client = ctx.claims().and_then(|c| c.client_id()).unwrap_or("-");
+    ///     eprintln!("tool call by client {client}");
+    ///     next(ctx).await
+    /// });
+    /// ```
+    #[inline]
+    pub fn claims(&self) -> Option<&dyn Claims> {
+        #[cfg(feature = "http-server")]
+        {
+            self.request()?.claims.as_deref()
+        }
+        #[cfg(not(feature = "http-server"))]
+        {
+            None
+        }
+    }
+
     /// Resolves a service and returns a cloned instance.
     /// `T` must implement `Clone` otherwise
     /// use resolve_shared method that returns a shared pointer.
@@ -199,5 +309,33 @@ impl Middlewares {
             next = Arc::new(move |ctx| current_mw(ctx, prev_next.clone()));
         }
         Some(next)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_reply_is_claimed_once() {
+        let reply = Arc::<AtomicBool>::default();
+
+        let claim = ReplyClaim::take(reply.clone()).expect("unclaimed");
+        assert!(ReplyClaim::take(reply.clone()).is_none());
+
+        claim.keep();
+        assert!(
+            ReplyClaim::take(reply).is_none(),
+            "a kept claim stays taken"
+        );
+    }
+
+    #[test]
+    fn a_claim_dropped_before_its_reply_is_out_is_given_back() {
+        let reply = Arc::<AtomicBool>::default();
+
+        drop(ReplyClaim::take(reply.clone()).expect("unclaimed"));
+
+        assert!(ReplyClaim::take(reply).is_some());
     }
 }

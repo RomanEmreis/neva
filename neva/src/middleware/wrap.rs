@@ -12,6 +12,20 @@ use std::future::Future;
 
 impl App {
     /// Registers a global middleware
+    ///
+    /// A middleware that returns without calling `next` answers the request
+    /// itself; [`Next`] says what reaches the caller.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use neva::prelude::*;
+    ///
+    /// let app = App::new().wrap(|ctx: MwContext, next: Next| async move {
+    ///     eprintln!("request {:?}", ctx.id());
+    ///     next(ctx).await
+    /// });
+    /// ```
     pub fn wrap<F, R>(mut self, middleware: F) -> Self
     where
         F: Fn(MwContext, Next) -> R + Clone + Send + Sync + 'static,

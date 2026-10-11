@@ -20,6 +20,23 @@ async fn remote_tool(name: String) {
     tracing::debug!("running remote tool: {}", name);
 }
 
+/// Who is calling: the subject and issuer of the caller's token
+#[tool]
+async fn whoami(ctx: Context) -> Result<String, Error> {
+    let Some(caller) = ctx.claims() else {
+        return Err(Error::new(
+            ErrorCode::InvalidRequest,
+            "no authenticated caller",
+        ));
+    };
+    // A subject is unique only within its issuer: per-user data is keyed by both.
+    Ok(format!(
+        "{} from {}",
+        caller.subject().unwrap_or("nobody"),
+        caller.issuer().unwrap_or("no issuer")
+    ))
+}
+
 /// A tool that allowed only to admins
 #[tool(roles = ["admin"])]
 async fn admin_tool(name: String) {

@@ -8,6 +8,11 @@
 use bytes::Bytes;
 use http::HeaderMap;
 
+// The claims contract is public as `neva::auth::{Claims, DefaultClaims}`,
+// without an HTTP transport too; this path is kept for engines that import it
+// from here.
+pub use crate::auth::{Claims, DefaultClaims};
+
 /// Engine-neutral inbound HTTP request.
 ///
 /// The body is fully buffered to [`Bytes`] before this type is constructed --
@@ -67,107 +72,6 @@ pub enum StreamResponse<S> {
 /// Note the `Status` variant is now [`StreamResponse::Complete`].
 #[deprecated(note = "renamed to StreamResponse; the Status variant is now Complete")]
 pub type SseResponse<S> = StreamResponse<S>;
-
-/// Typed claims contract used by neva's per-tool authorization checks.
-///
-/// This is neva's engine-neutral trait. Engine adapters that want their
-/// own claims type (axum, hyper, ...) implement this trait so that
-/// `with_roles` / `with_permissions` on tools, prompts, and resources
-/// continue to gate access regardless of which HTTP stack delivered the
-/// request.
-///
-/// Under the default Volga adapter, `volga::auth::AuthClaims` is also
-/// re-exported as [`crate::auth::Claims`], and the Volga-flavored
-/// `DefaultClaims` implements this trait too -- so the same validator
-/// runs for every engine.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// #[derive(Debug)]
-/// struct MyClaims { sub: String, role: String }
-///
-/// impl neva::auth::Claims for MyClaims {
-///     fn role(&self) -> Option<&str> { Some(&self.role) }
-/// }
-/// ```
-///
-/// `Debug` is required so that `Request` (which derives `Debug`) can
-/// hold an `Arc<dyn Claims>`.
-pub trait Claims: std::fmt::Debug + Send + Sync + 'static {
-    /// Authenticated subject (principal) for this request, if any.
-    ///
-    /// Used to bind MRTR `requestState` to the principal that produced it
-    /// under MCP 2026-07-28. Defaults to `None`.
-    fn subject(&self) -> Option<&str> {
-        None
-    }
-    /// Single role for this subject, if any.
-    fn role(&self) -> Option<&str> {
-        None
-    }
-    /// Multiple roles for this subject, if any.
-    fn roles(&self) -> Option<&[String]> {
-        None
-    }
-    /// Permission set for this subject, if any.
-    fn permissions(&self) -> Option<&[String]> {
-        None
-    }
-}
-
-/// Engine-agnostic pre-built [`Claims`] type matching the JWT standard
-/// claim names. Available for every HTTP engine -- under the Volga
-/// adapter it also implements `volga::auth::AuthClaims` so it can be
-/// fed straight into Volga's bearer-auth pipeline.
-#[derive(Default, Clone, Debug, serde::Deserialize)]
-pub struct DefaultClaims {
-    /// JWT `sub` claim -- subject.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sub: Option<String>,
-    /// JWT `iss` claim -- issuer.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub iss: Option<String>,
-    /// JWT `aud` claim -- audience.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub aud: Option<String>,
-    /// JWT `exp` claim -- expiration time (seconds since epoch).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub exp: Option<i64>,
-    /// JWT `nbf` claim -- not-before time.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub nbf: Option<i64>,
-    /// JWT `iat` claim -- issued-at time.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub iat: Option<i64>,
-    /// JWT `jti` claim -- token id.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub jti: Option<String>,
-    /// Subject role.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
-    /// Subject roles.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub roles: Option<Vec<String>>,
-    /// Subject permissions.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub permissions: Option<Vec<String>>,
-}
-
-impl Claims for DefaultClaims {
-    fn subject(&self) -> Option<&str> {
-        self.sub.as_deref()
-    }
-    fn role(&self) -> Option<&str> {
-        self.role.as_deref()
-    }
-    fn roles(&self) -> Option<&[String]> {
-        self.roles.as_deref()
-    }
-    fn permissions(&self) -> Option<&[String]> {
-        self.permissions.as_deref()
-    }
-}
 
 /// Identifier of one tracked SSE event: which stream carries it, and where in
 /// that stream it sits.
