@@ -30,9 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 * A token whose `aud` is an array is accepted; decoding it into
   `DefaultClaims` failed, so the request was refused (#161).
-* A request that a middleware answers without calling `next` gets that answer,
-  over every transport and inside a batch. It was dropped, and the caller
-  waited until its timeout.
+* A request that a middleware answers gets that answer, over every transport
+  and inside a batch: one answered without calling `next`, or once the
+  middleware stopped waiting for `next` (a timeout around it). It was dropped,
+  and the caller waited until its timeout.
 
 ## 0.7.1
 

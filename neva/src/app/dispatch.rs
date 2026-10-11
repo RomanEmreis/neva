@@ -12,6 +12,7 @@
 //! [`super::mrtr`]).
 
 use super::*;
+use crate::middleware::ReplyClaim;
 use crate::types::RequestId;
 use futures_util::FutureExt;
 use tokio_util::sync::CancellationToken;
@@ -212,14 +213,16 @@ impl App {
         let MwContext {
             msg,
             runtime,
-            dispatched,
+            reply,
             #[cfg(feature = "di")]
             scope,
         } = ctx;
 
-        // From here the reply is this dispatcher's to send, whatever the
-        // middleware around it returns.
-        dispatched.store(true, std::sync::atomic::Ordering::Release);
+        // The reply is this dispatcher's to send, whatever the middleware
+        // around it returns -- unless one of them has answered already,
+        // letting the request through without waiting for it. Given back if
+        // this future is dropped before the reply is out.
+        let claim = ReplyClaim::take(reply);
 
         let id = msg.id();
         let sender = runtime.sender();
@@ -272,13 +275,17 @@ impl App {
         };
 
         if let Some(resp) = resp
-            && let Err(_err) = sender.send(resp.into()).await
+            && let Some(claim) = claim
         {
-            #[cfg(feature = "tracing")]
-            tracing::error!(
-                logger = "neva",
-                error = format!("Error sending response: {:?}", _err)
-            );
+            let sent = sender.send(resp.into()).await;
+            claim.keep();
+            if let Err(_err) = sent {
+                #[cfg(feature = "tracing")]
+                tracing::error!(
+                    logger = "neva",
+                    error = format!("Error sending response: {:?}", _err)
+                );
+            }
         }
 
         Response::empty(id)
@@ -615,23 +622,7 @@ impl App {
             _ => resp,
         };
 
-        let mut resp = resp.into_response(req_id);
-        // The two things MCP 2026-07-28 puts on every result: the discriminator
-        // and the server's own identity (`serverInfo` left `DiscoverResult`).
-        // Both are stamped here, at the single seam every dispatched response
-        // passes through -- a handler that returns a `Response` it built
-        // elsewhere, or proxied from an upstream peer, reaches the wire without
-        // passing `Response::success`.
-        #[cfg(not(feature = "legacy-spec"))]
-        {
-            resp = resp
-                .with_result_type()
-                .with_server_info(&options.implementation);
-        }
-
-        if let Some(session_id) = session_id {
-            resp = resp.set_session_id(session_id);
-        }
+        let resp = outgoing(resp.into_response(req_id), &options, session_id);
 
         // Record the committed final response under the incoming state's tag
         // plus this round's answers digest (see `state_tag` above). Retained
@@ -1034,6 +1025,33 @@ mod opens_subscription_tests {
         ])
         .expect("non-empty batch");
         assert!(!opens_subscription(&Message::Batch(batch)));
+    }
+}
+
+/// What every reply to a request carries on its way out, whoever produced it:
+/// the handler's, through the dispatcher, or a middleware's that never let the
+/// request get there.
+///
+/// Under MCP 2026-07-28 that is the two things the protocol puts on every
+/// result: the `resultType` discriminator and the server's own identity
+/// (`serverInfo` left `DiscoverResult`). They are stamped here rather than
+/// trusted to every producer: a `Response` built elsewhere, or proxied from an
+/// upstream peer, reaches the wire without passing `Response::success`. And
+/// the session the transport matches the reply to its request by.
+pub(super) fn outgoing(
+    #[cfg_attr(feature = "legacy-spec", allow(unused_mut))] mut resp: Response,
+    #[cfg_attr(feature = "legacy-spec", allow(unused_variables))] options: &RuntimeMcpOptions,
+    session_id: Option<uuid::Uuid>,
+) -> Response {
+    #[cfg(not(feature = "legacy-spec"))]
+    {
+        resp = resp
+            .with_result_type()
+            .with_server_info(&options.implementation);
+    }
+    match session_id {
+        Some(session_id) => resp.set_session_id(session_id),
+        None => resp,
     }
 }
 

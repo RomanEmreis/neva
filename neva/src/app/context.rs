@@ -17,7 +17,7 @@ use crate::types::{
     SubscriptionsListenResult,
 };
 use crate::{
-    middleware::{MwContext, Next},
+    middleware::{MwContext, Next, ReplyClaim},
     shared::{IntoArgs, RequestQueue},
     transport::TransportProtoSender,
     types::{
@@ -344,10 +344,10 @@ impl ServerRuntime {
     /// Runs `msg` through the middleware pipeline.
     ///
     /// The dispatcher at the end of the pipeline sends a request's reply. A
-    /// middleware that answers without calling `next` keeps the request from
-    /// ever getting there, so what the pipeline returned is sent here instead,
-    /// on the request's session: the transport matches a reply to its request
-    /// by session and id.
+    /// request that a middleware answers without letting it get there -- or
+    /// whose dispatcher it stopped waiting for before the reply was out -- is
+    /// answered here instead, with what the pipeline returned. Exactly one of
+    /// the two sends: see [`ReplyClaim`].
     pub(crate) async fn execute(self, msg: Message) {
         let Some(mw_start) = self.mw_start.clone() else {
             return;
@@ -358,22 +358,22 @@ impl ServerRuntime {
             _ => None,
         };
         let sender = self.sender.clone();
+        let options = self.options();
         let ctx = MwContext::msg(msg, self);
-        let dispatched = ctx.dispatched.clone();
+        let reply = ctx.reply.clone();
 
         let answer = mw_start(ctx).await;
 
         let Some(session_id) = owed else {
             return;
         };
-        if dispatched.load(std::sync::atomic::Ordering::Acquire) {
+        let Some(claim) = ReplyClaim::take(reply) else {
             return;
-        }
-        let answer = match session_id {
-            Some(session_id) => answer.set_session_id(session_id),
-            None => answer,
         };
-        if let Err(_err) = sender.send(answer.into()).await {
+        let answer = super::dispatch::outgoing(answer, &options, session_id);
+        let sent = sender.send(answer.into()).await;
+        claim.keep();
+        if let Err(_err) = sent {
             #[cfg(feature = "tracing")]
             tracing::error!(
                 logger = "neva",
@@ -729,10 +729,22 @@ mod tests {
     use crate::transport::TransportProtoSender;
     use crate::types::notification::Notification;
     use crate::types::{Message, MessageEnvelope, Request, RequestId, Response};
+    use std::future::Future;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     /// Runs `msg` through `app`'s pipeline and returns every reply sent for it.
-    async fn replies(mut app: App, msg: Message) -> Vec<Response> {
+    async fn replies(app: App, msg: Message) -> Vec<Response> {
+        replies_then(app, msg, || async {}).await
+    }
+
+    /// [`replies`], once `then` has run as well: whatever the pipeline left
+    /// running gets to send before the replies are counted.
+    async fn replies_then<F, R>(mut app: App, msg: Message, then: F) -> Vec<Response>
+    where
+        F: FnOnce() -> R,
+        R: Future<Output = ()>,
+    {
         let sent: Arc<Mutex<Vec<MessageEnvelope>>> = Arc::default();
         app.prepare();
         app.compose_pipeline();
@@ -742,6 +754,7 @@ mod tests {
         });
 
         runtime.execute(msg).await;
+        then().await;
 
         let sent = std::mem::take(&mut *sent.lock().expect("replies"));
         sent.into_iter()
@@ -817,6 +830,91 @@ mod tests {
             panic!("one reply from the handler expected, got {replies:?}");
         };
         assert_eq!(ok.result["content"][0]["text"], "pong", "{:?}", ok.result);
+    }
+
+    #[tokio::test]
+    async fn a_middleware_that_stops_waiting_for_next_gets_its_answer_sent() {
+        // The timeout drops the dispatcher before the handler is done, and so
+        // before any reply is out: the middleware's answer is the reply.
+        let mut app = App::new();
+        app.map_tool("slow", || async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            "late"
+        });
+        let app = app.wrap(|ctx: MwContext, next: Next| async move {
+            let id = ctx.id();
+            match tokio::time::timeout(Duration::from_millis(20), next(ctx)).await {
+                Ok(resp) => resp,
+                Err(_) => Response::error(id, Error::new(ErrorCode::InternalError, "timed out")),
+            }
+        });
+
+        let replies = replies(app, Message::Request(call("slow"))).await;
+
+        let [Response::Err(err)] = replies.as_slice() else {
+            panic!("the middleware's answer expected, got {replies:?}");
+        };
+        assert_eq!(err.error.message, "timed out");
+    }
+
+    #[tokio::test]
+    async fn a_request_let_through_without_waiting_is_answered_once() {
+        // The middleware answers at once and leaves the handler running on a
+        // task of its own. On this single-threaded runtime that task starts
+        // only once the pipeline has returned, so the middleware's answer is
+        // out first, and the handler finds the reply taken.
+        let running: Arc<Mutex<Option<tokio::task::JoinHandle<Response>>>> = Arc::default();
+        let app = app().wrap({
+            let running = running.clone();
+            move |ctx: MwContext, next: Next| {
+                let running = running.clone();
+                async move {
+                    let id = ctx.id();
+                    *running.lock().expect("running") = Some(tokio::spawn(next(ctx)));
+                    Response::error(id, Error::new(ErrorCode::InternalError, "accepted"))
+                }
+            }
+        });
+
+        let replies = replies_then(app, Message::Request(call("ping")), || async move {
+            let handler = running.lock().expect("running").take();
+            if let Some(handler) = handler {
+                handler.await.expect("handler");
+            }
+        })
+        .await;
+
+        let [Response::Err(err)] = replies.as_slice() else {
+            panic!("one reply expected, got {replies:?}");
+        };
+        assert_eq!(err.error.message, "accepted");
+    }
+
+    #[cfg(not(feature = "legacy-spec"))]
+    #[tokio::test]
+    async fn a_middleware_answer_is_stamped_like_any_result() {
+        let app = app().wrap(|ctx: MwContext, _: Next| async move {
+            // Built by hand, as a proxied result is: no discriminator and no
+            // server identity.
+            let result = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": ctx.id(),
+                "result": { "content": [] }
+            });
+            Response::Ok(serde_json::from_value(result).expect("result"))
+        });
+
+        let replies = replies(app, Message::Request(call("ping"))).await;
+
+        let [Response::Ok(ok)] = replies.as_slice() else {
+            panic!("one result expected, got {replies:?}");
+        };
+        assert_eq!(ok.result["resultType"], "complete", "{:?}", ok.result);
+        assert!(
+            ok.result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"].is_string(),
+            "{:?}",
+            ok.result
+        );
     }
 
     #[tokio::test]

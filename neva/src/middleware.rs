@@ -7,7 +7,10 @@ use crate::{
     types::{Message, Request, RequestId, Response, notification::Notification},
 };
 use std::fmt::Debug;
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 #[cfg(feature = "di")]
 use {crate::error::Error, volga_di::Container};
@@ -25,11 +28,8 @@ pub struct MwContext {
     /// Server runtime reference
     pub(super) runtime: ServerRuntime,
 
-    /// Set by the dispatcher at the end of the pipeline when the message
-    /// reaches it: from then on a request's reply is the dispatcher's to send.
-    /// A request that never gets there is answered with what the pipeline
-    /// returned instead.
-    pub(super) dispatched: Arc<AtomicBool>,
+    /// Who sends a request's reply: see [`ReplyClaim`].
+    pub(super) reply: Arc<AtomicBool>,
 
     /// Dependency injection container scope.
     #[cfg(feature = "di")]
@@ -40,6 +40,48 @@ impl Debug for MwContext {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MwContext").field("msg", &self.msg).finish()
+    }
+}
+
+/// The right to send a request's reply, so that exactly one is sent.
+///
+/// The dispatcher at the end of the pipeline takes it when the request reaches
+/// it, and holds it while the handler runs and the reply goes out. Dropped
+/// before [`Self::keep`] -- its future cancelled by a middleware that stopped
+/// waiting for `next`, a timeout around it say -- it is given back, and the
+/// answer that middleware returned is sent instead. A send cut short sent
+/// nothing: both transports queue on a bounded channel, whose send is
+/// cancel-safe.
+///
+/// The pipeline's runner takes what is left once the pipeline returns. A
+/// middleware that let the request through without waiting for it, and
+/// answered itself, gets its answer out first; the dispatcher then runs the
+/// handler but finds the reply taken.
+pub(crate) struct ReplyClaim(Option<Arc<AtomicBool>>);
+
+impl ReplyClaim {
+    /// Takes the right to send the reply, unless it is taken already.
+    #[inline]
+    pub(crate) fn take(reply: Arc<AtomicBool>) -> Option<Self> {
+        reply
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+            .then(|| Self(Some(reply)))
+    }
+
+    /// Keeps the right for good: the reply is out.
+    #[inline]
+    pub(crate) fn keep(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for ReplyClaim {
+    #[inline]
+    fn drop(&mut self) {
+        if let Some(reply) = self.0.take() {
+            reply.store(false, Ordering::Release);
+        }
     }
 }
 
@@ -54,8 +96,9 @@ impl Debug for MwContext {
 ///
 /// A middleware that returns without calling `next` answers the request
 /// itself: what it returns is sent to the caller, over any transport and
-/// inside a batch alike. Build it with the request's id, from
-/// [`MwContext::id`]. A notification gets no reply either way.
+/// inside a batch alike. So does one that stops waiting for `next` before the
+/// reply is out, a timeout around it say. Build the answer with the request's
+/// id, from [`MwContext::id`]. A notification gets no reply either way.
 ///
 /// # Examples
 ///
@@ -91,7 +134,7 @@ impl MwContext {
         Self {
             msg,
             runtime,
-            dispatched: Arc::default(),
+            reply: Arc::default(),
             #[cfg(feature = "di")]
             scope,
         }
