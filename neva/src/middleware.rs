@@ -43,20 +43,23 @@ impl Debug for MwContext {
     }
 }
 
-/// The right to send a request's reply, so that exactly one is sent.
+/// The right to send a request's reply, so that exactly one is sent: the one
+/// ready first.
 ///
-/// The dispatcher at the end of the pipeline takes it when the request reaches
-/// it, and holds it while the handler runs and the reply goes out. Dropped
-/// before [`Self::keep`] -- its future cancelled by a middleware that stopped
-/// waiting for `next`, a timeout around it say -- it is given back, and the
-/// answer that middleware returned is sent instead. A send cut short sent
-/// nothing: both transports queue on a bounded channel, whose send is
-/// cancel-safe.
+/// The dispatcher at the end of the pipeline takes it once the handler's reply
+/// is ready, and holds it while the reply goes out. The pipeline's runner
+/// takes it once the pipeline returns, for what the pipeline returned. Neither
+/// sends without it.
 ///
-/// The pipeline's runner takes what is left once the pipeline returns. A
-/// middleware that let the request through without waiting for it, and
-/// answered itself, gets its answer out first; the dispatcher then runs the
-/// handler but finds the reply taken.
+/// So a middleware that stops waiting for `next` -- a timeout around it, say --
+/// has its own answer sent: the dispatcher it dropped never got as far. And a
+/// middleware that lets the request through on a task of its own and answers
+/// at once gets that answer out, while the handler's reply, when it comes,
+/// finds the right taken.
+///
+/// Dropped before [`Self::keep`], mid-send, the right is given back. A send
+/// cut short sent nothing: both transports queue on a bounded channel, whose
+/// send is cancel-safe.
 pub(crate) struct ReplyClaim(Option<Arc<AtomicBool>>);
 
 impl ReplyClaim {
@@ -306,5 +309,33 @@ impl Middlewares {
             next = Arc::new(move |ctx| current_mw(ctx, prev_next.clone()));
         }
         Some(next)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_reply_is_claimed_once() {
+        let reply = Arc::<AtomicBool>::default();
+
+        let claim = ReplyClaim::take(reply.clone()).expect("unclaimed");
+        assert!(ReplyClaim::take(reply.clone()).is_none());
+
+        claim.keep();
+        assert!(
+            ReplyClaim::take(reply).is_none(),
+            "a kept claim stays taken"
+        );
+    }
+
+    #[test]
+    fn a_claim_dropped_before_its_reply_is_out_is_given_back() {
+        let reply = Arc::<AtomicBool>::default();
+
+        drop(ReplyClaim::take(reply.clone()).expect("unclaimed"));
+
+        assert!(ReplyClaim::take(reply).is_some());
     }
 }

@@ -218,12 +218,6 @@ impl App {
             scope,
         } = ctx;
 
-        // The reply is this dispatcher's to send, whatever the middleware
-        // around it returns -- unless one of them has answered already,
-        // letting the request through without waiting for it. Given back if
-        // this future is dropped before the reply is out.
-        let claim = ReplyClaim::take(reply);
-
         let id = msg.id();
         let sender = runtime.sender();
 
@@ -274,8 +268,12 @@ impl App {
             }
         };
 
+        // The reply is claimed only now that it is ready: a middleware that
+        // let the request through without waiting for it, and answered first,
+        // has taken it already. Given back if this future is dropped before
+        // the reply is out.
         if let Some(resp) = resp
-            && let Some(claim) = claim
+            && let Some(claim) = ReplyClaim::take(reply)
         {
             let sent = sender.send(resp.into()).await;
             claim.keep();

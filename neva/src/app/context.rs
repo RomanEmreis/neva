@@ -732,6 +732,7 @@ mod tests {
     use std::future::Future;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
+    use tokio::sync::Notify;
 
     /// Runs `msg` through `app`'s pipeline and returns every reply sent for it.
     async fn replies(app: App, msg: Message) -> Vec<Response> {
@@ -857,26 +858,45 @@ mod tests {
         assert_eq!(err.error.message, "timed out");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_request_let_through_without_waiting_is_answered_once() {
-        // The middleware answers at once and leaves the handler running on a
-        // task of its own. On this single-threaded runtime that task starts
-        // only once the pipeline has returned, so the middleware's answer is
-        // out first, and the handler finds the reply taken.
+        // The middleware leaves the handler running on a task of its own and
+        // answers once the handler has started -- so the dispatcher is well
+        // under way, on another thread -- but before it is done. Its answer is
+        // ready first and goes out; the handler's, when it comes, finds the
+        // reply taken.
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let mut app = App::new();
+        app.map_tool("held", {
+            let (started, release) = (started.clone(), release.clone());
+            move || {
+                let (started, release) = (started.clone(), release.clone());
+                async move {
+                    started.notify_one();
+                    release.notified().await;
+                    "pong"
+                }
+            }
+        });
+
         let running: Arc<Mutex<Option<tokio::task::JoinHandle<Response>>>> = Arc::default();
-        let app = app().wrap({
+        let app = app.wrap({
             let running = running.clone();
             move |ctx: MwContext, next: Next| {
-                let running = running.clone();
+                let (running, started) = (running.clone(), started.clone());
                 async move {
                     let id = ctx.id();
-                    *running.lock().expect("running") = Some(tokio::spawn(next(ctx)));
+                    let handler = tokio::spawn(next(ctx));
+                    *running.lock().expect("running") = Some(handler);
+                    started.notified().await;
                     Response::error(id, Error::new(ErrorCode::InternalError, "accepted"))
                 }
             }
         });
 
-        let replies = replies_then(app, Message::Request(call("ping")), || async move {
+        let replies = replies_then(app, Message::Request(call("held")), || async move {
+            release.notify_one();
             let handler = running.lock().expect("running").take();
             if let Some(handler) = handler {
                 handler.await.expect("handler");
