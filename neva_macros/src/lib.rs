@@ -42,6 +42,9 @@ mod shared;
 /// * `output_schema` - Schema for the tool output.
 /// * `annotations` - Arbitrary [metadata](https://docs.rs/neva/latest/neva/types/tool/struct.ToolAnnotations.html).
 /// * `roles` & `permissions` - Define which users can run the tool when using Streamable HTTP transport with OAuth.
+/// * `scopes` - The OAuth scopes the caller's access token must grant, every one of them. A token
+///   short of some is answered with `403` and an `insufficient_scope` challenge, so the client can
+///   re-authorize for them and retry.
 /// * `middleware` - Middleware list to apply to the tool.
 /// * `task_support` - Specifies task augmentation support for this tool.
 /// * `no_schema` - Explicitly disables input schema generation if it's not set in `input_schema`.
@@ -113,6 +116,7 @@ mod shared;
 ///     descr = "Say from JSON",
 ///     roles = ["user"],
 ///     permissions = ["read"],
+///     scopes = ["notes:read"],
 ///     annotations = r#"{
 ///         "destructiveHint": false,
 ///         "idempotentHint": true,
@@ -171,6 +175,7 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// * `mime` - Resource MIME type.
 /// * `annotations` - Resource content arbitrary [metadata](https://docs.rs/neva/latest/neva/types/struct.Annotations.html).
 /// * `roles` & `permissions` - Define which users can read the resource when using Streamable HTTP transport with OAuth.
+/// * `scopes` - The OAuth scopes the caller's access token must grant. See [`macro@tool`].
 /// * `ui_meta` - MCP Apps: the resource's `_meta.ui` block as JSON (`csp`,
 ///   `permissions`, `domain`, `prefersBorder`). Needs neva's `apps` feature and
 ///   a `ui://` URI. Keys are checked at compile time -- `_meta` is an open map,
@@ -225,6 +230,7 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///     mime = "text/plain",
 ///     roles = ["user"],
 ///     permissions = ["read"],
+///     scopes = ["notes:read"],
 ///     annotations = r#"{
 ///         "audience": ["user"],
 ///         "priority": 1.0
@@ -280,7 +286,8 @@ pub fn resources(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// * `no_args` - Explicitly disables argument generation if it's not set in `args`.
 /// * `middleware` - Middleware list to apply to the prompt.
 /// * `blocking` - Runs the handler on Tokio's blocking pool. See [`macro@tool`].
-/// * `roles` & `permissions` - Define which users can read the resource when using Streamable HTTP transport with OAuth.
+/// * `roles` & `permissions` - Define which users can get the prompt when using Streamable HTTP transport with OAuth.
+/// * `scopes` - The OAuth scopes the caller's access token must grant. See [`macro@tool`].
 ///
 /// # Simple Example
 /// ```ignore
@@ -302,6 +309,7 @@ pub fn resources(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///     descr = "Analyze code for potential improvements",
 ///     roles = ["user"],
 ///     permissions = ["read"],
+///     scopes = ["notes:read"],
 ///     args = r#"[
 ///         {
 ///             "name": "lang",

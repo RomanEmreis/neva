@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.8.0
 
 ### Added
 * **Who is calling**: `claims()` on `Context` and `MwContext`, the claims of
@@ -15,6 +15,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `DefaultClaims` from `iss`, `aud`, `client_id` and `scope` (#161).
 * `downcast_ref::<T>()` on `dyn Claims`; `Any` is a supertrait of `Claims`
   (#161).
+* **Scope-gated tools, prompts and resources**: `scopes = [..]` on `#[tool]`,
+  `#[prompt]` and `#[resource]`, and `with_scopes(..)` beside `with_roles` /
+  `with_permissions`. Every listed scope is required. A token short of some is
+  refused with `ErrorCode::InsufficientScope` (`-31403`, outside the JSON-RPC
+  reserved range), `requiredScopes` and `missingScopes` in `data`; over HTTP
+  that is a `403` with `WWW-Authenticate: Bearer error="insufficient_scope",
+  scope=".."`, which the neva client steps up on. Checked before dispatch, so
+  streamed replies and batches get the `403` too; a batch is refused whole.
+  Both protocol profiles (#162).
+* Without `with_scopes`, `scopes_supported` in the protected resource metadata
+  lists every scope the tools, prompts and resources declare at start (#162).
 
 ### Changed
 * `neva::auth::{Claims, DefaultClaims}` no longer need `http-server` (#161).
@@ -23,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed (breaking)
 * `DefaultClaims.aud` is a `Vec<String>`, was `Option<String>`; new fields
   `client_id` and `scope` (#161).
+* New `ErrorCode::InsufficientScope` variant (#162).
 
 ### Fixed
 * A token whose `aud` is an array is no longer refused (#161).

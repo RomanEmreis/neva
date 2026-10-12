@@ -53,6 +53,20 @@ pub enum ErrorCode {
     #[cfg(not(feature = "legacy-spec"))]
     UnsupportedProtocolVersion = -32022,
 
+    /// The caller's access token is valid but does not grant every scope the
+    /// tool, prompt or resource requires.
+    ///
+    /// MCP allocates no code for this, so neva takes one outside the range
+    /// JSON-RPC reserves (`-32768` to `-32000`), where no later MCP allocation
+    /// can land on it. The error `data` carries `requiredScopes`, every scope
+    /// the item requires, and `missingScopes`, the ones the token lacks.
+    ///
+    /// Over HTTP the response status is `403 Forbidden`, with a
+    /// `WWW-Authenticate: Bearer error="insufficient_scope"` challenge naming
+    /// `requiredScopes` (RFC 6750 section 3.1): a client re-authorizes for them
+    /// and retries.
+    InsufficientScope = -31403,
+
     /// [Internal code] The request has been canceled
     RequestCancelled = -99999,
 
@@ -92,6 +106,7 @@ impl TryFrom<i32> for ErrorCode {
             -32021 => Ok(ErrorCode::MissingRequiredClientCapability),
             #[cfg(not(feature = "legacy-spec"))]
             -32022 => Ok(ErrorCode::UnsupportedProtocolVersion),
+            -31403 => Ok(ErrorCode::InsufficientScope),
             -99999 => Ok(ErrorCode::RequestCancelled),
             -99998 => Ok(ErrorCode::Timeout),
             #[cfg(not(feature = "legacy-spec"))]
@@ -144,6 +159,7 @@ impl Display for ErrorCode {
             }
             #[cfg(not(feature = "legacy-spec"))]
             ErrorCode::UnsupportedProtocolVersion => write!(f, "Unsupported protocol version"),
+            ErrorCode::InsufficientScope => write!(f, "Insufficient scope"),
             ErrorCode::RequestCancelled => write!(f, "Request cancelled"),
             ErrorCode::Timeout => write!(f, "Request timed out"),
             #[cfg(not(feature = "legacy-spec"))]
@@ -161,9 +177,8 @@ impl From<ErrorCode> for Error {
 impl ErrorCode {
     /// Returns the wire-safe equivalent of this code.
     ///
-    /// Internal codes (`RequestCancelled`, `Timeout`) fall outside the JSON-RPC 2.0
-    /// reserved range (`-32768` to `-32000`) and must never appear in a response
-    /// payload. This method maps them to [`ErrorCode::InternalError`] so callers can
+    /// Internal codes (`RequestCancelled`, `Timeout`) are neva's own and must
+    /// never appear in a response payload. This method maps them to [`ErrorCode::InternalError`] so callers can
     /// always serialise a spec-compliant code.
     ///
     /// Under MCP 2026-07-28 the deprecated [`Self::ResourceNotFound`]
@@ -240,6 +255,7 @@ mod tests {
             (-32603, ErrorCode::InternalError),
             (-32002, ErrorCode::ResourceNotFound),
             (-32042, ErrorCode::UrlElicitationRequiredError),
+            (-31403, ErrorCode::InsufficientScope),
             (-99999, ErrorCode::RequestCancelled),
             (-99998, ErrorCode::Timeout),
         ];
@@ -264,6 +280,7 @@ mod tests {
             ("-32603", ErrorCode::InternalError),
             ("-32002", ErrorCode::ResourceNotFound),
             ("-32042", ErrorCode::UrlElicitationRequiredError),
+            ("-31403", ErrorCode::InsufficientScope),
             ("-99999", ErrorCode::RequestCancelled),
             ("-99998", ErrorCode::Timeout),
         ];
@@ -284,6 +301,19 @@ mod tests {
             ErrorCode::InternalError
         );
         assert_eq!(ErrorCode::Timeout.wire_code(), ErrorCode::InternalError);
+    }
+
+    /// A later MCP allocation lands in the range JSON-RPC reserves, so a code
+    /// of neva's own has to stay out of it -- and, unlike the internal codes,
+    /// it is meant for the wire.
+    #[test]
+    fn insufficient_scope_travels_outside_the_reserved_range() {
+        let code = i32::from(ErrorCode::InsufficientScope);
+        assert!(!(-32768..=-32000).contains(&code));
+        assert_eq!(
+            ErrorCode::InsufficientScope.wire_code(),
+            ErrorCode::InsufficientScope
+        );
     }
 
     #[test]

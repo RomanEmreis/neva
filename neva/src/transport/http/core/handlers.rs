@@ -26,6 +26,10 @@ use super::{
 
 pub(crate) const MCP_SESSION_ID: &str = "Mcp-Session-Id";
 
+/// What a request is answered with when the POST it rode in on was refused
+/// for another request in the same batch.
+const NOT_PROCESSED: &str = "Not processed: another request in this batch was rejected";
+
 /// One-call POST pipeline for engine adapters: convert the engine-native
 /// request into neva's neutral form via [`HttpEngine::adapt_request`] and
 /// run the JSON-RPC dispatch.
@@ -64,7 +68,7 @@ pub(crate) const MCP_SESSION_ID: &str = "Mcp-Session-Id";
 /// ```
 ///
 /// **Authorization:** if the engine wants neva's per-tool / per-prompt /
-/// per-resource role & permission gates to engage, it must insert an
+/// per-resource role, permission and scope gates to engage, it must insert an
 /// `Arc<dyn neva::auth::Claims>` into `req.extensions_mut()` before
 /// `adapt_request` returns (typically inside `HttpEngine::adapt_request`
 /// or in the engine's route handler just before this call). See the
@@ -147,7 +151,7 @@ pub async fn handle_post(req: HttpRequest, ctx: &HttpContext) -> HttpResponse {
                 return status_response(http::StatusCode::INTERNAL_SERVER_ERROR, id);
             }
             match resp_rx.await {
-                Ok(resp) => build_json_response(dispatched_status(&resp), id, &resp),
+                Ok(resp) => dispatched_reply(ctx, id, &resp),
                 Err(_) => status_response(http::StatusCode::INTERNAL_SERVER_ERROR, id),
             }
         }
@@ -449,12 +453,8 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
 
         if invalid {
             let reply = reject_post_each(&msg, |r| {
-                request_meta_error(r, header_version).unwrap_or_else(|| {
-                    Error::new(
-                        ErrorCode::InvalidRequest,
-                        "Not processed: another request in this batch was rejected",
-                    )
-                })
+                request_meta_error(r, header_version)
+                    .unwrap_or_else(|| Error::new(ErrorCode::InvalidRequest, NOT_PROCESSED))
             });
 
             if let Some(reply) = reply {
@@ -616,6 +616,17 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
         return PostPrep::Reply(status_response(http::StatusCode::ACCEPTED, id));
     }
 
+    // A tool, prompt or resource that requires scopes the caller's token was
+    // not granted is refused here, before anything runs. Refused in the
+    // dispatch, it would be too late for the `403` a client steps up on: a
+    // request that opted into notifications has had its `200` and its event
+    // stream by then, and a batch shares one status among all its items.
+    // Refused here, nothing has run, so once the client holds the wider token
+    // it can send the very same POST again.
+    if let Some(reply) = scope_refusal(&msg, claims.as_deref(), ctx, id).await {
+        return PostPrep::Reply(reply);
+    }
+
     // Strip Authorization before forwarding (claims are already extracted).
     headers.remove(http::header::AUTHORIZATION);
 
@@ -656,11 +667,7 @@ async fn handle_post_streaming<E: HttpEngine>(
                     ));
                 }
                 return match resp_rx.await {
-                    Ok(resp) => StreamResponse::Complete(build_json_response(
-                        dispatched_status(&resp),
-                        id,
-                        &resp,
-                    )),
+                    Ok(resp) => StreamResponse::Complete(dispatched_reply(ctx, id, &resp)),
                     Err(_) => StreamResponse::Complete(status_response(
                         http::StatusCode::INTERNAL_SERVER_ERROR,
                         id,
@@ -1063,17 +1070,141 @@ fn reject_post_each(
 /// and sends nothing, because a notification is never answered.
 #[cfg(not(feature = "legacy-spec"))]
 fn reject_post(msg: &Message, err: Error) -> Message {
-    // `Error` is not `Clone` -- its cause is a boxed `dyn StdError` -- and a
-    // batch needs one reply per request, all saying the same thing.
-    let restated = reject_post_each(msg, |_| {
-        let copy = Error::new(err.code, err.to_string());
-        match err.data() {
-            Some(data) => copy.with_data(data.clone()),
-            None => copy,
-        }
-    });
+    // A batch needs one reply per request, all saying the same thing.
+    let restated = reject_post_each(msg, |_| restate(&err));
 
     restated.unwrap_or_else(|| Message::Response(Response::error(RequestId::Null, err)))
+}
+
+/// A copy of `err` as it goes on the wire: its code, its message and its
+/// `data`.
+///
+/// `Error` is not `Clone` -- its cause is a boxed `dyn StdError` -- and a
+/// rejection that answers several requests needs one for each.
+fn restate(err: &Error) -> Error {
+    let copy = Error::new(err.code, err.to_string());
+    match err.data() {
+        Some(data) => copy.with_data(data.clone()),
+        None => copy,
+    }
+}
+
+/// The `403` for a POST carrying a request whose tool, prompt or resource
+/// requires scopes the caller's token was not granted -- see
+/// [`ScopeGate`](super::auth::ScopeGate) -- or `None` when it carries none.
+///
+/// A batch is refused whole, the way the `_meta` gate refuses one: one status
+/// covers the POST, and the client sends all of it again once it holds the
+/// wider token. The refused requests are answered with what they lack, the
+/// rest with the fact that they were not processed, and the challenge asks for
+/// every scope the refused ones require.
+async fn scope_refusal(
+    msg: &Message,
+    claims: Option<&dyn Claims>,
+    ctx: &HttpContext,
+    session: uuid::Uuid,
+) -> Option<HttpResponse> {
+    // Every POST passes through here, so nothing is allocated until a request
+    // is actually refused.
+    let refused = match msg {
+        Message::Request(req) => vec![(req.id(), ctx.scope_gate.refusal(req, claims).await?)],
+        Message::Batch(batch) => {
+            let mut refused = Vec::new();
+            for env in batch.iter() {
+                if let crate::types::MessageEnvelope::Request(req) = env
+                    && let Some(refusal) = ctx.scope_gate.refusal(req, claims).await
+                {
+                    refused.push((req.id(), refusal));
+                }
+            }
+            if refused.is_empty() {
+                return None;
+            }
+            refused
+        }
+        _ => return None,
+    };
+
+    let scopes = refused
+        .iter()
+        .flat_map(|(_, refusal)| &refusal.scopes)
+        .fold(Vec::<String>::new(), |mut scopes, scope| {
+            if !scopes.contains(scope) {
+                scopes.push(scope.clone());
+            }
+            scopes
+        });
+
+    let reply = reject_post_each(msg, |req| {
+        let id = req.id();
+        refused
+            .iter()
+            .find(|(refused, _)| *refused == id)
+            .map_or_else(
+                || Error::new(ErrorCode::InvalidRequest, NOT_PROCESSED),
+                |(_, refusal)| restate(&refusal.error),
+            )
+    })?;
+
+    let mut resp = build_json_response(http::StatusCode::FORBIDDEN, session, &reply);
+    challenge_for_scope(&mut resp, ctx, &scopes);
+
+    Some(resp)
+}
+
+/// Puts the `WWW-Authenticate` challenge of a refusal for want of scope on
+/// `resp` (RFC 6750 section 3.1): `insufficient_scope`, the scopes to ask for,
+/// and, when OAuth is configured, where the resource's metadata is.
+///
+/// The scopes are everything the call requires, not just what the token
+/// lacks: a client that re-authorizes for exactly what a challenge names must
+/// not come back without a scope it already held and still needs. neva's own
+/// client asks for the union of the two anyway (SEP-2350).
+fn challenge_for_scope(resp: &mut HttpResponse, ctx: &HttpContext, scopes: &[String]) {
+    let scope = scopes.join(" ");
+
+    #[cfg(feature = "server-oauth")]
+    let challenge = {
+        use super::oauth::{BearerChallenge, OAuthErrorCode};
+
+        let mut challenge = BearerChallenge::new().with_error(OAuthErrorCode::InsufficientScope);
+        if !scope.is_empty() {
+            challenge = challenge.with_scope(scope);
+        }
+        if let Some(oauth) = &ctx.oauth {
+            challenge = challenge.with_resource_metadata(&*oauth.metadata_url);
+        }
+
+        challenge.to_string()
+    };
+
+    // No challenge builder without `server-oauth`, and no metadata document to
+    // point at either. The value is quoted the way the builder quotes it.
+    #[cfg(not(feature = "server-oauth"))]
+    let challenge = {
+        let _ = ctx;
+        let mut challenge = String::from(r#"Bearer error="insufficient_scope""#);
+        if !scope.is_empty() {
+            challenge.push_str(r#", scope=""#);
+            for symbol in scope.chars() {
+                match symbol {
+                    '"' | '\\' => {
+                        challenge.push('\\');
+                        challenge.push(symbol);
+                    }
+                    symbol if symbol.is_control() => challenge.push(' '),
+                    symbol => challenge.push(symbol),
+                }
+            }
+            challenge.push('"');
+        }
+        challenge
+    };
+
+    if let Ok(value) = HeaderValue::from_bytes(challenge.as_bytes()) {
+        resp.headers_mut()
+            .insert(http::header::WWW_AUTHENTICATE, value);
+    }
 }
 
 /// Why a request's `_meta` is unacceptable, if it is.
@@ -1160,6 +1291,7 @@ fn name_source(req: &crate::types::Request) -> Option<(&str, bool)> {
         crate::types::resource::commands::READ => "uri",
         _ => return None,
     };
+
     let raw = req.params.as_ref()?.as_object()?.get(field)?.as_str()?;
     Some((raw, true))
 }
@@ -1211,6 +1343,26 @@ fn routing_header_error(req: &crate::types::Request, headers: &HeaderMap) -> Opt
     }
 }
 
+/// The reply to a dispatched POST: the JSON body under the status
+/// [`dispatched_status`] gives it, and the step-up challenge of a refusal for
+/// want of scope.
+///
+/// [`scope_refusal`] turns most of those away before they are dispatched.
+/// The ones that reach here were raised after it: by a middleware, or by a
+/// prompt or resource handler that checks scopes itself or passes on a refusal
+/// from a scope-gated item it reached through `ctx` (a tool's errors become its
+/// `isError` result instead). The challenge names the scopes the error's
+/// `data` says were required.
+fn dispatched_reply(ctx: &HttpContext, session: uuid::Uuid, msg: &Message) -> HttpResponse {
+    let mut resp = build_json_response(dispatched_status(msg), session, msg);
+    if let Message::Response(Response::Err(err)) = msg
+        && err.error.code == ErrorCode::InsufficientScope
+    {
+        challenge_for_scope(&mut resp, ctx, &super::auth::required_scopes_of(&err.error));
+    }
+    resp
+}
+
 /// The HTTP status a dispatched JSON-RPC reply must be sent with.
 ///
 /// Most application-level errors ride on `200 OK` -- JSON-RPC carries them in
@@ -1218,7 +1370,8 @@ fn routing_header_error(req: &crate::types::Request, headers: &HeaderMap) -> Opt
 /// pins each of them to `400 Bad Request`, because they say the *request* was
 /// wrong, not that the method failed. `MissingRequiredClientCapability` is
 /// raised during dispatch rather than in the transport preamble, so the status
-/// has to be recovered here from the reply.
+/// has to be recovered here from the reply. The legacy profile has none of
+/// them.
 ///
 /// `MethodNotFound` is pinned to `404 Not Found` for a different reason: it is
 /// what lets a client tell "this endpoint speaks MCP and has no such method"
@@ -1226,29 +1379,26 @@ fn routing_header_error(req: &crate::types::Request, headers: &HeaderMap) -> Opt
 /// the same `404` a pre-2026 HTTP+SSE server returns for the modern endpoint.
 /// The JSON-RPC error body is what distinguishes the two.
 ///
+/// `InsufficientScope` is a `403 Forbidden` in both profiles: that, with the
+/// challenge [`dispatched_reply`] adds, is what a client steps up on
+/// (RFC 6750 section 3.1).
+///
 /// A batch keeps `200 OK` even when some of its items carry such an error: one
 /// status covers every item, and the per-item codes are in the body.
-#[cfg(not(feature = "legacy-spec"))]
 fn dispatched_status(msg: &Message) -> http::StatusCode {
     match msg {
         Message::Response(Response::Err(err)) => match err.error.code {
+            #[cfg(not(feature = "legacy-spec"))]
             ErrorCode::HeaderMismatch
             | ErrorCode::MissingRequiredClientCapability
             | ErrorCode::UnsupportedProtocolVersion => http::StatusCode::BAD_REQUEST,
+            #[cfg(not(feature = "legacy-spec"))]
             ErrorCode::MethodNotFound => http::StatusCode::NOT_FOUND,
+            ErrorCode::InsufficientScope => http::StatusCode::FORBIDDEN,
             _ => http::StatusCode::OK,
         },
         _ => http::StatusCode::OK,
     }
-}
-
-/// The HTTP status a dispatched JSON-RPC reply must be sent with.
-///
-/// The legacy profile has no status-bearing error codes: every dispatched
-/// reply is a `200 OK` with the error in the body.
-#[cfg(feature = "legacy-spec")]
-fn dispatched_status(_msg: &Message) -> http::StatusCode {
-    http::StatusCode::OK
 }
 
 fn build_json_response(
@@ -1598,6 +1748,7 @@ mod tests {
             // them; `Any` states that the gate is not what they are about.
             // `origin_gate_rejects_a_rebound_name` sets its own.
             origin_policy: crate::transport::http::core::origin::OriginPolicy::Any,
+            scope_gate: Default::default(),
             #[cfg(feature = "server-oauth")]
             oauth: None,
         };
@@ -2921,5 +3072,336 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("Bearer")
         );
+    }
+
+    /// The scope gate the transport runs before dispatch: a request whose
+    /// tool, prompt or resource needs scopes the token lacks gets a `403` and
+    /// a step-up challenge, and is never dispatched.
+    mod scopes {
+        use super::*;
+        use crate::app::options::McpOptions;
+        use crate::auth::DefaultClaims;
+        use crate::types::resource::template::ResourceFunc;
+        use crate::types::{Prompt, ResourceContents, ResourceTemplate, Role, Tool, Uri};
+
+        const BOTH: [&str; 2] = ["memory:read", "memory:write"];
+
+        /// A context whose gate is bound to a registry with a tool, a prompt
+        /// and a resource that each require scopes, and a tool that requires
+        /// a role besides.
+        fn gated_ctx() -> (
+            HttpContext,
+            mpsc::Receiver<Result<crate::types::Message, crate::error::Error>>,
+        ) {
+            let mut options = McpOptions::default();
+            options
+                .add_tool(Tool::new("forget", || async { "gone" }))
+                .with_scopes(BOTH);
+            options
+                .add_tool(Tool::new("audit", || async { "audited" }))
+                .with_roles(["admin"])
+                .with_scopes(["memory:write"]);
+            options.add_tool(Tool::new("open", || async { "open" }));
+            options
+                .add_prompt(Prompt::new("recall", || async { [("recall", Role::User)] }))
+                .with_scopes(["memory:read"]);
+            options
+                .add_resource_template(
+                    ResourceTemplate::new("notes://{id}", "note"),
+                    ResourceFunc::new(|uri: Uri| async move { ResourceContents::new(uri) }),
+                )
+                .with_scopes(["notes:read"]);
+
+            let (ctx, rx) = make_ctx();
+            ctx.scope_gate.bind(options.into_runtime());
+            (ctx, rx)
+        }
+
+        fn granting(scopes: &[&str]) -> Arc<dyn Claims> {
+            Arc::new(DefaultClaims {
+                scope: scopes.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            })
+        }
+
+        /// `params` of a request, with the `_meta` MCP 2026-07-28 requires.
+        fn params(params: serde_json::Value) -> serde_json::Value {
+            #[cfg(not(feature = "legacy-spec"))]
+            let params = {
+                let mut params = params;
+                params["_meta"] = meta();
+                params
+            };
+            params
+        }
+
+        /// A POST of `method`, naming `name` (in `key`), as `claims` send it.
+        fn post(
+            method: &str,
+            key: &str,
+            name: &str,
+            claims: Option<Arc<dyn Claims>>,
+        ) -> HttpRequest {
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": method,
+                "params": params(serde_json::json!({ key: name })),
+            });
+            let b = post_builder_for(method);
+            #[cfg(not(feature = "legacy-spec"))]
+            let b = b.header(crate::transport::http::MCP_NAME, name);
+            let mut req = b.body(Bytes::from(body.to_string())).unwrap();
+            if let Some(claims) = claims {
+                req.extensions_mut().insert(claims);
+            }
+            req
+        }
+
+        fn call(tool: &str, claims: Option<Arc<dyn Claims>>) -> HttpRequest {
+            post(crate::types::tool::commands::CALL, "name", tool, claims)
+        }
+
+        /// The `scope` the challenge on `resp` names, after checking that it
+        /// is an `insufficient_scope` one.
+        fn challenged_scope(resp: &HttpResponse) -> String {
+            let header = resp
+                .headers()
+                .get(http::header::WWW_AUTHENTICATE)
+                .and_then(|v| v.to_str().ok())
+                .expect("a challenge");
+            assert!(
+                header.starts_with(r#"Bearer error="insufficient_scope""#),
+                "{header}"
+            );
+            header
+                .split_once(r#"scope=""#)
+                .and_then(|(_, rest)| rest.split_once('"'))
+                .map(|(scope, _)| scope.to_owned())
+                .unwrap_or_default()
+        }
+
+        fn is_dispatched(prep: &PostPrep) -> bool {
+            matches!(prep, PostPrep::Dispatch { .. })
+        }
+
+        #[tokio::test]
+        async fn a_token_short_of_a_scope_is_refused_before_dispatch() {
+            let (ctx, mut rx) = gated_ctx();
+
+            let resp = handle_post(call("forget", Some(granting(&["memory:read"]))), &ctx).await;
+
+            assert_eq!(resp.status(), http::StatusCode::FORBIDDEN);
+            // Every scope the tool requires, not just the one missing: a
+            // client that asks for exactly this keeps what it still needs.
+            assert_eq!(challenged_scope(&resp), "memory:read memory:write");
+
+            let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+            assert_eq!(body["id"], 1);
+            assert_eq!(body["error"]["code"], -31403);
+            assert_eq!(
+                body["error"]["data"],
+                serde_json::json!({
+                    "requiredScopes": BOTH,
+                    "missingScopes": ["memory:write"],
+                })
+            );
+            assert!(rx.try_recv().is_err(), "nothing may have been dispatched");
+        }
+
+        #[tokio::test]
+        async fn a_token_granting_every_scope_is_dispatched() {
+            let (ctx, _rx) = gated_ctx();
+            let prep = prepare_post(call("forget", Some(granting(&BOTH))), &ctx).await;
+            assert!(is_dispatched(&prep));
+        }
+
+        /// What no new token fixes is left to the dispatch, which refuses it
+        /// with `InvalidParams` on a `200` as it always has.
+        #[tokio::test]
+        async fn what_a_step_up_cannot_fix_is_left_to_the_dispatch() {
+            let (ctx, _rx) = gated_ctx();
+
+            // No claims at all: there is no token to widen.
+            assert!(is_dispatched(
+                &prepare_post(call("forget", None), &ctx).await
+            ));
+            // A role the caller lacks outranks the scope it lacks too.
+            assert!(is_dispatched(
+                &prepare_post(call("audit", Some(granting(&[]))), &ctx).await
+            ));
+            // Nothing required, and nothing there to require anything.
+            assert!(is_dispatched(
+                &prepare_post(call("open", Some(granting(&[]))), &ctx).await
+            ));
+            assert!(is_dispatched(
+                &prepare_post(call("missing", Some(granting(&[]))), &ctx).await
+            ));
+        }
+
+        #[tokio::test]
+        async fn prompts_and_resources_are_gated_too() {
+            let (ctx, _rx) = gated_ctx();
+
+            let resp = handle_post(
+                post(
+                    crate::types::prompt::commands::GET,
+                    "name",
+                    "recall",
+                    Some(granting(&[])),
+                ),
+                &ctx,
+            )
+            .await;
+            assert_eq!(resp.status(), http::StatusCode::FORBIDDEN);
+            assert_eq!(challenged_scope(&resp), "memory:read");
+
+            let resp = handle_post(
+                post(
+                    crate::types::resource::commands::READ,
+                    "uri",
+                    "notes://7",
+                    Some(granting(&["memory:read"])),
+                ),
+                &ctx,
+            )
+            .await;
+            assert_eq!(resp.status(), http::StatusCode::FORBIDDEN);
+            assert_eq!(challenged_scope(&resp), "notes:read");
+        }
+
+        /// Until the runtime binds it, the gate checks nothing, and the
+        /// dispatch is what refuses.
+        #[tokio::test]
+        async fn an_unbound_gate_lets_everything_through() {
+            let (ctx, _rx) = make_ctx();
+            assert!(is_dispatched(
+                &prepare_post(call("forget", Some(granting(&[]))), &ctx).await
+            ));
+        }
+
+        /// A batch is refused whole: one status covers it, and the client
+        /// sends all of it again once it holds the wider token.
+        #[tokio::test]
+        async fn a_batch_is_refused_whole_for_the_union_of_what_it_lacks() {
+            let (ctx, mut rx) = gated_ctx();
+            let item = |id: u32, method: &str, key: &str, name: &str| {
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": method,
+                    "params": params(serde_json::json!({ key: name })),
+                })
+            };
+            let body = serde_json::json!([
+                item(1, crate::types::tool::commands::CALL, "name", "forget"),
+                item(2, crate::types::tool::commands::CALL, "name", "open"),
+                item(
+                    3,
+                    crate::types::resource::commands::READ,
+                    "uri",
+                    "notes://1"
+                ),
+            ]);
+            let mut req = post_builder().body(Bytes::from(body.to_string())).unwrap();
+            req.extensions_mut().insert(granting(&["memory:read"]));
+
+            let resp = handle_post(req, &ctx).await;
+
+            assert_eq!(resp.status(), http::StatusCode::FORBIDDEN);
+            assert_eq!(
+                challenged_scope(&resp),
+                "memory:read memory:write notes:read"
+            );
+            let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+            let code = |id: u32| {
+                body.as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|item| item["id"] == id)
+                    .map(|item| item["error"]["code"].clone())
+                    .unwrap()
+            };
+            assert_eq!(code(1), -31403);
+            assert_eq!(code(2), -32600, "not processed, but answered");
+            assert_eq!(code(3), -31403);
+            assert!(rx.try_recv().is_err(), "nothing may have been dispatched");
+        }
+
+        /// A request that opts into notifications would have had its `200`
+        /// and its event stream by the time the dispatch refused it.
+        #[cfg(not(feature = "legacy-spec"))]
+        #[tokio::test]
+        async fn a_streamed_reply_is_refused_with_a_403_too() {
+            let (ctx, _rx) = gated_ctx();
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": crate::types::tool::commands::CALL,
+                "params": {
+                    "name": "forget",
+                    "_meta": {
+                        "progressToken": "p-1",
+                        "io.modelcontextprotocol/protocolVersion": crate::LATEST_PROTOCOL_VERSION,
+                        "io.modelcontextprotocol/clientCapabilities": {}
+                    }
+                },
+            });
+            let mut req = post_builder_for(crate::types::tool::commands::CALL)
+                .header(crate::transport::http::MCP_NAME, "forget")
+                .body(Bytes::from(body.to_string()))
+                .unwrap();
+            req.extensions_mut().insert(granting(&[]));
+
+            match handle_post_streaming::<TestEngine>(req, &ctx).await {
+                StreamResponse::Complete(resp) => {
+                    assert_eq!(resp.status(), http::StatusCode::FORBIDDEN);
+                    assert_eq!(challenged_scope(&resp), "memory:read memory:write");
+                }
+                StreamResponse::Stream { .. } => panic!("refused before the stream opens"),
+            }
+        }
+
+        /// One refused inside a handler -- a tool calling a gated tool
+        /// in-process -- still steps up on the JSON path, for the scopes its
+        /// `data` names.
+        #[test]
+        fn a_refusal_from_inside_the_dispatch_is_a_403_as_well() {
+            let (ctx, _rx) = make_ctx();
+            let mut required = crate::transport::http::core::auth::RequiredClaims::default();
+            required.set_scopes(["files:write"]);
+            let refusal = required
+                .validate(Some(&DefaultClaims::default()))
+                .unwrap_err();
+            let msg = Message::Response(Response::error(RequestId::Number(1), refusal));
+
+            let resp = dispatched_reply(&ctx, uuid::Uuid::new_v4(), &msg);
+
+            assert_eq!(resp.status(), http::StatusCode::FORBIDDEN);
+            assert_eq!(challenged_scope(&resp), "files:write");
+        }
+
+        #[cfg(feature = "server-oauth")]
+        #[tokio::test]
+        async fn the_challenge_points_at_the_resource_metadata() {
+            use crate::transport::http::core::oauth::{BearerChallenge, OAuthErrorCode};
+
+            let (mut ctx, _rx) = gated_ctx();
+            ctx.oauth = make_oauth_ctx().oauth;
+
+            let resp = handle_post(call("forget", Some(granting(&[]))), &ctx).await;
+            let header = resp
+                .headers()
+                .get(http::header::WWW_AUTHENTICATE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap();
+            let challenge = BearerChallenge::parse(header).unwrap();
+            assert_eq!(challenge.error(), Some(&OAuthErrorCode::InsufficientScope));
+            assert_eq!(challenge.scope(), Some("memory:read memory:write"));
+            assert_eq!(
+                challenge.resource_metadata(),
+                Some("http://127.0.0.1:3000/.well-known/oauth-protected-resource/mcp")
+            );
+        }
     }
 }

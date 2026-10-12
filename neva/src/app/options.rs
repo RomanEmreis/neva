@@ -661,8 +661,8 @@ impl McpOptions {
             .or_insert(template)
     }
 
-    /// Copies each resource template's roles and permissions onto the routes it
-    /// registered.
+    /// Copies each resource template's roles, permissions and scopes onto the
+    /// routes it registered.
     ///
     /// The route is the one place `resources/read` checks, so an ordinary
     /// template and a `ui://` resource -- which has no template -- are judged
@@ -834,6 +834,48 @@ impl McpOptions {
         transport.unwrap_or_default()
     }
 
+    /// Offers the HTTP transport every scope a tool, prompt or resource
+    /// requires, which it advertises as `scopes_supported` unless scopes were
+    /// configured -- see
+    /// [`OAuthResourceOptions::with_scopes`](crate::transport::http::core::oauth::OAuthResourceOptions::with_scopes).
+    ///
+    /// Reads the collections, so it runs before the runtime freezes them.
+    #[cfg(feature = "server-oauth")]
+    pub(crate) fn declare_scopes(&mut self) {
+        if !matches!(self.proto, Some(TransportProto::HttpServer(_))) {
+            return;
+        }
+
+        let tools = self.tools.as_ref().values().map(|tool| &tool.required);
+        let prompts = self
+            .prompts
+            .as_ref()
+            .values()
+            .map(|prompt| &prompt.required);
+
+        let templates = self
+            .resources_templates
+            .as_ref()
+            .values()
+            .map(|template| &template.required);
+
+        #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
+        let templates = templates.chain(self.ui_resources.values().map(|ui| &ui.required));
+
+        let declared = tools
+            .chain(prompts)
+            .chain(templates)
+            .flat_map(|required| required.scopes())
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+
+        if let Some(TransportProto::HttpServer(http)) = &mut self.proto {
+            http.declare_scopes(declared);
+        }
+    }
+
     /// How a client would reach this server, as a `server.json` package entry
     /// names it -- or `None` when no transport has been configured yet.
     ///
@@ -869,6 +911,44 @@ impl McpOptions {
     #[inline]
     pub(crate) async fn get_tool(&self, name: &str) -> Option<Tool> {
         self.tools.get(name).await
+    }
+
+    /// Reads what a caller must hold to call the tool `name` through `f`,
+    /// without copying the tool.
+    #[inline]
+    #[cfg(feature = "http-server")]
+    pub(crate) async fn with_tool_requirement<R>(
+        &self,
+        name: &str,
+        f: impl FnOnce(&crate::transport::http::core::auth::RequiredClaims) -> R,
+    ) -> Option<R> {
+        self.tools.read_with(name, |tool| f(&tool.required)).await
+    }
+
+    /// Reads what a caller must hold to get the prompt `name` through `f`,
+    /// without copying the prompt.
+    #[inline]
+    #[cfg(feature = "http-server")]
+    pub(crate) async fn with_prompt_requirement<R>(
+        &self,
+        name: &str,
+        f: impl FnOnce(&crate::transport::http::core::auth::RequiredClaims) -> R,
+    ) -> Option<R> {
+        self.prompts
+            .read_with(name, |prompt| f(&prompt.required))
+            .await
+    }
+
+    /// Reads what a caller must hold to read the resource at `uri` through
+    /// `f`: the requirement of the route the read would take.
+    #[inline]
+    #[cfg(feature = "http-server")]
+    pub(crate) fn with_resource_requirement<R>(
+        &self,
+        uri: &Uri,
+        f: impl FnOnce(&crate::transport::http::core::auth::RequiredClaims) -> R,
+    ) -> Option<R> {
+        self.read_resource(uri).map(|(route, _)| f(&route.required))
     }
 
     /// Returns every tool, in name order.

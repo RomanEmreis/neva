@@ -222,6 +222,9 @@ where
     /// `None` means "derive from the bind address" -- see
     /// [`Self::with_allowed_origins`].
     origin_policy: Option<core::origin::OriginPolicy>,
+    /// Handed to the engine through [`HttpContext`], and bound by the `App`
+    /// to its registry once the runtime is built.
+    scope_gate: core::auth::ScopeGate,
     #[cfg(feature = "server-oauth")]
     oauth: Option<core::oauth::OAuthResourceOptions>,
     sender: HttpSender,
@@ -312,6 +315,7 @@ impl Default for HttpServer<server::DefaultClaims, server::VolgaEngine> {
             sse_cleanup_interval: DEFAULT_SSE_CLEANUP_INTERVAL,
             sse_session_ttl: DEFAULT_SSE_SESSION_TTL,
             origin_policy: None,
+            scope_gate: Default::default(),
             #[cfg(feature = "server-oauth")]
             oauth: None,
             receiver: HttpReceiver::new(),
@@ -463,6 +467,7 @@ where
             sse_cleanup_interval: DEFAULT_SSE_CLEANUP_INTERVAL,
             sse_session_ttl: DEFAULT_SSE_SESSION_TTL,
             origin_policy: None,
+            scope_gate: Default::default(),
             #[cfg(feature = "server-oauth")]
             oauth: None,
             receiver: HttpReceiver::new(),
@@ -608,6 +613,7 @@ where
             // Carried across the swap: the DNS-rebinding gate is a property of
             // the deployment, not of which engine serves it.
             origin_policy: self.origin_policy,
+            scope_gate: self.scope_gate,
             #[cfg(feature = "server-oauth")]
             oauth: self.oauth,
             sender: self.sender,
@@ -770,6 +776,7 @@ where
                 .origin_policy
                 .clone()
                 .unwrap_or_else(|| core::origin::OriginPolicy::for_addr(&self.url.addr)),
+            scope_gate: self.scope_gate.clone(),
             #[cfg(feature = "server-oauth")]
             oauth,
         };
@@ -802,6 +809,7 @@ impl HttpServer<server::DefaultClaims, VolgaEngine> {
             sse_cleanup_interval: DEFAULT_SSE_CLEANUP_INTERVAL,
             sse_session_ttl: DEFAULT_SSE_SESSION_TTL,
             origin_policy: None,
+            scope_gate: Default::default(),
             #[cfg(feature = "server-oauth")]
             oauth: None,
             receiver: HttpReceiver::new(),
@@ -1134,6 +1142,18 @@ where
 
     fn url_label(&self) -> String {
         self.url.to_string()
+    }
+
+    fn scope_gate(&self) -> core::auth::ScopeGate {
+        self.scope_gate.clone()
+    }
+
+    #[cfg(feature = "server-oauth")]
+    fn declare_scopes(&mut self, scopes: Vec<String>) {
+        self.oauth = self
+            .oauth
+            .take()
+            .map(|oauth| oauth.with_declared_scopes(scopes));
     }
 }
 

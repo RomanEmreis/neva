@@ -384,6 +384,34 @@ impl UiResource {
         self
     }
 
+    /// Sets the scopes a caller's access token must grant to read the
+    /// resource.
+    ///
+    /// What
+    /// [`ResourceTemplate::with_scopes`](crate::types::ResourceTemplate::with_scopes)
+    /// and `#[resource(scopes = [..])]` set on any other resource: every scope
+    /// listed is required, and a token short of some is refused with a `403`
+    /// step-up challenge over HTTP.
+    ///
+    /// # Examples
+    /// ```
+    /// # #[cfg(all(feature = "apps", feature = "http-server"))] {
+    /// use neva::app::extension::UiResource;
+    ///
+    /// let mut res = UiResource::new("ui://admin/app.html", "admin", "");
+    /// res.with_scopes(["reports:read"]);
+    /// # }
+    /// ```
+    #[cfg(feature = "http-server")]
+    pub fn with_scopes<T, I>(&mut self, scopes: T) -> &mut Self
+    where
+        T: IntoIterator<Item = I>,
+        I: Into<String>,
+    {
+        self.required.set_scopes(scopes);
+        self
+    }
+
     /// The `resources/list` entry for this app.
     pub(crate) fn listing(&self) -> Resource {
         let mut resource =

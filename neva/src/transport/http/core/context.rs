@@ -34,6 +34,9 @@ pub struct HttpContext {
     /// Which `Origin` / `Host` this server answers to -- the DNS-rebinding
     /// gate every route runs before it does anything else.
     pub(crate) origin_policy: super::origin::OriginPolicy,
+    /// The scope requirements of the server's tools, prompts and resources,
+    /// checked before a request is dispatched.
+    pub(crate) scope_gate: super::auth::ScopeGate,
     #[cfg(feature = "server-oauth")]
     pub(crate) oauth: Option<super::oauth::OAuthResource>,
 }

@@ -59,6 +59,11 @@ async fn wipe() -> String {
     "wiped".to_string()
 }
 
+#[tool(scopes = ["memory:write"])]
+async fn forget() -> String {
+    "forgotten".to_string()
+}
+
 /// Drives a "model" over the server's other tools.
 #[tool]
 async fn agent(ctx: Context) -> Result<String, Error> {
@@ -143,7 +148,8 @@ async fn a_tool_written_once_is_offered_to_a_model() {
 
     let mut names: Vec<_> = tools.tools().into_iter().map(|tool| tool.name).collect();
     names.sort();
-    // `wipe` requires a role, and an in-process call has no claims.
+    // `wipe` requires a role and `forget` a scope, and an in-process call has
+    // no claims.
     assert_eq!(
         names,
         [
@@ -183,7 +189,7 @@ async fn a_tool_gets_its_dependencies_and_context() {
     assert_eq!(told.content, "Hello, Ann!", "{told:?}");
 
     let told = tools.call(&call("c2", "count_tools", "")).await;
-    assert_eq!(told.content, "11", "{told:?}");
+    assert_eq!(told.content, "12", "{told:?}");
 }
 
 /// There is no peer to ask: the call is refused at once, not left to wait
@@ -264,7 +270,15 @@ async fn only_offered_tools_can_be_called() {
         .await
         .expect("load");
 
-    for name in ["greet", "local_greet", "wipe", "local_wipe", "nope"] {
+    for name in [
+        "greet",
+        "local_greet",
+        "wipe",
+        "local_wipe",
+        "forget",
+        "local_forget",
+        "nope",
+    ] {
         let told = tools.call(&call("c1", name, "{}")).await;
         assert!(told.is_error, "{name} -> {told:?}");
         assert!(told.content.contains("no tool named"), "{name} -> {told:?}");

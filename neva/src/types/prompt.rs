@@ -610,6 +610,32 @@ impl Prompt {
         self
     }
 
+    /// Sets the scopes a caller's access token must grant to get the prompt.
+    ///
+    /// Every scope listed is required; a token short of some is refused with
+    /// a `403` step-up challenge over HTTP. See
+    /// [`Tool::with_scopes`](crate::types::Tool::with_scopes).
+    ///
+    /// # Examples
+    /// ```no_run
+    /// use neva::{App, types::Role};
+    ///
+    /// let mut app = App::new();
+    /// app.map_prompt("recall", |topic: String| async move {
+    ///     (format!("What do you remember about {topic}?"), Role::User)
+    /// })
+    /// .with_scopes(["memory:read"]);
+    /// ```
+    #[cfg(feature = "http-server")]
+    pub fn with_scopes<T, I>(&mut self, scopes: T) -> &mut Self
+    where
+        T: IntoIterator<Item = I>,
+        I: Into<String>,
+    {
+        self.required.set_scopes(scopes);
+        self
+    }
+
     /// Get prompt result
     #[inline]
     pub(crate) async fn call(

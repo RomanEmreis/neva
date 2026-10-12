@@ -1435,6 +1435,35 @@ impl Tool {
         self
     }
 
+    /// Sets the scopes a caller's access token must grant to invoke the tool.
+    ///
+    /// Every scope listed is required, unlike [`Self::with_roles`] and
+    /// [`Self::with_permissions`], where any one is enough. A token short of
+    /// some is refused with [`ErrorCode::InsufficientScope`], which the HTTP
+    /// transport answers with a `403` and a
+    /// `WWW-Authenticate: Bearer error="insufficient_scope"` challenge naming
+    /// these scopes, so a client can re-authorize for them and retry. The tool
+    /// stays in `tools/list`: a client has to see a tool before it can step up
+    /// for it.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// use neva::App;
+    ///
+    /// let mut app = App::new();
+    /// app.map_tool("forget", |fact: String| async move { fact })
+    ///     .with_scopes(["memory:read", "memory:write"]);
+    /// ```
+    #[cfg(feature = "http-server")]
+    pub fn with_scopes<T, I>(&mut self, scopes: T) -> &mut Self
+    where
+        T: IntoIterator<Item = I>,
+        I: Into<String>,
+    {
+        self.required.set_scopes(scopes);
+        self
+    }
+
     /// Configures the annotations for the tool
     pub fn with_annotations<F>(&mut self, config: F) -> &mut Self
     where

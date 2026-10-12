@@ -396,10 +396,10 @@ impl LocalTools {
             .ok_or_else(|| Error::new(ErrorCode::InternalError, "The server is not running"))
     }
 
-    /// Whether the caller's claims reach `tool`: one that requires roles or
-    /// permissions the caller does not hold would refuse every call the model
-    /// made. Without `http-server` there are no claims, and no tool requires
-    /// any.
+    /// Whether the caller's claims reach `tool`: one that requires roles,
+    /// permissions or scopes the caller does not hold would refuse every call
+    /// the model made. Without `http-server` there are no claims, and no tool
+    /// requires any.
     fn may_call(&self, tool: &Tool) -> bool {
         #[cfg(feature = "http-server")]
         return tool.required.validate(self.claims.as_deref()).is_ok();

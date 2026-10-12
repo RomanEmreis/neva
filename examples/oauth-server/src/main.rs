@@ -31,6 +31,14 @@ async fn admin_report(name: String) -> String {
     format!("confidential report: {name}")
 }
 
+/// A tool that needs a wider grant than a client starts with. A token
+/// without `mcp:admin` is answered with `403 insufficient_scope`, and the
+/// client re-authorizes for it and retries.
+#[tool(scopes = ["mcp:tools", "mcp:admin"])]
+async fn purge_cache() -> &'static str {
+    "cache purged"
+}
+
 #[tokio::main]
 async fn main() {
     let issuer = std::env::var("OAUTH_ISSUER").expect("OAUTH_ISSUER must be set");
@@ -47,6 +55,9 @@ async fn main() {
                     // is derived from the issuer automatically - spelled
                     // out here to show the knobs (scopes, extra fields,
                     // and `with_resource(...)` for reverse proxies).
+                    // Without `with_scopes`, the document would list every
+                    // scope the tools declare; here a client starts with
+                    // `mcp:tools` and steps up for `purge_cache`.
                     .with_oauth_metadata(|oauth| {
                         oauth
                             .with_authorization_servers([issuer.as_str()])

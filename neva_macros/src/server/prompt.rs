@@ -6,13 +6,14 @@ use quote::quote;
 use syn::{ItemFn, Meta, punctuated::Punctuated, token::Comma};
 
 /// Every attribute `#[prompt]` accepts.
-const PROMPT_ATTRS: [&str; 8] = [
+const PROMPT_ATTRS: [&str; 9] = [
     "title",
     "descr",
     "args",
     "no_args",
     "roles",
     "permissions",
+    "scopes",
     "middleware",
     "blocking",
 ];
@@ -27,6 +28,7 @@ pub(crate) fn expand(
     let mut title = None;
     let mut roles = None;
     let mut permissions = None;
+    let mut scopes = None;
     let mut middleware = None;
     let mut no_args = false;
     let mut blocking = false;
@@ -75,6 +77,9 @@ pub(crate) fn expand(
                         }
                         "permissions" => {
                             permissions = get_params_arr(&nv.value);
+                        }
+                        "scopes" => {
+                            scopes = get_params_arr(&nv.value);
                         }
                         "middleware" => {
                             middleware = get_exprs_arr(&nv.value);
@@ -146,6 +151,11 @@ pub(crate) fn expand(
         quote! { .with_permissions([#(#permission_literals),*]) }
     });
 
+    let scopes_code = scopes.map(|scopes| {
+        let scope_literals = scopes.iter().map(|s| quote::quote! { #s });
+        quote! { .with_scopes([#(#scope_literals),*]) }
+    });
+
     let middleware_code = middleware.map(|mws| {
         let mw_calls = mws.iter().map(|mw| {
             quote! { .wrap_prompt(stringify!(#func_name), #mw) }
@@ -168,7 +178,8 @@ pub(crate) fn expand(
                 #description_code
                 #args_code
                 #roles_code
-                #permission_code;
+                #permission_code
+                #scopes_code;
         }
         neva::macros::inventory::submit! {
             neva::macros::server::ItemRegistrar(#module_name)
