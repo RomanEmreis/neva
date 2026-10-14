@@ -3,6 +3,8 @@
 #[cfg(any(feature = "server", feature = "client"))]
 use tokio_util::sync::CancellationToken;
 
+#[cfg(feature = "server")]
+pub(crate) use diagnostics::diagnostic;
 #[cfg(feature = "tracing")]
 pub(crate) use message_registry::MessageRegistry;
 #[cfg(any(feature = "server", feature = "client"))]
@@ -37,6 +39,8 @@ pub use task_api::{TaskApi, wait_to_completion};
 
 mod arc_slice;
 mod arc_str;
+#[cfg(feature = "server")]
+pub(crate) mod diagnostics;
 mod either;
 #[cfg(any(feature = "server", feature = "client"))]
 mod handler;

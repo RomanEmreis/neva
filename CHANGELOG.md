@@ -24,20 +24,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   refused whole; both protocol profiles (#162).
 * `scopes_supported` defaults to the scopes the tools, prompts and resources
   declare at start; `with_scopes` overrides it (#162).
+* `AuthConfig::with_decoding_key`, a static key of any kind: the public half
+  of an RSA, EC or Ed25519 key pair, from PEM or a JWK, or an HMAC secret.
+  `neva::auth::DecodingKey` is re-exported (#163).
+* `OAuthConfig::with_jwks_uri`: OAuth issuer mode fetches the issuer's keys
+  from that URL and skips discovery, for a server that cannot reach the
+  issuer URL its tokens name. `with_issuer` keeps its meaning (#163).
 
 ### Changed
 * `neva::auth::{Claims, DefaultClaims}` no longer need `http-server` (#161).
 * A `requestState` is bound to the caller's issuer as well as its subject.
+* The Volga adapter requires volga 0.13.3.
+* A static decoding key next to `with_oauth` fails the server start (#163).
 
 ### Changed (breaking)
 * `DefaultClaims.aud` is a `Vec<String>`, was `Option<String>`; new fields
   `client_id` and `scope` (#161).
 * `ErrorCode` has a new variant, `InsufficientScope` (#162).
+* `AuthConfig::with_alg` replaces the default `HS256` on its first call, where
+  it added to it: `with_alg(Algorithm::HS512)` no longer accepts `HS256`
+  tokens. A static key of another family than the algorithms fails the server
+  start (RomanEmreis/volga#280).
+* `AuthConfig::with_iss` refuses a token without `iss`, where it checked the
+  claim only when present (RomanEmreis/volga#281).
 
 ### Fixed
 * A token whose `aud` is an array is no longer refused (#161).
 * A middleware's own answer to a request, without calling `next` or after a
   timeout around it, reaches the caller instead of being dropped.
+* With `tracing` on and no subscriber installed, a server that fails to start
+  (runtime, transport, HTTP engine) and the MCP Apps resource warning say so
+  on stderr, where they went nowhere.
 
 ## 0.7.1
 

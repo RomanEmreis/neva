@@ -13,6 +13,12 @@
 //! # examples/oauth-with-keycloak):
 //! OAUTH_ISSUER=http://localhost:8080/realms/neva OAUTH_ALLOW_HTTP=1 \
 //!     cargo run -p example-oauth-server
+//!
+//! # A server that cannot reach the issuer URL its tokens name, e.g. in a
+//! # container: the keys come from OAUTH_JWKS_URI, and discovery is skipped.
+//! OAUTH_ISSUER=http://localhost:8787 \
+//!     OAUTH_JWKS_URI=http://host.docker.internal:8787/jwks OAUTH_ALLOW_HTTP=1 \
+//!     cargo run -p example-oauth-server
 //! ```
 //!
 //! Then connect with `cargo run -p example-oauth-client` (or MCP
@@ -42,6 +48,7 @@ async fn purge_cache() -> &'static str {
 #[tokio::main]
 async fn main() {
     let issuer = std::env::var("OAUTH_ISSUER").expect("OAUTH_ISSUER must be set");
+    let jwks_uri = std::env::var("OAUTH_JWKS_URI").ok();
     let allow_http = std::env::var("OAUTH_ALLOW_HTTP").is_ok();
 
     tracing_subscriber::fmt().init();
@@ -65,9 +72,16 @@ async fn main() {
                     })
                     .with_auth(|auth| {
                         auth.with_oauth(|oauth| {
+                            // `issuer` stays what tokens carry in `iss`
+                            // and where clients are sent to authorize.
                             let oauth = oauth.with_issuer(issuer.as_str());
+                            let oauth = match jwks_uri {
+                                Some(url) => oauth.with_jwks_uri(url),
+                                None => oauth,
+                            };
                             // Plain-http issuers are for local development
-                            // only - discovery rejects them by default.
+                            // only - discovery and key fetches reject them
+                            // by default.
                             if allow_http {
                                 oauth.with_config(|cfg| {
                                     cfg.with_client_config(|c| c.require_https(false))
