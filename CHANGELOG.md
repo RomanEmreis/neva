@@ -9,23 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 * **Who is calling**: `claims()` on `Context` and `MwContext`, the claims of
-  the caller's access token. `None` without an authenticated caller, and
-  always without `http-server` (#161).
+  the caller's access token; `None` without one, and without `http-server`
+  (#161).
 * `Claims::issuer()`, `audience()`, `client_id()` and `scopes()`, answered by
   `DefaultClaims` from `iss`, `aud`, `client_id` and `scope` (#161).
 * `downcast_ref::<T>()` on `dyn Claims`; `Any` is a supertrait of `Claims`
   (#161).
 * **Scope-gated tools, prompts and resources**: `scopes = [..]` on `#[tool]`,
-  `#[prompt]` and `#[resource]`, and `with_scopes(..)` beside `with_roles` /
-  `with_permissions`. Every listed scope is required. A token short of some is
-  refused with `ErrorCode::InsufficientScope` (`-31403`, outside the JSON-RPC
-  reserved range), `requiredScopes` and `missingScopes` in `data`; over HTTP
-  that is a `403` with `WWW-Authenticate: Bearer error="insufficient_scope",
-  scope=".."`, which the neva client steps up on. Checked before dispatch, so
-  streamed replies and batches get the `403` too; a batch is refused whole.
-  Both protocol profiles (#162).
-* Without `with_scopes`, `scopes_supported` in the protected resource metadata
-  lists every scope the tools, prompts and resources declare at start (#162).
+  `#[prompt]` and `#[resource]`, `with_scopes(..)` on the builders. Every
+  listed scope is required. A token short of some gets a `403` with
+  `WWW-Authenticate: Bearer error="insufficient_scope", scope=".."` and
+  `ErrorCode::InsufficientScope` (`-31403`), `requiredScopes` and
+  `missingScopes` in `data`. Streamed replies and batches included, a batch
+  refused whole; both protocol profiles (#162).
+* `scopes_supported` defaults to the scopes the tools, prompts and resources
+  declare at start; `with_scopes` overrides it (#162).
 
 ### Changed
 * `neva::auth::{Claims, DefaultClaims}` no longer need `http-server` (#161).
@@ -34,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed (breaking)
 * `DefaultClaims.aud` is a `Vec<String>`, was `Option<String>`; new fields
   `client_id` and `scope` (#161).
-* New `ErrorCode::InsufficientScope` variant (#162).
+* `ErrorCode` has a new variant, `InsufficientScope` (#162).
 
 ### Fixed
 * A token whose `aud` is an array is no longer refused (#161).
