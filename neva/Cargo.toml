@@ -64,9 +64,6 @@ nix = { version = "0.31.1", features = ["signal"], optional = true }
 [dev-dependencies]
 tokio = { version = "1.53.2", features = ["rt", "rt-multi-thread", "macros"] }
 tokio-stream = { version = "0.1.19" }
-# signs the ES256 tokens the issuer-key tests validate; the version and
-# backend volga already builds
-jsonwebtoken = { version = "11.1.0", features = ["aws_lc_rs"] }
 
 [features]
 default = []

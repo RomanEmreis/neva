@@ -16,6 +16,7 @@ use neva::{
 };
 use serde_json::{Value, json};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use volga::auth::{BearerAuthConfig, BearerTokenService, EncodingKey};
 
 /// What the tokens carry in `iss`. Nothing listens there.
 const ISSUER: &str = "http://127.0.0.1:1";
@@ -77,12 +78,13 @@ fn sign(key: &[u8], mut claims: Value) -> String {
         + 3600;
     claims["exp"] = json!(exp);
 
-    jsonwebtoken::encode(
-        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256),
-        &claims,
-        &jsonwebtoken::EncodingKey::from_ec_pem(key).expect("signing key"),
-    )
-    .expect("token")
+    // Volga signs with the first algorithm `with_alg` names
+    let service = BearerTokenService::from(
+        BearerAuthConfig::default()
+            .set_encoding_key(EncodingKey::from_ec_pem(key).expect("signing key"))
+            .with_alg(Algorithm::ES256),
+    );
+    service.encode(&claims).expect("token").to_string()
 }
 
 /// The issuer's token for `aud`, signed with `key`.
