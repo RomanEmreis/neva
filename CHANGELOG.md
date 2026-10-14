@@ -8,36 +8,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## 0.8.0
 
 ### Added
-* **Who is calling**: `claims()` on `Context` and `MwContext`, the claims of
-  the caller's access token; `None` without one, and without `http-server`
-  (#161).
-* `Claims::issuer()`, `audience()`, `client_id()` and `scopes()`, answered by
-  `DefaultClaims` from `iss`, `aud`, `client_id` and `scope` (#161).
-* `downcast_ref::<T>()` on `dyn Claims`; `Any` is a supertrait of `Claims`
-  (#161).
+* **Who is calling**: `claims()` on `Context` and `MwContext`; `None` without
+  a token, and without `http-server` (#161).
+* `Claims::issuer()`, `audience()`, `client_id()` and `scopes()`, from `iss`,
+  `aud`, `client_id` and `scope` in `DefaultClaims`; `downcast_ref::<T>()` on
+  `dyn Claims` (#161).
 * **Scope-gated tools, prompts and resources**: `scopes = [..]` on `#[tool]`,
   `#[prompt]` and `#[resource]`, `with_scopes(..)` on the builders. Every
-  listed scope is required. A token short of some gets a `403` with
-  `WWW-Authenticate: Bearer error="insufficient_scope", scope=".."` and
-  `ErrorCode::InsufficientScope` (`-31403`), `requiredScopes` and
-  `missingScopes` in `data`. Streamed replies and batches included, a batch
-  refused whole; both protocol profiles (#162).
-* `scopes_supported` defaults to the scopes the tools, prompts and resources
-  declare at start; `with_scopes` overrides it (#162).
+  listed scope is required. A token short of one gets a
+  `403 insufficient_scope` challenge and `ErrorCode::InsufficientScope`
+  (`-31403`) with `requiredScopes` and `missingScopes`; streams and batches
+  included, in both protocol profiles (#162).
+* `scopes_supported` defaults to the declared scopes; `with_scopes` overrides
+  it (#162).
+* **Keys for an unreachable issuer**: `OAuthConfig::with_jwks_uri` fetches
+  them from an explicit URL, without discovery;
+  `AuthConfig::with_decoding_key` takes a static RSA, EC or Ed25519 public
+  key, from PEM or a JWK. `neva::auth::DecodingKey` is re-exported (#163).
 
 ### Changed
 * `neva::auth::{Claims, DefaultClaims}` no longer need `http-server` (#161).
 * A `requestState` is bound to the caller's issuer as well as its subject.
+* A server with both a static decoding key and `with_oauth` fails to start
+  (#163).
+* The Volga adapter requires volga 0.13.3.
 
 ### Changed (breaking)
 * `DefaultClaims.aud` is a `Vec<String>`, was `Option<String>`; new fields
   `client_id` and `scope` (#161).
 * `ErrorCode` has a new variant, `InsufficientScope` (#162).
+* `AuthConfig::with_alg` replaces the default `HS256` instead of adding to it.
+  A server whose static key does not match the algorithms fails to start
+  (RomanEmreis/volga#280).
+* `AuthConfig::with_iss` requires the `iss` claim (RomanEmreis/volga#281).
 
 ### Fixed
-* A token whose `aud` is an array is no longer refused (#161).
-* A middleware's own answer to a request, without calling `next` or after a
-  timeout around it, reaches the caller instead of being dropped.
+* A token whose `aud` is an array is accepted (#161).
+* A middleware's own answer, without `next` or after a timeout around it,
+  reaches the caller.
+* With `tracing` on and no subscriber, start failures and the MCP Apps
+  resource warning go to stderr.
 
 ## 0.7.1
 

@@ -1106,18 +1106,16 @@ where
                         _ = engine_token.cancelled() => return,
                         _ = scope_gate.bound() => {}
                     }
-                    if let Err(_e) = engine.run(ctx, engine_token.clone()).await {
+                    if let Err(err) = engine.run(ctx, engine_token.clone()).await {
                         // The engine never starting is the whole server not
                         // starting -- most often the bind address, which the
                         // engine reports rather than quietly listening
-                        // somewhere else. Said on stderr when there is no
-                        // subscriber to say it to, as `App::run_blocking`
-                        // does for a runtime that fails to build: a server
-                        // that exits without a word looks like a hang.
-                        #[cfg(feature = "tracing")]
-                        tracing::error!(logger = "neva", "HTTP engine error: {:?}", _e);
-                        #[cfg(not(feature = "tracing"))]
-                        eprintln!("HTTP engine error: {_e:?}");
+                        // somewhere else, or an auth configuration it refuses.
+                        // Said on stderr when there is no subscriber to say it
+                        // to, as `App::run_blocking` does for a runtime that
+                        // fails to build: a server that exits without a word
+                        // looks like a hang.
+                        crate::shared::diagnostic!(ERROR, "HTTP engine error: {err:#}");
                         engine_token.cancel();
                     }
                 }

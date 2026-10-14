@@ -258,10 +258,7 @@ impl App {
         {
             Ok(rt) => rt,
             Err(err) => {
-                #[cfg(feature = "tracing")]
-                tracing::error!("failed to start the runtime: {err:#}");
-                #[cfg(not(feature = "tracing"))]
-                eprintln!("failed to start the runtime: {err:#}");
+                crate::shared::diagnostic!(ERROR, "failed to start the runtime: {err:#}");
                 return;
             }
         };
@@ -475,11 +472,8 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
             drained,
         } = match transport.start() {
             Ok(handle) => handle,
-            Err(_err) => {
-                #[cfg(feature = "tracing")]
-                tracing::error!(logger = "neva", "failed to start the transport: {_err:#}");
-                #[cfg(not(feature = "tracing"))]
-                eprintln!("failed to start the transport: {_err:#}");
+            Err(err) => {
+                crate::shared::diagnostic!(ERROR, "failed to start the transport: {err:#}");
                 return;
             }
         };
@@ -1074,17 +1068,11 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
     #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
     fn validate_ui_resources(&self) {
         for (tool, uri, complaint) in self.ui_resource_problems() {
-            // stderr, not stdout: the stdio transport owns stdout. Same shape as
-            // the runtime-start failure above -- a diagnostic a minimal build
-            // still gets, since `tracing` is optional and this one is a promise.
-            #[cfg(feature = "tracing")]
-            tracing::warn!(
-                logger = "neva",
-                "Tool `{tool}` advertises the MCP Apps resource `{uri}`, which {complaint}."
-            );
-            #[cfg(not(feature = "tracing"))]
-            eprintln!(
-                "neva: tool `{tool}` advertises the MCP Apps resource `{uri}`, which {complaint}."
+            // A diagnostic a build without a subscriber still gets, like the
+            // runtime-start failure above: this one is a promise.
+            crate::shared::diagnostic!(
+                WARN,
+                "tool `{tool}` advertises the MCP Apps resource `{uri}`, which {complaint}."
             );
         }
     }

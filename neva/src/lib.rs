@@ -189,6 +189,12 @@ pub mod auth {
     #[cfg(feature = "http-server-volga")]
     pub use volga::auth::{Algorithm, Authorizer, Claims as ClaimsDerive};
 
+    /// The key `AuthConfig::with_decoding_key` validates tokens with: an
+    /// HMAC secret, or the public half of an RSA, EC or Ed25519 key pair,
+    /// read from PEM or from a JSON Web Key.
+    #[cfg(feature = "http-server-volga")]
+    pub use volga::auth::DecodingKey;
+
     #[cfg(any(feature = "server-oauth", feature = "client-oauth"))]
     pub mod oauth {
         //! OAuth 2.1 / OIDC building blocks.

@@ -82,15 +82,72 @@ impl From<AuthConfig> for BearerAuthConfig {
 }
 
 impl<C: AuthClaims> AuthConfig<C> {
-    /// Specifies a security key to validate a JWT from a secret
-    pub fn set_decoding_key(mut self, secret: &[u8]) -> Self {
-        self.inner = self
-            .inner
-            .set_decoding_key(DecodingKey::from_secret(secret));
+    /// Specifies an HMAC secret to validate a JWT with (`HS256`, `HS384`,
+    /// `HS512`).
+    ///
+    /// For a public key, such as the one an authorization server signs its
+    /// access tokens with, use [`with_decoding_key`](Self::with_decoding_key).
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::App;
+    ///
+    /// let app = App::new()
+    ///     .with_options(|opt| opt
+    ///         .with_http(|http| http
+    ///             .with_auth(|auth| auth.set_decoding_key(b"a-string-secret-at-least-256-bits-long"))
+    ///         )
+    ///     );
+    /// ```
+    pub fn set_decoding_key(self, secret: &[u8]) -> Self {
+        self.with_decoding_key(DecodingKey::from_secret(secret))
+    }
+
+    /// Specifies the key to validate a JWT with: an HMAC secret, or the
+    /// public half of an RSA, EC or Ed25519 key pair, read from PEM or from
+    /// a JSON Web Key (`DecodingKey::from_jwk`).
+    ///
+    /// Pair a public key with [`with_alg`](Self::with_alg): the default
+    /// algorithm is `HS256`, and a key of another family than the
+    /// configured algorithms fails the server start. Pair it with
+    /// [`with_iss`](Self::with_iss) and [`with_aud`](Self::with_aud) too.
+    /// This is how a server validates an authorization server's tokens
+    /// without reaching the issuer at all. The key does not follow the
+    /// issuer's rotations: a re-keyed issuer means a restart with the new
+    /// key. Where the issuer's key set can be fetched from some URL, OAuth
+    /// issuer mode with `OAuthConfig::with_jwks_uri` tracks rotations
+    /// instead.
+    ///
+    /// A static key and OAuth issuer mode (`with_oauth`) exclude each
+    /// other: a server configured with both fails to start.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::{App, auth::{Algorithm, DecodingKey}};
+    ///
+    /// // the authorization server's public key, shipped with the deployment
+    /// let key = DecodingKey::from_pem_file("/etc/mcp/issuer.pem");
+    ///
+    /// let app = App::new()
+    ///     .with_options(|opt| opt
+    ///         .with_http(|http| http
+    ///             .with_auth(|auth| auth
+    ///                 .with_decoding_key(key)
+    ///                 .with_alg(Algorithm::ES256)
+    ///                 .with_iss(["http://localhost:8787"])
+    ///                 .with_aud(["http://localhost:3000/mcp"]))
+    ///         )
+    ///     );
+    /// ```
+    pub fn with_decoding_key(mut self, key: DecodingKey) -> Self {
+        self.inner = self.inner.set_decoding_key(key);
         self
     }
 
     /// Specifies the algorithm supported for verifying JWTs
+    ///
+    /// The first call replaces the default, and later calls add to the
+    /// accepted algorithms.
     ///
     /// Default: [`Algorithm::HS256`]
     /// # Example
@@ -187,7 +244,8 @@ impl<C: AuthClaims> AuthConfig<C> {
         self
     }
 
-    /// Sets one or more acceptable issuers
+    /// Sets one or more acceptable issuers: a token must carry one of them
+    /// in `iss`, and a token without `iss` is refused.
     ///
     /// # Example
     /// ```no_run
@@ -283,9 +341,10 @@ impl<C: AuthClaims> AuthConfig<C> {
 
     /// Switches token validation to OAuth 2.1/OIDC issuer mode: instead
     /// of a static decoding key, the issuer's JSON Web Key Set is
-    /// discovered (RFC 8414, with an OIDC fallback) and used to validate
-    /// incoming JWTs, keyed by each token's `kid` -- with rotation,
-    /// refresh cooldown and key-age limits handled by Volga.
+    /// discovered (RFC 8414, with an OIDC fallback), or fetched from
+    /// [`OAuthConfig::with_jwks_uri`], and used to validate incoming JWTs,
+    /// keyed by each token's `kid` -- with rotation, refresh cooldown and
+    /// key-age limits handled by Volga.
     ///
     /// MCP defaults applied automatically unless overridden: the token's
     /// `aud` must contain the server's canonical resource URI (RFC 8707;
@@ -347,18 +406,30 @@ impl<C: AuthClaims> AuthConfig<C> {
     }
 
     /// Takes the Volga-facing OAuth issuer configuration out, validating
-    /// that an issuer was actually provided -- `with_oauth` without
-    /// `with_issuer` is a configuration error that must fail startup.
+    /// it: `with_oauth` without `with_issuer`, or next to a static decoding
+    /// key, is a configuration error that must fail startup.
     #[cfg(feature = "server-oauth")]
     pub(crate) fn take_oauth(&mut self) -> Result<Option<VolgaOAuthConfig>, crate::error::Error> {
-        match self.oauth.take() {
-            None => Ok(None),
-            Some(oauth) if oauth.issuer.is_some() => Ok(Some(oauth.inner)),
-            Some(_) => Err(crate::error::Error::new(
-                crate::error::ErrorCode::InternalError,
-                "OAuth issuer is not configured; call `with_oauth(|oauth| oauth.with_issuer(..))`",
-            )),
+        use crate::error::{Error, ErrorCode};
+
+        let Some(oauth) = self.oauth.take() else {
+            return Ok(None);
+        };
+        if self.inner.decoding_key().is_some() {
+            return Err(Error::new(
+                ErrorCode::InternalError,
+                "Bearer auth is ambiguous: both a static decoding key \
+                 (`with_decoding_key` / `set_decoding_key`) and an OAuth issuer \
+                 (`with_oauth`) are configured; pick one",
+            ));
         }
+        if oauth.issuer.is_none() {
+            return Err(Error::new(
+                ErrorCode::InternalError,
+                "OAuth issuer is not configured; call `with_oauth(|oauth| oauth.with_issuer(..))`",
+            ));
+        }
+        Ok(Some(oauth.inner))
     }
 
     /// Deconstructs into [`Authorizer`] and [`BearerAuthConfig`]
@@ -416,6 +487,46 @@ impl OAuthConfig {
         self
     }
 
+    /// Fetches the issuer's JSON Web Key Set from `url` instead of
+    /// discovering it from the issuer's metadata.
+    ///
+    /// For a server that cannot reach the URL its tokens name in `iss`:
+    /// the issuer runs on the host as `http://localhost:8787`, and the
+    /// server, in a container, reaches it as
+    /// `http://host.docker.internal:8787`; or a Kubernetes service sits
+    /// behind a public ingress host. Discovery is skipped, since the
+    /// issuer's metadata names the unreachable host twice: as its `issuer`,
+    /// which must equal the URL it was fetched from, and in its `jwks_uri`.
+    ///
+    /// [`with_issuer`](Self::with_issuer) is still required and keeps its
+    /// meaning: tokens must carry it in `iss`, and the Protected Resource
+    /// Metadata document sends clients to it. Only where the keys come from
+    /// changes; rotation, the refresh cooldown and the key age work as they
+    /// do with discovery. The transport policy set through
+    /// [`with_config`](Self::with_config) applies to `url` as well, so a
+    /// plain `http` URL needs `require_https(false)`.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::App;
+    ///
+    /// let app = App::new()
+    ///     .with_options(|opt| opt
+    ///         .with_http(|http| http
+    ///             .with_auth(|auth| auth.with_oauth(|oauth| oauth
+    ///                 // what tokens carry in `iss`, and where clients go
+    ///                 .with_issuer("http://localhost:8787")
+    ///                 // where this server, in a container, gets the keys
+    ///                 .with_jwks_uri("http://host.docker.internal:8787/jwks")
+    ///                 .with_config(|cfg| cfg.with_client_config(|c| c.require_https(false)))))
+    ///         )
+    ///     );
+    /// ```
+    pub fn with_jwks_uri(mut self, url: impl Into<String>) -> Self {
+        self.inner = self.inner.with_jwks_uri(url);
+        self
+    }
+
     /// Sets the minimum interval between two JWKS refresh attempts.
     ///
     /// Default: 60 seconds.
@@ -464,8 +575,8 @@ impl OAuthConfig {
     }
 
     /// Escape hatch to the underlying [`volga::auth::OAuthConfig`] for
-    /// knobs without a neva-level counterpart (e.g. the discovery HTTP
-    /// client policy).
+    /// knobs without a neva-level counterpart (e.g. the HTTP client policy
+    /// for discovery and key fetches).
     ///
     /// # Example
     /// ```no_run
@@ -523,6 +634,43 @@ mod tests {
         let mut auth =
             AuthConfig::default().with_oauth(|o| o.with_issuer("https://auth.example.com"));
         assert!(auth.take_oauth().unwrap().is_some());
+    }
+
+    #[test]
+    fn a_static_key_next_to_oauth_fails() {
+        let mut auth = AuthConfig::default()
+            .with_decoding_key(DecodingKey::from_secret(b"secret"))
+            .with_oauth(|o| o.with_issuer("https://auth.example.com"));
+        let err = auth.take_oauth().unwrap_err();
+        assert!(err.to_string().contains("ambiguous"), "{err}");
+
+        // the HMAC shorthand is the same static key
+        let mut auth = AuthConfig::default()
+            .with_oauth(|o| o.with_issuer("https://auth.example.com"))
+            .set_decoding_key(b"secret");
+        assert!(auth.take_oauth().is_err());
+    }
+
+    #[test]
+    fn a_static_key_alone_is_not_oauth_mode() {
+        let mut auth = AuthConfig::default().with_decoding_key(DecodingKey::from_secret(b"secret"));
+        assert!(auth.take_oauth().unwrap().is_none());
+    }
+
+    #[test]
+    fn it_forwards_the_jwks_uri() {
+        let mut auth = AuthConfig::default().with_oauth(|o| {
+            o.with_issuer("http://localhost:8787")
+                .with_jwks_uri("http://host.docker.internal:8787/jwks")
+        });
+        // the issuer stays the public identifier
+        assert_eq!(auth.oauth_issuer(), Some("http://localhost:8787"));
+
+        let volga = auth.take_oauth().unwrap().unwrap();
+        assert!(
+            format!("{volga:?}").contains("Some(\"http://host.docker.internal:8787/jwks\")"),
+            "{volga:?}"
+        );
     }
 
     // `BearerAuthConfig` keeps its audience set private; its `Debug` impl
