@@ -463,7 +463,8 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
         self.options.declare_scopes();
 
         let mut transport = self.options.transport();
-        // Bound to the registry below, once the runtime holds it.
+        // Bound to the registry below, once the runtime holds it. The HTTP
+        // transport does not take a request until then.
         #[cfg(feature = "http-server")]
         let scope_gate = transport.scope_gate();
         // Two halves: the token that stops the transport, and the signal its

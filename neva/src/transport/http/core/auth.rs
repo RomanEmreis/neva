@@ -11,7 +11,8 @@ use super::types::Claims;
 use crate::app::options::RuntimeMcpOptions;
 use crate::error::{Error, ErrorCode};
 use crate::types::{Request, Uri};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+use tokio::sync::SetOnce;
 
 const ERR_NO_CLAIMS: &str = "Claims are not provided";
 const ERR_UNAUTHORIZED: &str = "Subject is not authorized to invoke this";
@@ -160,11 +161,14 @@ pub(crate) fn required_scopes_of(err: &crate::types::ErrorDetails) -> Vec<String
 /// a client steps up on.
 ///
 /// Bound once the server's runtime is built, which is after the transport
-/// starts. Until then nothing is checked here, and the requirement the
-/// dispatch checks is the one that refuses.
+/// starts: the runtime answers through the transport's sender. So the
+/// transport does not run its engine until the gate is bound -- see
+/// [`Self::bound`] -- and no request reaches an unbound one. A gate that is
+/// never bound, as in a test that drives the handlers directly, checks
+/// nothing, and the requirement the dispatch checks is the one that refuses.
 #[derive(Clone, Default)]
 pub(crate) struct ScopeGate {
-    options: Arc<OnceLock<RuntimeMcpOptions>>,
+    options: Arc<SetOnce<RuntimeMcpOptions>>,
 }
 
 impl std::fmt::Debug for ScopeGate {
@@ -191,6 +195,19 @@ impl ScopeGate {
     #[inline]
     pub(crate) fn bind(&self, options: RuntimeMcpOptions) {
         let _ = self.options.set(options);
+    }
+
+    /// Waits until the gate is bound.
+    ///
+    /// What the transport waits on before its engine takes a request. One let
+    /// in earlier would get past the gate unchecked, and be refused in the
+    /// dispatch instead: in-band, after a streamed reply has had its `200`
+    /// or a batch its one status, and so with no `403` to step up on.
+    ///
+    /// Cancel safe.
+    #[inline]
+    pub(crate) async fn bound(&self) {
+        self.options.wait().await;
     }
 
     /// Why `req` is refused for want of scope, if it is.
