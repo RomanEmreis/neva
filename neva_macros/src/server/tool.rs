@@ -30,7 +30,7 @@ use syn::{FnArg, ItemFn, Meta, Pat, ReturnType, punctuated::Punctuated, token::C
 
 /// Every attribute `#[tool]` accepts. Anything else is a compile error --
 /// see [`super::unknown_attr`].
-const TOOL_ATTRS: [&str; 13] = [
+const TOOL_ATTRS: [&str; 14] = [
     "title",
     "descr",
     "input_schema",
@@ -38,6 +38,7 @@ const TOOL_ATTRS: [&str; 13] = [
     "annotations",
     "roles",
     "permissions",
+    "scopes",
     "middleware",
     "task_support",
     "ui",
@@ -58,6 +59,7 @@ pub(crate) fn expand(
     let mut title = None;
     let mut roles = None;
     let mut permissions = None;
+    let mut scopes = None;
     let mut middleware = None;
     let mut task_support = None;
     let mut no_schema = false;
@@ -118,6 +120,9 @@ pub(crate) fn expand(
                         }
                         "permissions" => {
                             permissions = get_params_arr(&nv.value);
+                        }
+                        "scopes" => {
+                            scopes = get_params_arr(&nv.value);
                         }
                         "middleware" => {
                             middleware = get_exprs_arr(&nv.value);
@@ -371,6 +376,11 @@ pub(crate) fn expand(
         quote! { .with_permissions([#(#permission_literals),*]) }
     });
 
+    let scopes_code = scopes.map(|scopes| {
+        let scope_literals = scopes.iter().map(|s| quote::quote! { #s });
+        quote! { .with_scopes([#(#scope_literals),*]) }
+    });
+
     let middleware_code = middleware.map(|mws| {
         let mw_calls = mws.iter().map(|mw| {
             quote! { .wrap_tool(stringify!(#func_name), #mw) }
@@ -401,6 +411,7 @@ pub(crate) fn expand(
                 #annotations_code
                 #roles_code
                 #permission_code
+                #scopes_code
                 #task_support_code
                 #ui_code
                 #visibility_code;

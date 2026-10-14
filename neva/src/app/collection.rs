@@ -44,6 +44,16 @@ impl<T: Clone> Collection<T> {
         }
     }
 
+    /// Reads the `value` under `key` through `f`, without copying the value.
+    #[inline]
+    #[cfg(feature = "http-server")]
+    pub(crate) async fn read_with<R>(&self, key: &str, f: impl FnOnce(&T) -> R) -> Option<R> {
+        match self {
+            Self::Init(map) => map.get(key).map(f),
+            Self::Runtime(lock) => lock.read().await.get(key).map(f),
+        }
+    }
+
     /// Inserts a key-value pair into this [`Collection`] when it in [`Collection::Runtime`] state.
     ///
     /// For the [`Collection::Init`] state - use the `as_mut().insert()` method.

@@ -35,8 +35,8 @@ pub(crate) struct ResourceHandler {
     /// What a caller must hold to read this route.
     ///
     /// The one place `resources/read` looks, whatever registered the route: a
-    /// template's `with_roles` / `with_permissions` land here when the server
-    /// starts, a UI resource's when it is materialized.
+    /// template's `with_roles` / `with_permissions` / `with_scopes` land here
+    /// when the server starts, a UI resource's when it is materialized.
     #[cfg(feature = "http-server")]
     pub(crate) required: crate::transport::http::core::auth::RequiredClaims,
 

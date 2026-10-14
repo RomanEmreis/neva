@@ -6,7 +6,7 @@ use quote::quote;
 use syn::{ItemFn, Meta, punctuated::Punctuated, token::Comma};
 
 /// Every attribute `#[resource]` accepts.
-const RESOURCE_ATTRS: [&str; 9] = [
+const RESOURCE_ATTRS: [&str; 10] = [
     "uri",
     "title",
     "descr",
@@ -14,6 +14,7 @@ const RESOURCE_ATTRS: [&str; 9] = [
     "annotations",
     "roles",
     "permissions",
+    "scopes",
     "ui_meta",
     "blocking",
 ];
@@ -33,6 +34,7 @@ pub(crate) fn expand_resource(
     let mut annotations = None;
     let mut roles = None;
     let mut permissions = None;
+    let mut scopes = None;
     let mut mime_expr = None;
     let mut ui_meta_expr = None;
     let mut blocking = false;
@@ -91,6 +93,9 @@ pub(crate) fn expand_resource(
                         }
                         "permissions" => {
                             permissions = get_params_arr(&nv.value);
+                        }
+                        "scopes" => {
+                            scopes = get_params_arr(&nv.value);
                         }
                         "ui_meta" => {
                             ui_meta_expr = Some(nv.value.clone());
@@ -152,6 +157,11 @@ pub(crate) fn expand_resource(
         quote! { .with_permissions([#(#permission_literals),*]) }
     });
 
+    let scopes_code = scopes.map(|scopes| {
+        let scope_literals = scopes.iter().map(|s| quote::quote! { #s });
+        quote! { .with_scopes([#(#scope_literals),*]) }
+    });
+
     let module_name = syn::Ident::new(&format!("map_{func_name}"), func_name.span());
     let handler_code = super::handler_code(function, blocking, "resource")?;
 
@@ -168,6 +178,7 @@ pub(crate) fn expand_resource(
                 #annotations_code
                 #roles_code
                 #permission_code
+                #scopes_code
                 #ui_meta_code;
         }
         neva::macros::inventory::submit! {

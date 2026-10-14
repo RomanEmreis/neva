@@ -55,6 +55,9 @@ pub use volga_oauth_core::{
 #[derive(Debug, Clone, Default)]
 pub struct OAuthResourceOptions {
     metadata: ProtectedResourceMetadata,
+    /// Whether [`Self::with_scopes`] was called, so that the scopes the
+    /// server's items declare do not stand in for an explicit list.
+    scopes_configured: bool,
 }
 
 impl OAuthResourceOptions {
@@ -108,6 +111,14 @@ impl OAuthResourceOptions {
 
     /// Sets the scope values clients should request to access this server.
     ///
+    /// Without it, `scopes_supported` lists every scope the server's tools,
+    /// prompts and resources require through `with_scopes` (or
+    /// `scopes = [..]` in the macros), so the two lists cannot drift apart.
+    /// Set it when a client should ask for less than all of them up front,
+    /// or for scopes the server checks some other way; an empty list
+    /// advertises none. An item added while the server runs is not in the
+    /// derived list: the document is built once, at start.
+    ///
     /// # Example
     /// ```no_run
     /// use neva::App;
@@ -126,12 +137,32 @@ impl OAuthResourceOptions {
         S: Into<String>,
     {
         self.metadata = self.metadata.with_scopes(scopes);
+        self.scopes_configured = true;
+        self
+    }
+
+    /// Advertises `declared` as `scopes_supported`, unless scopes were
+    /// configured already: through [`Self::with_scopes`], an empty list
+    /// included, or as a non-empty list through [`Self::with_metadata`].
+    ///
+    /// An empty list set through [`Self::with_metadata`] cannot be told from
+    /// the default: `scopes_supported` is a plain `Vec`, and the closure hands
+    /// back the same value whether it set one or not.
+    pub(crate) fn with_declared_scopes(mut self, declared: Vec<String>) -> Self {
+        if !self.scopes_configured && self.metadata.scopes_supported.is_empty() {
+            self.metadata.scopes_supported = declared;
+        }
         self
     }
 
     /// Full-document escape hatch: configures any remaining
     /// [RFC 9728](https://www.rfc-editor.org/rfc/rfc9728) field on the
     /// underlying [`ProtectedResourceMetadata`] builder.
+    ///
+    /// A `scopes_supported` set here replaces the list derived from the
+    /// server's items only when it is not empty. An empty one is what the
+    /// document holds by default, so it reads as not set; to advertise no
+    /// scopes, call [`Self::with_scopes`] with an empty list.
     ///
     /// # Example
     /// ```no_run
@@ -280,6 +311,48 @@ mod tests {
         let doc: ProtectedResourceMetadata = serde_json::from_slice(&resource.body).unwrap();
         assert_eq!(doc.authorization_servers, ["https://auth.example.com"]);
         assert_eq!(doc.scopes_supported, ["mcp:tools"]);
+    }
+
+    #[test]
+    fn it_advertises_the_declared_scopes_when_none_were_configured() {
+        let declared = || vec!["memory:read".to_string(), "memory:write".to_string()];
+        let scopes = |options: OAuthResourceOptions| {
+            let resource = options
+                .with_declared_scopes(declared())
+                .resolve("http://127.0.0.1:3000/mcp")
+                .unwrap();
+            serde_json::from_slice::<ProtectedResourceMetadata>(&resource.body)
+                .unwrap()
+                .scopes_supported
+        };
+
+        assert_eq!(
+            scopes(OAuthResourceOptions::default()),
+            ["memory:read", "memory:write"]
+        );
+        assert_eq!(
+            scopes(OAuthResourceOptions::default().with_scopes(["memory:read"])),
+            ["memory:read"],
+            "an explicit list wins"
+        );
+        assert!(
+            scopes(OAuthResourceOptions::default().with_scopes(Vec::<String>::new())).is_empty(),
+            "so does an explicit empty one"
+        );
+        assert_eq!(
+            scopes(OAuthResourceOptions::default().with_metadata(|md| md.with_scopes(["a"]))),
+            ["a"],
+            "and one set through the full document"
+        );
+        // An empty one set there is the default value, which the closure
+        // hands back either way; `with_scopes` is how to advertise none.
+        assert_eq!(
+            scopes(
+                OAuthResourceOptions::default()
+                    .with_metadata(|md| md.with_scopes(Vec::<String>::new()))
+            ),
+            ["memory:read", "memory:write"]
+        );
     }
 
     #[test]

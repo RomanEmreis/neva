@@ -367,6 +367,33 @@ impl ResourceTemplate {
         self
     }
 
+    /// Sets the scopes a caller's access token must grant to read the
+    /// resource.
+    ///
+    /// Every scope listed is required; a token short of some is refused with
+    /// a `403` step-up challenge over HTTP. See
+    /// [`Tool::with_scopes`](crate::types::Tool::with_scopes).
+    ///
+    /// # Examples
+    /// ```no_run
+    /// use neva::App;
+    ///
+    /// let mut app = App::new();
+    /// app.map_resource("notes://{id}", "note", |id: String| async move {
+    ///     (format!("notes://{id}"), format!("Note {id}"))
+    /// })
+    /// .with_scopes(["notes:read"]);
+    /// ```
+    #[cfg(feature = "http-server")]
+    pub fn with_scopes<T, I>(&mut self, scopes: T) -> &mut Self
+    where
+        T: IntoIterator<Item = I>,
+        I: Into<String>,
+    {
+        self.required.set_scopes(scopes);
+        self
+    }
+
     /// Sets the [`ResourceTemplate`] icons
     pub fn with_icons(&mut self, icons: impl IntoIterator<Item = Icon>) -> &mut Self {
         self.icons = Some(icons.into_iter().collect());

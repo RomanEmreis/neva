@@ -457,7 +457,16 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
         // than starting it over.
         let drain_deadline = shutdown::DrainDeadline::default();
 
+        // Before the transport is taken out to start, and while the collections
+        // can still be read: they are what `scopes_supported` is derived from.
+        #[cfg(feature = "server-oauth")]
+        self.options.declare_scopes();
+
         let mut transport = self.options.transport();
+        // Bound to the registry below, once the runtime holds it. The HTTP
+        // transport does not take a request until then.
+        #[cfg(feature = "http-server")]
+        let scope_gate = transport.scope_gate();
         // Two halves: the token that stops the transport, and the signal its
         // writers raise once they have drained. This loop breaks on the first;
         // returning waits on the second.
@@ -555,6 +564,10 @@ are bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
         #[cfg(feature = "svir")]
         let toolbox = self.toolbox.take();
         let runtime = self.build_runtime(sender);
+        #[cfg(feature = "http-server")]
+        if let Some(gate) = scope_gate {
+            gate.bind(runtime.options());
+        }
         #[cfg(feature = "svir")]
         if let Some(toolbox) = toolbox {
             toolbox.send_replace(Some(runtime.clone()));

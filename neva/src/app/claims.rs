@@ -9,8 +9,8 @@ use std::fmt::Debug;
 /// HTTP engine before the request reaches the server.
 ///
 /// A handler reads them with [`Context::claims`](crate::Context::claims),
-/// and the `roles` / `permissions` gates on tools, prompts and resources check
-/// them before a handler runs. Every method has a default, so a claims type
+/// and the `roles` / `permissions` / `scopes` gates on tools, prompts and
+/// resources check them before a handler runs. Every method has a default, so a claims type
 /// answers only for the claims it carries.
 ///
 /// [`DefaultClaims`] covers the registered JWT claims and the ones RFC 9068

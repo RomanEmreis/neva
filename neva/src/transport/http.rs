@@ -222,6 +222,9 @@ where
     /// `None` means "derive from the bind address" -- see
     /// [`Self::with_allowed_origins`].
     origin_policy: Option<core::origin::OriginPolicy>,
+    /// Handed to the engine through [`HttpContext`], and bound by the `App`
+    /// to its registry once the runtime is built.
+    scope_gate: core::auth::ScopeGate,
     #[cfg(feature = "server-oauth")]
     oauth: Option<core::oauth::OAuthResourceOptions>,
     sender: HttpSender,
@@ -312,6 +315,7 @@ impl Default for HttpServer<server::DefaultClaims, server::VolgaEngine> {
             sse_cleanup_interval: DEFAULT_SSE_CLEANUP_INTERVAL,
             sse_session_ttl: DEFAULT_SSE_SESSION_TTL,
             origin_policy: None,
+            scope_gate: Default::default(),
             #[cfg(feature = "server-oauth")]
             oauth: None,
             receiver: HttpReceiver::new(),
@@ -463,6 +467,7 @@ where
             sse_cleanup_interval: DEFAULT_SSE_CLEANUP_INTERVAL,
             sse_session_ttl: DEFAULT_SSE_SESSION_TTL,
             origin_policy: None,
+            scope_gate: Default::default(),
             #[cfg(feature = "server-oauth")]
             oauth: None,
             receiver: HttpReceiver::new(),
@@ -608,6 +613,7 @@ where
             // Carried across the swap: the DNS-rebinding gate is a property of
             // the deployment, not of which engine serves it.
             origin_policy: self.origin_policy,
+            scope_gate: self.scope_gate,
             #[cfg(feature = "server-oauth")]
             oauth: self.oauth,
             sender: self.sender,
@@ -770,6 +776,7 @@ where
                 .origin_policy
                 .clone()
                 .unwrap_or_else(|| core::origin::OriginPolicy::for_addr(&self.url.addr)),
+            scope_gate: self.scope_gate.clone(),
             #[cfg(feature = "server-oauth")]
             oauth,
         };
@@ -802,6 +809,7 @@ impl HttpServer<server::DefaultClaims, VolgaEngine> {
             sse_cleanup_interval: DEFAULT_SSE_CLEANUP_INTERVAL,
             sse_session_ttl: DEFAULT_SSE_SESSION_TTL,
             origin_policy: None,
+            scope_gate: Default::default(),
             #[cfg(feature = "server-oauth")]
             oauth: None,
             receiver: HttpReceiver::new(),
@@ -1062,6 +1070,7 @@ where
             .expect("HttpServer::start called twice or after engine was moved");
 
         let pending = ctx.pending.clone();
+        let scope_gate = ctx.scope_gate.clone();
         let sse_registry = ctx.sse_registry.clone();
         let cleanup_registry = ctx.sse_registry.clone();
         let cleanup_interval = self.sse_cleanup_interval;
@@ -1087,6 +1096,16 @@ where
                     engine_token.clone(),
                 ),
                 async {
+                    // Not a request in before the scope gate can judge it,
+                    // which is once `App::run` has built the runtime: let
+                    // past it unchecked, a refusal for want of scope would
+                    // come from the dispatch, too late to be the `403` a
+                    // streamed reply or a batch steps up on.
+                    tokio::select! {
+                        biased;
+                        _ = engine_token.cancelled() => return,
+                        _ = scope_gate.bound() => {}
+                    }
                     if let Err(_e) = engine.run(ctx, engine_token.clone()).await {
                         // The engine never starting is the whole server not
                         // starting -- most often the bind address, which the
@@ -1134,6 +1153,18 @@ where
 
     fn url_label(&self) -> String {
         self.url.to_string()
+    }
+
+    fn scope_gate(&self) -> core::auth::ScopeGate {
+        self.scope_gate.clone()
+    }
+
+    #[cfg(feature = "server-oauth")]
+    fn declare_scopes(&mut self, scopes: Vec<String>) {
+        self.oauth = self
+            .oauth
+            .take()
+            .map(|oauth| oauth.with_declared_scopes(scopes));
     }
 }
 
@@ -1218,6 +1249,62 @@ mod engine_smoke_tests {
         }
     }
 
+    /// What `App::run` does once its runtime is built, and what the engine
+    /// waits on before it takes a request.
+    fn bind_gate<C, E: HttpEngine>(server: &HttpServer<C, E>) {
+        server
+            .scope_gate
+            .bind(crate::app::options::McpOptions::default().into_runtime());
+    }
+
+    /// The engine takes no request before the scope gate can judge it: one
+    /// let in earlier would get past the gate unchecked.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_engine_waits_for_the_scope_gate() {
+        let started = Arc::new(AtomicBool::new(false));
+        let engine = MockEngine {
+            started: started.clone(),
+            exited: Default::default(),
+        };
+        let mut server = HttpServer::from_engine("127.0.0.1:0", engine);
+        let handle = <HttpServer<_, _> as Transport>::start(&mut server).unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !started.load(Ordering::SeqCst),
+            "the engine ran before the gate was bound"
+        );
+
+        bind_gate(&server);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !started.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the engine runs once the gate is bound");
+
+        handle.token.cancel();
+    }
+
+    /// A transport stopped while it waits on the gate does not wait on: it
+    /// never ran its engine, and drains.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_transport_stopped_before_the_gate_is_bound_drains() {
+        let started = Arc::new(AtomicBool::new(false));
+        let engine = MockEngine {
+            started: started.clone(),
+            exited: Default::default(),
+        };
+        let mut server = HttpServer::from_engine("127.0.0.1:0", engine);
+        let handle = <HttpServer<_, _> as Transport>::start(&mut server).unwrap();
+
+        handle.token.cancel();
+
+        assert!(handle.drained.wait_or_abort(Duration::from_secs(5)).await);
+        assert!(!started.load(Ordering::SeqCst));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn engine_run_is_invoked_and_cancellation_propagates() {
         let started = Arc::new(AtomicBool::new(false));
@@ -1227,6 +1314,7 @@ mod engine_smoke_tests {
             exited: exited.clone(),
         };
         let mut server = HttpServer::from_engine("127.0.0.1:0", engine);
+        bind_gate(&server);
         let handle = <HttpServer<_, _> as Transport>::start(&mut server).unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1308,6 +1396,7 @@ mod engine_smoke_tests {
         let mut server =
             HttpServer::from_engine("127.0.0.1:0", CapturingEngine { ctx: slot.clone() });
         let sender = server.sender.clone();
+        bind_gate(&server);
 
         let handle = <HttpServer<_, _> as Transport>::start(&mut server).unwrap();
         let ctx = captured(&slot).await;
@@ -1341,6 +1430,7 @@ mod engine_smoke_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn the_volga_engine_stops_on_the_transport_token() {
         let mut server = HttpServer::new("127.0.0.1:0");
+        bind_gate(&server);
         let handle = <HttpServer<_, _> as Transport>::start(&mut server).unwrap();
 
         // Bound and serving before it is asked to stop, so this is a running

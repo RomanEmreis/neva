@@ -24,8 +24,8 @@ use super::{
 ///
 /// # Authorization contract
 ///
-/// To enable neva's per-tool / per-prompt / per-resource role and
-/// permission gates, the engine is responsible for decoding the
+/// To enable neva's per-tool / per-prompt / per-resource role, permission
+/// and scope gates, the engine is responsible for decoding the
 /// inbound request's auth credential (bearer token, session cookie,
 /// custom header -- whatever the engine supports) into a value
 /// implementing [`crate::auth::Claims`], wrapping it in
@@ -34,8 +34,12 @@ use super::{
 ///
 /// neva itself does not parse credentials -- that is the engine's job.
 /// If no claims are inserted, neva treats the request as unauthenticated
-/// and any tool/prompt/resource that declares required roles or
-/// permissions will reject it.
+/// and any tool/prompt/resource that declares required roles,
+/// permissions or scopes will reject it.
+///
+/// A scope gate the claims fall short of is answered before dispatch with a
+/// `403` and an `insufficient_scope` challenge; the helpers build it, so an
+/// engine has nothing to add for it.
 ///
 /// The default `VolgaEngine` (selected by `HttpServer::default()` /
 /// `with_default_http`) does this automatically using Volga's
@@ -180,4 +184,12 @@ pub(crate) trait HttpTransport: Send + Sync + 'static {
     );
     /// Human-readable URL label for the greeting banner.
     fn url_label(&self) -> String;
+    /// The gate this transport checks scopes at before it dispatches a
+    /// request, for the `App` to bind to its registry once the runtime is
+    /// built.
+    fn scope_gate(&self) -> super::auth::ScopeGate;
+    /// Offers the scopes the server's tools, prompts and resources declare,
+    /// advertised as `scopes_supported` when none were configured.
+    #[cfg(feature = "server-oauth")]
+    fn declare_scopes(&mut self, scopes: Vec<String>);
 }

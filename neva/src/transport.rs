@@ -180,6 +180,20 @@ impl Default for TransportProto {
     }
 }
 
+#[cfg(feature = "http-server")]
+impl TransportProto {
+    /// The gate an HTTP server checks scopes at before it dispatches a
+    /// request, or `None` for any other transport -- see
+    /// [`ScopeGate`](http::core::auth::ScopeGate).
+    #[inline]
+    pub(crate) fn scope_gate(&self) -> Option<http::core::auth::ScopeGate> {
+        match self {
+            TransportProto::HttpServer(http) => Some(http.scope_gate()),
+            _ => None,
+        }
+    }
+}
+
 impl Sender for TransportProtoSender {
     #[inline]
     async fn send(&self, resp: Message) -> Result<(), Error> {
