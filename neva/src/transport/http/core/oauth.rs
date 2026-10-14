@@ -115,9 +115,9 @@ impl OAuthResourceOptions {
     /// prompts and resources require through `with_scopes` (or
     /// `scopes = [..]` in the macros), so the two lists cannot drift apart.
     /// Set it when a client should ask for less than all of them up front,
-    /// or for scopes the server checks some other way. An item added while
-    /// the server runs is not in the derived list: the document is built
-    /// once, at start.
+    /// or for scopes the server checks some other way; an empty list
+    /// advertises none. An item added while the server runs is not in the
+    /// derived list: the document is built once, at start.
     ///
     /// # Example
     /// ```no_run
@@ -142,8 +142,12 @@ impl OAuthResourceOptions {
     }
 
     /// Advertises `declared` as `scopes_supported`, unless scopes were
-    /// configured already -- through [`Self::with_scopes`], or through
-    /// [`Self::with_metadata`].
+    /// configured already: through [`Self::with_scopes`], an empty list
+    /// included, or as a non-empty list through [`Self::with_metadata`].
+    ///
+    /// An empty list set through [`Self::with_metadata`] cannot be told from
+    /// the default: `scopes_supported` is a plain `Vec`, and the closure hands
+    /// back the same value whether it set one or not.
     pub(crate) fn with_declared_scopes(mut self, declared: Vec<String>) -> Self {
         if !self.scopes_configured && self.metadata.scopes_supported.is_empty() {
             self.metadata.scopes_supported = declared;
@@ -154,6 +158,11 @@ impl OAuthResourceOptions {
     /// Full-document escape hatch: configures any remaining
     /// [RFC 9728](https://www.rfc-editor.org/rfc/rfc9728) field on the
     /// underlying [`ProtectedResourceMetadata`] builder.
+    ///
+    /// A `scopes_supported` set here replaces the list derived from the
+    /// server's items only when it is not empty. An empty one is what the
+    /// document holds by default, so it reads as not set; to advertise no
+    /// scopes, call [`Self::with_scopes`] with an empty list.
     ///
     /// # Example
     /// ```no_run
@@ -334,6 +343,15 @@ mod tests {
             scopes(OAuthResourceOptions::default().with_metadata(|md| md.with_scopes(["a"]))),
             ["a"],
             "and one set through the full document"
+        );
+        // An empty one set there is the default value, which the closure
+        // hands back either way; `with_scopes` is how to advertise none.
+        assert_eq!(
+            scopes(
+                OAuthResourceOptions::default()
+                    .with_metadata(|md| md.with_scopes(Vec::<String>::new()))
+            ),
+            ["memory:read", "memory:write"]
         );
     }
 
