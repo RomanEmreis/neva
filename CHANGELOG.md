@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.8.1
+
+### Added
+* `AuthConfig::require_https(bool)`: lets the MCP endpoint take requests over
+  plain HTTP from a non-loopback peer, for TLS that ends in front of the
+  server. Default `true` (#167).
+* `Error::code()` (#168).
+
+### Fixed
+* A `#[tool]` argument of a `JsonSchema` type, `Json<T>` among them, no longer
+  carries `$schema` or the schemars name as `title` inside `properties`; a
+  `#[schemars(title = "...")]` stays (#169).
+
 ## 0.8.0
 
 ### Added

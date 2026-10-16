@@ -339,6 +339,47 @@ impl<C: AuthClaims> AuthConfig<C> {
         self
     }
 
+    /// Specifies whether the MCP endpoint accepts requests over HTTPS only.
+    ///
+    /// When `true`, a request over plain HTTP from a peer that is not
+    /// loopback is refused with `400 Bad Request` and
+    /// `WWW-Authenticate: Bearer error="invalid_request"`. A server that
+    /// terminates TLS itself (`with_tls`) is never refused.
+    ///
+    /// Turn it off only where TLS ends in front of the server, or where the
+    /// network in between is trusted: a reverse proxy or an ingress that
+    /// terminates TLS, a service mesh sidecar, a container whose published
+    /// port reaches the server from the bridge gateway rather than from
+    /// loopback. The server does not read `X-Forwarded-Proto`, so with the
+    /// check off it takes a token from any peer that reaches it. Never turn
+    /// it off on a server reachable directly over plain HTTP.
+    ///
+    /// This is not the `require_https` of the client configuration in
+    /// `OAuthConfig::with_config`: that one governs the URLs the server
+    /// fetches the issuer's keys from.
+    ///
+    /// Default: `true`
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::App;
+    ///
+    /// let app = App::new()
+    ///     .with_options(|opt| opt
+    ///         .with_http(|http| http
+    ///             .bind("0.0.0.0:3000")
+    ///             .with_auth(|auth| auth
+    ///                 .set_decoding_key(b"a-string-secret-at-least-256-bits-long")
+    ///                 // TLS ends at the ingress
+    ///                 .require_https(false))
+    ///         )
+    ///     );
+    /// ```
+    pub fn require_https(mut self, required: bool) -> Self {
+        self.inner = self.inner.require_https(required);
+        self
+    }
+
     /// Switches token validation to OAuth 2.1/OIDC issuer mode: instead
     /// of a static decoding key, the issuer's JSON Web Key Set is
     /// discovered (RFC 8414, with an OIDC fallback), or fetched from
@@ -702,5 +743,19 @@ mod tests {
         let mut auth = AuthConfig::default();
         auth.apply_mcp_defaults(Some("http://127.0.0.1:3000/mcp"));
         assert!(!resources_of(&auth).contains("http://127.0.0.1:3000/mcp"));
+    }
+
+    // The HTTPS switch is private to `BearerAuthConfig` as well, and shows in
+    // the same `Debug` output.
+    #[test]
+    fn https_is_required_by_default() {
+        let auth = AuthConfig::default();
+        assert!(format!("{:?}", auth.inner).contains("require_https: true"));
+    }
+
+    #[test]
+    fn it_forwards_require_https() {
+        let auth = AuthConfig::default().require_https(false);
+        assert!(format!("{:?}", auth.inner).contains("require_https: false"));
     }
 }

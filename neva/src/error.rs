@@ -110,6 +110,39 @@ impl Error {
         self
     }
 
+    /// The code of this error: what went wrong, for a caller to branch on.
+    ///
+    /// An error decoded from a peer's response keeps the code the peer sent,
+    /// and [`Self::data`] holds what goes with it, such as `missingScopes` on
+    /// [`ErrorCode::InsufficientScope`]. An error neva raises on its own side
+    /// may carry one of its internal codes, [`ErrorCode::Timeout`] or
+    /// [`ErrorCode::RequestCancelled`], which never travel on the wire.
+    ///
+    /// A response whose code is not an [`ErrorCode`], such as a server's own
+    /// code, does not reach a caller as that code: the response fails to
+    /// parse, and the request ends with [`ErrorCode::ParseError`] or
+    /// [`ErrorCode::InternalError`] instead.
+    ///
+    /// # Example
+    /// ```
+    /// use neva::error::{Error, ErrorCode};
+    ///
+    /// let err = Error::new(ErrorCode::InsufficientScope, "insufficient scope")
+    ///     .with_data(serde_json::json!({ "missingScopes": ["memory:write"] }));
+    ///
+    /// match err.code() {
+    ///     ErrorCode::InsufficientScope => {
+    ///         let missing = &err.data().unwrap()["missingScopes"];
+    ///         assert_eq!(missing[0], "memory:write");
+    ///     }
+    ///     other => panic!("unexpected {other}"),
+    /// }
+    /// ```
+    #[inline]
+    pub fn code(&self) -> ErrorCode {
+        self.code
+    }
+
     /// The structured `data` payload this error carries, if any.
     ///
     /// Set by [`Self::with_data`] on the way out, and preserved on the way in:
