@@ -295,13 +295,33 @@ pub trait ViaJsonSchema {
 #[cfg(not(feature = "legacy-spec"))]
 #[doc(hidden)]
 impl<T: schemars::JsonSchema> ViaJsonSchema for &SchemaProbe<T> {
+    /// The subschema lands in `properties`, so it carries none of the keywords
+    /// schemars gives a root schema. `$schema` must not appear in a schema that
+    /// is not a resource root (JSON Schema 2020-12 Core section 8.1.1), and the
+    /// `title` a root is given by default is only the type's schemars name,
+    /// such as `Array_of_Entity`. A title the type sets itself, through
+    /// `#[schemars(title = "...")]`, stays, unless it is that same name.
+    ///
+    /// It is generated as a root rather than with `subschema_for`, which would
+    /// point a recursive type at a `$defs` entry the subschema does not carry.
     #[inline]
     fn neva_subschema(&self) -> Value {
-        let settings =
-            schemars::generate::SchemaSettings::draft2020_12().with(|s| s.inline_subschemas = true);
-        schemars::SchemaGenerator::new(settings)
+        let settings = schemars::generate::SchemaSettings::draft2020_12().with(|s| {
+            s.inline_subschemas = true;
+            s.meta_schema = None;
+        });
+
+        let mut schema = schemars::SchemaGenerator::new(settings)
             .into_root_schema_for::<T>()
-            .to_value()
+            .to_value();
+
+        if let Value::Object(object) = &mut schema
+            && object.get("title").and_then(Value::as_str) == Some(T::schema_name().as_ref())
+        {
+            object.remove("title");
+        }
+
+        schema
     }
 }
 
@@ -555,6 +575,41 @@ mod tests {
             v.get("$defs").is_none(),
             "subschema must be inlined (no $defs)"
         );
+    }
+
+    /// The subschema is inlined into `properties`, where `$schema` must not
+    /// appear (JSON Schema 2020-12 Core section 8.1.1), and the title schemars
+    /// gives a root is only a type name.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn probe_leaves_the_root_keywords_out() {
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Entity {
+            name: String,
+        }
+
+        for v in [
+            crate::__tool_arg_subschema!(Entity),
+            crate::__tool_arg_subschema!(Vec<Entity>),
+        ] {
+            assert!(v.get("$schema").is_none(), "{v}");
+            assert!(v.get("title").is_none(), "{v}");
+        }
+    }
+
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn probe_keeps_a_title_the_type_sets_itself() {
+        #[derive(schemars::JsonSchema)]
+        #[schemars(title = "A named thing")]
+        #[allow(dead_code)]
+        struct Entity {
+            name: String,
+        }
+
+        let v = crate::__tool_arg_subschema!(Entity);
+        assert_eq!(v["title"], json!("A named thing"));
     }
 
     #[cfg(not(feature = "legacy-spec"))]

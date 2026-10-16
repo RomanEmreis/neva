@@ -290,6 +290,7 @@ async fn a_client_that_cannot_step_up_gets_the_insufficient_scope_error() {
         .call("forget", ())
         .await
         .expect_err("refused");
+    assert_eq!(err.code(), ErrorCode::InsufficientScope);
     assert!(err.to_string().contains("memory:write"), "{err}");
     assert_eq!(
         err.data(),

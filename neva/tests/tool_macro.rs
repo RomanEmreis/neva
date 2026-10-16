@@ -187,6 +187,11 @@ async fn tool_macro_emits_json_schema_2020() {
     assert!(!save_str.contains("$ref"), "must be inlined: {save_str}");
     assert!(!save_str.contains("$defs"), "must be inlined: {save_str}");
 
+    // A property is not a resource root: no `$schema`, and no schemars name
+    // for a `title` (JSON Schema 2020-12 Core section 8.1.1).
+    assert!(profile_schema.get("$schema").is_none(), "{profile_schema}");
+    assert!(profile_schema.get("title").is_none(), "{profile_schema}");
+
     // 3. Custom arg WITHOUT JsonSchema -> opaque object fallback.
     let store = by_name("store");
     assert_eq!(

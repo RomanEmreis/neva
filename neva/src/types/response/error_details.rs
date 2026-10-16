@@ -82,6 +82,19 @@ mod tests {
         assert_eq!(back.data(), Some(&data));
     }
 
+    /// What a client branches on: the code the peer sent, not a stand-in.
+    #[test]
+    fn the_code_survives_decoding() {
+        let wire = serde_json::json!({
+            "code": -31403,
+            "message": "insufficient scope",
+            "data": { "missingScopes": ["memory:write"] }
+        });
+        let details: ErrorDetails = serde_json::from_value(wire).unwrap();
+
+        assert_eq!(Error::from(details).code(), ErrorCode::InsufficientScope);
+    }
+
     #[test]
     fn an_error_without_data_stays_without_data() {
         let details = ErrorDetails::from(Error::new(ErrorCode::InvalidParams, "nope"));
