@@ -18,8 +18,10 @@ use neva::App;
 async fn stateless_discover_and_call() {
     let port = common::free_port();
     let addr = format!("127.0.0.1:{port}");
-    let mut app =
-        App::new().with_options(|opt| opt.with_http(|http| http.bind(&addr).with_endpoint("/mcp")));
+    let mut app = App::new().with_options(|opt| {
+        opt.with_instructions("Ping when in doubt.")
+            .with_http(|http| http.bind(&addr).with_endpoint("/mcp"))
+    });
     app.map_tool("ping", || async move { "pong".to_string() });
     let handle = tokio::spawn(async move { app.run().await });
     common::serving(&addr, &handle).await;
@@ -58,6 +60,7 @@ async fn stateless_discover_and_call() {
         body["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
         "neva"
     );
+    assert_eq!(body["result"]["instructions"], "Ping when in doubt.");
     // Every result carries the mandatory `resultType` discriminator, including
     // the discovery result.
     assert_eq!(body["result"]["resultType"], serde_json::json!("complete"));

@@ -16,6 +16,7 @@ impl Client {
             options: McpOptions::default(),
             server_capabilities: None,
             server_info: Default::default(),
+            server_instructions: None,
             cancellation_token: None,
             handler: None,
         }
@@ -341,6 +342,7 @@ impl Client {
 
         self.server_capabilities = Some(init_result.capabilities);
         self.server_info = std::sync::OnceLock::from(init_result.server_info);
+        self.server_instructions = init_result.instructions;
 
         self.send_notification(crate::types::notification::commands::INITIALIZED, None)
             .await
@@ -368,7 +370,8 @@ impl Client {
     }
 
     /// Applies a successful `server/discover` result: validates the
-    /// reported protocol version and stores the capabilities.
+    /// reported protocol version and stores the capabilities and
+    /// instructions.
     #[cfg(not(feature = "legacy-spec"))]
     pub(super) fn apply_discover(
         &mut self,
@@ -391,6 +394,7 @@ impl Client {
             ));
         }
         self.server_capabilities = Some(result.capabilities);
+        self.server_instructions = result.instructions;
         // `serverInfo` left `DiscoverResult` in the final spec: servers now
         // report themselves in every result's `_meta`, so it is picked up from
         // there instead.
@@ -693,7 +697,8 @@ mod dual_mode_tests {
                                 serde_json::json!({
                                     "protocolVersion": "2025-11-25",
                                     "capabilities": { "tools": {} },
-                                    "serverInfo": { "name": "legacy-mock", "version": "1.0.0" }
+                                    "serverInfo": { "name": "legacy-mock", "version": "1.0.0" },
+                                    "instructions": "Legacy instructions."
                                 }),
                             );
                             let headers = format!(
@@ -744,6 +749,7 @@ mod dual_mode_tests {
             client.server_info.get().map(|i| i.name.as_str()),
             Some("legacy-mock")
         );
+        assert_eq!(client.server_instructions(), Some("Legacy instructions."));
 
         let tools = client
             .tools()
