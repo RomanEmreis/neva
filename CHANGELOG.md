@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * `McpOptions::with_instructions`: the server's `instructions`, sent in the
   `server/discover` result, and in the `initialize` result under
   `legacy-spec` (#173).
+* `Client::server_instructions`: the instructions the connected server gave.
 
 ## 0.8.1
 

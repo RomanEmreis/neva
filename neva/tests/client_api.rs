@@ -73,6 +73,49 @@ async fn list_all_walks_every_page() {
     server.abort();
 }
 
+/// The instructions a server sets reach the client through the handshake:
+/// `server/discover`, or `initialize` under `legacy-spec`.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_client_keeps_the_server_instructions() {
+    let addr = format!("127.0.0.1:{}", common::free_port());
+    let app = App::new().without_greeting().with_options(|o| {
+        o.with_instructions("Recall before answering.")
+            .with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
+    });
+    let server = tokio::spawn(async move { app.run().await });
+    common::serving(&addr, &server).await;
+
+    let mut client = Client::new().with_options(|o| {
+        o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
+            .with_timeout(Duration::from_secs(10))
+    });
+    assert_eq!(client.server_instructions(), None, "not connected yet");
+    client.connect().await.expect("connect");
+
+    assert_eq!(
+        client.server_instructions(),
+        Some("Recall before answering.")
+    );
+
+    server.abort();
+}
+
+/// A server that sets none sends none.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_without_instructions_gives_none() {
+    let (addr, server) = serve().await;
+
+    let mut client = Client::new().with_options(|o| {
+        o.with_http(|h| h.bind(&addr).with_endpoint("/mcp"))
+            .with_timeout(Duration::from_secs(10))
+    });
+    client.connect().await.expect("connect");
+
+    assert_eq!(client.server_instructions(), None);
+
+    server.abort();
+}
+
 /// The flat methods are deprecated spellings of the namespaced ones, and must
 /// keep answering the same until they are removed.
 #[tokio::test(flavor = "multi_thread")]

@@ -63,6 +63,9 @@ pub struct Client {
     /// Implementation information of the connected server.
     server_info: std::sync::OnceLock<Implementation>,
 
+    /// Instructions the connected server gave in its handshake result.
+    server_instructions: Option<String>,
+
     /// A [`CancellationToken`] that cancels transport background processes.
     cancellation_token: Option<CancellationToken>,
 
@@ -77,6 +80,7 @@ impl Debug for Client {
             .field("options", &self.options)
             .field("server_capabilities", &self.server_capabilities)
             .field("server_info", &self.server_info.get())
+            .field("server_instructions", &self.server_instructions)
             .finish()
     }
 }
@@ -137,6 +141,36 @@ impl Client {
         #[cfg(not(feature = "legacy-spec"))]
         self.record_server_info(&resp);
         Ok(resp)
+    }
+
+    /// Returns the instructions the connected server gave for using it and its
+    /// features, if it gave any.
+    ///
+    /// They come from the `server/discover` result, or from the `initialize`
+    /// result against a legacy server. A client may pass them to its model,
+    /// so it knows when to reach for the server's tools. `None` until the
+    /// client has connected.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use neva::client::Client;
+    /// use neva::error::Error;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let mut client = Client::new();
+    ///     client.connect().await?;
+    ///
+    ///     if let Some(instructions) = client.server_instructions() {
+    ///         println!("{instructions}");
+    ///     }
+    ///
+    ///     client.disconnect().await
+    /// }
+    /// ```
+    #[inline]
+    pub fn server_instructions(&self) -> Option<&str> {
+        self.server_instructions.as_deref()
     }
 
     /// Creates a [`BatchBuilder`] for sending multiple requests in a single batch.
