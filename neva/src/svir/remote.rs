@@ -48,6 +48,44 @@ use std::sync::Arc;
 ///     Ok(())
 /// }
 /// ```
+///
+/// # Instructions
+///
+/// What the server says about when and how to use it,
+/// [`Client::server_instructions`], is meant for the same model as its tools.
+/// svir has one place for it, the system prompt:
+///
+/// ```no_run
+/// use neva::{Client, error::Error, svir::RemoteTools};
+///
+/// # async fn run(client: Client) -> Result<(), Error> {
+/// let tools = RemoteTools::new(client).load().await?;
+///
+/// let mut system = String::from("You are a research assistant.");
+/// if let Some(instructions) = tools.client().server_instructions() {
+///     system.push_str("\n\n## From the docs server\n\n");
+///     system.push_str(instructions);
+/// }
+/// let request = svir::Request::new("qwen3").system(system).tools(&tools);
+/// # let _ = request;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Two things the bridge leaves to the caller:
+///
+/// - **Names.** The instructions are free text and name the tools as the
+///   server does. After [`Self::rename`] or [`Self::with_prefix`] they still
+///   say `search` where the model is offered `docs_search`, and nothing
+///   rewrites them. Tell the model the prefix next to them, or keep the
+///   server's names.
+/// - **Trust.** They are text the server chose, and a model weighs the system
+///   prompt above the rest of the request. Put your own instructions first and
+///   mark the server's as its own, as above. A server you do not control
+///   writes into your system prompt this way, so forwarding its instructions
+///   is a decision, not a default. With the tools of several servers in one
+///   request there is still one system prompt: how their instructions are
+///   joined is the caller's to decide.
 pub struct RemoteTools {
     client: Arc<Client>,
     offer: Offer,
@@ -135,6 +173,10 @@ impl RemoteTools {
     /// made. A name is never changed silently -- one a model API cannot carry
     /// fails the snapshot (see [`Self::refresh`]) -- so this is also the way to
     /// offer a tool whose server name has a `.` in it.
+    ///
+    /// Only the descriptors are renamed. Text the server wrote, its
+    /// instructions or a description that names another tool, keeps the
+    /// server's names; see [Instructions](Self#instructions).
     ///
     /// # Examples
     /// ```no_run
