@@ -60,6 +60,10 @@ pub struct McpOptions {
     #[cfg(feature = "registry")]
     pub(crate) version_is_explicit: bool,
 
+    /// What the server tells the client about when and how to use it, set via
+    /// [`with_instructions`](Self::with_instructions).
+    instructions: Option<Box<str>>,
+
     /// Timeout for the requests from server to a client
     pub(crate) request_timeout: Duration,
 
@@ -247,6 +251,7 @@ impl Default for McpOptions {
             implementation: Default::default(),
             #[cfg(feature = "registry")]
             version_is_explicit: false,
+            instructions: None,
             request_timeout: Duration::from_secs(10),
             tools: Collection::new(),
             resources: Collection::new(),
@@ -372,6 +377,35 @@ impl McpOptions {
         {
             self.version_is_explicit = true;
         }
+        self
+    }
+
+    /// Specifies the instructions the server gives the client: when and how
+    /// to use it and its features.
+    ///
+    /// They go out as `instructions` in the `server/discover` result, or in
+    /// the `initialize` result under `legacy-spec`. A client may pass them to
+    /// its model, often before it has seen any tool, so this is the place to
+    /// say what the tools are for when the model should reach for them
+    /// unprompted.
+    ///
+    /// The spec sets no length limit, but clients may cut them: Claude Code
+    /// keeps the first 4,096 characters.
+    ///
+    /// Default: none.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use neva::App;
+    ///
+    /// let app = App::new().with_options(|opt| opt
+    ///     .with_name("memory")
+    ///     .with_instructions("Recall before answering; record what you learn."));
+    /// # let _ = app;
+    /// ```
+    pub fn with_instructions(mut self, instructions: impl Into<String>) -> Self {
+        self.instructions = Some(instructions.into().into_boxed_str());
         self
     }
 
@@ -826,6 +860,12 @@ impl McpOptions {
             Some(ver) => ver,
             None => PROTOCOL_VERSIONS.last().unwrap(),
         }
+    }
+
+    /// Returns the instructions set via [`with_instructions`](Self::with_instructions).
+    #[inline]
+    pub(crate) fn instructions(&self) -> Option<&str> {
+        self.instructions.as_deref()
     }
 
     /// Returns current transport protocol

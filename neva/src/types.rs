@@ -866,7 +866,7 @@ impl InitializeResult {
                 experimental: None,
             },
             server_info: options.implementation.clone(),
-            instructions: None,
+            instructions: options.instructions().map(Into::into),
         }
     }
 }
@@ -889,7 +889,7 @@ impl DiscoverResult {
                 tasks: None,
                 experimental: None,
             },
-            instructions: None,
+            instructions: options.instructions().map(Into::into),
             ttl_ms: cache::DEFAULT_TTL_MS,
             cache_scope: CacheScope::Private,
         }
@@ -934,6 +934,28 @@ mod tests {
         assert_eq!(caps["resources"]["subscribe"], serde_json::json!(true));
         assert_eq!(caps["resources"]["listChanged"], serde_json::json!(true));
         assert_eq!(caps["prompts"]["listChanged"], serde_json::json!(true));
+    }
+
+    #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
+    #[test]
+    fn discover_carries_instructions_only_when_set() {
+        let unset = serde_json::to_value(DiscoverResult::new(&McpOptions::default())).unwrap();
+        assert!(unset.get("instructions").is_none(), "got: {unset}");
+
+        let options = McpOptions::default().with_instructions("Recall before answering.");
+        let set = serde_json::to_value(DiscoverResult::new(&options)).unwrap();
+        assert_eq!(set["instructions"], "Recall before answering.");
+    }
+
+    #[cfg(all(feature = "server", feature = "legacy-spec"))]
+    #[test]
+    fn initialize_carries_instructions_only_when_set() {
+        let unset = serde_json::to_value(InitializeResult::new(&McpOptions::default())).unwrap();
+        assert!(unset.get("instructions").is_none(), "got: {unset}");
+
+        let options = McpOptions::default().with_instructions("Recall before answering.");
+        let set = serde_json::to_value(InitializeResult::new(&options)).unwrap();
+        assert_eq!(set["instructions"], "Recall before answering.");
     }
 
     /// The `logging` capability must be advertised iff the `logging/setLevel`
