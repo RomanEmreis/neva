@@ -111,6 +111,26 @@ async fn spelled(
     format!("{city} {floor:?}")
 }
 
+// A type that refers to itself, as the argument and inside a collection: its
+// `$ref`s have to resolve in the tool's `inputSchema`, not in the subschema
+// schemars generated (#172).
+#[derive(Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
+struct Node {
+    label: String,
+    children: Vec<Node>,
+}
+
+#[neva::tool]
+async fn add_tree(tree: Json<Node>) -> String {
+    tree.0.label
+}
+
+#[neva::tool]
+async fn add_forest(forest: Json<Vec<Node>>, also: Option<Json<Node>>) -> String {
+    format!("{} {}", forest.0.len(), also.is_some())
+}
+
 // Struct return via `Json<T>` -> output schema derived from the return type.
 #[neva::tool]
 async fn make_greeting(name: String) -> Json<Greeting> {
@@ -135,25 +155,41 @@ async fn tool_macro_emits_json_schema_2020() {
         .expect("test client");
     let url = format!("http://{addr}/mcp");
 
-    // Stateless 2026-07-28 transport: no handshake/session -- a single `tools/list`
-    // POST carrying the required `MCP-Protocol-Version` header is enough.
-    let list_body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/list",
-        "params": { "_meta": meta() }
-    });
-    let resp = routed(client.post(&url), &list_body)
-        .json(&list_body)
-        .send()
-        .await
-        .expect("tools/list failed");
-    assert!(resp.status().is_success());
-    let body: serde_json::Value = resp.json().await.unwrap();
-    let tools = body
-        .pointer("/result/tools")
-        .and_then(|v| v.as_array())
-        .expect("missing tools array");
+    // Stateless 2026-07-28 transport: no handshake/session -- `tools/list`
+    // POSTs carrying the required `MCP-Protocol-Version` header are enough,
+    // one per page.
+    let mut tools = Vec::new();
+    let mut cursor = None;
+    loop {
+        let mut params = serde_json::json!({ "_meta": meta() });
+        if let Some(cursor) = cursor.take() {
+            params["cursor"] = cursor;
+        }
+        let list_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": params
+        });
+        let resp = routed(client.post(&url), &list_body)
+            .json(&list_body)
+            .send()
+            .await
+            .expect("tools/list failed");
+        assert!(resp.status().is_success());
+        let body: serde_json::Value = resp.json().await.unwrap();
+        tools.extend(
+            body.pointer("/result/tools")
+                .and_then(|v| v.as_array())
+                .expect("missing tools array")
+                .iter()
+                .cloned(),
+        );
+        match body.pointer("/result/nextCursor") {
+            Some(next) if !next.is_null() => cursor = Some(next.clone()),
+            _ => break,
+        }
+    }
 
     let by_name = |name: &str| -> serde_json::Value {
         tools
@@ -271,6 +307,36 @@ async fn tool_macro_emits_json_schema_2020() {
         "an alias must publish exactly what the spelled-out type does"
     );
 
+    // 7b. A recursive argument points at its own definition at the root of
+    // `inputSchema`: never at `#`, the whole tool, and never at a `$defs` left
+    // inside the property. Two arguments of one type share the definition.
+    let tree = by_name("add_tree")["inputSchema"].clone();
+    assert_eq!(
+        tree["properties"]["tree"]["properties"]["children"]["items"],
+        serde_json::json!({ "$ref": "#/$defs/Node" })
+    );
+    assert!(
+        tree["$defs"]["Node"]["properties"]["label"].is_object(),
+        "{tree}"
+    );
+    assert_refs_resolve(&tree);
+
+    let forest = by_name("add_forest")["inputSchema"].clone();
+    assert!(
+        forest["properties"]["forest"].get("$defs").is_none(),
+        "{forest}"
+    );
+    assert_eq!(
+        forest["$defs"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        vec!["Node"],
+        "{forest}"
+    );
+    assert_refs_resolve(&forest);
+
     // 8. An optional argument the call leaves out arrives as `None`.
     for (args, expected) in [
         (serde_json::json!({ "name": "John" }), "John"),
@@ -327,6 +393,37 @@ async fn tool_macro_emits_json_schema_2020() {
     }
 
     handle.abort();
+}
+
+/// Every `$ref` in `schema` is local and resolves against its root.
+fn assert_refs_resolve(schema: &serde_json::Value) {
+    fn refs<'a>(value: &'a serde_json::Value, out: &mut Vec<&'a str>) {
+        match value {
+            serde_json::Value::Object(object) => {
+                object
+                    .iter()
+                    .for_each(|(key, value)| match (key.as_str(), value.as_str()) {
+                        ("$ref", Some(reference)) => out.push(reference),
+                        _ => refs(value, out),
+                    })
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|item| refs(item, out)),
+            _ => {}
+        }
+    }
+
+    let mut found = Vec::new();
+    refs(schema, &mut found);
+    assert!(!found.is_empty(), "expected a $ref in {schema}");
+    for reference in found {
+        let pointer = reference
+            .strip_prefix('#')
+            .unwrap_or_else(|| panic!("{reference}"));
+        assert!(
+            schema.pointer(pointer).is_some(),
+            "{reference} resolves to nothing in {schema}"
+        );
+    }
 }
 
 /// The `_meta` MCP 2026-07-28 requires on every request: the protocol version,

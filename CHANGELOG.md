@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.8.3
+
+### Security
+* Resolved RUSTSEC-2026-0382 (`rustls-webpki` may accept distrusted
+  intermediates) by updating the transitive `rustls-webpki` dependency to
+  0.103.16.
+* Resolved RUSTSEC-2026-0381 and RUSTSEC-2026-0383 (bundled roots trust
+  distrusted emSign intermediates) by updating the transitive `webpki-roots`
+  and `webpki-root-certs` dependencies to 1.0.10.
+
+### Fixed
+* A `#[tool]` argument of a recursive `JsonSchema` type published a `$ref`
+  to the wrong schema, or to none. Its definitions now sit in the
+  `inputSchema` root `$defs`, where every `$ref` resolves; two arguments that
+  bring different types of the same name keep both, under unique names
+  (#172).
+
 ## 0.8.2
 
 ### Added

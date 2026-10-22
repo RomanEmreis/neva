@@ -304,6 +304,9 @@ impl<T: schemars::JsonSchema> ViaJsonSchema for &SchemaProbe<T> {
     ///
     /// It is generated as a root rather than with `subschema_for`, which would
     /// point a recursive type at a `$defs` entry the subschema does not carry.
+    /// A recursive type keeps its `$defs`, and a root that refers to itself is
+    /// given an entry there too; [`object_schema`] hoists them into the tool's
+    /// root.
     #[inline]
     fn neva_subschema(&self) -> Value {
         let settings = schemars::generate::SchemaSettings::draft2020_12().with(|s| {
@@ -321,6 +324,7 @@ impl<T: schemars::JsonSchema> ViaJsonSchema for &SchemaProbe<T> {
             object.remove("title");
         }
 
+        define_self_reference(&mut schema, &T::schema_name());
         schema
     }
 }
@@ -359,23 +363,218 @@ pub fn primitive_subschema(ty: &str) -> Value {
 ///
 /// A tool whose arguments are all optional gets no `required` key at all
 /// rather than an empty array, matching what the non-macro path publishes.
+///
+/// A subschema's `$ref`s are written against its own root, which is not where
+/// it lands. Its `$defs` move to the tool's root, where `#/$defs/<Name>`
+/// resolves, and an entry whose name another argument already took is renamed
+/// unless both arguments brought the same definitions. Any other reference
+/// into the subschema is rebased onto `#/properties/<arg>`.
 #[cfg(not(feature = "legacy-spec"))]
 #[doc(hidden)]
 pub fn object_schema(properties: Vec<(String, Value)>, required: Vec<String>) -> InputSchema {
     let mut props = serde_json::Map::with_capacity(properties.len());
-    for (name, schema) in properties {
+    let mut defs = serde_json::Map::new();
+    for (name, mut schema) in properties {
+        hoist_defs(&name, &mut schema, &mut defs);
         props.insert(name, schema);
     }
-    let mut root = serde_json::Map::with_capacity(3);
+
+    let mut root = serde_json::Map::with_capacity(4);
+
     root.insert("type".to_string(), Value::String("object".to_string()));
     root.insert("properties".to_string(), Value::Object(props));
+
     if !required.is_empty() {
         root.insert(
             "required".to_string(),
             Value::Array(required.into_iter().map(Value::String).collect()),
         );
     }
+    if !defs.is_empty() {
+        root.insert("$defs".to_string(), Value::Object(defs));
+    }
+
     InputSchema::from(Value::Object(root))
+}
+
+/// Gives a root schema that refers to itself with `#` an entry of its own in
+/// its `$defs`, under `name`, and points those references at it.
+///
+/// schemars refers to the root type with `#`. Once the schema is a property,
+/// `#` is the tool's whole `inputSchema`, so it would describe the wrong
+/// thing. Named, the root takes the shape schemars gives every other recursive
+/// type: inlined where it is used, and defined under `$defs`.
+#[cfg(not(feature = "legacy-spec"))]
+fn define_self_reference(schema: &mut Value, name: &str) {
+    let mut refers_to_itself = false;
+    for_each_ref(schema, &mut |reference| {
+        refers_to_itself |= *reference == "#"
+    });
+
+    if !refers_to_itself {
+        return;
+    }
+
+    let mut defs = take_defs(schema);
+    let name = unique_name(name, |taken| defs.contains_key(taken));
+    let target = def_ref(&name);
+    let mut retarget = |reference: &mut String| {
+        if *reference == "#" {
+            reference.clone_from(&target);
+        }
+    };
+
+    for_each_ref(schema, &mut retarget);
+    defs.values_mut()
+        .for_each(|def| for_each_ref(def, &mut retarget));
+
+    defs.insert(name, schema.clone());
+    if let Value::Object(root) = schema {
+        root.insert("$defs".to_string(), Value::Object(defs));
+    }
+}
+
+/// Moves the `$defs` of the subschema of argument `arg` into `defs`, the
+/// tool's root definitions, and rewrites the subschema's references to match.
+#[cfg(not(feature = "legacy-spec"))]
+fn hoist_defs(arg: &str, schema: &mut Value, defs: &mut serde_json::Map<String, Value>) {
+    let mut own = take_defs(schema);
+
+    // Clashing names are kept only when every clash is the same definition:
+    // those are closed under their references, so whatever they point at is
+    // at the root already. Otherwise each clashing name is renamed.
+    let merge = own
+        .iter()
+        .all(|(name, def)| defs.get(name).is_none_or(|taken| taken == def));
+
+    let mut renames: Vec<(String, String)> = Vec::new();
+
+    if !merge {
+        for name in own.keys().filter(|name| defs.contains_key(*name)) {
+            let fresh = unique_name(name, |taken| {
+                defs.contains_key(taken)
+                    || own.contains_key(taken)
+                    || renames.iter().any(|(_, new)| new == taken)
+            });
+            renames.push((name.clone(), fresh));
+        }
+    }
+
+    let moved: Vec<(String, String)> = renames
+        .iter()
+        .map(|(old, new)| (def_ref(old), def_ref(new)))
+        .collect();
+
+    let property = format!("#/properties/{}", encode_segment(arg));
+    let mut rebase = |reference: &mut String| {
+        if let Some((old, new)) = moved.iter().find(|(old, _)| {
+            reference
+                .strip_prefix(old.as_str())
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        }) {
+            reference.replace_range(..old.len(), new);
+        } else if let Some(fragment) = reference.strip_prefix('#')
+            && !fragment.starts_with("/$defs/")
+        {
+            *reference = format!("{property}{fragment}");
+        }
+    };
+
+    for_each_ref(schema, &mut rebase);
+    own.values_mut()
+        .for_each(|def| for_each_ref(def, &mut rebase));
+
+    defs.extend(own.into_iter().map(|(name, def)| {
+        let name = renames
+            .iter()
+            .find(|(old, _)| *old == name)
+            .map_or(name, |(_, new)| new.clone());
+        (name, def)
+    }));
+}
+
+/// Removes the `$defs` at the root of `schema`, returning them.
+#[cfg(not(feature = "legacy-spec"))]
+fn take_defs(schema: &mut Value) -> serde_json::Map<String, Value> {
+    match schema {
+        Value::Object(root) => match root.remove("$defs") {
+            Some(Value::Object(defs)) => defs,
+            _ => serde_json::Map::new(),
+        },
+        _ => serde_json::Map::new(),
+    }
+}
+
+/// Calls `f` on every `$ref` in `schema`, at any depth.
+///
+/// The members of `properties`, `$defs` and the like are names, not keywords,
+/// and `const`, `default`, `enum` and `examples` hold instances, not schemas,
+/// so a `$ref` inside an instance is data and is left alone.
+#[cfg(not(feature = "legacy-spec"))]
+fn for_each_ref(schema: &mut Value, f: &mut impl FnMut(&mut String)) {
+    match schema {
+        Value::Object(object) => {
+            for (keyword, value) in object.iter_mut() {
+                match (keyword.as_str(), value) {
+                    ("$ref", Value::String(reference)) => f(reference),
+                    ("const" | "default" | "enum" | "examples", _) => {}
+                    (
+                        "properties" | "patternProperties" | "$defs" | "definitions"
+                        | "dependentSchemas",
+                        Value::Object(named),
+                    ) => named
+                        .values_mut()
+                        .for_each(|schema| for_each_ref(schema, f)),
+                    (_, value) => for_each_ref(value, f),
+                }
+            }
+        }
+        Value::Array(values) => values.iter_mut().for_each(|schema| for_each_ref(schema, f)),
+        _ => {}
+    }
+}
+
+/// `base`, or `base` followed by the first number from 2 that makes it a name
+/// not `taken`, the way schemars tells apart two types of the same name.
+#[cfg(not(feature = "legacy-spec"))]
+fn unique_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
+    if !taken(base) {
+        return base.to_string();
+    }
+
+    (2u64..)
+        .map(|n| format!("{base}{n}"))
+        .find(|name| !taken(name))
+        .unwrap_or_default()
+}
+
+/// The reference to the root `$defs` entry `name`.
+#[cfg(not(feature = "legacy-spec"))]
+fn def_ref(name: &str) -> String {
+    format!("#/$defs/{}", encode_segment(name))
+}
+
+/// `name` as a JSON Pointer segment in a URI fragment, encoded the way
+/// schemars encodes the references it writes: `~` and `/` escaped (RFC 6901),
+/// and a byte a fragment cannot carry percent-encoded (RFC 3986).
+#[cfg(not(feature = "legacy-spec"))]
+fn encode_segment(name: &str) -> String {
+    use std::fmt::Write as _;
+
+    name.bytes()
+        .fold(String::with_capacity(name.len()), |mut out, byte| {
+            match byte {
+                b'~' => out.push_str("~0"),
+                b'/' => out.push_str("~1"),
+                b'!' | b'$' | b'&'..=b';' | b'=' | b'?'..=b'Z' | b'_' | b'a'..=b'z' => {
+                    out.push(char::from(byte))
+                }
+                _ => {
+                    let _ = write!(out, "%{byte:02X}");
+                }
+            }
+            out
+        })
 }
 
 /// Builds a JSON Schema 2020-12 subschema for a type, used by the generated
@@ -665,5 +864,272 @@ mod tests {
         let mut req: Vec<String> = serde_json::from_value(v["required"].clone()).unwrap();
         req.sort();
         assert_eq!(req, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    /// Recursive types for the `$ref` tests (#172).
+    #[cfg(not(feature = "legacy-spec"))]
+    #[allow(dead_code)]
+    mod recursive {
+        #[derive(schemars::JsonSchema)]
+        pub(super) struct Node {
+            pub(super) label: String,
+            pub(super) children: Vec<Node>,
+        }
+
+        #[derive(schemars::JsonSchema)]
+        pub(super) struct A {
+            pub(super) b: Option<Box<B>>,
+        }
+
+        #[derive(schemars::JsonSchema)]
+        pub(super) struct B {
+            pub(super) a: Vec<A>,
+        }
+
+        #[derive(schemars::JsonSchema)]
+        pub(super) enum Expr {
+            Lit(i32),
+            Add(Box<Expr>, Box<Expr>),
+        }
+
+        /// Named `Node` by schemars too, but a different type.
+        pub(super) mod other {
+            #[derive(schemars::JsonSchema)]
+            pub(crate) struct Node {
+                pub(crate) id: u32,
+                pub(crate) next: Option<Box<Node>>,
+            }
+
+            /// A root named `Node` whose `$defs` already hold the other `Node`.
+            #[derive(schemars::JsonSchema)]
+            #[schemars(rename = "Node")]
+            pub(crate) struct Shadow {
+                pub(crate) again: Option<Box<Shadow>>,
+                pub(crate) tree: super::Node,
+            }
+        }
+    }
+
+    /// Every local `$ref` in `schema` names something that exists, read
+    /// against the root of `schema`.
+    #[cfg(not(feature = "legacy-spec"))]
+    fn assert_refs_resolve(schema: &Value) {
+        let mut copy = schema.clone();
+        let mut refs = Vec::new();
+        for_each_ref(&mut copy, &mut |reference| refs.push(reference.clone()));
+        for reference in refs {
+            let pointer = reference
+                .strip_prefix('#')
+                .unwrap_or_else(|| panic!("not local: {reference}"));
+            assert!(
+                schema.pointer(pointer).is_some(),
+                "{reference} resolves to nothing in {schema}"
+            );
+        }
+    }
+
+    #[cfg(not(feature = "legacy-spec"))]
+    fn tool(args: Vec<(&str, Value)>) -> Value {
+        crate::__macro_support::object_schema(
+            args.into_iter()
+                .map(|(name, schema)| (name.to_string(), schema))
+                .collect(),
+            Vec::new(),
+        )
+        .into_value()
+    }
+
+    /// A type that refers to itself used to publish `{"$ref": "#"}`, which
+    /// inside `properties` is the tool's whole `inputSchema`.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn a_self_reference_points_at_the_type_not_the_tool() {
+        let v = tool(vec![(
+            "tree",
+            crate::__tool_arg_subschema!(recursive::Node),
+        )]);
+
+        let tree = &v["properties"]["tree"];
+        assert_eq!(tree["properties"]["label"]["type"], json!("string"));
+        assert_eq!(
+            tree["properties"]["children"]["items"],
+            json!({ "$ref": "#/$defs/Node" })
+        );
+        assert!(tree.get("$defs").is_none(), "{v}");
+        assert_eq!(
+            v["$defs"]["Node"]["properties"]["children"]["items"],
+            json!({ "$ref": "#/$defs/Node" })
+        );
+        assert_refs_resolve(&v);
+    }
+
+    /// A recursive type below the root used to carry its `$defs` inside the
+    /// property, where `#/$defs/<Name>` does not look.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn a_nested_recursive_type_has_its_defs_at_the_root() {
+        let v = tool(vec![(
+            "forest",
+            crate::__tool_arg_subschema!(Vec<recursive::Node>),
+        )]);
+
+        let forest = &v["properties"]["forest"];
+        assert!(forest.get("$defs").is_none(), "{v}");
+        assert_eq!(
+            forest["items"]["properties"]["children"]["items"],
+            json!({ "$ref": "#/$defs/Node" })
+        );
+        assert!(v["$defs"]["Node"].is_object(), "{v}");
+        assert_refs_resolve(&v);
+    }
+
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn a_type_two_arguments_share_is_defined_once() {
+        let v = tool(vec![
+            ("tree", crate::__tool_arg_subschema!(recursive::Node)),
+            ("forest", crate::__tool_arg_subschema!(Vec<recursive::Node>)),
+        ]);
+
+        let defs = v["$defs"].as_object().unwrap();
+        assert_eq!(defs.keys().collect::<Vec<_>>(), vec!["Node"], "{v}");
+        assert_refs_resolve(&v);
+    }
+
+    /// Two arguments may bring two types schemars names alike: each keeps
+    /// its own definition, under a name unique across the tool.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn two_types_of_one_name_keep_apart() {
+        let v = tool(vec![
+            ("tree", crate::__tool_arg_subschema!(recursive::Node)),
+            (
+                "chain",
+                crate::__tool_arg_subschema!(recursive::other::Node),
+            ),
+        ]);
+
+        let defs = v["$defs"].as_object().unwrap();
+        assert_eq!(defs.keys().collect::<Vec<_>>(), vec!["Node", "Node2"]);
+        assert!(defs["Node"]["properties"]["label"].is_object(), "{v}");
+        assert!(defs["Node2"]["properties"]["id"].is_object(), "{v}");
+        assert_eq!(
+            v["properties"]["chain"]["properties"]["next"]["anyOf"][0],
+            json!({ "$ref": "#/$defs/Node2" })
+        );
+        assert_eq!(
+            defs["Node2"]["properties"]["next"]["anyOf"][0],
+            json!({ "$ref": "#/$defs/Node2" })
+        );
+        assert_refs_resolve(&v);
+    }
+
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn a_root_named_like_one_of_its_defs_gets_a_name_of_its_own() {
+        let v = crate::__tool_arg_subschema!(recursive::other::Shadow);
+
+        let defs = v["$defs"].as_object().unwrap();
+        assert_eq!(defs.len(), 2, "{v}");
+        assert_refs_resolve(&v);
+        assert_refs_resolve(&tool(vec![("shadow", v)]));
+    }
+
+    /// A reference schemars did not write, into the subschema rather than its
+    /// `$defs`, follows the subschema to its property. A `$ref` inside an
+    /// instance is data, and one to another document is not local.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn other_references_follow_the_subschema() {
+        let v = tool(vec![(
+            "pair",
+            json!({
+                "type": "object",
+                "properties": {
+                    "first": { "type": "string" },
+                    "second": { "$ref": "#/properties/first" },
+                    "default": { "$ref": "https://example.com/schema" }
+                },
+                "default": { "$ref": "#" }
+            }),
+        )]);
+
+        let pair = &v["properties"]["pair"];
+        assert_eq!(
+            pair["properties"]["second"],
+            json!({ "$ref": "#/properties/pair/properties/first" })
+        );
+        assert_eq!(
+            pair["properties"]["default"],
+            json!({ "$ref": "https://example.com/schema" })
+        );
+        assert_eq!(pair["default"], json!({ "$ref": "#" }));
+    }
+
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn a_name_is_encoded_as_schemars_encodes_it() {
+        assert_eq!(def_ref("Tree_for_string"), "#/$defs/Tree_for_string");
+        assert_eq!(def_ref("a/b~c"), "#/$defs/a~1b~0c");
+        assert_eq!(def_ref("two words%"), "#/$defs/two%20words%25");
+    }
+
+    /// The published schema means what the type does: a validator compiles it,
+    /// and judges every level of the tree by the type, not by the tool.
+    #[cfg(all(not(feature = "legacy-spec"), feature = "client"))]
+    #[test]
+    fn a_validator_reads_the_recursive_types_right() {
+        let v = tool(vec![
+            ("tree", crate::__tool_arg_subschema!(recursive::Node)),
+            ("forest", crate::__tool_arg_subschema!(Vec<recursive::Node>)),
+            (
+                "chain",
+                crate::__tool_arg_subschema!(recursive::other::Node),
+            ),
+            (
+                "shadow",
+                crate::__tool_arg_subschema!(recursive::other::Shadow),
+            ),
+            ("pair", crate::__tool_arg_subschema!(recursive::A)),
+            ("expr", crate::__tool_arg_subschema!(recursive::Expr)),
+        ]);
+        let validator = jsonschema::draft202012::new(&v).unwrap_or_else(|e| panic!("{e}: {v}"));
+
+        let leaf = json!({ "label": "c", "children": [] });
+        let tree = json!({ "label": "a", "children": [{ "label": "b", "children": [leaf] }] });
+        let bad_tree = json!({ "label": "a", "children": [{ "label": "b", "children": [{}] }] });
+        let chain = json!({ "id": 1, "next": { "id": 2, "next": null } });
+        let bad_chain = json!({ "id": 1, "next": { "id": "two" } });
+        let expr = json!({ "Add": [{ "Lit": 1 }, { "Add": [{ "Lit": 2 }, { "Lit": 3 }] }] });
+        let bad_expr = json!({ "Add": [{ "Lit": 1 }, { "Add": [{ "Lit": 2 }, { "Sub": 3 }] }] });
+
+        for (args, valid) in [
+            (json!({ "tree": tree }), true),
+            (json!({ "tree": bad_tree }), false),
+            (json!({ "forest": [tree, leaf] }), true),
+            (json!({ "forest": [bad_tree] }), false),
+            (json!({ "chain": chain }), true),
+            (json!({ "chain": bad_chain }), false),
+            (
+                json!({ "shadow": { "again": { "tree": leaf }, "tree": tree } }),
+                true,
+            ),
+            (
+                json!({ "shadow": { "again": { "tree": bad_tree }, "tree": tree } }),
+                false,
+            ),
+            (
+                json!({ "pair": { "b": { "a": [{ "b": { "a": [] } }] } } }),
+                true,
+            ),
+            (
+                json!({ "pair": { "b": { "a": [{ "b": { "a": 1 } }] } } }),
+                false,
+            ),
+            (json!({ "expr": expr }), true),
+            (json!({ "expr": bad_expr }), false),
+        ] {
+            assert_eq!(validator.is_valid(&args), valid, "{args}");
+        }
     }
 }
