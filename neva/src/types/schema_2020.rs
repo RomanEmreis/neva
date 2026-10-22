@@ -524,39 +524,72 @@ fn is_resource(schema: &Value) -> bool {
     schema.get("$id").is_some_and(Value::is_string)
 }
 
-/// Calls `f` on every `$ref` in `schema`, at any depth, that resolves against
-/// the same resource as `schema`.
+/// Keywords whose value is a subschema, or a list of them: the JSON Schema
+/// 2020-12 applicators, plus the draft-07 `additionalItems`.
+#[cfg(not(feature = "legacy-spec"))]
+const SUBSCHEMA_KEYWORDS: &[&str] = &[
+    "additionalItems",
+    "additionalProperties",
+    "allOf",
+    "anyOf",
+    "contains",
+    "contentSchema",
+    "else",
+    "if",
+    "items",
+    "not",
+    "oneOf",
+    "prefixItems",
+    "propertyNames",
+    "then",
+    "unevaluatedItems",
+    "unevaluatedProperties",
+];
+
+/// Keywords whose value maps names to subschemas, with the draft-07
+/// `definitions` and `dependencies`.
+#[cfg(not(feature = "legacy-spec"))]
+const NAMED_SUBSCHEMA_KEYWORDS: &[&str] = &[
+    "$defs",
+    "definitions",
+    "dependencies",
+    "dependentSchemas",
+    "patternProperties",
+    "properties",
+];
+
+/// Calls `f` on every `$ref` and `$dynamicRef` in `schema` and its
+/// subschemas, at any depth, that resolves against the same resource as
+/// `schema`.
 ///
-/// A subschema with an `$id` is a resource of its own, and is skipped, as is
-/// `schema` itself when it has one. The members of `properties`, `$defs` and
-/// the like are names, not keywords, and `const`, `default`, `enum` and
-/// `examples` hold instances, not schemas, so a `$ref` inside an instance is
-/// data and is left alone.
+/// Only the keywords that hold subschemas are followed. The value of any other
+/// keyword is not a schema, whether it is an assertion, an annotation or a
+/// keyword no vocabulary defines, so a `$ref` inside `default`, `examples` or
+/// an `x-` keyword is data and is left alone. A subschema with an `$id` is a
+/// resource of its own, and is skipped, as is `schema` itself when it has one.
 #[cfg(not(feature = "legacy-spec"))]
 fn for_each_ref(schema: &mut Value, f: &mut impl FnMut(&mut String)) {
     if is_resource(schema) {
         return;
     }
 
-    match schema {
-        Value::Object(object) => {
-            for (keyword, value) in object.iter_mut() {
-                match (keyword.as_str(), value) {
-                    ("$ref", Value::String(reference)) => f(reference),
-                    ("const" | "default" | "enum" | "examples", _) => {}
-                    (
-                        "properties" | "patternProperties" | "$defs" | "definitions"
-                        | "dependentSchemas",
-                        Value::Object(named),
-                    ) => named
-                        .values_mut()
-                        .for_each(|schema| for_each_ref(schema, f)),
-                    (_, value) => for_each_ref(value, f),
-                }
-            }
+    let Value::Object(object) = schema else {
+        return;
+    };
+
+    for (keyword, value) in object.iter_mut() {
+        let keyword = keyword.as_str();
+        match value {
+            Value::String(reference) if matches!(keyword, "$ref" | "$dynamicRef") => f(reference),
+            Value::Array(schemas) if SUBSCHEMA_KEYWORDS.contains(&keyword) => schemas
+                .iter_mut()
+                .for_each(|schema| for_each_ref(schema, f)),
+            schema if SUBSCHEMA_KEYWORDS.contains(&keyword) => for_each_ref(schema, f),
+            Value::Object(named) if NAMED_SUBSCHEMA_KEYWORDS.contains(&keyword) => named
+                .values_mut()
+                .for_each(|schema| for_each_ref(schema, f)),
+            _ => {}
         }
-        Value::Array(values) => values.iter_mut().for_each(|schema| for_each_ref(schema, f)),
-        _ => {}
     }
 }
 
@@ -935,6 +968,13 @@ mod tests {
             }
         }
 
+        /// A type whose schema carries an annotation shaped like a reference.
+        #[derive(schemars::JsonSchema)]
+        #[schemars(extend("x-meta" = { "$ref": "#" }))]
+        pub(super) struct Annotated {
+            pub(super) label: String,
+        }
+
         /// A recursive type that is a schema resource of its own.
         #[derive(schemars::JsonSchema)]
         #[schemars(extend("$id" = "https://example.com/rooted"))]
@@ -962,6 +1002,17 @@ mod tests {
                     "$defs": { "Node": { "type": "string" } }
                 }
             },
+            "$defs": { "Node": { "type": "integer" } }
+        })
+    }
+
+    /// An argument whose own `Node` clashes with the other `Node`, reached by
+    /// a `$dynamicRef` with a pointer, which resolves as a `$ref` does.
+    #[cfg(not(feature = "legacy-spec"))]
+    fn counted() -> Value {
+        json!({
+            "type": "object",
+            "properties": { "count": { "$dynamicRef": "#/$defs/Node" } },
             "$defs": { "Node": { "type": "integer" } }
         })
     }
@@ -1137,6 +1188,48 @@ mod tests {
         assert_refs_resolve(&v);
     }
 
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn a_dynamic_reference_follows_a_rename() {
+        let v = tool(vec![
+            ("tree", crate::__tool_arg_subschema!(recursive::Node)),
+            ("counted", counted()),
+        ]);
+
+        assert_eq!(
+            v["properties"]["counted"]["properties"]["count"],
+            json!({ "$dynamicRef": "#/$defs/Node2" })
+        );
+        assert_eq!(v["$defs"]["Node2"], json!({ "type": "integer" }));
+        assert_refs_resolve(&v);
+    }
+
+    /// The value of a keyword that holds no subschema is data, even when it is
+    /// shaped like a reference: it neither makes a type recursive nor follows
+    /// the subschema to its property.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn a_reference_inside_an_annotation_is_data() {
+        let annotated = crate::__tool_arg_subschema!(recursive::Annotated);
+        assert_eq!(annotated["x-meta"], json!({ "$ref": "#" }));
+        assert!(annotated.get("$defs").is_none(), "{annotated}");
+
+        let tagged = json!({
+            "type": "object",
+            "properties": { "first": { "type": "string" } },
+            "x-meta": { "$ref": "#/properties/first" },
+            "examples": [{ "$ref": "#" }]
+        });
+        let v = tool(vec![
+            ("annotated", annotated.clone()),
+            ("tagged", tagged.clone()),
+        ]);
+
+        assert_eq!(v["properties"]["annotated"], annotated);
+        assert_eq!(v["properties"]["tagged"], tagged);
+        assert!(v.get("$defs").is_none(), "{v}");
+    }
+
     /// A reference schemars did not write, into the subschema rather than its
     /// `$defs`, follows the subschema to its property. A plain-name fragment
     /// names an `$anchor`, not a pointer, a `$ref` inside an instance is data,
@@ -1249,6 +1342,7 @@ mod tests {
             ("rooted", crate::__tool_arg_subschema!(recursive::Rooted)),
             ("nested", nested_resource()),
             ("anchored", anchored()),
+            ("counted", counted()),
         ]);
         let validator = jsonschema::draft202012::new(&v).unwrap_or_else(|e| panic!("{e}: {v}"));
 
@@ -1269,6 +1363,11 @@ mod tests {
             ),
             (json!({ "anchored": { "second": "x" } }), true),
             (json!({ "anchored": { "second": 1 } }), false),
+            (json!({ "counted": { "count": 1 } }), true),
+            (
+                json!({ "counted": { "count": { "label": "a", "children": [] } } }),
+                false,
+            ),
         ] {
             assert_eq!(validator.is_valid(&args), valid, "{args}");
         }
