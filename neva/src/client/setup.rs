@@ -469,18 +469,24 @@ impl Client {
 /// * `MethodNotFound` -- a legacy server rejecting the unknown method
 ///   (neva's own legacy build answers exactly this);
 /// * `InvalidRequest` -- strict servers rejecting the 2026-07-28 request shape;
-/// * `ParseError` -- a non-JSON-RPC reply (an HTTP 4xx page) or an error
-///   code outside neva's `ErrorCode` set (e.g. the TS SDK's `-32000`
-///   "server not initialized"), both of which surface as parse failures.
+/// * `ParseError` -- a non-JSON-RPC reply, such as an HTTP 4xx page;
+/// * a code from `-32000` to `-32099`, the range JSON-RPC leaves to
+///   implementation-defined server errors -- a server that wants
+///   `initialize` first answers from it (the TS SDK's `-32000` "server not
+///   initialized").
 ///
 /// Network-level failures (`Timeout`, `InternalError`/"Connection
 /// closed") are *not* triggers: the server never answered, so falling
-/// back would only mask the outage.
+/// back would only mask the outage. Nor is a server's own code outside that
+/// range: the server understood the request and refused it.
 #[cfg(not(feature = "legacy-spec"))]
 fn is_fallback_trigger(err: &Error) -> bool {
     matches!(
         err.code,
-        ErrorCode::MethodNotFound | ErrorCode::InvalidRequest | ErrorCode::ParseError
+        ErrorCode::MethodNotFound
+            | ErrorCode::InvalidRequest
+            | ErrorCode::ParseError
+            | ErrorCode::Other(-32099..=-32000)
     )
 }
 
@@ -496,9 +502,11 @@ mod fallback_trigger_tests {
     fn protocol_level_rejections_trigger_the_fallback() {
         assert!(is_fallback_trigger(&err(ErrorCode::MethodNotFound)));
         assert!(is_fallback_trigger(&err(ErrorCode::InvalidRequest)));
-        // Non-JSON-RPC replies (HTTP 4xx pages) and unknown error codes
-        // (e.g. the TS SDK's -32000) surface as parse failures.
+        // Non-JSON-RPC replies, such as HTTP 4xx pages.
         assert!(is_fallback_trigger(&err(ErrorCode::ParseError)));
+        // Implementation-defined server errors, the TS SDK's -32000 first.
+        assert!(is_fallback_trigger(&err(ErrorCode::Other(-32000))));
+        assert!(is_fallback_trigger(&err(ErrorCode::Other(-32099))));
     }
 
     #[test]
@@ -506,6 +514,16 @@ mod fallback_trigger_tests {
         assert!(!is_fallback_trigger(&err(ErrorCode::Timeout)));
         assert!(!is_fallback_trigger(&err(ErrorCode::InternalError)));
         assert!(!is_fallback_trigger(&err(ErrorCode::InvalidParams)));
+    }
+
+    /// A code of the server's own, outside the range JSON-RPC leaves to
+    /// implementations, is a refusal from a server that understood the
+    /// request, not evidence of a legacy one.
+    #[test]
+    fn a_servers_own_code_does_not_trigger_the_fallback() {
+        assert!(!is_fallback_trigger(&err(ErrorCode::Other(-31999))));
+        assert!(!is_fallback_trigger(&err(ErrorCode::Other(-32100))));
+        assert!(!is_fallback_trigger(&err(ErrorCode::Other(-1))));
     }
 }
 
@@ -585,9 +603,14 @@ mod dual_mode_tests {
     /// A protected endpoint answering `401` with a non-JSON body must not
     /// trigger the fallback either -- that is an authentication failure,
     /// not evidence of a legacy peer.
+    /// A JSON-RPC error with a code neva has no variant for is either the
+    /// TS SDK's `-32000` "server not initialized", which must trigger the
+    /// fallback, or a code of the server's own, which must not.
     #[derive(Clone, Copy)]
     enum DiscoverReply {
         MethodNotFound,
+        ServerNotInitialized,
+        OwnCode,
         Html400,
         UnsupportedVersion,
         Unauthorized401,
@@ -632,11 +655,28 @@ mod dual_mode_tests {
                         .unwrap_or_default()
                     {
                         crate::commands::DISCOVER => match reply {
-                            DiscoverReply::MethodNotFound => {
+                            DiscoverReply::MethodNotFound
+                            | DiscoverReply::ServerNotInitialized
+                            | DiscoverReply::OwnCode => {
+                                let error = match reply {
+                                    DiscoverReply::ServerNotInitialized => serde_json::json!({
+                                        "code": -32000,
+                                        "message": "Bad Request: Server not initialized"
+                                    }),
+                                    DiscoverReply::OwnCode => serde_json::json!({
+                                        "code": -1234,
+                                        "message": "Discovery is disabled",
+                                        "data": { "contact": "ops" }
+                                    }),
+                                    _ => serde_json::json!({
+                                        "code": -32601,
+                                        "message": "Method not found"
+                                    }),
+                                };
                                 let body = serde_json::json!({
                                     "jsonrpc": "2.0",
                                     "id": id,
-                                    "error": { "code": -32601, "message": "Method not found" }
+                                    "error": error
                                 })
                                 .to_string();
                                 write_response(
@@ -797,6 +837,64 @@ mod dual_mode_tests {
         assert!(
             list_lower.contains(&format!("mcp-session-id: {LEGACY_SESSION_ID}")),
             "the captured session id must ride every request"
+        );
+    }
+
+    /// A server built on the TS SDK answers `server/discover` with `-32000`
+    /// "server not initialized". The code now decodes as itself instead of
+    /// failing to parse, and still triggers the fallback (#171).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_falls_back_when_discover_gets_server_not_initialized() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        tokio::spawn(serve_legacy(
+            listener,
+            log.clone(),
+            DiscoverReply::ServerNotInitialized,
+        ));
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                .with_timeout(std::time::Duration::from_secs(5))
+        });
+
+        client
+            .connect()
+            .await
+            .expect("fallback connect must succeed");
+        assert!(client.is_legacy_peer(), "peer must be marked legacy");
+    }
+
+    /// A code of the server's own reaches the caller as the server sent it,
+    /// message and `data` included, and is not taken for a legacy peer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_servers_own_code_on_discover_reaches_the_caller() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        tokio::spawn(serve_legacy(listener, log.clone(), DiscoverReply::OwnCode));
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                .with_timeout(std::time::Duration::from_secs(5))
+        });
+
+        let err = client
+            .connect()
+            .await
+            .expect_err("a refusal must fail the connect");
+        assert_eq!(err.code(), ErrorCode::Other(-1234));
+        assert_eq!(err.to_string(), "Discovery is disabled");
+        assert_eq!(err.data(), Some(&serde_json::json!({ "contact": "ops" })));
+        assert!(!client.is_legacy_peer(), "a refusal is not a legacy peer");
+
+        let log = log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            !log.iter().any(|r| r.contains("\"method\":\"initialize\"")),
+            "no initialize after a refusal"
         );
     }
 

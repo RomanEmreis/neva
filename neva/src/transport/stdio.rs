@@ -169,11 +169,9 @@ enum Line {
 
 /// Parses one stdio line into a [`Message`].
 ///
-/// A line that isn't a readable `Message` -- malformed JSON, or a JSON-RPC
-/// error whose `code` falls outside neva's [`ErrorCode`] set (the TS SDK's
-/// `-32000` "server not initialized" family) -- must **not** tear down the
-/// receive loop: the peer is alive and every following line is still
-/// readable. Pushing a bare `Err` did exactly that, and since the loop
+/// A line that isn't a readable `Message` -- malformed JSON, or JSON that is
+/// not JSON-RPC -- must **not** tear down the receive loop: the peer is alive
+/// and every following line is still readable. Pushing a bare `Err` did exactly that, and since the loop
 /// died before completing the pending request, the caller saw a timeout
 /// instead of the parse failure.
 ///
@@ -601,13 +599,28 @@ mod parse_line_tests {
     use super::*;
     use crate::types::RequestId;
 
-    /// A JSON-RPC error whose code is outside neva's `ErrorCode` set (the
-    /// TS SDK's `-32000`) is the exact reply a legacy server sends to the
-    /// 2026-07-28 client's pre-initialize `server/discover`. It must complete the
-    /// pending request as an id-bound `ParseError`, not kill the loop.
+    /// A JSON-RPC error whose code neva has no variant for (the TS SDK's
+    /// `-32000`, the reply a legacy server sends to the 2026-07-28 client's
+    /// pre-initialize `server/discover`) is a readable response: it completes
+    /// the pending request with the code and message the peer sent (#171).
     #[test]
-    fn unknown_error_code_becomes_an_id_bound_parse_error() {
+    fn an_unknown_error_code_completes_the_request_as_sent() {
         let line = r#"{"jsonrpc":"2.0","id":7,"error":{"code":-32000,"message":"Server not initialized"}}"#;
+
+        let Line::Message(Message::Response(crate::types::Response::Err(resp))) = parse_line(line)
+        else {
+            panic!("the response must complete the pending request");
+        };
+        assert_eq!(resp.id, RequestId::Number(7));
+        assert_eq!(resp.error.code, ErrorCode::Other(-32000));
+        assert_eq!(resp.error.message, "Server not initialized");
+    }
+
+    /// A response whose JSON is fine but is not JSON-RPC still completes the
+    /// pending request, as an id-bound `ParseError`.
+    #[test]
+    fn a_malformed_response_becomes_an_id_bound_parse_error() {
+        let line = r#"{"jsonrpc":"2.0","id":7,"error":{"code":"not a number"}}"#;
 
         let Line::Message(Message::Response(crate::types::Response::Err(resp))) = parse_line(line)
         else {
@@ -627,7 +640,7 @@ mod parse_line_tests {
     #[tokio::test]
     async fn a_bad_line_neither_ends_the_stream_nor_is_swallowed() {
         const INPUT: &[u8] = concat!(
-            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"Server not initialized"}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":"not a number"}}"#,
             "\n",
             "total garbage, no id\n",
             r#"{"jsonrpc":"2.0","method":"ping"}"#,
@@ -640,7 +653,7 @@ mod parse_line_tests {
         receiver.start(BufReader::new(INPUT), replies, CancellationToken::new());
 
         let Ok(Message::Response(crate::types::Response::Err(resp))) = receiver.recv().await else {
-            panic!("the legacy rejection must complete the pending request");
+            panic!("the malformed response must complete the pending request");
         };
         assert_eq!(resp.id, RequestId::Number(1));
         assert_eq!(resp.error.code, ErrorCode::ParseError);

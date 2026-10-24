@@ -85,11 +85,22 @@ impl From<::svir::Error> for Error {
 
 impl Error {
     /// Creates a new [`Error`]
+    ///
+    /// The code is an [`ErrorCode`] or its number; a number neva has no
+    /// variant for is kept as [`ErrorCode::Other`].
+    ///
+    /// # Example
+    /// ```
+    /// use neva::error::{Error, ErrorCode};
+    ///
+    /// assert_eq!(Error::new(ErrorCode::InvalidParams, "bad").code(), ErrorCode::InvalidParams);
+    /// assert_eq!(Error::new(-32000, "not ready").code(), ErrorCode::Other(-32000));
+    /// ```
     #[inline]
-    pub fn new(code: impl TryInto<ErrorCode>, err: impl Into<BoxError>) -> Self {
+    pub fn new(code: impl Into<ErrorCode>, err: impl Into<BoxError>) -> Self {
         Self {
             inner: err.into(),
-            code: code.try_into().unwrap_or_default(),
+            code: code.into(),
             data: None,
         }
     }
@@ -118,10 +129,9 @@ impl Error {
     /// may carry one of its internal codes, [`ErrorCode::Timeout`] or
     /// [`ErrorCode::RequestCancelled`], which never travel on the wire.
     ///
-    /// A response whose code is not an [`ErrorCode`], such as a server's own
-    /// code, does not reach a caller as that code: the response fails to
-    /// parse, and the request ends with [`ErrorCode::ParseError`] or
-    /// [`ErrorCode::InternalError`] instead.
+    /// A code neva has no variant for, such as a server's own, arrives as
+    /// [`ErrorCode::Other`] with the number the peer sent, its message and
+    /// `data` intact.
     ///
     /// # Example
     /// ```
