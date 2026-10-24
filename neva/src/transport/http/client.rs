@@ -398,9 +398,7 @@ async fn handle_connection(
 /// method/route" -- an allowlist, not a catch-all:
 ///
 /// * any `2xx` -- a legacy peer answering `server/discover` on the wire but
-///   with a body neva can't read as JSON-RPC, most notably an error code
-///   outside its `ErrorCode` set (the TS SDK's `-32000` "server not
-///   initialized" family);
+///   with a body neva can't read as JSON-RPC;
 /// * `400` / `404` / `405` / `406` -- routers and legacy servers rejecting
 ///   the unknown method or endpoint outright.
 ///

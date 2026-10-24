@@ -209,9 +209,11 @@ pub(crate) fn expand(
     } else if !no_schema {
         if cfg!(not(feature = "legacy-spec")) {
             // 2026-07-28: assemble a JSON Schema 2020-12 object schema via neva helpers
-            // so generated code never names `serde_json`. Primitive args use
-            // `primitive_subschema`; object/custom args use
-            // `__tool_arg_subschema!` (rich-or-fallback).
+            // so generated code never names `serde_json` or `schemars`. Primitive
+            // args use `primitive_subschema`; object/custom args use
+            // `__tool_arg_subschema!` (rich-or-fallback) with the generator of the
+            // tool's one `InputSchemaBuilder`, so a type every argument shares, or
+            // one that cannot be inlined, is defined once in the root `$defs`.
             let mut entries = Vec::new();
             for arg in &function.sig.inputs {
                 if let FnArg::Typed(pat_type) = arg
@@ -242,14 +244,15 @@ pub(crate) fn expand(
                         if <#param_ty as neva::__macro_support::IsArgument>::is_argument() {
                             let category = <#param_ty as neva::__macro_support::IsArgument>::category();
                             let subschema = if category == "object" {
-                                neva::__tool_arg_subschema!(#probe_ty)
+                                neva::__tool_arg_subschema!(schema, #probe_ty)
                             } else {
                                 neva::__macro_support::primitive_subschema(category)
                             };
-                            props.push((#arg_name.to_string(), subschema));
-                            if <#param_ty as neva::__macro_support::IsArgument>::is_required() {
-                                required.push(#arg_name.to_string());
-                            }
+                            schema.arg(
+                                #arg_name,
+                                subschema,
+                                <#param_ty as neva::__macro_support::IsArgument>::is_required(),
+                            );
                         }
                     });
                 }
@@ -259,10 +262,9 @@ pub(crate) fn expand(
             } else {
                 quote! {
                     .with_input_schema(|_| {
-                        let mut props = ::std::vec::Vec::new();
-                        let mut required = ::std::vec::Vec::new();
+                        let mut schema = neva::__macro_support::InputSchemaBuilder::new();
                         #(#entries)*
-                        neva::__macro_support::object_schema(props, required)
+                        schema.build()
                     })
                 }
             }

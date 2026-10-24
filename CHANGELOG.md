@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.9.0
+
+### Changed
+* The dual-mode client falls back to `initialize` on a `server/discover`
+  error from `-32000` to `-32099`, the TS SDK's `-32000` among them. A
+  server's own code outside that range reaches the caller instead (#171).
+* `neva` requires the `neva_macros` of its own version (`=0.9.0`).
+
+### Changed (breaking)
+* `ErrorCode` is `#[non_exhaustive]`, and keeps a code it has no variant for
+  as `ErrorCode::Other(i32)`. An error response with such a code no longer
+  fails to parse: the caller gets the code, message and `data` the peer sent
+  (#171).
+* `ErrorCode` implements `From<i32>` instead of `TryFrom<i32>`, and has no
+  discriminants: convert with `i32::from`. `Error::new` takes
+  `impl Into<ErrorCode>`, and keeps a number neva does not name instead of
+  turning it into `InternalError`.
+
+### Fixed
+* A `#[tool]` argument of a recursive `JsonSchema` type published a `$ref`
+  to the wrong schema, or to none. One schemars generator now serves every
+  argument of a tool, so such a type is defined in the `inputSchema` root
+  `$defs`, where its `$ref` resolves; a type two arguments share is defined
+  once, and two types of the same name keep both (#172).
+
+### Security
+* Resolved RUSTSEC-2026-0382 (`rustls-webpki` may accept distrusted
+  intermediates) by updating the transitive `rustls-webpki` dependency to
+  0.103.16.
+* Resolved RUSTSEC-2026-0381 and RUSTSEC-2026-0383 (bundled roots trust
+  distrusted emSign intermediates) by updating the transitive `webpki-roots`
+  and `webpki-root-certs` dependencies to 1.0.10.
+* Resolved RUSTSEC-2026-0385 (non-constant-time mask generation and `u128`
+  comparisons in `ctutils`) by updating the transitive `ctutils` dependency
+  to 0.4.5.
+
 ## 0.8.2
 
 ### Added

@@ -314,8 +314,7 @@ pub(super) async fn exchange(
                 tracing::error!(logger = "neva", "Failed to send response: {}", _err);
             }
         }
-        // A reply that is not JSON-RPC -- an HTML error page, or an error
-        // code outside neva's `ErrorCode` set (e.g. the TS SDK's -32000).
+        // A reply that is not JSON-RPC, such as an HTML error page.
         // Complete every originating request with an id-bound error
         // response: a bare `Err` pushed into the channel would terminate
         // the receive loop without ever resolving the pending request.

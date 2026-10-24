@@ -4,57 +4,72 @@ use crate::error::Error;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt::Display;
 
-/// Standard JSON-RPC error codes as defined in the MCP specification.
+/// JSON-RPC error codes: the ones the JSON-RPC and MCP specifications define,
+/// neva's own, and [`ErrorCode::Other`] for any other number.
+///
+/// New codes are added as MCP allocates them, so a `match` needs a `_` arm.
+/// A number neva names converts to its variant, and every other number to
+/// [`ErrorCode::Other`]:
+///
+/// ```
+/// use neva::error::ErrorCode;
+///
+/// assert_eq!(ErrorCode::from(-32602), ErrorCode::InvalidParams);
+/// assert_eq!(ErrorCode::from(-32000), ErrorCode::Other(-32000));
+/// assert_eq!(i32::from(ErrorCode::Other(-32000)), -32000);
+/// ```
+#[non_exhaustive]
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ErrorCode {
-    /// The server received invalid JSON.
-    ParseError = -32700,
+    /// `-32700`: the server received invalid JSON.
+    ParseError,
 
-    /// The JSON sent is not a valid Request object.
-    InvalidRequest = -32600,
+    /// `-32600`: the JSON sent is not a valid Request object.
+    InvalidRequest,
 
-    /// The method does not exist / is not available.
-    MethodNotFound = -32601,
+    /// `-32601`: the method does not exist / is not available.
+    MethodNotFound,
 
-    /// Invalid method parameter(s).
-    InvalidParams = -32602,
+    /// `-32602`: invalid method parameter(s).
+    InvalidParams,
 
-    /// Internal JSON-RPC error.
+    /// `-32603`: internal JSON-RPC error.
     #[default]
-    InternalError = -32603,
+    InternalError,
 
-    /// The resource does not exist / is not available.
+    /// `-32002`: the resource does not exist / is not available.
     #[deprecated(note = "use InvalidParams")]
-    ResourceNotFound = -32002,
+    ResourceNotFound,
 
-    /// The URL mode elicitation is required.
-    UrlElicitationRequiredError = -32042,
+    /// `-32042`: the URL mode elicitation is required.
+    UrlElicitationRequiredError,
 
-    /// The request's HTTP headers do not match the corresponding values in the
-    /// body, or a required header is missing or malformed (MCP 2026-07-28).
+    /// `-32020`: the request's HTTP headers do not match the corresponding
+    /// values in the body, or a required header is missing or malformed (MCP
+    /// 2026-07-28).
     ///
     /// Over HTTP the response status must be `400 Bad Request`.
     #[cfg(not(feature = "legacy-spec"))]
-    HeaderMismatch = -32020,
+    HeaderMismatch,
 
-    /// Processing the request needs a capability the client did not declare in
-    /// its per-request `clientCapabilities` (MCP 2026-07-28).
+    /// `-32021`: processing the request needs a capability the client did not
+    /// declare in its per-request `clientCapabilities` (MCP 2026-07-28).
     ///
     /// The error `data` carries `requiredCapabilities`. Over HTTP the response
     /// status must be `400 Bad Request`.
     #[cfg(not(feature = "legacy-spec"))]
-    MissingRequiredClientCapability = -32021,
+    MissingRequiredClientCapability,
 
-    /// The request's protocol version is unknown to or unsupported by the
-    /// server (MCP 2026-07-28).
+    /// `-32022`: the request's protocol version is unknown to or unsupported
+    /// by the server (MCP 2026-07-28).
     ///
     /// The error `data` carries `supported` and `requested`. Over HTTP the
     /// response status must be `400 Bad Request`.
     #[cfg(not(feature = "legacy-spec"))]
-    UnsupportedProtocolVersion = -32022,
+    UnsupportedProtocolVersion,
 
-    /// The caller's access token is valid but does not grant every scope the
-    /// tool, prompt or resource requires.
+    /// `-31403`: the caller's access token is valid but does not grant every
+    /// scope the tool, prompt or resource requires.
     ///
     /// MCP allocates no code for this, so neva takes one outside the range
     /// JSON-RPC reserves (`-32768` to `-32000`), where no later MCP allocation
@@ -65,53 +80,82 @@ pub enum ErrorCode {
     /// `WWW-Authenticate: Bearer error="insufficient_scope"` challenge naming
     /// `requiredScopes` (RFC 6750 section 3.1): a client re-authorizes for them
     /// and retries.
-    InsufficientScope = -31403,
+    InsufficientScope,
 
-    /// [Internal code] The request has been canceled
-    RequestCancelled = -99999,
+    /// `-99999`, \[internal code\]: the request has been canceled.
+    RequestCancelled,
 
-    /// [Internal code] The request has been timed out
-    Timeout = -99998,
+    /// `-99998`, \[internal code\]: the request has been timed out.
+    Timeout,
 
-    /// [Internal code] A handler requested additional input via MRTR. Never
-    /// sent on the wire as an error -- intercepted by the server dispatch layer
-    /// and converted into an `InputRequiredResult`.
+    /// `-99997`, \[internal code\]: a handler requested additional input via
+    /// MRTR. Never sent on the wire as an error -- intercepted by the server
+    /// dispatch layer and converted into an `InputRequiredResult`.
     #[cfg(not(feature = "legacy-spec"))]
-    InputRequired = -99997,
+    InputRequired,
+
+    /// A code neva has no variant for, kept as the number the peer sent or the
+    /// handler gave: an implementation-defined server error from the range
+    /// JSON-RPC leaves to implementations (`-32000` to `-32099`), such as the
+    /// TypeScript SDK's `-32000`, or a code of a server's own.
+    ///
+    /// [`ErrorCode::from`] returns this only for a number no other variant
+    /// stands for; `Other(-32602)` built by hand is not equal to
+    /// [`ErrorCode::InvalidParams`], though both travel as `-32602`.
+    Other(i32),
 }
 
 impl From<ErrorCode> for i32 {
     fn from(code: ErrorCode) -> Self {
-        code as i32
+        match code {
+            ErrorCode::ParseError => -32700,
+            ErrorCode::InvalidRequest => -32600,
+            ErrorCode::MethodNotFound => -32601,
+            ErrorCode::InvalidParams => -32602,
+            ErrorCode::InternalError => -32603,
+            #[allow(deprecated)]
+            ErrorCode::ResourceNotFound => -32002,
+            ErrorCode::UrlElicitationRequiredError => -32042,
+            #[cfg(not(feature = "legacy-spec"))]
+            ErrorCode::HeaderMismatch => -32020,
+            #[cfg(not(feature = "legacy-spec"))]
+            ErrorCode::MissingRequiredClientCapability => -32021,
+            #[cfg(not(feature = "legacy-spec"))]
+            ErrorCode::UnsupportedProtocolVersion => -32022,
+            ErrorCode::InsufficientScope => -31403,
+            ErrorCode::RequestCancelled => -99999,
+            ErrorCode::Timeout => -99998,
+            #[cfg(not(feature = "legacy-spec"))]
+            ErrorCode::InputRequired => -99997,
+            ErrorCode::Other(code) => code,
+        }
     }
 }
 
-impl TryFrom<i32> for ErrorCode {
-    type Error = ();
-
+impl From<i32> for ErrorCode {
     #[inline]
-    fn try_from(value: i32) -> Result<Self, Self::Error> {
+    fn from(value: i32) -> Self {
         match value {
-            -32700 => Ok(ErrorCode::ParseError),
-            -32600 => Ok(ErrorCode::InvalidRequest),
-            -32601 => Ok(ErrorCode::MethodNotFound),
-            -32602 => Ok(ErrorCode::InvalidParams),
-            -32603 => Ok(ErrorCode::InternalError),
+            -32700 => ErrorCode::ParseError,
+            -32600 => ErrorCode::InvalidRequest,
+            -32601 => ErrorCode::MethodNotFound,
+            -32602 => ErrorCode::InvalidParams,
+            -32603 => ErrorCode::InternalError,
             #[allow(deprecated)]
-            -32002 => Ok(ErrorCode::ResourceNotFound),
-            -32042 => Ok(ErrorCode::UrlElicitationRequiredError),
+            -32002 => ErrorCode::ResourceNotFound,
+            -32042 => ErrorCode::UrlElicitationRequiredError,
             #[cfg(not(feature = "legacy-spec"))]
-            -32020 => Ok(ErrorCode::HeaderMismatch),
+            -32020 => ErrorCode::HeaderMismatch,
             #[cfg(not(feature = "legacy-spec"))]
-            -32021 => Ok(ErrorCode::MissingRequiredClientCapability),
+            -32021 => ErrorCode::MissingRequiredClientCapability,
             #[cfg(not(feature = "legacy-spec"))]
-            -32022 => Ok(ErrorCode::UnsupportedProtocolVersion),
-            -31403 => Ok(ErrorCode::InsufficientScope),
-            -99999 => Ok(ErrorCode::RequestCancelled),
-            -99998 => Ok(ErrorCode::Timeout),
+            -32022 => ErrorCode::UnsupportedProtocolVersion,
+            -31403 => ErrorCode::InsufficientScope,
+            -99999 => ErrorCode::RequestCancelled,
+            -99998 => ErrorCode::Timeout,
             #[cfg(not(feature = "legacy-spec"))]
-            -99997 => Ok(ErrorCode::InputRequired),
-            _ => Err(()),
+            -99997 => ErrorCode::InputRequired,
+            other => ErrorCode::Other(other),
         }
     }
 }
@@ -129,13 +173,12 @@ impl Serialize for ErrorCode {
 
 // Implement serde::Deserialize
 impl<'de> Deserialize<'de> for ErrorCode {
+    /// Any number decodes: one neva does not name as [`ErrorCode::Other`].
     fn deserialize<D>(deserializer: D) -> Result<ErrorCode, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let value = i32::deserialize(deserializer)?;
-        ErrorCode::try_from(value)
-            .map_err(|_| serde::de::Error::custom(format!("Invalid error code: {value}")))
+        i32::deserialize(deserializer).map(ErrorCode::from)
     }
 }
 
@@ -164,6 +207,7 @@ impl Display for ErrorCode {
             ErrorCode::Timeout => write!(f, "Request timed out"),
             #[cfg(not(feature = "legacy-spec"))]
             ErrorCode::InputRequired => write!(f, "Input required"),
+            ErrorCode::Other(code) => write!(f, "Error code {code}"),
         }
     }
 }
@@ -186,7 +230,10 @@ impl ErrorCode {
     /// per the 2026-07-28, so a user handler returning the old variant still serialises
     /// the spec-current code.
     ///
-    /// All other standard codes are returned unchanged.
+    /// All other standard codes, and [`Self::Other`] codes, are returned
+    /// unchanged. An `Other` holding a number neva names is read as that
+    /// variant first, so a hand-built `Other(-99999)` does not carry an
+    /// internal code out either.
     ///
     /// # Example
     /// ```
@@ -195,6 +242,7 @@ impl ErrorCode {
     /// assert_eq!(ErrorCode::RequestCancelled.wire_code(), ErrorCode::InternalError);
     /// assert_eq!(ErrorCode::Timeout.wire_code(), ErrorCode::InternalError);
     /// assert_eq!(ErrorCode::ParseError.wire_code(), ErrorCode::ParseError);
+    /// assert_eq!(ErrorCode::Other(-32000).wire_code(), ErrorCode::Other(-32000));
     /// ```
     #[inline]
     pub fn wire_code(self) -> Self {
@@ -205,6 +253,10 @@ impl ErrorCode {
             #[cfg(not(feature = "legacy-spec"))]
             #[allow(deprecated)]
             Self::ResourceNotFound => Self::InvalidParams,
+            Self::Other(code) => match Self::from(code) {
+                other @ Self::Other(_) => other,
+                named => named.wire_code(),
+            },
             other => other,
         }
     }
@@ -261,7 +313,7 @@ mod tests {
         ];
 
         for (code, val) in codes {
-            let error: ErrorCode = code.try_into().unwrap();
+            let error = ErrorCode::from(code);
             assert_eq!(error, val);
 
             let int: i32 = val.into();
@@ -292,6 +344,68 @@ mod tests {
             let error_code: ErrorCode = serde_json::from_str(&error).unwrap();
             assert_eq!(error_code, val);
         }
+    }
+
+    /// A code neva has no variant for keeps its number, in both directions
+    /// and through serde (#171).
+    #[test]
+    fn an_unknown_code_keeps_its_number() {
+        for code in [-32000, -32099, -32768, -1, 0, 42, i32::MIN, i32::MAX] {
+            assert_eq!(ErrorCode::from(code), ErrorCode::Other(code));
+            assert_eq!(i32::from(ErrorCode::Other(code)), code);
+
+            let decoded: ErrorCode = serde_json::from_str(&code.to_string()).unwrap();
+            assert_eq!(decoded, ErrorCode::Other(code));
+            assert_eq!(serde_json::to_string(&decoded).unwrap(), code.to_string());
+        }
+        assert_eq!(ErrorCode::Other(-32000).to_string(), "Error code -32000");
+    }
+
+    /// A number with a variant of its own converts to it, never to `Other`.
+    #[test]
+    #[allow(deprecated)]
+    fn a_named_code_never_converts_to_other() {
+        let named = [
+            ErrorCode::ParseError,
+            ErrorCode::InvalidRequest,
+            ErrorCode::MethodNotFound,
+            ErrorCode::InvalidParams,
+            ErrorCode::InternalError,
+            ErrorCode::ResourceNotFound,
+            ErrorCode::UrlElicitationRequiredError,
+            ErrorCode::InsufficientScope,
+            ErrorCode::RequestCancelled,
+            ErrorCode::Timeout,
+        ];
+        for code in named {
+            assert_eq!(ErrorCode::from(i32::from(code)), code);
+        }
+    }
+
+    /// Under `legacy-spec` the 2026-07-28 allocations have no variant, so a
+    /// peer's `-32020` arrives as `Other` rather than failing to decode.
+    #[cfg(feature = "legacy-spec")]
+    #[test]
+    fn a_later_allocation_arrives_as_other_under_legacy_spec() {
+        assert_eq!(ErrorCode::from(-32020), ErrorCode::Other(-32020));
+    }
+
+    /// `Other` travels as written, unless it holds a number neva names: then
+    /// it is that code, internal ones masked as usual.
+    #[test]
+    fn other_codes_are_unchanged_on_wire_unless_neva_names_them() {
+        assert_eq!(
+            ErrorCode::Other(-32000).wire_code(),
+            ErrorCode::Other(-32000)
+        );
+        assert_eq!(
+            ErrorCode::Other(-32602).wire_code(),
+            ErrorCode::InvalidParams
+        );
+        assert_eq!(
+            ErrorCode::Other(-99999).wire_code(),
+            ErrorCode::InternalError
+        );
     }
 
     #[test]
@@ -389,7 +503,7 @@ mod spec_error_code_tests {
             // They sit inside the JSON-RPC reserved range, so they travel as
             // themselves rather than being masked as an internal error.
             assert_eq!(code.wire_code(), code);
-            assert_eq!(ErrorCode::try_from(i32::from(code)), Ok(code));
+            assert_eq!(ErrorCode::from(i32::from(code)), code);
         }
     }
 }

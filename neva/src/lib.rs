@@ -277,7 +277,7 @@ pub mod json {
 pub mod __macro_support {
     #[cfg(not(feature = "legacy-spec"))]
     pub use crate::types::schema_2020::{
-        SchemaProbe, ViaFallback, ViaJsonSchema, object_schema, primitive_subschema,
+        InputSchemaBuilder, SchemaProbe, ViaFallback, ViaJsonSchema, primitive_subschema,
     };
 
     /// Whether a handler parameter type is a value-carrying argument rather
