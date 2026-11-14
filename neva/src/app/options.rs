@@ -317,6 +317,14 @@ impl McpOptions {
         self
     }
 
+    /// Sets one end of an in-memory pipe as the transport: stdio, minus the
+    /// process. Used by [`testing`](crate::testing).
+    #[cfg(feature = "testing")]
+    pub(crate) fn with_in_memory(mut self, link: tokio::io::DuplexStream) -> Self {
+        self.proto = Some(TransportProto::StdIoServer(StdIoServer::in_memory(link)));
+        self
+    }
+
     /// Sets Streamable HTTP as a transport protocol.
     ///
     /// Accepts any `HttpServer<C, E>` for any engine `E: HttpEngine`. When

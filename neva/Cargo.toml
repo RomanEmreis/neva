@@ -71,6 +71,8 @@ full = ["server-full", "client-full"]
 di = ["dep:volga-di"]
 macros = ["dep:neva_macros", "dep:inventory"]
 tasks = []
+# `neva::testing`: drive an `App` from a test with no process and no port.
+testing = ["server", "client"]
 # MCP Apps (SEP-1865): `ui://` resources and the `_meta.ui` blocks that bind a
 # tool to one. Additive, no new dependencies.
 apps = ["neva_macros?/apps"]
@@ -135,4 +137,6 @@ legacy-spec = ["neva_macros?/legacy-spec"]
 # `with_mcp_version` presented as current. `full` is every feature except the
 # generation flag, which is the default build users get; `svir` is added on
 # top, since `full` leaves it out only to keep svir's 0.x releases out of it.
-features = ["full", "svir"]
+# `testing` is a test-only surface, not part of `full`, and is documented here
+# because `neva::testing` is how a tool is meant to be tested.
+features = ["full", "svir", "testing"]
