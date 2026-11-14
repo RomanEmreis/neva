@@ -127,21 +127,22 @@ async fn a_subscription_delivers_and_ends_gracefully() {
         Ok::<_, Error>("grown".to_string())
     });
 
-    let mut client = TestClient::connect_with(
-        app,
-        Client::new().with_options(|opt| opt.with_timeout(Duration::from_secs(5))),
-    )
-    .await
-    .expect("connect");
-
+    // Registered before connecting: the running client reads its notification
+    // handlers when it connects, so one added afterwards is only seen if
+    // another handler (the `tracing` feature's) was registered first.
     let seen = Arc::new(AtomicUsize::new(0));
     let counter = seen.clone();
-    client.on_tools_changed(move |_| {
+    let mut handlers = Client::new().with_options(|opt| opt.with_timeout(Duration::from_secs(5)));
+    handlers.subscribe(neva::types::tool::commands::LIST_CHANGED, move |_| {
         let counter = counter.clone();
         async move {
             counter.fetch_add(1, Ordering::SeqCst);
         }
     });
+
+    let client = TestClient::connect_with(app, handlers)
+        .await
+        .expect("connect");
 
     let subscription = client
         .listen(SubscriptionFilter::new().with_tools_changed())
