@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+* `neva::testing` (feature `testing`): `TestClient` runs an `App` on a task of
+  the current runtime and connects a `Client` to it over an in-memory pipe, with
+  no process and no port. It is the stdio transport over `tokio::io::duplex`, so
+  a request takes the dispatch path it takes on the wire, MRTR and
+  `subscriptions/listen` included. `TestClient::connect_with` takes a `Client`
+  configured with handlers (`map_elicitation`, ...) and options (#134).
+
 ## 0.9.0
 
 ### Changed
