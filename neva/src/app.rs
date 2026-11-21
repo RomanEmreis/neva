@@ -356,6 +356,20 @@ answered, bounded by [`with_shutdown_drain`](Self::with_shutdown_drain)."
         self
     }
 
+    /// The budget [`Self::run`]'s teardown is bounded by, for
+    /// [`testing`](crate::testing) to wait on.
+    #[cfg(feature = "testing")]
+    pub(crate) fn shutdown_drain(&self) -> std::time::Duration {
+        #[cfg(not(feature = "legacy-spec"))]
+        {
+            self.shutdown_drain
+        }
+        #[cfg(feature = "legacy-spec")]
+        {
+            DEFAULT_SHUTDOWN_DRAIN
+        }
+    }
+
     /// Run the MCP server
     ///
     /// Returns once the server has stopped -- on an OS signal, on a

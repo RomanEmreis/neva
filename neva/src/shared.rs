@@ -137,7 +137,14 @@ pub use futures_util::Stream;
 #[cfg(any(feature = "server", feature = "client"))]
 pub(crate) fn wait_for_shutdown_signal(token: CancellationToken) {
     tokio::spawn(async move {
-        match wait_for_shutdown_signal_impl().await {
+        let signal = tokio::select! {
+            // Stopped another way -- a `ShutdownHandle`, a disconnect -- so
+            // there is nothing left for a signal to stop, and a watcher kept
+            // waiting would outlive what it watched (#178).
+            _ = token.cancelled() => return,
+            signal = wait_for_shutdown_signal_impl() => signal,
+        };
+        match signal {
             // A shutdown signal actually arrived -- cancel the transport.
             Ok(_) => token.cancel(),
             // Failing to *register* the handler (e.g. a sandboxed

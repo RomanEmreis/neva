@@ -8,12 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased
 
 ### Added
-* `neva::testing` (feature `testing`): `TestClient` runs an `App` on a task of
-  the current runtime and connects a `Client` to it over an in-memory pipe, with
-  no process and no port. It is the stdio transport over `tokio::io::duplex`, so
-  a request takes the dispatch path it takes on the wire, MRTR and
-  `subscriptions/listen` included. `TestClient::connect_with` takes a `Client`
-  configured with handlers (`map_elicitation`, ...) and options (#134).
+* `neva::testing` (feature `testing`): `TestClient` runs an `App` on the
+  current runtime and connects a `Client` to it over an in-memory pipe, with no
+  process and no port (#134).
+
+### Fixed
+* The signal watcher that `App::run` and `Client::connect` start ends when the
+  token it watches is cancelled another way (a `ShutdownHandle`,
+  `Client::disconnect`) instead of running on (#178).
 
 ## 0.9.0
 

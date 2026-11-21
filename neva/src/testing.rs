@@ -35,6 +35,12 @@
 //! [`Client`]. Configure one and hand it to [`TestClient::connect_with`]; the
 //! transport of the client you pass is replaced.
 //!
+//! Handlers belong on that `Client`, before `connect_with`: the running client
+//! takes them when it connects. A [`subscribe`](Client::subscribe) made on a
+//! `TestClient` after [`connect`](TestClient::connect) is never called unless
+//! the `tracing` feature registered a notification handler first
+//! (<https://github.com/RomanEmreis/neva/issues/180>).
+//!
 //! ```
 //! # #[cfg(not(feature = "legacy-spec"))]
 //! # #[tokio::main(flavor = "current_thread")]
@@ -74,7 +80,8 @@
 //! * **Stopping.** [`TestClient::shutdown`] stops the server the way
 //!   [`App::with_shutdown`] does -- live `subscriptions/listen` streams are
 //!   answered first -- waits for it, and disconnects the client. A
-//!   `TestClient` dropped without it asks the server to stop and does not wait.
+//!   `TestClient` dropped without it stops the client's transport and asks
+//!   the server to stop, and waits for neither.
 //! * **Panics.** A tool handler that panics is answered with an
 //!   [`InternalError`](crate::error::ErrorCode::InternalError) response and
 //!   the call returns `Err`; the test is not failed for you, so assert on the
@@ -103,14 +110,35 @@ use tokio::{io::duplex, task::JoinHandle};
 /// How much one end of the pipe buffers before a write waits for a read.
 const PIPE_CAPACITY: usize = 64 * 1024;
 
-/// How long [`TestClient::shutdown`] waits for the server task to end.
-const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long [`TestClient::shutdown`] waits for the server task beyond the
+/// app's shutdown drain budget, which is what the server's own teardown is
+/// bounded by.
+const STOP_MARGIN: Duration = Duration::from_secs(10);
 
 /// A [`Client`] connected to an [`App`] running on a task of the current
 /// runtime, over an in-memory pipe.
 ///
 /// Dereferences to the [`Client`], so it is used as one. See the
 /// [module documentation](self) for what it does and does not cover.
+///
+/// # Examples
+/// ```
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() {
+/// use neva::{App, testing::TestClient};
+///
+/// let mut app = App::new();
+/// app.map_tool("ping", || async { "pong" });
+///
+/// let client = TestClient::connect(app).await.expect("connect");
+///
+/// // Anything a `Client` does: list, call, read, subscribe, ...
+/// let tools = client.tools().list(None).await.expect("tools/list");
+/// assert!(tools.tools.iter().any(|tool| tool.name == "ping"));
+///
+/// client.shutdown().await.expect("shutdown");
+/// # }
+/// ```
 #[derive(Debug)]
 pub struct TestClient {
     client: Client,
@@ -121,7 +149,9 @@ pub struct TestClient {
 #[derive(Debug)]
 struct Server {
     shutdown: ShutdownHandle,
-    task: Option<JoinHandle<()>>,
+    task: JoinHandle<()>,
+    /// How long [`TestClient::shutdown`] waits for `task`.
+    stop_timeout: Duration,
 }
 
 impl Drop for Server {
@@ -130,8 +160,59 @@ impl Drop for Server {
     }
 }
 
+impl Server {
+    /// Asks the server to stop and waits for it, for up to `stop_timeout`.
+    ///
+    /// Called once, from [`TestClient::shutdown`]: `task` must not be polled
+    /// again after it has finished.
+    async fn stop(&mut self) -> Result<(), Error> {
+        self.shutdown.shutdown();
+        match tokio::time::timeout(self.stop_timeout, &mut self.task).await {
+            Err(_) => Err(Error::new(
+                ErrorCode::Timeout,
+                format!(
+                    "the server did not stop within {:?} of the shutdown request",
+                    self.stop_timeout
+                ),
+            )),
+            Ok(Err(err)) if err.is_panic() => resume_unwind(err.into_panic()),
+            Ok(_) => Ok(()),
+        }
+    }
+}
+
+impl Drop for TestClient {
+    fn drop(&mut self) {
+        // The client's reader, writer and receive loop watch this token; the
+        // server is asked to stop by `Server`'s own `Drop`, which runs next.
+        self.client.cancel_transport();
+    }
+}
+
 impl TestClient {
     /// Starts `app` and connects a default [`Client`] to it.
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// use neva::{App, testing::TestClient};
+    ///
+    /// let mut app = App::new();
+    /// app.map_tool("add", |a: i32, b: i32| async move { a + b })
+    ///     .with_arg_names(["a", "b"]);
+    ///
+    /// let client = TestClient::connect(app).await.expect("connect");
+    /// let result = client
+    ///     .tools()
+    ///     .call("add", [("a", 2), ("b", 3)])
+    ///     .await
+    ///     .expect("tool call");
+    /// assert_eq!(result.content[0].as_text().unwrap().text, "5");
+    ///
+    /// client.shutdown().await.expect("shutdown");
+    /// # }
+    /// ```
     ///
     /// # Errors
     /// Returns the [`Error`] of a failed handshake.
@@ -147,7 +228,30 @@ impl TestClient {
     /// client was configured with.
     ///
     /// Use it for a client that has handlers (`map_elicitation`, roots, ...)
-    /// or options (`with_timeout`, ...) of its own.
+    /// or options (`with_timeout`, ...) of its own. Register them on `client`
+    /// before calling this: see [A client that needs
+    /// handlers](crate::testing#a-client-that-needs-handlers).
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// use neva::{App, Client, testing::TestClient};
+    /// use std::time::Duration;
+    ///
+    /// let mut app = App::new();
+    /// app.map_tool("ping", || async { "pong" });
+    ///
+    /// let client = Client::new()
+    ///     .with_options(|opt| opt.with_timeout(Duration::from_secs(5)));
+    ///
+    /// let client = TestClient::connect_with(app, client).await.expect("connect");
+    /// let result = client.tools().call("ping", ()).await.expect("tool call");
+    /// assert_eq!(result.content[0].as_text().unwrap().text, "pong");
+    ///
+    /// client.shutdown().await.expect("shutdown");
+    /// # }
+    /// ```
     ///
     /// # Errors
     /// Returns the [`Error`] of a failed handshake.
@@ -158,17 +262,28 @@ impl TestClient {
     pub async fn connect_with(app: App, client: Client) -> Result<Self, Error> {
         let (server_end, client_end) = duplex(PIPE_CAPACITY);
 
+        // Read before `run` takes the app: it bounds the server's teardown.
+        let stop_timeout = app.shutdown_drain().saturating_add(STOP_MARGIN);
         let (app, shutdown) = app
             .without_greeting()
             .with_options(|opt| opt.with_in_memory(server_end))
             .with_shutdown();
-        let mut client = client.with_options(|opt| opt.with_in_memory(client_end));
 
-        let mut task = tokio::spawn(app.run());
+        // Whole from here on, so that every way out of this function that is
+        // not success -- a failed handshake, a server that stopped first, its
+        // panic -- drops it, and the drop stops both ends.
+        let mut this = Self {
+            client: client.with_options(|opt| opt.with_in_memory(client_end)),
+            server: Server {
+                shutdown,
+                task: tokio::spawn(app.run()),
+                stop_timeout,
+            },
+        };
 
         let connected = tokio::select! {
-            connected = client.connect() => connected,
-            ended = &mut task => {
+            connected = this.client.connect() => connected,
+            ended = &mut this.server.task => {
                 return Err(match ended {
                     Err(err) if err.is_panic() => resume_unwind(err.into_panic()),
                     _ => Error::new(
@@ -179,44 +294,84 @@ impl TestClient {
             }
         };
 
-        let server = Server {
-            shutdown,
-            task: Some(task),
-        };
-        connected.map(|()| Self { client, server })
+        connected.map(|()| this)
     }
 
     /// A handle that stops the server without disconnecting the client, for a
     /// test of what the client sees when the server goes away.
+    ///
+    /// What it sees is its request timeout. The client's reader stops at the
+    /// end of the pipe, but nothing tells the requests waiting on it, so a
+    /// call in flight when the server stops, or made after, fails with
+    /// `Request timed out` once the client's
+    /// [`with_timeout`](crate::client::options::McpOptions::with_timeout) has
+    /// passed: ten seconds unless set. Give such a test a short one
+    /// (<https://github.com/RomanEmreis/neva/issues/179>).
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// use neva::{App, Client, testing::TestClient};
+    /// use std::time::Duration;
+    ///
+    /// let mut app = App::new();
+    /// app.map_tool("ping", || async { "pong" });
+    ///
+    /// // A short timeout, since that is what a call to a server that is gone
+    /// // waits out.
+    /// let client = Client::new()
+    ///     .with_options(|opt| opt.with_timeout(Duration::from_millis(200)));
+    /// let client = TestClient::connect_with(app, client).await.expect("connect");
+    ///
+    /// client.shutdown_handle().shutdown();
+    /// // Let the server finish stopping.
+    /// tokio::time::sleep(Duration::from_millis(50)).await;
+    ///
+    /// let gone = client.tools().call("ping", ()).await;
+    /// assert!(gone.is_err(), "the server is gone");
+    ///
+    /// client.shutdown().await.expect("shutdown");
+    /// # }
+    /// ```
     pub fn shutdown_handle(&self) -> ShutdownHandle {
         self.server.shutdown.clone()
     }
 
     /// Stops the server, waits for it, and disconnects the client.
     ///
+    /// The server's teardown is bounded by its shutdown drain budget, two
+    /// seconds unless `App::with_shutdown_drain` set another, and this waits
+    /// for that budget plus ten seconds.
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// use neva::{App, testing::TestClient};
+    ///
+    /// let client = TestClient::connect(App::new()).await.expect("connect");
+    ///
+    /// // ... the test ...
+    ///
+    /// client.shutdown().await.expect("the server stops in time");
+    /// # }
+    /// ```
+    ///
     /// # Errors
-    /// Returns an [`Error`] when the server does not stop within ten seconds.
+    /// Returns an [`Error`] when the server does not stop in that time. The
+    /// client is disconnected either way.
     ///
     /// # Panics
     /// Re-raises the panic of a server task that panicked.
-    pub async fn shutdown(self) -> Result<(), Error> {
-        let Self { client, mut server } = self;
+    pub async fn shutdown(mut self) -> Result<(), Error> {
+        let stopped = self.server.stop().await;
 
-        server.shutdown.shutdown();
-        if let Some(task) = server.task.take() {
-            match tokio::time::timeout(STOP_TIMEOUT, task).await {
-                Err(_) => {
-                    return Err(Error::new(
-                        ErrorCode::Timeout,
-                        "the server did not stop within ten seconds of the shutdown request",
-                    ));
-                }
-                Ok(Err(err)) if err.is_panic() => resume_unwind(err.into_panic()),
-                Ok(_) => {}
-            }
-        }
+        // Taken to be consumed: what `Drop` finds in its place was never
+        // connected, and the server it asks to stop already has.
+        let disconnected = std::mem::take(&mut self.client).disconnect().await;
 
-        client.disconnect().await
+        stopped.and(disconnected)
     }
 }
 

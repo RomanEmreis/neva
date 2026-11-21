@@ -568,33 +568,41 @@ impl TransportReceiver for StdIoReceiver {
     }
 }
 
+/// Starts the reader and writer tasks of either side over one end of an
+/// in-memory pipe.
+///
+/// A client and a server run the same two here: there is no child process to
+/// spawn, and no stdin to park a thread on.
+#[cfg(feature = "testing")]
+fn start_in_memory(
+    link: DuplexStream,
+    receiver: &StdIoReceiver,
+    sender: &mut StdIoSender,
+) -> TransportHandle {
+    let token = CancellationToken::new();
+    let (guard, mut drained) = DrainSignal::new();
+    let (reader, writer) = tokio::io::split(link);
+    receiver.start(BufReader::new(reader), sender.tx.clone(), token.clone());
+    if let Some(task) = sender.start(BufWriter::new(writer), token.clone(), guard) {
+        drained.abort_on_timeout(task.abort_handle());
+    }
+    TransportHandle::new(token, drained)
+}
+
 #[cfg(feature = "client")]
 impl Transport for StdIoClient {
     type Sender = StdIoSender;
     type Receiver = StdIoReceiver;
 
     fn start(&mut self) -> Result<TransportHandle, Error> {
-        let token = CancellationToken::new();
-        let (guard, mut drained) = DrainSignal::new();
-
         #[cfg(feature = "testing")]
         if let Some(link) = self.link.take() {
-            let (reader, writer) = tokio::io::split(link);
-            self.receiver.start(
-                BufReader::new(reader),
-                self.sender.tx.clone(),
-                token.clone(),
-            );
-            if let Some(task) = self
-                .sender
-                .start(BufWriter::new(writer), token.clone(), guard)
-            {
-                drained.abort_on_timeout(task.abort_handle());
-            }
-            return Ok(TransportHandle::new(token, drained));
+            return Ok(start_in_memory(link, &self.receiver, &mut self.sender));
         }
 
+        let token = CancellationToken::new();
         let (reader, writer) = self.handshake(token.clone())?;
+        let (guard, mut drained) = DrainSignal::new();
 
         self.receiver
             .start(reader, self.sender.tx.clone(), token.clone());
@@ -620,28 +628,12 @@ impl Transport for StdIoServer {
     type Receiver = StdIoReceiver;
 
     fn start(&mut self) -> Result<TransportHandle, Error> {
-        let token = CancellationToken::new();
-
         #[cfg(feature = "testing")]
         if let Some(link) = self.link.take() {
-            // The same reader and writer tasks as a client's, over the pipe:
-            // there is no stdin to park a thread on.
-            let (reader, writer) = tokio::io::split(link);
-            let (guard, mut drained) = DrainSignal::new();
-            self.receiver.start(
-                BufReader::new(reader),
-                self.sender.tx.clone(),
-                token.clone(),
-            );
-            if let Some(task) = self
-                .sender
-                .start(BufWriter::new(writer), token.clone(), guard)
-            {
-                drained.abort_on_timeout(task.abort_handle());
-            }
-            return Ok(TransportHandle::new(token, drained));
+            return Ok(start_in_memory(link, &self.receiver, &mut self.sender));
         }
 
+        let token = CancellationToken::new();
         let (reader, writer) = StdIoServer::init();
         // Only the writer takes a guard: the reader is a thread of neva's own
         // (see `start_blocking`), parked in a read nothing can interrupt, and

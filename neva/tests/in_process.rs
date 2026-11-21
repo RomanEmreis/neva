@@ -232,3 +232,110 @@ async fn a_server_that_panics_at_startup_fails_connect() {
         .unwrap_or_default();
     assert!(message.contains("`bad`"), "{message}");
 }
+
+/// How many tasks are alive on this test's runtime once the teardown has had
+/// time to finish: waits until the count is back to `baseline`, or five
+/// seconds have passed, and returns the count it stopped at.
+async fn alive_after_teardown(baseline: usize) -> usize {
+    let metrics = tokio::runtime::Handle::current().metrics();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let alive = metrics.num_alive_tasks();
+        if alive <= baseline || tokio::time::Instant::now() >= deadline {
+            return alive;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn app_with_ping() -> App {
+    let mut app = App::new();
+    app.map_tool("ping", || async { "pong" });
+    app
+}
+
+/// A `TestClient` dropped without `shutdown` stops both ends: the client's
+/// reader, writer, receive loop and signal watcher go with the server's.
+#[tokio::test]
+async fn a_dropped_test_client_leaves_no_task_behind() {
+    let baseline = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+
+    for _ in 0..3 {
+        let client = TestClient::connect(app_with_ping()).await.expect("connect");
+        drop(client);
+    }
+
+    assert_eq!(alive_after_teardown(baseline).await, baseline);
+}
+
+/// `shutdown` ends every task either side started, the signal watchers that
+/// `App::run` and `Client::connect` start included (#178).
+#[tokio::test]
+async fn a_shut_down_test_client_leaves_no_task_behind() {
+    let baseline = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+
+    for _ in 0..3 {
+        let client = TestClient::connect(app_with_ping()).await.expect("connect");
+        client.shutdown().await.expect("shutdown");
+    }
+
+    assert_eq!(alive_after_teardown(baseline).await, baseline);
+}
+
+/// A handshake the server refuses fails `connect` with the client it started
+/// stopped, and the server too.
+#[tokio::test]
+async fn a_refused_handshake_leaves_no_task_behind() {
+    use neva::{
+        error::Error,
+        middleware::{MwContext, Next},
+        types::Response,
+    };
+
+    let baseline = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+
+    // Answers every request, the handshake's included, with an error that is
+    // no reason to fall back to the other handshake.
+    let refusing = app_with_ping().wrap(|ctx: MwContext, _next: Next| async move {
+        Response::error(
+            ctx.id(),
+            Error::new(ErrorCode::InternalError, "refused on purpose"),
+        )
+    });
+    let err = TestClient::connect(refusing)
+        .await
+        .expect_err("the handshake is refused");
+    assert_eq!(err.code(), ErrorCode::InternalError, "{err}");
+
+    assert_eq!(alive_after_teardown(baseline).await, baseline);
+}
+
+/// A server that panics before the client connected: `connect` re-raises the
+/// panic, and the client it started does not outlive it.
+#[tokio::test]
+async fn a_server_that_panics_at_startup_leaves_no_task_behind() {
+    use futures_util::FutureExt;
+
+    let baseline = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+
+    let mut app = App::new();
+    app.map_tool("bad", |a: String| async move { a })
+        .with_arg_names(["a", "b"]);
+    let started = std::panic::AssertUnwindSafe(TestClient::connect(app))
+        .catch_unwind()
+        .await;
+    assert!(
+        started.is_err(),
+        "the server's panic is raised from connect"
+    );
+
+    assert_eq!(alive_after_teardown(baseline).await, baseline);
+}
