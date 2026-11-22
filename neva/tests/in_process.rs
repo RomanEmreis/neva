@@ -127,9 +127,7 @@ async fn a_subscription_delivers_and_ends_gracefully() {
         Ok::<_, Error>("grown".to_string())
     });
 
-    // Registered before connecting: the running client reads its notification
-    // handlers when it connects, so one added afterwards is only seen if
-    // another handler (the `tracing` feature's) was registered first.
+    // Registered on the `Client` before `connect_with`.
     let seen = Arc::new(AtomicUsize::new(0));
     let counter = seen.clone();
     let mut handlers = Client::new().with_options(|opt| opt.with_timeout(Duration::from_secs(5)));

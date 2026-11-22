@@ -36,10 +36,7 @@
 //! transport of the client you pass is replaced.
 //!
 //! Handlers belong on that `Client`, before `connect_with`: the running client
-//! takes them when it connects. A [`subscribe`](Client::subscribe) made on a
-//! `TestClient` after [`connect`](TestClient::connect) is never called unless
-//! the `tracing` feature registered a notification handler first
-//! (<https://github.com/RomanEmreis/neva/issues/180>).
+//! takes them when it connects.
 //!
 //! ```
 //! # #[cfg(not(feature = "legacy-spec"))]

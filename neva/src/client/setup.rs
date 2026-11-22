@@ -188,8 +188,25 @@ impl Client {
         #[cfg(feature = "tracing")]
         self.register_tracing_notification_handlers();
 
+        // `RequestHandler::new` dispatches to the notification map it is handed
+        // here, and `subscribe` writes to the one the options hold. Creating it
+        // here, not on the first `subscribe`, makes those the same map: a
+        // handler subscribed after connecting -- the only time `on_tools_changed`
+        // and friends can be -- used to land in one nothing reads, unless
+        // something had subscribed before, as `tracing` does above (#180).
+        let notification_handler = self
+            .options
+            .notification_handler
+            .get_or_insert_default()
+            .clone();
+
         self.cancellation_token = Some(token.clone());
-        self.handler = Some(RequestHandler::new(transport, &self.options, token));
+        self.handler = Some(RequestHandler::new(
+            transport,
+            &self.options,
+            notification_handler,
+            token,
+        ));
 
         self.wait_for_shutdown_signal();
         self.init().await
