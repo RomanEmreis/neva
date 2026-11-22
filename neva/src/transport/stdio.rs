@@ -22,6 +22,9 @@ use tokio_util::sync::CancellationToken;
 #[cfg(feature = "server")]
 use tokio::io::Stdout;
 
+#[cfg(feature = "testing")]
+use tokio::io::DuplexStream;
+
 #[cfg(feature = "client")]
 use self::options::StdIoOptions;
 #[cfg(feature = "client")]
@@ -40,6 +43,10 @@ pub(crate) mod options;
 pub(crate) struct StdIoServer {
     sender: StdIoSender,
     receiver: StdIoReceiver,
+    /// One end of an in-memory pipe to read and write instead of the process's
+    /// stdin and stdout. Taken by `start`.
+    #[cfg(feature = "testing")]
+    link: Option<DuplexStream>,
 }
 
 /// Represents stdio client transport
@@ -48,6 +55,10 @@ pub(crate) struct StdIoClient {
     sender: StdIoSender,
     receiver: StdIoReceiver,
     options: StdIoOptions,
+    /// One end of an in-memory pipe to read and write instead of a child
+    /// process's stdout and stdin. Taken by `start`.
+    #[cfg(feature = "testing")]
+    link: Option<DuplexStream>,
 }
 
 /// Represents stdio sender
@@ -412,6 +423,17 @@ impl StdIoClient {
             receiver: StdIoReceiver::new(),
             sender: StdIoSender::new(),
             options,
+            #[cfg(feature = "testing")]
+            link: None,
+        }
+    }
+
+    /// Creates a stdio transport that talks over `link` and spawns no process.
+    #[cfg(feature = "testing")]
+    pub(crate) fn in_memory(link: DuplexStream) -> Self {
+        Self {
+            link: Some(link),
+            ..Self::new(StdIoOptions::new("", []))
         }
     }
 
@@ -496,6 +518,18 @@ impl StdIoServer {
         Self {
             receiver: StdIoReceiver::new(),
             sender: StdIoSender::new(),
+            #[cfg(feature = "testing")]
+            link: None,
+        }
+    }
+
+    /// Creates a stdio transport that talks over `link` and leaves the
+    /// process's own stdin and stdout alone.
+    #[cfg(feature = "testing")]
+    pub(crate) fn in_memory(link: DuplexStream) -> Self {
+        Self {
+            link: Some(link),
+            ..Self::new()
         }
     }
 
@@ -534,12 +568,38 @@ impl TransportReceiver for StdIoReceiver {
     }
 }
 
+/// Starts the reader and writer tasks of either side over one end of an
+/// in-memory pipe.
+///
+/// A client and a server run the same two here: there is no child process to
+/// spawn, and no stdin to park a thread on.
+#[cfg(feature = "testing")]
+fn start_in_memory(
+    link: DuplexStream,
+    receiver: &StdIoReceiver,
+    sender: &mut StdIoSender,
+) -> TransportHandle {
+    let token = CancellationToken::new();
+    let (guard, mut drained) = DrainSignal::new();
+    let (reader, writer) = tokio::io::split(link);
+    receiver.start(BufReader::new(reader), sender.tx.clone(), token.clone());
+    if let Some(task) = sender.start(BufWriter::new(writer), token.clone(), guard) {
+        drained.abort_on_timeout(task.abort_handle());
+    }
+    TransportHandle::new(token, drained)
+}
+
 #[cfg(feature = "client")]
 impl Transport for StdIoClient {
     type Sender = StdIoSender;
     type Receiver = StdIoReceiver;
 
     fn start(&mut self) -> Result<TransportHandle, Error> {
+        #[cfg(feature = "testing")]
+        if let Some(link) = self.link.take() {
+            return Ok(start_in_memory(link, &self.receiver, &mut self.sender));
+        }
+
         let token = CancellationToken::new();
         let (reader, writer) = self.handshake(token.clone())?;
         let (guard, mut drained) = DrainSignal::new();
@@ -568,6 +628,11 @@ impl Transport for StdIoServer {
     type Receiver = StdIoReceiver;
 
     fn start(&mut self) -> Result<TransportHandle, Error> {
+        #[cfg(feature = "testing")]
+        if let Some(link) = self.link.take() {
+            return Ok(start_in_memory(link, &self.receiver, &mut self.sender));
+        }
+
         let token = CancellationToken::new();
         let (reader, writer) = StdIoServer::init();
         // Only the writer takes a guard: the reader is a thread of neva's own

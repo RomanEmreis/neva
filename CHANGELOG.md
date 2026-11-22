@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+* `neva::testing` (feature `testing`): `TestClient` runs an `App` on the
+  current runtime and connects a `Client` to it over an in-memory pipe, with no
+  process and no port (#134).
+
+### Fixed
+* The signal watcher that `App::run` and `Client::connect` start ends when the
+  token it watches is cancelled another way (a `ShutdownHandle`,
+  `Client::disconnect`) instead of running on (#178).
+
 ## 0.9.0
 
 ### Changed

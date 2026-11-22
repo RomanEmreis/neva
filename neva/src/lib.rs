@@ -71,6 +71,12 @@
 //! }
 //! # }
 //! ```
+//!
+//! ## Testing a server
+//! The recommended way to test a tool, a prompt or a whole `App` is the
+//! `testing` feature: `neva::testing::TestClient` runs the server on the
+//! current runtime and connects a `Client` to it over an in-memory pipe, with
+//! no process to spawn and no port to bind.
 
 #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
 pub use app::extension::Extension;
@@ -104,6 +110,8 @@ pub mod registry;
 pub mod shared;
 #[cfg(all(feature = "svir", any(feature = "server", feature = "client")))]
 pub mod svir;
+#[cfg(feature = "testing")]
+pub mod testing;
 #[cfg(any(feature = "server", feature = "client"))]
 pub mod transport;
 pub mod types;

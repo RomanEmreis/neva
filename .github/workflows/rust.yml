@@ -51,6 +51,10 @@ jobs:
         run: cargo clippy --all-targets --features "client legacy-spec" -- -D warnings
       - name: Run slim server with legacy-spec
         run: cargo clippy --all-targets --features "server legacy-spec" -- -D warnings
+      # `testing` is in no `-full` set either, and the tests that drive MRTR and
+      # subscriptions through it are compiled on the default profile only.
+      - name: Run server+client with testing
+        run: cargo clippy --all-targets --features "server-full client-full testing" -- -D warnings
       # `svir` is in no `-full` set, so only `--all-features` above would see
       # it, and on the legacy profile at that.
       - name: Run server+client with svir
@@ -232,6 +236,8 @@ jobs:
         run: cargo doc --no-deps --features "client legacy-spec"
       - name: Check docs build clean with svir
         run: cargo doc --no-deps --features "server-full client-full svir"
+      - name: Check docs build clean with testing
+        run: cargo doc --no-deps --features "server-full client-full testing"
       - name: Check docs build clean on a slim client with svir
         run: cargo doc --no-deps --features "client svir"
       - name: Check docs build clean on a slim server with svir
@@ -258,3 +264,5 @@ jobs:
         run: cargo test --features "server-full client-full legacy-spec" --verbose
       - name: Run tests with svir
         run: cargo test --features "server-full client-full svir" --verbose
+      - name: Run tests with testing
+        run: cargo test --features "server-full client-full testing" --verbose
