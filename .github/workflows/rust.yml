@@ -204,7 +204,39 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The whole history, so a push can be compared with the commit it
+          # came after, however far back that is.
+          fetch-depth: 0
+      # An advisory published against a dependency `main` already has is not
+      # this change's doing, and it used to fail every open PR until `main`
+      # moved off it. The daily run in `audit.yml` catches those. Here the audit
+      # runs when the change touches a manifest, a lockfile or this workflow.
+      # The job itself always runs, since `audit` is a required check.
+      - name: Look for dependency changes
+        id: deps
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          pattern='(^|/)Cargo\.(toml|lock)$|^\.github/workflows/rust\.yml$'
+          case "$GITHUB_EVENT_NAME" in
+            # The checkout is GitHub's merge of the PR into its base, so the
+            # first parent is the base this change lands on.
+            pull_request) base=$(git rev-parse HEAD^1) ;;
+            push) base=$BEFORE ;;
+            *) base= ;;
+          esac
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            echo "Nothing to compare with: auditing."
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          elif git diff --name-only "$base" HEAD | grep -E "$pattern"; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No manifest, lockfile or workflow change: the daily audit covers this one."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Security audit
+        if: steps.deps.outputs.changed == 'true'
         uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
