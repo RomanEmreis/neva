@@ -6,20 +6,25 @@ publish = false
 
 [dependencies]
 neva = { path = "../../neva", features = ["http-server", "server-macros", "tracing", "di"] }
-# Default features minus `http2`, which is the only thing that pulls `h2` 0.3
-# (RUSTSEC-2026-0258, unbounded empty DATA frames). The 0.3 line has no fixed
-# release -- the advisory's remedy is 0.4.16+, and `actix-http` still requires
-# `h2 ^0.3` as of 3.13.3 -- so opting out is the only way this workspace stops
-# carrying the vulnerable crate. Nothing here serves HTTP/2: the example
-# exists to show `HttpEngine` wired to actix, and `cargo audit` runs over the
-# whole workspace lockfile, examples included. Drop `default-features` and
-# this list once actix-http moves to `h2` 0.4.
+# Default features minus two, each of which is the only thing that pulls a
+# vulnerable crate with no fixed release on the line actix requires. `cargo
+# audit` runs over the whole workspace lockfile, examples included, and the
+# example exists to show `HttpEngine` wired to actix, so it needs neither:
+#
+# - `http2` pulls `h2` 0.3 (RUSTSEC-2026-0258, unbounded empty DATA frames).
+#   The remedy is 0.4.16+, and `actix-http` still requires `h2 ^0.3` as of
+#   3.13.3. Nothing here serves HTTP/2.
+# - `cookies` pulls `cookie` 0.16 (RUSTSEC-2026-0594, private cookie nonces
+#   can repeat after fork). The remedy is 0.18.3+, and `actix-web` still
+#   requires `cookie ^0.16` as of 4.20.0. Nothing here reads or sets cookies.
+#
+# Drop `default-features` and this list once actix moves to `h2` 0.4 and
+# `cookie` 0.18.
 actix-web = { version = "4", default-features = false, features = [
     "macros",
     "compress-brotli",
     "compress-gzip",
     "compress-zstd",
-    "cookies",
     "unicode",
     "compat",
     "ws",
