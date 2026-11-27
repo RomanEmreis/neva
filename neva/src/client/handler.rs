@@ -76,7 +76,7 @@ pub(super) struct RequestHandler {
     elicitation_handler: Option<ElicitationHandler>,
 
     /// Represents a hash map of notification handlers
-    notification_handler: Option<Arc<NotificationsHandler>>,
+    notification_handler: Arc<NotificationsHandler>,
 
     /// Task tracker for client-hosted tasks (legacy server->client requests).
     #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
@@ -209,9 +209,14 @@ impl Drop for Abandon {
 
 impl RequestHandler {
     /// Creates a new [`RequestHandler`]
+    ///
+    /// `notification_handler` is passed in, not read from `options` like the
+    /// other handlers: it has to be the map `Client::subscribe` writes to, which
+    /// `connect` creates and keeps in the options.
     pub(super) fn new(
         transport: TransportProto,
         options: &McpOptions,
+        notification_handler: Arc<NotificationsHandler>,
         token: CancellationToken,
     ) -> Self {
         let (tx, rx) = transport.split();
@@ -225,7 +230,7 @@ impl RequestHandler {
             token,
             sampling_handler: options.sampling_handler.clone(),
             elicitation_handler: options.elicitation_handler.clone(),
-            notification_handler: options.notification_handler.clone(),
+            notification_handler,
             #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
             tasks: Arc::new(TaskTracker::new()),
             #[cfg(not(feature = "legacy-spec"))]
@@ -525,7 +530,7 @@ impl RequestHandler {
                                 continue;
                             }
                         }
-                        dispatch_notification(notification, &notification_handler).await;
+                        notification_handler.notify(notification).await;
                     }
                     Message::Batch(batch) => {
                         // JSON-RPC 2.0 section 6 allows either peer to send a batch
@@ -609,7 +614,7 @@ async fn dispatch_batch_deferred(
     roots: &Arc<RwLock<Vec<Root>>>,
     sampling_handler: &Option<SamplingHandler>,
     elicitation_handler: &Option<ElicitationHandler>,
-    notification_handler: &Option<Arc<NotificationsHandler>>,
+    notification_handler: &Arc<NotificationsHandler>,
     #[cfg(all(feature = "tasks", feature = "legacy-spec"))] tasks: &Arc<TaskTracker>,
     #[cfg(not(feature = "legacy-spec"))] peer_mode: &crate::shared::PeerMode,
 ) -> Vec<MessageEnvelope> {
@@ -632,7 +637,7 @@ async fn dispatch_batch_deferred(
                 .await,
             )),
             MessageEnvelope::Notification(notification) => {
-                dispatch_notification(notification, notification_handler).await;
+                notification_handler.notify(notification).await;
                 None
             }
         }
@@ -829,21 +834,6 @@ fn admitted(
     }
 
     admitted
-}
-
-/// Forwards a [`Notification`] to the registered handler or traces it when
-/// no handler is configured.
-#[inline]
-async fn dispatch_notification(
-    notification: Notification,
-    handler: &Option<Arc<NotificationsHandler>>,
-) {
-    if let Some(h) = handler {
-        h.notify(notification).await
-    } else {
-        #[cfg(feature = "tracing")]
-        notification.write();
-    }
 }
 
 #[inline]
@@ -1139,6 +1129,7 @@ mod tests {
         let handler = RequestHandler::new(
             TransportProto::HttpClient(Box::default()),
             &McpOptions::default(),
+            Arc::default(),
             token.clone(),
         );
 
@@ -1224,7 +1215,7 @@ mod tests {
             },
         ));
         let elicitation_handler = None;
-        let notification_handler = None;
+        let notification_handler = Arc::default();
 
         let deferred = vec![
             MessageEnvelope::Request(Request::new(

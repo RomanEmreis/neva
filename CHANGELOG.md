@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * The signal watcher that `App::run` and `Client::connect` start ends when the
   token it watches is cancelled another way (a `ShutdownHandle`,
   `Client::disconnect`) instead of running on (#178).
+* A notification handler registered after `Client::connect`, with `subscribe`
+  or `on_tools_changed` and the other helpers, is called. Unless one had been
+  registered before connecting, which `tracing` does in `connect` itself, it
+  used to be dropped without a word (#180).
 
 ## 0.9.0
 

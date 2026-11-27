@@ -1288,4 +1288,112 @@ mod listen_rejection_tests {
             "the rejection must not wait out the request timeout"
         );
     }
+
+    /// Answers `server/discover` normally, acknowledges the subscription, then
+    /// pushes one tagged notification inside the filter it acknowledged.
+    async fn serve_one_notification(listener: TcpListener) {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                loop {
+                    let Some((_head, body)) = read_request(&mut stream).await else {
+                        return;
+                    };
+                    let msg: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    let id = msg.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                    let method = msg
+                        .get("method")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or_default();
+
+                    if method == crate::commands::DISCOVER {
+                        let reply = serde_json::json!({
+                            "jsonrpc": "2.0", "id": id,
+                            "result": {
+                                "supportedVersions": [crate::LATEST_PROTOCOL_VERSION],
+                                "capabilities": { "tools": { "listChanged": true } }
+                            }
+                        });
+                        write_json(&mut stream, &reply.to_string()).await;
+                        continue;
+                    }
+
+                    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\r\n";
+                    let _ = stream.write_all(head.as_bytes()).await;
+
+                    let ack = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/subscriptions/acknowledged",
+                        "params": {
+                            "notifications": { "toolsListChanged": true },
+                            "_meta": { crate::types::SUBSCRIPTION_ID_KEY: id }
+                        }
+                    });
+                    let _ = stream
+                        .write_all(format!("data: {ack}\n\n").as_bytes())
+                        .await;
+
+                    let changed = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": crate::types::tool::commands::LIST_CHANGED,
+                        "params": { "_meta": { crate::types::SUBSCRIPTION_ID_KEY: id } }
+                    });
+                    let _ = stream
+                        .write_all(format!("data: {changed}\n\n").as_bytes())
+                        .await;
+
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    return;
+                }
+            });
+        }
+    }
+
+    /// `on_tools_changed` and the other capability-gated helpers can only be
+    /// called after `connect`, which discovers the capabilities they assert
+    /// on. A handler registered then has to reach the running client whether
+    /// or not one was registered before it connected: it used to be dropped
+    /// without a word unless `tracing`, which registers handlers of its own in
+    /// `connect`, was on (#180).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_handler_subscribed_after_connect_is_called() {
+        use std::sync::atomic::AtomicUsize;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_one_notification(listener));
+
+        let tools = Arc::new(AtomicUsize::new(0));
+        let seen = tools.clone();
+
+        let mut client = Client::new().with_options(|opt| {
+            opt.with_http(|http| http.bind(addr.to_string()))
+                .with_timeout(std::time::Duration::from_secs(5))
+        });
+        client.connect().await.expect("connect");
+        client.on_tools_changed(move |_| {
+            let seen = seen.clone();
+            async move {
+                seen.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        });
+
+        let _subscription = client
+            .listen(crate::types::SubscriptionFilter::new().with_tools_changed())
+            .await
+            .expect("listen");
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        while tools.load(AtomicOrdering::SeqCst) == 0 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        assert_eq!(
+            tools.load(AtomicOrdering::SeqCst),
+            1,
+            "a handler subscribed after `connect` must be called"
+        );
+    }
 }

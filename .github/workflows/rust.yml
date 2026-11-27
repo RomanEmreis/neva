@@ -298,3 +298,8 @@ jobs:
         run: cargo test --features "server-full client-full svir" --verbose
       - name: Run tests with testing
         run: cargo test --features "server-full client-full testing" --verbose
+      # Every row above has `tracing` on (both `-full` sets include it), and
+      # `connect` then subscribes handlers of its own. That hid #180 from all of
+      # them: without `tracing`, a handler subscribed after `connect` was dropped.
+      - name: Run tests without tracing
+        run: cargo test --features "server client http-server-volga http-client macros" --verbose
