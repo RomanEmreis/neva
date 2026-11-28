@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   flushed at once.
 * The stdio reader and writer give back what a message over 1 MiB grew their
   buffers by, instead of keeping it for the life of the process (#138).
+* A stdio server writes its stdout from a thread of its own instead of
+  through tokio's blocking pool (#138). 20,000 `tools/list` round trips cost
+  the server 0.50 s of CPU instead of 0.95 s.
 * What `next(ctx)` returns to a middleware once the request is answered is a
   placeholder with the request's id and a `null` result. It is not sent.
 * Under 2026-07-28 the per-`POST` correlation id is a process-unique counter
@@ -53,6 +56,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `value` panicked inside the notification layer, and so inside the handler
   that emitted it. It now sends nothing; a non-numeric `total` is left out
   (#137).
+* A stdio server whose client had stopped reading its stdout did not exit
+  once stopped: dropping the runtime waited for the write stuck on the full
+  pipe. It now exits when the shutdown budget runs out (#138).
 
 ## 0.9.0
 
