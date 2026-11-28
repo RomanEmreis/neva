@@ -170,7 +170,7 @@ impl Response {
             jsonrpc: JSONRPC_VERSION.to_string(),
             session_id: None,
             #[cfg(feature = "http-server")]
-            headers: HeaderMap::with_capacity(8),
+            headers: HeaderMap::new(),
             id,
             result,
         })
@@ -192,13 +192,30 @@ impl Response {
         })
     }
 
+    /// A successful response with no id yet and a `null` result, for the
+    /// setters below to finish.
+    ///
+    /// What the end of the server's middleware pipeline hands back once it has
+    /// sent the request's reply itself: never sent, so nothing is built for it.
+    #[cfg(feature = "server")]
+    pub(crate) fn new() -> Self {
+        Response::Ok(OkResponse {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            session_id: None,
+            #[cfg(feature = "http-server")]
+            headers: HeaderMap::new(),
+            id: RequestId::default(),
+            result: Value::Null,
+        })
+    }
+
     /// Creates an error response
     pub fn error(id: RequestId, error: Error) -> Self {
         Response::Err(ErrorResponse {
             jsonrpc: JSONRPC_VERSION.to_string(),
             session_id: None,
             #[cfg(feature = "http-server")]
-            headers: HeaderMap::with_capacity(8),
+            headers: HeaderMap::new(),
             id,
             error: error.into(),
         })
@@ -228,7 +245,18 @@ impl Response {
     /// # let _ = resp;
     /// ```
     #[cfg(not(feature = "legacy-spec"))]
-    pub fn with_server_info(mut self, info: &crate::types::Implementation) -> Self {
+    pub fn with_server_info(self, info: &crate::types::Implementation) -> Self {
+        match serde_json::to_value(info) {
+            Ok(info) => self.with_server_info_value(&info),
+            Err(_) => self,
+        }
+    }
+
+    /// [`Self::with_server_info`] for an identity already serialized: the
+    /// dispatch seam stamps the same one on every result, so it serializes it
+    /// once.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(crate) fn with_server_info_value(mut self, info: &Value) -> Self {
         const KEY: &str = "io.modelcontextprotocol/serverInfo";
 
         if let Response::Ok(ok) = &mut self
@@ -239,9 +267,9 @@ impl Response {
                 .or_insert_with(|| Value::Object(Default::default()));
             if let Value::Object(meta) = meta
                 && !meta.contains_key(KEY)
-                && let Ok(info) = serde_json::to_value(info)
+                && !info.is_null()
             {
-                meta.insert(KEY.into(), info);
+                meta.insert(KEY.into(), info.clone());
             }
         }
         self

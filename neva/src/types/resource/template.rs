@@ -1,7 +1,7 @@
 //! Utilities for Resource templates
 
 #[cfg(feature = "server")]
-use crate::app::handler::{FromHandlerParams, Handler, HandlerFn, HandlerParams};
+use crate::app::handler::{Handler, HandlerFn, HandlerParams, RequestParams};
 #[cfg(feature = "server")]
 use crate::error::Error;
 #[cfg(feature = "server")]
@@ -19,7 +19,7 @@ use crate::types::{
 };
 
 #[cfg(feature = "server")]
-use crate::types::{FromRequest, ReadResourceRequestParams, ReadResourceResult, Request};
+use crate::types::{ReadResourceRequestParams, ReadResourceResult};
 
 /// Represents a known resource template that the server is capable of reading.
 ///
@@ -157,13 +157,7 @@ impl From<Page<'_, ResourceTemplate>> for ListResourceTemplatesResult {
 }
 
 #[cfg(feature = "server")]
-impl FromHandlerParams for ListResourceTemplatesRequestParams {
-    #[inline]
-    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
-        let req = Request::from_params(params)?;
-        Self::from_request(req)
-    }
-}
+impl RequestParams for ListResourceTemplatesRequestParams {}
 
 impl ListResourceTemplatesResult {
     /// Creates a new [`ListResourceTemplatesResult`]

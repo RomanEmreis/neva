@@ -12,12 +12,10 @@ use std::fmt::{Debug, Formatter};
 use {
     super::helpers::TypeCategory,
     crate::shared::BoxFuture,
-    crate::types::{
-        ArgNames, FromHandlerArgs, FromRequest, IntoResponse, Page, Request, RequestId, Response,
-    },
+    crate::types::{ArgNames, FromHandlerArgs, IntoResponse, Page, RequestId, Response},
     crate::{
         Context,
-        app::handler::{FromHandlerParams, Handler, HandlerFn, HandlerParams, RequestHandler},
+        app::handler::{Handler, HandlerFn, HandlerParams, RequestHandler, RequestParams},
         shared::{BlockingFn, marker},
     },
     std::{future::Future, sync::Arc},
@@ -154,6 +152,18 @@ pub struct Tool {
     #[serde(skip)]
     #[cfg(feature = "server")]
     custom_schema: bool,
+
+    /// The `Mcp-Param-*` headers this tool declares through `x-mcp-header`
+    /// annotations in [`Self::input_schema`], and the property each carries.
+    ///
+    /// Read from the schema when the tool is registered -- the schema does not
+    /// change after that -- so the check an HTTP call goes through is a
+    /// lookup rather than a walk of the whole schema. `None` when the tool
+    /// declares none, and when its annotations are invalid: such a tool is
+    /// the problem, and clients are required to drop it rather than call it.
+    #[serde(skip)]
+    #[cfg(all(feature = "http-server", not(feature = "legacy-spec")))]
+    pub(crate) param_headers: Option<Arc<[crate::shared::param_headers::ParamHeader]>>,
 }
 
 /// Execution-related properties for a tool.
@@ -728,22 +738,10 @@ impl SchemaProperty {
 }
 
 #[cfg(feature = "server")]
-impl FromHandlerParams for CallToolRequestParams {
-    #[inline]
-    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
-        let req = Request::from_params(params)?;
-        Self::from_request(req)
-    }
-}
+impl RequestParams for CallToolRequestParams {}
 
 #[cfg(feature = "server")]
-impl FromHandlerParams for ListToolsRequestParams {
-    #[inline]
-    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
-        let req = Request::from_params(params)?;
-        Self::from_request(req)
-    }
-}
+impl RequestParams for ListToolsRequestParams {}
 
 /// Describes a generic MCP Tool handler.
 ///
@@ -1301,6 +1299,8 @@ impl Tool {
             arg_names,
             custom_schema: false,
             icons: None,
+            #[cfg(all(feature = "http-server", not(feature = "legacy-spec")))]
+            param_headers: None,
             #[cfg(feature = "http-server")]
             required: Default::default(),
             #[cfg(feature = "tasks")]
@@ -1653,6 +1653,16 @@ impl Tool {
         };
 
         Some(move |name: &str| props.contains_key(name))
+    }
+
+    /// Reads [`Self::param_headers`] out of the input schema, now that the
+    /// tool is registered and the schema final.
+    #[cfg(all(feature = "http-server", not(feature = "legacy-spec")))]
+    pub(crate) fn read_param_headers(&mut self) {
+        self.param_headers = crate::shared::param_headers::collect(self.input_schema.as_value())
+            .ok()
+            .filter(|declared| !declared.is_empty())
+            .map(Arc::from);
     }
 
     /// Invoke a tool

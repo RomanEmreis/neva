@@ -95,7 +95,9 @@ impl Drop for ReplyClaim {
 /// A middleware that calls `next` hands the request on, and the reply the
 /// caller gets is the one the request's handler produced: it is sent once the
 /// request reaches the end of the pipeline, so a different [`Response`]
-/// returned after `next` is not sent.
+/// returned after `next` is not sent. Nor is the reply itself what `next`
+/// returns: that is a placeholder carrying the request's id and a `null`
+/// result.
 ///
 /// A middleware that returns without calling `next` answers the request
 /// itself: what it returns is sent to the caller, over any transport and

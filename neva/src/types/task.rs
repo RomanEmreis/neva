@@ -13,10 +13,7 @@ use serde_json::Value;
 use std::ops::{Deref, DerefMut};
 
 #[cfg(feature = "server")]
-use crate::{
-    app::handler::{FromHandlerParams, HandlerParams},
-    types::request::{FromRequest, Request},
-};
+use crate::app::handler::RequestParams;
 
 pub(crate) const RELATED_TASK_KEY: &str = "io.modelcontextprotocol/related-task";
 
@@ -480,49 +477,19 @@ impl From<Meta<RelatedTaskMetadata>> for RelatedTaskMetadata {
 }
 
 #[cfg(all(feature = "server", feature = "legacy-spec"))]
-impl FromHandlerParams for ListTasksRequestParams {
-    #[inline]
-    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
-        let req = Request::from_params(params)?;
-        Self::from_request(req)
-    }
-}
+impl RequestParams for ListTasksRequestParams {}
 
 #[cfg(feature = "server")]
-impl FromHandlerParams for CancelTaskRequestParams {
-    #[inline]
-    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
-        let req = Request::from_params(params)?;
-        Self::from_request(req)
-    }
-}
+impl RequestParams for CancelTaskRequestParams {}
 
 #[cfg(feature = "server")]
-impl FromHandlerParams for GetTaskRequestParams {
-    #[inline]
-    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
-        let req = Request::from_params(params)?;
-        Self::from_request(req)
-    }
-}
+impl RequestParams for GetTaskRequestParams {}
 
 #[cfg(all(feature = "server", feature = "legacy-spec"))]
-impl FromHandlerParams for GetTaskPayloadRequestParams {
-    #[inline]
-    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
-        let req = Request::from_params(params)?;
-        Self::from_request(req)
-    }
-}
+impl RequestParams for GetTaskPayloadRequestParams {}
 
 #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
-impl FromHandlerParams for UpdateTaskRequestParams {
-    #[inline]
-    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
-        let req = Request::from_params(params)?;
-        Self::from_request(req)
-    }
-}
+impl RequestParams for UpdateTaskRequestParams {}
 
 impl Default for Task {
     #[inline]

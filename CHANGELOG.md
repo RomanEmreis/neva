@@ -5,17 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.10.0
 
 ### Added
 * `neva::testing` (feature `testing`): `TestClient` runs an `App` on the
   current runtime and connects a `Client` to it over an in-memory pipe, with no
   process and no port (#134).
 
+### Changed
+* Less work per request on the server (#137): extractors read the request in
+  place instead of copying it, tool arguments are not cloned to be
+  deserialized, the MRTR request binding is computed only for a round that
+  needs it, a tool's `x-mcp-header` set is read once at registration, and the
+  HTTP intake copies the request headers once. Under 2026-07-28 an event inside
+  a request that asked for no `logLevel` is dropped before its notification is
+  built. A whole `tools/call` (bench `request_path`) is about 5% faster for a
+  small call and 29% for a 15 KB one.
+* What `next(ctx)` returns to a middleware once the request is answered is a
+  placeholder with the request's id and a `null` result. It is not sent.
+* Under 2026-07-28 the per-`POST` correlation id is a process-unique counter
+  rather than a random UUID. It never leaves the process.
+* The request span records `mcp_session_id` through `Display`.
+* The HTTP server's own `401`, `403`, `404` and `405` carry a short text
+  body, Volga's, where they had none.
+* jsonschema 0.63, nix 0.32, tokio 1.54, uuid 1.29.
+
+### Changed (breaking)
+* The `svir` bridge speaks svir 0.2: an application using `neva::svir` moves
+  its own `svir` dependency to 0.2 (whose `tls` feature is now `tls-ring`).
+* volga 0.15: `neva::auth`'s `DecodingKey`, `Algorithm`, `Authorizer`,
+  `AuthClaims` and `ClaimsDerive` are volga 0.15's.
+  `AuthConfig::set_decoding_key` with an empty secret panics, as volga's
+  `DecodingKey::from_secret` does.
+
 ### Fixed
 * The signal watcher that `App::run` and `Client::connect` start ends when the
   token it watches is cancelled another way (a `ShutdownHandle`,
   `Client::disconnect`) instead of running on (#178).
+* A tracing event on the `progress` target without a `token` or a numeric
+  `value` panicked inside the notification layer, and so inside the handler
+  that emitted it. It now sends nothing; a non-numeric `total` is left out
+  (#137).
 
 ## 0.9.0
 

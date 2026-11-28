@@ -9,10 +9,10 @@ use crate::shared;
 use crate::shared::BoxFuture;
 use crate::types::request::RequestParamsMeta;
 #[cfg(feature = "server")]
-use crate::types::{ArgNames, FromHandlerArgs, FromRequest};
+use crate::types::{ArgNames, FromHandlerArgs};
 use crate::types::{Cursor, Icon};
 #[cfg(feature = "server")]
-use crate::types::{IntoResponse, Page, PropertyType, Request, RequestId, Response};
+use crate::types::{IntoResponse, Page, PropertyType, RequestId, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -25,7 +25,7 @@ use std::sync::Arc;
 #[cfg(feature = "server")]
 use crate::app::{
     context::Context,
-    handler::{FromHandlerParams, Handler, HandlerFn, HandlerParams, RequestHandler},
+    handler::{Handler, HandlerFn, HandlerParams, RequestHandler, RequestParams},
 };
 #[cfg(feature = "server")]
 use crate::shared::{BlockingFn, marker};
@@ -239,22 +239,10 @@ impl ListPromptsResult {
 }
 
 #[cfg(feature = "server")]
-impl FromHandlerParams for ListPromptsRequestParams {
-    #[inline]
-    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
-        let req = Request::from_params(params)?;
-        Self::from_request(req)
-    }
-}
+impl RequestParams for ListPromptsRequestParams {}
 
 #[cfg(feature = "server")]
-impl FromHandlerParams for GetPromptRequestParams {
-    #[inline]
-    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
-        let req = Request::from_params(params)?;
-        Self::from_request(req)
-    }
-}
+impl RequestParams for GetPromptRequestParams {}
 
 #[cfg(feature = "server")]
 impl From<&str> for PromptArgument {

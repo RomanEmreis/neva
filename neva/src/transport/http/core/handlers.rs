@@ -324,7 +324,10 @@ enum PostPrep {
 /// protocol-version validation, body parse, trace-context recording, and the
 /// notification fast-paths (which forward to the runtime and reply `202`).
 async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
-    let mut headers = req.headers().clone();
+    // Owned, so taken apart rather than copied: the headers travel on with the
+    // message.
+    let (parts, body) = req.into_parts();
+    let mut headers = parts.headers;
     let id = get_or_create_mcp_session(&headers);
 
     // DNS-rebinding gate, before anything else is read: a request addressed by
@@ -387,8 +390,7 @@ async fn prepare_post(req: HttpRequest, ctx: &HttpContext) -> PostPrep {
     // calling `dispatch_post`. Per-tool/prompt/resource role and
     // permission gates then run against whatever concrete claims type
     // the engine supplied.
-    let claims = req.extensions().get::<Arc<dyn Claims>>().cloned();
-    let body = req.into_body();
+    let claims = parts.extensions.get::<Arc<dyn Claims>>().cloned();
 
     let msg = match parse_message(&body) {
         Ok(msg) => msg,
@@ -1006,7 +1008,7 @@ fn get_or_create_mcp_session(
     // stateless requests onto the same sink/slot.
     #[cfg(not(feature = "legacy-spec"))]
     {
-        uuid::Uuid::new_v4()
+        next_post_id()
     }
     #[cfg(feature = "legacy-spec")]
     headers
@@ -1014,6 +1016,25 @@ fn get_or_create_mcp_session(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| uuid::Uuid::parse_str(s).ok())
         .unwrap_or_else(uuid::Uuid::new_v4)
+}
+
+/// A per-`POST` id no other `POST` this process has served or will serve
+/// shares.
+///
+/// Under 2026-07-28 the id never leaves the process -- no header carries it
+/// out, and none is read in -- so all it has to be is distinct, and a counter
+/// is. That spares every `POST` the call into the OS random source a v4 UUID
+/// is. The random half, drawn once, keeps one process's ids apart from the
+/// next one's in a log the two share.
+#[cfg(not(feature = "legacy-spec"))]
+fn next_post_id() -> uuid::Uuid {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static PROCESS: std::sync::LazyLock<u64> =
+        std::sync::LazyLock::new(|| uuid::Uuid::new_v4().as_u64_pair().0);
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    uuid::Uuid::from_u64_pair(*PROCESS, NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
 /// Addresses a whole-POST rejection to every request the POST carried, each
@@ -1725,6 +1746,21 @@ pub async fn handle_get_sse<E: HttpEngine>(
 mod tests {
     use super::*;
     use crate::shared::SseSessionRegistry;
+
+    /// The per-`POST` id has one job, being distinct, and it does it without
+    /// the OS random source: one process half, and a counter.
+    #[test]
+    #[cfg(not(feature = "legacy-spec"))]
+    fn post_ids_are_distinct() {
+        let ids = (0..1000).map(|_| next_post_id()).collect::<Vec<_>>();
+        let distinct = ids.iter().collect::<std::collections::HashSet<_>>();
+        assert_eq!(distinct.len(), ids.len());
+        assert!(
+            ids.iter()
+                .all(|id| id.as_u64_pair().0 == ids[0].as_u64_pair().0),
+            "one process, one random half"
+        );
+    }
     use bytes::Bytes;
     use dashmap::DashMap;
     use std::sync::Arc;

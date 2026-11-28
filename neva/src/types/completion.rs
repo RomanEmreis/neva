@@ -6,11 +6,9 @@ use crate::error::Error;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "server")]
-use super::{IntoResponse, Request, RequestId, Response};
+use super::{IntoResponse, RequestId, Response};
 #[cfg(feature = "server")]
-use crate::app::handler::{FromHandlerParams, HandlerParams};
-#[cfg(feature = "server")]
-use crate::types::request::FromRequest;
+use crate::app::handler::RequestParams;
 
 /// List of commands for Completion
 pub mod commands {
@@ -84,13 +82,7 @@ impl Default for Completion {
 }
 
 #[cfg(feature = "server")]
-impl FromHandlerParams for CompleteRequestParams {
-    #[inline]
-    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
-        let req = Request::from_params(params)?;
-        Self::from_request(req)
-    }
-}
+impl RequestParams for CompleteRequestParams {}
 
 #[cfg(feature = "server")]
 impl Completion {

@@ -213,7 +213,7 @@ impl Request {
             method: method.into(),
             params: params.and_then(|p| serde_json::to_value(p).ok()),
             #[cfg(feature = "http-server")]
-            headers: HeaderMap::with_capacity(8),
+            headers: HeaderMap::new(),
             #[cfg(feature = "http-server")]
             claims: None,
         }
@@ -359,14 +359,16 @@ impl Request {
     /// ```
     #[cfg(not(feature = "legacy-spec"))]
     pub fn state(&self) -> Option<String> {
-        let from_params = self
-            .params
-            .as_ref()
-            .and_then(|p| p.get("requestState"))
-            .and_then(|v| v.as_str())
-            .map(str::to_owned);
+        self.state_ref().map(str::to_owned)
+    }
 
-        from_params.or_else(|| self.meta_field("requestState"))
+    /// [`Self::state`], borrowed: the server reads it more than once a round.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(crate) fn state_ref(&self) -> Option<&str> {
+        let params = self.params.as_ref()?;
+        let from_params = params.get("requestState").and_then(|v| v.as_str());
+
+        from_params.or_else(|| params.get("_meta")?.get("requestState")?.as_str())
     }
 
     /// Why this request's MRTR fields are not acceptable, if they are not.

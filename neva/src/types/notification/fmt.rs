@@ -3,8 +3,6 @@
 use crate::shared::MessageRegistry;
 #[cfg(not(feature = "legacy-spec"))]
 use crate::types::Message;
-#[cfg(not(feature = "legacy-spec"))]
-use crate::types::notification::LoggingLevel;
 use crate::types::notification::formatter::build_notification;
 use once_cell::sync::Lazy;
 use std::io::{self, Write};
@@ -125,64 +123,65 @@ where
             return;
         };
 
-        let notification = build_notification(event);
-        if let Some(span) = ctx.event_span(event) {
-            let mut notification = notification;
-            // Resolve the request context through the whole span scope, not just
-            // the immediate span: an event emitted from a child span (e.g. a
-            // `#[tracing::instrument]` handler) sits below the `request` span
-            // that carries the extensions.
-            notification.session_id = span
-                .scope()
-                .find_map(|s| s.extensions().get::<uuid::Uuid>().cloned());
-
-            // 2026-07-28: `logging/setLevel` is gone; the level is request-scoped. Deliver
-            // a `notifications/message` only when the originating request carried
-            // `io.modelcontextprotocol/logLevel` and this event is at or above
-            // that severity. Without a requested level, log messages are
-            // suppressed. Progress notifications are never gated this way.
-            #[cfg(not(feature = "legacy-spec"))]
-            if notification.method.as_str() == crate::types::notification::commands::MESSAGE {
-                let requested = span.scope().find_map(|s| {
-                    s.extensions()
-                        .get::<super::formatter::MinLogSeverity>()
-                        .map(|m| m.0)
-                });
-                // Filter on the notification's own level (which preserves MCP
-                // severities), not the lossy tracing level of the event.
-                let event_severity = super::formatter::notification_severity(&notification)
-                    .unwrap_or_else(|| LoggingLevel::from(event.metadata().level()).severity());
-                if !super::formatter::message_delivered(requested, event_severity) {
-                    return;
-                }
-            }
-
-            // 2026-07-28: request-scoped notifications flow on the originating request's
-            // `POST` response stream (there is no session SSE `GET`). Route to the
-            // per-request sink registered by `handle_post` for this `POST` session
-            // id; fall through to the legacy session-SSE path otherwise.
-            #[cfg(not(feature = "legacy-spec"))]
-            if let Some(session_id) = notification.session_id
-                && let Some(sink) = super::sink::REQUEST_NOTIFICATIONS.get(&session_id)
+        let Some(span) = ctx.event_span(event) else {
+            // Outside any request there is no client to send it to.
+            if let Some(notification) = build_notification(event)
+                && let Ok(json) = serde_json::to_string(&notification)
             {
-                let _ = sink.try_send(Message::Notification(notification));
-
-                return;
+                let _ = writeln!(io::stderr(), "{json}");
             }
+            return;
+        };
 
-            // Legacy: the session-scoped SSE `GET` stream. Queued here and now,
-            // synchronously, so a notification a handler emits is on the
-            // stream's channel before the handler returns -- routing it through
-            // a channel of its own once cost a scheduler hop, and a handler that
-            // never awaits (it reports progress and returns) would not yield
-            // until it was done, letting its own response overtake the progress
-            // it had already reported.
-            let _ = LOG_REGISTRY.send(notification.into());
-        } else {
-            let mut stderr = io::stderr();
-            let json = serde_json::to_string(&notification).unwrap();
-            let _ = writeln!(stderr, "{json}");
+        // 2026-07-28: `logging/setLevel` is gone; the level is request-scoped. Deliver
+        // a `notifications/message` only when the originating request carried
+        // `io.modelcontextprotocol/logLevel` and this event is at or above
+        // that severity. Without a requested level, log messages are
+        // suppressed. Progress notifications are never gated this way.
+        // Decided before the notification is built: see `formatter::delivered`.
+        #[cfg(not(feature = "legacy-spec"))]
+        if !super::formatter::delivered(event, || {
+            span.scope().find_map(|s| {
+                s.extensions()
+                    .get::<super::formatter::MinLogSeverity>()
+                    .map(|m| m.0)
+            })
+        }) {
+            return;
         }
+
+        let Some(mut notification) = build_notification(event) else {
+            return;
+        };
+        // Resolve the request context through the whole span scope, not just
+        // the immediate span: an event emitted from a child span (e.g. a
+        // `#[tracing::instrument]` handler) sits below the `request` span
+        // that carries the extensions.
+        notification.session_id = span
+            .scope()
+            .find_map(|s| s.extensions().get::<uuid::Uuid>().cloned());
+
+        // 2026-07-28: request-scoped notifications flow on the originating request's
+        // `POST` response stream (there is no session SSE `GET`). Route to the
+        // per-request sink registered by `handle_post` for this `POST` session
+        // id; fall through to the legacy session-SSE path otherwise.
+        #[cfg(not(feature = "legacy-spec"))]
+        if let Some(session_id) = notification.session_id
+            && let Some(sink) = super::sink::REQUEST_NOTIFICATIONS.get(&session_id)
+        {
+            let _ = sink.try_send(Message::Notification(notification));
+
+            return;
+        }
+
+        // Legacy: the session-scoped SSE `GET` stream. Queued here and now,
+        // synchronously, so a notification a handler emits is on the
+        // stream's channel before the handler returns -- routing it through
+        // a channel of its own once cost a scheduler hop, and a handler that
+        // never awaits (it reports progress and returns) would not yield
+        // until it was done, letting its own response overtake the progress
+        // it had already reported.
+        let _ = LOG_REGISTRY.send(notification.into());
     }
 }
 
@@ -277,16 +276,25 @@ impl Visit for SpanVisitor {
         }
     }
 
+    /// The request span records its session id as `%sid`, which arrives here.
+    /// It is written onto the stack -- a session id that fits is all this
+    /// reads -- and parsed back. A quoted form (`?` on a string) is read too.
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        // fallback if id was passed as %mcp_session_id or something else
         if field.name() == MCP_SESSION_ID && self.session_id.is_none() {
-            let formatted = format!("{value:?}");
-            let stripped = formatted
-                .strip_prefix('"')
-                .and_then(|s| s.strip_suffix('"'))
-                .unwrap_or(&formatted);
+            // Room for any form a UUID parses from, quotes included.
+            let mut buf = [0u8; 48];
+            let mut cursor = io::Cursor::new(&mut buf[..]);
+            if write!(cursor, "{value:?}").is_err() {
+                return;
+            }
+            let len = cursor.position() as usize;
+            let text = &buf[..len];
+            let text = text
+                .strip_prefix(b"\"")
+                .and_then(|s| s.strip_suffix(b"\""))
+                .unwrap_or(text);
 
-            if let Ok(session_id) = uuid::Uuid::parse_str(stripped) {
+            if let Ok(session_id) = uuid::Uuid::try_parse_ascii(text) {
                 self.session_id = Some(session_id);
             }
         }
@@ -615,5 +623,38 @@ mod tests {
             fallback_rx.try_recv().is_err(),
             "request-scoped notification leaked to the legacy path"
         );
+    }
+
+    /// The dispatcher records the session id as `%sid`, which reaches the
+    /// layer through `record_debug` rather than as a string; a quoted form
+    /// (`?` on a string) is read as well. Either way the event finds its sink.
+    #[tokio::test]
+    async fn routes_by_a_session_id_recorded_through_debug() {
+        for quoted in [false, true] {
+            let session_id = uuid::Uuid::new_v4();
+            let mut sink_rx = super::super::sink::register(session_id, 8, false).await;
+            let subscriber = tracing_subscriber::registry().with(super::MpscLayer);
+
+            tracing::subscriber::with_default(subscriber, || {
+                let level = u64::from(LoggingLevel::Debug.severity());
+                let request = if quoted {
+                    tracing::error_span!(
+                        "request",
+                        mcp_session_id = ?session_id.to_string(),
+                        mcp_log_level = level
+                    )
+                } else {
+                    tracing::error_span!("request", mcp_session_id = %session_id, mcp_log_level = level)
+                };
+                let _entered = request.enter();
+                tracing::warn!(logger = "tool", "routed");
+            });
+
+            super::super::sink::unregister(&session_id);
+            assert!(
+                sink_rx.try_recv().is_ok(),
+                "quoted = {quoted}: the event must reach the request sink"
+            );
+        }
     }
 }

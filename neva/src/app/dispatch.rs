@@ -286,7 +286,9 @@ impl App {
             }
         }
 
-        Response::empty(id)
+        // Sent already, or owed to no one: what goes back up the pipeline is
+        // never sent.
+        Response::new().set_id(id)
     }
 
     #[inline]
@@ -331,19 +333,8 @@ impl App {
         let session_id = req.session_id;
         let full_id = req.full_id();
 
-        // MRTR pre-capture: method + salient params (the params that identify
-        // this request, see `salient_params`), needed after `req`/`context` are
-        // moved into `handler.call`.
         #[cfg(not(feature = "legacy-spec"))]
         let mrtr_method = shared::is_mrtr_method(&req.method);
-        #[cfg(not(feature = "legacy-spec"))]
-        let req_method = req.method.clone();
-        #[cfg(not(feature = "legacy-spec"))]
-        let salient_params = req
-            .params
-            .as_ref()
-            .map(salient_params)
-            .unwrap_or(serde_json::Value::Null);
 
         // What MCP 2026-07-28 requires of every request's `_meta`: the
         // mandatory fields, and a protocol version this build actually speaks.
@@ -428,8 +419,6 @@ impl App {
             match seed_mrtr_ctx(
                 &req,
                 context.client_capabilities,
-                &req_method,
-                &salient_params,
                 &options,
                 principal.as_deref(),
             ) {
@@ -477,7 +466,7 @@ impl App {
         // there to deduplicate.
         #[cfg(not(feature = "legacy-spec"))]
         let state_tag: Option<String> = if mrtr_method {
-            req.state().and_then(|state| {
+            req.state_ref().and_then(|state| {
                 let (_, tag) = state.rsplit_once('.')?;
                 let answers = mrtr_arc
                     .as_ref()
@@ -520,6 +509,10 @@ impl App {
 
         #[cfg(feature = "tracing")]
         tracing::trace!(logger = "neva", "Received: {:?}", req);
+        // Shared with the handler rather than handed over: MRTR binds the state
+        // it mints to the request's params, and reads them, if at all, once the
+        // handler is done.
+        let req = Arc::new(req);
         let resp = if let Some(handler) = handlers.get(&req.method) {
             // The token first: a request cancelled before it got here never
             // starts its handler.
@@ -533,7 +526,7 @@ impl App {
                     "The request with ID: {} has been cancelled", full_id);
                     Err(Error::from(ErrorCode::RequestCancelled))
                 }
-            resp = handler.call(HandlerParams::Request(context, req)) => {
+            resp = handler.call(HandlerParams::Request(context, Arc::clone(&req))) => {
                 options.complete_request(&full_id);
                 resp
             }
@@ -566,14 +559,8 @@ impl App {
                 if let Some(reason) = malformed {
                     Err(Error::new(ErrorCode::InvalidParams, reason))
                 } else if has_pending {
-                    build_input_required(
-                        &arc,
-                        &req_method,
-                        &salient_params,
-                        &options,
-                        mrtr_principal,
-                    )
-                    .map(|ir| ir.into_response(req_id.clone()))
+                    build_input_required(&arc, &req, &options, mrtr_principal)
+                        .map(|ir| ir.into_response(req_id.clone()))
                 } else if mrtr_should_commit(&resp) {
                     // Final round: run deferred commits in registration order.
                     // The first Err becomes the response error.
@@ -712,7 +699,7 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
 #[cfg(all(feature = "tracing", feature = "legacy-spec"))]
 fn create_tracing_span(session_id: Option<uuid::Uuid>) -> tracing::Span {
     if let Some(mcp_session_id) = session_id {
-        tracing::error_span!("request", mcp_session_id = mcp_session_id.to_string())
+        tracing::error_span!("request", mcp_session_id = %mcp_session_id)
     } else {
         tracing::error_span!("request")
     }
@@ -737,11 +724,11 @@ fn create_tracing_span(
     match (session_id, log_level) {
         (Some(sid), Some(level)) => tracing::error_span!(
             "request",
-            mcp_session_id = sid.to_string(),
+            mcp_session_id = %sid,
             mcp_log_level = u64::from(level.severity())
         ),
         (Some(sid), None) => {
-            tracing::error_span!("request", mcp_session_id = sid.to_string())
+            tracing::error_span!("request", mcp_session_id = %sid)
         }
         (None, Some(level)) => {
             tracing::error_span!("request", mcp_log_level = u64::from(level.severity()))
@@ -772,8 +759,13 @@ pub(super) struct ReadRequest {
 
 impl ReadRequest {
     pub(super) fn register(msg: &Message, options: RuntimeMcpOptions) -> Self {
-        let ids: Vec<RequestId> = match msg {
-            Message::Request(req) => vec![req.full_id()],
+        let track = |id: RequestId| {
+            let token = options.track_request(&id);
+            (id, token)
+        };
+
+        let tracked = match msg {
+            Message::Request(req) => vec![track(req.full_id())],
             Message::Batch(batch) => batch
                 .iter()
                 .filter_map(|envelope| match envelope {
@@ -783,17 +775,10 @@ impl ReadRequest {
                     }),
                     _ => None,
                 })
+                .map(track)
                 .collect(),
             _ => Vec::new(),
         };
-
-        let tracked = ids
-            .into_iter()
-            .map(|id| {
-                let token = options.track_request(&id);
-                (id, token)
-            })
-            .collect();
 
         Self { options, tracked }
     }
@@ -921,17 +906,16 @@ async fn param_header_error(
         return None;
     }
 
+    static NO_ARGUMENTS: serde_json::Value = serde_json::Value::Null;
+
     let params = req.params.as_ref()?.as_object()?;
     let name = params.get("name")?.as_str()?;
-    let tool = options.get_tool(name).await?;
-    let schema = serde_json::to_value(&tool.input_schema).ok()?;
-    let declared = param_headers::collect(&schema).ok()?;
-    if declared.is_empty() {
-        return None;
-    }
+    // Read off the registered tool, not off a copy of it: see
+    // `Tool::param_headers`.
+    let declared = options.tool_param_headers(name).await?;
 
-    let args = params.get("arguments").cloned().unwrap_or_default();
-    let mirrored = param_headers::extract(&declared, &args);
+    let args = params.get("arguments").unwrap_or(&NO_ARGUMENTS);
+    let mirrored = param_headers::extract(&declared, args);
 
     let mismatch = |header: &str, stated: &str, body: &str| {
         Some(Error::new(
@@ -942,7 +926,7 @@ async fn param_header_error(
         ))
     };
 
-    for header in &declared {
+    for header in declared.iter() {
         let name = format!("{}{}", param_headers::PARAM_HEADER_PREFIX, header.header);
         let stated = req.headers.get(&name).and_then(|v| v.to_str().ok());
         let body = mirrored
@@ -1045,7 +1029,7 @@ pub(super) fn outgoing(
     {
         resp = resp
             .with_result_type()
-            .with_server_info(&options.implementation);
+            .with_server_info_value(&options.server_info);
     }
     match session_id {
         Some(session_id) => resp.set_session_id(session_id),

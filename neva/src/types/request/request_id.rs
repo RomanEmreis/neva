@@ -48,9 +48,13 @@ impl Clone for RequestId {
 }
 
 impl Default for RequestId {
+    /// `"(no id)"`, the id of a message that carries none: one string shared
+    /// by every such message rather than one allocated for each.
     #[inline]
     fn default() -> RequestId {
-        Self::String("(no id)".into())
+        static NO_ID: std::sync::LazyLock<ArcStr> =
+            std::sync::LazyLock::new(|| ArcStr::from("(no id)"));
+        Self::String(NO_ID.clone())
     }
 }
 
@@ -250,6 +254,18 @@ mod tests {
                 .into()
             )
         );
+    }
+
+    /// Every message without an id shares one `"(no id)"`.
+    #[test]
+    fn the_default_id_is_shared() {
+        let (RequestId::String(a), RequestId::String(b)) =
+            (RequestId::default(), RequestId::default())
+        else {
+            panic!("the default id is a string");
+        };
+        assert_eq!(&*a, "(no id)");
+        assert!(std::ptr::eq(a.as_ptr(), b.as_ptr()));
     }
 
     #[test]

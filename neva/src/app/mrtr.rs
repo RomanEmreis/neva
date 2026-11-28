@@ -21,7 +21,7 @@ use crate::types::{Request, Response};
 /// round 1 and every state would be rejected as "not matching this request":
 /// the binding is about *which* request this is, and a request does not become
 /// a different one by being answered.
-pub(super) fn salient_params(params: &serde_json::Value) -> serde_json::Value {
+fn salient_params(params: &serde_json::Value) -> serde_json::Value {
     match params {
         serde_json::Value::Object(map) => {
             let mut cloned = map.clone();
@@ -32,6 +32,22 @@ pub(super) fn salient_params(params: &serde_json::Value) -> serde_json::Value {
         }
         other => other.clone(),
     }
+}
+
+/// The binding of a request to the states minted for it: its method, and a
+/// digest of its [`salient_params`].
+///
+/// Computed only where a binding is compared or minted -- a request that
+/// echoes a `requestState`, a round whose handler asked for input -- since
+/// it copies the params, and a round that does neither is most of them.
+fn binding(req: &Request) -> String {
+    let salient = req
+        .params
+        .as_ref()
+        .map(salient_params)
+        .unwrap_or(serde_json::Value::Null);
+
+    crate::types::mrtr::state::request_binding(&req.method, &salient)
 }
 
 /// The caller a `requestState` is bound to: the token's subject together with
@@ -50,12 +66,10 @@ pub(super) fn principal_of(claims: &dyn Claims) -> Option<String> {
 pub(super) fn seed_mrtr_ctx(
     req: &Request,
     client_capabilities: crate::types::mrtr::ClientMrtrCapabilities,
-    method: &str,
-    salient: &serde_json::Value,
     options: &crate::app::options::RuntimeMcpOptions,
     principal: Option<&str>,
 ) -> Result<std::sync::Arc<crate::app::context::MrtrCtx>, Error> {
-    use crate::types::mrtr::state::{StateCodec, now_secs, request_binding};
+    use crate::types::mrtr::state::{StateCodec, now_secs};
 
     let mut answers = std::collections::HashMap::new();
     let mut memos = std::collections::HashMap::new();
@@ -64,7 +78,7 @@ pub(super) fn seed_mrtr_ctx(
     // state. `None` means no valid state was supplied, so no input was solicited.
     let mut requested: Option<Vec<String>> = None;
 
-    if let Some(state) = req.state() {
+    if let Some(state) = req.state_ref() {
         // Reject an oversized inbound state before decoding it. Base64 decoding
         // and AEAD decryption in `StateCodec::decode` both allocate/compute in
         // proportion to the blob size, so without this guard `with_max_state_bytes`
@@ -79,12 +93,12 @@ pub(super) fn seed_mrtr_ctx(
             ));
         }
 
-        let payload = StateCodec::new(options.request_state_keys()).decode(&state)?;
+        let payload = StateCodec::new(options.request_state_keys()).decode(state)?;
         if payload.exp < now_secs() {
             return Err(Error::new(ErrorCode::InvalidParams, "requestState expired"));
         }
 
-        if payload.req != request_binding(method, salient) {
+        if payload.req != binding(req) {
             return Err(Error::new(
                 ErrorCode::InvalidParams,
                 "requestState does not match this request",
@@ -156,16 +170,15 @@ pub(super) fn seed_mrtr_ctx(
 }
 
 /// Builds the `InputRequiredResult` for the input the handler requested,
-/// encoding a fresh encrypted `requestState`.
+/// encoding a fresh encrypted `requestState` bound to `req`.
 pub(super) fn build_input_required(
     arc: &std::sync::Arc<crate::app::context::MrtrCtx>,
-    method: &str,
-    salient: &serde_json::Value,
+    req: &Request,
     options: &crate::app::options::RuntimeMcpOptions,
     principal: Option<String>,
 ) -> Result<crate::types::mrtr::InputRequiredResult, Error> {
     use crate::types::mrtr::InputRequiredResult;
-    use crate::types::mrtr::state::{StateCodec, StatePayload, now_secs, request_binding};
+    use crate::types::mrtr::state::{StateCodec, StatePayload, now_secs};
 
     let pending = arc
         .pending
@@ -212,7 +225,7 @@ pub(super) fn build_input_required(
         memos,
         effects,
         exp: now_secs() + options.request_state_ttl_secs(),
-        req: request_binding(method, salient),
+        req: binding(req),
         principal,
         aud: options.request_state_audience().map(str::to_owned),
     };
@@ -316,7 +329,7 @@ mod tests {
                 .client_capabilities()
                 .map(|caps| caps.mrtr)
                 .unwrap_or_default();
-            super::super::seed_mrtr_ctx(req, caps, METHOD, &salient(), options, principal)
+            super::super::seed_mrtr_ctx(req, caps, options, principal)
         }
 
         fn salient() -> serde_json::Value {
