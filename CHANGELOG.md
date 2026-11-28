@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.10.0
 
 ### Added
 * `neva::testing` (feature `testing`): `TestClient` runs an `App` on the
@@ -26,6 +26,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * Under 2026-07-28 the per-`POST` correlation id is a process-unique counter
   rather than a random UUID. It never leaves the process.
 * The request span records `mcp_session_id` through `Display`.
+* The HTTP server's own `401`, `403`, `404` and `405` carry a short text
+  body, Volga's, where they had none.
+* jsonschema 0.63, nix 0.32, tokio 1.54, uuid 1.29.
+
+### Changed (breaking)
+* The `svir` bridge speaks svir 0.2: an application using `neva::svir` moves
+  its own `svir` dependency to 0.2 (whose `tls` feature is now `tls-ring`).
+* volga 0.15: `neva::auth`'s `DecodingKey`, `Algorithm`, `Authorizer`,
+  `AuthClaims` and `ClaimsDerive` are volga 0.15's.
+  `AuthConfig::set_decoding_key` with an empty secret panics, as volga's
+  `DecodingKey::from_secret` does.
 
 ### Fixed
 * The signal watcher that `App::run` and `Client::connect` start ends when the

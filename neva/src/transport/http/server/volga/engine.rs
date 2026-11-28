@@ -230,9 +230,23 @@ async fn read_body(body: HttpBody) -> Result<bytes::Bytes, ::volga::error::Error
     Ok(body.collect().await?.to_bytes())
 }
 
-async fn handle_http_error(_err: ::volga::error::Error) {
+/// Logs an error a request ended in and hands it back, so Volga's default
+/// handler answers it with its own status and headers.
+///
+/// Since Volga 0.15 this sees Volga's own rejections too -- the `401` and
+/// `403` of `authorize` with their `WWW-Authenticate` challenge, the `404` and
+/// `405` of the router -- and answering any of them with a response of its own
+/// would replace their status: a client without a token would get a `200` and
+/// never learn to authorize. Only a server error is logged as one; the rest
+/// are the caller's, and logged at `debug`.
+async fn handle_http_error(err: ::volga::error::Error) -> ::volga::error::Error {
     #[cfg(feature = "tracing")]
-    tracing::error!(logger = "neva", "HTTP error: {:?}", _err);
+    if err.status().is_server_error() {
+        tracing::error!(logger = "neva", "HTTP error: {:?}", err);
+    } else {
+        tracing::debug!(logger = "neva", "HTTP error: {:?}", err);
+    }
+    err
 }
 
 #[cfg(test)]
