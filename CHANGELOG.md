@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   a request that asked for no `logLevel` is dropped before its notification is
   built. A whole `tools/call` (bench `request_path`) is about 5% faster for a
   small call and 29% for a 15 KB one.
+* The stdio writer flushes once per burst of queued messages instead of once
+  per message, and serializes into one reused buffer instead of a new `Vec`
+  per message (#138). A burst of 20,000 notifications reaches the server's
+  stdout about 40 times faster; a message on its own is still written and
+  flushed at once.
+* The stdio reader and writer give back what a message over 1 MiB grew their
+  buffers by, instead of keeping it for the life of the process (#138).
 * What `next(ctx)` returns to a middleware once the request is answered is a
   placeholder with the request's id and a `null` result. It is not sent.
 * Under 2026-07-28 the per-`POST` correlation id is a process-unique counter
