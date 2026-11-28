@@ -297,6 +297,47 @@ mod runtime_registration_tests {
 
         ctx().tools().add(tool).await.expect("must be accepted");
     }
+
+    #[cfg(not(feature = "legacy-spec"))]
+    fn region_tool() -> Tool {
+        const JSON: &str = r#"{"type":"object","properties":{
+            "region":{"type":"string","x-mcp-header":"Region"}
+        }}"#;
+        let mut tool = Tool::new("route", |region: String| async move { region });
+        tool.with_input_schema(|_| {
+            crate::types::schema_2020::InputSchema::from_json_str(JSON).unwrap_or_default()
+        })
+        .with_arg_names(["region"]);
+        tool
+    }
+
+    /// The `Mcp-Param-*` check reads the headers a tool declares off the
+    /// registered tool, and finds them there only if registration read them:
+    /// a tool that arrived without them would have its headers go unchecked.
+    /// Both ways in.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[tokio::test]
+    async fn a_registered_tool_knows_its_param_headers() {
+        let ctx = ctx();
+        ctx.tools().add(region_tool()).await.expect("accepted");
+        let headers = ctx
+            .options
+            .tool_param_headers("route")
+            .await
+            .expect("declares one");
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].header, "Region");
+
+        let mut options = McpOptions::default();
+        options.add_tool(region_tool());
+        let options = options.into_runtime();
+        assert!(options.tool_param_headers("route").await.is_some());
+
+        let plain = Tool::new("plain", |name: String| async move { name });
+        ctx.tools().add(plain).await.expect("accepted");
+        assert!(ctx.options.tool_param_headers("plain").await.is_none());
+        assert!(ctx.options.tool_param_headers("missing").await.is_none());
+    }
 }
 
 /// Who may read a resource. A route no template backs -- a `ui://` resource --

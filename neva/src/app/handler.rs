@@ -23,9 +23,14 @@ pub(crate) type RequestHandler<T> = Arc<dyn Handler<T> + Send + Sync>;
 /// `arguments` map by name and only the registered [`crate::types::Tool`] /
 /// [`crate::types::prompt::Prompt`] knows what its handler's arguments are
 /// called.
+///
+/// The `Request` variant shares its request rather than handing it over: the
+/// dispatcher keeps it for the rest of the round, since MRTR binds the state
+/// it mints to the request's params, and reads them, if at all, once the
+/// handler is done.
 #[derive(Debug)]
 pub enum HandlerParams {
-    Request(Context, Request),
+    Request(Context, Arc<Request>),
     Tool(CallToolRequestParams, ArgNames),
     Resource(ReadResourceRequestParams),
     Prompt(GetPromptRequestParams, ArgNames),
@@ -46,6 +51,31 @@ pub(crate) trait Handler<T: IntoResponse> {
 /// Represents an extractor trait from handler parameters
 pub trait FromHandlerParams: Sized {
     fn from_params(params: &HandlerParams) -> Result<Self, Error>;
+}
+
+/// The params of an MCP method, which a handler takes by declaring them.
+///
+/// They are read from the request in place -- `serde_json` deserializes from
+/// a borrowed value as well as from an owned one -- and absent params read as
+/// an empty object, which a params type of optional fields takes for its
+/// defaults, as [`FromRequest`](crate::types::FromRequest) does.
+pub(crate) trait RequestParams: serde::de::DeserializeOwned {}
+
+impl<T: RequestParams> FromHandlerParams for T {
+    #[inline]
+    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
+        match params {
+            HandlerParams::Request(_, req) => match &req.params {
+                Some(params) => T::deserialize(params),
+                None => T::deserialize(serde_json::Value::Object(Default::default())),
+            }
+            .map_err(|err| Error::new(ErrorCode::InvalidParams, err)),
+            _ => Err(Error::new(
+                ErrorCode::InternalError,
+                "invalid handler parameters",
+            )),
+        }
+    }
 }
 
 /// Represents a generic request handler, as registered by
@@ -187,9 +217,15 @@ impl FromHandlerParams for () {
 }
 
 impl FromHandlerParams for RequestId {
+    #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
-        let req = Request::from_params(params)?;
-        Ok(req.id())
+        match params {
+            HandlerParams::Request(_, req) => Ok(req.id()),
+            _ => Err(Error::new(
+                ErrorCode::InternalError,
+                "invalid handler parameters",
+            )),
+        }
     }
 }
 
@@ -219,11 +255,13 @@ impl FromHandlerParams for RuntimeMcpOptions {
     }
 }
 
+/// The whole request, for a handler that asks for it, and so a copy of it.
+/// Every other extractor reads the request in place.
 impl FromHandlerParams for Request {
     #[inline]
     fn from_params(params: &HandlerParams) -> Result<Self, Error> {
         match params {
-            HandlerParams::Request(_, req) => Ok(req.clone()),
+            HandlerParams::Request(_, req) => Ok(Request::clone(req)),
             _ => Err(Error::new(
                 ErrorCode::InternalError,
                 "invalid handler parameters",
@@ -424,4 +462,80 @@ impl_generic_handler! { T1 T2 T3 T4 }
 impl_generic_handler! { T1 T2 T3 T4 T5 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+    use crate::App;
+    use crate::transport::TransportProtoSender;
+    use crate::types::ListToolsRequestParams;
+    use serde_json::json;
+
+    fn params(req: &Arc<Request>) -> HandlerParams {
+        let runtime = App::new().build_runtime(TransportProtoSender::None);
+        #[cfg(not(feature = "http-server"))]
+        let context = runtime.context(None);
+        #[cfg(feature = "http-server")]
+        let context = runtime.context(None, Default::default(), None);
+        HandlerParams::Request(context, Arc::clone(req))
+    }
+
+    fn call(params: serde_json::Value) -> Arc<Request> {
+        Arc::new(Request::new(
+            Some(RequestId::Number(7)),
+            "tools/call",
+            Some(params),
+        ))
+    }
+
+    #[test]
+    fn params_are_read_from_the_shared_request() {
+        let req = call(json!({ "name": "greet", "arguments": { "who": "Ada" } }));
+        let params = params(&req);
+
+        let call = CallToolRequestParams::from_params(&params).expect("well-formed params");
+        assert_eq!(call.name, "greet");
+        assert_eq!(call.args.expect("arguments")["who"], "Ada");
+        assert_eq!(
+            RequestId::from_params(&params).expect("an id"),
+            RequestId::Number(7)
+        );
+    }
+
+    /// As `FromRequest` does: no params at all is an empty object, which a
+    /// params type of optional fields reads as its defaults.
+    #[test]
+    fn absent_params_read_as_an_empty_object() {
+        let req = Arc::new(Request::new(
+            Some(RequestId::Number(1)),
+            "tools/list",
+            None::<()>,
+        ));
+        let params = params(&req);
+
+        let list = ListToolsRequestParams::from_params(&params).expect("defaults");
+        assert!(list.cursor.is_none());
+
+        let err = CallToolRequestParams::from_params(&params).expect_err("`name` is required");
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+    }
+
+    #[test]
+    fn params_of_the_wrong_shape_are_invalid_params() {
+        let req = call(json!({ "name": 42 }));
+
+        let err = CallToolRequestParams::from_params(&params(&req)).expect_err("not a string");
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+    }
+
+    /// The handler keeps nothing of the request once it is done: what the
+    /// dispatcher holds is the request again, whole.
+    #[tokio::test]
+    async fn a_handler_leaves_the_request_to_the_dispatcher() {
+        let handler = RequestFunc::new(|call: CallToolRequestParams| async move { call.name });
+        let req = call(json!({ "name": "greet" }));
+
+        let resp = handler.call(params(&req)).await.expect("a response");
+        assert_eq!(resp.id(), &RequestId::Number(7));
+        assert_eq!(Arc::strong_count(&req), 1);
+        assert!(req.params.is_some());
+    }
+}

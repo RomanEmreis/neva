@@ -1,11 +1,6 @@
 //! Utilities for Notifications
 
 use crate::types::{JSONRPC_VERSION, Message, RequestId};
-#[cfg(feature = "server")]
-use crate::{
-    error::Error,
-    types::{FromRequest, Request},
-};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -17,7 +12,7 @@ pub use log_message::SetLevelRequestParams;
 pub use log_message::{LogMessage, LoggingLevel};
 
 #[cfg(feature = "server")]
-use crate::app::handler::{FromHandlerParams, HandlerParams};
+use crate::app::handler::RequestParams;
 
 pub use progress::ProgressNotification;
 
@@ -110,13 +105,7 @@ impl From<Notification> for Message {
 }
 
 #[cfg(feature = "server")]
-impl FromHandlerParams for CancelledNotificationParams {
-    #[inline]
-    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
-        let req = Request::from_params(params)?;
-        Self::from_request(req)
-    }
-}
+impl RequestParams for CancelledNotificationParams {}
 
 impl Notification {
     /// `notifications/cancelled` for request `id`, saying why.
@@ -157,7 +146,7 @@ impl Notification {
     #[inline]
     pub fn params<T: DeserializeOwned>(&self) -> Option<T> {
         match self.params {
-            Some(ref params) => serde_json::from_value(params.clone()).ok(),
+            Some(ref params) => T::deserialize(params).ok(),
             None => None,
         }
     }
@@ -173,7 +162,7 @@ impl Notification {
         if is_stderr {
             Self::write_err_internal(params);
         } else {
-            match serde_json::from_value::<LogMessage>(params.clone()) {
+            match serde_json::from_value::<LogMessage>(params) {
                 Ok(log) => log.write(),
                 Err(err) => tracing::error!(logger = "neva", "{}", err),
             }

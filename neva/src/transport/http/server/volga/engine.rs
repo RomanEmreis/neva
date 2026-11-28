@@ -18,7 +18,6 @@ use crate::types::Message;
 #[cfg(feature = "server-tls")]
 use ::volga::tls::TlsConfig;
 use ::volga::{App, HttpBody, HttpRequest, HttpResult, http::sse::Message as SseMessage};
-use bytes::BytesMut;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -75,10 +74,11 @@ impl HttpEngine for VolgaEngine {
             .uri(req.uri().clone())
             .version(req.version());
 
+        // Volga lends its request's headers rather than giving them up, so this
+        // is the one copy of them an HTTP request costs: taken whole, sized
+        // once, rather than grown header by header.
         if let Some(headers_mut) = builder.headers_mut() {
-            for (k, v) in req.headers().iter() {
-                headers_mut.append(k, v.clone());
-            }
+            *headers_mut = req.headers().clone();
         }
 
         let body = read_body(req.into_body())
@@ -221,18 +221,47 @@ impl HttpEngine for VolgaEngine {
 /// MCP JSON-RPC frames are bounded; falling back to an empty body on
 /// transport failure lets the protocol layer reply with a clean
 /// JSON-RPC `ParseError` instead of a 500.
+///
+/// A body that arrives in one chunk -- most of them -- is that chunk, with no
+/// copy; one in several is copied once, into a buffer of its whole size.
 async fn read_body(body: HttpBody) -> Result<bytes::Bytes, ::volga::error::Error> {
-    use futures_util::StreamExt as _;
-    let mut stream = body.into_data_stream();
-    let mut buf = BytesMut::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| ::volga::error::Error::server_error(e.to_string()))?;
-        buf.extend_from_slice(&chunk);
-    }
-    Ok(buf.freeze())
+    use http_body_util::BodyExt as _;
+
+    Ok(body.collect().await?.to_bytes())
 }
 
 async fn handle_http_error(_err: ::volga::error::Error) {
     #[cfg(feature = "tracing")]
     tracing::error!(logger = "neva", "HTTP error: {:?}", _err);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_body;
+    use ::volga::HttpBody;
+    use bytes::Bytes;
+
+    /// One chunk is the body as it arrived: the same bytes, not a copy.
+    #[tokio::test]
+    async fn a_body_in_one_chunk_is_that_chunk() {
+        let chunk = Bytes::from(vec![b'x'; 4096]);
+        let body = read_body(HttpBody::full(chunk.clone()))
+            .await
+            .expect("a body");
+        assert_eq!(body.as_ptr(), chunk.as_ptr());
+    }
+
+    #[tokio::test]
+    async fn a_body_in_several_chunks_is_gathered_in_order() {
+        let chunks = [&b"{\"a\":"[..], b"1,", b"\"b\":2}"].map(Bytes::from_static);
+
+        let stream = futures_util::stream::iter(chunks);
+        let body = read_body(HttpBody::stream_bytes(stream))
+            .await
+            .expect("a body");
+        assert_eq!(&body[..], b"{\"a\":1,\"b\":2}");
+
+        let empty = read_body(HttpBody::empty()).await.expect("a body");
+        assert!(empty.is_empty());
+    }
 }

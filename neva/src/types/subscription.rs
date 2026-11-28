@@ -13,11 +13,9 @@ use crate::types::{RequestId, RequestParamsMeta, Uri};
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "server")]
-use crate::app::handler::{FromHandlerParams, HandlerParams};
+use crate::app::handler::RequestParams;
 #[cfg(feature = "server")]
-use crate::error::Error;
-#[cfg(feature = "server")]
-use crate::types::{IntoResponse, Request, Response, request::FromRequest};
+use crate::types::{IntoResponse, Response};
 
 /// `_meta` key that tags every message belonging to a subscription with the
 /// id of the `subscriptions/listen` request that opened it.
@@ -537,13 +535,7 @@ impl SubscriptionsListenResult {
 }
 
 #[cfg(feature = "server")]
-impl FromHandlerParams for SubscriptionsListenRequestParams {
-    #[inline]
-    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
-        let req = Request::from_params(params)?;
-        Self::from_request(req)
-    }
-}
+impl RequestParams for SubscriptionsListenRequestParams {}
 
 #[cfg(feature = "server")]
 impl IntoResponse for SubscriptionsListenResult {

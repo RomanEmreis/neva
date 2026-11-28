@@ -38,9 +38,7 @@ use tokio_util::sync::CancellationToken;
 use self::shutdown::DEFAULT_SHUTDOWN_DRAIN;
 
 #[cfg(not(feature = "legacy-spec"))]
-use self::mrtr::{
-    build_input_required, mrtr_should_commit, principal_of, salient_params, seed_mrtr_ctx,
-};
+use self::mrtr::{build_input_required, mrtr_should_commit, principal_of, seed_mrtr_ctx};
 
 #[cfg(all(feature = "tasks", feature = "legacy-spec"))]
 use crate::types::Task;

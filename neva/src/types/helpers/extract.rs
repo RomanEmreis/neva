@@ -244,8 +244,9 @@ impl ArgNames {
 
 /// Represents a payload that needs the type to be extracted from
 pub(crate) enum Payload<'a> {
-    /// Tool or Prompt argument
-    Args(serde_json::Value),
+    /// Tool or Prompt argument, read in place: deserializing from a borrowed
+    /// value copies only what the target type keeps.
+    Args(&'a Value),
 
     /// Request metadata ("_meta")
     Meta(&'a Option<RequestParamsMeta>),
@@ -312,7 +313,7 @@ pub trait FromHandlerArgs<P>: Sized {
 impl<'a> Payload<'a> {
     /// Returns arguments value for type extraction
     #[inline]
-    pub(crate) fn expect_args(self) -> serde_json::Value {
+    pub(crate) fn expect_args(self) -> &'a Value {
         match self {
             Payload::Args(val) => val,
             _ => unreachable!("Expected Args variant"),
@@ -441,13 +442,13 @@ pub(crate) fn extract_arg<T: RequestArgument<Error = Error> + TypeCategory>(
             let name = names.get(*slot);
             *slot += 1;
             match args.and_then(|args| args.get(name)) {
-                Some(value) => T::extract(Payload::Args(value.clone())).map_err(|err| {
+                Some(value) => T::extract(Payload::Args(value)).map_err(|err| {
                     Error::new(
                         ErrorCode::InvalidParams,
                         format!("invalid value for argument `{name}`: {err}"),
                     )
                 }),
-                None if T::is_optional() => T::extract(Payload::Args(Value::Null)),
+                None if T::is_optional() => T::extract(Payload::Args(&Value::Null)),
                 None => Err(Error::new(
                     ErrorCode::InvalidParams,
                     format!("missing required argument `{name}`"),

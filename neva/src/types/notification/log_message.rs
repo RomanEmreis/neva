@@ -1,12 +1,10 @@
 //! Utilities for log messages
 
 #[cfg(all(feature = "server", feature = "legacy-spec"))]
-use crate::app::handler::{FromHandlerParams, HandlerParams};
+use crate::app::handler::RequestParams;
 use crate::error::Error;
 use crate::types::notification::Notification;
 use crate::types::response::ErrorDetails;
-#[cfg(all(feature = "server", feature = "legacy-spec"))]
-use crate::types::{FromRequest, Request};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "tracing")]
 use tracing::Level;
@@ -119,13 +117,7 @@ impl From<LogMessage> for Notification {
 }
 
 #[cfg(all(feature = "server", feature = "legacy-spec"))]
-impl FromHandlerParams for SetLevelRequestParams {
-    #[inline]
-    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
-        let req = Request::from_params(params)?;
-        Self::from_request(req)
-    }
-}
+impl RequestParams for SetLevelRequestParams {}
 
 impl LogMessage {
     /// Creates a new [`LogMessage`]

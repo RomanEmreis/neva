@@ -60,6 +60,12 @@ pub struct McpOptions {
     #[cfg(feature = "registry")]
     pub(crate) version_is_explicit: bool,
 
+    /// [`Self::implementation`] as the `serverInfo` every result carries
+    /// under MCP 2026-07-28: serialized once, when the options freeze, rather
+    /// than once per response.
+    #[cfg(not(feature = "legacy-spec"))]
+    pub(crate) server_info: serde_json::Value,
+
     /// What the server tells the client about when and how to use it, set via
     /// [`with_instructions`](Self::with_instructions).
     instructions: Option<Box<str>>,
@@ -251,6 +257,8 @@ impl Default for McpOptions {
             implementation: Default::default(),
             #[cfg(feature = "registry")]
             version_is_explicit: false,
+            #[cfg(not(feature = "legacy-spec"))]
+            server_info: serde_json::Value::Null,
             instructions: None,
             request_timeout: Duration::from_secs(10),
             tools: Collection::new(),
@@ -961,6 +969,20 @@ impl McpOptions {
         self.tools.get(name).await
     }
 
+    /// The `Mcp-Param-*` headers the tool `name` declares: `None` when there
+    /// is no such tool or it declares none.
+    #[inline]
+    #[cfg(all(feature = "http-server", not(feature = "legacy-spec")))]
+    pub(crate) async fn tool_param_headers(
+        &self,
+        name: &str,
+    ) -> Option<Arc<[crate::shared::param_headers::ParamHeader]>> {
+        self.tools
+            .read_with(name, |tool| tool.param_headers.clone())
+            .await
+            .flatten()
+    }
+
     /// Reads what a caller must hold to call the tool `name` through `f`,
     /// without copying the tool.
     #[inline]
@@ -1343,6 +1365,15 @@ impl McpOptions {
         self.require_template_claims();
         #[cfg(all(feature = "apps", not(feature = "legacy-spec")))]
         self.register_ui_resources();
+        #[cfg(not(feature = "legacy-spec"))]
+        {
+            self.server_info = serde_json::to_value(&self.implementation).unwrap_or_default();
+        }
+        #[cfg(all(feature = "http-server", not(feature = "legacy-spec")))]
+        self.tools
+            .as_mut()
+            .values_mut()
+            .for_each(Tool::read_param_headers);
         self.tools = self.tools.into_runtime();
         self.prompts = self.prompts.into_runtime();
         self.resources = self.resources.into_runtime();

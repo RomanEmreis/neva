@@ -26,6 +26,9 @@ dashmap = "6.2.1"
 # answered.
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 http = "1.5.0"
+# `BodyExt::collect` for the Volga engine's request body; already in the tree
+# under Volga and hyper.
+http-body-util = { version = "0.1.5", optional = true }
 memchr = "2.8.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -62,8 +65,17 @@ windows = { version = "0.62.0", features = ["Win32_Foundation", "Win32_System_Jo
 nix = { version = "0.31.1", features = ["signal"], optional = true }
 
 [dev-dependencies]
+# No plots or HTML reports: the bench is read as numbers.
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 tokio = { version = "1.53.2", features = ["rt", "rt-multi-thread", "macros"] }
 tokio-stream = { version = "0.1.19" }
+
+# `parse`, `meta` and a whole `tools/call` through `neva::testing`: see
+# https://github.com/RomanEmreis/neva/issues/137.
+[[bench]]
+name = "request_path"
+harness = false
+required-features = ["testing"]
 
 [features]
 default = []
@@ -95,7 +107,7 @@ server-oauth = ["http-server", "dep:volga-oauth-core", "volga?/oauth-client"]
 # `HttpEngine` for your own stack (e.g. axum, hyper). No Volga in deps.
 http-server = ["server", "dep:tokio-stream"]
 # Default Volga adapter — pulls Volga as a dep and provides VolgaEngine.
-http-server-volga = ["http-server", "dep:volga"]
+http-server-volga = ["http-server", "dep:volga", "dep:http-body-util"]
 # `chacha20poly1305` + `sha2` back the MRTR `requestState` sealing codec
 # (`types/mrtr/state.rs`), which is server-only and compiled out under
 # `legacy-spec`. Cargo features are additive, so they cannot be un-enabled by

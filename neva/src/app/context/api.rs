@@ -308,6 +308,12 @@ impl Tools<'_> {
         if let Some(conflict) = tool.arg_name_conflict() {
             return Err(Error::new(ErrorCode::InternalError, conflict));
         }
+        #[cfg(all(feature = "http-server", not(feature = "legacy-spec")))]
+        let tool = {
+            let mut tool = tool;
+            tool.read_param_headers();
+            tool
+        };
 
         let options = &self.ctx.options;
         options.tools.insert(tool.name.clone(), tool).await?;

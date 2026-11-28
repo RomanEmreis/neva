@@ -9,9 +9,10 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
 #[cfg(feature = "server")]
+use crate::{app::handler::RequestParams, app::options::McpOptions};
+#[cfg(all(feature = "server", not(feature = "legacy-spec")))]
 use crate::{
     app::handler::{FromHandlerParams, HandlerParams},
-    app::options::McpOptions,
     error::Error,
 };
 
@@ -321,7 +322,7 @@ impl MessageBatch {
             id: RequestId::Uuid(uuid::Uuid::new_v4()),
             session_id: None,
             #[cfg(feature = "http-server")]
-            headers: HeaderMap::with_capacity(8),
+            headers: HeaderMap::new(),
             #[cfg(feature = "http-server")]
             claims: None,
             items,
@@ -446,7 +447,7 @@ impl<'de> Deserialize<'de> for MessageBatch {
             id: RequestId::Uuid(uuid::Uuid::new_v4()),
             session_id: None,
             #[cfg(feature = "http-server")]
-            headers: HeaderMap::with_capacity(8),
+            headers: HeaderMap::new(),
             #[cfg(feature = "http-server")]
             claims: None,
             items,
@@ -686,13 +687,7 @@ impl IntoResponse for InitializeResult {
 }
 
 #[cfg(feature = "server")]
-impl FromHandlerParams for InitializeRequestParams {
-    #[inline]
-    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
-        let req = Request::from_params(params)?;
-        Self::from_request(req)
-    }
-}
+impl RequestParams for InitializeRequestParams {}
 
 #[cfg(all(feature = "server", not(feature = "legacy-spec")))]
 impl FromHandlerParams for DiscoverRequestParams {

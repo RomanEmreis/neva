@@ -110,27 +110,23 @@ where
         mut writer: Writer<'_>,
         event: &Event<'_>,
     ) -> std::fmt::Result {
-        let notification = build_notification(event);
-
         // 2026-07-28: the stdio emission path honors the same request-scoped level as
         // the HTTP path. A `notifications/message` is written only when the
         // originating request carried `io.modelcontextprotocol/logLevel` and
         // this event is at or above that severity. Progress notifications are
-        // not gated.
+        // not gated. Decided before anything is built: see [`delivered`].
         #[cfg(not(feature = "legacy-spec"))]
-        if notification.method.as_str() == crate::types::notification::commands::MESSAGE {
-            let requested = requested_severity(_ctx);
-
-            // Filter on the notification's own level (which preserves MCP
-            // severities), not the lossy tracing level of the event.
-            let event_severity = notification_severity(&notification)
-                .unwrap_or_else(|| LoggingLevel::from(event.metadata().level()).severity());
-            if !message_delivered(requested, event_severity) {
-                return Ok(());
-            }
+        if !delivered(event, || requested_severity(_ctx)) {
+            return Ok(());
         }
 
-        let json = serde_json::to_string(&notification).unwrap();
+        let Some(notification) = build_notification(event) else {
+            return Ok(());
+        };
+        let Ok(json) = serde_json::to_string(&notification) else {
+            return Ok(());
+        };
+
         writeln!(writer, "{json}")
     }
 }
@@ -225,66 +221,126 @@ pub(super) fn message_delivered(requested: Option<u8>, event_severity: u8) -> bo
     requested.map(|min| event_severity >= min).unwrap_or(false)
 }
 
-/// Reads the RFC-5424 severity rank of a `notifications/message`'s own level,
-/// so filtering matches the level actually delivered to the client (which, via
-/// [`build_notification`], preserves MCP-specific severities).
+/// The target of an event that reports progress rather than logging.
+const PROGRESS_TARGET: &str = "progress";
+
+/// The field carrying an event's MCP level, which tracing's own levels cannot
+/// all express: see `LogMessage::write`.
+const MCP_LEVEL: &str = "mcp_level";
+
+/// Whether an event becomes a notification the client is sent, under MCP
+/// 2026-07-28's request-scoped logging.
+///
+/// Read off the event itself and the level the request asked for, so it is
+/// settled before the notification is built. That ordering is the point: a
+/// request that asked for no level is sent no log message at all, and every
+/// event inside it used to be turned into JSON first and dropped after.
+/// `requested` is asked only for an event that is a log message.
+///
+/// The level compared is the event's MCP level where it states one -- the
+/// level the client would be sent -- and its tracing level otherwise.
 #[cfg(not(feature = "legacy-spec"))]
-#[inline]
-pub(super) fn notification_severity(notification: &Notification) -> Option<u8> {
-    notification
-        .params
-        .as_ref()
-        .and_then(|params| params.get("level"))
-        .and_then(|level| serde_json::from_value::<LoggingLevel>(level.clone()).ok())
-        .map(LoggingLevel::severity)
+pub(super) fn delivered(event: &Event<'_>, requested: impl FnOnce() -> Option<u8>) -> bool {
+    if event.metadata().target() == PROGRESS_TARGET {
+        return true;
+    }
+    let Some(min) = requested() else {
+        return false;
+    };
+
+    message_delivered(Some(min), event_severity(event))
 }
 
+/// The RFC-5424 severity rank of the log message an event becomes: its
+/// `mcp_level` field where that names a level, its tracing level otherwise --
+/// the same choice [`build_notification`] makes.
+#[cfg(not(feature = "legacy-spec"))]
+fn event_severity(event: &Event<'_>) -> u8 {
+    struct McpLevel(Option<LoggingLevel>);
+
+    impl Visit for McpLevel {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == MCP_LEVEL {
+                use serde::Deserialize as _;
+                use serde::de::value::{Error, StrDeserializer};
+
+                self.0 = LoggingLevel::deserialize(StrDeserializer::<Error>::new(value)).ok();
+            }
+        }
+
+        fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+    }
+
+    let mut level = McpLevel(None);
+    event.record(&mut level);
+    level
+        .0
+        .unwrap_or_else(|| LoggingLevel::from(event.metadata().level()))
+        .severity()
+}
+
+/// The notification an event describes, if it describes one.
+///
+/// An event on the `progress` target is a progress notification; any other
+/// is a log message.
 #[inline]
-pub(super) fn build_notification(event: &Event<'_>) -> Notification {
+pub(super) fn build_notification(event: &Event<'_>) -> Option<Notification> {
     let meta = event.metadata();
-    let level = meta.level();
-    let fields = extract_fields(event);
+    let mut fields = extract_fields(event);
 
-    match meta.target() {
-        "progress" => {
-            let token = fields
-                .get("token")
-                .map(|v| serde_json::from_value::<ProgressToken>(v.clone()).unwrap());
+    if meta.target() == PROGRESS_TARGET {
+        return progress(&fields);
+    }
 
-            let total = fields
-                .get("total")
-                .map(|v| v.to_string().replace("\"", "").parse().unwrap());
+    let logger = fields
+        .remove("logger")
+        .map(|v| v.to_string().replace('"', ""));
 
-            let value = fields
-                .get("value")
-                .map(|v| v.to_string().replace("\"", "").parse().unwrap());
+    // An explicit MCP level (from `LogMessage::write`) preserves
+    // severities tracing cannot express; otherwise map the tracing level.
+    let level = fields
+        .remove(MCP_LEVEL)
+        .and_then(|v| serde_json::from_value::<LoggingLevel>(v).ok())
+        .unwrap_or_else(|| meta.level().into());
 
-            token.unwrap().notify(value.unwrap(), total).into()
-        }
-        _ => {
-            let logger = fields
-                .get("logger")
-                .map(|v| v.to_string().replace("\"", ""));
+    // The fields are this event's own, so they move into the message.
+    let data = fields
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), value))
+        .collect::<serde_json::Map<_, _>>();
 
-            // Remove `logger` from data map
-            let mut data_map = fields.clone();
-            data_map.remove("logger");
+    let log = LogMessage {
+        level,
+        data: Some(serde_json::Value::Object(data)),
+        logger,
+    };
 
-            // An explicit MCP level (from `LogMessage::write`) preserves
-            // severities tracing cannot express; otherwise map the tracing level.
-            let level = data_map
-                .remove("mcp_level")
-                .and_then(|v| serde_json::from_value::<LoggingLevel>(v).ok())
-                .unwrap_or_else(|| level.into());
+    Some(Notification::from(log))
+}
 
-            let log = LogMessage {
-                level,
-                data: serde_json::to_value(data_map).ok(),
-                logger,
-            };
+/// The progress notification a `progress`-target event describes: a `token`,
+/// a numeric `value`, and optionally a numeric `total`.
+///
+/// An event without a token or a value, or whose value is not a number,
+/// describes no progress, and nothing is sent for it. A `total` that is not a
+/// number is left out, and the progress it came with is still reported.
+fn progress(fields: &BTreeMap<&str, serde_json::Value>) -> Option<Notification> {
+    use serde::Deserialize as _;
 
-            Notification::from(log)
-        }
+    let token = ProgressToken::deserialize(fields.get("token")?).ok()?;
+    let value = number(fields.get("value")?)?;
+    let total = fields.get("total").and_then(number);
+
+    Some(token.notify(value, total).into())
+}
+
+/// A number as an event field carries it: a JSON number, or the text of one,
+/// which is how a float -- recorded through `Debug` -- arrives.
+fn number(value: &serde_json::Value) -> Option<f64> {
+    match value {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.trim_matches('"').parse().ok(),
+        _ => None,
     }
 }
 
@@ -511,5 +567,164 @@ mod tests {
 
         let out = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
         assert!(out.is_empty(), "expected no output, got: {out}");
+    }
+}
+
+/// What an event builds, in both profiles: the progress branch above all,
+/// which used to `unwrap` its way through an event's fields.
+#[cfg(test)]
+mod build_tests {
+    use super::build_notification;
+    use serde_json::{Value, json};
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::prelude::*;
+
+    /// Records what each event builds into.
+    struct Built(Arc<Mutex<Vec<Option<Value>>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Built {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let built = build_notification(event)
+                .map(|n| serde_json::to_value(n).expect("a notification serializes"));
+            self.0.lock().expect("not poisoned").push(built);
+        }
+    }
+
+    fn built(emit: impl FnOnce()) -> Vec<Option<Value>> {
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(Built(out.clone()));
+        tracing::subscriber::with_default(subscriber, emit);
+        out.lock().expect("not poisoned").clone()
+    }
+
+    /// Each of these panicked inside the layer -- that is, inside whatever
+    /// handler emitted it. An event that describes no progress builds nothing.
+    #[test]
+    fn a_progress_event_that_describes_no_progress_builds_nothing() {
+        let out = built(|| {
+            tracing::info!(target: "progress", value = 1);
+            tracing::info!(target: "progress", token = "t");
+            tracing::info!(target: "progress", token = "t", value = "half");
+            tracing::info!(target: "progress", token = "t", value = true);
+        });
+
+        assert_eq!(out, vec![None, None, None, None]);
+    }
+
+    #[test]
+    fn a_progress_event_builds_a_progress_notification() {
+        let out = built(|| {
+            tracing::info!(target: "progress", token = "t", value = 0.5, total = 2);
+            tracing::info!(target: "progress", token = 7, value = 1);
+        });
+
+        let half = out[0].as_ref().expect("a progress notification");
+        assert_eq!(half["method"], "notifications/progress");
+        assert_eq!(
+            half["params"],
+            json!({ "progressToken": "t", "progress": 0.5, "total": 2.0 })
+        );
+
+        let one = out[1].as_ref().expect("a progress notification");
+        assert_eq!(
+            one["params"],
+            json!({ "progressToken": 7, "progress": 1.0 })
+        );
+    }
+
+    /// The progress is what the event is about; a total that cannot be read
+    /// is left out rather than taking the progress down with it.
+    #[test]
+    fn an_unreadable_total_is_left_out() {
+        let out =
+            built(|| tracing::info!(target: "progress", token = "t", value = 3, total = "lots"));
+
+        let progress = out[0].as_ref().expect("a progress notification");
+        assert_eq!(
+            progress["params"],
+            json!({ "progressToken": "t", "progress": 3.0 })
+        );
+    }
+
+    /// Whether an event is delivered under the requested level, for each
+    /// event, and how many times the level was asked for.
+    #[cfg(not(feature = "legacy-spec"))]
+    fn delivered(requested: Option<u8>, emit: impl FnOnce()) -> (Vec<bool>, usize) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Delivered {
+            requested: Option<u8>,
+            asked: Arc<AtomicUsize>,
+            out: Arc<Mutex<Vec<bool>>>,
+        }
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Delivered {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let delivered = super::delivered(event, || {
+                    self.asked.fetch_add(1, Ordering::Relaxed);
+                    self.requested
+                });
+                self.out.lock().expect("not poisoned").push(delivered);
+            }
+        }
+
+        let asked = Arc::new(AtomicUsize::new(0));
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(Delivered {
+            requested,
+            asked: asked.clone(),
+            out: out.clone(),
+        });
+        tracing::subscriber::with_default(subscriber, emit);
+        let out = out.lock().expect("not poisoned").clone();
+        (out, asked.load(Ordering::Relaxed))
+    }
+
+    /// Settled from the event before anything is built, by the same rules
+    /// the built notification was filtered by: its MCP level where it states
+    /// one, its tracing level otherwise, and progress never gated.
+    #[cfg(not(feature = "legacy-spec"))]
+    #[test]
+    fn delivery_is_settled_before_anything_is_built() {
+        use crate::types::notification::LoggingLevel;
+
+        let emit = || {
+            tracing::error!("error");
+            tracing::info!("info");
+            // Tracing's `WARN`, but MCP's `notice`: below `warning`.
+            tracing::warn!(mcp_level = "notice", "notice");
+            // An MCP level that names none falls back to the tracing level.
+            tracing::warn!(mcp_level = "bogus", "warning");
+            tracing::info!(target: "progress", token = "t", value = 1);
+        };
+
+        let warning = Some(LoggingLevel::Warning.severity());
+        let (out, asked) = delivered(warning, emit);
+        assert_eq!(out, [true, false, false, true, true]);
+        assert_eq!(asked, 4, "progress does not ask for the level");
+
+        let (out, _) = delivered(None, emit);
+        assert_eq!(out, [false, false, false, false, true]);
+    }
+
+    /// The fields move into the message; `logger` and the MCP level are taken
+    /// out of them on the way.
+    #[test]
+    fn a_log_event_builds_a_log_message() {
+        let out = built(|| tracing::warn!(logger = "tool", mcp_level = "notice", answer = 42));
+
+        let log = out[0].as_ref().expect("a log message");
+        assert_eq!(log["method"], "notifications/message");
+        assert_eq!(log["params"]["level"], "notice");
+        assert_eq!(log["params"]["logger"], "tool");
+        assert_eq!(log["params"]["data"], json!({ "answer": 42 }));
     }
 }

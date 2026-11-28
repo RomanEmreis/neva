@@ -12,10 +12,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   current runtime and connects a `Client` to it over an in-memory pipe, with no
   process and no port (#134).
 
+### Changed
+* Less work per request on the server (#137): extractors read the request in
+  place instead of copying it, tool arguments are not cloned to be
+  deserialized, the MRTR request binding is computed only for a round that
+  needs it, a tool's `x-mcp-header` set is read once at registration, and the
+  HTTP intake copies the request headers once. Under 2026-07-28 an event inside
+  a request that asked for no `logLevel` is dropped before its notification is
+  built. A whole `tools/call` (bench `request_path`) is about 5% faster for a
+  small call and 29% for a 15 KB one.
+* What `next(ctx)` returns to a middleware once the request is answered is a
+  placeholder with the request's id and a `null` result. It is not sent.
+* Under 2026-07-28 the per-`POST` correlation id is a process-unique counter
+  rather than a random UUID. It never leaves the process.
+* The request span records `mcp_session_id` through `Display`.
+
 ### Fixed
 * The signal watcher that `App::run` and `Client::connect` start ends when the
   token it watches is cancelled another way (a `ShutdownHandle`,
   `Client::disconnect`) instead of running on (#178).
+* A tracing event on the `progress` target without a `token` or a numeric
+  `value` panicked inside the notification layer, and so inside the handler
+  that emitted it. It now sends nothing; a non-numeric `total` is left out
+  (#137).
 
 ## 0.9.0
 

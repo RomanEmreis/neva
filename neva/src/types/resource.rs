@@ -1,18 +1,11 @@
 //! Represents an MCP resource
 
 #[cfg(feature = "server")]
-use crate::app::{
-    context::Context,
-    handler::{FromHandlerParams, HandlerParams},
-};
-#[cfg(feature = "server")]
-use crate::error::Error;
-#[cfg(feature = "server")]
-use crate::types::request::FromRequest;
+use crate::app::{context::Context, handler::RequestParams};
 use crate::types::request::RequestParamsMeta;
 use crate::types::{Annotations, Cursor, Icon};
 #[cfg(feature = "server")]
-use crate::types::{IntoResponse, Page, Request, RequestId, Response};
+use crate::types::{IntoResponse, Page, RequestId, Response};
 use serde::{Deserialize, Serialize};
 
 pub use read_resource_result::{
@@ -288,40 +281,16 @@ impl From<Page<'_, Resource>> for ListResourcesResult {
 }
 
 #[cfg(feature = "server")]
-impl FromHandlerParams for ListResourcesRequestParams {
-    #[inline]
-    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
-        let req = Request::from_params(params)?;
-        Self::from_request(req)
-    }
-}
+impl RequestParams for ListResourcesRequestParams {}
 
 #[cfg(feature = "server")]
-impl FromHandlerParams for ReadResourceRequestParams {
-    #[inline]
-    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
-        let req = Request::from_params(params)?;
-        Self::from_request(req)
-    }
-}
+impl RequestParams for ReadResourceRequestParams {}
 
 #[cfg(feature = "server")]
-impl FromHandlerParams for SubscribeRequestParams {
-    #[inline]
-    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
-        let req = Request::from_params(params)?;
-        Self::from_request(req)
-    }
-}
+impl RequestParams for SubscribeRequestParams {}
 
 #[cfg(all(feature = "server", any(feature = "legacy-spec", feature = "client")))]
-impl FromHandlerParams for UnsubscribeRequestParams {
-    #[inline]
-    fn from_params(params: &HandlerParams) -> Result<Self, Error> {
-        let req = Request::from_params(params)?;
-        Self::from_request(req)
-    }
-}
+impl RequestParams for UnsubscribeRequestParams {}
 
 #[cfg(feature = "server")]
 impl ListResourcesResult {
