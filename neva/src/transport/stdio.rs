@@ -7,20 +7,21 @@ use crate::transport::{
 };
 use crate::types::Message;
 use futures_util::TryFutureExt;
-use tokio::{
-    io::{AsyncWrite, AsyncWriteExt, BufWriter},
-    sync::mpsc::{self, Receiver, Sender},
-};
+use tokio::sync::mpsc::{self, Receiver, Sender};
 
-// The async reader serves a child process's piped stdout, which only a client
-// has. A server reads its own stdin, and does that on a thread of its own --
-// see `StdIoReceiver::start_blocking`.
+// The async reader and writer serve a child process's pipes, which only a
+// client has (and the in-memory link, which needs one too). A server reads
+// its own stdin and writes its own stdout, each on a thread of its own -- see
+// `StdIoReceiver::start_blocking` and `StdIoSender::start_blocking`.
 #[cfg(feature = "client")]
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "server")]
-use tokio::io::Stdout;
+use std::{
+    sync::Arc,
+    task::{Context, Poll, Wake, Waker},
+};
 
 #[cfg(feature = "testing")]
 use tokio::io::DuplexStream;
@@ -37,6 +38,22 @@ mod windows;
 
 #[cfg(feature = "client")]
 pub(crate) mod options;
+
+/// How much of a burst the writer buffers before handing it to the sink.
+///
+/// Once this much is buffered, it is written out before the next message is
+/// added, so a long burst of small messages goes out in pieces of about this
+/// size, one write each, rather than one write per message or all at once.
+const WRITE_CHUNK: usize = 64 * 1024;
+
+/// The most capacity a stdio buffer keeps once it is done with a message.
+///
+/// The reader's line and the writer's burst each grow to fit the largest
+/// message they have carried, and would otherwise keep that memory for the
+/// life of the process. Well above what ordinary traffic needs, so the common
+/// path never pays for it: the trim is one reallocation, after a message large
+/// enough that it is noise.
+const RETAINED_CAPACITY: usize = 1024 * 1024;
 
 /// Represents stdio server transport
 #[cfg(feature = "server")]
@@ -90,15 +107,24 @@ impl StdIoSender {
         Self { tx, rx: Some(rx) }
     }
 
-    /// Starts a new thread that writes to stdout asynchronously
+    /// Starts a task that writes the queued messages to `writer`, one line of
+    /// JSON each.
+    ///
+    /// For a sink with a real async form: a child's stdin, or the in-memory
+    /// link. The server's own stdout has none -- see
+    /// [`start_blocking`](Self::start_blocking). `writer` is the raw sink and
+    /// is not to be wrapped in a buffer of its own: the task keeps one, and
+    /// flushes it once per burst rather than once per message (see
+    /// [`Outbox::write_burst`]).
     ///
     /// `drained` is held for as long as this writer may still write, so a
     /// caller awaiting the transport's drain signal knows the queue reached
-    /// stdout rather than merely reaching the channel. The task is handed back
-    /// so that caller can also end it when the shutdown budget runs out.
+    /// the wire rather than merely reaching the channel. The task is handed
+    /// back so that caller can also end it when the shutdown budget runs out.
+    #[cfg(feature = "client")]
     pub(crate) fn start<T: AsyncWrite + Unpin + Send + 'static>(
         &mut self,
-        mut writer: BufWriter<T>,
+        writer: T,
         token: CancellationToken,
         drained: DrainGuard,
     ) -> Option<tokio::task::JoinHandle<()>> {
@@ -109,17 +135,9 @@ impl StdIoSender {
         };
 
         Some(tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = token.cancelled() => break,
-                    resp = receiver.recv() => {
-                        match resp {
-                            Some(resp) => write_message(&mut writer, resp).await,
-                            None => return,
-                        }
-                    }
-                }
+            let mut outbox = Outbox::new(writer);
+            while let Some(msg) = next_message(&token, &mut receiver).await {
+                outbox.write_burst(msg, &mut receiver).await;
             }
 
             // Cancellation stops new work, it does not discard queued work.
@@ -127,9 +145,10 @@ impl StdIoSender {
             // finished before the teardown got this far -- notably the
             // graceful-close result of a `subscriptions/listen` stream, which
             // the shutdown drain waited for on purpose. `try_recv`, since the
-            // senders outlive this task and `recv` would never return `None`.
-            while let Ok(resp) = receiver.try_recv() {
-                write_message(&mut writer, resp).await;
+            // senders outlive this task and `recv` would never return `None`;
+            // the burst takes the rest of the queue, under the same one flush.
+            if let Ok(msg) = receiver.try_recv() {
+                outbox.write_burst(msg, &mut receiver).await;
             }
 
             // Last thing the writer does: everything queued is now on the
@@ -139,28 +158,255 @@ impl StdIoSender {
             drop(drained);
         }))
     }
+
+    /// Starts a dedicated OS thread that writes the queued messages to
+    /// `writer` with blocking I/O, one line of JSON each.
+    ///
+    /// Used for the server's own stdout, which -- unlike a child's stdin --
+    /// has no async form. [`tokio::io::stdout`] emulates one on the runtime's
+    /// blocking pool, where every write and every flush is a round trip: two
+    /// for a message on its own. A thread of our own writes it with one
+    /// syscall instead, straight from the [`Outbox`] buffer, with no copy into
+    /// tokio's.
+    ///
+    /// It also keeps shutdown from hanging on a peer that stopped reading. A
+    /// write stuck on a full pipe cannot be interrupted either way, but on the
+    /// blocking pool it is the runtime's, and dropping the runtime waits for
+    /// it; this thread is nobody's to wait for, the reader's way (see
+    /// [`StdIoReceiver::start_blocking`]).
+    ///
+    /// The thread waits on the channel and on `token` at once (see
+    /// [`block_on`]): `blocking_recv` alone would sleep through a cancellation
+    /// that arrives while nothing is queued, and shutdown would wait out its
+    /// whole budget for a writer with nothing to write. On cancellation it
+    /// drains what is queued, as the task does, then drops `drained`.
+    ///
+    /// Returns the token that stops the thread, for the caller to register
+    /// with [`DrainSignal::stop_on_timeout`]: nothing can abort a thread, so
+    /// one that runs out of shutdown budget is told to stop instead, which it
+    /// checks before each write.
+    #[cfg(feature = "server")]
+    pub(crate) fn start_blocking<W: std::io::Write + Send + 'static>(
+        &mut self,
+        writer: W,
+        token: CancellationToken,
+        drained: DrainGuard,
+    ) -> Result<Option<CancellationToken>, Error> {
+        let Some(mut receiver) = self.rx.take() else {
+            #[cfg(feature = "tracing")]
+            tracing::error!(logger = "neva", "The stdout writer already in use");
+            return Ok(None);
+        };
+
+        let stop = CancellationToken::new();
+        std::thread::Builder::new()
+            .name("neva-stdout".into())
+            .spawn({
+                let stop = stop.clone();
+                move || {
+                    let mut outbox = Outbox::new(writer);
+                    let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
+                    while let Some(msg) = block_on(&waker, next_message(&token, &mut receiver)) {
+                        outbox.write_burst_blocking(msg, &mut receiver, &stop);
+                    }
+
+                    // The task's drain, for the task's reasons.
+                    if let Ok(msg) = receiver.try_recv() {
+                        outbox.write_burst_blocking(msg, &mut receiver, &stop);
+                    }
+
+                    // The signal, as in the task: explicit, because the drop
+                    // is what the shutdown is waiting for.
+                    drop(drained);
+                }
+            })
+            .map_err(|err| {
+                Error::new(
+                    ErrorCode::InternalError,
+                    format!("failed to start the stdout writer: {err}"),
+                )
+            })?;
+        Ok(Some(stop))
+    }
 }
 
-/// Serializes one message as a line of JSON on stdout, flushing it.
+/// The next message to write, or `None` once the writer is to take no more:
+/// `token` cancelled, or every sender gone.
 ///
-/// Neither failure is fatal to the writer: a message that cannot be serialized
-/// is this message's problem, and a write error on stdout is reported by the
-/// next one too.
-#[inline]
-async fn write_message<T: AsyncWrite + Unpin + Send>(writer: &mut BufWriter<T>, resp: Message) {
-    match serde_json::to_vec(&resp) {
-        Ok(mut json_bytes) => {
-            json_bytes.push(b'\n');
-            if let Err(_err) = writer.write_all(&json_bytes).await {
+/// Cancellation first: a writer told to stop drains what is queued with
+/// `try_recv`, rather than taking one more here.
+async fn next_message(token: &CancellationToken, queue: &mut Receiver<Message>) -> Option<Message> {
+    tokio::select! {
+        biased;
+        _ = token.cancelled() => None,
+        msg = queue.recv() => msg,
+    }
+}
+
+/// Runs `future` to completion on the current thread, parking the thread
+/// whenever the future waits.
+///
+/// What lets the stdout writer thread wait on the channel and its
+/// cancellation token at once. Both wake whatever waker they were polled
+/// with and need no runtime to do it -- tokio's own `blocking_recv` is a
+/// `block_on` over the same `recv`. `waker` must unpark this thread: an
+/// [`Unpark`] of [`std::thread::current`], made once per thread.
+#[cfg(feature = "server")]
+fn block_on<F: Future>(waker: &Waker, future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    let mut cx = Context::from_waker(waker);
+    loop {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+            return output;
+        }
+        // A wake that lands before this park is not lost: it leaves the
+        // thread's token set, and `park` returns at once. A spurious return
+        // just polls again.
+        std::thread::park();
+    }
+}
+
+/// A waker that unparks one thread -- the one [`block_on`] is parked on.
+#[cfg(feature = "server")]
+struct Unpark(std::thread::Thread);
+
+#[cfg(feature = "server")]
+impl Wake for Unpark {
+    fn wake(self: Arc<Self>) {
+        self.0.unpark();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.unpark();
+    }
+}
+
+/// The writer's end of the transport: the sink, and the one buffer every
+/// message is serialized into on its way there.
+///
+/// One buffer for the life of the writer, rather than a fresh `Vec` per
+/// message that a large message also regrows through every doubling. It is
+/// also the only buffer: the bytes go from here straight to the sink, with no
+/// `BufWriter` in between to copy them once more.
+///
+/// The burst itself is the same for both writers; only the I/O differs --
+/// async for the task ([`write_burst`](Self::write_burst)), blocking for the
+/// thread ([`write_burst_blocking`](Self::write_burst_blocking)).
+struct Outbox<T> {
+    sink: T,
+    buf: Vec<u8>,
+}
+
+impl<T> Outbox<T> {
+    /// An outbox with nothing buffered yet.
+    fn new(sink: T) -> Self {
+        Self {
+            sink,
+            buf: Vec::new(),
+        }
+    }
+
+    /// Appends `msg` to the buffer as one line of JSON.
+    ///
+    /// A message that cannot be serialized is that message's problem: whatever
+    /// part of it was already written is taken back out, so the lines on
+    /// either side of it still reach the peer whole.
+    fn encode(&mut self, msg: &impl serde::Serialize) {
+        let start = self.buf.len();
+        match serde_json::to_writer(&mut self.buf, msg) {
+            Ok(()) => self.buf.push(b'\n'),
+            Err(_err) => {
+                self.buf.truncate(start);
                 #[cfg(feature = "tracing")]
-                tracing::error!(logger = "neva", "stdout write error: {:?}", _err);
+                tracing::error!(logger = "neva", "Serialization error: {:?}", _err);
             }
-            let _ = writer.flush().await;
         }
-        Err(_err) => {
+    }
+
+    /// Empties the buffer once what it held is written (or dropped), giving
+    /// back what an unusually large message grew it by.
+    fn recycle(&mut self) {
+        self.buf.clear();
+        self.buf.shrink_to(RETAINED_CAPACITY);
+    }
+}
+
+#[cfg(feature = "client")]
+impl<T: AsyncWrite + Unpin> Outbox<T> {
+    /// Writes `first` and everything queued behind it, then flushes once.
+    ///
+    /// A message on its own is flushed as soon as it is written. A burst --
+    /// progress or log notifications queued faster than the sink takes them --
+    /// shares one flush instead of paying one each, and its small messages
+    /// share a write. The order on the wire is the channel's.
+    ///
+    /// Neither failure is fatal to the writer: see [`encode`](Self::encode)
+    /// and [`write_out`](Self::write_out).
+    async fn write_burst(&mut self, first: Message, queue: &mut Receiver<Message>) {
+        self.encode(&first);
+        while let Ok(msg) = queue.try_recv() {
+            if self.buf.len() >= WRITE_CHUNK {
+                self.write_out().await;
+            }
+            self.encode(&msg);
+        }
+        self.write_out().await;
+        let _ = self.sink.flush().await;
+    }
+
+    /// Hands everything buffered to the sink, leaving the buffer empty.
+    ///
+    /// A write error is logged and those bytes are dropped; a sink that is
+    /// gone for good is reported by the next write too.
+    async fn write_out(&mut self) {
+        if let Err(_err) = self.sink.write_all(&self.buf).await {
             #[cfg(feature = "tracing")]
-            tracing::error!(logger = "neva", "Serialization error: {:?}", _err);
+            tracing::error!(logger = "neva", "stdout write error: {:?}", _err);
         }
+        self.recycle();
+    }
+}
+
+#[cfg(feature = "server")]
+impl<T: std::io::Write> Outbox<T> {
+    /// [`write_burst`](Self::write_burst) for the writer thread: the same
+    /// burst and the same one flush, with blocking I/O -- and a `stop` that
+    /// is checked before each write.
+    ///
+    /// Once `stop` is cancelled the rest of the burst is dropped unwritten:
+    /// the shutdown budget is spent, and output past it would land after the
+    /// server said it had stopped.
+    fn write_burst_blocking(
+        &mut self,
+        first: Message,
+        queue: &mut Receiver<Message>,
+        stop: &CancellationToken,
+    ) {
+        self.encode(&first);
+        while let Ok(msg) = queue.try_recv() {
+            if self.buf.len() >= WRITE_CHUNK && !self.write_out_blocking(stop) {
+                return;
+            }
+            self.encode(&msg);
+        }
+        if self.write_out_blocking(stop) {
+            let _ = self.sink.flush();
+        }
+    }
+
+    /// Hands everything buffered to the sink unless `stop` is cancelled,
+    /// leaving the buffer empty either way. Returns whether it wrote.
+    ///
+    /// A write error is logged and those bytes are dropped, as in
+    /// [`write_out`](Self::write_out).
+    fn write_out_blocking(&mut self, stop: &CancellationToken) -> bool {
+        let stopped = stop.is_cancelled();
+        if !stopped && let Err(_err) = self.sink.write_all(&self.buf) {
+            #[cfg(feature = "tracing")]
+            tracing::error!(logger = "neva", "stdout write error: {:?}", _err);
+        }
+        self.recycle();
+        !stopped
     }
 }
 
@@ -323,6 +569,7 @@ impl StdIoReceiver {
             let mut line = String::new();
             loop {
                 line.clear();
+                line.shrink_to(RETAINED_CAPACITY);
                 let read = tokio::select! {
                     biased;
                     _ = token.cancelled() => break,
@@ -393,6 +640,7 @@ impl StdIoReceiver {
             let mut line = String::new();
             loop {
                 line.clear();
+                line.shrink_to(RETAINED_CAPACITY);
                 if token.is_cancelled() {
                     break;
                 }
@@ -445,7 +693,7 @@ impl StdIoClient {
     fn handshake(
         &self,
         token: CancellationToken,
-    ) -> Result<(BufReader<ChildStdout>, BufWriter<ChildStdin>), Error> {
+    ) -> Result<(BufReader<ChildStdout>, ChildStdin), Error> {
         let options = &self.options;
         // `&dyn Display` rather than a concrete error type: each backend below
         // chooses its own, and this closure should not have to be touched when
@@ -507,7 +755,7 @@ impl StdIoClient {
             }
         });
 
-        Ok((BufReader::new(stdout), BufWriter::new(stdin)))
+        Ok((BufReader::new(stdout), stdin))
     }
 }
 
@@ -535,16 +783,13 @@ impl StdIoServer {
 
     /// Initializes and Returns handles to `stdin` and `stdout`.
     ///
-    /// `stdin` is the std one, read on a thread of our own: see
-    /// [`StdIoReceiver::start_blocking`] for why tokio's cannot be used here.
-    /// `stdout` stays async -- a write parks on the blocking pool only for as
-    /// long as the write takes, so it is never the thing left outstanding at
-    /// shutdown.
-    pub(crate) fn init() -> (std::io::BufReader<std::io::Stdin>, BufWriter<Stdout>) {
-        (
-            std::io::BufReader::new(std::io::stdin()),
-            BufWriter::new(tokio::io::stdout()),
-        )
+    /// Both are the std ones, each served by a thread of our own: see
+    /// [`StdIoReceiver::start_blocking`] and [`StdIoSender::start_blocking`]
+    /// for why tokio's are not used here. `stdout` is not buffered here: the
+    /// writer keeps a buffer of its own, and every burst it writes ends on a
+    /// newline, which std's line-buffered stdout passes straight through.
+    pub(crate) fn init() -> (std::io::BufReader<std::io::Stdin>, std::io::Stdout) {
+        (std::io::BufReader::new(std::io::stdin()), std::io::stdout())
     }
 }
 
@@ -583,7 +828,7 @@ fn start_in_memory(
     let (guard, mut drained) = DrainSignal::new();
     let (reader, writer) = tokio::io::split(link);
     receiver.start(BufReader::new(reader), sender.tx.clone(), token.clone());
-    if let Some(task) = sender.start(BufWriter::new(writer), token.clone(), guard) {
+    if let Some(task) = sender.start(writer, token.clone(), guard) {
         drained.abort_on_timeout(task.abort_handle());
     }
     TransportHandle::new(token, drained)
@@ -635,18 +880,20 @@ impl Transport for StdIoServer {
 
         let token = CancellationToken::new();
         let (reader, writer) = StdIoServer::init();
-        // Only the writer takes a guard: the reader is a thread of neva's own
-        // (see `start_blocking`), parked in a read nothing can interrupt, and
-        // shutdown was never allowed to wait for it -- nor can it be aborted,
-        // being nothing the runtime owns.
+        // Only the writer takes a guard. Both are threads of neva's own, but
+        // the reader is parked in a read nothing can interrupt, and shutdown
+        // was never allowed to wait for it. The writer checks in between
+        // writes, so it can be both waited for and stopped.
         let (guard, mut drained) = DrainSignal::new();
+
+        // The writer first: it is the one that can fail to start, and failing
+        // must not leave a reader thread behind with nobody to cancel it.
+        if let Some(stop) = self.sender.start_blocking(writer, token.clone(), guard)? {
+            drained.stop_on_timeout(stop);
+        }
 
         self.receiver
             .start_blocking(reader, self.sender.tx.clone(), token.clone());
-
-        if let Some(task) = self.sender.start(writer, token.clone(), guard) {
-            drained.abort_on_timeout(task.abort_handle());
-        }
 
         #[cfg(feature = "tracing")]
         tracing::info!(logger = "neva", "Listening: stdio");
@@ -861,16 +1108,55 @@ mod parse_line_tests {
 
 #[cfg(test)]
 mod tests {
-    /// A sink the test can read back while the writer task owns it.
+    use super::StdIoSender;
+    use crate::transport::{DrainGuard, DrainSignal};
+    use crate::types::Message;
+    use tokio_util::sync::CancellationToken;
+
+    /// A sink the test can read back while a writer owns it: async for the
+    /// task, blocking for the thread.
     #[derive(Clone, Default)]
-    struct SharedSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    struct SharedSink(std::sync::Arc<std::sync::Mutex<Recorded>>);
+
+    /// Everything a [`SharedSink`] was handed, and how.
+    #[derive(Default)]
+    struct Recorded {
+        bytes: Vec<u8>,
+        writes: usize,
+        flushes: usize,
+    }
 
     impl SharedSink {
+        /// Reads what has been recorded so far.
+        fn read<R>(&self, f: impl FnOnce(&Recorded) -> R) -> R {
+            match self.0.lock() {
+                Ok(recorded) => f(&recorded),
+                Err(poisoned) => f(&poisoned.into_inner()),
+            }
+        }
+
         /// How many complete lines have been written so far.
         fn lines(&self) -> usize {
-            match self.0.lock() {
-                Ok(buf) => buf.iter().filter(|b| **b == b'\n').count(),
-                Err(_) => 0,
+            self.read(|r| r.bytes.iter().filter(|b| **b == b'\n').count())
+        }
+
+        /// The `seq` of every line written so far, in the order written.
+        fn seqs(&self) -> Vec<u64> {
+            self.read(|r| seqs(&r.bytes))
+        }
+
+        /// Records one write of `buf`, taken whole.
+        fn record_write(&self, buf: &[u8]) {
+            if let Ok(mut sink) = self.0.lock() {
+                sink.bytes.extend_from_slice(buf);
+                sink.writes += 1;
+            }
+        }
+
+        /// Records one flush.
+        fn record_flush(&self) {
+            if let Ok(mut sink) = self.0.lock() {
+                sink.flushes += 1;
             }
         }
     }
@@ -881,9 +1167,7 @@ mod tests {
             _: &mut std::task::Context<'_>,
             buf: &[u8],
         ) -> std::task::Poll<std::io::Result<usize>> {
-            if let Ok(mut sink) = self.get_mut().0.lock() {
-                sink.extend_from_slice(buf);
-            }
+            self.record_write(buf);
             std::task::Poll::Ready(Ok(buf.len()))
         }
 
@@ -891,6 +1175,7 @@ mod tests {
             self: std::pin::Pin<&mut Self>,
             _: &mut std::task::Context<'_>,
         ) -> std::task::Poll<std::io::Result<()>> {
+            self.record_flush();
             std::task::Poll::Ready(Ok(()))
         }
 
@@ -902,18 +1187,44 @@ mod tests {
         }
     }
 
+    impl std::io::Write for SharedSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.record_write(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.record_flush();
+            Ok(())
+        }
+    }
+
+    /// The `seq` of every line in `bytes`, in order. Panics on a line that is
+    /// not whole JSON.
+    fn seqs(bytes: &[u8]) -> Vec<u64> {
+        bytes
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                let json: serde_json::Value =
+                    serde_json::from_slice(line).expect("each line is whole JSON");
+                json["params"]["seq"].as_u64().expect("a seq")
+            })
+            .collect()
+    }
+
     /// Shutdown cancels the writer, but whatever a handler already queued still
     /// has to reach stdout -- the graceful-close result of a
     /// `subscriptions/listen` stream is written in exactly that window, after
     /// the drain phase woke the handler and before the transport goes down.
     /// Breaking out of the loop on cancellation without draining is what used
     /// to lose it.
+    #[cfg(feature = "client")]
     #[tokio::test]
     async fn a_cancelled_writer_still_flushes_what_was_queued() {
         use super::StdIoSender;
         use crate::transport::DrainSignal;
         use crate::types::{Message, notification::Notification};
-        use tokio::io::BufWriter;
         use tokio_util::sync::CancellationToken;
 
         const QUEUED: usize = 3;
@@ -939,7 +1250,7 @@ mod tests {
 
         let sink = SharedSink::default();
         let (guard, _drained) = DrainSignal::new();
-        sender.start(BufWriter::new(sink.clone()), token, guard);
+        sender.start(sink.clone(), token, guard);
 
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while sink.lines() < QUEUED {
@@ -961,11 +1272,13 @@ mod tests {
     /// finishes inside the moment between the shutdown signal and the runtime
     /// going away, and the drain nobody waited for looks like a drain that
     /// worked.
+    #[cfg(feature = "client")]
     struct SlowSink {
         sink: SharedSink,
         delay: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
     }
 
+    #[cfg(feature = "client")]
     impl SlowSink {
         /// Long enough that no write completes by accident, short enough that
         /// the whole queue still clears well inside a test's patience.
@@ -976,6 +1289,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "client")]
     impl tokio::io::AsyncWrite for SlowSink {
         fn poll_write(
             self: std::pin::Pin<&mut Self>,
@@ -1012,11 +1326,11 @@ mod tests {
     /// returning how much of the queue reached the sink after the runtime was
     /// dropped. `join` is the fix under test: whether the shutdown waits for
     /// the writer's drain signal before letting the runtime go.
+    #[cfg(feature = "client")]
     fn shutdown_on_an_owned_runtime(queued: usize, join: bool) -> usize {
         use super::StdIoSender;
         use crate::transport::DrainSignal;
         use crate::types::{Message, notification::Notification};
-        use tokio::io::BufWriter;
         use tokio_util::sync::CancellationToken;
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -1040,11 +1354,7 @@ mod tests {
 
             let token = CancellationToken::new();
             let (guard, drained) = DrainSignal::new();
-            sender.start(
-                BufWriter::new(SlowSink::new(sink.clone())),
-                token.clone(),
-                guard,
-            );
+            sender.start(SlowSink::new(sink.clone()), token.clone(), guard);
 
             // Shutdown reaching the transport: the writer starts draining what
             // is queued, and the server's loop is over.
@@ -1071,6 +1381,7 @@ mod tests {
     /// and that abandons a writer still mid-drain. Waiting for the writer's
     /// signal first is what gets the queue -- the graceful-close result of a
     /// `subscriptions/listen` stream among it -- onto the wire.
+    #[cfg(feature = "client")]
     #[test]
     fn waiting_for_the_writer_is_what_survives_the_runtime_being_dropped() {
         const QUEUED: usize = 3;
@@ -1085,6 +1396,428 @@ mod tests {
         assert_eq!(
             abandoned, 0,
             "and one that does not is the hazard: the runtime goes away mid-drain"
+        );
+    }
+
+    /// A log notification carrying its place in the queue, and `pad` bytes of
+    /// payload to give it some size.
+    fn numbered(seq: usize, pad: usize) -> Message {
+        use crate::types::notification::Notification;
+
+        Message::Notification(Notification::new(
+            "notifications/message",
+            Some(serde_json::json!({ "seq": seq, "pad": "x".repeat(pad) })),
+        ))
+    }
+
+    /// Queues `count` messages on a sender no writer has taken yet, so the
+    /// writer's first wake-up finds all of them waiting.
+    async fn queued(count: usize, pad: usize) -> StdIoSender {
+        let sender = StdIoSender::new();
+        for seq in 0..count {
+            sender
+                .tx
+                .send(numbered(seq, pad))
+                .await
+                .expect("the channel has room");
+        }
+        sender
+    }
+
+    /// The two writers: a task for a sink with an async form, a thread for the
+    /// server's own stdout. Each where its feature compiles it.
+    #[derive(Clone, Copy, Debug)]
+    enum Kind {
+        #[cfg(feature = "client")]
+        Task,
+        #[cfg(feature = "server")]
+        Thread,
+    }
+
+    /// Every writer this build has, for the tests that hold for both.
+    const KINDS: &[Kind] = &[
+        #[cfg(feature = "client")]
+        Kind::Task,
+        #[cfg(feature = "server")]
+        Kind::Thread,
+    ];
+
+    /// Starts a writer of `kind` over `sender`'s queue and registers it with
+    /// `drained`, the way its transport does.
+    fn start_writer(
+        kind: Kind,
+        sender: &mut StdIoSender,
+        sink: SharedSink,
+        token: CancellationToken,
+        guard: DrainGuard,
+        drained: &mut DrainSignal,
+    ) {
+        match kind {
+            #[cfg(feature = "client")]
+            Kind::Task => {
+                let task = sender.start(sink, token, guard).expect("a fresh sender");
+                drained.abort_on_timeout(task.abort_handle());
+            }
+            #[cfg(feature = "server")]
+            Kind::Thread => {
+                let stop = sender
+                    .start_blocking(sink, token, guard)
+                    .expect("the thread starts")
+                    .expect("a fresh sender");
+                drained.stop_on_timeout(stop);
+            }
+        }
+    }
+
+    /// Runs a writer of `kind` over `sender`'s queue until it is empty and the
+    /// writer is done -- on its own because every sender is gone, or draining
+    /// on its way out if `cancelled`.
+    async fn write_all_queued(kind: Kind, mut sender: StdIoSender, cancelled: bool) -> SharedSink {
+        let token = CancellationToken::new();
+        if cancelled {
+            token.cancel();
+        }
+        let sink = SharedSink::default();
+        let (guard, mut drained) = DrainSignal::new();
+        start_writer(kind, &mut sender, sink.clone(), token, guard, &mut drained);
+
+        // The last sender: with it gone, a running writer ends once the queue
+        // is empty, and raises the drain signal on the way.
+        drop(sender);
+        assert!(
+            drained
+                .wait_or_abort(std::time::Duration::from_secs(5))
+                .await,
+            "the {kind:?} writer must finish the queue well inside the budget"
+        );
+        sink
+    }
+
+    /// What is already queued when the writer wakes goes out under one flush,
+    /// in the order it was queued -- whether the writer is running or draining
+    /// on its way out (#138). A flush per message cost the server's stdout a
+    /// blocking-pool round trip per message.
+    #[tokio::test]
+    async fn a_queued_burst_reaches_the_sink_with_one_flush() {
+        const QUEUED: usize = 10;
+
+        for &kind in KINDS {
+            for cancelled in [false, true] {
+                let sink = write_all_queued(kind, queued(QUEUED, 0).await, cancelled).await;
+
+                assert_eq!(
+                    sink.seqs(),
+                    (0..QUEUED as u64).collect::<Vec<_>>(),
+                    "every queued message, in order ({kind:?}, cancelled: {cancelled})"
+                );
+                assert_eq!(
+                    sink.read(|r| r.flushes),
+                    1,
+                    "one burst, one flush ({kind:?}, cancelled: {cancelled})"
+                );
+                assert_eq!(
+                    sink.read(|r| r.writes),
+                    1,
+                    "small messages share a write ({kind:?}, cancelled: {cancelled})"
+                );
+            }
+        }
+    }
+
+    /// Batching never holds a message back waiting for company: a message
+    /// that arrives on its own is written and flushed before the writer goes
+    /// back to waiting.
+    #[tokio::test]
+    async fn a_lone_message_is_flushed_without_waiting_for_more() {
+        for &kind in KINDS {
+            let mut sender = StdIoSender::new();
+            let tx = sender.tx.clone();
+            let sink = SharedSink::default();
+            let (guard, mut drained) = DrainSignal::new();
+            let token = CancellationToken::new();
+            start_writer(
+                kind,
+                &mut sender,
+                sink.clone(),
+                token.clone(),
+                guard,
+                &mut drained,
+            );
+
+            for seq in 0..3 {
+                tx.send(numbered(seq, 0))
+                    .await
+                    .expect("the writer is running");
+
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while sink.read(|r| r.flushes) <= seq {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| panic!("{kind:?}: message {seq} must be flushed on its own"));
+                assert_eq!(sink.lines(), seq + 1, "{kind:?}");
+            }
+
+            token.cancel();
+            assert!(
+                drained
+                    .wait_or_abort(std::time::Duration::from_secs(5))
+                    .await
+            );
+        }
+    }
+
+    /// A burst too big for one piece is still written in pieces, so the
+    /// writer never holds a whole queue of large messages in memory at once --
+    /// but it still flushes once.
+    #[tokio::test]
+    async fn a_large_burst_is_written_in_pieces_under_one_flush() {
+        const QUEUED: usize = 64;
+        const PAD: usize = 4 * 1024;
+
+        for &kind in KINDS {
+            let sink = write_all_queued(kind, queued(QUEUED, PAD).await, false).await;
+
+            let (bytes, writes, flushes) = sink.read(|r| (r.bytes.len(), r.writes, r.flushes));
+            assert_eq!(sink.lines(), QUEUED, "{kind:?}");
+            assert_eq!(flushes, 1, "{kind:?}: one burst, one flush");
+            assert!(
+                writes > 1,
+                "{kind:?}: {bytes} bytes must not go out as one piece of {bytes}"
+            );
+            // Every write but the last carries at least a full chunk.
+            assert!(
+                writes <= bytes / super::WRITE_CHUNK + 1,
+                "{kind:?}: {bytes} bytes in {writes} writes: the messages must share them"
+            );
+        }
+    }
+
+    /// A message that fails halfway through serializing does not leave half a
+    /// line in the burst for the next message to be glued onto.
+    #[test]
+    fn a_message_that_cannot_be_serialized_leaves_its_neighbours_whole() {
+        /// Starts an object, then fails inside it.
+        struct FailsHalfway;
+
+        impl serde::Serialize for FailsHalfway {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::{Error, SerializeStruct};
+
+                let mut object = s.serialize_struct("FailsHalfway", 2)?;
+                object.serialize_field("written", "before the failure")?;
+                Err(S::Error::custom("fails halfway"))
+            }
+        }
+
+        let mut outbox = super::Outbox::new(());
+        outbox.encode(&numbered(0, 0));
+        outbox.encode(&FailsHalfway);
+        outbox.encode(&numbered(1, 0));
+
+        assert_eq!(
+            seqs(&outbox.buf),
+            [0, 1],
+            "two whole lines and nothing between"
+        );
+    }
+
+    /// The writer's buffer is kept from one burst to the next, except for
+    /// what an unusually large message grew it by.
+    #[test]
+    fn the_writer_keeps_its_buffer_but_not_an_oversized_one() {
+        let mut outbox = super::Outbox::new(());
+
+        outbox.encode(&numbered(0, 0));
+        outbox.recycle();
+        let kept = outbox.buf.capacity();
+        assert!(kept > 0, "an ordinary message's buffer is reused");
+
+        outbox.encode(&numbered(1, 0));
+        outbox.recycle();
+        assert_eq!(outbox.buf.capacity(), kept, "and not reallocated");
+
+        outbox.encode(&numbered(2, 2 * super::RETAINED_CAPACITY));
+        assert!(outbox.buf.capacity() > super::RETAINED_CAPACITY);
+        outbox.recycle();
+        assert!(
+            outbox.buf.capacity() <= super::RETAINED_CAPACITY,
+            "the excess of an oversized message is given back"
+        );
+    }
+
+    /// A blocking sink that lets each write through only when the test says
+    /// so -- stdout with a peer that has stopped reading, until it hasn't.
+    ///
+    /// Raises `gone` when dropped, which is when the writer thread that owns
+    /// it has exited.
+    #[cfg(feature = "server")]
+    struct GatedSink {
+        sink: SharedSink,
+        permits: std::sync::mpsc::Receiver<()>,
+        gone: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[cfg(feature = "server")]
+    impl std::io::Write for GatedSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            // A test that has gone away lets everything through.
+            let _ = self.permits.recv();
+            self.sink.write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.sink.flush()
+        }
+    }
+
+    #[cfg(feature = "server")]
+    impl Drop for GatedSink {
+        fn drop(&mut self) {
+            self.gone.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// A writer thread over a [`GatedSink`], already told to drain `queued`
+    /// messages of `pad` bytes each. Returns what the test holds: the sink to
+    /// read, the permits to hand out, the drain signal, and the flag the
+    /// thread raises on its way out.
+    #[cfg(feature = "server")]
+    async fn a_gated_writer_thread(
+        queued: usize,
+        pad: usize,
+    ) -> (
+        SharedSink,
+        std::sync::mpsc::Sender<()>,
+        DrainSignal,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let mut sender = self::queued(queued, pad).await;
+        let sink = SharedSink::default();
+        let (permit, permits) = std::sync::mpsc::channel();
+        let gone = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let gated = GatedSink {
+            sink: sink.clone(),
+            permits,
+            gone: gone.clone(),
+        };
+
+        // Cancelled up front: the shutdown has begun, and the thread goes
+        // straight to draining what is queued.
+        let token = CancellationToken::new();
+        token.cancel();
+        let (guard, mut drained) = DrainSignal::new();
+        let stop = sender
+            .start_blocking(gated, token, guard)
+            .expect("the thread starts")
+            .expect("a fresh sender");
+        drained.stop_on_timeout(stop);
+
+        (sink, permit, drained, gone)
+    }
+
+    /// The thread's half of the drain contract: it holds its guard until what
+    /// was queued is written, so a shutdown that waits for it waits for the
+    /// bytes -- not merely for the channel to empty.
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn a_writer_thread_holds_its_guard_until_the_queue_is_written() {
+        const QUEUED: usize = 3;
+
+        let (sink, permit, drained, _gone) = a_gated_writer_thread(QUEUED, 0).await;
+        let waiting = tokio::spawn(drained.wait_or_abort(std::time::Duration::from_secs(5)));
+
+        // The write is held at the gate, so the wait must be too.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!waiting.is_finished(), "nothing is written yet");
+
+        permit.send(()).expect("the thread is waiting");
+        assert!(
+            waiting.await.expect("the wait itself does not fail"),
+            "the thread raises its signal once the queue is written"
+        );
+        assert_eq!(sink.lines(), QUEUED);
+    }
+
+    /// The thread cannot be aborted, so a spent budget stops it instead: the
+    /// write already under way finishes, as it would on the blocking pool
+    /// behind an aborted task, but none starts after it -- the rest of the
+    /// queue is dropped, and the thread exits.
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn a_writer_thread_past_its_budget_writes_no_more() {
+        // Each message a chunk of its own, so the drain is three writes.
+        const QUEUED: usize = 3;
+        const PAD: usize = super::WRITE_CHUNK;
+
+        let (sink, permit, drained, gone) = a_gated_writer_thread(QUEUED, PAD).await;
+
+        // The first write is held at the gate for longer than the budget.
+        assert!(
+            !drained
+                .wait_or_abort(std::time::Duration::from_millis(20))
+                .await,
+            "a writer stuck in a write cannot finish inside the budget"
+        );
+        assert_eq!(sink.lines(), 0, "and has written nothing yet");
+
+        // Let every write through: only the one under way is still made.
+        for _ in 0..QUEUED {
+            let _ = permit.send(());
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !gone.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a stopped writer thread exits");
+        assert_eq!(
+            sink.lines(),
+            1,
+            "the write under way finishes, and none starts after the budget"
+        );
+    }
+
+    /// A peer that stops reading leaves the writer stuck in a write nothing
+    /// can interrupt. On the runtime's blocking pool, where tokio's stdout
+    /// writes, that write held the runtime's drop -- and so the process --
+    /// open until the peer read again: a server told to stop never exited. A
+    /// thread of neva's own is nobody's to wait for.
+    #[cfg(feature = "server")]
+    #[test]
+    fn a_writer_thread_stuck_in_a_write_does_not_hold_the_runtime_open() {
+        let (dropped, runtime_dropped) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime for the server");
+            let permit = runtime.block_on(async {
+                let (_sink, permit, drained, _gone) = a_gated_writer_thread(1, 0).await;
+                assert!(
+                    !drained
+                        .wait_or_abort(std::time::Duration::from_millis(20))
+                        .await,
+                    "the writer is stuck at the gate"
+                );
+                permit
+            });
+
+            // `App::run_blocking` drops its runtime here, with the writer
+            // still stuck: the gate stays shut until the drop has returned.
+            drop(runtime);
+            let _ = dropped.send(());
+            drop(permit);
+        });
+
+        assert!(
+            runtime_dropped
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok(),
+            "dropping the runtime must not wait for a writer stuck in a write"
         );
     }
 

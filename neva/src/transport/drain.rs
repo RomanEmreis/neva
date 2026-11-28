@@ -27,15 +27,20 @@
 use std::time::Duration;
 use tokio::{sync::mpsc, task::AbortHandle};
 
-/// How long an abort is given to land before shutdown stops caring.
+#[cfg(feature = "server")]
+use tokio_util::sync::CancellationToken;
+
+/// How long a stop is given to land before shutdown stops caring.
 ///
-/// [`AbortHandle::abort`] is a request, not a stop: the task ends at its next
-/// yield point, and only then is its future -- and the [`DrainGuard`] inside it
-/// -- dropped. Waiting for that is what makes "stopped" true rather than
-/// "asked to stop", so that a writer mid-poll cannot finish its write after
-/// `run` has returned. Not a knob: what it covers is one poll of an
-/// already-cancelled task, and a task that never yields at all must not be
-/// able to hold open a shutdown that has already spent its budget.
+/// Stopping a writer is a request, not a stop. [`AbortHandle::abort`] ends a
+/// task at its next yield point, and only then is its future -- and the
+/// [`DrainGuard`] inside it -- dropped. A writer thread sees its stop token
+/// before its next write, and drops its guard on the way out. Waiting for that
+/// is what makes "stopped" true rather than "asked to stop", so that a writer
+/// between two writes cannot start another after `run` has returned. Not a
+/// knob: what it covers is one poll of an already-cancelled task, or the end
+/// of a write already under way, and a writer that never gets there must not
+/// be able to hold open a shutdown that has already spent its budget.
 const ABORT_GRACE: Duration = Duration::from_millis(100);
 
 /// Held by a transport writer for as long as it may still write.
@@ -62,10 +67,41 @@ pub(crate) struct DrainGuard {
 pub(crate) struct DrainSignal {
     #[cfg_attr(not(feature = "server"), allow(dead_code))]
     rx: mpsc::Receiver<()>,
-    /// The tasks behind the guards, so a budget that runs out ends them
+    /// The writers behind the guards, so a budget that runs out ends them
     /// instead of merely giving up on them.
     #[cfg_attr(not(feature = "server"), allow(dead_code))]
-    tasks: Vec<AbortHandle>,
+    writers: Vec<Writer>,
+}
+
+/// A writer holding one of the guards, and how to end it.
+///
+/// A bare `server` build has only the stdio writer thread: the tasks belong to
+/// the client's stdio, the in-memory link and the HTTP server. Hence the
+/// dead-code exemption on the task side there.
+#[derive(Debug)]
+enum Writer {
+    /// A task on the runtime: aborted.
+    #[cfg_attr(
+        not(any(feature = "client", feature = "http-server")),
+        allow(dead_code)
+    )]
+    Task(AbortHandle),
+    /// A thread of neva's own, which nothing can abort: told to stop, which
+    /// it checks before each write.
+    #[cfg(feature = "server")]
+    Thread(CancellationToken),
+}
+
+impl Writer {
+    /// Asks this writer to stop now, dropping whatever it has not written.
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    fn stop(&self) {
+        match self {
+            Self::Task(task) => task.abort(),
+            #[cfg(feature = "server")]
+            Self::Thread(stop) => stop.cancel(),
+        }
+    }
 }
 
 impl DrainSignal {
@@ -76,7 +112,7 @@ impl DrainSignal {
             DrainGuard { _tx: tx },
             Self {
                 rx,
-                tasks: Vec::new(),
+                writers: Vec::new(),
             },
         )
     }
@@ -87,8 +123,24 @@ impl DrainSignal {
     /// A transport registers what it spawned; anything it did not spawn -- the
     /// stdio reader thread, which is not the runtime's to end -- stays out of
     /// this, as it always has.
+    #[cfg_attr(
+        not(any(feature = "client", feature = "http-server")),
+        allow(dead_code)
+    )]
     pub(crate) fn abort_on_timeout(&mut self, task: AbortHandle) {
-        self.tasks.push(task);
+        self.writers.push(Writer::Task(task));
+    }
+
+    /// Registers a writer thread behind one of the guards: `stop` is cancelled
+    /// if the shutdown budget runs out before the thread finishes.
+    ///
+    /// A thread cannot be aborted, so this only works with one that checks
+    /// `stop` before each write and, once it is cancelled, drops what is left
+    /// and its guard with it. A write already under way still finishes, as it
+    /// would on the blocking pool behind an aborted task.
+    #[cfg(feature = "server")]
+    pub(crate) fn stop_on_timeout(&mut self, stop: CancellationToken) {
+        self.writers.push(Writer::Thread(stop));
     }
 
     /// A signal that is already complete, for a transport with no writers of
@@ -103,15 +155,15 @@ impl DrainSignal {
     }
 
     /// Waits until every [`DrainGuard`] has been dropped, or `budget` elapses
-    /// -- in which case the registered tasks are aborted.
+    /// -- in which case the registered writers are stopped.
     ///
     /// Returns whether they finished inside the budget. Giving up on the wait
-    /// is not the same as giving up on the tasks: a writer left running past
-    /// the budget goes on writing on a runtime that outlives the server, so
-    /// output the shutdown decided not to wait for would land after `run`
-    /// returned, on a stdout its host may have taken back. A budget of
-    /// [`Duration::ZERO`] therefore is what it says it is -- one poll, then an
-    /// abrupt close -- at the cost of a message the writer was midway through.
+    /// is not the same as giving up on the writers: one left running past the
+    /// budget goes on writing after the server is gone, so output the shutdown
+    /// decided not to wait for would land after `run` returned, on a stdout its
+    /// host may have taken back. A budget of [`Duration::ZERO`] therefore is
+    /// what it says it is -- one poll, then an abrupt close -- at the cost of a
+    /// message the writer was midway through.
     #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub(crate) async fn wait_or_abort(mut self, budget: Duration) -> bool {
         // Nothing is ever sent on this channel, so the only way `recv`
@@ -120,8 +172,8 @@ impl DrainSignal {
             return true;
         }
 
-        for task in &self.tasks {
-            task.abort();
+        for writer in &self.writers {
+            writer.stop();
         }
 
         // The guards go down with the futures the abort drops, so the signal
@@ -205,6 +257,42 @@ mod tests {
             writer.await.is_err_and(|err| err.is_cancelled()),
             "a writer past the budget must be stopped, not abandoned"
         );
+    }
+
+    /// A writer thread cannot be aborted, so running out of budget tells it to
+    /// stop instead -- and the wait still reports it stopped only once it has
+    /// dropped its guard, which a thread that heard the request does on its
+    /// way out.
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn it_tells_a_writer_thread_the_budget_ran_out_on_to_stop() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let (guard, mut drained) = DrainSignal::new();
+        let stop = CancellationToken::new();
+        let stopped = Arc::new(AtomicBool::new(false));
+
+        let writer = std::thread::spawn({
+            let stop = stop.clone();
+            let stopped = stopped.clone();
+            move || {
+                // Writing, one piece at a time, until told otherwise.
+                while !stop.is_cancelled() {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                stopped.store(true, Ordering::SeqCst);
+                drop(guard);
+            }
+        });
+        drained.stop_on_timeout(stop);
+
+        assert!(!drained.wait_or_abort(Duration::from_millis(20)).await);
+        assert!(
+            stopped.load(Ordering::SeqCst),
+            "the thread must have stopped before the wait reported it stopped"
+        );
+        assert!(writer.join().is_ok());
     }
 
     /// A writer that finished in time is left alone -- there is nothing to
